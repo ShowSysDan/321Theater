@@ -397,8 +397,6 @@ function sortSchedRowsByTime(perfId) {
 }
 
 /* ── Drag-to-reorder schedule rows ─────────────────────────────── */
-let _dragSrc = null;
-
 function _bindRowDrag(tr) {
   const handle = tr.querySelector('.row-drag-handle');
   if (!handle) return;
