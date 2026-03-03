@@ -363,7 +363,7 @@ const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
           <tbody id="schedule-rows-{{ p.id }}">
             {% if day_rows %}
               {% for row in day_rows %}
-              <tr class="schedule-row" draggable="true">
+              <tr class="schedule-row">
                 {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
                 <td><input type="text" class="sched-cell" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
                 <td><input type="text" class="sched-cell" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
@@ -373,7 +373,7 @@ const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
               </tr>
               {% endfor %}
             {% else %}
-              <tr class="schedule-row" draggable="true">
+              <tr class="schedule-row">
                 {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
                 <td><input type="text" class="sched-cell" placeholder="15:00" value="" {% if restricted %}disabled{% endif %}></td>
                 <td><input type="text" class="sched-cell" placeholder="16:00" value="" {% if restricted %}disabled{% endif %}></td>
@@ -427,7 +427,7 @@ const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
             {% set null_rows = schedule_rows | selectattr('perf_id', 'none') | list %}
             {% if null_rows %}
               {% for row in null_rows %}
-              <tr class="schedule-row" draggable="true">
+              <tr class="schedule-row">
                 {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
                 <td><input type="text" class="sched-cell" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
                 <td><input type="text" class="sched-cell" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
@@ -437,7 +437,7 @@ const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
               </tr>
               {% endfor %}
             {% else %}
-              <tr class="schedule-row" draggable="true">
+              <tr class="schedule-row">
                 {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
                 <td><input type="text" class="sched-cell" placeholder="15:00" value="" {% if restricted %}disabled{% endif %}></td>
                 <td><input type="text" class="sched-cell" placeholder="16:00" value="" {% if restricted %}disabled{% endif %}></td>
