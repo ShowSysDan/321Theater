@@ -61,20 +61,9 @@
 
     {% elif field.field_type == 'select' %}
       <select class="field-input adv-field" data-key="{{ field.field_key }}" {% if restricted %}disabled{% endif %}>
-        {% if field.field_key == 'venue' and venue_list %}
-          {% for opt in venue_list %}
-          <option value="{{ opt }}" {% if cur == opt %}selected{% endif %}>{{ opt }}</option>
-          {% endfor %}
-        {% elif field.field_key == 'radio_channel' and radio_channel_list %}
-          <option value="">— Select —</option>
-          {% for opt in radio_channel_list %}
-          <option value="{{ opt }}" {% if cur == opt %}selected{% endif %}>{{ opt }}</option>
-          {% endfor %}
-        {% else %}
-          {% for opt in field.options %}
-          <option value="{{ opt }}" {% if cur == opt %}selected{% endif %}>{{ opt }}</option>
-          {% endfor %}
-        {% endif %}
+        {% for opt in field.options %}
+        <option value="{{ opt }}" {% if cur == opt %}selected{% endif %}>{{ opt }}</option>
+        {% endfor %}
       </select>
 
     {% elif field.field_type == 'contact_dropdown' %}
@@ -247,6 +236,13 @@
 {# ════════════════════════════════════════════════════════════════════════════ #}
 {#                       PRODUCTION SCHEDULE TAB                                #}
 {# ════════════════════════════════════════════════════════════════════════════ #}
+
+{# Pass data to JS #}
+<script>
+const SCHED_PERFORMANCES = {{ performances | tojson }};
+const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
+</script>
+
 <div id="tab-schedule" class="tab-pane {% if tab == 'schedule' %}active{% endif %}">
 <form id="schedule-form" autocomplete="off">
 
@@ -273,58 +269,185 @@
         {% else %}
         <p class="text-dim" style="font-size:12px;grid-column:1/-1">No fields configured. Add fields in Settings → Form Fields → Schedule Template.</p>
         {% endfor %}
+
+        {# ── Global WiFi (read-only) ──────────────────────────────────────── #}
+        {% if global_wifi_network %}
+        <div class="field-group" style="grid-column:1 / -1">
+          <label class="field-label">WIFI</label>
+          <div class="field-input" style="background:var(--bg-hover);color:var(--text-muted);cursor:default">
+            <strong>{{ global_wifi_network }}</strong>{% if global_wifi_password %} &nbsp;·&nbsp; {{ global_wifi_password }}{% endif %}
+          </div>
+          <p class="field-hint" style="font-size:10px;color:var(--text-muted);margin-top:3px">From global WiFi settings — change in Admin → Settings → WiFi</p>
+        </div>
+        {% endif %}
       </div>
     </div>
   </div>
 
-  {# ── Timeline ──────────────────────────────────────────────────────────── #}
-  <div class="form-section">
-    <div class="form-section-header">
-      <span class="section-icon">◈</span> TIMELINE
+  {# ── Day Tabs (multi-performance) ─────────────────────────────────────── #}
+  {% if performances | length > 1 %}
+  <div class="sched-day-tabs" style="display:flex;gap:6px;padding:0 0 0 0;margin-bottom:0">
+    {% for p in performances %}
+    <button type="button"
+            class="btn btn-sm {% if loop.first %}btn-primary{% else %}btn-ghost{% endif %} sched-day-tab"
+            data-perf-id="{{ p.id }}"
+            onclick="switchSchedDay({{ p.id }}, this)">
+      DAY {{ loop.index }}{% if p.perf_date %} · {{ p.perf_date[5:] | replace('-','/') }}{% endif %}
+    </button>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {# ── Per-day Timeline sections ─────────────────────────────────────────── #}
+  {% for p in performances %}
+  {% set day_rows = schedule_rows | selectattr('perf_id', 'equalto', p.id) | list %}
+  {% if loop.first %}
+    {# First day also shows NULL-keyed legacy rows #}
+    {% set null_rows = schedule_rows | selectattr('perf_id', 'none') | list %}
+    {% set day_rows = null_rows + (schedule_rows | selectattr('perf_id', 'equalto', p.id) | list) %}
+  {% endif %}
+  <div class="sched-day-pane {% if not loop.first %}hidden{% endif %}"
+       data-perf-id="{{ p.id }}"
+       style="{% if not loop.first %}display:none{% endif %}">
+
+    <div class="form-section">
+      <div class="form-section-header">
+        <span class="section-icon">◈</span>
+        TIMELINE{% if performances | length > 1 %} — DAY {{ loop.index }}{% if p.perf_date %}: {{ p.perf_date }}{% endif %}{% if p.perf_time %} {{ p.perf_time }}{% endif %}{% endif %}
+        {% if not restricted %}
+        <div style="display:flex;gap:6px;align-items:center;margin-left:auto">
+          {# Apply template dropdown #}
+          {% if sched_templates %}
+          <select class="field-input" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
+                  onchange="applySchedTemplate(this.value, {{ p.id }}); this.value=''">
+            <option value="">Apply template…</option>
+            {% for t in sched_templates %}
+            <option value="{{ t.id }}">{{ t.name }}</option>
+            {% endfor %}
+          </select>
+          {% endif %}
+          {# Copy from another day #}
+          {% if performances | length > 1 %}
+          <select class="field-input" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
+                  onchange="copySchedDay(this.value, {{ p.id }}); this.value=''">
+            <option value="">Copy from…</option>
+            {% for op in performances %}
+            {% if op.id != p.id %}
+            <option value="{{ op.id }}">Day {{ loop.index }}{% if op.perf_date %} ({{ op.perf_date[5:] | replace('-','/') }}){% endif %}</option>
+            {% endif %}
+            {% endfor %}
+          </select>
+          {% endif %}
+          {# Pull show time #}
+          {% if p.perf_time %}
+          <button type="button" class="btn btn-sm btn-ghost"
+                  onclick="pullAdvanceTime({{ p.id }}, '{{ p.perf_time | e }}')">Pull time</button>
+          {% endif %}
+          <button type="button" class="btn btn-sm btn-ghost" onclick="addScheduleRow({{ p.id }})">+ Add Row</button>
+        </div>
+        {% endif %}
+      </div>
+      <div class="form-section-body no-pad">
+        <table class="schedule-table">
+          <thead>
+            <tr>
+              <th style="width:110px">START</th>
+              <th style="width:110px">END</th>
+              <th>DESCRIPTION</th>
+              <th style="width:160px">NOTES</th>
+              {% if not restricted %}<th style="width:40px"></th>{% endif %}
+            </tr>
+          </thead>
+          <tbody id="schedule-rows-{{ p.id }}">
+            {% if day_rows %}
+              {% for row in day_rows %}
+              <tr class="schedule-row">
+                <td><input type="text" class="sched-cell" placeholder="3:00pm" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
+                <td><input type="text" class="sched-cell" placeholder="4:00pm" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
+                <td><input type="text" class="sched-cell" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
+                <td><input type="text" class="sched-cell" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
+                {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)" title="Remove">×</button></td>{% endif %}
+              </tr>
+              {% endfor %}
+            {% else %}
+              <tr class="schedule-row">
+                <td><input type="text" class="sched-cell" placeholder="3:00pm" value="" {% if restricted %}disabled{% endif %}></td>
+                <td><input type="text" class="sched-cell" placeholder="4:00pm" value="" {% if restricted %}disabled{% endif %}></td>
+                <td><input type="text" class="sched-cell" placeholder="Crew Called" value="" {% if restricted %}disabled{% endif %}></td>
+                <td><input type="text" class="sched-cell" placeholder="" value="" {% if restricted %}disabled{% endif %}></td>
+                {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>{% endif %}
+              </tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
       {% if not restricted %}
-      <button type="button" class="btn btn-sm btn-ghost ml-auto" onclick="addScheduleRow()">+ Add Row</button>
+      <div class="form-section-footer">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="addScheduleRow({{ p.id }})">+ Add Row</button>
+      </div>
       {% endif %}
     </div>
-    <div class="form-section-body no-pad">
-      <table class="schedule-table" id="schedule-table">
-        <thead>
-          <tr>
-            <th style="width:110px">START</th>
-            <th style="width:110px">END</th>
-            <th>DESCRIPTION</th>
-            <th style="width:160px">NOTES</th>
-            {% if not restricted %}<th style="width:40px"></th>{% endif %}
-          </tr>
-        </thead>
-        <tbody id="schedule-rows">
-          {% if schedule_rows %}
-            {% for row in schedule_rows %}
-            <tr class="schedule-row" data-id="{{ row.id }}">
-              <td><input type="text" class="sched-cell" placeholder="3:00pm" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="4:00pm" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
-              {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)" title="Remove">×</button></td>{% endif %}
-            </tr>
-            {% endfor %}
-          {% else %}
-            <tr class="schedule-row">
-              <td><input type="text" class="sched-cell" placeholder="3:00pm" value="" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="4:00pm" value="" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="Crew Called" value="" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="" value="" {% if restricted %}disabled{% endif %}></td>
-              {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>{% endif %}
-            </tr>
-          {% endif %}
-        </tbody>
-      </table>
-    </div>
-    {% if not restricted %}
-    <div class="form-section-footer">
-      <button type="button" class="btn btn-ghost btn-sm" onclick="addScheduleRow()">+ Add Row</button>
-    </div>
-    {% endif %}
   </div>
+  {% else %}
+  {# Fallback: show has no performances recorded — single legacy table #}
+  <div class="sched-day-pane" data-perf-id="">
+    <div class="form-section">
+      <div class="form-section-header">
+        <span class="section-icon">◈</span> TIMELINE
+        {% if not restricted %}
+        <div style="display:flex;gap:6px;align-items:center;margin-left:auto">
+          {% if sched_templates %}
+          <select class="field-input" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
+                  onchange="applySchedTemplate(this.value, null); this.value=''">
+            <option value="">Apply template…</option>
+            {% for t in sched_templates %}
+            <option value="{{ t.id }}">{{ t.name }}</option>
+            {% endfor %}
+          </select>
+          {% endif %}
+          <button type="button" class="btn btn-sm btn-ghost" onclick="addScheduleRow(null)">+ Add Row</button>
+        </div>
+        {% endif %}
+      </div>
+      <div class="form-section-body no-pad">
+        <table class="schedule-table">
+          <thead><tr>
+            <th style="width:110px">START</th><th style="width:110px">END</th>
+            <th>DESCRIPTION</th><th style="width:160px">NOTES</th>
+            {% if not restricted %}<th style="width:40px"></th>{% endif %}
+          </tr></thead>
+          <tbody id="schedule-rows-null">
+            {% set null_rows = schedule_rows | selectattr('perf_id', 'none') | list %}
+            {% if null_rows %}
+              {% for row in null_rows %}
+              <tr class="schedule-row">
+                <td><input type="text" class="sched-cell" placeholder="3:00pm" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
+                <td><input type="text" class="sched-cell" placeholder="4:00pm" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
+                <td><input type="text" class="sched-cell" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
+                <td><input type="text" class="sched-cell" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
+                {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>{% endif %}
+              </tr>
+              {% endfor %}
+            {% else %}
+              <tr class="schedule-row">
+                <td><input type="text" class="sched-cell" placeholder="3:00pm" value="" {% if restricted %}disabled{% endif %}></td>
+                <td><input type="text" class="sched-cell" placeholder="4:00pm" value="" {% if restricted %}disabled{% endif %}></td>
+                <td><input type="text" class="sched-cell" placeholder="Crew Called" value="" {% if restricted %}disabled{% endif %}></td>
+                <td><input type="text" class="sched-cell" placeholder="" value="" {% if restricted %}disabled{% endif %}></td>
+                {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>{% endif %}
+              </tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+      {% if not restricted %}
+      <div class="form-section-footer">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="addScheduleRow(null)">+ Add Row</button>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
 
   {# ── Contacts ──────────────────────────────────────────────────────────── #}
   <div class="form-section">

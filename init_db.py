@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS advance_data (
 CREATE TABLE IF NOT EXISTS schedule_rows (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     show_id INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    perf_id INTEGER DEFAULT NULL,
     sort_order INTEGER DEFAULT 0,
     start_time TEXT DEFAULT '',
     end_time TEXT DEFAULT '',
@@ -213,6 +214,22 @@ CREATE TABLE IF NOT EXISTS schedule_meta_fields (
     advance_field_key TEXT DEFAULT NULL,
     sort_order       INTEGER DEFAULT 0,
     width_hint       TEXT DEFAULT 'half'
+);
+
+CREATE TABLE IF NOT EXISTS schedule_templates (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS schedule_template_rows (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id INTEGER NOT NULL REFERENCES schedule_templates(id) ON DELETE CASCADE,
+    sort_order  INTEGER DEFAULT 0,
+    start_time  TEXT DEFAULT '',
+    end_time    TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    notes       TEXT DEFAULT ''
 );
 """
 
@@ -497,8 +514,7 @@ def _seed_form_data(conn):
 
 SCHEDULE_META_FIELDS_SEED = [
     # (field_key, label, field_type, advance_field_key, sort_order, width_hint)
-    ('wifi_network',     'WIFI NETWORK',            'text', None,            10, 'half'),
-    ('wifi_code',        'WIFI CODE',               'text', None,            20, 'half'),
+    # wifi_network and wifi_code removed — WiFi comes from global Settings only
     ('radio_channel',    'RADIO CHANNEL',           'text', 'radio_channel', 30, 'half'),
     ('mix_position',     'MIX POSITION',            'text', 'mix_position',  40, 'half'),
     ('parking_security', 'PARKING & SECURITY INFO', 'text', None,            50, 'full'),
@@ -707,13 +723,14 @@ def migrate_db():
         'ALTER TABLE export_log ADD COLUMN pdf_data BLOB',
         "ALTER TABLE export_log ADD COLUMN filename TEXT DEFAULT ''",
         'ALTER TABLE form_sections ADD COLUMN default_open INTEGER DEFAULT 1',
+        'ALTER TABLE schedule_rows ADD COLUMN perf_id INTEGER DEFAULT NULL',
     ]:
         try:
             conn.execute(alter_sql)
         except Exception:
             pass  # Column already exists
 
-    # Create schedule_meta_fields table (new feature, safe to rerun)
+    # Create schedule_meta_fields and schedule_templates tables (safe to rerun)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS schedule_meta_fields (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -724,7 +741,26 @@ def migrate_db():
             sort_order       INTEGER DEFAULT 0,
             width_hint       TEXT DEFAULT 'half'
         );
+
+        CREATE TABLE IF NOT EXISTS schedule_templates (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            sort_order INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS schedule_template_rows (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_id INTEGER NOT NULL REFERENCES schedule_templates(id) ON DELETE CASCADE,
+            sort_order  INTEGER DEFAULT 0,
+            start_time  TEXT DEFAULT '',
+            end_time    TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            notes       TEXT DEFAULT ''
+        );
     """)
+
+    # Remove WiFi fields from schedule_meta_fields — WiFi is now global-only
+    conn.execute("DELETE FROM schedule_meta_fields WHERE field_key IN ('wifi_network', 'wifi_code')")
 
     # Seed show_performances from existing show_date/show_time if empty
     perf_count = conn.execute('SELECT COUNT(*) FROM show_performances').fetchone()[0]

@@ -7,6 +7,10 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: Arial, Helvetica, sans-serif; font-size: 8.5pt; color: #1a1a1a; line-height: 1.35; }
 
+  /* ── Page break between days ── */
+  .day-section { page-break-after: always; }
+  .day-section:last-child { page-break-after: avoid; }
+
   /* ── Header ── */
   .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 2.5px solid #000; }
   .doc-title { font-size: 18pt; font-weight: 900; letter-spacing: 0.05em; text-transform: uppercase; }
@@ -15,10 +19,24 @@
   .doc-meta { text-align: right; font-size: 7.5pt; color: #444; }
   .doc-meta .version { font-size: 10pt; font-weight: bold; color: #B8840A; }
 
+  /* ── Day label banner ── */
+  .day-banner { background: #1a1a1a; color: #fff; font-size: 10pt; font-weight: bold;
+                letter-spacing: 0.08em; text-transform: uppercase; padding: 5px 10px;
+                margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+  .day-banner .day-date { font-size: 8pt; color: #ccc; font-weight: normal; }
+
   /* ── Info bar ── */
-  .info-bar { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 10px; background: #f5f5f5; border: 1px solid #ddd; padding: 7px 10px; }
+  .info-bar { display: grid; gap: 6px; margin-bottom: 10px; background: #f5f5f5; border: 1px solid #ddd; padding: 7px 10px; align-items: center; }
   .info-item .lbl { font-size: 6.5pt; font-weight: bold; color: #888; text-transform: uppercase; letter-spacing: 0.06em; }
   .info-item .val { font-size: 8.5pt; color: #111; margin-top: 1px; font-weight: 600; }
+
+  /* ── WiFi box ── */
+  .wifi-box { display: flex; align-items: center; gap: 10px; background: #f0f8ff; border: 1.5px solid #4a90d9; padding: 6px 10px; border-radius: 4px; margin-bottom: 10px; }
+  .wifi-qr img { width: 90px; height: 90px; }
+  .wifi-info .wifi-label { font-size: 9pt; font-weight: 900; letter-spacing: 0.1em; color: #1a4a7a; text-transform: uppercase; margin-bottom: 3px; }
+  .wifi-info .wifi-ssid  { font-size: 10pt; font-weight: bold; color: #1a1a1a; }
+  .wifi-info .wifi-pass  { font-size: 8.5pt; color: #444; margin-top: 2px; }
+  .wifi-info .wifi-pass span { font-family: monospace; font-weight: bold; color: #1a1a1a; }
 
   /* ── Schedule Table ── */
   .sched-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
@@ -50,124 +68,152 @@
 {% macro m(key, default='') %}{{ d.get(key, default)|string|trim }}{% endmacro %}
 {% macro adv(key, default='') %}{{ a.get(key, default)|string|trim }}{% endmacro %}
 
-<!-- Header -->
-<div class="doc-header">
-  <div style="display:flex;align-items:center;gap:12px">
-    {% if logo_data %}
-    <img src="{{ logo_data }}" alt="Logo" style="max-height:45px;max-width:120px;object-fit:contain">
-    {% endif %}
-    <div>
-      <div class="doc-title">DPC <span>PRODUCTION</span> SCHEDULE</div>
-      <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
-    </div>
-  </div>
-  <div class="doc-meta">
-    <div class="version">v{{ version }}</div>
-    <div>{{ export_date }}</div>
-    <div style="margin-top:3px; font-size:8pt; color:#222">
-      <strong>{{ show.name }}</strong> &nbsp;·&nbsp; {{ show.show_date or '—' }}{% if show.show_time %} &nbsp;·&nbsp; {{ show.show_time }}{% endif %}
-    </div>
-  </div>
-</div>
-
-<!-- Info Bar -->
 {% set _smf = sched_meta_fields if sched_meta_fields is defined else [] %}
 {% set _bar_fields = _smf | selectattr('width_hint', 'ne', 'full') | list %}
 {% set _full_fields = _smf | selectattr('width_hint', 'eq', 'full') | list %}
-{% set _n_bar = _bar_fields | length + 1 %}
-<div class="info-bar" style="grid-template-columns: 1fr {% for _ in _bar_fields %}1fr {% endfor %}{% if wifi_qr_b64 %}60px{% endif %}">
-  <div class="info-item">
-    <div class="lbl">Venue</div>
-    <div class="val">{{ show.venue or '—' }}</div>
-  </div>
-  {% for f in _bar_fields %}
-  <div class="info-item">
-    <div class="lbl">{{ f.label }}</div>
-    <div class="val">
-      {% if f.advance_field_key %}{{ adv(f.advance_field_key) or m(f.field_key) or '—' }}
-      {% else %}{{ m(f.field_key) or '—' }}{% endif %}
+
+{% for day in schedule_days %}
+<div class="day-section">
+
+  <!-- Header -->
+  <div class="doc-header">
+    <div style="display:flex;align-items:center;gap:12px">
+      {% if logo_data %}
+      <img src="{{ logo_data }}" alt="Logo" style="max-height:45px;max-width:120px;object-fit:contain">
+      {% endif %}
+      <div>
+        <div class="doc-title">DPC <span>PRODUCTION</span> SCHEDULE</div>
+        <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
+      </div>
+    </div>
+    <div class="doc-meta">
+      <div class="version">v{{ version }}</div>
+      <div>{{ export_date }}</div>
+      <div style="margin-top:3px; font-size:8pt; color:#222">
+        <strong>{{ show.name }}</strong>
+        {% if schedule_days | length > 1 %} &nbsp;·&nbsp; <strong>Day {{ day.day_num }}</strong>{% endif %}
+        &nbsp;·&nbsp; {{ day.perf.perf_date or show.show_date or '—' }}
+        {% if day.perf.perf_time %} &nbsp;·&nbsp; {{ day.perf.perf_time }}{% endif %}
+      </div>
     </div>
   </div>
-  {% endfor %}
-  {% if wifi_qr_b64 %}
-  <div class="info-item" style="text-align:center">
-    <img src="data:image/png;base64,{{ wifi_qr_b64 }}" alt="WiFi QR" style="width:52px;height:52px">
+
+  <!-- Day banner (only when multi-day) -->
+  {% if schedule_days | length > 1 %}
+  <div class="day-banner">
+    <span>Day {{ day.day_num }}</span>
+    <span class="day-date">{{ day.perf.perf_date or '' }}{% if day.perf.perf_time %} · {{ day.perf.perf_time }}{% endif %}</span>
   </div>
   {% endif %}
-</div>
 
-{% for f in _full_fields %}
-{% set fval = (adv(f.advance_field_key) if f.advance_field_key else m(f.field_key)) | trim %}
-{% if fval %}
-<div style="background:#fff8e8; border:1px solid #e8c870; padding:4px 8px; margin-bottom:10px; font-size:8pt;">
-  <strong>{{ f.label }}:</strong> {{ fval }}
-</div>
-{% endif %}
-{% endfor %}
-
-<!-- Schedule Table -->
-<table class="sched-table">
-  <thead>
-    <tr>
-      <th style="width:90px">Start</th>
-      <th style="width:90px">End</th>
-      <th>Description</th>
-      <th style="width:200px">Notes</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for row in schedule_rows %}
-    {% if row.description or row.start_time %}
-    <tr>
-      <td class="time-col">{{ row.start_time or '' }}</td>
-      <td class="time-col">{{ row.end_time or '' }}</td>
-      <td class="desc-col">{{ row.description or '' }}</td>
-      <td class="notes-col">{{ row.notes or '' }}</td>
-    </tr>
-    {% endif %}
+  <!-- Info Bar -->
+  <div class="info-bar" style="grid-template-columns: 1fr {% for _ in _bar_fields %}1fr {% endfor %}">
+    <div class="info-item">
+      <div class="lbl">Venue</div>
+      <div class="val">{{ show.venue or '—' }}</div>
+    </div>
+    {% for f in _bar_fields %}
+    <div class="info-item">
+      <div class="lbl">{{ f.label }}</div>
+      <div class="val">
+        {% if f.advance_field_key %}{{ adv(f.advance_field_key) or m(f.field_key) or '—' }}
+        {% else %}{{ m(f.field_key) or '—' }}{% endif %}
+      </div>
+    </div>
     {% endfor %}
-    {% if not schedule_rows %}
-    <tr><td colspan="4" style="text-align:center;color:#aaa;padding:12px;">No schedule rows entered.</td></tr>
-    {% endif %}
-  </tbody>
-</table>
-
-<!-- Contacts -->
-<div class="contacts-grid">
-  <!-- Artist / Tour Contacts -->
-  <div class="contacts-box">
-    <div class="contacts-box-head">Artist / Tour Contacts</div>
-    <div style="padding:6px 8px; font-size:8pt; white-space:pre-wrap; min-height:50px;">{{ m('artist_contacts') or '—' }}</div>
   </div>
 
-  <!-- DPC Contacts -->
-  <div class="contacts-box">
-    <div class="contacts-box-head">DPC Contacts</div>
-    <table class="contacts-table">
-      {% for role, key in [
-        ('Production Manager', 'production_manager'),
-        ('Hospitality',        'hospitality_contact'),
-        ('Programming',        'programming'),
-        ('Event Manager',      'events'),
-        ('Education',          'education_contact'),
-        ('Guest Services',     'guest_services'),
-        ('Runner',             'runner_contact'),
-      ] %}
-      {% set val = adv(key) %}
-      {% if val and val not in ['-',''] %}
+  {% for f in _full_fields %}
+  {% set fval = (adv(f.advance_field_key) if f.advance_field_key else m(f.field_key)) | trim %}
+  {% if fval %}
+  <div style="background:#fff8e8; border:1px solid #e8c870; padding:4px 8px; margin-bottom:10px; font-size:8pt;">
+    <strong>{{ f.label }}:</strong> {{ fval }}
+  </div>
+  {% endif %}
+  {% endfor %}
+
+  <!-- WiFi Box (only on first day, or all days) -->
+  {% if wifi_ssid %}
+  <div class="wifi-box">
+    {% if wifi_qr_b64 %}
+    <div class="wifi-qr">
+      <img src="data:image/png;base64,{{ wifi_qr_b64 }}" alt="WiFi QR Code">
+    </div>
+    {% endif %}
+    <div class="wifi-info">
+      <div class="wifi-label">WiFi Access</div>
+      <div class="wifi-ssid">{{ wifi_ssid }}</div>
+      {% if wifi_pass %}<div class="wifi-pass">Password: <span>{{ wifi_pass }}</span></div>{% endif %}
+      {% if wifi_qr_b64 %}<div style="font-size:7pt;color:#666;margin-top:3px">Scan QR code to connect automatically</div>{% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Schedule Table -->
+  <table class="sched-table">
+    <thead>
       <tr>
-        <td class="lbl">{{ role }}</td>
-        <td>{{ val }}</td>
+        <th style="width:90px">Start</th>
+        <th style="width:90px">End</th>
+        <th>Description</th>
+        <th style="width:200px">Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in day.rows %}
+      {% if row.description or row.start_time %}
+      <tr>
+        <td class="time-col">{{ row.start_time or '' }}</td>
+        <td class="time-col">{{ row.end_time or '' }}</td>
+        <td class="desc-col">{{ row.description or '' }}</td>
+        <td class="notes-col">{{ row.notes or '' }}</td>
       </tr>
       {% endif %}
       {% endfor %}
-      {% set sec = m('security_email') %}
-      {% if sec and sec not in ['-',''] %}
-      <tr><td class="lbl">Security</td><td>{{ sec }}</td></tr>
+      {% if not day.rows %}
+      <tr><td colspan="4" style="text-align:center;color:#aaa;padding:12px;">No schedule rows entered.</td></tr>
       {% endif %}
-    </table>
+    </tbody>
+  </table>
+
+  <!-- Contacts (only on last day or single-day) -->
+  {% if loop.last %}
+  <div class="contacts-grid">
+    <div class="contacts-box">
+      <div class="contacts-box-head">Artist / Tour Contacts</div>
+      <div style="padding:6px 8px; font-size:8pt; white-space:pre-wrap; min-height:50px;">{{ m('artist_contacts') or '—' }}</div>
+    </div>
+    <div class="contacts-box">
+      <div class="contacts-box-head">DPC Contacts</div>
+      <table class="contacts-table">
+        {% for role, key in [
+          ('Production Manager', 'production_manager'),
+          ('Hospitality',        'hospitality_contact'),
+          ('Programming',        'programming'),
+          ('Event Manager',      'events'),
+          ('Education',          'education_contact'),
+          ('Guest Services',     'guest_services'),
+          ('Runner',             'runner_contact'),
+        ] %}
+        {% set val = adv(key) %}
+        {% if val and val not in ['-',''] %}
+        <tr>
+          <td class="lbl">{{ role }}</td>
+          <td>{{ val }}</td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+        {% set sec = m('security_email') %}
+        {% if sec and sec not in ['-',''] %}
+        <tr><td class="lbl">Security</td><td>{{ sec }}</td></tr>
+        {% endif %}
+      </table>
+    </div>
   </div>
-</div>
+  {% endif %}
+
+</div>{# end .day-section #}
+{% endfor %}
 
 <!-- Footer -->
 <div class="doc-footer">

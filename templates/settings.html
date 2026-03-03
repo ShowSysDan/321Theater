@@ -357,10 +357,70 @@
         </div>
       </div>
 
+      {# ── Schedule Day Templates ─────────────────────────────────────────── #}
+      <div class="form-section" style="margin-top:16px">
+        <div class="form-section-header">
+          <span class="section-icon">◈</span> SCHEDULE DAY TEMPLATES
+          <div class="action-btns ml-auto">
+            <button class="btn btn-sm btn-ghost" onclick="openSchedTemplateModal(null)">+ New Template</button>
+          </div>
+        </div>
+        <div class="form-section-body" style="gap:10px">
+          <p class="text-dim" style="font-size:12px">Pre-built timelines (Load In, Concert, etc.) you can apply to any schedule day with one click.</p>
+          {% if sched_templates %}
+          {% for t in sched_templates %}
+          <div class="section-row" style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-hover);border-radius:4px">
+            <span style="font-size:12px;font-weight:600">{{ t.name }}</span>
+            <div class="action-btns ml-auto">
+              <button class="btn btn-xs btn-ghost" onclick="openSchedTemplateModal({{ t.id }})">Edit</button>
+              <button class="btn btn-xs btn-danger-ghost" onclick="deleteSchedTemplate({{ t.id }})">Delete</button>
+            </div>
+          </div>
+          {% endfor %}
+          {% else %}
+          <p class="text-dim" style="font-size:12px">No templates yet. Click + New Template to create one.</p>
+          {% endif %}
+        </div>
+      </div>
+
     </div>
   </div>
 </div>
 {% endif %}{# end fields admin/content_admin #}
+
+<!-- Schedule Template Modal -->
+<div id="sched-template-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeSchedTemplateModal()">
+  <div class="modal-card" style="max-width:700px;width:95%">
+    <div class="modal-header">Schedule Day Template <button onclick="closeSchedTemplateModal()" class="modal-close">×</button></div>
+    <div class="modal-body">
+      <div class="field-group" style="margin-bottom:16px">
+        <label class="field-label">TEMPLATE NAME *</label>
+        <input type="text" id="sched-tmpl-name" class="field-input" placeholder="e.g. Load In Day, Concert Day">
+      </div>
+      <table class="schedule-table" style="margin-bottom:8px">
+        <thead><tr>
+          <th style="width:100px">START</th><th style="width:100px">END</th>
+          <th>DESCRIPTION</th><th style="width:140px">NOTES</th>
+          <th style="width:36px"></th>
+        </tr></thead>
+        <tbody id="sched-tmpl-rows">
+          <tr class="schedule-row">
+            <td><input type="text" class="sched-cell tmpl-cell" placeholder="8:00am"></td>
+            <td><input type="text" class="sched-cell tmpl-cell" placeholder="10:00am"></td>
+            <td><input type="text" class="sched-cell tmpl-cell" placeholder="Load In"></td>
+            <td><input type="text" class="sched-cell tmpl-cell" placeholder="Notes"></td>
+            <td><button type="button" class="row-del-btn" onclick="this.closest('tr').remove()">×</button></td>
+          </tr>
+        </tbody>
+      </table>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="addSchedTmplRow()">+ Add Row</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeSchedTemplateModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveSchedTemplate()">Save Template</button>
+    </div>
+  </div>
+</div>
 
 {# ── SYSLOG (admin only) ───────────────────────────────────────────────────── #}
 {% if user.role == 'admin' %}
@@ -384,30 +444,6 @@
         <div class="server-save-msg field-msg"></div>
         <button type="submit" class="btn btn-primary">Save Port</button>
       </form>
-    </div>
-  </div>
-
-  {# Venue / Radio / WiFi / Logo / Upload settings #}
-  <div class="form-section" style="margin-bottom:16px">
-    <div class="form-section-header"><span class="section-icon">◈</span> VENUE & CHANNEL LISTS</div>
-    <div class="form-section-body">
-      <p class="text-dim" style="font-size:12px;margin-bottom:12px">One item per line. Used as dropdown options in the advance form.</p>
-      <div class="form-row cols-2">
-        <div class="field-group">
-          <label class="field-label">VENUES (one per line)</label>
-          <textarea id="venue-list-input" class="field-input field-textarea" rows="5"
-            placeholder="Judson's Live&#10;Walt Disney Theater">{{ venue_list | join('\n') }}</textarea>
-          <button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="saveVenueList()">Save Venues</button>
-          <span id="venue-save-msg" class="field-msg" style="margin-left:8px"></span>
-        </div>
-        <div class="field-group">
-          <label class="field-label">RADIO CHANNELS (one per line)</label>
-          <textarea id="radio-list-input" class="field-input field-textarea" rows="5"
-            placeholder="16/Judson's&#10;17/Walt Disney">{{ radio_channel_list | join('\n') }}</textarea>
-          <button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="saveRadioList()">Save Channels</button>
-          <span id="radio-save-msg" class="field-msg" style="margin-left:8px"></span>
-        </div>
-      </div>
     </div>
   </div>
 
