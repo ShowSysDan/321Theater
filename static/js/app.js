@@ -400,13 +400,20 @@ function sortSchedRowsByTime(perfId) {
 let _dragSrc = null;
 
 function _bindRowDrag(tr) {
-  tr.draggable = true;
+  const handle = tr.querySelector('.row-drag-handle');
+  if (!handle) return;
+
+  // Only enable dragging while the ⠿ handle is held — all other row buttons stay clickable
+  handle.addEventListener('mousedown', () => { tr.draggable = true; });
+  handle.addEventListener('mouseup',   () => { tr.draggable = false; });
+
   tr.addEventListener('dragstart', function(e) {
     _dragSrc = this;
     e.dataTransfer.effectAllowed = 'move';
     this.classList.add('row-dragging');
   });
   tr.addEventListener('dragend', function() {
+    this.draggable = false;
     this.classList.remove('row-dragging');
     document.querySelectorAll('.schedule-row.row-drag-over').forEach(r => r.classList.remove('row-drag-over'));
     _dragSrc = null;
