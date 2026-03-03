@@ -700,16 +700,16 @@ def show_page(show_id):
     form_sections = get_form_fields_for_template()
     restricted = session.get('is_restricted', False)
 
-    try:
-        _vl = get_app_setting('venue_list', '[]')
-        venue_list = json.loads(_vl) if _vl else []
-    except Exception:
-        venue_list = []
-    try:
-        _rl = get_app_setting('radio_channel_list', '[]')
-        radio_channel_list = json.loads(_rl) if _rl else []
-    except Exception:
-        radio_channel_list = []
+    # Global WiFi for schedule display (no longer a per-show editable field)
+    global_wifi_network  = get_app_setting('wifi_network', '')
+    global_wifi_password = get_app_setting('wifi_password', '')
+
+    # Schedule templates for the schedule tab
+    db2 = get_db()
+    sched_templates = [dict(r) for r in db2.execute(
+        'SELECT id, name FROM schedule_templates ORDER BY sort_order, name'
+    ).fetchall()]
+    db2.close()
 
     return render_template('show.html',
                            show=show,
@@ -728,8 +728,9 @@ def show_page(show_id):
                            last_saved_at=last_saved_at,
                            restricted=restricted,
                            all_users=all_users,
-                           venue_list=venue_list,
-                           radio_channel_list=radio_channel_list,
+                           global_wifi_network=global_wifi_network,
+                           global_wifi_password=global_wifi_password,
+                           sched_templates=sched_templates,
                            user=get_current_user())
 
 
@@ -873,10 +874,11 @@ def save_schedule(show_id):
     if 'rows' in data:
         db.execute('DELETE FROM schedule_rows WHERE show_id = ?', (show_id,))
         for i, row in enumerate(data['rows']):
+            perf_id = row.get('perf_id')  # None for single-day / first day
             db.execute("""
-                INSERT INTO schedule_rows (show_id, sort_order, start_time, end_time, description, notes)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (show_id, i,
+                INSERT INTO schedule_rows (show_id, perf_id, sort_order, start_time, end_time, description, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (show_id, perf_id, i,
                   row.get('start_time', ''), row.get('end_time', ''),
                   row.get('description', ''), row.get('notes', '')))
 
@@ -1470,7 +1472,7 @@ def _build_advance_pdf(show_id):
 def _build_schedule_pdf(show_id):
     db = get_db()
     show = db.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
-    sched_rows = db.execute(
+    all_sched_rows = db.execute(
         'SELECT * FROM schedule_rows WHERE show_id=? ORDER BY sort_order,id', (show_id,)
     ).fetchall()
     meta_rows = db.execute(
@@ -1481,15 +1483,18 @@ def _build_schedule_pdf(show_id):
         'SELECT field_key, field_value FROM advance_data WHERE show_id=?', (show_id,)
     ).fetchall()
     advance_data = {r['field_key']: r['field_value'] for r in adv_rows}
+    performances = [dict(p) for p in db.execute(
+        'SELECT * FROM show_performances WHERE show_id=? ORDER BY sort_order, perf_date, id', (show_id,)
+    ).fetchall()]
     contacts = db.execute('SELECT * FROM contacts ORDER BY name').fetchall()
     contact_map = {c['id']: dict(c) for c in contacts}
 
     logo_data = get_app_setting('logo_data', '')
 
-    # WiFi QR Code generation
+    # WiFi always from global settings (not per-show)
+    wifi_ssid = get_app_setting('wifi_network', '')
+    wifi_pass  = get_app_setting('wifi_password', '')
     wifi_qr_b64 = None
-    wifi_ssid = schedule_meta.get('wifi_network') or get_app_setting('wifi_network', '')
-    wifi_pass = schedule_meta.get('wifi_code') or get_app_setting('wifi_password', '')
     if wifi_ssid:
         try:
             import qrcode, io, base64
@@ -1500,6 +1505,24 @@ def _build_schedule_pdf(show_id):
         except Exception:
             pass
 
+    # Group schedule rows by perf_id; NULL rows go to the first performance
+    rows_by_perf = {}
+    for row in all_sched_rows:
+        pid = row['perf_id']
+        rows_by_perf.setdefault(pid, []).append(dict(row))
+
+    # Build per-day data for the PDF template
+    schedule_days = []
+    for i, p in enumerate(performances):
+        day_rows = rows_by_perf.get(p['id'], [])
+        if i == 0:  # First day absorbs any legacy NULL-keyed rows
+            day_rows = rows_by_perf.get(None, []) + day_rows
+        schedule_days.append({'perf': p, 'rows': day_rows, 'day_num': i + 1})
+
+    if not schedule_days:  # Fallback: show with no performances recorded
+        schedule_days = [{'perf': {'perf_date': show['show_date'], 'perf_time': show['show_time']},
+                          'rows': rows_by_perf.get(None, []), 'day_num': 1}]
+
     new_v = (show['schedule_version'] or 0) + 1
     db.execute('UPDATE shows SET schedule_version=? WHERE id=?', (new_v, show_id))
     log_cur = db.execute("""INSERT INTO export_log (show_id, export_type, version, exported_by)
@@ -1509,12 +1532,15 @@ def _build_schedule_pdf(show_id):
     db.close()
 
     html = render_template('pdf/schedule_pdf.html',
-                           show=show, schedule_rows=sched_rows,
+                           show=show,
+                           schedule_days=schedule_days,
                            schedule_meta=schedule_meta,
                            sched_meta_fields=get_schedule_meta_fields(),
                            advance_data=advance_data,
                            contact_map=contact_map,
                            logo_data=logo_data,
+                           wifi_ssid=wifi_ssid,
+                           wifi_pass=wifi_pass,
                            wifi_qr_b64=wifi_qr_b64,
                            version=new_v,
                            export_date=datetime.now().strftime('%B %d, %Y at %I:%M %p'))
@@ -1783,14 +1809,11 @@ def settings():
     form_sections = get_form_fields_for_template() if _is_ca else []
     sched_meta_fields = get_schedule_meta_fields() if _is_ca else []
 
-    try:
-        venue_list = json.loads(all_settings.get('venue_list', '[]'))
-    except Exception:
-        venue_list = []
-    try:
-        radio_channel_list = json.loads(all_settings.get('radio_channel_list', '[]'))
-    except Exception:
-        radio_channel_list = []
+    db3 = get_db()
+    sched_templates = [dict(t) for t in db3.execute(
+        'SELECT id, name FROM schedule_templates ORDER BY sort_order, name'
+    ).fetchall()] if _is_ca else []
+    db3.close()
 
     return render_template('settings.html',
                            contacts=contacts,
@@ -1801,8 +1824,7 @@ def settings():
                            syslog_settings=all_settings,
                            departments=DEPARTMENTS,
                            is_content_admin=_is_ca,
-                           venue_list=venue_list,
-                           radio_channel_list=radio_channel_list,
+                           sched_templates=sched_templates,
                            wifi_network=all_settings.get('wifi_network', ''),
                            wifi_password=all_settings.get('wifi_password', ''),
                            upload_max_mb=all_settings.get('upload_max_mb', '20'),
@@ -2066,14 +2088,12 @@ def form_fields_settings():
     db.close()
 
     _is_ca = session.get('is_content_admin', False) or session.get('user_role') == 'admin'
-    try:
-        venue_list = json.loads(all_settings.get('venue_list', '[]'))
-    except Exception:
-        venue_list = []
-    try:
-        radio_channel_list = json.loads(all_settings.get('radio_channel_list', '[]'))
-    except Exception:
-        radio_channel_list = []
+
+    db4 = get_db()
+    sched_templates2 = [dict(t) for t in db4.execute(
+        'SELECT id, name FROM schedule_templates ORDER BY sort_order, name'
+    ).fetchall()] if _is_ca else []
+    db4.close()
 
     return render_template('settings.html',
                            contacts=contacts,
@@ -2085,8 +2105,7 @@ def form_fields_settings():
                            departments=DEPARTMENTS,
                            active_tab='fields',
                            is_content_admin=_is_ca,
-                           venue_list=venue_list,
-                           radio_channel_list=radio_channel_list,
+                           sched_templates=sched_templates2,
                            wifi_network=all_settings.get('wifi_network', ''),
                            wifi_password=all_settings.get('wifi_password', ''),
                            upload_max_mb=all_settings.get('upload_max_mb', '20'),
@@ -2550,31 +2569,90 @@ def api_file_manager():
     })
 
 
-# ─── Venue / Radio / WiFi / Logo Settings ────────────────────────────────────
+# ─── Schedule Templates ───────────────────────────────────────────────────────
 
-@app.route('/settings/venues', methods=['POST'])
-@admin_required
-def save_venues():
-    data = request.get_json(force=True) or {}
-    venue_list = data.get('venue_list', [])
+@app.route('/api/schedule-templates')
+@login_required
+def api_schedule_templates():
     db = get_db()
-    db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
-               ('venue_list', json.dumps(venue_list)))
+    templates = [dict(t) for t in db.execute(
+        'SELECT * FROM schedule_templates ORDER BY sort_order, name'
+    ).fetchall()]
+    for t in templates:
+        t['rows'] = [dict(r) for r in db.execute(
+            'SELECT * FROM schedule_template_rows WHERE template_id=? ORDER BY sort_order',
+            (t['id'],)
+        ).fetchall()]
+    db.close()
+    return jsonify(templates)
+
+
+@app.route('/api/schedule-templates/<int:tid>')
+@login_required
+def api_schedule_template(tid):
+    db = get_db()
+    t = db.execute('SELECT * FROM schedule_templates WHERE id=?', (tid,)).fetchone()
+    if not t:
+        db.close(); return jsonify({'error': 'Not found'}), 404
+    rows = [dict(r) for r in db.execute(
+        'SELECT * FROM schedule_template_rows WHERE template_id=? ORDER BY sort_order', (tid,)
+    ).fetchall()]
+    db.close()
+    return jsonify({'id': t['id'], 'name': t['name'], 'rows': rows})
+
+
+@app.route('/settings/schedule-templates/add', methods=['POST'])
+@content_admin_required
+def add_schedule_template():
+    data = request.get_json(force=True) or {}
+    name = data.get('name', '').strip()
+    if not name:
+        return jsonify({'success': False, 'error': 'Name required.'}), 400
+    db = get_db()
+    max_o = db.execute('SELECT MAX(sort_order) FROM schedule_templates').fetchone()[0] or 0
+    cur = db.execute('INSERT INTO schedule_templates (name, sort_order) VALUES (?,?)',
+                     (name, max_o + 10))
+    tid = cur.lastrowid
+    for i, row in enumerate(data.get('rows', [])):
+        db.execute("""INSERT INTO schedule_template_rows
+                      (template_id, sort_order, start_time, end_time, description, notes)
+                      VALUES (?,?,?,?,?,?)""",
+                   (tid, i, row.get('start_time',''), row.get('end_time',''),
+                    row.get('description',''), row.get('notes','')))
+    db.commit(); db.close()
+    return jsonify({'success': True, 'id': tid})
+
+
+@app.route('/settings/schedule-templates/<int:tid>/edit', methods=['POST'])
+@content_admin_required
+def edit_schedule_template(tid):
+    data = request.get_json(force=True) or {}
+    name = data.get('name', '').strip()
+    if not name:
+        return jsonify({'success': False, 'error': 'Name required.'}), 400
+    db = get_db()
+    db.execute('UPDATE schedule_templates SET name=? WHERE id=?', (name, tid))
+    db.execute('DELETE FROM schedule_template_rows WHERE template_id=?', (tid,))
+    for i, row in enumerate(data.get('rows', [])):
+        db.execute("""INSERT INTO schedule_template_rows
+                      (template_id, sort_order, start_time, end_time, description, notes)
+                      VALUES (?,?,?,?,?,?)""",
+                   (tid, i, row.get('start_time',''), row.get('end_time',''),
+                    row.get('description',''), row.get('notes','')))
     db.commit(); db.close()
     return jsonify({'success': True})
 
 
-@app.route('/settings/radio-channels', methods=['POST'])
-@admin_required
-def save_radio_channels():
-    data = request.get_json(force=True) or {}
-    channel_list = data.get('channel_list', [])
+@app.route('/settings/schedule-templates/<int:tid>/delete', methods=['POST'])
+@content_admin_required
+def delete_schedule_template(tid):
     db = get_db()
-    db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
-               ('radio_channel_list', json.dumps(channel_list)))
+    db.execute('DELETE FROM schedule_templates WHERE id=?', (tid,))
     db.commit(); db.close()
     return jsonify({'success': True})
 
+
+# ─── WiFi / Logo Settings ─────────────────────────────────────────────────────
 
 @app.route('/settings/wifi', methods=['POST'])
 @admin_required

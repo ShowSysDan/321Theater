@@ -45,8 +45,9 @@
         <div class="show-card-top">
           <div class="show-date-badge">
             {% if s.show_date %}
-              <span class="show-month">{{ s.show_date[:7].replace('-','/') }}</span>
-              <span class="show-day">{{ s.show_date[-2:] }}</span>
+              {% set _mo = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'] %}
+              <span class="show-month">{{ _mo[s.show_date[5:7]|int - 1] }}</span>
+              <span class="show-day">{{ s.show_date[8:10] }}</span>
             {% else %}
               <span class="show-month">NO</span>
               <span class="show-day">DATE</span>
@@ -99,8 +100,9 @@
       <div class="show-card-top">
         <div class="show-date-badge dim">
           {% if s.show_date %}
-            <span class="show-month">{{ s.show_date[:7].replace('-','/') }}</span>
-            <span class="show-day">{{ s.show_date[-2:] }}</span>
+            {% set _mo = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'] %}
+            <span class="show-month">{{ _mo[s.show_date[5:7]|int - 1] }}</span>
+            <span class="show-day">{{ s.show_date[8:10] }}</span>
           {% else %}
             <span class="show-month">—</span><span class="show-day">—</span>
           {% endif %}

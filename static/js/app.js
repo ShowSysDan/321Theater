@@ -345,11 +345,14 @@ function bindScheduleForm() {
   const form = document.getElementById('schedule-form');
   if (!form) return;
   form.addEventListener('change', () => scheduleSave());
-  form.addEventListener('input', () => scheduleSave());
+  form.addEventListener('input',  () => scheduleSave());
 }
 
-function addScheduleRow() {
-  const tbody = document.getElementById('schedule-rows');
+/* Add a row to the day identified by perfId (null = legacy/single-day) */
+function addScheduleRow(perfId) {
+  const id    = (perfId !== undefined && perfId !== null) ? perfId : null;
+  const tbodyId = id !== null ? `schedule-rows-${id}` : 'schedule-rows-null';
+  const tbody = document.getElementById(tbodyId);
   if (!tbody) return;
   const tr = document.createElement('tr');
   tr.className = 'schedule-row';
@@ -362,15 +365,88 @@ function addScheduleRow() {
   `;
   tbody.appendChild(tr);
   tr.querySelector('.sched-cell').focus();
-  // Bind changes
-  tr.querySelectorAll('.sched-cell').forEach(inp => {
-    inp.addEventListener('input', () => scheduleSave());
-  });
 }
 
 function removeRow(btn) {
-  const row = btn.closest('tr');
-  row.remove();
+  btn.closest('tr').remove();
+  scheduleSave();
+}
+
+function switchSchedDay(perfId, btn) {
+  document.querySelectorAll('.sched-day-tab').forEach(t => {
+    t.classList.remove('btn-primary');
+    t.classList.add('btn-ghost');
+  });
+  btn.classList.add('btn-primary');
+  btn.classList.remove('btn-ghost');
+  document.querySelectorAll('.sched-day-pane').forEach(p => {
+    const show = p.dataset.perfId == perfId;
+    p.style.display = show ? '' : 'none';
+  });
+}
+
+/* Copy all rows from sourcePerfId day into targetPerfId day */
+function copySchedDay(sourcePerfId, targetPerfId) {
+  if (!confirm('Replace this day\'s rows with a copy from the selected day?')) return;
+  const src = document.getElementById(`schedule-rows-${sourcePerfId}`);
+  const tgt = document.getElementById(`schedule-rows-${targetPerfId}`);
+  if (!src || !tgt) return;
+  tgt.innerHTML = '';
+  src.querySelectorAll('.schedule-row').forEach(row => {
+    const cells = row.querySelectorAll('.sched-cell');
+    const tr = document.createElement('tr');
+    tr.className = 'schedule-row';
+    tr.innerHTML = `
+      <td><input type="text" class="sched-cell" placeholder="3:00pm" value="${cells[0]?.value || ''}"></td>
+      <td><input type="text" class="sched-cell" placeholder="4:00pm" value="${cells[1]?.value || ''}"></td>
+      <td><input type="text" class="sched-cell" placeholder="Description" value="${cells[2]?.value || ''}"></td>
+      <td><input type="text" class="sched-cell" placeholder="Notes" value="${cells[3]?.value || ''}"></td>
+      <td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>
+    `;
+    tgt.appendChild(tr);
+  });
+  scheduleSave();
+}
+
+/* Insert a SHOW START row at the top of the day */
+function pullAdvanceTime(perfId, perfTime) {
+  const tbody = document.getElementById(`schedule-rows-${perfId}`);
+  if (!tbody) return;
+  const tr = document.createElement('tr');
+  tr.className = 'schedule-row';
+  tr.innerHTML = `
+    <td><input type="text" class="sched-cell" value="${perfTime}"></td>
+    <td><input type="text" class="sched-cell" placeholder="4:00pm" value=""></td>
+    <td><input type="text" class="sched-cell" value="SHOW START"></td>
+    <td><input type="text" class="sched-cell" placeholder="Notes" value=""></td>
+    <td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>
+  `;
+  tbody.insertBefore(tr, tbody.firstChild);
+  scheduleSave();
+}
+
+/* Apply a saved template to a day */
+async function applySchedTemplate(templateId, perfId) {
+  if (!templateId) return;
+  const resp = await fetch(`/api/schedule-templates/${templateId}`);
+  const d = await resp.json();
+  if (!d.rows) return;
+  const tbodyId = perfId !== null ? `schedule-rows-${perfId}` : 'schedule-rows-null';
+  const tbody   = document.getElementById(tbodyId);
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  d.rows.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.className = 'schedule-row';
+    tr.innerHTML = `
+      <td><input type="text" class="sched-cell" placeholder="3:00pm" value="${r.start_time || ''}"></td>
+      <td><input type="text" class="sched-cell" placeholder="4:00pm" value="${r.end_time || ''}"></td>
+      <td><input type="text" class="sched-cell" placeholder="Description" value="${r.description || ''}"></td>
+      <td><input type="text" class="sched-cell" placeholder="Notes" value="${r.notes || ''}"></td>
+      <td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>
+    `;
+    tbody.appendChild(tr);
+  });
   scheduleSave();
 }
 
@@ -381,13 +457,19 @@ function collectScheduleData() {
     if (key) meta[key] = el.value;
   });
   const rows = [];
-  document.querySelectorAll('#schedule-rows .schedule-row').forEach(tr => {
-    const cells = tr.querySelectorAll('.sched-cell');
-    rows.push({
-      start_time:  cells[0] ? cells[0].value : '',
-      end_time:    cells[1] ? cells[1].value : '',
-      description: cells[2] ? cells[2].value : '',
-      notes:       cells[3] ? cells[3].value : '',
+  // Collect all day panes (multi-day or single legacy)
+  document.querySelectorAll('.sched-day-pane').forEach(pane => {
+    const rawId  = pane.dataset.perfId;
+    const perfId = (rawId && rawId !== '') ? parseInt(rawId, 10) : null;
+    pane.querySelectorAll('.schedule-row').forEach(tr => {
+      const cells = tr.querySelectorAll('.sched-cell');
+      rows.push({
+        perf_id:     perfId,
+        start_time:  cells[0]?.value || '',
+        end_time:    cells[1]?.value || '',
+        description: cells[2]?.value || '',
+        notes:       cells[3]?.value || '',
+      });
     });
   });
   return {meta, rows};
@@ -900,6 +982,92 @@ async function saveSection() {
 async function deleteSection(sid) {
   if (!confirm('Delete this section and ALL its fields? This cannot be undone.')) return;
   const resp = await fetch(`/settings/form-sections/${sid}/delete`, {method:'POST'});
+  const d = await resp.json();
+  if (d.success) location.reload();
+  else alert(d.error || 'Delete failed.');
+}
+
+/* ── Schedule Template Editor (Settings) ─────────────────────── */
+let _editSchedTmplId = null;
+
+function openSchedTemplateModal(tid) {
+  _editSchedTmplId = tid;
+  const modal = document.getElementById('sched-template-modal');
+  if (!modal) return;
+  document.getElementById('sched-tmpl-name').value = '';
+  const tbody = document.getElementById('sched-tmpl-rows');
+  tbody.innerHTML = `<tr class="schedule-row">
+    <td><input type="text" class="sched-cell tmpl-cell" placeholder="8:00am"></td>
+    <td><input type="text" class="sched-cell tmpl-cell" placeholder="10:00am"></td>
+    <td><input type="text" class="sched-cell tmpl-cell" placeholder="Load In"></td>
+    <td><input type="text" class="sched-cell tmpl-cell" placeholder="Notes"></td>
+    <td><button type="button" class="row-del-btn" onclick="this.closest('tr').remove()">×</button></td>
+  </tr>`;
+  if (tid) {
+    fetch(`/api/schedule-templates/${tid}`).then(r => r.json()).then(d => {
+      document.getElementById('sched-tmpl-name').value = d.name || '';
+      tbody.innerHTML = '';
+      (d.rows || []).forEach(r => _appendTmplRow(tbody, r));
+      if (!d.rows || d.rows.length === 0) _appendTmplRow(tbody, {});
+    });
+  }
+  modal.style.display = '';
+}
+
+function _appendTmplRow(tbody, r) {
+  const tr = document.createElement('tr');
+  tr.className = 'schedule-row';
+  tr.innerHTML = `
+    <td><input type="text" class="sched-cell tmpl-cell" placeholder="8:00am" value="${r.start_time || ''}"></td>
+    <td><input type="text" class="sched-cell tmpl-cell" placeholder="10:00am" value="${r.end_time || ''}"></td>
+    <td><input type="text" class="sched-cell tmpl-cell" placeholder="Description" value="${r.description || ''}"></td>
+    <td><input type="text" class="sched-cell tmpl-cell" placeholder="Notes" value="${r.notes || ''}"></td>
+    <td><button type="button" class="row-del-btn" onclick="this.closest('tr').remove()">×</button></td>
+  `;
+  tbody.appendChild(tr);
+}
+
+function addSchedTmplRow() {
+  _appendTmplRow(document.getElementById('sched-tmpl-rows'), {});
+}
+
+function closeSchedTemplateModal() {
+  const modal = document.getElementById('sched-template-modal');
+  if (modal) modal.style.display = 'none';
+  _editSchedTmplId = null;
+}
+
+async function saveSchedTemplate() {
+  const name = document.getElementById('sched-tmpl-name').value.trim();
+  if (!name) { alert('Template name is required.'); return; }
+  const rows = [];
+  document.querySelectorAll('#sched-tmpl-rows .schedule-row').forEach(tr => {
+    const cells = tr.querySelectorAll('.tmpl-cell');
+    rows.push({
+      start_time:  cells[0]?.value || '',
+      end_time:    cells[1]?.value || '',
+      description: cells[2]?.value || '',
+      notes:       cells[3]?.value || '',
+    });
+  });
+  const url = _editSchedTmplId
+    ? `/settings/schedule-templates/${_editSchedTmplId}/edit`
+    : '/settings/schedule-templates/add';
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, rows})
+    });
+    const d = await resp.json();
+    if (d.success) { closeSchedTemplateModal(); location.reload(); }
+    else alert(d.error || 'Save failed.');
+  } catch(e) { alert('Network error.'); }
+}
+
+async function deleteSchedTemplate(tid) {
+  if (!confirm('Delete this template?')) return;
+  const resp = await fetch(`/settings/schedule-templates/${tid}/delete`, {method:'POST'});
   const d = await resp.json();
   if (d.success) location.reload();
   else alert(d.error || 'Delete failed.');
