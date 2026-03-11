@@ -2844,6 +2844,7 @@ def save_database_settings():
         )
     _sqlite_conn.commit(); _sqlite_conn.close()
 
+    db_adapter.clear_settings_cache()
     syslog_logger.info(f"SETTINGS_CHANGE key=database db_type={db_type} by={session.get('username')}")
     return jsonify({'success': True})
 

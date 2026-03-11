@@ -6,6 +6,21 @@ SQL written for SQLite (using ? placeholders) is automatically adapted for Postg
 import re
 import sqlite3
 import os
+import time
+
+# ─── Settings Cache ────────────────────────────────────────────────────────────
+# read_db_settings() is called on every get_db() invocation. Cache results for
+# 30 s so we're not opening a second SQLite connection on every request.
+_settings_cache: dict = {}
+_settings_ts: float = 0.0
+_CACHE_TTL = 30  # seconds
+
+
+def clear_settings_cache():
+    """Invalidate the settings cache immediately (call after saving DB settings)."""
+    global _settings_cache, _settings_ts
+    _settings_cache = {}
+    _settings_ts = 0.0
 
 # Re-export sqlite3.IntegrityError so callers can use DBIntegrityError
 # and still be caught by existing `except sqlite3.IntegrityError:` clauses.
@@ -184,8 +199,12 @@ def read_db_settings(database_path):
     """
     Read database connection settings directly from the SQLite bootstrap file.
     Always reads from SQLite regardless of configured db_type, so this is safe
-    to call before any DB connection is established.
+    to call before any DB connection is established. Results are cached for
+    _CACHE_TTL seconds to avoid a SQLite open on every request.
     """
+    global _settings_cache, _settings_ts
+    if _settings_cache and (time.time() - _settings_ts) < _CACHE_TTL:
+        return _settings_cache
     if not os.path.exists(database_path):
         return {}
     try:
@@ -196,7 +215,10 @@ def read_db_settings(database_path):
             "('db_type','pg_host','pg_port','pg_dbname','pg_user','pg_password','pg_schema')"
         ).fetchall()
         conn.close()
-        return {r['key']: r['value'] for r in rows}
+        result = {r['key']: r['value'] for r in rows}
+        _settings_cache = result
+        _settings_ts = time.time()
+        return result
     except Exception:
         return {}
 
