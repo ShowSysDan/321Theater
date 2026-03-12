@@ -1831,15 +1831,17 @@ def settings():
     db3.close()
 
     db_settings = {
-        'db_type':     all_settings.get('db_type', 'sqlite'),
-        'pg_host':     all_settings.get('pg_host', 'localhost'),
-        'pg_port':     all_settings.get('pg_port', '5432'),
-        'pg_dbname':   all_settings.get('pg_dbname', 'showadvance'),
-        'pg_user':     all_settings.get('pg_user', ''),
-        'pg_schema':   all_settings.get('pg_schema', 'showadvance'),
+        'db_type':   all_settings.get('db_type', 'sqlite'),
+        'pg_host':   all_settings.get('pg_host', 'localhost'),
+        'pg_port':   all_settings.get('pg_port', '5432'),
+        'pg_dbname': all_settings.get('pg_dbname', 'showadvance'),
+        'pg_user':   all_settings.get('pg_user', ''),
+        'pg_schema': all_settings.get('pg_schema', 'showadvance'),
+    }
+    ai_settings = {
         'ollama_enabled': all_settings.get('ollama_enabled', '0'),
-        'ollama_url':  all_settings.get('ollama_url', 'http://localhost:11434'),
-        'ollama_model': all_settings.get('ollama_model', 'llama3.2'),
+        'ollama_url':     all_settings.get('ollama_url', 'http://localhost:11434'),
+        'ollama_model':   all_settings.get('ollama_model', 'llama3.2'),
     }
 
     return render_template('settings.html',
@@ -1850,6 +1852,7 @@ def settings():
                            sched_meta_fields=sched_meta_fields,
                            syslog_settings=all_settings,
                            db_settings=db_settings,
+                           ai_settings=ai_settings,
                            departments=DEPARTMENTS,
                            is_content_admin=_is_ca,
                            sched_templates=sched_templates,
