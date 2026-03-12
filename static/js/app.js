@@ -1866,12 +1866,15 @@ function resetAiExtract() {
   if (sel) sel.value = '';
   const msg = document.getElementById('ai-upload-msg');
   if (msg) { msg.style.display = 'none'; msg.textContent = ''; }
+  const log = document.getElementById('ai-progress-log');
+  if (log) { log.style.display = 'none'; log.innerHTML = ''; }
 }
 
 async function runAiExtract() {
   const fileInput = document.getElementById('ai-file-input');
   const attachSel = document.getElementById('ai-attachment-select');
   const msgEl     = document.getElementById('ai-upload-msg');
+  const logEl     = document.getElementById('ai-progress-log');
 
   const hasFile   = fileInput && fileInput.files && fileInput.files.length > 0;
   const attachId  = attachSel ? attachSel.value : '';
@@ -1883,9 +1886,26 @@ async function runAiExtract() {
     return;
   }
 
-  msgEl.style.display = '';
-  msgEl.textContent = 'Extracting... this may take 10–60 seconds depending on document size and model.';
-  msgEl.style.color = 'var(--text-dim)';
+  // Progress log helpers
+  const _start = Date.now();
+  function _elapsed() {
+    return '[' + String(Math.floor((Date.now() - _start) / 1000)).padStart(3) + 's]';
+  }
+  function _log(msg, color) {
+    if (!logEl) return;
+    logEl.style.display = '';
+    const line = document.createElement('div');
+    line.style.color = color || '';
+    line.textContent = _elapsed() + ' ' + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  msgEl.style.display = 'none';
+  if (logEl) { logEl.style.display = ''; logEl.innerHTML = ''; }
+
+  const fname = hasFile ? fileInput.files[0].name : ('attachment #' + attachId);
+  _log('Reading document: ' + fname);
 
   const formData = new FormData();
   if (hasFile) {
@@ -1894,25 +1914,42 @@ async function runAiExtract() {
     formData.append('attachment_id', attachId);
   }
 
+  // Animated "waiting" line while fetch is in-flight
+  let _waitLine = null;
+  let _waitDots = 0;
+  const _waitTimer = setInterval(() => {
+    if (!_waitLine) {
+      _waitLine = document.createElement('div');
+      logEl.appendChild(_waitLine);
+    }
+    _waitDots = (_waitDots % 3) + 1;
+    _waitLine.textContent = _elapsed() + ' AI model is processing' + '.'.repeat(_waitDots);
+    logEl.scrollTop = logEl.scrollHeight;
+  }, 800);
+
   try {
+    _log('Sending to Ollama...');
     const resp = await fetch(`/shows/${SHOW_ID}/ai-extract`, {
       method: 'POST',
       body: formData,
     });
+    clearInterval(_waitTimer);
+    if (_waitLine) _waitLine.remove();
+
     const data = await resp.json();
 
     if (!data.success) {
-      msgEl.style.display = '';
-      msgEl.textContent = 'Error: ' + (data.error || 'Unknown error');
-      msgEl.style.color = 'var(--danger, #f44336)';
+      _log('Error: ' + (data.error || 'Unknown error'), 'var(--red, #f44336)');
       return;
     }
 
-    _showAiSuggestions(data);
+    const n = Object.keys(data.suggestions || {}).length;
+    _log(`Done — ${n} field${n !== 1 ? 's' : ''} found in ${data.model}`, 'var(--green, #22c55e)');
+    setTimeout(() => _showAiSuggestions(data), 600);
   } catch(e) {
-    msgEl.style.display = '';
-    msgEl.textContent = 'Network error: ' + e.message;
-    msgEl.style.color = 'var(--danger, #f44336)';
+    clearInterval(_waitTimer);
+    if (_waitLine) _waitLine.remove();
+    _log('Network error: ' + e.message, 'var(--red, #f44336)');
   }
 }
 
