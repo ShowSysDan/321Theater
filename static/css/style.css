@@ -1,31 +1,31 @@
 /* ================================================================
-   DPC Advance App — Style Sheet
+   AdvanceIt — Style Sheet
    Aesthetic: Dark professional stage management — warm amber accents
 ================================================================ */
 
-@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
-  --bg:          #0d1117;
-  --bg-card:     #161b22;
-  --bg-surface:  #1c2130;
-  --bg-hover:    #232b3e;
-  --accent:      #E09520;
-  --accent-dim:  #A06A15;
-  --accent-glow: rgba(224,149,32,0.12);
+  --bg:          #0e1015;
+  --bg-card:     #14171f;
+  --bg-surface:  #1a1e2c;
+  --bg-hover:    #21263a;
+  --accent:      #E8980E;
+  --accent-dim:  #A86D09;
+  --accent-glow: rgba(232,152,14,0.14);
   --blue:        #4A9EFF;
   --green:       #22C55E;
   --red:         #EF4444;
   --yellow:      #EAB308;
-  --text:        #D0D6E2;
-  --text-dim:    #7E8A9E;
-  --text-muted:  #4A5568;
-  --border:      #252D40;
-  --border-light:#2E3850;
+  --text:        #DCE1EE;
+  --text-dim:    #818FA4;
+  --text-muted:  #4D5870;
+  --border:      #232840;
+  --border-light:#2B3352;
   --sidebar-w:   230px;
 
-  --font-main:  'Barlow', sans-serif;
-  --font-cond:  'Barlow Condensed', sans-serif;
+  --font-main:  'Poppins', sans-serif;
+  --font-cond:  'Poppins', sans-serif;
   --font-mono:  'JetBrains Mono', monospace;
   --radius:     6px;
   --radius-lg:  10px;
@@ -75,7 +75,7 @@ a:hover { text-decoration: underline; }
   flex-shrink: 0;
 }
 .brand-icon.lg { font-size: 42px; display: block; }
-.brand-name { font-family: var(--font-cond); font-size: 13px; font-weight: 700; letter-spacing: 0.12em; color: var(--text); line-height: 1; }
+.brand-name { font-family: var(--font-cond); font-size: 13px; font-weight: 700; letter-spacing: 0.06em; color: var(--text); line-height: 1; }
 .brand-sub  { font-size: 9px; color: var(--text-muted); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 2px; }
 
 .sidebar-nav { flex: 1; padding: 0 8px; }
@@ -310,7 +310,7 @@ button.section-label:hover { color: var(--text); }
   padding: 10px 16px;
   background: var(--bg-surface); border-bottom: 1px solid var(--border);
   font-family: var(--font-cond); font-size: 11px; font-weight: 700;
-  letter-spacing: 0.12em; color: var(--text-dim); text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-dim); text-transform: uppercase;
 }
 .form-section-header.collapsible { cursor: pointer; }
 .form-section-header.collapsible:hover { color: var(--text); }
@@ -324,7 +324,7 @@ button.section-label:hover { color: var(--text); }
 .form-section.collapsed .form-section-footer { display: none; }
 
 .two-col { display: grid; grid-template-columns: 1.2fr 1fr; gap: 24px; }
-.sub-section-label { font-family: var(--font-cond); font-size: 10px; font-weight: 700; letter-spacing: 0.1em; color: var(--text-muted); text-transform: uppercase; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+.sub-section-label { font-family: var(--font-cond); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; color: var(--text-muted); text-transform: uppercase; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
 .section-count { font-size: 11px; }
 
 .checkbox-row { display: flex; flex-wrap: wrap; gap: 14px; }
@@ -686,13 +686,13 @@ select option { background: var(--bg-surface); color: var(--text); }
    LIGHT THEME
 ══════════════════════════════════════════════════════════════════════ */
 html[data-theme="light"] {
-  --bg:          #f0f2f5;
+  --bg:          #eef1f5;
   --bg-card:     #ffffff;
-  --bg-surface:  #f5f7fa;
-  --bg-hover:    #e8edf5;
-  --accent:      #b87214;
-  --accent-dim:  #8a5510;
-  --accent-glow: rgba(184,114,20,0.12);
+  --bg-surface:  #f4f6fa;
+  --bg-hover:    #e6ecf5;
+  --accent:      #B8700E;
+  --accent-dim:  #88500A;
+  --accent-glow: rgba(184,112,14,0.12);
   --blue:        #1d6ed8;
   --green:       #16a34a;
   --red:         #dc2626;
