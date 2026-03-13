@@ -574,20 +574,43 @@ const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
       </div>
       {% endif %}
     </div>
+    {% if not restricted %}
+    <div class="labor-quickfill" id="labor-quickfill">
+      <span class="labor-qf-label">Quick Fill</span>
+      <label class="labor-qf-field"><span>In</span>
+        <input type="text" id="qf-in" class="field-input field-input-sm" placeholder="14:00" maxlength="5">
+      </label>
+      <label class="labor-qf-field"><span>Out</span>
+        <input type="text" id="qf-out" class="field-input field-input-sm" placeholder="22:00" maxlength="5">
+      </label>
+      <label class="labor-qf-field"><span>Break Start</span>
+        <input type="text" id="qf-break-start" class="field-input field-input-sm" placeholder="18:00" maxlength="5">
+      </label>
+      <label class="labor-qf-field"><span>Break End</span>
+        <input type="text" id="qf-break-end" class="field-input field-input-sm" placeholder="18:30" maxlength="5">
+      </label>
+      <button type="button" class="btn btn-sm btn-ghost" onclick="applyQuickFill(false)">Apply to Selected</button>
+      <button type="button" class="btn btn-sm btn-primary" onclick="applyQuickFill(true)">Apply to All</button>
+    </div>
+    {% endif %}
     <div class="form-section-body no-pad">
       <table class="data-table" id="labor-table">
         <thead>
           <tr>
-            <th style="width:220px">POSITION</th>
-            <th style="width:120px">IN TIME</th>
-            <th style="width:120px">OUT TIME</th>
-            <th>REQUESTED NAME</th>
-            {% if not restricted %}<th style="width:60px"></th>{% endif %}
+            {% if not restricted %}<th style="width:32px;text-align:center"><input type="checkbox" id="labor-select-all" title="Select / deselect all" onchange="toggleAllLaborRows(this)"></th>{% endif %}
+            <th style="width:190px">POSITION</th>
+            <th style="width:90px">IN</th>
+            <th style="width:90px">OUT</th>
+            <th style="width:100px">BREAK START</th>
+            <th style="width:100px">BREAK END</th>
+            <th>TECHNICIAN</th>
+            {% if not restricted %}<th style="width:44px"></th>{% endif %}
           </tr>
         </thead>
         <tbody id="labor-tbody">
           {% for lr in labor_requests_data %}
           <tr data-rid="{{ lr.id }}">
+            {% if not restricted %}<td style="text-align:center"><input type="checkbox" class="labor-row-check"></td>{% endif %}
             <td>
               <select class="field-input field-input-sm labor-field" data-field="position_id"
                       {% if restricted %}disabled{% endif %}
@@ -598,14 +621,28 @@ const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
             <td>
               <input type="text" class="field-input field-input-sm labor-field" data-field="in_time"
                      value="{{ lr.in_time or '' }}"
-                     placeholder="14:00" pattern="[0-2][0-9]:[0-5][0-9]"
+                     placeholder="14:00" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5"
                      {% if restricted %}disabled{% endif %}
                      onchange="saveLaborRow(this)">
             </td>
             <td>
               <input type="text" class="field-input field-input-sm labor-field" data-field="out_time"
                      value="{{ lr.out_time or '' }}"
-                     placeholder="22:00" pattern="[0-2][0-9]:[0-5][0-9]"
+                     placeholder="22:00" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5"
+                     {% if restricted %}disabled{% endif %}
+                     onchange="saveLaborRow(this)">
+            </td>
+            <td>
+              <input type="text" class="field-input field-input-sm labor-field" data-field="break_start"
+                     value="{{ lr.break_start or '' }}"
+                     placeholder="18:00" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5"
+                     {% if restricted %}disabled{% endif %}
+                     onchange="saveLaborRow(this)">
+            </td>
+            <td>
+              <input type="text" class="field-input field-input-sm labor-field" data-field="break_end"
+                     value="{{ lr.break_end or '' }}"
+                     placeholder="18:30" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5"
                      {% if restricted %}disabled{% endif %}
                      onchange="saveLaborRow(this)">
             </td>
@@ -617,7 +654,7 @@ const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
               </select>
             </td>
             {% if not restricted %}
-            <td>
+            <td style="text-align:center">
               <button type="button" class="btn btn-xs btn-danger-ghost" onclick="removeLaborRow(this)" title="Remove">×</button>
             </td>
             {% endif %}
@@ -893,24 +930,20 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
 {% block scripts %}
 <style>
-/* ── Labor autocomplete ──────────────────────────── */
-.labor-name-wrap { position: relative; display: flex; align-items: center; gap: 6px; }
-.labor-name-wrap input { flex: 1; min-width: 0; }
-.qual-badge { font-size: 11px; font-weight: 700; flex-shrink: 0; white-space: nowrap; }
-.qual-badge.ok  { color: var(--accent); }
-.qual-badge.warn { color: #f59e0b; }
-.labor-ac-list {
-  position: absolute; top: 100%; left: 0; right: 0; z-index: 200;
-  background: var(--bg-card); border: 1px solid var(--border-light);
-  border-radius: var(--radius); box-shadow: 0 4px 16px rgba(0,0,0,.4);
-  max-height: 180px; overflow-y: auto; margin-top: 2px;
+/* ── Labor quick-fill toolbar ────────────────────── */
+.labor-quickfill {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
 }
-.labor-ac-item {
-  padding: 7px 10px; font-size: 13px; cursor: pointer;
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+.labor-qf-label {
+  font-size: 10px; font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--text-muted); white-space: nowrap;
+  margin-right: 4px;
 }
-.labor-ac-item:hover { background: var(--bg-hover); }
-.labor-ac-warn { font-size: 10px; color: #f59e0b; font-weight: 600; white-space: nowrap; }
+.labor-qf-field { display: flex; align-items: center; gap: 4px; }
+.labor-qf-field span { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.labor-qf-field .field-input-sm { width: 72px; }
 </style>
 <script>
   const RESTRICTED = {{ 'true' if restricted else 'false' }};
@@ -1274,11 +1307,14 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     const tr = document.createElement('tr');
     tr.dataset.rid = rid;
     tr.innerHTML = `
+      <td style="text-align:center"><input type="checkbox" class="labor-row-check"></td>
       <td><select class="field-input field-input-sm labor-field" data-field="position_id" onchange="saveLaborRow(this)"></select></td>
-      <td><input type="text" class="field-input field-input-sm labor-field" data-field="in_time" placeholder="14:00" pattern="[0-2][0-9]:[0-5][0-9]" onchange="saveLaborRow(this)"></td>
-      <td><input type="text" class="field-input field-input-sm labor-field" data-field="out_time" placeholder="22:00" pattern="[0-2][0-9]:[0-5][0-9]" onchange="saveLaborRow(this)"></td>
+      <td><input type="text" class="field-input field-input-sm labor-field" data-field="in_time" placeholder="14:00" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" onchange="saveLaborRow(this)"></td>
+      <td><input type="text" class="field-input field-input-sm labor-field" data-field="out_time" placeholder="22:00" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" onchange="saveLaborRow(this)"></td>
+      <td><input type="text" class="field-input field-input-sm labor-field" data-field="break_start" placeholder="18:00" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" onchange="saveLaborRow(this)"></td>
+      <td><input type="text" class="field-input field-input-sm labor-field" data-field="break_end" placeholder="18:30" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" onchange="saveLaborRow(this)"></td>
       <td><select class="field-input field-input-sm labor-field" data-field="requested_name" onchange="saveLaborRow(this)"></select></td>
-      <td><button type="button" class="btn btn-xs btn-danger-ghost" onclick="removeLaborRow(this)" title="Remove">×</button></td>
+      <td style="text-align:center"><button type="button" class="btn btn-xs btn-danger-ghost" onclick="removeLaborRow(this)" title="Remove">×</button></td>
     `;
     document.getElementById('labor-tbody').appendChild(tr);
     const newPosSel  = tr.querySelector('select[data-field="position_id"]');
@@ -1297,14 +1333,38 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     const tr = el.closest('tr');
     const rid = tr.dataset.rid;
     if (!rid) return;
-    const position_id = tr.querySelector('[data-field="position_id"]').value || null;
-    const in_time = tr.querySelector('[data-field="in_time"]').value || '';
-    const out_time = tr.querySelector('[data-field="out_time"]').value || '';
+    const position_id   = tr.querySelector('[data-field="position_id"]').value || null;
+    const in_time       = tr.querySelector('[data-field="in_time"]').value || '';
+    const out_time      = tr.querySelector('[data-field="out_time"]').value || '';
+    const break_start   = tr.querySelector('[data-field="break_start"]').value || '';
+    const break_end     = tr.querySelector('[data-field="break_end"]').value || '';
     const requested_name = tr.querySelector('[data-field="requested_name"]').value || '';
     await fetch(`/shows/{{ show.id }}/labor-requests/${rid}`, {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({position_id, in_time, out_time, requested_name})
+      body: JSON.stringify({position_id, in_time, out_time, break_start, break_end, requested_name})
+    });
+  }
+
+  function toggleAllLaborRows(masterCb) {
+    document.querySelectorAll('#labor-tbody .labor-row-check').forEach(cb => { cb.checked = masterCb.checked; });
+  }
+
+  function applyQuickFill(toAll) {
+    const inVal  = document.getElementById('qf-in').value.trim();
+    const outVal = document.getElementById('qf-out').value.trim();
+    const bsVal  = document.getElementById('qf-break-start').value.trim();
+    const beVal  = document.getElementById('qf-break-end').value.trim();
+    const rows = Array.from(document.querySelectorAll('#labor-tbody tr'));
+    const targets = toAll ? rows : rows.filter(tr => tr.querySelector('.labor-row-check')?.checked);
+    if (!targets.length) { alert(toAll ? 'No rows to fill.' : 'Select at least one row first.'); return; }
+    targets.forEach(tr => {
+      const set = (field, val) => { if (val === '') return; const el = tr.querySelector(`[data-field="${field}"]`); if (el) el.value = val; };
+      set('in_time', inVal);
+      set('out_time', outVal);
+      set('break_start', bsVal);
+      set('break_end', beVal);
+      saveLaborRow(tr.querySelector('.labor-field'));
     });
   }
 
