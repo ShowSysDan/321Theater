@@ -830,7 +830,7 @@
             {% for pos in job_positions %}
             <tr data-pid="{{ pos.id }}">
               <td id="pos-name-{{ pos.id }}">{{ pos.name }}</td>
-              <td class="text-dim" id="pos-cat-{{ pos.id }}">{{ pos.category_name or '—' }}</td>
+              <td class="text-dim" id="pos-cat-{{ pos.id }}" data-cat-id="{{ pos.category_id or '' }}">{{ pos.category_name or '—' }}</td>
               <td>
                 <div class="action-btns">
                   <button class="btn btn-xs btn-ghost" onclick="editPosition(this)">✎</button>
@@ -1756,7 +1756,16 @@ function editPosition(btn) {
   };
   const onKey = e => { if (e.key === 'Enter') { e.preventDefault(); save(); } if (e.key === 'Escape') { nameEl.textContent = origName; catEl.textContent = origCatText; } };
   inp.addEventListener('keydown', onKey); sel.addEventListener('keydown', onKey);
-  inp.addEventListener('blur', () => setTimeout(save, 120));
+  // Only save when focus leaves BOTH fields (not when moving between them)
+  let _saveTimer = null;
+  const scheduleSave = () => { _saveTimer = setTimeout(save, 200); };
+  const cancelSave  = () => { clearTimeout(_saveTimer); };
+  inp.addEventListener('blur',  scheduleSave);
+  inp.addEventListener('focus', cancelSave);
+  sel.addEventListener('blur',  scheduleSave);
+  sel.addEventListener('focus', cancelSave);
+  // Immediately save + close when user picks a category option
+  sel.addEventListener('change', () => { cancelSave(); save(); });
   nameEl.appendChild(inp); catEl.appendChild(sel); inp.focus(); inp.select();
 }
 
