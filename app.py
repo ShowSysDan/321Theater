@@ -205,13 +205,13 @@ def _get_user_group_types(user_id):
 
 
 def is_content_admin(user_id):
-    """True if the user is a system admin OR is in an 'admin_group' type group."""
+    """True if the user is a system admin, a staff user, or is in an 'admin_group' type group."""
     db = get_db()
     user = db.execute('SELECT role FROM users WHERE id=?', (user_id,)).fetchone()
     db.close()
     if not user:
         return False
-    if user['role'] == 'admin':
+    if user['role'] in ('admin', 'staff'):
         return True
     return 'admin_group' in _get_user_group_types(user_id)
 
