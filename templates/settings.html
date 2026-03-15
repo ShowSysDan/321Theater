@@ -1337,7 +1337,7 @@ function switchFieldsTab(name) {
 }
 
 /* ── Settings Tab Switcher ─────────────────────────────────────── */
-const ALL_STABS = ['contacts','users','groups','fields','positions','technicians','syslog','backups','account','files','godmode','database','ai'];
+const ALL_STABS = ['contacts','users','groups','fields','positions','technicians','syslog','backups','account','files','godmode','database','ai','email'];
 
 function switchSettingsTab(name) {
   ALL_STABS.forEach(t => {
@@ -1632,7 +1632,7 @@ async function adminDeleteFile(showId, fileId, btn) {
   loadShowOptions();
   // Activate tab from URL hash or server-side default
   const hash = location.hash.replace('#','');
-  const validTabs = ['contacts','users','groups','fields','positions','technicians','syslog','backups','account','files','godmode','database','ai'];
+  const validTabs = ['contacts','users','groups','fields','positions','technicians','syslog','backups','account','files','godmode','database','ai','email'];
   const defaultTab = {% if user.role == 'admin' or is_content_admin %}'contacts'{% else %}'users'{% endif %};
   switchSettingsTab(validTabs.includes(hash) ? hash : {% if active_tab %}'{{ active_tab }}'{% else %}defaultTab{% endif %});
 })();
