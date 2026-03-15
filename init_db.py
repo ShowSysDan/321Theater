@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     phone TEXT DEFAULT '',
     email TEXT DEFAULT '',
     sort_order INTEGER DEFAULT 0,
+    report_recipient INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -297,6 +298,19 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_show_id ON audit_log(show_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_action  ON audit_log(action);
 CREATE INDEX IF NOT EXISTS idx_audit_log_ts      ON audit_log(timestamp);
+
+CREATE TABLE IF NOT EXISTS email_send_log (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    show_id          INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    pdf_type         TEXT NOT NULL,
+    trigger_type     TEXT NOT NULL,
+    days_before      INTEGER,
+    sent_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    sent_by          TEXT DEFAULT '',
+    recipient_count  INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_send_log_show ON email_send_log(show_id, pdf_type, sent_at);
 """
 
 SEED_CONTACTS = [
@@ -848,6 +862,7 @@ def migrate_db():
         'ALTER TABLE show_comments ADD COLUMN deleted_at TIMESTAMP',
         'ALTER TABLE show_comments ADD COLUMN deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL',
         'ALTER TABLE show_comments ADD COLUMN edited_at TIMESTAMP',
+        'ALTER TABLE contacts ADD COLUMN report_recipient INTEGER DEFAULT 0',
     ]:
         try:
             conn.execute(alter_sql)
@@ -923,6 +938,19 @@ def migrate_db():
         CREATE INDEX IF NOT EXISTS idx_audit_log_show_id  ON audit_log(show_id);
         CREATE INDEX IF NOT EXISTS idx_audit_log_action   ON audit_log(action);
         CREATE INDEX IF NOT EXISTS idx_audit_log_ts       ON audit_log(timestamp);
+
+        CREATE TABLE IF NOT EXISTS email_send_log (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            show_id          INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+            pdf_type         TEXT NOT NULL,
+            trigger_type     TEXT NOT NULL,
+            days_before      INTEGER,
+            sent_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            sent_by          TEXT DEFAULT '',
+            recipient_count  INTEGER DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_email_send_log_show ON email_send_log(show_id, pdf_type, sent_at);
     """)
 
     # Seed job positions if empty

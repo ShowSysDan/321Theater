@@ -796,9 +796,15 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         <span class="version-badge">Current: v{{ show.advance_version }}</span>
         {% endif %}
       </div>
-      <a href="{{ url_for('export_advance', show_id=show.id) }}" class="btn btn-primary" target="_blank">
-        Export → v{{ (show.advance_version or 0) + 1 }}
-      </a>
+      <div style="display:flex;gap:8px;align-items:center">
+        <a href="{{ url_for('export_advance', show_id=show.id) }}" class="btn btn-primary" target="_blank">
+          Export → v{{ (show.advance_version or 0) + 1 }}
+        </a>
+        <button class="btn btn-ghost btn-sm" title="Generate PDF and email to report recipients"
+                onclick="emailPdf({{ show.id }}, 'advance', this)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16" style="margin-right:4px;vertical-align:middle"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>Email
+        </button>
+      </div>
     </div>
 
     <!-- Schedule PDF -->
@@ -813,9 +819,15 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         <span class="version-badge">Current: v{{ show.schedule_version }}</span>
         {% endif %}
       </div>
-      <a href="{{ url_for('export_schedule', show_id=show.id) }}" class="btn btn-primary" target="_blank">
-        Export → v{{ (show.schedule_version or 0) + 1 }}
-      </a>
+      <div style="display:flex;gap:8px;align-items:center">
+        <a href="{{ url_for('export_schedule', show_id=show.id) }}" class="btn btn-primary" target="_blank">
+          Export → v{{ (show.schedule_version or 0) + 1 }}
+        </a>
+        <button class="btn btn-ghost btn-sm" title="Generate PDF and email to report recipients"
+                onclick="emailPdf({{ show.id }}, 'schedule', this)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16" style="margin-right:4px;vertical-align:middle"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>Email
+        </button>
+      </div>
     </div>
   </div>
 
@@ -1430,6 +1442,28 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     if (data.success) tr.remove();
     else alert('Error removing row: ' + (data.error || 'Unknown'));
   }
+
+async function emailPdf(showId, pdfType, btn) {
+  const label = pdfType === 'advance' ? 'Advance Sheet' : 'Production Schedule';
+  if (!confirm(`Generate and email the ${label} PDF to all report recipients?`)) return;
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  try {
+    const resp = await fetch(`/shows/${showId}/email/${pdfType}`, {method: 'POST'});
+    const d = await resp.json();
+    if (d.success) {
+      btn.textContent = `✓ Sent (${d.recipients})`;
+      setTimeout(() => { btn.innerHTML = orig; btn.disabled = false; }, 4000);
+    } else {
+      alert('Email failed: ' + (d.message || 'Unknown error'));
+      btn.innerHTML = orig; btn.disabled = false;
+    }
+  } catch (e) {
+    alert('Network error: ' + e);
+    btn.innerHTML = orig; btn.disabled = false;
+  }
+}
 
 </script>
 {% endblock %}

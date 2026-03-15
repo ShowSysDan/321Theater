@@ -363,12 +363,237 @@ def run_daily_backup():
         os.remove(os.path.join(daily_dir, old))
 
 
+def _get_smtp_settings():
+    """Return a dict of SMTP config from app_settings."""
+    keys = ('smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass',
+            'smtp_from', 'smtp_tls')
+    return {k: get_app_setting(k, '') for k in keys}
+
+
+def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_before=None):
+    """
+    Build a PDF (advance or schedule) and email it to all report recipients.
+
+    triggered_by : display string for the email body ('username' or 'system')
+    exported_by_id : user.id to log in export_log (None for scheduled sends)
+    days_before : int used for dedup key in email_send_log
+
+    Returns (success: bool, message: str, recipient_count: int)
+    """
+    smtp_cfg = _get_smtp_settings()
+    if not smtp_cfg.get('smtp_host'):
+        return False, 'SMTP not configured.', 0
+
+    # Fetch recipients
+    db = get_db()
+    recipients = [
+        r['email'] for r in
+        db.execute(
+            "SELECT email FROM contacts WHERE report_recipient=1 AND email != '' ORDER BY name"
+        ).fetchall()
+    ]
+    db.close()
+
+    if not recipients:
+        return False, 'No report recipients configured.', 0
+
+    # Build PDF bytes — run inside app context, no request context needed
+    try:
+        with app.app_context():
+            if pdf_type == 'advance':
+                _, _, show_dict, pdf_bytes = _build_advance_pdf(
+                    show_id, exported_by_id=exported_by_id, base_url='/'
+                )
+            else:
+                _, _, show_dict, pdf_bytes = _build_schedule_pdf(
+                    show_id, exported_by_id=exported_by_id, base_url='/'
+                )
+    except Exception as e:
+        app.logger.error(f'PDF build failed for email show={show_id} type={pdf_type}: {e}')
+        return False, f'PDF generation failed: {e}', 0
+
+    if not pdf_bytes:
+        return False, 'PDF generation produced no output.', 0
+
+    # Build email subject
+    show_name  = show_dict.get('name', 'Show')
+    show_date  = show_dict.get('show_date', '')
+    venue      = show_dict.get('venue', '')
+    pm_name    = show_dict.get('production_manager', '')
+    if not pm_name:
+        # Try pulling from advance_data
+        try:
+            _db2 = get_db()
+            _row = _db2.execute(
+                "SELECT field_value FROM advance_data WHERE show_id=? AND field_key='production_manager'",
+                (show_id,)
+            ).fetchone()
+            _db2.close()
+            pm_name = _row['field_value'] if _row else ''
+        except Exception:
+            pm_name = ''
+
+    type_label  = 'Advance Sheet' if pdf_type == 'advance' else 'Production Schedule'
+    subject_parts = ['AdvanceIt', type_label, show_name]
+    if show_date:
+        subject_parts.append(show_date)
+    if venue:
+        subject_parts.append(venue)
+    if pm_name:
+        subject_parts.append(f'PM: {pm_name}')
+    subject = ' | '.join(subject_parts)
+
+    # Email body
+    if triggered_by == 'system':
+        body_line = (f'This {type_label} was automatically generated and sent by AdvanceIt '
+                     f'on {datetime.now().strftime("%B %d, %Y at %I:%M %p")}.')
+    else:
+        body_line = (f'This {type_label} was generated and sent by {triggered_by} '
+                     f'on {datetime.now().strftime("%B %d, %Y at %I:%M %p")}.')
+
+    safe_show = show_name.replace(' ', '_').replace('/', '-')
+    filename   = f"{type_label.replace(' ','_')}_{safe_show}_{show_date}.pdf"
+
+    # Build MIME message
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.mime.base import MIMEBase
+    from email import encoders as email_encoders
+
+    msg = MIMEMultipart()
+    msg['From']    = smtp_cfg.get('smtp_from') or smtp_cfg.get('smtp_user', '')
+    msg['To']      = ', '.join(recipients)
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body_line, 'plain'))
+
+    part = MIMEBase('application', 'octet-stream')
+    part.set_payload(pdf_bytes)
+    email_encoders.encode_base64(part)
+    part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+    msg.attach(part)
+
+    # Send via SMTP
+    try:
+        port = int(smtp_cfg.get('smtp_port') or 587)
+        use_tls = smtp_cfg.get('smtp_tls', '1') not in ('0', 'false', 'False', '')
+        if use_tls:
+            server = smtplib.SMTP(smtp_cfg['smtp_host'], port, timeout=15)
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+        else:
+            server = smtplib.SMTP_SSL(smtp_cfg['smtp_host'], port, timeout=15)
+        if smtp_cfg.get('smtp_user') and smtp_cfg.get('smtp_pass'):
+            server.login(smtp_cfg['smtp_user'], smtp_cfg['smtp_pass'])
+        server.sendmail(msg['From'], recipients, msg.as_string())
+        server.quit()
+    except Exception as e:
+        app.logger.error(f'SMTP send failed show={show_id} type={pdf_type}: {e}')
+        return False, f'SMTP error: {e}', 0
+
+    # Log the send
+    try:
+        _db3 = get_db()
+        _db3.execute("""
+            INSERT INTO email_send_log
+              (show_id, pdf_type, trigger_type, days_before, sent_by, recipient_count)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (show_id, pdf_type,
+              'scheduled' if triggered_by == 'system' else 'manual',
+              days_before, triggered_by, len(recipients)))
+        _db3.commit()
+        _db3.close()
+    except Exception as e:
+        app.logger.warning(f'email_send_log write failed: {e}')
+
+    syslog_logger.info(
+        f"PDF_EMAIL show_id={show_id} type={pdf_type} "
+        f"recipients={len(recipients)} by={triggered_by}"
+    )
+    return True, f'Sent to {len(recipients)} recipient(s).', len(recipients)
+
+
+def run_scheduled_pdf_emails():
+    """
+    APScheduler job: hourly tick.  Sends PDFs when the configured send hour
+    matches the current hour and no send has been recorded for this show/type/day.
+    """
+    send_hour = int(get_app_setting('pdf_email_send_hour', '6'))
+    if datetime.now().hour != send_hour:
+        return
+
+    today = date.today()
+    today_str = today.isoformat()
+
+    db = get_db()
+    shows = db.execute(
+        "SELECT id, name, show_date FROM shows WHERE status='active'"
+    ).fetchall()
+
+    # Pre-load first perf date per show
+    perfs = db.execute(
+        "SELECT show_id, MIN(perf_date) as first_perf FROM show_performances GROUP BY show_id"
+    ).fetchall()
+    first_perf = {r['show_id']: r['first_perf'] for r in perfs}
+
+    # Already sent today (to avoid duplicate sends within the same day)
+    sent_today = set()
+    for r in db.execute(
+        "SELECT show_id, pdf_type, days_before FROM email_send_log "
+        "WHERE trigger_type='scheduled' AND DATE(sent_at)=?", (today_str,)
+    ).fetchall():
+        sent_today.add((r['show_id'], r['pdf_type'], r['days_before']))
+
+    db.close()
+
+    configs = [
+        ('advance',  'advance_email_enabled',     'advance_email_days_before',  None),
+        ('schedule', 'schedule_email_enabled_1',  'schedule_email_days_1',      None),
+        ('schedule', 'schedule_email_enabled_2',  'schedule_email_days_2',      None),
+    ]
+
+    for show_row in shows:
+        show_id   = show_row['id']
+        perf_date_str = first_perf.get(show_id) or show_row['show_date']
+        if not perf_date_str:
+            continue
+        try:
+            perf_date = date.fromisoformat(perf_date_str)
+        except ValueError:
+            continue
+        days_until = (perf_date - today).days
+
+        for pdf_type, enabled_key, days_key, _ in configs:
+            if get_app_setting(enabled_key, '0') not in ('1', 'true'):
+                continue
+            try:
+                trigger_days = int(get_app_setting(days_key, '0'))
+            except ValueError:
+                continue
+            if trigger_days <= 0:
+                continue
+            if days_until != trigger_days:
+                continue
+            if (show_id, pdf_type, trigger_days) in sent_today:
+                continue
+
+            ok, msg, _ = _send_pdf_email(
+                show_id, pdf_type, 'system', days_before=trigger_days
+            )
+            app.logger.info(
+                f'Scheduled PDF email show={show_id} type={pdf_type} '
+                f'days_before={trigger_days}: {msg}'
+            )
+
+
 def start_scheduler():
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
         scheduler = BackgroundScheduler()
         scheduler.add_job(run_hourly_backup, 'interval', hours=1, id='hourly_backup')
         scheduler.add_job(run_daily_backup, 'cron', hour=0, minute=0, id='daily_backup')
+        scheduler.add_job(run_scheduled_pdf_emails, 'interval', hours=1, id='pdf_email_check')
         scheduler.start()
         return scheduler
     except ImportError:
@@ -1650,7 +1875,17 @@ def show_heartbeat(show_id):
 
 # ─── PDF Export ───────────────────────────────────────────────────────────────
 
-def _build_advance_pdf(show_id):
+def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
+    """
+    Build the advance PDF.  Works both in a request context (base_url=None reads
+    from request.url_root) and in a background context (pass base_url='/').
+    exported_by_id defaults to session['user_id'] when not supplied.
+    """
+    if exported_by_id is None:
+        exported_by_id = session.get('user_id')
+    if base_url is None:
+        base_url = request.url_root
+
     db = get_db()
     show = db.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
     adv_rows = db.execute(
@@ -1665,7 +1900,7 @@ def _build_advance_pdf(show_id):
     new_v = (show['advance_version'] or 0) + 1
     db.execute('UPDATE shows SET advance_version=? WHERE id=?', (new_v, show_id))
     log_cur = db.execute("""INSERT INTO export_log (show_id, export_type, version, exported_by)
-                  VALUES (?, 'advance', ?, ?)""", (show_id, new_v, session['user_id']))
+                  VALUES (?, 'advance', ?, ?)""", (show_id, new_v, exported_by_id))
     log_id = log_cur.lastrowid
     db.commit()
     db.close()
@@ -1698,7 +1933,7 @@ def _build_advance_pdf(show_id):
     # Store PDF bytes in export_log for re-download
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html, base_url=request.url_root).write_pdf()
+        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf()
         db2 = get_db()
         db2.execute('UPDATE export_log SET pdf_data=? WHERE id=?', (pdf_bytes, log_id))
         db2.commit()
@@ -1707,12 +1942,22 @@ def _build_advance_pdf(show_id):
         pdf_bytes = None
 
     syslog_logger.info(
-        f"PDF_EXPORT show_id={show_id} type=advance v={new_v} by={session.get('username')}"
+        f"PDF_EXPORT show_id={show_id} type=advance v={new_v} by={exported_by_id}"
     )
     return html, new_v, dict(show), pdf_bytes
 
 
-def _build_schedule_pdf(show_id):
+def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
+    """
+    Build the schedule PDF.  Works both in a request context (base_url=None reads
+    from request.url_root) and in a background context (pass base_url='/').
+    exported_by_id defaults to session['user_id'] when not supplied.
+    """
+    if exported_by_id is None:
+        exported_by_id = session.get('user_id')
+    if base_url is None:
+        base_url = request.url_root
+
     db = get_db()
     show = db.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
     all_sched_rows = db.execute(
@@ -1776,7 +2021,7 @@ def _build_schedule_pdf(show_id):
     new_v = (show['schedule_version'] or 0) + 1
     db.execute('UPDATE shows SET schedule_version=? WHERE id=?', (new_v, show_id))
     log_cur = db.execute("""INSERT INTO export_log (show_id, export_type, version, exported_by)
-                  VALUES (?, 'schedule', ?, ?)""", (show_id, new_v, session['user_id']))
+                  VALUES (?, 'schedule', ?, ?)""", (show_id, new_v, exported_by_id))
     log_id = log_cur.lastrowid
     db.commit()
     db.close()
@@ -1799,7 +2044,7 @@ def _build_schedule_pdf(show_id):
     # Store PDF bytes in export_log for re-download
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html, base_url=request.url_root).write_pdf()
+        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf()
         db2 = get_db()
         db2.execute('UPDATE export_log SET pdf_data=? WHERE id=?', (pdf_bytes, log_id))
         db2.commit()
@@ -1808,7 +2053,7 @@ def _build_schedule_pdf(show_id):
         pdf_bytes = None
 
     syslog_logger.info(
-        f"PDF_EXPORT show_id={show_id} type=schedule v={new_v} by={session.get('username')}"
+        f"PDF_EXPORT show_id={show_id} type=schedule v={new_v} by={exported_by_id}"
     )
     return html, new_v, dict(show), pdf_bytes
 
@@ -1885,6 +2130,26 @@ def download_export_history(show_id, log_id):
     resp.headers['Content-Type'] = 'application/pdf'
     resp.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
     return resp
+
+
+@app.route('/shows/<int:show_id>/email/<pdf_type>', methods=['POST'])
+@login_required
+def email_pdf(show_id, pdf_type):
+    """Manually trigger a PDF email for advance or schedule."""
+    if pdf_type not in ('advance', 'schedule'):
+        abort(400)
+    if not can_access_show(session['user_id'], show_id):
+        abort(403)
+    get_show_or_404(show_id)
+    triggered_by = session.get('username') or session.get('user_display') or 'user'
+    ok, msg, count = _send_pdf_email(
+        show_id, pdf_type, triggered_by,
+        exported_by_id=session.get('user_id')
+    )
+    if ok:
+        log_audit(get_db(), f'PDF_EMAIL_{pdf_type.upper()}', 'show', show_id,
+                  show_id=show_id, detail=f'Manual email to {count} recipient(s)')
+    return jsonify({'success': ok, 'message': msg, 'recipients': count})
 
 
 @app.route('/shows/<int:show_id>/export/postnotes')
@@ -2180,6 +2445,23 @@ def settings():
         'ollama_url':     all_settings.get('ollama_url', 'http://localhost:11434'),
         'ollama_model':   all_settings.get('ollama_model', 'llama3.2'),
     }
+    smtp_settings = {
+        'smtp_host':  all_settings.get('smtp_host', ''),
+        'smtp_port':  all_settings.get('smtp_port', '587'),
+        'smtp_user':  all_settings.get('smtp_user', ''),
+        'smtp_pass':  all_settings.get('smtp_pass', ''),
+        'smtp_from':  all_settings.get('smtp_from', ''),
+        'smtp_tls':   all_settings.get('smtp_tls', '1'),
+    }
+    pdf_email_settings = {
+        'pdf_email_send_hour':       all_settings.get('pdf_email_send_hour', '6'),
+        'advance_email_enabled':     all_settings.get('advance_email_enabled', '0'),
+        'advance_email_days_before': all_settings.get('advance_email_days_before', '7'),
+        'schedule_email_enabled_1':  all_settings.get('schedule_email_enabled_1', '0'),
+        'schedule_email_days_1':     all_settings.get('schedule_email_days_1', '10'),
+        'schedule_email_enabled_2':  all_settings.get('schedule_email_enabled_2', '0'),
+        'schedule_email_days_2':     all_settings.get('schedule_email_days_2', '1'),
+    }
 
     return render_template('settings.html',
                            contacts=contacts,
@@ -2200,6 +2482,8 @@ def settings():
                            wifi_password=all_settings.get('wifi_password', ''),
                            upload_max_mb=all_settings.get('upload_max_mb', '20'),
                            logo_data=all_settings.get('logo_data', ''),
+                           smtp_settings=smtp_settings,
+                           pdf_email_settings=pdf_email_settings,
                            user=get_current_user())
 
 
@@ -2208,13 +2492,14 @@ def settings():
 def add_contact():
     db = get_db()
     db.execute("""
-        INSERT INTO contacts (name, title, department, phone, email)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO contacts (name, title, department, phone, email, report_recipient)
+        VALUES (?, ?, ?, ?, ?, ?)
     """, (request.form.get('name','').strip(),
           request.form.get('title','').strip(),
           request.form.get('department','').strip(),
           request.form.get('phone','').strip(),
-          request.form.get('email','').strip()))
+          request.form.get('email','').strip(),
+          1 if request.form.get('report_recipient') else 0))
     db.commit(); db.close()
     flash('Contact added.', 'success')
     return redirect(url_for('settings') + '#contacts')
@@ -2226,10 +2511,12 @@ def edit_contact(cid):
     data = request.get_json(force=True) or {}
     db = get_db()
     db.execute("""
-        UPDATE contacts SET name=?, title=?, department=?, phone=?, email=?
+        UPDATE contacts SET name=?, title=?, department=?, phone=?, email=?,
+                            report_recipient=?
         WHERE id=?
     """, (data.get('name',''), data.get('title',''), data.get('department',''),
-          data.get('phone',''), data.get('email',''), cid))
+          data.get('phone',''), data.get('email',''),
+          1 if data.get('report_recipient') else 0, cid))
     db.commit(); db.close()
     return jsonify({'success': True})
 
@@ -3298,6 +3585,93 @@ def test_ai_connection():
         return jsonify({'success': False, 'message': f'Cannot reach Ollama at {url}: {e.reason}'})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
+
+
+# ─── SMTP / PDF Email Settings ────────────────────────────────────────────────
+
+@app.route('/settings/smtp', methods=['POST'])
+@admin_required
+def save_smtp_settings():
+    data = request.get_json(force=True) or {}
+    db = get_db()
+    for key in ('smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass',
+                'smtp_from', 'smtp_tls'):
+        if key in data:
+            db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+                       (key, str(data[key])))
+    db.commit(); db.close()
+    log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
+              after={k: v for k, v in data.items() if 'pass' not in k},
+              detail='smtp_settings')
+    syslog_logger.info(f"SETTINGS_CHANGE key=smtp by={session.get('username')}")
+    return jsonify({'success': True})
+
+
+@app.route('/settings/smtp/test', methods=['POST'])
+@admin_required
+def test_smtp_connection():
+    import smtplib
+    data = request.get_json(force=True) or {}
+    host     = data.get('smtp_host', '')
+    port     = int(data.get('smtp_port') or 587)
+    user     = data.get('smtp_user', '')
+    password = data.get('smtp_pass', '')
+    use_tls  = data.get('smtp_tls', '1') not in ('0', 'false', 'False', '')
+    from_addr = data.get('smtp_from') or user
+    to_addr   = data.get('test_to') or user
+    if not host:
+        return jsonify({'success': False, 'message': 'SMTP host is required.'})
+    try:
+        if use_tls:
+            server = smtplib.SMTP(host, port, timeout=10)
+            server.ehlo(); server.starttls(); server.ehlo()
+        else:
+            server = smtplib.SMTP_SSL(host, port, timeout=10)
+        if user and password:
+            server.login(user, password)
+        if to_addr:
+            from email.mime.text import MIMEText
+            msg = MIMEText('AdvanceIt SMTP test — connection successful.')
+            msg['Subject'] = 'AdvanceIt SMTP Test'
+            msg['From'] = from_addr
+            msg['To']   = to_addr
+            server.sendmail(from_addr, [to_addr], msg.as_string())
+            server.quit()
+            return jsonify({'success': True, 'message': f'Test email sent to {to_addr}.'})
+        server.quit()
+        return jsonify({'success': True, 'message': 'Connected successfully (no test email sent).'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/settings/pdf-emails', methods=['POST'])
+@admin_required
+def save_pdf_email_settings():
+    data = request.get_json(force=True) or {}
+    db = get_db()
+    keys = ('pdf_email_send_hour',
+            'advance_email_enabled',   'advance_email_days_before',
+            'schedule_email_enabled_1','schedule_email_days_1',
+            'schedule_email_enabled_2','schedule_email_days_2')
+    for key in keys:
+        if key in data:
+            db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+                       (key, str(data[key])))
+    db.commit(); db.close()
+    log_audit(db, 'SETTINGS_CHANGE', 'setting', None, after=data, detail='pdf_email_settings')
+    syslog_logger.info(f"SETTINGS_CHANGE key=pdf_emails by={session.get('username')}")
+    return jsonify({'success': True})
+
+
+@app.route('/settings/contacts/<int:cid>/recipient', methods=['POST'])
+@admin_required
+def toggle_contact_recipient(cid):
+    data = request.get_json(force=True) or {}
+    val  = 1 if data.get('recipient') else 0
+    db   = get_db()
+    db.execute('UPDATE contacts SET report_recipient=? WHERE id=?', (val, cid))
+    db.commit(); db.close()
+    return jsonify({'success': True})
 
 
 # ─── AI Document Extraction ────────────────────────────────────────────────────
