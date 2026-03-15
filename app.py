@@ -1469,6 +1469,7 @@ def delete_comment(show_id, cid):
     )
     db.commit()
     db.close()
+    syslog_logger.info(f"COMMENT_DELETE show_id={show_id} comment_id={cid} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -1510,6 +1511,7 @@ def edit_comment(show_id, cid):
               before={'body': old_body}, after={'body': new_body})
     db.commit()
     db.close()
+    syslog_logger.info(f"COMMENT_EDIT show_id={show_id} comment_id={cid} by={session.get('username')}")
     return jsonify({'success': True, 'body': new_body})
 
 
@@ -1530,6 +1532,7 @@ def restore_comment(show_id, cid):
     log_audit(db, 'COMMENT_RESTORE', 'comment', cid, show_id=show_id)
     db.commit()
     db.close()
+    syslog_logger.info(f"COMMENT_RESTORE show_id={show_id} comment_id={cid} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -1585,6 +1588,7 @@ def comment_version_restore(show_id, cid, vid):
               detail=f'version_id={vid}')
     db.commit()
     db.close()
+    syslog_logger.info(f"COMMENT_VERSION_RESTORE show_id={show_id} comment_id={cid} version_id={vid} by={session.get('username')}")
     return jsonify({'success': True, 'body': version['body']})
 
 
@@ -1638,6 +1642,7 @@ def upload_attachment(show_id):
         VALUES (?, ?, ?, ?, ?, ?)
     """, (show_id, session['user_id'], filename, mime_type, data, len(data)))
     aid = cur.lastrowid
+    log_audit(db, 'FILE_UPLOAD', 'attachment', aid, show_id=show_id, detail=filename)
     db.commit()
     row = db.execute("""
         SELECT sa.id, sa.filename, sa.mime_type, sa.file_size, sa.created_at,
@@ -1645,7 +1650,6 @@ def upload_attachment(show_id):
         FROM show_attachments sa LEFT JOIN users u ON sa.uploaded_by = u.id
         WHERE sa.id = ?
     """, (aid,)).fetchone()
-    log_audit(db, 'FILE_UPLOAD', 'attachment', aid, show_id=show_id, detail=filename)
     db.close()
     syslog_logger.info(f"FILE_UPLOAD show_id={show_id} filename={filename} by={session.get('username')}")
     return jsonify({
@@ -2277,6 +2281,7 @@ def remove_show_access(show_id):
     log_audit(db, 'SHOW_ACCESS_REMOVE', 'show', show_id, show_id=show_id,
               detail=f'group_id={group_id}')
     db.commit(); db.close()
+    syslog_logger.info(f"SHOW_ACCESS_REMOVE show_id={show_id} group_id={group_id} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -2504,8 +2509,10 @@ def add_contact():
           request.form.get('phone','').strip(),
           request.form.get('email','').strip(),
           1 if request.form.get('report_recipient') else 0))
-    log_audit(db, 'CONTACT_ADD', 'contact', cur.lastrowid, detail=name)
+    cid_new = cur.lastrowid
+    log_audit(db, 'CONTACT_ADD', 'contact', cid_new, detail=name)
     db.commit(); db.close()
+    syslog_logger.info(f"CONTACT_ADD id={cid_new} name={name!r} by={session.get('username')}")
     flash('Contact added.', 'success')
     return redirect(url_for('settings') + '#contacts')
 
@@ -2524,6 +2531,7 @@ def edit_contact(cid):
           1 if data.get('report_recipient') else 0, cid))
     log_audit(db, 'CONTACT_EDIT', 'contact', cid, detail=data.get('name',''))
     db.commit(); db.close()
+    syslog_logger.info(f"CONTACT_EDIT id={cid} name={data.get('name','')!r} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -2535,6 +2543,7 @@ def delete_contact(cid):
     log_audit(db, 'CONTACT_DELETE', 'contact', cid, detail=row['name'] if row else str(cid))
     db.execute('DELETE FROM contacts WHERE id=?', (cid,))
     db.commit(); db.close()
+    syslog_logger.info(f"CONTACT_DELETE id={cid} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -2664,6 +2673,7 @@ def edit_group(gid):
           data.get('description',''), gid))
     log_audit(db, 'GROUP_EDIT', 'group', gid, detail=data.get('name',''))
     db.commit(); db.close()
+    syslog_logger.info(f"GROUP_EDIT id={gid} name={data.get('name','')!r} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -2675,6 +2685,7 @@ def delete_group(gid):
     log_audit(db, 'GROUP_DELETE', 'group', gid, detail=row['name'] if row else str(gid))
     db.execute('DELETE FROM user_groups WHERE id=?', (gid,))
     db.commit(); db.close()
+    syslog_logger.info(f"GROUP_DELETE id={gid} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -2860,6 +2871,7 @@ def edit_form_field(fid):
           fid))
     log_audit(db, 'FIELD_EDIT', 'form_field', fid, detail=data.get('label',''))
     db.commit(); db.close()
+    syslog_logger.info(f"FIELD_EDIT id={fid} label={data.get('label','')!r} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -2907,6 +2919,7 @@ def add_form_section():
         sid = cur.lastrowid
         log_audit(db, 'SECTION_ADD', 'form_section', sid, detail=label)
         db.commit()
+        syslog_logger.info(f"SECTION_ADD id={sid} label={label!r} by={session.get('username')}")
         return jsonify({'success': True, 'id': sid})
     except sqlite3.IntegrityError:
         return jsonify({'success': False, 'error': f'section_key "{section_key}" already exists.'}), 400
@@ -2928,6 +2941,7 @@ def edit_form_section(sid):
           sid))
     log_audit(db, 'SECTION_EDIT', 'form_section', sid, detail=data.get('label',''))
     db.commit(); db.close()
+    syslog_logger.info(f"SECTION_EDIT id={sid} label={data.get('label','')!r} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -2938,6 +2952,7 @@ def delete_form_section(sid):
     log_audit(db, 'SECTION_DELETE', 'form_section', sid)
     db.execute('DELETE FROM form_sections WHERE id=?', (sid,))
     db.commit(); db.close()
+    syslog_logger.info(f"SECTION_DELETE id={sid} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -3309,6 +3324,7 @@ def add_schedule_template():
                     row.get('description',''), row.get('notes','')))
     log_audit(db, 'TEMPLATE_ADD', 'schedule_template', tid, detail=name)
     db.commit(); db.close()
+    syslog_logger.info(f"TEMPLATE_ADD id={tid} name={name!r} by={session.get('username')}")
     return jsonify({'success': True, 'id': tid})
 
 
@@ -3330,6 +3346,7 @@ def edit_schedule_template(tid):
                     row.get('description',''), row.get('notes','')))
     log_audit(db, 'TEMPLATE_EDIT', 'schedule_template', tid, detail=name)
     db.commit(); db.close()
+    syslog_logger.info(f"TEMPLATE_EDIT id={tid} name={name!r} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -3342,6 +3359,7 @@ def delete_schedule_template(tid):
               detail=row['name'] if row else str(tid))
     db.execute('DELETE FROM schedule_templates WHERE id=?', (tid,))
     db.commit(); db.close()
+    syslog_logger.info(f"TEMPLATE_DELETE id={tid} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -3358,6 +3376,7 @@ def save_wifi_settings():
                        (key, data[key]))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, detail='wifi')
     db.commit(); db.close()
+    syslog_logger.info(f"SETTINGS_CHANGE detail=wifi by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -3382,6 +3401,7 @@ def save_logo():
                ('logo_data', logo_data))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, detail='logo_upload')
     db.commit(); db.close()
+    syslog_logger.info(f"SETTINGS_CHANGE detail=logo_upload by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -3392,6 +3412,7 @@ def delete_logo():
     db.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('logo_data', '')")
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, detail='logo_delete')
     db.commit(); db.close()
+    syslog_logger.info(f"SETTINGS_CHANGE detail=logo_delete by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -3409,6 +3430,7 @@ def save_upload_size():
                ('upload_max_mb', str(mb)))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, detail=f'upload_max_mb={mb}')
     db.commit(); db.close()
+    syslog_logger.info(f"SETTINGS_CHANGE detail=upload_max_mb={mb} by={session.get('username')}")
     return jsonify({'success': True, 'upload_max_mb': mb})
 
 
@@ -3634,10 +3656,10 @@ def save_smtp_settings():
         if key in data:
             db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
                        (key, str(data[key])))
-    db.commit(); db.close()
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
               after={k: v for k, v in data.items() if 'pass' not in k},
               detail='smtp_settings')
+    db.commit(); db.close()
     syslog_logger.info(f"SETTINGS_CHANGE key=smtp by={session.get('username')}")
     return jsonify({'success': True})
 
@@ -3692,8 +3714,8 @@ def save_pdf_email_settings():
         if key in data:
             db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
                        (key, str(data[key])))
-    db.commit(); db.close()
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, after=data, detail='pdf_email_settings')
+    db.commit(); db.close()
     syslog_logger.info(f"SETTINGS_CHANGE key=pdf_emails by={session.get('username')}")
     return jsonify({'success': True})
 
@@ -3708,6 +3730,7 @@ def toggle_contact_recipient(cid):
     log_audit(db, 'CONTACT_RECIPIENT_TOGGLE', 'contact', cid,
               detail=f"recipient={'yes' if val else 'no'}")
     db.commit(); db.close()
+    syslog_logger.info(f"CONTACT_RECIPIENT_TOGGLE id={cid} recipient={'yes' if val else 'no'} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -3947,6 +3970,7 @@ def add_position_category():
         (name, max_order + 10)
     )
     cid = cur.lastrowid
+    log_audit(db, 'POSITION_CATEGORY_ADD', 'position_category', cid, detail=name)
     db.commit()
     db.close()
     syslog_logger.info(f"POSITION_CATEGORY_ADD id={cid} name={name!r} by={session.get('username')}")
@@ -3962,6 +3986,7 @@ def edit_position_category(cid):
         return jsonify({'success': False, 'error': 'Name is required.'}), 400
     db = get_db()
     db.execute('UPDATE position_categories SET name=? WHERE id=?', (name, cid))
+    log_audit(db, 'POSITION_CATEGORY_EDIT', 'position_category', cid, detail=name)
     db.commit()
     db.close()
     syslog_logger.info(f"POSITION_CATEGORY_EDIT id={cid} name={name!r} by={session.get('username')}")
@@ -3973,8 +3998,11 @@ def edit_position_category(cid):
 def delete_position_category(cid):
     db = get_db()
     # Null out category_id on positions in this category
+    row = db.execute('SELECT name FROM position_categories WHERE id=?', (cid,)).fetchone()
     db.execute('UPDATE job_positions SET category_id=NULL WHERE category_id=?', (cid,))
     db.execute('DELETE FROM position_categories WHERE id=?', (cid,))
+    log_audit(db, 'POSITION_CATEGORY_DELETE', 'position_category', cid,
+              detail=row['name'] if row else str(cid))
     db.commit()
     db.close()
     syslog_logger.info(f"POSITION_CATEGORY_DELETE id={cid} by={session.get('username')}")
@@ -3996,6 +4024,7 @@ def add_job_position():
         (category_id, name, max_order + 10)
     )
     pid = cur.lastrowid
+    log_audit(db, 'JOB_POSITION_ADD', 'job_position', pid, detail=name)
     db.commit()
     db.close()
     syslog_logger.info(f"JOB_POSITION_ADD id={pid} name={name!r} category_id={category_id} by={session.get('username')}")
@@ -4015,6 +4044,7 @@ def edit_job_position(pid):
         'UPDATE job_positions SET name=?, category_id=? WHERE id=?',
         (name, category_id, pid)
     )
+    log_audit(db, 'JOB_POSITION_EDIT', 'job_position', pid, detail=name)
     db.commit()
     db.close()
     syslog_logger.info(f"JOB_POSITION_EDIT id={pid} name={name!r} category_id={category_id} by={session.get('username')}")
@@ -4025,6 +4055,9 @@ def edit_job_position(pid):
 @content_admin_required
 def delete_job_position(pid):
     db = get_db()
+    row = db.execute('SELECT name FROM job_positions WHERE id=?', (pid,)).fetchone()
+    log_audit(db, 'JOB_POSITION_DELETE', 'job_position', pid,
+              detail=row['name'] if row else str(pid))
     db.execute('DELETE FROM job_positions WHERE id=?', (pid,))
     db.commit()
     db.close()
@@ -4088,6 +4121,8 @@ def add_labor_request(show_id):
           data.get('requested_name', ''),
           max_order + 10))
     rid = cur.lastrowid
+    log_audit(db, 'LABOR_REQUEST_ADD', 'labor_request', rid, show_id=show_id,
+              detail=data.get('requested_name', '') or f'position_id={data.get("position_id")}')
     db.commit()
     db.close()
     syslog_logger.info(f"LABOR_REQUEST_ADD show_id={show_id} id={rid} by={session.get('username')}")
@@ -4114,6 +4149,7 @@ def update_labor_request(show_id, rid):
           data.get('break_end', ''),
           data.get('requested_name', ''),
           rid, show_id))
+    log_audit(db, 'LABOR_REQUEST_EDIT', 'labor_request', rid, show_id=show_id)
     db.commit()
     db.close()
     syslog_logger.info(f"LABOR_REQUEST_EDIT show_id={show_id} id={rid} by={session.get('username')}")
@@ -4129,6 +4165,7 @@ def delete_labor_request(show_id, rid):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
     db.execute('DELETE FROM labor_requests WHERE id=? AND show_id=?', (rid, show_id))
+    log_audit(db, 'LABOR_REQUEST_DELETE', 'labor_request', rid, show_id=show_id)
     db.commit()
     db.close()
     syslog_logger.info(f"LABOR_REQUEST_DELETE show_id={show_id} id={rid} by={session.get('username')}")
@@ -4241,6 +4278,7 @@ def add_crew_member():
         (name, max_order + 10)
     )
     mid = cur.lastrowid
+    log_audit(db, 'CREW_MEMBER_ADD', 'crew_member', mid, detail=name)
     db.commit()
     db.close()
     syslog_logger.info(f"TECHNICIAN_ADD id={mid} name={name!r} by={session.get('username')}")
@@ -4256,6 +4294,7 @@ def edit_crew_member(mid):
         return jsonify({'success': False, 'error': 'Name is required.'}), 400
     db = get_db()
     db.execute('UPDATE crew_members SET name=? WHERE id=?', (name, mid))
+    log_audit(db, 'CREW_MEMBER_EDIT', 'crew_member', mid, detail=name)
     db.commit()
     db.close()
     syslog_logger.info(f"TECHNICIAN_EDIT id={mid} name={name!r} by={session.get('username')}")
@@ -4267,6 +4306,7 @@ def edit_crew_member(mid):
 def delete_crew_member(mid):
     db = get_db()
     db.execute('DELETE FROM crew_members WHERE id=?', (mid,))
+    log_audit(db, 'CREW_MEMBER_DELETE', 'crew_member', mid)
     db.commit()
     db.close()
     syslog_logger.info(f"TECHNICIAN_DELETE id={mid} by={session.get('username')}")
@@ -4311,9 +4351,11 @@ def toggle_crew_qualification():
             (crew_member_id, position_id)
         )
         has = True
+    action = 'QUAL_ADD' if has else 'QUAL_REMOVE'
+    log_audit(db, f'CREW_{action}', 'crew_qualification', crew_member_id,
+              detail=f'position_id={position_id}')
     db.commit()
     db.close()
-    action = 'QUAL_ADD' if has else 'QUAL_REMOVE'
     syslog_logger.info(f"TECHNICIAN_{action} crew_member_id={crew_member_id} position_id={position_id} by={session.get('username')}")
     return jsonify({'success': True, 'has': has})
 
