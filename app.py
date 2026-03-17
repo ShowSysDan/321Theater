@@ -461,7 +461,17 @@ def _send_email_direct(subject, recipients, body_text=None, body_html=None,
 
     smtp_cfg = _get_smtp_settings()
     from_addr = from_address or smtp_cfg.get('smtp_from') or 'noreply@localhost'
-    msg = _build_mime_message(subject, from_addr, recipients, body_text,
+    ehlo_hostname = get_app_setting('direct_ehlo_hostname', '').strip() or None
+    display_name = get_app_setting('direct_display_name', '').strip()
+
+    # Wrap from address with display name if configured
+    if display_name:
+        from email.utils import formataddr
+        from_addr_header = formataddr((display_name, from_addr))
+    else:
+        from_addr_header = from_addr
+
+    msg = _build_mime_message(subject, from_addr_header, recipients, body_text,
                               body_html, attachments)
     msg_str = msg.as_string()
 
@@ -489,11 +499,12 @@ def _send_email_direct(subject, recipients, body_text=None, body_html=None,
         for mx in mx_hosts:
             mx_host = str(mx.exchange).rstrip('.')
             try:
-                server = smtplib.SMTP(mx_host, 25, timeout=15)
-                server.ehlo()
+                server = smtplib.SMTP(mx_host, 25, timeout=15,
+                                      local_hostname=ehlo_hostname)
+                server.ehlo(ehlo_hostname)
                 try:
                     server.starttls()
-                    server.ehlo()
+                    server.ehlo(ehlo_hostname)
                 except smtplib.SMTPNotSupportedError:
                     pass  # Server doesn't support STARTTLS, continue unencrypted
                 server.sendmail(from_addr, addrs, msg_str)
@@ -2606,7 +2617,9 @@ def settings():
         'smtp_tls':   all_settings.get('smtp_tls', '1'),
     }
     email_provider_settings = {
-        'email_provider': all_settings.get('email_provider', 'smtp'),
+        'email_provider':        all_settings.get('email_provider', 'smtp'),
+        'direct_ehlo_hostname':  all_settings.get('direct_ehlo_hostname', ''),
+        'direct_display_name':   all_settings.get('direct_display_name', ''),
     }
     pdf_email_settings = {
         'pdf_email_send_hour':       all_settings.get('pdf_email_send_hour', '6'),
@@ -3859,10 +3872,11 @@ def save_email_provider_settings():
         provider = 'smtp'
     db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
                ('email_provider', provider))
-    # Also save smtp_from when in direct mode (used as sender address)
-    if 'smtp_from' in data:
-        db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
-                   ('smtp_from', str(data['smtp_from'])))
+    # Save direct send settings
+    for key in ('smtp_from', 'direct_ehlo_hostname', 'direct_display_name'):
+        if key in data:
+            db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+                       (key, str(data[key])))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
               after={'email_provider': provider}, detail='email_provider')
     db.commit(); db.close()

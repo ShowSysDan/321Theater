@@ -941,6 +941,20 @@
                  value="{{ smtp_settings.smtp_from }}">
         </div>
         <div class="field-group">
+          <label class="field-label">DISPLAY NAME</label>
+          <input type="text" id="direct_display_name" class="field-input" placeholder="ShowAdvance"
+                 value="{{ email_provider_settings.direct_display_name }}">
+          <span class="field-hint">Shown as sender name in recipient's inbox</span>
+        </div>
+        <div class="field-group">
+          <label class="field-label">EHLO HOSTNAME</label>
+          <input type="text" id="direct_ehlo_hostname" class="field-input" placeholder="mail.yourdomain.com"
+                 value="{{ email_provider_settings.direct_ehlo_hostname }}">
+          <span class="field-hint">Hostname announced to receiving mail servers</span>
+        </div>
+      </div>
+      <div class="form-row cols-2" style="max-width:480px">
+        <div class="field-group">
           <label class="field-label">TEST SEND TO</label>
           <input type="email" id="direct_test_to" class="field-input" placeholder="you@example.com">
         </div>
@@ -2095,10 +2109,11 @@ function toggleEmailMode() {
 async function saveEmailMode() {
   const provider = document.getElementById('email_provider').value;
   const data = { email_provider: provider };
-  // If direct mode, also save the from address
-  const directFrom = document.getElementById('direct_from');
-  if (provider === 'direct' && directFrom) {
-    data.smtp_from = directFrom.value.trim();
+  // If direct mode, also save the direct send settings
+  if (provider === 'direct') {
+    data.smtp_from = (document.getElementById('direct_from').value || '').trim();
+    data.direct_display_name = (document.getElementById('direct_display_name').value || '').trim();
+    data.direct_ehlo_hostname = (document.getElementById('direct_ehlo_hostname').value || '').trim();
   }
   const resp = await fetch('/settings/email-provider', {
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)
