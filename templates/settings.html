@@ -96,10 +96,9 @@
             <td class="text-sm" data-field="email">{{ c.email or '—' }}</td>
             {% if user.role == 'admin' %}
             <td style="text-align:center">
-              <input type="checkbox" class="recipient-chk" data-cid="{{ c.id }}"
-                     {% if c.report_recipient %}checked{% endif %}
-                     title="Include in PDF email sends"
-                     onchange="toggleRecipient({{ c.id }}, this.checked)">
+              <span class="recipient-indicator" data-cid="{{ c.id }}"
+                    title="{% if c.report_recipient %}Included in PDF email sends{% else %}Not a PDF recipient{% endif %}"
+                    style="font-size:14px;opacity:{{ '1' if c.report_recipient else '0.25' }}">●</span>
             </td>
             {% endif %}
             {% if user.role == 'admin' or is_content_admin %}
@@ -907,8 +906,68 @@
 {% if user.role == 'admin' %}
 <div id="stab-email" class="stab-pane" style="display:none">
 
-  {# SMTP Configuration #}
+  {# Email Mode Selection #}
   <div class="form-section">
+    <div class="form-section-header"><span class="section-icon">◈</span> EMAIL MODE</div>
+    <div class="form-section-body">
+      <div class="form-row cols-3">
+        <div class="field-group">
+          <label class="field-label">SENDING METHOD</label>
+          <select id="email_provider" class="field-input" onchange="toggleEmailMode()">
+            <option value="smtp" {% if email_provider_settings.email_provider != 'direct' %}selected{% endif %}>SMTP Relay</option>
+            <option value="direct" {% if email_provider_settings.email_provider == 'direct' %}selected{% endif %}>Direct Send (MX Lookup)</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top:8px">
+        <button class="btn btn-primary" onclick="saveEmailMode()">Save Email Mode</button>
+        <p id="email-mode-msg" class="text-dim text-sm mt-sm" style="display:none"></p>
+      </div>
+    </div>
+  </div>
+
+  {# Direct Send Configuration (shown when direct mode selected) #}
+  <div id="direct-send-config" class="form-section mt-lg" style="display:none">
+    <div class="form-section-header"><span class="section-icon">◈</span> DIRECT SEND</div>
+    <div class="form-section-body">
+      <p class="text-dim text-sm" style="margin-bottom:12px">
+        Sends email directly to the recipient's mail server via MX record lookup. No external SMTP relay needed.
+      </p>
+      <div class="form-row cols-3">
+        <div class="field-group">
+          <label class="field-label">FROM ADDRESS</label>
+          <input type="email" id="direct_from" class="field-input" placeholder="advanceit@yourdomain.com"
+                 value="{{ smtp_settings.smtp_from }}">
+        </div>
+        <div class="field-group">
+          <label class="field-label">DISPLAY NAME</label>
+          <input type="text" id="direct_display_name" class="field-input" placeholder="ShowAdvance"
+                 value="{{ email_provider_settings.direct_display_name }}">
+          <span class="field-hint">Shown as sender name in recipient's inbox</span>
+        </div>
+        <div class="field-group">
+          <label class="field-label">EHLO HOSTNAME</label>
+          <input type="text" id="direct_ehlo_hostname" class="field-input" placeholder="mail.yourdomain.com"
+                 value="{{ email_provider_settings.direct_ehlo_hostname }}">
+          <span class="field-hint">Hostname announced to receiving mail servers</span>
+        </div>
+      </div>
+      <div class="form-row cols-2" style="max-width:480px">
+        <div class="field-group">
+          <label class="field-label">TEST SEND TO</label>
+          <input type="email" id="direct_test_to" class="field-input" placeholder="you@example.com">
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn btn-primary" onclick="saveEmailMode()">Save</button>
+        <button class="btn btn-ghost" onclick="testEmailDirect()">Send Test Email</button>
+      </div>
+      <p id="direct-msg" class="text-dim text-sm mt-sm" style="display:none"></p>
+    </div>
+  </div>
+
+  {# SMTP Configuration (shown when smtp mode selected) #}
+  <div id="smtp-config" class="form-section mt-lg">
     <div class="form-section-header"><span class="section-icon">◈</span> OUTGOING SMTP</div>
     <div class="form-section-body">
       <div class="form-row cols-3">
@@ -1406,9 +1465,13 @@ async function saveContact() {
     // Sync the table row's recipient state and inline checkbox without a full reload
     const row = document.querySelector(`#contacts-table tr[data-id="${id}"]`);
     if (row && recipientChk !== null) {
-      row.dataset.recipient = recipientChk && recipientChk.checked ? '1' : '0';
-      const inlineChk = row.querySelector('.recipient-chk');
-      if (inlineChk) inlineChk.checked = recipientChk && recipientChk.checked;
+      const isRecip = recipientChk && recipientChk.checked;
+      row.dataset.recipient = isRecip ? '1' : '0';
+      const indicator = row.querySelector('.recipient-indicator');
+      if (indicator) {
+        indicator.style.opacity = isRecip ? '1' : '0.25';
+        indicator.title = isRecip ? 'Included in PDF email sends' : 'Not a PDF recipient';
+      }
     }
     closeEditModal();
     location.reload();
@@ -2024,13 +2087,50 @@ async function deleteCrewMember(mid) {
 }
 
 /* ── Email Tab ──────────────────────────────────────────────────── */
-async function toggleRecipient(cid, checked) {
-  const resp = await fetch(`/settings/contacts/${cid}/recipient`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({recipient: checked})
+function toggleEmailMode() {
+  const mode = document.getElementById('email_provider').value;
+  const smtpSection = document.getElementById('smtp-config');
+  const directSection = document.getElementById('direct-send-config');
+  if (mode === 'direct') {
+    smtpSection.style.display = 'none';
+    directSection.style.display = '';
+  } else {
+    smtpSection.style.display = '';
+    directSection.style.display = 'none';
+  }
+}
+
+async function saveEmailMode() {
+  const provider = document.getElementById('email_provider').value;
+  const data = { email_provider: provider };
+  // If direct mode, also save the direct send settings
+  if (provider === 'direct') {
+    data.smtp_from = (document.getElementById('direct_from').value || '').trim();
+    data.direct_display_name = (document.getElementById('direct_display_name').value || '').trim();
+    data.direct_ehlo_hostname = (document.getElementById('direct_ehlo_hostname').value || '').trim();
+  }
+  const resp = await fetch('/settings/email-provider', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)
   });
-  if ((await resp.json()).success) showSaveToast(checked ? '✓ Recipient added' : '✓ Recipient removed');
+  const d = await resp.json();
+  const msg = document.getElementById('email-mode-msg');
+  msg.style.display = 'block';
+  msg.textContent = d.success ? '✓ Email mode saved.' : '✗ ' + (d.error || 'Error');
+  if (d.success) { showSaveToast('✓ Email mode saved'); setTimeout(() => { msg.style.display='none'; }, 3000); }
+}
+
+async function testEmailDirect() {
+  const toAddr = document.getElementById('direct_test_to').value.trim();
+  if (!toAddr) { alert('Enter a test recipient address.'); return; }
+  const msg = document.getElementById('direct-msg');
+  msg.style.display = 'block';
+  msg.textContent = 'Sending…';
+  const resp = await fetch('/settings/email/test', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ test_to: toAddr })
+  });
+  const d = await resp.json();
+  msg.textContent = d.success ? '✓ ' + d.message : '✗ ' + d.message;
 }
 
 async function saveSmtpSettings() {
@@ -2091,5 +2191,8 @@ async function savePdfEmailSettings() {
   msg.textContent = d.success ? '✓ Email schedule saved.' : '✗ ' + (d.error || 'Error');
   if (d.success) { showSaveToast('✓ Email schedule saved'); setTimeout(() => { msg.style.display='none'; }, 3000); }
 }
+
+// Initialize email mode toggle on page load
+if (document.getElementById('email_provider')) toggleEmailMode();
 </script>
 {% endblock %}
