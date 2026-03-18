@@ -1,13 +1,31 @@
 {% extends "base.html" %}
-{% block title %}Login — 3, 2, 1 Theater{% endblock %}
+{% block title %}Login — 3·2·1→Theater{% endblock %}
 
 {% block auth_content %}
 <div class="login-page">
   <div class="login-card">
     <div class="login-brand">
-      <span class="brand-icon lg">⬡</span>
-      <h1>3, 2, 1 THEATER</h1>
-      <p>Showtime starts here</p>
+      <svg class="brand-icon lg" width="60" height="73" viewBox="0 0 36 44" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <!-- hang pipe -->
+        <rect x="16.5" y="0" width="3" height="6" rx="1.5" fill="rgba(245,127,32,0.55)"/>
+        <!-- fixture body -->
+        <rect x="10" y="5" width="16" height="12" rx="2.5" fill="#F57F20"/>
+        <!-- lens recess -->
+        <rect x="11.5" y="6.5" width="13" height="9" rx="1.5" fill="rgba(0,0,0,0.18)"/>
+        <!-- lens highlight -->
+        <ellipse cx="18" cy="11" rx="4.5" ry="3.2" fill="rgba(255,255,255,0.1)"/>
+        <ellipse cx="14.5" cy="8.2" rx="2.5" ry="1.5" fill="rgba(255,255,255,0.3)"/>
+        <!-- beam -->
+        <path d="M12,17 L24,17 L30,40 L6,40 Z" fill="rgba(245,127,32,0.14)"/>
+        <line x1="12" y1="17" x2="6" y2="40" stroke="rgba(245,127,32,0.3)" stroke-width="0.8"/>
+        <line x1="24" y1="17" x2="30" y2="40" stroke="rgba(245,127,32,0.3)" stroke-width="0.8"/>
+        <!-- stage floor -->
+        <rect x="4" y="40" width="28" height="2" rx="1" fill="rgba(245,127,32,0.4)"/>
+        <!-- floor glow -->
+        <ellipse cx="18" cy="41.5" rx="9" ry="2.5" fill="rgba(245,127,32,0.2)"/>
+      </svg>
+      <h1>3·2·1→THEATER</h1>
+      <p>Advance to stage in 3-2-1</p>
     </div>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
