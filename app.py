@@ -620,7 +620,7 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
             pm_name = ''
 
     type_label  = 'Advance Sheet' if pdf_type == 'advance' else 'Production Schedule'
-    subject_parts = ['3, 2, 1 Theater', type_label, show_name]
+    subject_parts = ['3·2·1→Theater', type_label, show_name]
     if show_date:
         subject_parts.append(show_date)
     if venue:
@@ -631,7 +631,7 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
 
     # Email body
     if triggered_by == 'system':
-        body_line = (f'This {type_label} was automatically generated and sent by 3, 2, 1 Theater '
+        body_line = (f'This {type_label} was automatically generated and sent by 3·2·1→Theater '
                      f'on {datetime.now().strftime("%B %d, %Y at %I:%M %p")}.')
     else:
         body_line = (f'This {type_label} was generated and sent by {triggered_by} '
@@ -3855,8 +3855,8 @@ def test_smtp_connection():
             server.login(user, password)
         if to_addr:
             from email.mime.text import MIMEText
-            msg = MIMEText('3, 2, 1 Theater SMTP test — connection successful.')
-            msg['Subject'] = '3, 2, 1 Theater SMTP Test'
+            msg = MIMEText('3·2·1→Theater SMTP test — connection successful.')
+            msg['Subject'] = '3·2·1→Theater SMTP Test'
             msg['From'] = from_addr
             msg['To']   = to_addr
             server.sendmail(from_addr, [to_addr], msg.as_string())
