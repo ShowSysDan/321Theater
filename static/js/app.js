@@ -161,8 +161,8 @@ function _updatePresenceBadge(users) {
   el.hidden = false;
   el.innerHTML = users.map(u => {
     const color = _userColor(u.name);
-    return `<span class="presence-avatar" style="background:${color}" title="${u.name} · ${u.tab} tab">${_initials(u.name)}</span>`;
-  }).join('') + `<span class="presence-label">${users.length === 1 ? users[0].name.split(' ')[0] : users.length + ' people'} also here</span>`;
+    return `<span class="presence-avatar" style="background:${color}" title="${_esc(u.name)} · ${_esc(u.tab)} tab">${_esc(_initials(u.name))}</span>`;
+  }).join('') + `<span class="presence-label">${users.length === 1 ? _esc(users[0].name.split(' ')[0]) : users.length + ' people'} also here</span>`;
 }
 
 /** Non-blocking "someone else saved" banner for schedule/postnotes tabs. */
@@ -484,10 +484,10 @@ function copySchedDay(sourcePerfId, targetPerfId) {
     tr.className = 'schedule-row';
     tr.innerHTML = `
       <td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>
-      <td><input type="text" class="sched-cell" placeholder="15:00" value="${cells[0]?.value || ''}"></td>
-      <td><input type="text" class="sched-cell" placeholder="16:00" value="${cells[1]?.value || ''}"></td>
-      <td><input type="text" class="sched-cell" placeholder="Description" value="${cells[2]?.value || ''}"></td>
-      <td><input type="text" class="sched-cell" placeholder="Notes" value="${cells[3]?.value || ''}"></td>
+      <td><input type="text" class="sched-cell" placeholder="15:00" value="${_esc(cells[0]?.value || '')}"></td>
+      <td><input type="text" class="sched-cell" placeholder="16:00" value="${_esc(cells[1]?.value || '')}"></td>
+      <td><input type="text" class="sched-cell" placeholder="Description" value="${_esc(cells[2]?.value || '')}"></td>
+      <td><input type="text" class="sched-cell" placeholder="Notes" value="${_esc(cells[3]?.value || '')}"></td>
       <td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>
     `;
     tgt.appendChild(tr);
@@ -530,10 +530,10 @@ async function applySchedTemplate(templateId, perfId) {
     tr.className = 'schedule-row';
     tr.innerHTML = `
       <td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>
-      <td><input type="text" class="sched-cell" placeholder="15:00" value="${r.start_time || ''}"></td>
-      <td><input type="text" class="sched-cell" placeholder="16:00" value="${r.end_time || ''}"></td>
-      <td><input type="text" class="sched-cell" placeholder="Description" value="${r.description || ''}"></td>
-      <td><input type="text" class="sched-cell" placeholder="Notes" value="${r.notes || ''}"></td>
+      <td><input type="text" class="sched-cell" placeholder="15:00" value="${_esc(r.start_time || '')}"></td>
+      <td><input type="text" class="sched-cell" placeholder="16:00" value="${_esc(r.end_time || '')}"></td>
+      <td><input type="text" class="sched-cell" placeholder="Description" value="${_esc(r.description || '')}"></td>
+      <td><input type="text" class="sched-cell" placeholder="Notes" value="${_esc(r.notes || '')}"></td>
       <td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>
     `;
     tbody.appendChild(tr);
