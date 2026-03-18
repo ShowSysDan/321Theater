@@ -1,15 +1,15 @@
 /* ================================================================
-   AdvanceIt — Style Sheet
+   3, 2, 1 Theater — Style Sheet
    Aesthetic: Dark professional stage management — warm amber accents
 ================================================================ */
 
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
-  --bg:          #0e1015;
-  --bg-card:     #14171f;
-  --bg-surface:  #1a1e2c;
-  --bg-hover:    #21263a;
+  --bg:          #141414;
+  --bg-card:     #1e1e1e;
+  --bg-surface:  #252525;
+  --bg-hover:    #2d2d2d;
   --accent:      #E8980E;
   --accent-dim:  #A86D09;
   --accent-glow: rgba(232,152,14,0.14);
@@ -17,11 +17,11 @@
   --green:       #22C55E;
   --red:         #EF4444;
   --yellow:      #EAB308;
-  --text:        #DCE1EE;
-  --text-dim:    #818FA4;
-  --text-muted:  #4D5870;
-  --border:      #232840;
-  --border-light:#2B3352;
+  --text:        #d8d8d9;
+  --text-dim:    #909090;
+  --text-muted:  #606060;
+  --border:      #2e2e2e;
+  --border-light:#3a3a3a;
   --sidebar-w:   230px;
 
   --font-main:  'Poppins', sans-serif;
@@ -700,10 +700,10 @@ select option { background: var(--bg-surface); color: var(--text); }
    LIGHT THEME
 ══════════════════════════════════════════════════════════════════════ */
 html[data-theme="light"] {
-  --bg:          #eef1f5;
-  --bg-card:     #ffffff;
-  --bg-surface:  #f4f6fa;
-  --bg-hover:    #e6ecf5;
+  --bg:          #d8d8d9;
+  --bg-card:     #f0f0f0;
+  --bg-surface:  #e8e8e8;
+  --bg-hover:    #e0e0e0;
   --accent:      #B8700E;
   --accent-dim:  #88500A;
   --accent-glow: rgba(184,112,14,0.12);
@@ -711,11 +711,11 @@ html[data-theme="light"] {
   --green:       #16a34a;
   --red:         #dc2626;
   --yellow:      #ca8a04;
-  --text:        #1a202c;
-  --text-dim:    #374151;
-  --text-muted:  #6b7280;
-  --border:      #d1d5db;
-  --border-light:#e5e7eb;
+  --text:        #444444;
+  --text-dim:    #5a5a5a;
+  --text-muted:  #787878;
+  --border:      #c0c0c0;
+  --border-light:#d0d0d0;
 }
 
 /* Light-mode overrides for hardcoded colours */
