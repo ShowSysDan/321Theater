@@ -1,6 +1,7 @@
 /* ================================================================
    3·2·1→Theater — Style Sheet
-   Aesthetic: Dark professional stage management — warm amber accents
+   Aesthetic: Dark professional stage management
+   Brand: Navy #194980 · Orange #F57F20 · Red-Orange #F04E23
 ================================================================ */
 
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -10,9 +11,11 @@
   --bg-card:     #1e1e1e;
   --bg-surface:  #252525;
   --bg-hover:    #2d2d2d;
-  --accent:      #E8980E;
-  --accent-dim:  #A86D09;
-  --accent-glow: rgba(232,152,14,0.14);
+  --accent:      #F57F20;
+  --accent-dim:  #C0611A;
+  --accent-glow: rgba(245,127,32,0.14);
+  --brand-navy:  #194980;
+  --brand-red:   #F04E23;
   --blue:        #4A9EFF;
   --green:       #22C55E;
   --red:         #EF4444;
@@ -65,9 +68,12 @@ a:hover { text-decoration: underline; }
   align-items: center;
   gap: 10px;
   padding: 20px 16px 16px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid rgba(25,73,128,0.6);
   margin-bottom: 8px;
+  background: var(--brand-navy);
 }
+.sidebar-brand .brand-name { color: #fff; }
+.sidebar-brand .brand-sub  { color: rgba(255,255,255,0.55); }
 .brand-icon {
   flex-shrink: 0;
   display: block;
@@ -150,7 +156,7 @@ a:hover { text-decoration: underline; }
 .btn-ghost        { background: transparent; color: var(--text-dim); border-color: var(--border-light); }
 .btn-ghost:hover  { background: var(--bg-hover); color: var(--text); }
 .btn-accent       { background: var(--accent-glow); color: var(--accent); border-color: var(--accent-dim); }
-.btn-accent:hover { background: rgba(224,149,32,.2); }
+.btn-accent:hover { background: rgba(245,127,32,0.2); }
 .btn-danger       { background: var(--red, #ef4444); color: #fff; border-color: var(--red, #ef4444); }
 .btn-danger:hover { background: #dc2626; border-color: #dc2626; }
 .btn-danger-ghost { background: transparent; color: var(--red); border-color: transparent; }
@@ -433,7 +439,7 @@ html[data-theme="light"] select.field-input {
 .type-advance  { background: var(--accent-glow); color: var(--accent); }
 .type-schedule { background: rgba(74,158,255,.1); color: var(--blue); }
 .role-badge { display: inline-block; padding: 2px 7px; border-radius: 3px; font-family: var(--font-cond); font-size: 10px; font-weight: 700; letter-spacing: 0.08em; }
-.role-admin { background: rgba(224,149,32,.15); color: var(--accent); }
+.role-admin { background: rgba(245,127,32,0.15); color: var(--accent); }
 .role-staff { background: rgba(74,158,255,.12); color: var(--blue); }
 .role-user  { background: var(--bg-surface); color: var(--text-dim); }
 .dept-badge { display: inline-block; padding: 2px 7px; border-radius: 3px; font-size: 11px; background: var(--bg-surface); color: var(--text-dim); border: 1px solid var(--border); }
@@ -453,7 +459,7 @@ html[data-theme="light"] select.field-input {
 .field-msg-error   { background: rgba(239,68,68,.1);  color: var(--red);   border: 1px solid rgba(239,68,68,.3);  }
 
 /* ── Login Page ──────────────────────────────────────────────────── */
-.login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--bg); background-image: radial-gradient(ellipse at 60% 30%, rgba(224,149,32,.06) 0%, transparent 60%); }
+.login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--bg); background-image: radial-gradient(ellipse at 60% 30%, rgba(245,127,32,0.06) 0%, transparent 60%); }
 .login-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 40px; width: 360px; }
 .login-brand { text-align: center; margin-bottom: 28px; }
 .login-brand h1 { font-family: var(--font-cond); font-size: 22px; font-weight: 700; color: var(--text); letter-spacing: 0.1em; margin: 10px 0 4px; }
@@ -702,9 +708,11 @@ html[data-theme="light"] {
   --bg-card:     #f0f0f0;
   --bg-surface:  #e8e8e8;
   --bg-hover:    #e0e0e0;
-  --accent:      #B8700E;
-  --accent-dim:  #88500A;
-  --accent-glow: rgba(184,112,14,0.12);
+  --accent:      #D06810;
+  --accent-dim:  #A04F0C;
+  --accent-glow: rgba(245,127,32,0.12);
+  --brand-navy:  #194980;
+  --brand-red:   #D03818;
   --blue:        #1d6ed8;
   --green:       #16a34a;
   --red:         #dc2626;
