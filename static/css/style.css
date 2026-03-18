@@ -69,12 +69,10 @@ a:hover { text-decoration: underline; }
   margin-bottom: 8px;
 }
 .brand-icon {
-  font-size: 22px;
-  color: var(--accent);
-  line-height: 1;
   flex-shrink: 0;
+  display: block;
 }
-.brand-icon.lg { font-size: 42px; display: block; }
+.brand-icon.lg { margin: 0 auto 6px; }
 .brand-name { font-family: var(--font-cond); font-size: 13px; font-weight: 700; letter-spacing: 0.06em; color: var(--text); line-height: 1; }
 .brand-sub  { font-size: 9px; color: var(--text-muted); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 2px; }
 
