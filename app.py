@@ -1045,7 +1045,11 @@ def _login_route():
             if not next_url or not next_url.startswith('/') or next_url.startswith('//'):
                 next_url = url_for('dashboard')
             # Force password change if still using default
-            if user.get('must_change_password'):
+            try:
+                _must_change = user['must_change_password']
+            except (KeyError, IndexError):
+                _must_change = False
+            if _must_change:
                 session['must_change_password'] = True
                 return redirect(url_for('force_change_password'))
             return redirect(next_url)
