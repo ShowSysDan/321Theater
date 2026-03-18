@@ -2312,8 +2312,11 @@ def email_pdf(show_id, pdf_type):
         exported_by_id=session.get('user_id')
     )
     if ok:
-        log_audit(get_db(), f'PDF_EMAIL_{pdf_type.upper()}', 'show', show_id,
+        _adb = get_db()
+        log_audit(_adb, f'PDF_EMAIL_{pdf_type.upper()}', 'show', show_id,
                   show_id=show_id, detail=f'Manual email to {count} recipient(s)')
+        _adb.commit()
+        _adb.close()
     return jsonify({'success': ok, 'message': msg, 'recipients': count})
 
 
