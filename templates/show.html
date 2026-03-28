@@ -119,7 +119,7 @@
     <span class="save-status" id="save-status"></span>
     <button type="button" class="btn btn-ghost btn-sm" onclick="openHistory()" title="Version history">History</button>
     {% if not restricted and ollama_enabled %}
-    <button type="button" class="btn btn-ghost btn-sm" onclick="openAiExtract()" title="Extract field values from a document using AI">AI Extract</button>
+    <button type="button" class="btn btn-ghost btn-sm" id="ai-extract-btn" onclick="openAiExtract()" title="Extract field values from a document using AI">AI Extract</button>
     {% endif %}
     {% if not restricted %}
     <button class="btn btn-primary" id="save-btn" onclick="saveActive()">Save</button>
@@ -1915,6 +1915,25 @@ async function emailPdf(showId, pdfType, btn) {
     btn.innerHTML = orig; btn.disabled = false;
   }
 }
+
+{% if not restricted and ollama_enabled %}
+// ── AI slot polling — disable button when all slots busy ──────────────────────
+(function pollAiSlots() {
+  const btn = document.getElementById('ai-extract-btn');
+  if (!btn) return;
+  fetch('/api/ai/slots').then(r => r.json()).then(d => {
+    if (d.busy) {
+      btn.disabled = true;
+      btn.title = `AI busy — ${d.active}/${d.limit} slots in use`;
+      btn.textContent = 'AI Busy…';
+    } else {
+      btn.disabled = false;
+      btn.title = 'Extract field values from a document using AI';
+      btn.textContent = 'AI Extract';
+    }
+  }).catch(() => {}).finally(() => setTimeout(pollAiSlots, 5000));
+})();
+{% endif %}
 
 </script>
 {% endblock %}
