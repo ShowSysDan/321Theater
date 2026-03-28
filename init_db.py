@@ -1664,12 +1664,12 @@ def init_db_postgres(settings, seed=True):
         print("psycopg2 is not installed. Run: pip install psycopg2-binary")
         return False
 
-    schema = settings.get('pg_schema', 'showadvance') or 'showadvance'
+    schema = settings.get('pg_schema', '321theater') or '321theater'
     try:
         conn = psycopg2.connect(
             host=settings.get('pg_host', 'localhost'),
             port=int(settings.get('pg_port', 5432) or 5432),
-            dbname=settings.get('pg_dbname', 'showadvance'),
+            dbname=settings.get('pg_dbname', '321theater'),
             user=settings.get('pg_user', ''),
             password=settings.get('pg_password', ''),
             connect_timeout=10,
@@ -1723,16 +1723,27 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
     if not ok:
         return {'error': 'Could not initialize PostgreSQL schema'}
 
-    schema = pg_settings.get('pg_schema', 'showadvance') or 'showadvance'
+    schema = pg_settings.get('pg_schema', '321theater') or '321theater'
 
-    # Table copy order respects foreign key dependencies
+    # Table copy order respects foreign key dependencies (parents before children)
     TABLE_ORDER = [
+        # ── No dependencies ───────────────────────────────────────────────────
         'users', 'user_groups', 'contacts', 'form_sections', 'schedule_templates',
-        'app_settings', 'shows', 'form_fields', 'schedule_meta_fields',
+        'app_settings', 'position_categories', 'warehouse_locations',
+        'asset_categories', 'site_messages', 'ai_sessions',
+        # ── Depend on level above ─────────────────────────────────────────────
+        'shows', 'form_fields', 'schedule_meta_fields', 'user_group_members',
+        'job_positions', 'asset_types', 'site_message_dismissals',
+        'user_pending_registration', 'password_reset_tokens',
+        # ── Depend on shows / asset_types ─────────────────────────────────────
         'advance_data', 'schedule_meta', 'post_show_notes', 'schedule_rows',
-        'show_performances', 'user_group_members', 'show_group_access',
-        'form_history', 'show_comments', 'show_attachments', 'advance_reads',
-        'export_log', 'schedule_template_rows', 'active_sessions',
+        'show_performances', 'show_group_access', 'form_history',
+        'show_comments', 'show_attachments', 'advance_reads', 'export_log',
+        'schedule_template_rows', 'active_sessions', 'labor_requests',
+        'crew_members', 'asset_items', 'asset_dashboards', 'email_send_log',
+        # ── Depend on asset_items / show_comments / crew_members ──────────────
+        'asset_logs', 'asset_maintenance', 'show_assets', 'show_external_rentals',
+        'comment_versions', 'crew_qualifications', 'audit_log',
     ]
 
     src = sqlite3.connect(sqlite_path)
@@ -1741,7 +1752,7 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
     pg_conn = psycopg2.connect(
         host=pg_settings.get('pg_host', 'localhost'),
         port=int(pg_settings.get('pg_port', 5432) or 5432),
-        dbname=pg_settings.get('pg_dbname', 'showadvance'),
+        dbname=pg_settings.get('pg_dbname', '321theater'),
         user=pg_settings.get('pg_user', ''),
         password=pg_settings.get('pg_password', ''),
         connect_timeout=10,
@@ -1801,13 +1812,24 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
         pg_conn.commit()
         stats[table] = {'copied': copied, 'skipped': skipped}
 
-    # Sync sequences so new inserts get correct IDs
+    # Sync sequences so new inserts get correct IDs after copy
     serial_tables = [
         'users', 'shows', 'advance_data', 'schedule_rows', 'schedule_meta',
         'post_show_notes', 'show_performances', 'contacts', 'export_log',
         'form_sections', 'form_fields', 'form_history', 'user_groups',
         'show_comments', 'show_attachments', 'advance_reads',
         'schedule_meta_fields', 'schedule_templates', 'schedule_template_rows',
+        # Added in v2.0.0+
+        'position_categories', 'job_positions', 'labor_requests',
+        'crew_members', 'crew_qualifications', 'audit_log', 'comment_versions',
+        'email_send_log', 'warehouse_locations',
+        'asset_categories', 'asset_types', 'asset_items', 'asset_maintenance',
+        'show_assets', 'show_external_rentals',
+        'user_pending_registration', 'password_reset_tokens',
+        'site_messages', 'site_message_dismissals', 'asset_dashboards',
+        'ai_sessions',
+        # Added in v2.3.0+
+        'asset_logs',
     ]
     for table in serial_tables:
         try:
