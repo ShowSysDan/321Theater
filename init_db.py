@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS shows (
     status TEXT DEFAULT 'active',
     advance_version INTEGER DEFAULT 0,
     schedule_version INTEGER DEFAULT 0,
+    performance_company TEXT DEFAULT '',
     created_by INTEGER REFERENCES users(id),
     last_saved_by INTEGER REFERENCES users(id),
     last_saved_at TIMESTAMP,
@@ -312,6 +313,88 @@ CREATE TABLE IF NOT EXISTS email_send_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_email_send_log_show ON email_send_log(show_id, pdf_type, sent_at);
+
+-- ── Asset Manager ────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS warehouse_locations (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT UNIQUE NOT NULL,
+    sort_order INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS asset_categories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS asset_types (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_id      INTEGER NOT NULL REFERENCES asset_categories(id) ON DELETE CASCADE,
+    parent_type_id   INTEGER REFERENCES asset_types(id) ON DELETE SET NULL,
+    name             TEXT NOT NULL,
+    manufacturer     TEXT DEFAULT '',
+    model            TEXT DEFAULT '',
+    photo            BLOB,
+    photo_mime       TEXT DEFAULT '',
+    storage_location TEXT DEFAULT '',
+    rental_cost      REAL DEFAULT 0.0,
+    reserve_count    INTEGER DEFAULT 0,
+    is_consumable    INTEGER DEFAULT 0,
+    track_quantity   INTEGER DEFAULT 1,
+    sort_order       INTEGER DEFAULT 0,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS asset_items (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_type_id     INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
+    barcode           TEXT DEFAULT '',
+    status            TEXT DEFAULT 'available',
+    sort_order        INTEGER DEFAULT 0,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS asset_maintenance (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_item_id INTEGER NOT NULL REFERENCES asset_items(id) ON DELETE CASCADE,
+    removed_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    reason        TEXT DEFAULT '',
+    notes         TEXT DEFAULT '',
+    status        TEXT DEFAULT 'in_progress',
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    resolved_at   TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS show_assets (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    show_id        INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    asset_type_id  INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
+    quantity       INTEGER DEFAULT 1,
+    rental_start   DATE,
+    rental_end     DATE,
+    locked_price   REAL DEFAULT 0.0,
+    is_hidden      INTEGER DEFAULT 0,
+    notes          TEXT DEFAULT '',
+    added_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS show_external_rentals (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    show_id      INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    description  TEXT NOT NULL DEFAULT '',
+    cost         REAL DEFAULT 0.0,
+    pdf_data     BLOB,
+    pdf_filename TEXT DEFAULT '',
+    sort_order   INTEGER DEFAULT 0,
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_show_assets_show   ON show_assets(show_id);
+CREATE INDEX IF NOT EXISTS idx_show_assets_type   ON show_assets(asset_type_id);
+CREATE INDEX IF NOT EXISTS idx_asset_items_type   ON asset_items(asset_type_id);
+CREATE INDEX IF NOT EXISTS idx_asset_maint_item   ON asset_maintenance(asset_item_id);
 """
 
 SEED_CONTACTS = [
@@ -406,6 +489,7 @@ FORM_FIELDS_SEED = [
     ('show_info', 'show_time',           'SHOW TIME(S)',               'text',             30,  None, None, None, None, 'e.g. 7pm and 9pm',       'half',  0),
     ('show_info', 'venue',               'VENUE',                      'text',             40,  None, None, None, None, '',                       'full',  0),
     ('show_info', 'production_manager',  'PRODUCTION MANAGER',         'contact_dropdown', 50,  None, 'Production',    None, None, '',            'full',  0),
+    ('show_info', 'performance_company',  'PERFORMANCE COMPANY',        'text',             62,  None, None, None, None, 'Touring company / artist', 'full', 0),
     ('show_info', 'tour_manager',        'TOUR MANAGER',               'text',             60,  None, None, None, None, 'Name · email / phone',   'full',  0),
     ('show_info', 'promoter',            'PROMOTER',                   'text',             70,  None, None, None, None, '',                       'full',  0),
     ('show_info', 'additional_contacts', 'ADDITIONAL CONTACTS',        'textarea',         80,  None, None, None, None, 'Name, role, phone/email...', 'full', 0),
@@ -954,6 +1038,98 @@ def migrate_db():
 
         CREATE INDEX IF NOT EXISTS idx_email_send_log_show ON email_send_log(show_id, pdf_type, sent_at);
     """)
+
+    # Asset manager tables (safe to rerun)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS warehouse_locations (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT UNIQUE NOT NULL,
+            sort_order INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS asset_categories (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            sort_order INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS asset_types (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            category_id      INTEGER NOT NULL REFERENCES asset_categories(id) ON DELETE CASCADE,
+            parent_type_id   INTEGER REFERENCES asset_types(id) ON DELETE SET NULL,
+            name             TEXT NOT NULL,
+            manufacturer     TEXT DEFAULT '',
+            model            TEXT DEFAULT '',
+            photo            BLOB,
+            photo_mime       TEXT DEFAULT '',
+            storage_location TEXT DEFAULT '',
+            rental_cost      REAL DEFAULT 0.0,
+            reserve_count    INTEGER DEFAULT 0,
+            is_consumable    INTEGER DEFAULT 0,
+            track_quantity   INTEGER DEFAULT 1,
+            sort_order       INTEGER DEFAULT 0,
+            created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS asset_items (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset_type_id     INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
+            barcode           TEXT DEFAULT '',
+            status            TEXT DEFAULT 'available',
+            sort_order        INTEGER DEFAULT 0,
+            created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS asset_maintenance (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset_item_id INTEGER NOT NULL REFERENCES asset_items(id) ON DELETE CASCADE,
+            removed_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            reason        TEXT DEFAULT '',
+            notes         TEXT DEFAULT '',
+            status        TEXT DEFAULT 'in_progress',
+            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            resolved_at   TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS show_assets (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            show_id        INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+            asset_type_id  INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
+            quantity       INTEGER DEFAULT 1,
+            rental_start   DATE,
+            rental_end     DATE,
+            locked_price   REAL DEFAULT 0.0,
+            is_hidden      INTEGER DEFAULT 0,
+            notes          TEXT DEFAULT '',
+            added_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS show_external_rentals (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            show_id      INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+            description  TEXT NOT NULL DEFAULT '',
+            cost         REAL DEFAULT 0.0,
+            pdf_data     BLOB,
+            pdf_filename TEXT DEFAULT '',
+            sort_order   INTEGER DEFAULT 0,
+            created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_show_assets_show ON show_assets(show_id);
+        CREATE INDEX IF NOT EXISTS idx_show_assets_type ON show_assets(asset_type_id);
+        CREATE INDEX IF NOT EXISTS idx_asset_items_type ON asset_items(asset_type_id);
+        CREATE INDEX IF NOT EXISTS idx_asset_maint_item ON asset_maintenance(asset_item_id);
+    """)
+
+    # New column migrations for asset manager
+    for alter_sql in [
+        "ALTER TABLE shows ADD COLUMN performance_company TEXT DEFAULT ''",
+    ]:
+        try:
+            conn.execute(alter_sql)
+        except Exception:
+            pass  # Column already exists
 
     # Seed job positions if empty
     _seed_job_positions(conn)

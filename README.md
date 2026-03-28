@@ -1,6 +1,33 @@
 # ShowAdvance (3·2·1→THEATER) — Production Management System
 
-ShowAdvance is a web-based production advance and day-of-show management tool built for Dr. Phillips Center for the Performing Arts (DPC). It provides a central place to fill out advance forms, build production schedules, record post-show notes, manage labor requests, send schedule emails, and share documents with crew and clients.
+ShowAdvance is a web-based production advance and day-of-show management tool built for Dr. Phillips Center for the Performing Arts (DPC). It provides a central place to fill out advance forms, build production schedules, record post-show notes, manage labor requests, track inventory and rentals, send schedule emails, and share documents with crew and clients.
+
+---
+
+## Version Numbering
+
+**Current version: `2.0.0`**
+
+This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
+
+| Segment | When to increment |
+|---------|------------------|
+| **MAJOR** | Breaking schema changes, major architectural overhaul, or changes that require a full DB re-init |
+| **MINOR** | New feature sets added (e.g. asset manager, user system enhancements, messaging system) |
+| **PATCH** | Bug fixes, security patches, small UI tweaks, wording changes |
+
+### Rules for AI coding sessions
+
+> **IMPORTANT for future AI sessions:** Before committing any change, determine which version segment to increment and update `APP_VERSION` in `app.py`. The format is `'MAJOR.MINOR.PATCH'` as a string constant near the top of the file. Do not skip this step. The version displays in the sidebar footer of every page.
+>
+> - New feature → increment MINOR (reset PATCH to 0)
+> - Bug fix only → increment PATCH
+> - Schema changes requiring migration → evaluate MAJOR vs MINOR based on impact
+> - Always commit the version bump in the same commit as the feature/fix
+
+Version history:
+- `1.x` — Initial release through security hardening and red team audit
+- `2.0.0` — Asset Manager (inventory tracking, rental pricing, show reservations, external rentals), Performance Company field, version numbering system
 
 ---
 
@@ -15,11 +42,13 @@ ShowAdvance is a web-based production advance and day-of-show management tool bu
    - [Production Schedule](#production-schedule)
    - [Post-Show Notes](#post-show-notes)
    - [Labor Requests](#labor-requests)
+   - [Assets Tab](#assets-tab)
    - [Comments](#comments)
    - [Export & Files](#export--files)
    - [Email](#email)
    - [Public Show Page](#public-show-page)
 5. [Admin & Settings Guide](#admin--settings-guide)
+   - [Asset Manager](#asset-manager)
    - [Contacts](#contacts)
    - [Users & Roles](#users--roles)
    - [Groups & Show Access](#groups--show-access)
@@ -127,6 +156,17 @@ Click **Export PDF** to generate a Post-Show Notes PDF.
 
 Track labor needs per show. Add requests with department, position, quantity, date/time, and notes. Drag rows to reorder. Restricted (read-only) users can view but not modify labor requests.
 
+### Assets Tab
+
+The **Assets** tab on every show allows content admins to:
+- **Search** the asset inventory and add items to the show
+- Set **quantity**, **rental period** (defaults to show production dates), and **unit price** (locked at time of reservation — subsequent database price changes do not affect existing reservations)
+- Add **external rental line items** with optional PDF attachment (vendor quote, contract, etc.)
+- View the combined **total cost** for internal + external rentals
+- **Hide** specific items from production managers (admin only) — useful when e.g. an admin needs to confirm a lens before adding it
+
+Availability is checked in real time when adding items. Items that are over-allocated or in maintenance show their status clearly.
+
 ### Comments
 
 Show-specific comment thread with `@mention` autocomplete. Visible to all authorised users. Admins can view comment edit history.
@@ -162,6 +202,30 @@ Configure email settings in Settings → Email. A test button verifies connectiv
 ---
 
 ## Admin & Settings Guide
+
+### Asset Manager
+
+Access via **Asset Manager** in the sidebar (admin only). The asset manager uses a three-level hierarchy:
+
+```
+Category (e.g. Video)
+  └── Item Type (e.g. Laser Projector — Christie Crimson+3DLP)
+        └── Individual Unit (ID:42, barcode: X1234)
+```
+
+**Categories** group related equipment. **Item Types** define a make/model with:
+- Photo, storage location, rental cost per show, reserve count (units held back as spares)
+- Consumable flag + optional quantity tracking
+
+**Individual Units** are each tracked with a database ID (always unique, even without a barcode). Barcodes are optional.
+
+**Maintenance:** Remove a unit from service with a reason and notes. Return it to service when resolved. Both actions are captured in the Audit Log and Syslog.
+
+**Warehouse Locations:** Manage a central list of storage location names (click **Warehouse Locations** button). These appear as a dropdown when editing item types.
+
+**Availability:** When a unit is added to a show, the system checks real-time availability for the rental period, accounting for maintenance units, reserved spares, and other shows requesting the same item type. Negative availability is displayed — it does not prevent allocation, but makes the over-allocation visible.
+
+**Rental pricing:** Each item type has a base rental cost. When added to a show the price is **locked** immediately — if the database price is updated later, existing show reservations keep the original price. New reservations use the current price.
 
 ### Contacts
 

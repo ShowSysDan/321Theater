@@ -227,6 +227,7 @@ function switchTab(name) {
       _pollHeartbeat();
       if (name === 'comments') loadComments();
       if (name === 'export')   { loadAttachments(); loadReadReceipts(); }
+      if (name === 'assets' && typeof loadAssetsTab === 'function') loadAssetsTab();
     }
   }
 }

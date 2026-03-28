@@ -1,0 +1,526 @@
+{% extends "base.html" %}
+{% block title %}Asset Manager — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Asset Manager</h1>
+    <p class="page-sub">Manage inventory categories, item types, and individual units</p>
+  </div>
+  <div class="header-actions">
+    <button class="btn btn-ghost btn-sm" onclick="openWarehouseModal()">Warehouse Locations</button>
+    <button class="btn btn-primary" onclick="openCategoryModal()">+ New Category</button>
+  </div>
+</div>
+
+{# ── Category + Type Tree ────────────────────────────────────────────────────── #}
+<div id="asset-tree" style="display:flex;flex-direction:column;gap:16px">
+  <p id="asset-tree-empty" style="color:var(--text-dim);text-align:center;padding:40px 0">
+    No categories yet. Click <strong>+ New Category</strong> to get started.
+  </p>
+</div>
+
+{# ── Modals ──────────────────────────────────────────────────────────────────── #}
+
+{# Category Modal #}
+<div id="cat-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeCatModal()">
+  <div class="modal-card" style="max-width:400px">
+    <div class="modal-header">
+      <span id="cat-modal-title">New Category</span>
+      <button onclick="closeCatModal()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="cat-edit-id">
+      <div class="field-group">
+        <label class="field-label">CATEGORY NAME</label>
+        <input type="text" id="cat-name" class="field-input" placeholder="e.g. Video, Audio, Lighting">
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+        <button class="btn btn-ghost" onclick="closeCatModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveCat()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# Asset Type Modal #}
+<div id="type-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeTypeModal()">
+  <div class="modal-card" style="max-width:560px;max-height:90vh;overflow-y:auto">
+    <div class="modal-header">
+      <span id="type-modal-title">New Item Type</span>
+      <button onclick="closeTypeModal()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="type-edit-id">
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field-group" style="grid-column:span 2">
+          <label class="field-label">ITEM NAME *</label>
+          <input type="text" id="type-name" class="field-input" placeholder="e.g. Laser Projector">
+        </div>
+        <div class="field-group">
+          <label class="field-label">CATEGORY *</label>
+          <select id="type-category" class="field-input">
+            <option value="">— Select —</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label class="field-label">PARENT TYPE (optional)</label>
+          <select id="type-parent" class="field-input">
+            <option value="">— None —</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label class="field-label">MANUFACTURER</label>
+          <input type="text" id="type-manufacturer" class="field-input" placeholder="e.g. Christie">
+        </div>
+        <div class="field-group">
+          <label class="field-label">MODEL</label>
+          <input type="text" id="type-model" class="field-input" placeholder="e.g. Crimson+3DLP">
+        </div>
+        <div class="field-group">
+          <label class="field-label">STORAGE LOCATION</label>
+          <select id="type-location" class="field-input">
+            <option value="">— None —</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label class="field-label">RENTAL COST ($/show)</label>
+          <input type="number" id="type-cost" class="field-input" value="0" min="0" step="0.01">
+        </div>
+        <div class="field-group">
+          <label class="field-label">RESERVE COUNT (spares)</label>
+          <input type="number" id="type-reserve" class="field-input" value="0" min="0">
+        </div>
+        <div class="field-group" style="grid-column:span 2;display:flex;gap:20px;align-items:center">
+          <label class="checkbox-label">
+            <input type="checkbox" id="type-consumable">
+            Consumable item
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="type-track-qty" checked>
+            Track by quantity
+          </label>
+        </div>
+        <div class="field-group" style="grid-column:span 2">
+          <label class="field-label">PHOTO</label>
+          <input type="file" id="type-photo" class="field-input" accept="image/*">
+          <div id="type-photo-preview" style="margin-top:6px"></div>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+        <button class="btn btn-ghost" onclick="closeTypeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveType()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# Individual Items Modal #}
+<div id="items-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeItemsModal()">
+  <div class="modal-card" style="max-width:640px;max-height:90vh;display:flex;flex-direction:column">
+    <div class="modal-header">
+      <span id="items-modal-title">Items</span>
+      <button onclick="closeItemsModal()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body" style="overflow-y:auto;flex:1">
+      <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+        <input type="number" id="add-items-count" class="field-input" value="1" min="1" style="width:80px" title="Number of units to add">
+        <input type="text" id="add-item-barcode" class="field-input" placeholder="Barcode (single unit only)" style="flex:1">
+        <button class="btn btn-primary btn-sm" onclick="addItems()">+ Add Units</button>
+      </div>
+      <div id="items-list"></div>
+    </div>
+  </div>
+</div>
+
+{# Warehouse Locations Modal #}
+<div id="warehouse-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeWarehouseModal()">
+  <div class="modal-card" style="max-width:440px;max-height:90vh;display:flex;flex-direction:column">
+    <div class="modal-header">
+      Warehouse Locations
+      <button onclick="closeWarehouseModal()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body" style="overflow-y:auto;flex:1">
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <input type="text" id="new-location-name" class="field-input" placeholder="New location name…" style="flex:1">
+        <button class="btn btn-primary btn-sm" onclick="addLocation()">Add</button>
+      </div>
+      <div id="locations-list"></div>
+    </div>
+  </div>
+</div>
+
+{# Maintenance Modal #}
+<div id="maint-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeMaintModal()">
+  <div class="modal-card" style="max-width:440px">
+    <div class="modal-header">
+      <span id="maint-modal-title">Remove for Maintenance</span>
+      <button onclick="closeMaintModal()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="maint-item-id">
+      <div class="field-group">
+        <label class="field-label">REASON</label>
+        <input type="text" id="maint-reason" class="field-input" placeholder="e.g. Lamp replacement">
+      </div>
+      <div class="field-group">
+        <label class="field-label">NOTES</label>
+        <textarea id="maint-notes" class="field-input field-textarea" rows="3" placeholder="Additional details…"></textarea>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+        <button class="btn btn-ghost" onclick="closeMaintModal()">Cancel</button>
+        <button class="btn btn-primary" style="background:#C53030" onclick="submitMaintenance()">Remove from Service</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+.asset-cat-block { background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+.asset-cat-header { display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--bg);border-bottom:1px solid var(--border); }
+.asset-cat-name { font-weight:600;font-size:14px;flex:1 }
+.asset-types-grid { display:flex;flex-direction:column;gap:0 }
+.asset-type-row { display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);font-size:13px }
+.asset-type-row:last-child { border-bottom:none }
+.asset-type-name { flex:1;font-weight:500 }
+.asset-type-meta { color:var(--text-dim);font-size:11px;margin-top:2px }
+.asset-type-thumb { width:36px;height:36px;border-radius:4px;object-fit:cover;background:var(--border) }
+.item-row { display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px }
+.item-row:last-child { border-bottom:none }
+.item-status { display:inline-block;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:600 }
+.item-status.available { background:rgba(72,187,120,.15);color:#48BB78 }
+.item-status.maintenance { background:rgba(252,129,74,.15);color:#FC814A }
+</style>
+
+<script>
+const _categories = {{ categories | tojson }};
+const _locations  = {{ locations | tojson }};
+let _allTypes = [];
+let _currentTypeId = null;
+let _currentTypeName = '';
+
+// ── Initial Load ──────────────────────────────────────────────────────────────
+(async function init() {
+  await loadTypes();
+  renderTree();
+})();
+
+async function loadTypes() {
+  const r = await fetch('/settings/asset-types', {headers:{'X-Requested-With':'XMLHttpRequest'}});
+  _allTypes = await r.json();
+}
+
+function renderTree() {
+  const container = document.getElementById('asset-tree');
+  const empty = document.getElementById('asset-tree-empty');
+  container.innerHTML = '';
+
+  if (_categories.length === 0) { empty.style.display=''; return; }
+  empty.style.display = 'none';
+
+  _categories.forEach(cat => {
+    const types = _allTypes.filter(t => t.category_id === cat.id);
+    const div = document.createElement('div');
+    div.className = 'asset-cat-block';
+    div.innerHTML = `
+      <div class="asset-cat-header">
+        <span class="asset-cat-name">${esc(cat.name)}</span>
+        <span style="font-size:11px;color:var(--text-dim)">${types.length} type${types.length !== 1 ? 's' : ''}</span>
+        <button class="btn btn-xs btn-ghost" onclick="openTypeModal(null,${cat.id})">+ Add Type</button>
+        <button class="btn btn-xs btn-ghost" onclick="openCategoryModal(${cat.id},'${esc(cat.name).replace(/'/g,"\\'")}')" title="Edit">✎</button>
+        <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="deleteCategory(${cat.id})" title="Delete">✕</button>
+      </div>
+      <div class="asset-types-grid">
+        ${types.length === 0
+          ? '<p style="padding:12px 16px;color:var(--text-dim);font-size:12px">No item types yet.</p>'
+          : types.map(t => renderTypeRow(t)).join('')}
+      </div>
+    `;
+    container.appendChild(div);
+  });
+}
+
+function renderTypeRow(t) {
+  const label = [t.manufacturer, t.model].filter(Boolean).join(' ') || t.name;
+  const thumb = t.photo ? `<img src="/asset-types/${t.id}/photo" class="asset-type-thumb" alt="">` :
+    `<div class="asset-type-thumb" style="display:flex;align-items:center;justify-content:center;color:var(--text-dim);font-size:18px">◈</div>`;
+  const avail = (t.item_count || 0) - (t.reserve_count || 0);
+  return `
+    <div class="asset-type-row">
+      ${thumb}
+      <div style="flex:1;min-width:0">
+        <div class="asset-type-name">${esc(label)}</div>
+        ${t.manufacturer ? `<div class="asset-type-meta">${esc(t.name)}</div>` : ''}
+        <div class="asset-type-meta">
+          ${t.item_count} units · ${t.reserve_count} reserved · $${Number(t.rental_cost||0).toFixed(2)}/show
+          ${t.storage_location ? ' · ' + esc(t.storage_location) : ''}
+          ${t.is_consumable ? ' · <em>consumable</em>' : ''}
+        </div>
+      </div>
+      <div style="display:flex;gap:4px;flex-shrink:0">
+        <button class="btn btn-xs btn-ghost" onclick="openItemsModal(${t.id},'${esc(label).replace(/'/g,"\\'")}')">Items (${t.item_count})</button>
+        <button class="btn btn-xs btn-ghost" onclick="openTypeModal(${t.id})">Edit</button>
+        <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="deleteType(${t.id})">✕</button>
+      </div>
+    </div>
+  `;
+}
+
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Category Modal ────────────────────────────────────────────────────────────
+window.openCategoryModal = function(id, name) {
+  document.getElementById('cat-edit-id').value = id || '';
+  document.getElementById('cat-name').value = name || '';
+  document.getElementById('cat-modal-title').textContent = id ? 'Edit Category' : 'New Category';
+  document.getElementById('cat-modal').style.display = 'flex';
+  setTimeout(() => document.getElementById('cat-name').focus(), 80);
+};
+window.closeCatModal = function() { document.getElementById('cat-modal').style.display = 'none'; };
+window.saveCat = async function() {
+  const id = document.getElementById('cat-edit-id').value;
+  const name = document.getElementById('cat-name').value.trim();
+  if (!name) { alert('Name required'); return; }
+  const url = id ? `/settings/asset-categories/${id}` : '/settings/asset-categories';
+  const method = id ? 'PUT' : 'POST';
+  const r = await fetch(url, {method, headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({name})});
+  const data = await r.json();
+  if (!r.ok) { alert(data.error || 'Error'); return; }
+  if (!id) { _categories.push(data); }
+  else { const i = _categories.findIndex(c => c.id == id); if (i>=0) _categories[i].name = name; }
+  closeCatModal();
+  renderTree();
+};
+window.deleteCategory = async function(id) {
+  if (!confirm('Delete this category and all its types? This cannot be undone.')) return;
+  await fetch(`/settings/asset-categories/${id}`, {method:'DELETE',headers:{'X-Requested-With':'XMLHttpRequest'}});
+  const i = _categories.findIndex(c => c.id == id);
+  if (i >= 0) _categories.splice(i, 1);
+  _allTypes = _allTypes.filter(t => t.category_id !== id);
+  renderTree();
+};
+
+// ── Type Modal ────────────────────────────────────────────────────────────────
+window.openTypeModal = async function(id, defaultCatId) {
+  document.getElementById('type-edit-id').value = id || '';
+  document.getElementById('type-modal-title').textContent = id ? 'Edit Item Type' : 'New Item Type';
+  // Populate category dropdown
+  const catSel = document.getElementById('type-category');
+  catSel.innerHTML = '<option value="">— Select —</option>' +
+    _categories.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  // Populate parent dropdown
+  const parentSel = document.getElementById('type-parent');
+  parentSel.innerHTML = '<option value="">— None —</option>' +
+    _allTypes.filter(t => !id || t.id != id).map(t => `<option value="${t.id}">${esc(t.category_name)} › ${esc(t.name)}</option>`).join('');
+  // Populate location dropdown
+  const locSel = document.getElementById('type-location');
+  locSel.innerHTML = '<option value="">— None —</option>' +
+    _locations.map(l => `<option value="${esc(l.name)}">${esc(l.name)}</option>`).join('');
+
+  if (id) {
+    const t = _allTypes.find(x => x.id == id);
+    if (t) {
+      document.getElementById('type-name').value = t.name;
+      catSel.value = t.category_id;
+      parentSel.value = t.parent_type_id || '';
+      document.getElementById('type-manufacturer').value = t.manufacturer || '';
+      document.getElementById('type-model').value = t.model || '';
+      locSel.value = t.storage_location || '';
+      document.getElementById('type-cost').value = Number(t.rental_cost||0).toFixed(2);
+      document.getElementById('type-reserve').value = t.reserve_count || 0;
+      document.getElementById('type-consumable').checked = !!t.is_consumable;
+      document.getElementById('type-track-qty').checked = t.track_quantity !== 0;
+      document.getElementById('type-photo-preview').innerHTML = t.photo
+        ? `<img src="/asset-types/${t.id}/photo" style="height:60px;border-radius:4px;object-fit:cover">` : '';
+    }
+  } else {
+    document.getElementById('type-name').value = '';
+    if (defaultCatId) catSel.value = defaultCatId;
+    parentSel.value = '';
+    document.getElementById('type-manufacturer').value = '';
+    document.getElementById('type-model').value = '';
+    locSel.value = '';
+    document.getElementById('type-cost').value = '0';
+    document.getElementById('type-reserve').value = '0';
+    document.getElementById('type-consumable').checked = false;
+    document.getElementById('type-track-qty').checked = true;
+    document.getElementById('type-photo-preview').innerHTML = '';
+    document.getElementById('type-photo').value = '';
+  }
+  document.getElementById('type-modal').style.display = 'flex';
+};
+window.closeTypeModal = function() { document.getElementById('type-modal').style.display = 'none'; };
+window.saveType = async function() {
+  const id = document.getElementById('type-edit-id').value;
+  const payload = {
+    name: document.getElementById('type-name').value.trim(),
+    category_id: document.getElementById('type-category').value,
+    parent_type_id: document.getElementById('type-parent').value || null,
+    manufacturer: document.getElementById('type-manufacturer').value.trim(),
+    model: document.getElementById('type-model').value.trim(),
+    storage_location: document.getElementById('type-location').value,
+    rental_cost: parseFloat(document.getElementById('type-cost').value) || 0,
+    reserve_count: parseInt(document.getElementById('type-reserve').value) || 0,
+    is_consumable: document.getElementById('type-consumable').checked,
+    track_quantity: document.getElementById('type-track-qty').checked,
+  };
+  if (!payload.name || !payload.category_id) { alert('Name and category required'); return; }
+  const url = id ? `/settings/asset-types/${id}` : '/settings/asset-types';
+  const method = id ? 'PUT' : 'POST';
+  const r = await fetch(url, {method, headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify(payload)});
+  const data = await r.json();
+  if (!r.ok) { alert(data.error || 'Error'); return; }
+  // Handle photo upload
+  const photoFile = document.getElementById('type-photo').files[0];
+  const savedId = id || data.id;
+  if (photoFile && savedId) {
+    const fd = new FormData();
+    fd.append('photo', photoFile);
+    await fetch(`/settings/asset-types/${savedId}/photo`, {method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}, body: fd});
+  }
+  closeTypeModal();
+  await loadTypes();
+  renderTree();
+};
+window.deleteType = async function(id) {
+  if (!confirm('Delete this item type and all its units? This cannot be undone.')) return;
+  await fetch(`/settings/asset-types/${id}`, {method:'DELETE',headers:{'X-Requested-With':'XMLHttpRequest'}});
+  _allTypes = _allTypes.filter(t => t.id !== id);
+  renderTree();
+};
+
+// ── Items Modal ───────────────────────────────────────────────────────────────
+window.openItemsModal = async function(typeId, typeName) {
+  _currentTypeId = typeId;
+  _currentTypeName = typeName;
+  document.getElementById('items-modal-title').textContent = `Units: ${typeName}`;
+  document.getElementById('items-modal').style.display = 'flex';
+  document.getElementById('add-items-count').value = 1;
+  document.getElementById('add-item-barcode').value = '';
+  await loadItems();
+};
+window.closeItemsModal = function() { document.getElementById('items-modal').style.display = 'none'; };
+
+async function loadItems() {
+  const r = await fetch(`/settings/asset-types/${_currentTypeId}/items`, {headers:{'X-Requested-With':'XMLHttpRequest'}});
+  const items = await r.json();
+  const container = document.getElementById('items-list');
+  if (items.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-dim);font-size:12px;text-align:center;padding:16px">No units yet.</p>';
+    return;
+  }
+  container.innerHTML = items.map(item => `
+    <div class="item-row" id="item-${item.id}">
+      <span style="color:var(--text-dim);font-size:10px;min-width:40px">ID:${item.id}</span>
+      <span class="item-status ${item.status === 'maintenance' ? 'maintenance' : 'available'}">${item.status}</span>
+      <span style="flex:1;font-size:11px">${item.barcode ? '🔖 ' + esc(item.barcode) : '<span style="color:var(--text-dim)">No barcode</span>'}</span>
+      ${item.maint_reason ? `<span style="font-size:10px;color:var(--text-dim);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(item.maint_reason||'')}">⚠ ${esc(item.maint_reason)}</span>` : ''}
+      <div style="display:flex;gap:4px">
+        ${item.status === 'maintenance'
+          ? `<button class="btn btn-xs btn-ghost" style="color:#48BB78" onclick="resolveMaintenance(${item.id})">Return</button>`
+          : `<button class="btn btn-xs btn-ghost" onclick="openMaintModal(${item.id})">Maint.</button>`}
+        <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="deleteItem(${item.id})">✕</button>
+      </div>
+    </div>
+  `).join('');
+  // Update count on tree
+  const t = _allTypes.find(x => x.id === _currentTypeId);
+  if (t) { t.item_count = items.length; renderTree(); }
+}
+
+window.addItems = async function() {
+  const count = parseInt(document.getElementById('add-items-count').value) || 1;
+  const barcode = document.getElementById('add-item-barcode').value.trim();
+  await fetch(`/settings/asset-types/${_currentTypeId}/items`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+    body: JSON.stringify({count, barcode})
+  });
+  document.getElementById('add-item-barcode').value = '';
+  await loadItems();
+};
+
+window.deleteItem = async function(id) {
+  if (!confirm('Remove this unit permanently?')) return;
+  await fetch(`/settings/asset-items/${id}`, {method:'DELETE',headers:{'X-Requested-With':'XMLHttpRequest'}});
+  await loadItems();
+};
+
+window.openMaintModal = function(itemId) {
+  document.getElementById('maint-item-id').value = itemId;
+  document.getElementById('maint-reason').value = '';
+  document.getElementById('maint-notes').value = '';
+  document.getElementById('maint-modal-title').textContent = `Remove Unit ${itemId} for Maintenance`;
+  document.getElementById('maint-modal').style.display = 'flex';
+};
+window.closeMaintModal = function() { document.getElementById('maint-modal').style.display = 'none'; };
+window.submitMaintenance = async function() {
+  const id = document.getElementById('maint-item-id').value;
+  const reason = document.getElementById('maint-reason').value.trim();
+  const notes = document.getElementById('maint-notes').value.trim();
+  await fetch(`/settings/asset-items/${id}/maintenance`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+    body: JSON.stringify({reason, notes})
+  });
+  closeMaintModal();
+  await loadItems();
+};
+window.resolveMaintenance = async function(itemId) {
+  if (!confirm('Mark this unit as back in service?')) return;
+  await fetch(`/settings/asset-items/${itemId}/maintenance/resolve`, {
+    method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}
+  });
+  await loadItems();
+};
+
+// ── Warehouse Locations ───────────────────────────────────────────────────────
+let _locationsArr = [..._locations];
+window.openWarehouseModal = async function() {
+  document.getElementById('new-location-name').value = '';
+  renderLocations();
+  document.getElementById('warehouse-modal').style.display = 'flex';
+};
+window.closeWarehouseModal = function() { document.getElementById('warehouse-modal').style.display = 'none'; };
+function renderLocations() {
+  const c = document.getElementById('locations-list');
+  if (_locationsArr.length === 0) {
+    c.innerHTML = '<p style="color:var(--text-dim);font-size:12px;text-align:center;padding:12px">No locations yet.</p>';
+    return;
+  }
+  c.innerHTML = _locationsArr.map(l => `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <span style="flex:1;font-size:13px">${esc(l.name)}</span>
+      <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="deleteLocation(${l.id})">✕</button>
+    </div>
+  `).join('');
+}
+window.addLocation = async function() {
+  const name = document.getElementById('new-location-name').value.trim();
+  if (!name) return;
+  const r = await fetch('/settings/warehouse-locations', {
+    method:'POST', headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+    body: JSON.stringify({name})
+  });
+  const data = await r.json();
+  if (!r.ok) { alert(data.error || 'Error'); return; }
+  _locationsArr.push(data);
+  // Also update the type-location dropdown if open
+  const locSel = document.getElementById('type-location');
+  if (locSel) {
+    const opt = document.createElement('option');
+    opt.value = data.name; opt.textContent = data.name;
+    locSel.appendChild(opt);
+  }
+  document.getElementById('new-location-name').value = '';
+  renderLocations();
+};
+window.deleteLocation = async function(id) {
+  await fetch(`/settings/warehouse-locations/${id}`, {method:'DELETE',headers:{'X-Requested-With':'XMLHttpRequest'}});
+  _locationsArr = _locationsArr.filter(l => l.id !== id);
+  renderLocations();
+};
+</script>
+{% endblock %}
