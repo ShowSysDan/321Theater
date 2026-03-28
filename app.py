@@ -4473,9 +4473,9 @@ def test_email_provider():
     if not to_addr:
         return jsonify({'success': False, 'message': 'Test recipient address is required.'})
     success, message = _send_email(
-        subject='321Theater Email Test',
+        subject='3·2·1→THEATER Email Test',
         recipients=[to_addr],
-        body_text='This is a test email from 321Theater to verify your email configuration.'
+        body_text='This is a test email from 3·2·1→THEATER to verify your email configuration.'
     )
     return jsonify({'success': success, 'message': message})
 
