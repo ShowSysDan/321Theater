@@ -18,6 +18,21 @@
   </div>
 </div>
 
+{# ── Search + Sort Bar ────────────────────────────────────────────────────────── #}
+<div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+  <input type="text" id="type-search" class="field-input" placeholder="Search types, manufacturers, models…"
+         style="flex:1;min-width:200px;padding:7px 10px;font-size:13px" oninput="renderTree()">
+  <select id="type-sort" class="field-input" style="width:160px;padding:7px 8px;font-size:12px" onchange="renderTree()">
+    <option value="default">Default order</option>
+    <option value="name-asc">Name A → Z</option>
+    <option value="name-desc">Name Z → A</option>
+    <option value="items-desc">Most units</option>
+    <option value="items-asc">Fewest units</option>
+    <option value="cost-desc">Highest cost</option>
+    <option value="cost-asc">Lowest cost</option>
+  </select>
+</div>
+
 {# ── Category + Type Tree ────────────────────────────────────────────────────── #}
 <div id="asset-tree" style="display:flex;flex-direction:column;gap:16px">
   <p id="asset-tree-empty" style="color:var(--text-dim);text-align:center;padding:40px 0">
@@ -138,11 +153,23 @@
     <div style="display:flex;flex:1;overflow:hidden">
       {# Left pane: unit list #}
       <div style="width:280px;min-width:280px;display:flex;flex-direction:column;border-right:1px solid var(--border)">
-        <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;gap:6px;align-items:center">
-          <input type="number" id="add-items-count" class="field-input" value="1" min="1" style="width:56px;padding:4px 6px" title="Number of units to add">
+        <div style="padding:8px 10px;border-bottom:1px solid var(--border);display:flex;gap:6px;align-items:center">
+          <input type="number" id="add-items-count" class="field-input" value="1" min="1" style="width:52px;padding:4px 6px" title="Number of units to add">
           <input type="text" id="add-item-barcode" class="field-input" placeholder="Barcode" style="flex:1;padding:4px 6px">
           <button class="btn btn-primary btn-sm" onclick="addItems()">+</button>
         </div>
+        <div style="padding:6px 10px;border-bottom:1px solid var(--border);display:flex;gap:5px;align-items:center">
+          <input type="text" id="items-search" class="field-input" placeholder="Search barcode…" style="flex:1;padding:4px 6px;font-size:11px" oninput="renderItemsList()">
+          <select id="items-sort" class="field-input" style="width:90px;padding:4px 5px;font-size:10px" onchange="renderItemsList()">
+            <option value="id-asc">ID ↑</option>
+            <option value="id-desc">ID ↓</option>
+            <option value="barcode-asc">Barcode ↑</option>
+            <option value="barcode-desc">Barcode ↓</option>
+            <option value="status-asc">Status</option>
+            <option value="condition-asc">Condition</option>
+          </select>
+        </div>
+        <div style="padding:3px 10px;font-size:10px;color:var(--text-dim);border-bottom:1px solid var(--border)" id="items-count-label"></div>
         <div id="items-list" style="overflow-y:auto;flex:1;padding:4px 0"></div>
       </div>
       {# Right pane: item detail #}
@@ -323,10 +350,61 @@ function renderTree() {
   container.innerHTML = '';
 
   if (_categories.length === 0) { empty.style.display=''; return; }
+
+  const query = (document.getElementById('type-search')?.value || '').trim().toLowerCase();
+  const sortVal = document.getElementById('type-sort')?.value || 'default';
+
+  // Filter types by search query
+  const matchType = t => {
+    if (!query) return true;
+    return (t.name||'').toLowerCase().includes(query)
+        || (t.manufacturer||'').toLowerCase().includes(query)
+        || (t.model||'').toLowerCase().includes(query)
+        || (t.category_name||'').toLowerCase().includes(query)
+        || (t.storage_location||'').toLowerCase().includes(query);
+  };
+
+  // Sort helper
+  const sortTypes = arr => {
+    if (sortVal === 'default') return arr;
+    return [...arr].sort((a, b) => {
+      switch (sortVal) {
+        case 'name-asc':   return (a.name||'').localeCompare(b.name||'');
+        case 'name-desc':  return (b.name||'').localeCompare(a.name||'');
+        case 'items-desc': return (b.item_count||0) - (a.item_count||0);
+        case 'items-asc':  return (a.item_count||0) - (b.item_count||0);
+        case 'cost-desc':  return (b.rental_cost||0) - (a.rental_cost||0);
+        case 'cost-asc':   return (a.rental_cost||0) - (b.rental_cost||0);
+        default: return 0;
+      }
+    });
+  };
+
+  // If searching, show a flat filtered list across all categories
+  if (query) {
+    const matched = sortTypes(_allTypes.filter(matchType));
+    if (matched.length === 0) {
+      empty.style.display = '';
+      empty.textContent = `No types match "${query}".`;
+      return;
+    }
+    empty.style.display = 'none';
+    const div = document.createElement('div');
+    div.className = 'asset-cat-block';
+    div.innerHTML = `
+      <div class="asset-cat-header">
+        <span class="asset-cat-name" style="color:var(--text-dim)">Search results</span>
+        <span style="font-size:11px;color:var(--text-dim)">${matched.length} type${matched.length!==1?'s':''}</span>
+      </div>
+      <div class="asset-types-grid">${matched.map(t => renderTypeRow(t)).join('')}</div>`;
+    container.appendChild(div);
+    return;
+  }
+
   empty.style.display = 'none';
 
   _categories.forEach(cat => {
-    const types = _allTypes.filter(t => t.category_id === cat.id);
+    let types = sortTypes(_allTypes.filter(t => t.category_id === cat.id));
     const div = document.createElement('div');
     div.className = 'asset-cat-block';
     div.innerHTML = `
@@ -519,6 +597,8 @@ window.openItemsModal = async function(typeId, typeName) {
   document.getElementById('items-modal').style.display = 'flex';
   document.getElementById('add-items-count').value = 1;
   document.getElementById('add-item-barcode').value = '';
+  document.getElementById('items-search').value = '';
+  document.getElementById('items-sort').value = 'id-asc';
   document.getElementById('item-detail-empty').style.display = '';
   document.getElementById('item-detail-content').style.display = 'none';
   await loadItems();
@@ -537,12 +617,57 @@ async function loadItems() {
   if (t) { t.item_count = _currentItems.length; renderTree(); }
 }
 
+// Strip leading zeros for tolerant barcode matching
+function normBarcode(s) { return String(s||'').replace(/^0+/, '') || '0'; }
+
 function renderItemsList() {
   const container = document.getElementById('items-list');
+  const countLabel = document.getElementById('items-count-label');
   if (_currentItems.length === 0) {
     container.innerHTML = '<p style="color:var(--text-dim);font-size:12px;text-align:center;padding:16px">No units yet.</p>';
+    if (countLabel) countLabel.textContent = '';
     return;
   }
+
+  const query = (document.getElementById('items-search')?.value || '').trim();
+  const normQuery = normBarcode(query);
+  const sortVal = document.getElementById('items-sort')?.value || 'id-asc';
+
+  // Filter
+  let items = _currentItems.filter(item => {
+    if (!query) return true;
+    // Match by ID
+    if (String(item.id) === query) return true;
+    // Match by barcode — tolerant of leading zeros
+    const bc = item.barcode || '';
+    if (bc.toLowerCase().includes(query.toLowerCase())) return true;
+    if (normBarcode(bc) === normQuery) return true;
+    return false;
+  });
+
+  // Sort
+  const condOrder = {excellent:0, good:1, fair:2, poor:3, retired:4};
+  const statusOrder = {available:0, maintenance:1, retired:2};
+  items = [...items].sort((a, b) => {
+    switch (sortVal) {
+      case 'id-desc':       return b.id - a.id;
+      case 'barcode-asc':   return normBarcode(a.barcode).localeCompare(normBarcode(b.barcode), undefined, {numeric:true});
+      case 'barcode-desc':  return normBarcode(b.barcode).localeCompare(normBarcode(a.barcode), undefined, {numeric:true});
+      case 'status-asc':    return (statusOrder[a.status]??9) - (statusOrder[b.status]??9);
+      case 'condition-asc': return (condOrder[a.condition]??9) - (condOrder[b.condition]??9);
+      default:              return a.id - b.id; // id-asc
+    }
+  });
+
+  if (countLabel) countLabel.textContent = query
+    ? `${items.length} of ${_currentItems.length} units`
+    : `${_currentItems.length} unit${_currentItems.length !== 1 ? 's' : ''}`;
+
+  if (items.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-dim);font-size:12px;text-align:center;padding:16px">No matches.</p>';
+    return;
+  }
+
   const condIcons = {excellent:'★',good:'◆',fair:'◇',poor:'△',retired:'×'};
   container.innerHTML = _currentItems.map(item => {
     const isRetiredItem = item.status === 'retired';
