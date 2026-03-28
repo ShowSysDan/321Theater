@@ -1,6 +1,6 @@
-# ShowAdvance (3·2·1→THEATER) — Production Management System
+# 3·2·1→THEATER — Production Management System
 
-ShowAdvance is a web-based production advance and day-of-show management tool built for Dr. Phillips Center for the Performing Arts (DPC). It provides a central place to fill out advance forms, build production schedules, record post-show notes, manage labor requests, track inventory and rentals, send schedule emails, and share documents with crew and clients.
+3·2·1→THEATER (321Theater) is a web-based production advance and day-of-show management tool built for Dr. Phillips Center for the Performing Arts (DPC). It provides a central place to fill out advance forms, build production schedules, record post-show notes, manage labor requests, track inventory and rentals, send schedule emails, and share documents with crew and clients.
 
 ---
 
@@ -111,6 +111,10 @@ sudo apt install libpango-1.0-0 libpangoft2-1.0-0 libffi-dev libcairo2
 ## Installation
 
 ```bash
+# Clone to a sensible location, then install:
+git clone https://github.com/ShowSysDan/ShowAdvance 321theater
+cd 321theater
+
 # Full install with systemd service (recommended):
 sudo ./install.sh
 
@@ -118,9 +122,16 @@ sudo ./install.sh
 ./install.sh
 ```
 
-The installer: creates a Python venv, installs dependencies, initialises/migrates the SQLite database, creates backup directories, writes a systemd service unit, generates a SECRET_KEY, and starts the service.
+The installer: creates a Python venv, installs dependencies, initialises/migrates the SQLite database, creates backup directories, writes a systemd service unit (`321theater`) generates a SECRET_KEY, and starts the service.
 
 After installation the app is available at `http://<server-ip>:<port>` (default port **5400**).
+
+**Useful service commands:**
+```bash
+systemctl status 321theater
+journalctl -u 321theater -f
+sudo systemctl restart 321theater
+```
 
 ### Updating
 
@@ -461,7 +472,7 @@ Settings → Backups. Automatic hourly (keeps 24) and daily at midnight (keeps 3
 **Restore:**
 ```bash
 cp backups/daily/advance_YYYYMMDD_0000.db advance.db
-sudo systemctl restart showadvance
+sudo systemctl restart 321theater
 ```
 
 ### File Manager
@@ -508,13 +519,13 @@ sudo apt install libpango-1.0-0 libpangoft2-1.0-0 libcairo2 libffi-dev
 
 **Port change doesn't take effect:** Restart the service:
 ```bash
-sudo systemctl restart showadvance
+sudo systemctl restart 321theater
 ```
 
 **Service logs:**
 ```bash
-journalctl -u showadvance -f
-journalctl -u showadvance -n 100
+journalctl -u 321theater -f
+journalctl -u 321theater -n 100
 ```
 
 **Database migration errors:**
@@ -523,3 +534,15 @@ venv/bin/python init_db.py --migrate
 ```
 
 **Login rate limiting:** After 15 failed login attempts per minute from an IP, further attempts return HTTP 429. Wait 60 seconds or restart the app.
+
+---
+
+## Transition Notes (ShowAdvance → 321Theater)
+
+The git repository and codebase were previously named **ShowAdvance**. The rename to **321Theater** is in progress. For the current transition period:
+
+- The **service name** on new installs is `321theater` (old installs still use `showadvance` — both are auto-detected)
+- The **SQLite database file** remains `advance.db` until the upcoming PostgreSQL migration, at which point the database and schema will be named `321theater`
+- The **syslog identifier** (`showadvance`) will update to `321theater` on the new server install — update any syslog filters at that time
+- The **folder** should be cloned as `321theater/` on new servers (`git clone <url> 321theater`)
+- Internal table names are generic (`shows`, `asset_types`, etc.) and require no renaming

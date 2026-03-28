@@ -277,12 +277,12 @@ def connect(database_path, settings=None):
     if db_type == 'postgres':
         try:
             import psycopg2
-            schema = settings.get('pg_schema', 'showadvance') or 'showadvance'
+            schema = settings.get('pg_schema', '321theater') or '321theater'
             _validate_identifier(schema, 'schema')
             conn = psycopg2.connect(
                 host=settings.get('pg_host', 'localhost'),
                 port=int(settings.get('pg_port', 5432) or 5432),
-                dbname=settings.get('pg_dbname', 'showadvance'),
+                dbname=settings.get('pg_dbname', '321theater'),
                 user=settings.get('pg_user', ''),
                 password=settings.get('pg_password', ''),
                 connect_timeout=10,

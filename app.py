@@ -2926,9 +2926,9 @@ def settings():
         'db_type':   all_settings.get('db_type', 'sqlite'),
         'pg_host':   all_settings.get('pg_host', 'localhost'),
         'pg_port':   all_settings.get('pg_port', '5432'),
-        'pg_dbname': all_settings.get('pg_dbname', 'showadvance'),
+        'pg_dbname': all_settings.get('pg_dbname', '321theater'),
         'pg_user':   all_settings.get('pg_user', ''),
-        'pg_schema': all_settings.get('pg_schema', 'showadvance'),
+        'pg_schema': all_settings.get('pg_schema', '321theater'),
     }
     ai_settings = {
         'ollama_enabled': all_settings.get('ollama_enabled', '0'),
@@ -4199,9 +4199,9 @@ def save_database_settings():
         'db_type': db_type,
         'pg_host': data.get('pg_host', 'localhost'),
         'pg_port': str(data.get('pg_port', '5432')),
-        'pg_dbname': data.get('pg_dbname', 'showadvance'),
+        'pg_dbname': data.get('pg_dbname', '321theater'),
         'pg_user': data.get('pg_user', ''),
-        'pg_schema': data.get('pg_schema', 'showadvance'),
+        'pg_schema': data.get('pg_schema', '321theater'),
     }
     # Only update password if provided (non-empty)
     if data.get('pg_password'):
@@ -4239,10 +4239,10 @@ def test_database_connection():
         ok, err = db_adapter.test_postgres_connection(
             host=data.get('pg_host', 'localhost'),
             port=data.get('pg_port', 5432),
-            dbname=data.get('pg_dbname', 'showadvance'),
+            dbname=data.get('pg_dbname', '321theater'),
             user=data.get('pg_user', ''),
             password=data.get('pg_password', ''),
-            schema=data.get('pg_schema', 'showadvance'),
+            schema=data.get('pg_schema', '321theater'),
         )
         if ok:
             return jsonify({'success': True, 'message': 'Connected to PostgreSQL successfully.'})
@@ -4473,9 +4473,9 @@ def test_email_provider():
     if not to_addr:
         return jsonify({'success': False, 'message': 'Test recipient address is required.'})
     success, message = _send_email(
-        subject='ShowAdvance Email Test',
+        subject='321Theater Email Test',
         recipients=[to_addr],
-        body_text='This is a test email from ShowAdvance to verify your email configuration.'
+        body_text='This is a test email from 321Theater to verify your email configuration.'
     )
     return jsonify({'success': success, 'message': message})
 

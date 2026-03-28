@@ -703,11 +703,11 @@
         <div class="form-row cols-2">
           <div class="field-group">
             <label class="field-label">DATABASE NAME</label>
-            <input type="text" id="pg-dbname" class="field-input" value="{{ db_settings.pg_dbname or 'showadvance' }}" placeholder="showadvance">
+            <input type="text" id="pg-dbname" class="field-input" value="{{ db_settings.pg_dbname or '321theater' }}" placeholder="321theater">
           </div>
           <div class="field-group">
             <label class="field-label">SCHEMA <span class="text-dim" style="font-size:10px">(namespace, for multi-app isolation)</span></label>
-            <input type="text" id="pg-schema" class="field-input" value="{{ db_settings.pg_schema or 'showadvance' }}" placeholder="showadvance">
+            <input type="text" id="pg-schema" class="field-input" value="{{ db_settings.pg_schema or '321theater' }}" placeholder="321theater">
           </div>
         </div>
         <div class="form-row cols-2">
@@ -862,7 +862,7 @@
       <div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:16px">
         <div class="field-group" style="margin:0;flex:1">
           <label class="field-label">SYSTEMD SERVICE NAME (auto-detected)</label>
-          <input type="text" id="update-service" class="field-input" placeholder="showadvance">
+          <input type="text" id="update-service" class="field-input" placeholder="321theater">
         </div>
         <button class="btn btn-ghost" onclick="detectService()">Auto-Detect</button>
         <button class="btn btn-ghost" onclick="checkUpdates()">Check for Updates</button>
@@ -1058,7 +1058,7 @@
         </div>
         <div class="field-group">
           <label class="field-label">DISPLAY NAME</label>
-          <input type="text" id="direct_display_name" class="field-input" placeholder="ShowAdvance"
+          <input type="text" id="direct_display_name" class="field-input" placeholder="321Theater"
                  value="{{ email_provider_settings.direct_display_name }}">
           <span class="field-hint">Shown as sender name in recipient's inbox</span>
         </div>
@@ -1859,7 +1859,7 @@ async function testDbConnection() {
     pg_dbname: document.getElementById('pg-dbname')?.value || '',
     pg_user: document.getElementById('pg-user')?.value || '',
     pg_password: document.getElementById('pg-password')?.value || '',
-    pg_schema: document.getElementById('pg-schema')?.value || 'showadvance',
+    pg_schema: document.getElementById('pg-schema')?.value || '321theater',
   };
   try {
     const resp = await fetch('/settings/database/test', {
@@ -1883,7 +1883,7 @@ async function saveDatabaseSettings() {
     pg_dbname: document.getElementById('pg-dbname')?.value || '',
     pg_user: document.getElementById('pg-user')?.value || '',
     pg_password: document.getElementById('pg-password')?.value || '',
-    pg_schema: document.getElementById('pg-schema')?.value || 'showadvance',
+    pg_schema: document.getElementById('pg-schema')?.value || '321theater',
   };
   try {
     const resp = await fetch('/settings/database', {

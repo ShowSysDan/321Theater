@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ShowAdvance service launcher.
+# 321Theater service launcher.
 # Reads the configured port from the database so that changing the port
 # in Settings takes effect on the next service restart — no need to
 # edit the systemd unit or re-run install.sh.
@@ -20,7 +20,7 @@ except Exception:
     print('5400')
 " 2>/dev/null || echo "5400")
 
-echo "[showadvance] Starting on port ${PORT}"
+echo "[321theater] Starting on port ${PORT}"
 
 exec "${VENV}/bin/gunicorn" \
     --workers 4 \
