@@ -13,6 +13,7 @@ import subprocess
 import threading
 import secrets
 import re
+import html as _html_mod
 from datetime import datetime, date, timedelta
 from functools import wraps
 from io import BytesIO
@@ -30,6 +31,43 @@ def _safe_content_disposition(filename):
     """Build a safe Content-Disposition header value, stripping injection chars."""
     safe = secure_filename(filename) or 'download'
     return f'attachment; filename="{safe}"'
+
+
+# Allowed HTML tags/attributes for user-supplied rich text (message body)
+_MSG_ALLOWED_TAGS  = frozenset(['p','br','b','strong','i','em','a','ul','ol','li','span','h3','h4','hr','div'])
+_MSG_ALLOWED_ATTRS = {'a': ['href', 'title']}
+
+def _sanitize_html(raw):
+    """Strip disallowed HTML tags, keeping a safe subset. Prevents stored XSS."""
+    from html.parser import HTMLParser
+    class _S(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.out = []
+        def handle_starttag(self, tag, attrs):
+            t = tag.lower()
+            if t not in _MSG_ALLOWED_TAGS:
+                return
+            allowed = _MSG_ALLOWED_ATTRS.get(t, [])
+            safe_attrs = ''
+            for k, v in attrs:
+                k = k.lower()
+                if k not in allowed or not v:
+                    continue
+                # Reject javascript: and data: URIs
+                if re.match(r'\s*(javascript|data|vbscript)\s*:', v, re.I):
+                    continue
+                safe_attrs += f' {_html_mod.escape(k)}="{_html_mod.escape(v)}"'
+            self.out.append(f'<{t}{safe_attrs}>')
+        def handle_endtag(self, tag):
+            t = tag.lower()
+            if t in _MSG_ALLOWED_TAGS:
+                self.out.append(f'</{t}>')
+        def handle_data(self, data):
+            self.out.append(_html_mod.escape(data))
+    s = _S()
+    s.feed(raw or '')
+    return ''.join(s.out)
 
 app = Flask(__name__)
 
@@ -150,7 +188,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.2.0'
+APP_VERSION = '2.2.1'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -5468,9 +5506,17 @@ def assets_availability_bulk():
                 'available':   info.get('available'),
             }
 
-    # By-show summary (for 'by_show' layout)
+    # By-show summary (for 'by_show' layout) — respect access control
+    accessible_ids = get_accessible_shows(session['user_id'])  # None = all, [] = none, list = specific
     params = []
     where  = []
+    if accessible_ids is not None and len(accessible_ids) > 0:
+        placeholders = ','.join('?' * len(accessible_ids))
+        where.append(f's.id IN ({placeholders})')
+        params.extend(accessible_ids)
+    elif accessible_ids is not None and len(accessible_ids) == 0:
+        db.close()
+        return jsonify({'by_type': by_type, 'by_show': []})
     if date_from: where.append("COALESCE(s.show_date,'9999') >= ?"); params.append(date_from)
     if date_to:   where.append("COALESCE(s.show_date,'0000') <= ?"); params.append(date_to)
     where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
@@ -6026,8 +6072,7 @@ def _send_email(to_addr, subject, plain, html=None):
         _send_email_direct(from_addr, [to_addr], subject, plain, html)
 
 
-@app.route('/register', methods=['GET', 'POST'])
-def register():
+def _register_route():
     if session.get('user_id'):
         return redirect(url_for('dashboard'))
     error = None
@@ -6053,12 +6098,12 @@ def register():
             db = get_db()
             existing = db.execute('SELECT id FROM users WHERE username=?', (username,)).fetchone()
             if existing:
-                error = 'That username is already taken.'
+                error = 'That username or email is not available.'
             else:
                 existing_pending = db.execute(
                     'SELECT id FROM user_pending_registration WHERE username=?', (username,)).fetchone()
                 if existing_pending:
-                    error = 'A registration for that username is already pending.'
+                    error = 'That username or email is not available.'
                 else:
                     token = secrets.token_urlsafe(32)
                     expires = datetime.utcnow() + timedelta(hours=24)
@@ -6103,13 +6148,25 @@ def register():
                                                success='Registration submitted! Check your email to confirm, then wait for admin approval.',
                                                user=None)
                     except Exception as exc:
-                        error = f'Registration error: {exc}'
+                        app.logger.error(f'Registration error: {exc}')
+                        error = 'Registration failed due to a server error. Please try again.'
                     finally:
                         try:
                             db.close()
                         except Exception:
                             pass
     return render_template('register.html', error=error, user=None)
+
+
+if _limiter_available and limiter:
+    @app.route('/register', methods=['GET', 'POST'])
+    @limiter.limit("10 per minute", methods=["POST"])
+    def register():
+        return _register_route()
+else:
+    @app.route('/register', methods=['GET', 'POST'])
+    def register():
+        return _register_route()
 
 
 @app.route('/confirm-email/<token>')
@@ -6202,8 +6259,7 @@ def deny_registration(reg_id):
     return jsonify({'success': True})
 
 
-@app.route('/forgot-password', methods=['GET', 'POST'])
-def forgot_password():
+def _forgot_password_route():
     if session.get('user_id'):
         return redirect(url_for('dashboard'))
     sent = False
@@ -6245,6 +6301,17 @@ def forgot_password():
             db.close()
             sent = True
     return render_template('forgot_password.html', sent=sent, error=error, user=None)
+
+
+if _limiter_available and limiter:
+    @app.route('/forgot-password', methods=['GET', 'POST'])
+    @limiter.limit("5 per minute", methods=["POST"])
+    def forgot_password():
+        return _forgot_password_route()
+else:
+    @app.route('/forgot-password', methods=['GET', 'POST'])
+    def forgot_password():
+        return _forgot_password_route()
 
 
 @app.route('/reset-password/<token>', methods=['GET', 'POST'])
@@ -6354,7 +6421,7 @@ def messages_list():
 def message_create():
     data = request.get_json(force=True) or {}
     title = (data.get('title') or '').strip()
-    body_html = (data.get('body_html') or '').strip()
+    body_html = _sanitize_html((data.get('body_html') or '').strip())
     if not title:
         return jsonify({'error': 'Title required'}), 400
     db = get_db()
@@ -6395,7 +6462,7 @@ def message_edit(msg_id):
         WHERE id=?
     """, (
         (data.get('title') or '').strip(),
-        (data.get('body_html') or '').strip(),
+        _sanitize_html((data.get('body_html') or '').strip()),
         data.get('msg_type', 'motd'),
         data.get('dismissible_by', 'user'),
         data.get('expires_at') or None,
