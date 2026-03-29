@@ -251,9 +251,9 @@
 }
 .gs-panel {
   position: fixed;
-  left: calc(var(--sidebar-w, 230px) + 10px);
-  top: 8px;
-  width: 400px;
+  left: calc(var(--sidebar-w, 256px) + 10px);
+  top: 60px; /* overridden dynamically by _gsPositionPanel() */
+  width: 420px;
   max-height: 80vh;
   overflow-y: auto;
   background: var(--surface);
@@ -326,12 +326,20 @@ function _gsOnInput() {
   _gsTimer = setTimeout(() => _gsFetch(q.trim()), 280);
 }
 
+function _gsPositionPanel() {
+  const input = document.getElementById('gs-input');
+  const panel = document.getElementById('gs-panel');
+  if (!input || !panel) return;
+  const rect = input.getBoundingClientRect();
+  panel.style.top = (rect.bottom + 6) + 'px';
+}
+
 async function _gsFetch(q) {
   try {
     const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
     if (!r.ok) return;
     const data = await r.json();
-    if (Array.isArray(data)) _gsRender(data, q);
+    if (Array.isArray(data)) { _gsPositionPanel(); _gsRender(data, q); }
   } catch (_) { /* network error — fail silently */ }
 }
 
