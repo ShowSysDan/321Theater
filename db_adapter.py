@@ -8,6 +8,27 @@ import sqlite3
 import os
 import time
 
+
+class _Row(dict):
+    """Dict-based row that also supports integer index access (row[0]).
+    Supports .get(), named key access, and positional index access so both
+    new-style (row['col']) and legacy (row[0]) patterns work on Python 3.12+.
+    """
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        if isinstance(key, int):
+            vals = list(self.values())
+            return vals[key] if key < len(vals) else default
+        return super().get(key, default)
+
+
+def _row_factory(cursor, row):
+    return _Row(zip((col[0] for col in cursor.description), row))
+
 # ─── Settings Cache ────────────────────────────────────────────────────────────
 # read_db_settings() is called on every get_db() invocation. Cache results for
 # 30 s so we're not opening a second SQLite connection on every request.
@@ -209,7 +230,7 @@ def read_db_settings(database_path):
         return {}
     try:
         conn = sqlite3.connect(database_path)
-        conn.row_factory = lambda c, r: {col[0]: r[i] for i, col in enumerate(c.description)}
+        conn.row_factory = _row_factory
         rows = conn.execute(
             "SELECT key, value FROM app_settings WHERE key IN "
             "('db_type','pg_host','pg_port','pg_dbname','pg_user','pg_password','pg_schema')"

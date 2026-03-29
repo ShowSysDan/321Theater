@@ -291,7 +291,7 @@ def get_app_setting(key, default=''):
         return default
     try:
         _conn = sqlite3.connect(DATABASE)
-        _conn.row_factory = sqlite3.Row
+        _conn.row_factory = db_adapter._row_factory
         row = _conn.execute('SELECT value FROM app_settings WHERE key=?', (key,)).fetchone()
         _conn.close()
         return row['value'] if row and row['value'] is not None else default
@@ -1159,10 +1159,10 @@ def logout():
 @login_required
 def admin_view_as():
     """Admin-only: temporarily view the site as a different role."""
-    if session.get('role') != 'admin' and not session.get('_real_role'):
+    if session.get('user_role') != 'admin' and not session.get('_real_role'):
         return jsonify({'error': 'Forbidden'}), 403
-    # If already in view-as mode, restore real role first before switching
-    real_role = session.get('_real_role', session.get('role'))
+    # If already in view-as mode, check the saved real role
+    real_role = session.get('_real_role', session.get('user_role'))
     if real_role != 'admin':
         return jsonify({'error': 'Forbidden'}), 403
     data = request.get_json() or {}
@@ -1171,21 +1171,21 @@ def admin_view_as():
         return jsonify({'error': 'Invalid role'}), 400
     # Save real values if not already saved
     if '_real_role' not in session:
-        session['_real_role'] = session.get('role')
+        session['_real_role'] = session.get('user_role')
         session['_real_is_readonly'] = session.get('is_readonly', False)
         session['_real_is_content_admin'] = session.get('is_content_admin', False)
     session['_view_as'] = view_as
     syslog_logger.info(f"ADMIN_VIEW_AS view_as={view_as} by={session.get('username')}")
     if view_as == 'readonly':
-        session['role'] = 'user'
+        session['user_role'] = 'user'
         session['is_readonly'] = True
         session['is_content_admin'] = False
     elif view_as == 'user':
-        session['role'] = 'user'
+        session['user_role'] = 'user'
         session['is_readonly'] = False
         session['is_content_admin'] = False
     elif view_as == 'content_admin':
-        session['role'] = 'user'
+        session['user_role'] = 'user'
         session['is_readonly'] = False
         session['is_content_admin'] = True
     return jsonify({'success': True, 'view_as': view_as})
@@ -1197,7 +1197,7 @@ def admin_view_as_reset():
     """Restore the admin's real role after view-as preview."""
     if '_real_role' not in session:
         return jsonify({'success': True})
-    session['role'] = session.pop('_real_role')
+    session['user_role'] = session.pop('_real_role')
     session['is_readonly'] = session.pop('_real_is_readonly', False)
     session['is_content_admin'] = session.pop('_real_is_content_admin', False)
     session.pop('_view_as', None)
@@ -3731,7 +3731,7 @@ def global_search():
     db = get_db()
     results = []
     like = f'%{q}%'
-    is_admin = session.get('role') == 'admin'
+    is_admin = session.get('user_role') == 'admin'
 
     # ── Shows ────────────────────────────────────────────────────────────────
     accessible = get_accessible_shows(session['user_id'])  # None=all, []=none, list=ids
