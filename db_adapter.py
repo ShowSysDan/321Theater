@@ -329,9 +329,9 @@ def connect(database_path, settings=None):
 
     # SQLite (default)
     conn = sqlite3.connect(database_path)
-    # Return plain dicts so .get() works on all Python versions (sqlite3.Row
-    # dropped undocumented .get() support in Python 3.12+)
-    conn.row_factory = lambda c, r: {col[0]: r[i] for i, col in enumerate(c.description)}
+    # Use _Row so both row['col'] and row[0] integer-index access work
+    # (sqlite3.Row dropped undocumented dict-like behaviour in Python 3.13)
+    conn.row_factory = _row_factory
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     return DBConnection(conn, 'sqlite')

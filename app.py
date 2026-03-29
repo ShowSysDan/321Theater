@@ -2820,7 +2820,7 @@ def audit_log_view():
     total_row = db.execute(
         f'SELECT COUNT(*) FROM audit_log al {where}', params
     ).fetchone()
-    total = total_row[0] if total_row else 0
+    total = list(total_row.values())[0] if total_row else 0
 
     rows = db.execute(f"""
         SELECT al.id, al.timestamp, al.username, al.action, al.entity_type,
