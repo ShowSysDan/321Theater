@@ -1,6 +1,42 @@
-# ShowAdvance (3·2·1→THEATER) — Production Management System
+# 3·2·1→THEATER — Production Management System
 
-ShowAdvance is a web-based production advance and day-of-show management tool built for Dr. Phillips Center for the Performing Arts (DPC). It provides a central place to fill out advance forms, build production schedules, record post-show notes, manage labor requests, send schedule emails, and share documents with crew and clients.
+3·2·1→THEATER (321Theater) is a web-based production advance and day-of-show management tool built for Dr. Phillips Center for the Performing Arts (DPC). It provides a central place to fill out advance forms, build production schedules, record post-show notes, manage labor requests, track inventory and rentals, send schedule emails, and share documents with crew and clients.
+
+---
+
+## Version Numbering
+
+**Current version: `2.5.1`**
+
+This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
+
+| Segment | When to increment |
+|---------|------------------|
+| **MAJOR** | Breaking schema changes, major architectural overhaul, or changes that require a full DB re-init |
+| **MINOR** | New feature sets added (e.g. asset manager, user system enhancements, messaging system) |
+| **PATCH** | Bug fixes, security patches, small UI tweaks, wording changes |
+
+### Rules for AI coding sessions
+
+> **IMPORTANT for future AI sessions:** Before committing any change, determine which version segment to increment and update `APP_VERSION` in `app.py`. The format is `'MAJOR.MINOR.PATCH'` as a string constant near the top of the file. Do not skip this step. The version displays in the sidebar footer of every page.
+>
+> - New feature → increment MINOR (reset PATCH to 0)
+> - Bug fix only → increment PATCH
+> - Schema changes requiring migration → evaluate MAJOR vs MINOR based on impact
+> - Always commit the version bump in the same commit as the feature/fix
+
+Version history:
+- `1.x` — Initial release through security hardening and red team audit
+- `2.0.0` — Asset Manager (inventory tracking, rental pricing, show reservations, external rentals), Performance Company field, version numbering system
+- `2.1.0` — User registration with CAPTCHA, password recovery via email, pending registration approval workflow, in-app git update system with rollback, site-wide messaging (MOTD/maintenance/alerts with dismissal), AI session concurrency management, asset availability dashboards (public/private), asset usage reports by company/date range, Dashboards and Asset Reports in sidebar nav
+- `2.2.0` — Asset invoice PDF export, MOTD cards on dashboard home page, admin email notifications (new registration + asset over-allocation), password strength meter on register/reset, scheduled_for field in site messages, message Scheduled/Expired status display, read-only badge in users table, email + is_readonly in Add User form
+- `2.2.1` — Security hardening: HTML sanitizer on message body_html (prevents stored XSS), access control on /api/assets/availability (respects show permissions for restricted users), unified registration error messages (prevents username enumeration), rate limiting on /register (10/min) and /forgot-password (5/min), exception details no longer exposed to users
+- `2.3.0` — Asset Manager enhancements: condition rating (excellent/good/fair/poor/retired) per unit, supplier/vendor name and contact per item type, warranty expiry date, year purchased, purchase value, straight-line depreciation with live remaining-capital calculator, per-unit maintenance log (note/damage/service/usage entries with date, author, and body)
+- `2.4.0` — Admin "View As" role switcher: admins can preview the site as Content Admin, User, or Read-only without logging out; amber preview banner shown while in preview mode; one-click return to admin
+- `2.4.1` — Soft-retire instead of hard delete: asset types and individual units can only be retired (never deleted); full history preserved permanently; dedicated Retired Assets archive page (/assets/retired); show/hide retired toggle in Asset Manager; category delete blocked while types exist
+- `2.4.2` — Asset Manager sort and search: sort type tree by name, unit count, or rental cost (asc/desc); filter units in items modal by barcode with leading-zero tolerance (normBarcode)
+- `2.5.0` — Global site-wide search: persistent search box in sidebar (/ or Ctrl+K to focus) searches shows (access-controlled), contacts, asset types, and barcodes; grouped results panel with keyboard navigation (↑↓ Enter Escape); `<mark>` highlight on matching text; leading-zero barcode tolerance client- and server-side
+- `2.5.1` — Security patch: XSS fix in Retired Assets JS template literals (esc() helper); rate limiting on /api/search (60/min); max query length guard; log_date ISO format validation; syslog coverage for ADMIN_VIEW_AS, ADMIN_VIEW_AS_RESET, ASSET_LOG_ADD, ASSET_LOG_DELETE
 
 ---
 
@@ -11,25 +47,38 @@ ShowAdvance is a web-based production advance and day-of-show management tool bu
 3. [First Login](#first-login)
 4. [User Guide](#user-guide)
    - [Dashboard](#dashboard)
+   - [Global Search](#global-search)
    - [Advance Sheet](#advance-sheet)
    - [Production Schedule](#production-schedule)
    - [Post-Show Notes](#post-show-notes)
    - [Labor Requests](#labor-requests)
+   - [Assets Tab](#assets-tab)
+   - [Asset Availability Dashboards](#asset-availability-dashboards)
    - [Comments](#comments)
    - [Export & Files](#export--files)
    - [Email](#email)
    - [Public Show Page](#public-show-page)
 5. [Admin & Settings Guide](#admin--settings-guide)
+   - [Asset Manager](#asset-manager)
+   - [Asset Financial Tracking](#asset-financial-tracking)
+   - [Asset Maintenance Log](#asset-maintenance-log)
+   - [Retired Assets](#retired-assets)
+   - [Asset Reports](#asset-reports)
    - [Contacts](#contacts)
    - [Users & Roles](#users--roles)
+   - [View As (Role Preview)](#view-as-role-preview)
+   - [Registration Approval](#registration-approval)
    - [Groups & Show Access](#groups--show-access)
    - [Form Field Customisation](#form-field-customisation)
+   - [Site-Wide Messages](#site-wide-messages)
+   - [In-App Updates](#in-app-updates)
    - [Venues & Radio Channels](#venues--radio-channels)
    - [WiFi Defaults](#wifi-defaults)
    - [Organisation Logo](#organisation-logo)
    - [Upload Size Limit](#upload-size-limit)
    - [Email Settings](#email-settings)
    - [AI Extraction (Ollama)](#ai-extraction-ollama)
+   - [AI Session Concurrency](#ai-session-concurrency)
    - [Syslog Settings](#syslog-settings)
    - [Database Backups](#database-backups)
    - [File Manager](#file-manager)
@@ -62,6 +111,10 @@ sudo apt install libpango-1.0-0 libpangoft2-1.0-0 libffi-dev libcairo2
 ## Installation
 
 ```bash
+# Clone to a sensible location, then install:
+git clone https://github.com/ShowSysDan/ShowAdvance 321theater
+cd 321theater
+
 # Full install with systemd service (recommended):
 sudo ./install.sh
 
@@ -69,9 +122,16 @@ sudo ./install.sh
 ./install.sh
 ```
 
-The installer: creates a Python venv, installs dependencies, initialises/migrates the SQLite database, creates backup directories, writes a systemd service unit, generates a SECRET_KEY, and starts the service.
+The installer: creates a Python venv, installs dependencies, initialises/migrates the SQLite database, creates backup directories, writes a systemd service unit (`321theater`) generates a SECRET_KEY, and starts the service.
 
 After installation the app is available at `http://<server-ip>:<port>` (default port **5400**).
+
+**Useful service commands:**
+```bash
+systemctl status 321theater
+journalctl -u 321theater -f
+sudo systemctl restart 321theater
+```
 
 ### Updating
 
@@ -92,6 +152,15 @@ Default credentials: **admin / admin123**
 ### Dashboard
 
 Lists all active and archived shows. Click a show to open it. **New Show** creates a new show.
+
+### Global Search
+
+A persistent search box lives in the left sidebar (below the logo). Press **/** or **Ctrl+K** from anywhere to focus it.
+
+- Searches **shows** (by name, venue, company, date — respects your show access permissions), **contacts** (name, department, email, title), **asset types** (name, manufacturer, model — admin only), and **asset barcodes** (admin only, with leading-zero tolerance)
+- Results appear in a grouped panel with match highlighting
+- Keyboard navigation: **↑ / ↓** to move, **Enter** to open, **Escape** to close
+- Minimum 2 characters to trigger, maximum 255 characters
 
 ### Advance Sheet
 
@@ -126,6 +195,25 @@ Click **Export PDF** to generate a Post-Show Notes PDF.
 ### Labor Requests
 
 Track labor needs per show. Add requests with department, position, quantity, date/time, and notes. Drag rows to reorder. Restricted (read-only) users can view but not modify labor requests.
+
+### Assets Tab
+
+The **Assets** tab on every show allows content admins to:
+- **Search** the asset inventory and add items to the show
+- Set **quantity**, **rental period** (defaults to show production dates), and **unit price** (locked at time of reservation — subsequent database price changes do not affect existing reservations)
+- Add **external rental line items** with optional PDF attachment (vendor quote, contract, etc.)
+- View the combined **total cost** for internal + external rentals
+- **Hide** specific items from production managers (admin only) — useful when e.g. an admin needs to confirm a lens before adding it
+
+Availability is checked in real time when adding items. Items that are over-allocated or in maintenance show their status clearly.
+
+### Asset Availability Dashboards
+
+Access via **Dashboards** in the sidebar. Create personal or public availability views showing real-time asset status across your date range.
+
+- **Layouts:** Combined (all assets), By Category, or By Show
+- **Public dashboards** get a shareable URL (`/d/<slug>`) accessible without login — useful for tour managers and external clients
+- Each dashboard refreshes live from the `/api/assets/availability` endpoint
 
 ### Comments
 
@@ -163,6 +251,80 @@ Configure email settings in Settings → Email. A test button verifies connectiv
 
 ## Admin & Settings Guide
 
+### Asset Manager
+
+Access via **Asset Manager** in the sidebar (admin only). The asset manager uses a three-level hierarchy:
+
+```
+Category (e.g. Video)
+  └── Item Type (e.g. Laser Projector — Christie Crimson+3DLP)
+        └── Individual Unit (ID:42, barcode: X1234)
+```
+
+**Categories** group related equipment. **Item Types** define a make/model with:
+- Photo, storage location, rental cost per show, reserve count (units held back as spares)
+- Consumable flag + optional quantity tracking
+- Supplier/vendor name and contact
+
+**Individual Units** are each tracked with a database ID (always unique, even without a barcode). Barcodes are optional.
+
+**Search & Sort:** Use the search bar above the type tree to filter by name/manufacturer/model. Sort by name, unit count, or rental cost (ascending/descending). Within the units modal, filter units by barcode with leading-zero tolerance.
+
+**Maintenance:** Remove a unit from service with a reason and notes. Return it to service when resolved. Both actions are captured in the Audit Log and Syslog.
+
+**Retiring:** Asset types and individual units are **never deleted** — only retired. Retiring a type also retires all its available units. Use the **Show Retired** checkbox to view retired entries inline. The **Retired Archive** link opens the full retired-assets history page.
+
+**Warehouse Locations:** Manage a central list of storage location names (click **Warehouse Locations** button). These appear as a dropdown when editing item types.
+
+**Availability:** When a unit is added to a show, the system checks real-time availability for the rental period, accounting for maintenance units, reserved spares, and other shows requesting the same item type. Negative availability is displayed — it does not prevent allocation, but makes the over-allocation visible.
+
+**Rental pricing:** Each item type has a base rental cost. When added to a show the price is **locked** immediately — if the database price is updated later, existing show reservations keep the original price. New reservations use the current price.
+
+### Asset Financial Tracking
+
+Each individual unit can store financial metadata:
+
+| Field | Description |
+|-------|-------------|
+| Condition | excellent / good / fair / poor / retired |
+| Year Purchased | Calendar year of acquisition |
+| Purchase Value | Original cost in dollars |
+| Depreciation (years) | Straight-line depreciation timeframe |
+| Warranty Expires | Date warranty coverage ends |
+
+When **Purchase Value** and **Depreciation Years** are both set, the unit detail panel shows a live **remaining capital value** with a color-coded bar (green → amber → red as the asset approaches full depreciation). The calculation is straight-line: `remaining = max(0, value − (value ÷ years) × age)`.
+
+### Asset Maintenance Log
+
+Each individual unit has a built-in log for recording its history. Access it from the **Log** tab in the unit detail pane.
+
+| Log Type | Use for |
+|----------|---------|
+| `note` | General observations |
+| `damage` | Damage noticed during use or inspection |
+| `service` | Repairs, cleaning, calibration |
+| `usage` | Notable usage events |
+
+Each entry records a date, the author (logged-in user), and a free-text body. Admins can delete entries. Entries are preserved permanently even after a unit is retired.
+
+### Retired Assets
+
+Access via **Retired Archive** link in Asset Manager, or **Retired Assets** in the sidebar.
+
+Retired assets are split into two sections:
+
+1. **Retired Item Types** — the entire type was retired. Expand each row to view all units that belonged to that type.
+2. **Individually Retired Units** — the parent type is still active, but this specific unit was retired. The table includes condition, purchase value, warranty, and a link to view the unit's full log history inline.
+
+All records are **read-only** and preserved permanently.
+
+### Asset Reports
+
+Access via **Asset Reports** in the sidebar (admin only). Filter asset usage by performance company and date range. Export results as CSV.
+
+- Summary cards show total revenue, line item count, show count, and categories used
+- The **Performance Company** field on each show's advance sheet drives company-level filtering
+
 ### Contacts
 
 Add, edit, delete DPC contacts. Fields: name, title, department, phone, email. Contacts appear in dropdowns on advance and schedule forms.
@@ -175,6 +337,29 @@ Add, edit, delete DPC contacts. Fields: name, title, department, phone, email. C
 | `user` | Access controlled by group membership |
 
 Add users via Settings → Users. Admins can reset passwords.
+
+### View As (Role Preview)
+
+Admins can preview the site from another role's perspective without logging out. The **VIEW SITE AS** control appears at the bottom of the sidebar (admin only).
+
+| Preview Mode | Simulates |
+|---|---|
+| **C.Admin** | Content Admin (can edit form fields, manage messages) |
+| **User** | Standard user (show access controlled by groups) |
+| **R/O** | Read-only user (view-only, no edits) |
+
+An amber banner appears at the top of every page while in preview mode. Click **Exit Preview** (or **RETURN TO ADMIN** in the sidebar) to restore full admin access. The real session is preserved — no actual role change occurs in the database.
+
+### Registration Approval
+
+New users can self-register at `/register`. The flow:
+1. User fills out registration form and completes the Dino CAPTCHA (score ≥ 1 to pass)
+2. A confirmation email is sent — user must click the link to verify their address
+3. Admin sees pending requests in Settings → Registrations (with badge count)
+4. Admin selects a role and clicks **Approve** (or **Deny**)
+5. User receives an approval email and can log in
+
+**Forgot password:** Available at `/forgot-password`. Sends a 2-hour reset link via email. Also requires CAPTCHA.
 
 ### Groups & Show Access
 
@@ -242,11 +427,43 @@ Settings → Email. Configure outbound email for sending schedule PDFs to contac
 
 Settings → AI. Connect to a local [Ollama](https://ollama.com) instance for AI-powered data extraction from uploaded documents (PDF, DOCX, XLSX, RTF, TXT). Configure the Ollama server URL and enable/disable the feature. The AI can pre-populate advance form fields from uploaded rider documents.
 
+### AI Session Concurrency
+
+Settings → AI → **Max Concurrent AI Sessions**. Limits how many AI extraction jobs can run simultaneously across all Gunicorn workers (stored in DB, shared across processes). Default: 2. The AI extract button is dynamically disabled in the UI when all slots are busy.
+
+### Site-Wide Messages
+
+Settings → Messages. Create banners visible to all logged-in users.
+
+| Field | Description |
+|-------|-------------|
+| Type | `MOTD` (message of the day), `Maintenance` (scheduled downtime notice), `Alert` (urgent) |
+| Dismissible by | `user` (anyone can dismiss) or `admin` (only admins, persists for regular users) |
+| Expires at | Automatically hides after this datetime |
+| Show on login | Display prominently on the login page |
+
+Messages are fetched via `/api/messages` on every page load and appear as dismissible flash banners at the top of the main content area. Admins can deactivate a message for **all** users at once with the **✕ All** button.
+
+### In-App Updates
+
+Settings → Updates. Pull the latest release from git and auto-restart the service.
+
+1. Click **Auto-Detect** to identify the systemd service name (or enter it manually)
+2. Click **Check for Updates** to see pending commits and changed files
+3. Click **Apply Update** to:
+   - Archive all changed files to `backups/pre_update_<timestamp>/` (rollback point)
+   - Run `git pull`
+   - Run `python init_db.py --migrate` (applies any schema changes)
+   - Restart the systemd service
+   - If any step fails, the archived files are restored and the service restarted
+
+The update progress log is displayed live in the browser. If the service restarts, the page automatically detects when Flask comes back up.
+
 ### Syslog Settings
 
 Settings → Syslog. Send audit events to a remote syslog server via UDP.
 
-Events: LOGIN/LOGOUT · SHOW_CREATE/ARCHIVE/DELETE/RESTORE · FORM_SAVE · PDF_EXPORT · USER_CREATE/DELETE/PASSWORD_CHANGE · GROUP_ASSIGN/REMOVE · BACKUP_CREATED · SETTINGS_CHANGE
+Events: LOGIN/LOGOUT · SHOW_CREATE/ARCHIVE/DELETE/RESTORE · FORM_SAVE · PDF_EXPORT · USER_CREATE/DELETE/PASSWORD_CHANGE · GROUP_ASSIGN/REMOVE · BACKUP_CREATED · SETTINGS_CHANGE · REGISTER_PENDING · EMAIL_CONFIRMED · USER_APPROVED · USER_DENIED · PASSWORD_RESET_REQUEST · PASSWORD_RESET_COMPLETE · APP_UPDATE_START · MESSAGE_CREATE · MESSAGE_EDIT · MESSAGE_DELETE · ASSET_TYPE_RETIRE · ASSET_ITEM_RETIRE · ASSET_LOG_ADD · ASSET_LOG_DELETE · ADMIN_VIEW_AS · ADMIN_VIEW_AS_RESET
 
 ### Database Backups
 
@@ -255,7 +472,7 @@ Settings → Backups. Automatic hourly (keeps 24) and daily at midnight (keeps 3
 **Restore:**
 ```bash
 cp backups/daily/advance_YYYYMMDD_0000.db advance.db
-sudo systemctl restart showadvance
+sudo systemctl restart 321theater
 ```
 
 ### File Manager
@@ -302,13 +519,13 @@ sudo apt install libpango-1.0-0 libpangoft2-1.0-0 libcairo2 libffi-dev
 
 **Port change doesn't take effect:** Restart the service:
 ```bash
-sudo systemctl restart showadvance
+sudo systemctl restart 321theater
 ```
 
 **Service logs:**
 ```bash
-journalctl -u showadvance -f
-journalctl -u showadvance -n 100
+journalctl -u 321theater -f
+journalctl -u 321theater -n 100
 ```
 
 **Database migration errors:**
@@ -317,3 +534,15 @@ venv/bin/python init_db.py --migrate
 ```
 
 **Login rate limiting:** After 15 failed login attempts per minute from an IP, further attempts return HTTP 429. Wait 60 seconds or restart the app.
+
+---
+
+## Transition Notes (ShowAdvance → 321Theater)
+
+The git repository and codebase were previously named **ShowAdvance**. The rename to **321Theater** is in progress. For the current transition period:
+
+- The **service name** on new installs is `321theater` (old installs still use `showadvance` — both are auto-detected)
+- The **SQLite database file** remains `advance.db` until the upcoming PostgreSQL migration, at which point the database and schema will be named `321theater`
+- The **syslog identifier** (`showadvance`) will update to `321theater` on the new server install — update any syslog filters at that time
+- The **folder** should be cloned as `321theater/` on new servers (`git clone <url> 321theater`)
+- Internal table names are generic (`shows`, `asset_types`, etc.) and require no renaming

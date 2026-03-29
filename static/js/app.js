@@ -227,6 +227,7 @@ function switchTab(name) {
       _pollHeartbeat();
       if (name === 'comments') loadComments();
       if (name === 'export')   { loadAttachments(); loadReadReceipts(); }
+      if (name === 'assets' && typeof loadAssetsTab === 'function') loadAssetsTab();
     }
   }
 }
@@ -1999,7 +2000,110 @@ function resetAiExtract() {
   if (msg) { msg.style.display = 'none'; msg.textContent = ''; }
   const log = document.getElementById('ai-progress-log');
   if (log) { log.style.display = 'none'; log.innerHTML = ''; }
+  _aiDino.stop();
 }
+
+// ── AI modal Dino game ────────────────────────────────────────────────────────
+function aiDinoJump() { _aiDino.jump(); }
+
+const _aiDino = (() => {
+  const GROUND = 78;
+  let canvas, ctx, raf = null;
+  let dino, obstacles, frame, score, running, dead, speed;
+  let _keyBound = false;
+
+  function _reset() {
+    dino = { x: 40, y: GROUND - 22, w: 18, h: 22, vy: 0, onGround: true };
+    obstacles = []; frame = 0; score = 0; dead = false; speed = 3; running = false;
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+    _setMsg('Click or Space to play');
+    _setScore('');
+    if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+
+  function _setMsg(t) {
+    const el = document.getElementById('ai-dino-msg');
+    if (el) { el.textContent = t; el.style.display = t ? 'block' : 'none'; }
+  }
+  function _setScore(t) {
+    const el = document.getElementById('ai-dino-score');
+    if (el) el.textContent = t;
+  }
+
+  function _loop() {
+    if (!running || dead) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = 'rgba(245,127,32,0.3)';
+    ctx.beginPath(); ctx.moveTo(0, GROUND); ctx.lineTo(canvas.width, GROUND); ctx.stroke();
+
+    speed = 3 + score * 0.15;
+    frame++;
+    if (frame % Math.max(40, 80 - score * 3) === 0) {
+      const h = 18 + Math.random() * 14;
+      obstacles.push({ x: canvas.width + 20, y: GROUND - h, w: 12, h });
+    }
+
+    dino.vy += 0.55; dino.y += dino.vy;
+    if (dino.y >= GROUND - dino.h) { dino.y = GROUND - dino.h; dino.vy = 0; dino.onGround = true; }
+
+    ctx.fillStyle = '#F57F20';
+    ctx.fillRect(dino.x, dino.y, dino.w, dino.h);
+    ctx.fillRect(dino.x + 4, dino.y - 8, 14, 10);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(dino.x + 14, dino.y - 7, 3, 3);
+
+    ctx.fillStyle = 'rgba(245,127,32,0.7)';
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      const o = obstacles[i];
+      o.x -= speed;
+      ctx.fillRect(o.x, o.y, o.w, o.h);
+      if (o.x + o.w < 0) { obstacles.splice(i, 1); score++; _setScore(`Score: ${score}`); }
+      if (dino.x + 3 < o.x + o.w && dino.x + dino.w - 3 > o.x &&
+          dino.y + 3 < o.y + o.h && dino.y + dino.h - 3 > o.y) {
+        dead = true; running = false;
+        ctx.fillStyle = 'rgba(239,68,68,0.15)'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        _setMsg('Click to try again');
+        return;
+      }
+    }
+
+    ctx.fillStyle = 'var(--text-dim,#888)'; ctx.font = '11px monospace';
+    ctx.fillText(score, canvas.width - 36, 14);
+    raf = requestAnimationFrame(_loop);
+  }
+
+  return {
+    start() {
+      canvas = document.getElementById('ai-dino-canvas');
+      ctx = canvas ? canvas.getContext('2d') : null;
+      if (!canvas) return;
+      if (!_keyBound) {
+        const c = document.getElementById('ai-dino-container');
+        if (c) c.addEventListener('keydown', e => { if (e.key === ' ' || e.key === 'ArrowUp') { e.preventDefault(); this.jump(); } });
+        _keyBound = true;
+      }
+      _reset();
+      const section = document.getElementById('ai-game-section');
+      if (section) section.style.display = '';
+      // auto-start after a brief moment so user sees the canvas
+      setTimeout(() => { running = true; _setMsg(''); _loop(); }, 400);
+    },
+    stop() {
+      running = false;
+      if (raf) { cancelAnimationFrame(raf); raf = null; }
+      const section = document.getElementById('ai-game-section');
+      if (section) section.style.display = 'none';
+    },
+    jump() {
+      if (!canvas) return;
+      if (dead) { _reset(); return; }
+      if (!running) {
+        running = true; _setMsg(''); _loop(); return;
+      }
+      if (dino.onGround) { dino.vy = -9; dino.onGround = false; }
+    }
+  };
+})();
 
 async function runAiExtract() {
   const fileInput = document.getElementById('ai-file-input');
@@ -2037,6 +2141,7 @@ async function runAiExtract() {
 
   msgEl.style.display = 'none';
   if (logEl) { logEl.style.display = ''; logEl.innerHTML = ''; }
+  _aiDino.start();
 
   const fname = hasFile ? fileInput.files[0].name : ('attachment #' + attachId);
   _log('Reading document: ' + fname);
@@ -2094,6 +2199,7 @@ async function runAiExtract() {
 }
 
 function _showAiSuggestions(data) {
+  _aiDino.stop();
   document.getElementById('ai-upload-section').style.display = 'none';
   document.getElementById('ai-results-section').style.display = '';
 

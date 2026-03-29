@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# ShowAdvance — install / update script
+# 321Theater — install / update script
 # Supports fresh installs and in-place upgrades.
 # Run as root for full systemd service setup; run as a regular user for manual-start mode.
 
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_NAME="showadvance"
+APP_NAME="321theater"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 ENV_FILE="${APP_DIR}/.env"
 
@@ -38,7 +38,7 @@ step()  { echo -e "\n${CYAN}==> $*${NC}"; }
 
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║     ShowAdvance — Production Manager     ║${NC}"
+echo -e "${CYAN}║    3·2·1→THEATER — Production Manager    ║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -137,7 +137,7 @@ if [ "$(id -u)" -eq 0 ]; then
     # this file when the port changes via the Settings UI).
     cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=ShowAdvance — Production Management
+Description=321Theater — Production Management
 Documentation=https://github.com/ShowSysDan/ShowAdvance
 After=network.target
 
@@ -159,7 +159,7 @@ EOF
 
     info "Systemd unit written to ${SERVICE_FILE}"
 
-    # Allow the service user to restart showadvance without a password.
+    # Allow the service user to restart 321theater without a password.
     # This enables the "Change Port" UI button to trigger a live restart.
     SUDOERS_FILE="/etc/sudoers.d/${APP_NAME}"
     echo "${RUN_USER} ALL=(ALL) NOPASSWD: /bin/systemctl restart ${APP_NAME}, /usr/bin/systemctl restart ${APP_NAME}" \
@@ -187,7 +187,7 @@ EOF
     echo -e "${GREEN}║          Installation Complete!          ║${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "  Open ShowAdvance at: ${CYAN}http://${LAN_IP}:${PORT}${NC}"
+    echo -e "  Open 321Theater at: ${CYAN}http://${LAN_IP}:${PORT}${NC}"
     echo ""
     echo -e "  ${YELLOW}Default login:${NC}  admin / admin   ← change this immediately!"
     echo ""
@@ -201,7 +201,7 @@ else
     # ── Non-root: manual-start instructions ──────────────────────────────────
     step "Non-root install complete — systemd service not configured."
     echo ""
-    echo "  To start ShowAdvance manually:"
+    echo "  To start 321Theater manually:"
     echo ""
     echo "    ${VENV}/bin/python ${APP_DIR}/app.py"
     echo ""

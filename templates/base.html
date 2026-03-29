@@ -43,6 +43,21 @@
       </div>
     </div>
 
+    <!-- Global Search -->
+    <div class="gs-wrap" id="gs-wrap">
+      <div class="gs-input-row">
+        <svg class="gs-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+        <input id="gs-input" class="gs-input" type="text" placeholder="Search shows, assets, barcodes…"
+               autocomplete="off" spellcheck="false"
+               oninput="_gsOnInput()" onfocus="_gsOpen()" onkeydown="_gsKey(event)">
+        <button id="gs-clear" class="gs-clear" style="display:none" onclick="_gsClear()" tabindex="-1">×</button>
+      </div>
+    </div>
+    <!-- Results panel (fixed, floats right of sidebar) -->
+    <div id="gs-panel" class="gs-panel" style="display:none">
+      <div id="gs-results"></div>
+    </div>
+
     <nav class="sidebar-nav">
       <a href="{{ url_for('dashboard') }}" class="nav-item {% if request.endpoint == 'dashboard' %}active{% endif %}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
@@ -63,6 +78,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
         Labor Requests
       </a>
+      <a href="{{ url_for('show_page', show_id=show.id, tab='assets') }}" class="nav-item sub {% if tab == 'assets' %}active{% endif %}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/></svg>
+        Assets
+      </a>
       <a href="{{ url_for('show_page', show_id=show.id, tab='postnotes') }}" class="nav-item sub {% if tab == 'postnotes' %}active{% endif %}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
         Post-Show Notes
@@ -78,10 +97,28 @@
       {% endif %}
 
       <div class="nav-section-label">SYSTEM</div>
+      <a href="{{ url_for('dashboards_list') }}" class="nav-item {% if request.endpoint in ['dashboards_list','dashboard_view'] %}active{% endif %}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+        Dashboards
+      </a>
       <a href="{{ url_for('crew_tracker') }}" class="nav-item {% if request.endpoint == 'crew_tracker' %}active{% endif %}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
         Skill Tracker
       </a>
+      {% if user.role == 'admin' %}
+      <a href="{{ url_for('asset_reports') }}" class="nav-item {% if request.endpoint == 'asset_reports' %}active{% endif %}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        Asset Reports
+      </a>
+      <a href="{{ url_for('assets_admin') }}" class="nav-item {% if request.endpoint == 'assets_admin' %}active{% endif %}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>
+        Asset Manager
+      </a>
+      <a href="{{ url_for('assets_retired') }}" class="nav-item {% if request.endpoint == 'assets_retired' %}active{% endif %}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+        Retired Assets
+      </a>
+      {% endif %}
       <a href="{{ url_for('settings') }}" class="nav-item {% if request.endpoint == 'settings' %}active{% endif %}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
         Settings
@@ -95,13 +132,36 @@
     </nav>
 
     <div class="sidebar-footer">
+      <div class="app-version" style="font-size:10px;color:var(--text-dim);text-align:center;padding:4px 0 6px;letter-spacing:.04em">v{{ app_version }}</div>
       <div class="sidebar-user">
         <div class="user-avatar">{{ user.display_name[0].upper() }}</div>
         <div class="user-info">
           <div class="user-name">{{ user.display_name }}</div>
-          <div class="user-role">{{ user.role }}</div>
+          <div class="user-role">
+            {% if session.get('_view_as') %}
+            <span style="color:#F6AD55">viewing as {{ session['_view_as'] }}</span>
+            {% else %}
+            {{ user.role }}
+            {% endif %}
+          </div>
         </div>
       </div>
+      {% if session.get('_real_role') == 'admin' or user.role == 'admin' %}
+      <div style="padding:4px 8px 6px;border-top:1px solid var(--border)">
+        {% if session.get('_view_as') %}
+        <button onclick="resetViewAs()" style="width:100%;font-size:10px;padding:5px 8px;background:rgba(246,173,85,.15);border:1px solid rgba(246,173,85,.4);color:#F6AD55;border-radius:4px;cursor:pointer;letter-spacing:.04em;font-weight:600">
+          ↩ RETURN TO ADMIN
+        </button>
+        {% else %}
+        <div style="font-size:9px;color:var(--text-dim);margin-bottom:4px;letter-spacing:.06em;text-align:center">VIEW SITE AS</div>
+        <div style="display:flex;gap:4px">
+          <button onclick="setViewAs('content_admin')" class="view-as-btn" title="Content Admin">C.Admin</button>
+          <button onclick="setViewAs('user')" class="view-as-btn" title="Regular User">User</button>
+          <button onclick="setViewAs('readonly')" class="view-as-btn" title="Read-only">R/O</button>
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
       <button class="theme-toggle-btn" id="theme-toggle-btn" onclick="toggleTheme()"
               title="Toggle light / dark mode">
         {% if user.theme == 'light' %}
@@ -120,6 +180,13 @@
 
   <!-- Main -->
   <main class="main-content">
+    {% if session.get('_view_as') %}
+    <div style="background:rgba(246,173,85,.15);border-bottom:1px solid rgba(246,173,85,.35);padding:7px 20px;display:flex;align-items:center;gap:10px;font-size:12px;position:sticky;top:0;z-index:50">
+      <span style="color:#F6AD55;font-weight:700;letter-spacing:.05em">PREVIEW MODE</span>
+      <span style="color:var(--text-dim)">You are viewing the site as a <strong style="color:#F6AD55">{{ session['_view_as'].replace('_',' ') }}</strong> — changes you make will take effect as if you had that role.</span>
+      <button onclick="resetViewAs()" style="margin-left:auto;font-size:11px;padding:3px 10px;background:rgba(246,173,85,.2);border:1px solid rgba(246,173,85,.5);color:#F6AD55;border-radius:4px;cursor:pointer;font-weight:600">Exit Preview</button>
+    </div>
+    {% endif %}
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         <div class="flash-container">
@@ -133,6 +200,9 @@
       {% endif %}
     {% endwith %}
 
+    <!-- Site-wide message banners -->
+    <div id="site-msg-container"></div>
+
     {% block content %}{% endblock %}
   </main>
 
@@ -144,5 +214,278 @@
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 {% block scripts %}{% endblock %}
 <div id="save-toast" class="save-toast"></div>
+<style>
+/* ── Global search ───────────────────────────────────────────────── */
+.gs-wrap {
+  margin: 4px 10px 8px;
+  position: relative;
+}
+.gs-input-row {
+  display: flex;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 8px;
+  gap: 6px;
+  transition: border-color .15s;
+}
+.gs-input-row:focus-within {
+  border-color: var(--accent, #F57F20);
+  box-shadow: 0 0 0 2px rgba(245,127,32,.12);
+}
+.gs-icon { width:13px;height:13px;flex-shrink:0;color:var(--text-dim);opacity:.7 }
+.gs-input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  font-size: 12px;
+  color: var(--text);
+  padding: 7px 0;
+  min-width: 0;
+}
+.gs-input::placeholder { color: var(--text-dim); opacity: .6 }
+.gs-clear {
+  background: none; border: none; cursor: pointer;
+  color: var(--text-dim); font-size: 15px; padding: 0 2px; line-height: 1;
+}
+.gs-panel {
+  position: fixed;
+  left: calc(var(--sidebar-w, 230px) + 10px);
+  top: 8px;
+  width: 400px;
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.3);
+  z-index: 300;
+  padding: 8px 0;
+}
+.gs-group-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  color: var(--text-dim);
+  padding: 6px 14px 3px;
+  text-transform: uppercase;
+}
+.gs-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  cursor: pointer;
+  text-decoration: none;
+  color: var(--text);
+  transition: background .1s;
+  border-radius: 4px;
+  margin: 0 4px;
+}
+.gs-item:hover, .gs-item.active {
+  background: rgba(245,127,32,.1);
+}
+.gs-item-icon { font-size: 14px; flex-shrink: 0; opacity: .8; width: 18px; text-align: center }
+.gs-item-body { flex: 1; min-width: 0 }
+.gs-item-label { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.gs-item-sub   { font-size: 10px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px }
+.gs-retired .gs-item-label { text-decoration: line-through; opacity: .6 }
+.gs-empty { padding: 20px 14px; font-size: 12px; color: var(--text-dim); text-align: center }
+.gs-separator { border: none; border-top: 1px solid var(--border); margin: 4px 0 }
+.view-as-btn {
+  flex:1;font-size:10px;padding:4px 6px;background:var(--surface);
+  border:1px solid var(--border);color:var(--text-dim);border-radius:4px;
+  cursor:pointer;font-weight:600;letter-spacing:.04em;transition:background .15s,color .15s;
+}
+.view-as-btn:hover { background:rgba(245,127,32,.12);color:#F57F20;border-color:rgba(245,127,32,.4) }
+</style>
+<script>
+async function setViewAs(role) {
+  const r = await fetch('/admin/view-as', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({role})
+  });
+  if (r.ok) location.reload();
+}
+async function resetViewAs() {
+  await fetch('/admin/view-as/reset', {method:'POST'});
+  location.reload();
+}
+
+// ── Global Search ─────────────────────────────────────────────────────────────
+let _gsTimer = null;
+let _gsActiveIdx = -1;
+let _gsItems = [];
+
+function _gsOnInput() {
+  const q = document.getElementById('gs-input').value;
+  document.getElementById('gs-clear').style.display = q ? '' : 'none';
+  clearTimeout(_gsTimer);
+  if (q.trim().length < 2) { _gsHidePanel(); return; }
+  _gsTimer = setTimeout(() => _gsFetch(q.trim()), 280);
+}
+
+async function _gsFetch(q) {
+  const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+  const data = await r.json();
+  _gsRender(data, q);
+}
+
+function _gsRender(results, q) {
+  const panel = document.getElementById('gs-panel');
+  const container = document.getElementById('gs-results');
+  _gsActiveIdx = -1;
+  _gsItems = [];
+
+  if (results.length === 0) {
+    container.innerHTML = `<div class="gs-empty">No results for "<strong>${_gsEsc(q)}</strong>"</div>`;
+    panel.style.display = '';
+    return;
+  }
+
+  // Group by type
+  const groups = {};
+  const order = ['show','contact','asset_type','asset_item'];
+  const groupLabels = {show:'Shows', contact:'Contacts', asset_type:'Asset Types', asset_item:'Units / Barcodes'};
+  results.forEach(r => { (groups[r.type] = groups[r.type] || []).push(r); });
+
+  let html = '';
+  let first = true;
+  order.filter(k => groups[k]).forEach(key => {
+    if (!first) html += '<hr class="gs-separator">';
+    first = false;
+    html += `<div class="gs-group-label">${groupLabels[key]}</div>`;
+    groups[key].forEach(item => {
+      const idx = _gsItems.length;
+      _gsItems.push(item);
+      const href = item.url ? `href="${item.url}"` : '';
+      const tag = item.url ? 'a' : 'div';
+      const retiredCls = item.retired ? ' gs-retired' : '';
+      html += `<${tag} ${href} class="gs-item${retiredCls}" data-idx="${idx}" onmousedown="_gsNavigate(event,${idx})">
+        <span class="gs-item-icon">${item.icon}</span>
+        <span class="gs-item-body">
+          <div class="gs-item-label">${_gsHighlight(item.label, q)}</div>
+          ${item.sub ? `<div class="gs-item-sub">${_gsEsc(item.sub)}</div>` : ''}
+        </span>
+      </${tag}>`;
+    });
+  });
+
+  container.innerHTML = html;
+  panel.style.display = '';
+}
+
+function _gsNavigate(e, idx) {
+  e.preventDefault();
+  const item = _gsItems[idx];
+  if (item && item.url) { window.location.href = item.url; }
+  _gsHidePanel();
+}
+
+function _gsKey(e) {
+  const panel = document.getElementById('gs-panel');
+  if (panel.style.display === 'none') return;
+  if (e.key === 'Escape') { _gsClear(); return; }
+  if (e.key === 'ArrowDown') { e.preventDefault(); _gsMoveCursor(1); }
+  if (e.key === 'ArrowUp')   { e.preventDefault(); _gsMoveCursor(-1); }
+  if (e.key === 'Enter') {
+    const active = _gsItems[_gsActiveIdx];
+    if (active && active.url) { window.location.href = active.url; _gsHidePanel(); }
+  }
+}
+
+function _gsMoveCursor(dir) {
+  const items = document.querySelectorAll('.gs-item');
+  if (!items.length) return;
+  items.forEach(el => el.classList.remove('active'));
+  _gsActiveIdx = Math.max(0, Math.min(_gsItems.length - 1, _gsActiveIdx + dir));
+  items[_gsActiveIdx]?.classList.add('active');
+  items[_gsActiveIdx]?.scrollIntoView({block:'nearest'});
+}
+
+function _gsOpen() {
+  const q = document.getElementById('gs-input').value.trim();
+  if (q.length >= 2 && document.getElementById('gs-results').innerHTML) {
+    document.getElementById('gs-panel').style.display = '';
+  }
+}
+
+function _gsHidePanel() {
+  document.getElementById('gs-panel').style.display = 'none';
+  _gsActiveIdx = -1;
+}
+
+function _gsClear() {
+  document.getElementById('gs-input').value = '';
+  document.getElementById('gs-clear').style.display = 'none';
+  _gsHidePanel();
+}
+
+function _gsEsc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function _gsHighlight(text, q) {
+  const safe = _gsEsc(text);
+  if (!q) return safe;
+  const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
+  return safe.replace(re, '<mark style="background:rgba(245,127,32,.3);border-radius:2px;padding:0 1px">$1</mark>');
+}
+
+// Close panel when clicking outside
+document.addEventListener('mousedown', e => {
+  const panel = document.getElementById('gs-panel');
+  const wrap  = document.getElementById('gs-wrap');
+  if (panel && wrap && !panel.contains(e.target) && !wrap.contains(e.target)) {
+    _gsHidePanel();
+  }
+});
+
+// Keyboard shortcut: / or Ctrl+K focuses search
+document.addEventListener('keydown', e => {
+  if ((e.key === '/' || (e.ctrlKey && e.key === 'k')) && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+    e.preventDefault();
+    document.getElementById('gs-input')?.focus();
+  }
+});
+</script>
+<style>
+.view-as-btn {
+  flex:1;font-size:10px;padding:4px 6px;background:var(--surface);
+  border:1px solid var(--border);color:var(--text-dim);border-radius:4px;
+  cursor:pointer;font-weight:600;letter-spacing:.04em;transition:background .15s,color .15s;
+}
+.view-as-btn:hover { background:rgba(245,127,32,.12);color:#F57F20;border-color:rgba(245,127,32,.4) }
+</style>
+
+{% if user %}
+<script>
+// ── Site-wide message banners ─────────────────────────────────────────────────
+(function loadSiteMsgs() {
+  fetch('/api/messages').then(r => r.json()).then(msgs => {
+    const container = document.getElementById('site-msg-container');
+    if (!container || !msgs.length) return;
+    container.innerHTML = msgs.map(m => {
+      const typeMap = { motd:'info', maintenance:'warning', alert:'error' };
+      const cls = typeMap[m.msg_type] || 'info';
+      const dismissBtn = m.dismissible_by === 'user' || {{ 'true' if user.role == 'admin' else 'false' }}
+        ? `<button onclick="dismissMsg(${m.id},this)" style="background:none;border:none;font-size:18px;cursor:pointer;color:inherit;opacity:.6;margin-left:auto">×</button>`
+        : '';
+      return `<div class="flash flash-${cls}" id="site-msg-${m.id}" style="display:flex;align-items:flex-start;gap:8px">
+        <div style="flex:1"><strong>${m.title}</strong>${m.body_html ? '<br><div style="margin-top:4px;font-size:12px">'+m.body_html+'</div>' : ''}</div>
+        ${dismissBtn}
+      </div>`;
+    }).join('');
+  }).catch(() => {});
+})();
+
+function dismissMsg(id, btn) {
+  fetch('/api/messages/' + id + '/dismiss', { method:'POST' })
+    .then(() => { const el = document.getElementById('site-msg-'+id); if(el) el.remove(); });
+}
+</script>
+{% endif %}
 </body>
 </html>

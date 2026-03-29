@@ -11,6 +11,9 @@ import logging.handlers
 import atexit
 import subprocess
 import threading
+import secrets
+import re
+import html as _html_mod
 from datetime import datetime, date, timedelta
 from functools import wraps
 from io import BytesIO
@@ -28,6 +31,43 @@ def _safe_content_disposition(filename):
     """Build a safe Content-Disposition header value, stripping injection chars."""
     safe = secure_filename(filename) or 'download'
     return f'attachment; filename="{safe}"'
+
+
+# Allowed HTML tags/attributes for user-supplied rich text (message body)
+_MSG_ALLOWED_TAGS  = frozenset(['p','br','b','strong','i','em','a','ul','ol','li','span','h3','h4','hr','div'])
+_MSG_ALLOWED_ATTRS = {'a': ['href', 'title']}
+
+def _sanitize_html(raw):
+    """Strip disallowed HTML tags, keeping a safe subset. Prevents stored XSS."""
+    from html.parser import HTMLParser
+    class _S(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.out = []
+        def handle_starttag(self, tag, attrs):
+            t = tag.lower()
+            if t not in _MSG_ALLOWED_TAGS:
+                return
+            allowed = _MSG_ALLOWED_ATTRS.get(t, [])
+            safe_attrs = ''
+            for k, v in attrs:
+                k = k.lower()
+                if k not in allowed or not v:
+                    continue
+                # Reject javascript: and data: URIs
+                if re.match(r'\s*(javascript|data|vbscript)\s*:', v, re.I):
+                    continue
+                safe_attrs += f' {_html_mod.escape(k)}="{_html_mod.escape(v)}"'
+            self.out.append(f'<{t}{safe_attrs}>')
+        def handle_endtag(self, tag):
+            t = tag.lower()
+            if t in _MSG_ALLOWED_TAGS:
+                self.out.append(f'</{t}>')
+        def handle_data(self, data):
+            self.out.append(_html_mod.escape(data))
+    s = _S()
+    s.feed(raw or '')
+    return ''.join(s.out)
 
 app = Flask(__name__)
 
@@ -126,6 +166,11 @@ def _origin_matches():
     return True
 
 
+@app.context_processor
+def inject_version():
+    return {'app_version': APP_VERSION}
+
+
 @app.template_filter('pretty_json')
 def pretty_json_filter(value):
     """Pretty-print a JSON string in templates."""
@@ -137,6 +182,13 @@ def pretty_json_filter(value):
 
 DATABASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'advance.db')
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
+
+# ── Application Version ───────────────────────────────────────────────────────
+# Format: MAJOR.MINOR.PATCH
+#   MAJOR — breaking schema or architectural changes
+#   MINOR — new feature sets (e.g. asset manager, user enhancements)
+#   PATCH — bug fixes, small improvements, security patches
+APP_VERSION = '2.5.1'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -266,6 +318,18 @@ def login_required(f):
     return decorated
 
 
+def readonly_blocked(f):
+    """Block read-only users from mutating actions."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if session.get('is_readonly'):
+            if request.is_json:
+                return jsonify({'error': 'Read-only access'}), 403
+            abort(403)
+        return f(*args, **kwargs)
+    return decorated
+
+
 def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -324,6 +388,7 @@ def _refresh_session_roles():
         session['display_name'] = user['display_name'] or session.get('username', '')
         session['is_restricted'] = is_restricted_user(user['id'])
         session['is_content_admin'] = is_content_admin(user['id'])
+        session['is_readonly'] = bool(user.get('is_readonly', 0))
         session['_role_checked_at'] = now
     except Exception:
         pass
@@ -1035,6 +1100,7 @@ def _login_route():
             session['theme']          = user['theme'] or 'dark'
             session['is_restricted']  = is_restricted_user(user['id'])
             session['is_content_admin'] = is_content_admin(user['id'])
+            session['is_readonly'] = bool(user.get('is_readonly', 0))
             session['_role_checked_at'] = datetime.utcnow().timestamp()
             log_audit(db, 'LOGIN', 'user', user['id'], detail=username)
             db.commit()
@@ -1087,6 +1153,56 @@ def logout():
         db.close()
     session.clear()
     return redirect(url_for('login'))
+
+
+@app.route('/admin/view-as', methods=['POST'])
+@login_required
+def admin_view_as():
+    """Admin-only: temporarily view the site as a different role."""
+    if session.get('role') != 'admin' and not session.get('_real_role'):
+        return jsonify({'error': 'Forbidden'}), 403
+    # If already in view-as mode, restore real role first before switching
+    real_role = session.get('_real_role', session.get('role'))
+    if real_role != 'admin':
+        return jsonify({'error': 'Forbidden'}), 403
+    data = request.get_json() or {}
+    view_as = data.get('role', '')
+    if view_as not in ('user', 'readonly', 'content_admin'):
+        return jsonify({'error': 'Invalid role'}), 400
+    # Save real values if not already saved
+    if '_real_role' not in session:
+        session['_real_role'] = session.get('role')
+        session['_real_is_readonly'] = session.get('is_readonly', False)
+        session['_real_is_content_admin'] = session.get('is_content_admin', False)
+    session['_view_as'] = view_as
+    syslog_logger.info(f"ADMIN_VIEW_AS view_as={view_as} by={session.get('username')}")
+    if view_as == 'readonly':
+        session['role'] = 'user'
+        session['is_readonly'] = True
+        session['is_content_admin'] = False
+    elif view_as == 'user':
+        session['role'] = 'user'
+        session['is_readonly'] = False
+        session['is_content_admin'] = False
+    elif view_as == 'content_admin':
+        session['role'] = 'user'
+        session['is_readonly'] = False
+        session['is_content_admin'] = True
+    return jsonify({'success': True, 'view_as': view_as})
+
+
+@app.route('/admin/view-as/reset', methods=['POST'])
+@login_required
+def admin_view_as_reset():
+    """Restore the admin's real role after view-as preview."""
+    if '_real_role' not in session:
+        return jsonify({'success': True})
+    session['role'] = session.pop('_real_role')
+    session['is_readonly'] = session.pop('_real_is_readonly', False)
+    session['is_content_admin'] = session.pop('_real_is_content_admin', False)
+    session.pop('_view_as', None)
+    syslog_logger.info(f"ADMIN_VIEW_AS_RESET by={session.get('username')}")
+    return jsonify({'success': True})
 
 
 @app.route('/change-password', methods=['GET', 'POST'])
@@ -1206,6 +1322,7 @@ def dashboard():
                            archived_shows=archived,
                            venue_groups=venue_groups,
                            restricted=restricted,
+                           motd_messages=get_active_messages(session.get('user_id'), 'motd'),
                            user=get_current_user())
 
 
@@ -1366,6 +1483,10 @@ def show_page(show_id):
         ORDER BY lr.sort_order, lr.id
     """, (show_id,)).fetchall()
     labor_requests_data = [dict(r) for r in labor_rows]
+
+    # Asset categories (for the Assets tab)
+    asset_cats = db2.execute('SELECT * FROM asset_categories ORDER BY sort_order, name').fetchall()
+    asset_categories_for_tab = [dict(c) for c in asset_cats]
     db2.close()
 
     return render_template('show.html',
@@ -1389,6 +1510,8 @@ def show_page(show_id):
                            global_wifi_password=global_wifi_password,
                            sched_templates=sched_templates,
                            labor_requests_data=labor_requests_data,
+                           asset_categories=asset_categories_for_tab,
+                           is_content_admin_user=session.get('is_content_admin', False),
                            ollama_enabled=get_app_setting('ollama_enabled', '0') == '1',
                            user=get_current_user())
 
@@ -2748,7 +2871,7 @@ def settings():
     db = get_db()
     contacts = db.execute('SELECT * FROM contacts ORDER BY department, name').fetchall()
     users    = db.execute(
-        'SELECT id, username, display_name, role, created_at FROM users ORDER BY display_name'
+        'SELECT id, username, display_name, role, created_at, is_readonly FROM users ORDER BY display_name'
     ).fetchall()
     groups   = db.execute('SELECT * FROM user_groups ORDER BY name').fetchall()
 
@@ -2803,9 +2926,9 @@ def settings():
         'db_type':   all_settings.get('db_type', 'sqlite'),
         'pg_host':   all_settings.get('pg_host', 'localhost'),
         'pg_port':   all_settings.get('pg_port', '5432'),
-        'pg_dbname': all_settings.get('pg_dbname', 'showadvance'),
+        'pg_dbname': all_settings.get('pg_dbname', '321theater'),
         'pg_user':   all_settings.get('pg_user', ''),
-        'pg_schema': all_settings.get('pg_schema', 'showadvance'),
+        'pg_schema': all_settings.get('pg_schema', '321theater'),
     }
     ai_settings = {
         'ollama_enabled': all_settings.get('ollama_enabled', '0'),
@@ -2842,6 +2965,17 @@ def settings():
         if k not in ('smtp_pass', 'pg_password', 'wifi_password')
     }
 
+    # Pending registrations for admin approval panel
+    pending_regs = []
+    if _is_admin:
+        db4 = get_db()
+        pending_regs = [dict(r) for r in db4.execute("""
+            SELECT id, username, display_name, email, created_at, email_confirmed
+            FROM user_pending_registration
+            ORDER BY created_at
+        """).fetchall()]
+        db4.close()
+
     return render_template('settings.html',
                            contacts=contacts,
                            users=users,
@@ -2864,6 +2998,8 @@ def settings():
                            smtp_settings=smtp_settings,
                            email_provider_settings=email_provider_settings,
                            pdf_email_settings=pdf_email_settings,
+                           pending_regs=pending_regs,
+                           ai_max_sessions=all_settings.get('ai_max_sessions', '2'),
                            user=get_current_user())
 
 
@@ -2943,15 +3079,17 @@ def add_user():
     if pw_err:
         flash(pw_err, 'error')
         return redirect(url_for('settings') + '#users')
+    email    = request.form.get('email','').strip()
+    is_readonly = 1 if request.form.get('is_readonly') else 0
     db = get_db()
     try:
-        cur = db.execute("""INSERT INTO users (username, password_hash, display_name, role)
-                      VALUES (?, ?, ?, ?)""",
-                   (username, generate_password_hash(password), display, role))
+        cur = db.execute("""INSERT INTO users (username, password_hash, display_name, role, email, is_readonly)
+                      VALUES (?, ?, ?, ?, ?, ?)""",
+                   (username, generate_password_hash(password), display, role, email, is_readonly))
         log_audit(db, 'USER_CREATE', 'user', cur.lastrowid, detail=f'{username} role={role}')
         db.commit()
         flash(f'User "{username}" created.', 'success')
-        syslog_logger.info(f"USER_CREATE username={username} by={session.get('username')}")
+        syslog_logger.info(f"USER_CREATE username={username} role={role} by={session.get('username')}")
     except sqlite3.IntegrityError:
         flash('Username already exists.', 'error')
     db.close()
@@ -3578,6 +3716,120 @@ def manual_backup():
 
 # ─── API ──────────────────────────────────────────────────────────────────────
 
+_gs_rate_limit = limiter.limit("200 per minute") if (_limiter_available and limiter) else (lambda f: f)
+
+
+@app.route('/api/search')
+@login_required
+@_gs_rate_limit
+def global_search():
+    """Universal search across shows, contacts, asset types, and asset items."""
+    q = (request.args.get('q') or '').strip()
+    if len(q) < 2 or len(q) > 255:
+        return jsonify([])
+
+    db = get_db()
+    results = []
+    like = f'%{q}%'
+    is_admin = session.get('role') == 'admin'
+
+    # ── Shows ────────────────────────────────────────────────────────────────
+    accessible = get_accessible_shows(session['user_id'])  # None=all, []=none, list=ids
+    if accessible != []:
+        if accessible is None:
+            show_rows = db.execute("""
+                SELECT id, name, show_date, venue, performance_company, status
+                FROM shows
+                WHERE name LIKE ? OR venue LIKE ? OR performance_company LIKE ? OR show_date LIKE ?
+                ORDER BY show_date DESC LIMIT 6
+            """, (like, like, like, like)).fetchall()
+        else:
+            placeholders = ','.join('?' * len(accessible))
+            show_rows = db.execute(f"""
+                SELECT id, name, show_date, venue, performance_company, status
+                FROM shows
+                WHERE id IN ({placeholders})
+                  AND (name LIKE ? OR venue LIKE ? OR performance_company LIKE ? OR show_date LIKE ?)
+                ORDER BY show_date DESC LIMIT 6
+            """, (*accessible, like, like, like, like)).fetchall()
+        for r in show_rows:
+            sub_parts = [p for p in [r['show_date'], r['venue'], r['performance_company']] if p]
+            results.append({
+                'type': 'show',
+                'icon': '🎭',
+                'label': r['name'],
+                'sub': '  ·  '.join(sub_parts),
+                'url': f"/shows/{r['id']}",
+                'status': r['status'],
+            })
+
+    # ── Contacts ────────────────────────────────────────────────────────────
+    contact_rows = db.execute("""
+        SELECT id, name, title, department, email, phone
+        FROM contacts
+        WHERE name LIKE ? OR department LIKE ? OR email LIKE ? OR phone LIKE ? OR title LIKE ?
+        ORDER BY department, name LIMIT 5
+    """, (like, like, like, like, like)).fetchall()
+    for r in contact_rows:
+        sub_parts = [p for p in [r['department'], r['title'], r['email']] if p]
+        results.append({
+            'type': 'contact',
+            'icon': '👤',
+            'label': r['name'],
+            'sub': '  ·  '.join(sub_parts),
+            'url': None,  # contacts don't have their own page; sub-label carries the info
+        })
+
+    # ── Asset Types (admin only) ─────────────────────────────────────────────
+    if is_admin:
+        type_rows = db.execute("""
+            SELECT at.id, at.name, at.manufacturer, at.model, ac.name as cat_name,
+                   at.storage_location, at.is_retired
+            FROM asset_types at
+            JOIN asset_categories ac ON ac.id = at.category_id
+            WHERE at.name LIKE ? OR at.manufacturer LIKE ? OR at.model LIKE ?
+            ORDER BY at.is_retired, at.name LIMIT 5
+        """, (like, like, like)).fetchall()
+        for r in type_rows:
+            label_parts = [p for p in [r['manufacturer'], r['model']] if p]
+            sub_parts = [r['cat_name']] + ([r['storage_location']] if r['storage_location'] else [])
+            results.append({
+                'type': 'asset_type',
+                'icon': '◈',
+                'label': r['name'] + (f" — {' '.join(label_parts)}" if label_parts else ''),
+                'sub': '  ·  '.join(sub_parts) + ('  ·  RETIRED' if r['is_retired'] else ''),
+                'url': '/assets',
+                'retired': bool(r['is_retired']),
+            })
+
+        # ── Asset Items / Barcodes (leading-zero tolerant) ──────────────────
+        # Strip leading zeros from stored barcodes and compare with stripped query
+        norm_q = q.lstrip('0') or '0'
+        item_rows = db.execute("""
+            SELECT ai.id, ai.barcode, ai.status, ai.condition,
+                   at.name as type_name, at.id as type_id, ac.name as cat_name
+            FROM asset_items ai
+            JOIN asset_types at ON at.id = ai.asset_type_id
+            JOIN asset_categories ac ON ac.id = at.category_id
+            WHERE ai.barcode LIKE ?
+               OR ltrim(ai.barcode, '0') = ?
+               OR ai.barcode = ?
+            ORDER BY ai.status, ai.id LIMIT 5
+        """, (like, norm_q, q)).fetchall()
+        for r in item_rows:
+            results.append({
+                'type': 'asset_item',
+                'icon': '🔖',
+                'label': f"Unit #{r['id']}" + (f" — {r['barcode']}" if r['barcode'] else ''),
+                'sub': f"{r['type_name']}  ·  {r['cat_name']}  ·  {r['status']}",
+                'url': '/assets',
+                'status': r['status'],
+            })
+
+    db.close()
+    return jsonify(results)
+
+
 @app.route('/api/contacts')
 @login_required
 def api_contacts():
@@ -3947,9 +4199,9 @@ def save_database_settings():
         'db_type': db_type,
         'pg_host': data.get('pg_host', 'localhost'),
         'pg_port': str(data.get('pg_port', '5432')),
-        'pg_dbname': data.get('pg_dbname', 'showadvance'),
+        'pg_dbname': data.get('pg_dbname', '321theater'),
         'pg_user': data.get('pg_user', ''),
-        'pg_schema': data.get('pg_schema', 'showadvance'),
+        'pg_schema': data.get('pg_schema', '321theater'),
     }
     # Only update password if provided (non-empty)
     if data.get('pg_password'):
@@ -3987,10 +4239,10 @@ def test_database_connection():
         ok, err = db_adapter.test_postgres_connection(
             host=data.get('pg_host', 'localhost'),
             port=data.get('pg_port', 5432),
-            dbname=data.get('pg_dbname', 'showadvance'),
+            dbname=data.get('pg_dbname', '321theater'),
             user=data.get('pg_user', ''),
             password=data.get('pg_password', ''),
-            schema=data.get('pg_schema', 'showadvance'),
+            schema=data.get('pg_schema', '321theater'),
         )
         if ok:
             return jsonify({'success': True, 'message': 'Connected to PostgreSQL successfully.'})
@@ -4083,7 +4335,7 @@ def _validate_ollama_url(url):
 def save_ai_settings():
     data = request.get_json(force=True) or {}
     db = get_db()
-    for key in ('ollama_enabled', 'ollama_url', 'ollama_model'):
+    for key in ('ollama_enabled', 'ollama_url', 'ollama_model', 'ai_max_sessions'):
         if key in data:
             db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
                        (key, str(data[key])))
@@ -4221,9 +4473,9 @@ def test_email_provider():
     if not to_addr:
         return jsonify({'success': False, 'message': 'Test recipient address is required.'})
     success, message = _send_email(
-        subject='ShowAdvance Email Test',
+        subject='3·2·1→THEATER Email Test',
         recipients=[to_addr],
-        body_text='This is a test email from ShowAdvance to verify your email configuration.'
+        body_text='This is a test email from 3·2·1→THEATER to verify your email configuration.'
     )
     return jsonify({'success': success, 'message': message})
 
@@ -4267,11 +4519,16 @@ def toggle_contact_recipient(cid):
 @login_required
 def ai_extract(show_id):
     """Extract form field values from an uploaded document using Ollama."""
+    ai_sid, slot_error = _claim_ai_session(show_id)
+    if slot_error:
+        return jsonify({'success': False, 'error': slot_error}), 429
     try:
         return _ai_extract_impl(show_id)
     except Exception as e:
         app.logger.exception("ai_extract unhandled error")
         return jsonify({'success': False, 'error': f'Server error: {e}'}), 500
+    finally:
+        _release_ai_session(ai_sid)
 
 def _ai_extract_impl(show_id):
     if not can_access_show(session['user_id'], show_id):
@@ -4891,6 +5148,1937 @@ def toggle_crew_qualification():
     db.close()
     syslog_logger.info(f"TECHNICIAN_{action} crew_member_id={crew_member_id} position_id={position_id} by={session.get('username')}")
     return jsonify({'success': True, 'has': has})
+
+
+# ─── Asset Manager — Warehouse Locations ──────────────────────────────────────
+
+@app.route('/settings/warehouse-locations', methods=['GET'])
+@admin_required
+def warehouse_locations_list():
+    db = get_db()
+    rows = db.execute('SELECT * FROM warehouse_locations ORDER BY sort_order, name').fetchall()
+    db.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/settings/warehouse-locations', methods=['POST'])
+@admin_required
+def warehouse_location_add():
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'Name required'}), 400
+    db = get_db()
+    try:
+        max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM warehouse_locations').fetchone()[0]
+        db.execute('INSERT INTO warehouse_locations (name, sort_order) VALUES (?,?)', (name, max_order + 1))
+        db.commit()
+        row = db.execute('SELECT * FROM warehouse_locations WHERE name=?', (name,)).fetchone()
+        log_audit(db, 'WAREHOUSE_LOC_ADD', 'warehouse_location', row['id'], detail=name)
+        db.commit()
+        syslog_logger.info(f"WAREHOUSE_LOC_ADD name={name} by={session.get('username')}")
+        result = dict(row)
+        db.close()
+        return jsonify(result), 201
+    except DBIntegrityError:
+        db.close()
+        return jsonify({'error': 'Location name already exists'}), 409
+
+
+@app.route('/settings/warehouse-locations/<int:loc_id>', methods=['PUT'])
+@admin_required
+def warehouse_location_edit(loc_id):
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'Name required'}), 400
+    db = get_db()
+    try:
+        db.execute('UPDATE warehouse_locations SET name=? WHERE id=?', (name, loc_id))
+        db.commit()
+        log_audit(db, 'WAREHOUSE_LOC_EDIT', 'warehouse_location', loc_id, detail=name)
+        db.commit()
+        db.close()
+        return jsonify({'success': True})
+    except DBIntegrityError:
+        db.close()
+        return jsonify({'error': 'Location name already exists'}), 409
+
+
+@app.route('/settings/warehouse-locations/<int:loc_id>', methods=['DELETE'])
+@admin_required
+def warehouse_location_delete(loc_id):
+    db = get_db()
+    row = db.execute('SELECT name FROM warehouse_locations WHERE id=?', (loc_id,)).fetchone()
+    db.execute('DELETE FROM warehouse_locations WHERE id=?', (loc_id,))
+    db.commit()
+    log_audit(db, 'WAREHOUSE_LOC_DELETE', 'warehouse_location', loc_id,
+              detail=row['name'] if row else str(loc_id))
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+# ─── Asset Manager — Categories ───────────────────────────────────────────────
+
+@app.route('/settings/asset-categories', methods=['GET'])
+@admin_required
+def asset_categories_list():
+    db = get_db()
+    rows = db.execute('SELECT * FROM asset_categories ORDER BY sort_order, name').fetchall()
+    db.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/settings/asset-categories', methods=['POST'])
+@admin_required
+def asset_category_add():
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'Name required'}), 400
+    db = get_db()
+    max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM asset_categories').fetchone()[0]
+    db.execute('INSERT INTO asset_categories (name, sort_order) VALUES (?,?)', (name, max_order + 1))
+    db.commit()
+    row = db.execute('SELECT * FROM asset_categories WHERE name=? ORDER BY id DESC LIMIT 1', (name,)).fetchone()
+    log_audit(db, 'ASSET_CATEGORY_ADD', 'asset_category', row['id'], detail=name)
+    db.commit()
+    syslog_logger.info(f"ASSET_CATEGORY_ADD name={name} by={session.get('username')}")
+    result = dict(row)
+    db.close()
+    return jsonify(result), 201
+
+
+@app.route('/settings/asset-categories/<int:cat_id>', methods=['PUT'])
+@admin_required
+def asset_category_edit(cat_id):
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'Name required'}), 400
+    db = get_db()
+    db.execute('UPDATE asset_categories SET name=? WHERE id=?', (name, cat_id))
+    db.commit()
+    log_audit(db, 'ASSET_CATEGORY_EDIT', 'asset_category', cat_id, detail=name)
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/asset-categories/<int:cat_id>', methods=['DELETE'])
+@admin_required
+def asset_category_delete(cat_id):
+    db = get_db()
+    # Block deletion if any types (including retired) exist — preserves history
+    type_count = db.execute(
+        'SELECT COUNT(*) FROM asset_types WHERE category_id=?', (cat_id,)
+    ).fetchone()[0]
+    if type_count > 0:
+        db.close()
+        return jsonify({'error': f'Cannot delete: this category still has {type_count} item type(s). Retire all types first.'}), 400
+    row = db.execute('SELECT name FROM asset_categories WHERE id=?', (cat_id,)).fetchone()
+    db.execute('DELETE FROM asset_categories WHERE id=?', (cat_id,))
+    db.commit()
+    log_audit(db, 'ASSET_CATEGORY_DELETE', 'asset_category', cat_id,
+              detail=row['name'] if row else str(cat_id))
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+# ─── Asset Manager — Types ────────────────────────────────────────────────────
+
+@app.route('/api/asset-types', methods=['GET'])
+@login_required
+def asset_types_api():
+    """Return active (non-retired) asset types for search/browse."""
+    db = get_db()
+    rows = db.execute("""
+        SELECT at.*, ac.name as category_name,
+               pt.name as parent_name
+        FROM asset_types at
+        JOIN asset_categories ac ON ac.id = at.category_id
+        LEFT JOIN asset_types pt ON pt.id = at.parent_type_id
+        WHERE at.is_retired = 0
+        ORDER BY ac.sort_order, ac.name, at.sort_order, at.name
+    """).fetchall()
+    db.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d.pop('photo', None)  # Don't send blob over API
+        result.append(d)
+    return jsonify(result)
+
+
+@app.route('/settings/asset-types', methods=['GET'])
+@admin_required
+def asset_types_admin_list():
+    db = get_db()
+    show_retired = request.args.get('show_retired') == '1'
+    where = '' if show_retired else 'WHERE at.is_retired = 0'
+    rows = db.execute(f"""
+        SELECT at.*, ac.name as category_name,
+               pt.name as parent_name,
+               (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id) as item_count,
+               (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id AND ai.status = 'retired') as retired_item_count
+        FROM asset_types at
+        JOIN asset_categories ac ON ac.id = at.category_id
+        LEFT JOIN asset_types pt ON pt.id = at.parent_type_id
+        {where}
+        ORDER BY ac.sort_order, ac.name, at.sort_order, at.name
+    """).fetchall()
+    db.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d.pop('photo', None)
+        result.append(d)
+    return jsonify(result)
+
+
+@app.route('/settings/asset-types', methods=['POST'])
+@admin_required
+def asset_type_add():
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    category_id = data.get('category_id')
+    if not name or not category_id:
+        return jsonify({'error': 'Name and category required'}), 400
+    db = get_db()
+    max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM asset_types WHERE category_id=?',
+                           (category_id,)).fetchone()[0]
+    db.execute("""
+        INSERT INTO asset_types
+          (category_id, parent_type_id, name, manufacturer, model,
+           storage_location, rental_cost, reserve_count, is_consumable, track_quantity,
+           supplier_name, supplier_contact, sort_order)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        category_id,
+        data.get('parent_type_id') or None,
+        name,
+        (data.get('manufacturer') or '').strip(),
+        (data.get('model') or '').strip(),
+        (data.get('storage_location') or '').strip(),
+        float(data.get('rental_cost') or 0),
+        int(data.get('reserve_count') or 0),
+        1 if data.get('is_consumable') else 0,
+        1 if data.get('track_quantity', True) else 0,
+        (data.get('supplier_name') or '').strip(),
+        (data.get('supplier_contact') or '').strip(),
+        max_order + 1,
+    ))
+    db.commit()
+    row = db.execute('SELECT * FROM asset_types ORDER BY id DESC LIMIT 1').fetchone()
+    log_audit(db, 'ASSET_TYPE_ADD', 'asset_type', row['id'], detail=name)
+    db.commit()
+    syslog_logger.info(f"ASSET_TYPE_ADD name={name} category_id={category_id} by={session.get('username')}")
+    result = dict(row)
+    result.pop('photo', None)
+    db.close()
+    return jsonify(result), 201
+
+
+@app.route('/settings/asset-types/<int:type_id>', methods=['PUT'])
+@admin_required
+def asset_type_edit(type_id):
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'Name required'}), 400
+    db = get_db()
+    db.execute("""
+        UPDATE asset_types SET
+          name=?, manufacturer=?, model=?, storage_location=?,
+          rental_cost=?, reserve_count=?, is_consumable=?, track_quantity=?,
+          supplier_name=?, supplier_contact=?,
+          category_id=?, parent_type_id=?
+        WHERE id=?
+    """, (
+        name,
+        (data.get('manufacturer') or '').strip(),
+        (data.get('model') or '').strip(),
+        (data.get('storage_location') or '').strip(),
+        float(data.get('rental_cost') or 0),
+        int(data.get('reserve_count') or 0),
+        1 if data.get('is_consumable') else 0,
+        1 if data.get('track_quantity', True) else 0,
+        (data.get('supplier_name') or '').strip(),
+        (data.get('supplier_contact') or '').strip(),
+        data.get('category_id'),
+        data.get('parent_type_id') or None,
+        type_id,
+    ))
+    db.commit()
+    log_audit(db, 'ASSET_TYPE_EDIT', 'asset_type', type_id, detail=name)
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/asset-types/<int:type_id>', methods=['DELETE'])
+@admin_required
+def asset_type_delete(type_id):
+    """Retire an asset type (soft delete) — history is preserved."""
+    db = get_db()
+    row = db.execute('SELECT name FROM asset_types WHERE id=?', (type_id,)).fetchone()
+    db.execute("""
+        UPDATE asset_types SET is_retired=1, retired_at=CURRENT_TIMESTAMP WHERE id=?
+    """, (type_id,))
+    # Retire all active items under this type too
+    db.execute("""
+        UPDATE asset_items SET status='retired' WHERE asset_type_id=? AND status='available'
+    """, (type_id,))
+    db.commit()
+    log_audit(db, 'ASSET_TYPE_RETIRE', 'asset_type', type_id,
+              detail=row['name'] if row else str(type_id))
+    db.commit()
+    syslog_logger.info(f"ASSET_TYPE_RETIRE type_id={type_id} by={session.get('username')}")
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/asset-types/<int:type_id>/photo', methods=['POST'])
+@admin_required
+def asset_type_photo_upload(type_id):
+    f = request.files.get('photo')
+    if not f:
+        return jsonify({'error': 'No file'}), 400
+    mime = f.mimetype or 'image/jpeg'
+    data = f.read()
+    db = get_db()
+    db.execute('UPDATE asset_types SET photo=?, photo_mime=? WHERE id=?', (data, mime, type_id))
+    db.commit()
+    log_audit(db, 'ASSET_TYPE_PHOTO', 'asset_type', type_id)
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/asset-types/<int:type_id>/photo', methods=['DELETE'])
+@admin_required
+def asset_type_photo_delete(type_id):
+    db = get_db()
+    db.execute("UPDATE asset_types SET photo=NULL, photo_mime='' WHERE id=?", (type_id,))
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/asset-types/<int:type_id>/photo')
+@login_required
+def asset_type_photo(type_id):
+    db = get_db()
+    row = db.execute('SELECT photo, photo_mime FROM asset_types WHERE id=?', (type_id,)).fetchone()
+    db.close()
+    if not row or not row['photo']:
+        abort(404)
+    resp = make_response(row['photo'])
+    resp.headers['Content-Type'] = row['photo_mime'] or 'image/jpeg'
+    resp.headers['Cache-Control'] = 'max-age=86400'
+    return resp
+
+
+# ─── Asset Manager — Items ────────────────────────────────────────────────────
+
+@app.route('/settings/asset-types/<int:type_id>/items', methods=['GET'])
+@admin_required
+def asset_items_list(type_id):
+    db = get_db()
+    show_retired = request.args.get('show_retired') == '1'
+    status_filter = '' if show_retired else "AND ai.status != 'retired'"
+    rows = db.execute(f"""
+        SELECT ai.*,
+               COALESCE(am.status, 'available') as maint_status,
+               am.reason as maint_reason,
+               am.notes as maint_notes,
+               am.id as maint_id
+        FROM asset_items ai
+        LEFT JOIN asset_maintenance am ON am.asset_item_id = ai.id AND am.status = 'in_progress'
+        WHERE ai.asset_type_id = ? {status_filter}
+        ORDER BY ai.status, ai.sort_order, ai.id
+    """, (type_id,)).fetchall()
+    db.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/settings/asset-types/<int:type_id>/items', methods=['POST'])
+@admin_required
+def asset_item_add(type_id):
+    data = request.get_json() or {}
+    count = int(data.get('count') or 1)
+    barcode = (data.get('barcode') or '').strip()
+    db = get_db()
+    max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM asset_items WHERE asset_type_id=?',
+                           (type_id,)).fetchone()[0]
+    added_ids = []
+    for i in range(count):
+        bc = barcode if count == 1 else ''
+        db.execute('INSERT INTO asset_items (asset_type_id, barcode, status, sort_order) VALUES (?,?,?,?)',
+                   (type_id, bc, 'available', max_order + i + 1))
+        db.commit()
+        row = db.execute('SELECT * FROM asset_items ORDER BY id DESC LIMIT 1').fetchone()
+        added_ids.append(row['id'])
+    log_audit(db, 'ASSET_ITEM_ADD', 'asset_item', type_id, detail=f'count={count}')
+    db.commit()
+    syslog_logger.info(f"ASSET_ITEM_ADD type_id={type_id} count={count} by={session.get('username')}")
+    db.close()
+    return jsonify({'success': True, 'added': len(added_ids)}), 201
+
+
+@app.route('/settings/asset-items/<int:item_id>', methods=['PUT'])
+@admin_required
+def asset_item_edit(item_id):
+    data = request.get_json() or {}
+    db = get_db()
+    def _int_or_none(v):
+        try: return int(v) if v not in (None, '', 'null') else None
+        except (ValueError, TypeError): return None
+    def _float_or_none(v):
+        try: return float(v) if v not in (None, '', 'null') else None
+        except (ValueError, TypeError): return None
+    valid_conditions = {'excellent', 'good', 'fair', 'poor', 'retired'}
+    condition = data.get('condition', 'good')
+    if condition not in valid_conditions:
+        condition = 'good'
+    db.execute("""
+        UPDATE asset_items SET
+          barcode=?, condition=?, year_purchased=?, purchase_value=?,
+          depreciation_years=?, warranty_expires=?
+        WHERE id=?
+    """, (
+        (data.get('barcode') or '').strip(),
+        condition,
+        _int_or_none(data.get('year_purchased')),
+        _float_or_none(data.get('purchase_value')),
+        _int_or_none(data.get('depreciation_years')),
+        (data.get('warranty_expires') or '').strip() or None,
+        item_id,
+    ))
+    db.commit()
+    log_audit(db, 'ASSET_ITEM_EDIT', 'asset_item', item_id)
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/asset-items/<int:item_id>/logs', methods=['GET'])
+@admin_required
+def asset_item_logs_list(item_id):
+    db = get_db()
+    rows = db.execute("""
+        SELECT al.*, u.display_name as author_name
+        FROM asset_logs al
+        LEFT JOIN users u ON u.id = al.user_id
+        WHERE al.asset_item_id = ?
+        ORDER BY al.log_date DESC, al.created_at DESC
+    """, (item_id,)).fetchall()
+    db.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/settings/asset-items/<int:item_id>/logs', methods=['POST'])
+@admin_required
+def asset_item_log_add(item_id):
+    data = request.get_json() or {}
+    body = (data.get('body') or '').strip()
+    if not body:
+        return jsonify({'error': 'Entry body required'}), 400
+    log_type = data.get('log_type', 'note')
+    if log_type not in ('note', 'damage', 'service', 'usage'):
+        log_type = 'note'
+    import re as _re
+    from datetime import date as _date
+    log_date = (data.get('log_date') or '').strip()
+    if not log_date:
+        log_date = _date.today().isoformat()
+    elif not _re.match(r'^\d{4}-\d{2}-\d{2}$', log_date):
+        return jsonify({'error': 'Invalid log_date format; use YYYY-MM-DD'}), 400
+    db = get_db()
+    db.execute("""
+        INSERT INTO asset_logs (asset_item_id, user_id, log_date, log_type, body)
+        VALUES (?,?,?,?,?)
+    """, (item_id, session['user_id'], log_date, log_type, body))
+    db.commit()
+    row = db.execute("""
+        SELECT al.*, u.display_name as author_name
+        FROM asset_logs al LEFT JOIN users u ON u.id = al.user_id
+        WHERE al.id = last_insert_rowid()
+    """).fetchone()
+    db.close()
+    syslog_logger.info(f"ASSET_LOG_ADD item_id={item_id} log_type={log_type} by={session.get('username')}")
+    return jsonify(dict(row)), 201
+
+
+@app.route('/settings/asset-logs/<int:log_id>', methods=['DELETE'])
+@admin_required
+def asset_log_delete(log_id):
+    db = get_db()
+    db.execute('DELETE FROM asset_logs WHERE id=?', (log_id,))
+    db.commit()
+    db.close()
+    syslog_logger.info(f"ASSET_LOG_DELETE log_id={log_id} by={session.get('username')}")
+    return jsonify({'success': True})
+
+
+@app.route('/settings/asset-items/<int:item_id>', methods=['DELETE'])
+@admin_required
+def asset_item_delete(item_id):
+    """Retire an asset item (soft delete) — history is preserved."""
+    db = get_db()
+    db.execute("UPDATE asset_items SET status='retired' WHERE id=?", (item_id,))
+    db.commit()
+    log_audit(db, 'ASSET_ITEM_RETIRE', 'asset_item', item_id)
+    db.commit()
+    syslog_logger.info(f"ASSET_ITEM_RETIRE item_id={item_id} by={session.get('username')}")
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/asset-items/<int:item_id>/maintenance', methods=['POST'])
+@admin_required
+def asset_item_maintenance_start(item_id):
+    data = request.get_json() or {}
+    reason = (data.get('reason') or '').strip()
+    notes = (data.get('notes') or '').strip()
+    db = get_db()
+    # Close any open maintenance records first
+    db.execute("UPDATE asset_maintenance SET status='resolved', resolved_at=CURRENT_TIMESTAMP WHERE asset_item_id=? AND status='in_progress'",
+               (item_id,))
+    db.execute("""
+        INSERT INTO asset_maintenance (asset_item_id, removed_by, reason, notes, status)
+        VALUES (?,?,?,?,'in_progress')
+    """, (item_id, session['user_id'], reason, notes))
+    db.execute("UPDATE asset_items SET status='maintenance' WHERE id=?", (item_id,))
+    db.commit()
+    log_audit(db, 'ASSET_MAINT_START', 'asset_item', item_id, detail=reason)
+    db.commit()
+    syslog_logger.info(f"ASSET_MAINT_START item_id={item_id} reason={reason} by={session.get('username')}")
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/asset-items/<int:item_id>/maintenance/resolve', methods=['POST'])
+@admin_required
+def asset_item_maintenance_resolve(item_id):
+    data = request.get_json() or {}
+    notes = (data.get('notes') or '').strip()
+    db = get_db()
+    db.execute("""
+        UPDATE asset_maintenance
+        SET status='resolved', resolved_at=CURRENT_TIMESTAMP, notes=COALESCE(NULLIF(?,''), notes)
+        WHERE asset_item_id=? AND status='in_progress'
+    """, (notes, item_id))
+    db.execute("UPDATE asset_items SET status='available' WHERE id=?", (item_id,))
+    db.commit()
+    log_audit(db, 'ASSET_MAINT_RESOLVE', 'asset_item', item_id)
+    db.commit()
+    syslog_logger.info(f"ASSET_MAINT_RESOLVE item_id={item_id} by={session.get('username')}")
+    db.close()
+    return jsonify({'success': True})
+
+
+# ─── Asset Manager — Availability ─────────────────────────────────────────────
+
+def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
+    """
+    Return dict with:
+      total_items   — count of all items for this type
+      reserve_count — held back as spares
+      in_maintenance — items currently in maintenance
+      available     — items available for the date range (may be negative)
+      shows         — list of shows requesting this asset with quantities
+    """
+    type_row = db.execute('SELECT * FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
+    if not type_row:
+        return None
+
+    total_items = db.execute(
+        "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=? AND status != 'retired'",
+        (asset_type_id,)
+    ).fetchone()[0]
+
+    in_maintenance = db.execute(
+        "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=? AND status='maintenance'",
+        (asset_type_id,)
+    ).fetchone()[0]
+
+    reserve_count = type_row['reserve_count'] or 0
+
+    # For consumables with unlimited stock
+    if type_row['is_consumable'] and not type_row['track_quantity']:
+        return {
+            'total_items': None,
+            'reserve_count': reserve_count,
+            'in_maintenance': 0,
+            'available': None,
+            'shows': [],
+            'unlimited': True,
+        }
+
+    # Shows requesting this asset (optionally filtered by date range overlap)
+    params = [asset_type_id]
+    date_filter = ''
+    if start_date and end_date:
+        date_filter = ' AND (sa.rental_end >= ? AND sa.rental_start <= ?)'
+        params.extend([start_date, end_date])
+
+    shows = db.execute(f"""
+        SELECT sa.id, sa.show_id, sa.quantity, sa.rental_start, sa.rental_end,
+               sa.is_hidden, s.name as show_name
+        FROM show_assets sa
+        JOIN shows s ON s.id = sa.show_id
+        WHERE sa.asset_type_id = ?{date_filter}
+        ORDER BY sa.rental_start
+    """, params).fetchall()
+
+    total_reserved = sum(r['quantity'] for r in shows)
+    available = total_items - in_maintenance - reserve_count - total_reserved
+
+    return {
+        'total_items': total_items,
+        'reserve_count': reserve_count,
+        'in_maintenance': in_maintenance,
+        'total_reserved': total_reserved,
+        'available': available,
+        'shows': [dict(r) for r in shows],
+        'unlimited': False,
+    }
+
+
+@app.route('/api/asset-types/<int:type_id>/availability')
+@login_required
+def asset_type_availability(type_id):
+    start = request.args.get('start')
+    end = request.args.get('end')
+    db = get_db()
+    result = _get_asset_availability(db, type_id, start, end)
+    db.close()
+    if result is None:
+        abort(404)
+    return jsonify(result)
+
+
+@app.route('/api/assets/availability')
+@login_required
+def assets_availability_bulk():
+    """Return availability summary for all asset types, plus by-show data."""
+    date_from = request.args.get('from')
+    date_to   = request.args.get('to')
+    db = get_db()
+    type_ids = [r['id'] for r in db.execute('SELECT id FROM asset_types WHERE is_retired=0').fetchall()]
+    by_type = {}
+    for tid in type_ids:
+        info = _get_asset_availability(db, tid, date_from, date_to)
+        if info:
+            by_type[tid] = {
+                'total':       info.get('total_items'),
+                'maintenance': info.get('in_maintenance', 0),
+                'reserved':    info.get('reserve_count', 0),
+                'available':   info.get('available'),
+            }
+
+    # By-show summary (for 'by_show' layout) — respect access control
+    accessible_ids = get_accessible_shows(session['user_id'])  # None = all, [] = none, list = specific
+    params = []
+    where  = []
+    if accessible_ids is not None and len(accessible_ids) > 0:
+        placeholders = ','.join('?' * len(accessible_ids))
+        where.append(f's.id IN ({placeholders})')
+        params.extend(accessible_ids)
+    elif accessible_ids is not None and len(accessible_ids) == 0:
+        db.close()
+        return jsonify({'by_type': by_type, 'by_show': []})
+    if date_from: where.append("COALESCE(s.show_date,'9999') >= ?"); params.append(date_from)
+    if date_to:   where.append("COALESCE(s.show_date,'0000') <= ?"); params.append(date_to)
+    where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
+    shows_raw = db.execute(f"""
+        SELECT s.id, s.name, s.show_date FROM shows s {where_sql}
+        ORDER BY s.show_date
+    """, params).fetchall()
+    by_show = []
+    for sr in shows_raw:
+        assets = db.execute("""
+            SELECT sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end,
+                   at.name as type_name, at.manufacturer,
+                   ac.name as category_name
+            FROM show_assets sa
+            JOIN asset_types at ON at.id = sa.asset_type_id
+            JOIN asset_categories ac ON ac.id = at.category_id
+            WHERE sa.show_id = ? AND sa.is_hidden = 0
+            ORDER BY ac.name, at.name
+        """, (sr['id'],)).fetchall()
+        if assets:
+            by_show.append({
+                'id':       sr['id'],
+                'name':     sr['name'],
+                'show_date':sr['show_date'],
+                'assets':   [dict(a) for a in assets],
+            })
+    db.close()
+    return jsonify({'by_type': by_type, 'by_show': by_show})
+
+
+# ─── Asset Manager — Show Assets (per-show tab) ───────────────────────────────
+
+@app.route('/shows/<int:show_id>/assets', methods=['GET'])
+@login_required
+def show_assets_list(show_id):
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'error': 'Access denied'}), 403
+    db = get_db()
+    user_is_restricted = session.get('is_restricted', False)
+    user_is_admin = session.get('user_role') == 'admin'
+
+    rows = db.execute("""
+        SELECT sa.*, at.name as type_name, at.is_consumable, at.manufacturer, at.model,
+               at.rental_cost as current_price,
+               ac.name as category_name
+        FROM show_assets sa
+        JOIN asset_types at ON at.id = sa.asset_type_id
+        JOIN asset_categories ac ON ac.id = at.category_id
+        WHERE sa.show_id = ?
+          AND (? = 1 OR sa.is_hidden = 0)
+        ORDER BY ac.name, at.name, sa.created_at
+    """, (show_id, 1 if user_is_admin else 0)).fetchall()
+
+    # External rentals
+    ext_rows = db.execute("""
+        SELECT * FROM show_external_rentals WHERE show_id=? ORDER BY sort_order, id
+    """, (show_id,)).fetchall()
+
+    db.close()
+    return jsonify({
+        'assets': [dict(r) for r in rows],
+        'external_rentals': [{k: v for k, v in dict(r).items() if k != 'pdf_data'} for r in ext_rows],
+    })
+
+
+@app.route('/shows/<int:show_id>/assets', methods=['POST'])
+@content_admin_required
+def show_asset_add(show_id):
+    data = request.get_json() or {}
+    asset_type_id = data.get('asset_type_id')
+    quantity = int(data.get('quantity') or 1)
+    if not asset_type_id or quantity < 1:
+        return jsonify({'error': 'asset_type_id and quantity required'}), 400
+
+    db = get_db()
+
+    # Get show dates for rental period defaults
+    show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
+    perfs = db.execute(
+        'SELECT perf_date FROM show_performances WHERE show_id=? ORDER BY perf_date', (show_id,)
+    ).fetchall()
+    rental_start = data.get('rental_start') or (perfs[0]['perf_date'] if perfs else show['show_date'])
+    rental_end = data.get('rental_end') or (perfs[-1]['perf_date'] if perfs else show['show_date'])
+
+    # Lock current price
+    type_row = db.execute('SELECT rental_cost FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
+    locked_price = float(data.get('locked_price') if data.get('locked_price') is not None
+                         else (type_row['rental_cost'] if type_row else 0))
+
+    is_hidden = 1 if data.get('is_hidden') else 0
+
+    db.execute("""
+        INSERT INTO show_assets
+          (show_id, asset_type_id, quantity, rental_start, rental_end, locked_price, is_hidden, notes, added_by)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    """, (show_id, asset_type_id, quantity, rental_start, rental_end, locked_price,
+          is_hidden, (data.get('notes') or '').strip(), session['user_id']))
+    db.commit()
+    row = db.execute('SELECT * FROM show_assets ORDER BY id DESC LIMIT 1').fetchone()
+    log_audit(db, 'ASSET_ADDED_TO_SHOW', 'show_asset', row['id'], show_id=show_id,
+              detail=f'type_id={asset_type_id} qty={quantity}')
+    db.commit()
+    syslog_logger.info(f"ASSET_ADDED_TO_SHOW show_id={show_id} type_id={asset_type_id} qty={quantity} by={session.get('username')}")
+    result = dict(row)
+    # Check for over-allocation and notify admins
+    try:
+        _avail = _get_asset_availability(db, asset_type_id, rental_start, rental_end)
+        if _avail and not _avail.get('unlimited') and _avail.get('available') is not None and _avail['available'] < 0:
+            _trow = db.execute('SELECT name FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
+            _type_name = _trow['name'] if _trow else f'Type #{asset_type_id}'
+            _show_name = show['name'] if show else f'Show #{show_id}'
+            _admin_emails = [r['email'] for r in db.execute(
+                "SELECT email FROM users WHERE role='admin' AND email != '' AND email IS NOT NULL"
+            ).fetchall()]
+            for _ae in _admin_emails:
+                _send_simple_email(
+                    _ae,
+                    f'3\u00b72\u00b71\u2192THEATER: Asset Over-Allocated \u2014 {_type_name}',
+                    f'Asset "{_type_name}" is now over-allocated for show "{_show_name}".\n\n'
+                    f'Current availability: {_avail["available"]} (negative = over-allocated)\n'
+                    f'Total units: {_avail.get("total_items","?")}, In maintenance: {_avail.get("in_maintenance",0)}, '
+                    f'Reserved spares: {_avail.get("reserve_count",0)}\n\n'
+                    f'Review the show\'s assets tab for details.',
+                )
+    except Exception:
+        pass
+    db.close()
+    return jsonify(result), 201
+
+
+@app.route('/shows/<int:show_id>/assets/<int:sa_id>', methods=['PUT'])
+@content_admin_required
+def show_asset_edit(show_id, sa_id):
+    data = request.get_json() or {}
+    db = get_db()
+    db.execute("""
+        UPDATE show_assets SET quantity=?, rental_start=?, rental_end=?,
+               is_hidden=?, notes=?
+        WHERE id=? AND show_id=?
+    """, (
+        int(data.get('quantity') or 1),
+        data.get('rental_start') or None,
+        data.get('rental_end') or None,
+        1 if data.get('is_hidden') else 0,
+        (data.get('notes') or '').strip(),
+        sa_id, show_id,
+    ))
+    db.commit()
+    log_audit(db, 'ASSET_SHOW_EDIT', 'show_asset', sa_id, show_id=show_id)
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/shows/<int:show_id>/assets/<int:sa_id>', methods=['DELETE'])
+@content_admin_required
+def show_asset_remove(show_id, sa_id):
+    db = get_db()
+    row = db.execute('SELECT * FROM show_assets WHERE id=? AND show_id=?', (sa_id, show_id)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+    db.execute('DELETE FROM show_assets WHERE id=?', (sa_id,))
+    db.commit()
+    log_audit(db, 'ASSET_REMOVED_FROM_SHOW', 'show_asset', sa_id, show_id=show_id,
+              detail=f'type_id={row["asset_type_id"]}')
+    db.commit()
+    syslog_logger.info(f"ASSET_REMOVED_FROM_SHOW show_id={show_id} sa_id={sa_id} by={session.get('username')}")
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/shows/<int:show_id>/assets/<int:sa_id>/toggle-hidden', methods=['POST'])
+@content_admin_required
+def show_asset_toggle_hidden(show_id, sa_id):
+    db = get_db()
+    row = db.execute('SELECT is_hidden FROM show_assets WHERE id=? AND show_id=?', (sa_id, show_id)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+    new_val = 0 if row['is_hidden'] else 1
+    db.execute('UPDATE show_assets SET is_hidden=? WHERE id=?', (new_val, sa_id))
+    db.commit()
+    log_audit(db, 'ASSET_HIDE_TOGGLE', 'show_asset', sa_id, show_id=show_id,
+              detail=f'hidden={new_val}')
+    db.commit()
+    db.close()
+    return jsonify({'success': True, 'is_hidden': new_val})
+
+
+# ─── Asset Manager — External Rentals ─────────────────────────────────────────
+
+@app.route('/shows/<int:show_id>/external-rentals', methods=['POST'])
+@content_admin_required
+def external_rental_add(show_id):
+    db = get_db()
+    description = (request.form.get('description') or '').strip()
+    cost = float(request.form.get('cost') or 0)
+    if not description:
+        return jsonify({'error': 'Description required'}), 400
+    pdf_data = None
+    pdf_filename = ''
+    f = request.files.get('pdf')
+    if f:
+        pdf_data = f.read()
+        pdf_filename = secure_filename(f.filename)
+    max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM show_external_rentals WHERE show_id=?',
+                           (show_id,)).fetchone()[0]
+    db.execute("""
+        INSERT INTO show_external_rentals (show_id, description, cost, pdf_data, pdf_filename, sort_order)
+        VALUES (?,?,?,?,?,?)
+    """, (show_id, description, cost, pdf_data, pdf_filename, max_order + 1))
+    db.commit()
+    row = db.execute('SELECT * FROM show_external_rentals ORDER BY id DESC LIMIT 1').fetchone()
+    log_audit(db, 'EXTERNAL_RENTAL_ADD', 'show_external_rental', row['id'], show_id=show_id,
+              detail=description)
+    db.commit()
+    result = {k: v for k, v in dict(row).items() if k != 'pdf_data'}
+    db.close()
+    return jsonify(result), 201
+
+
+@app.route('/shows/<int:show_id>/external-rentals/<int:er_id>', methods=['DELETE'])
+@content_admin_required
+def external_rental_delete(show_id, er_id):
+    db = get_db()
+    db.execute('DELETE FROM show_external_rentals WHERE id=? AND show_id=?', (er_id, show_id))
+    db.commit()
+    log_audit(db, 'EXTERNAL_RENTAL_DELETE', 'show_external_rental', er_id, show_id=show_id)
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/shows/<int:show_id>/external-rentals/<int:er_id>/pdf')
+@login_required
+def external_rental_pdf(show_id, er_id):
+    if not can_access_show(session['user_id'], show_id):
+        abort(403)
+    db = get_db()
+    row = db.execute('SELECT * FROM show_external_rentals WHERE id=? AND show_id=?',
+                     (er_id, show_id)).fetchone()
+    db.close()
+    if not row or not row['pdf_data']:
+        abort(404)
+    resp = make_response(row['pdf_data'])
+    resp.headers['Content-Type'] = 'application/pdf'
+    resp.headers['Content-Disposition'] = _safe_content_disposition(row['pdf_filename'] or 'rental.pdf')
+    return resp
+
+
+# ─── Asset Manager — Asset Page (admin view) ──────────────────────────────────
+
+@app.route('/assets')
+@admin_required
+def assets_admin():
+    db = get_db()
+    categories = db.execute('SELECT * FROM asset_categories ORDER BY sort_order, name').fetchall()
+    locations = db.execute('SELECT * FROM warehouse_locations ORDER BY sort_order, name').fetchall()
+    db.close()
+    return render_template('assets.html',
+                           categories=[dict(c) for c in categories],
+                           locations=[dict(l) for l in locations],
+                           user=get_current_user())
+
+
+@app.route('/assets/retired')
+@admin_required
+def assets_retired():
+    db = get_db()
+    # Retired types with their items and log counts
+    types = db.execute("""
+        SELECT at.*, ac.name as category_name,
+               (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id) as total_items,
+               (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id AND ai.status='retired') as retired_items
+        FROM asset_types at
+        JOIN asset_categories ac ON ac.id = at.category_id
+        WHERE at.is_retired = 1
+        ORDER BY at.retired_at DESC
+    """).fetchall()
+    # Also standalone retired items (type is still active, but item was individually retired)
+    standalone = db.execute("""
+        SELECT ai.*, at.name as type_name, at.manufacturer, at.model,
+               ac.name as category_name,
+               (SELECT COUNT(*) FROM asset_logs al WHERE al.asset_item_id = ai.id) as log_count
+        FROM asset_items ai
+        JOIN asset_types at ON at.id = ai.asset_type_id
+        JOIN asset_categories ac ON ac.id = at.category_id
+        WHERE ai.status = 'retired' AND at.is_retired = 0
+        ORDER BY ai.created_at DESC
+    """).fetchall()
+    db.close()
+    return render_template('asset_retired.html',
+                           retired_types=[dict(t) for t in types],
+                           standalone_items=[dict(s) for s in standalone],
+                           user=get_current_user())
+
+
+# ─── Asset Invoice PDF ───────────────────────────────────────────────────────
+
+@app.route('/shows/<int:show_id>/assets/invoice.pdf')
+@login_required
+def show_asset_invoice(show_id):
+    """Generate a PDF invoice for all show assets and external rentals."""
+    if not can_access_show(session['user_id'], show_id):
+        abort(403)
+    db = get_db()
+    show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
+    if not show:
+        db.close()
+        abort(404)
+
+    assets = db.execute("""
+        SELECT sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end, sa.notes,
+               at.name as type_name, at.manufacturer, at.model,
+               ac.name as category_name
+        FROM show_assets sa
+        JOIN asset_types at ON at.id = sa.asset_type_id
+        JOIN asset_categories ac ON ac.id = at.category_id
+        WHERE sa.show_id = ? AND sa.is_hidden = 0
+        ORDER BY ac.sort_order, at.name
+    """, (show_id,)).fetchall()
+
+    external_rentals = db.execute("""
+        SELECT description, cost, pdf_filename
+        FROM show_external_rentals
+        WHERE show_id = ?
+        ORDER BY sort_order
+    """, (show_id,)).fetchall()
+
+    perf_company_row = db.execute(
+        "SELECT field_value FROM advance_data WHERE show_id=? AND field_key='performance_company'",
+        (show_id,)
+    ).fetchone()
+    performance_company = perf_company_row['field_value'] if perf_company_row else ''
+
+    assets_list = [dict(a) for a in assets]
+    ext_list    = [dict(e) for e in external_rentals]
+    assets_subtotal  = sum((a['locked_price'] or 0) * a['quantity'] for a in assets_list)
+    external_subtotal = sum(e['cost'] or 0 for e in ext_list)
+    grand_total = assets_subtotal + external_subtotal
+    db.close()
+
+    html_str = render_template(
+        'pdf/asset_invoice_pdf.html',
+        show=dict(show),
+        assets=assets_list,
+        external_rentals=ext_list,
+        assets_subtotal=assets_subtotal,
+        external_subtotal=external_subtotal,
+        grand_total=grand_total,
+        performance_company=performance_company,
+        generated_date=date.today().isoformat(),
+    )
+
+    try:
+        from weasyprint import HTML as WP_HTML
+        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+    except Exception as e:
+        app.logger.error(f'WeasyPrint invoice error: {e}')
+        return f'PDF generation failed: {e}', 500
+
+    safe_name = secure_filename(show['name'] or f'show_{show_id}')
+    resp = make_response(pdf_bytes)
+    resp.headers['Content-Type'] = 'application/pdf'
+    resp.headers['Content-Disposition'] = _safe_content_disposition(f'{safe_name}_invoice.pdf')
+    return resp
+
+
+# ─── In-App Updates ───────────────────────────────────────────────────────────
+
+_update_state = {'running': False, 'log': [], 'phase': 'idle', 'error': None}
+_update_lock  = threading.Lock()
+
+def _update_log(msg):
+    ts = datetime.now().strftime('%H:%M:%S')
+    entry = f'[{ts}] {msg}'
+    _update_state['log'].append(entry)
+    app.logger.info(f'[updater] {msg}')
+
+def _detect_service_name():
+    """Auto-detect the systemd service this process is running under."""
+    pid = os.getpid()
+    try:
+        r = subprocess.run(['systemctl', 'status', str(pid)],
+                           capture_output=True, text=True, timeout=5)
+        for line in r.stdout.split('\n'):
+            m = re.search(r'(\S+\.service)', line)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    # Try common names
+    for name in ['showadvance', 'showadvance.service', '321theater', '321theater.service',
+                 'gunicorn', 'gunicorn.service']:
+        try:
+            r = subprocess.run(['systemctl', 'is-active', name],
+                               capture_output=True, text=True, timeout=2)
+            if r.stdout.strip() == 'active':
+                return name
+        except Exception:
+            pass
+    return None
+
+def _run_update(service_name):
+    """Background thread: git pull + archive + restart + rollback on failure."""
+    import glob as _glob
+    update_archive = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'backups', f'pre_update_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+    archived_files = []
+
+    try:
+        _update_state['phase'] = 'checking'
+        _update_log('Fetching latest commits from remote…')
+        r = subprocess.run(['git', 'fetch', 'origin'], capture_output=True, text=True, timeout=30,
+                           cwd=os.path.dirname(os.path.abspath(__file__)))
+        if r.returncode != 0:
+            raise RuntimeError(f'git fetch failed: {r.stderr.strip()}')
+        _update_log('Fetch complete.')
+
+        # Get list of files that will change
+        r = subprocess.run(['git', 'diff', '--name-only', 'HEAD', 'origin/HEAD'],
+                           capture_output=True, text=True, timeout=10,
+                           cwd=os.path.dirname(os.path.abspath(__file__)))
+        changed = [f.strip() for f in r.stdout.split('\n') if f.strip()]
+        if not changed:
+            _update_log('Already up to date — no changes to apply.')
+            _update_state['phase'] = 'done'
+            return
+
+        _update_log(f'Files to update: {", ".join(changed)}')
+
+        # Archive changed files
+        _update_state['phase'] = 'archiving'
+        _update_log(f'Archiving {len(changed)} files to {update_archive}…')
+        os.makedirs(update_archive, exist_ok=True)
+        base = os.path.dirname(os.path.abspath(__file__))
+        for rel in changed:
+            src = os.path.join(base, rel)
+            if os.path.exists(src):
+                dst = os.path.join(update_archive, rel)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                archived_files.append((src, dst))
+        _update_log(f'Archived {len(archived_files)} files.')
+
+        # Pull
+        _update_state['phase'] = 'pulling'
+        _update_log('Running git pull…')
+        r = subprocess.run(['git', 'pull', '--ff-only'],
+                           capture_output=True, text=True, timeout=60,
+                           cwd=os.path.dirname(os.path.abspath(__file__)))
+        if r.returncode != 0:
+            raise RuntimeError(f'git pull failed: {r.stderr.strip() or r.stdout.strip()}')
+        _update_log(r.stdout.strip() or 'Pull successful.')
+
+        # Run DB migration
+        _update_log('Running database migrations…')
+        r = subprocess.run(['python', 'init_db.py', '--migrate'],
+                           capture_output=True, text=True, timeout=60,
+                           cwd=os.path.dirname(os.path.abspath(__file__)))
+        _update_log(r.stdout.strip() or 'Migrations complete.')
+
+        # Restart service
+        if service_name:
+            _update_state['phase'] = 'restarting'
+            _update_log(f'Restarting service {service_name}…')
+            r = subprocess.run(['systemctl', 'restart', service_name],
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                raise RuntimeError(f'Service restart failed: {r.stderr.strip()}')
+            # Wait and check it came back
+            import time as _time
+            _time.sleep(3)
+            r2 = subprocess.run(['systemctl', 'is-active', service_name],
+                                capture_output=True, text=True, timeout=5)
+            if r2.stdout.strip() != 'active':
+                raise RuntimeError(f'Service not active after restart: {r2.stdout.strip()}')
+            _update_log(f'Service {service_name} is active.')
+        else:
+            _update_log('No systemd service detected — please restart the app manually.')
+
+        _update_state['phase'] = 'done'
+        _update_log('Update complete!')
+        syslog_logger.info('APP_UPDATE applied successfully')
+
+    except Exception as exc:
+        _update_state['error'] = str(exc)
+        _update_log(f'ERROR: {exc}')
+        _update_log('Attempting rollback…')
+        _update_state['phase'] = 'rolling_back'
+        try:
+            for src, bak in archived_files:
+                shutil.copy2(bak, src)
+                _update_log(f'  Restored {os.path.basename(src)}')
+            _update_log('Rollback complete.')
+            if service_name:
+                _update_log(f'Restarting {service_name} after rollback…')
+                subprocess.run(['systemctl', 'restart', service_name], timeout=30)
+                _update_log('Restart issued.')
+        except Exception as rb_exc:
+            _update_log(f'Rollback failed: {rb_exc}')
+        _update_state['phase'] = 'failed'
+        syslog_logger.error(f'APP_UPDATE failed: {exc}')
+
+
+@app.route('/settings/update/check')
+@admin_required
+def update_check():
+    """Check whether remote has updates without applying them."""
+    try:
+        r = subprocess.run(['git', 'fetch', 'origin'], capture_output=True, text=True, timeout=20,
+                           cwd=os.path.dirname(os.path.abspath(__file__)))
+        r2 = subprocess.run(['git', 'log', 'HEAD..origin/HEAD', '--oneline'],
+                            capture_output=True, text=True, timeout=10,
+                            cwd=os.path.dirname(os.path.abspath(__file__)))
+        commits = [l.strip() for l in r2.stdout.split('\n') if l.strip()]
+        r3 = subprocess.run(['git', 'diff', '--name-only', 'HEAD', 'origin/HEAD'],
+                            capture_output=True, text=True, timeout=10,
+                            cwd=os.path.dirname(os.path.abspath(__file__)))
+        files = [f.strip() for f in r3.stdout.split('\n') if f.strip()]
+        return jsonify({'available': bool(commits), 'commits': commits, 'files': files})
+    except Exception as e:
+        return jsonify({'available': False, 'error': str(e)})
+
+
+@app.route('/settings/update/apply', methods=['POST'])
+@admin_required
+def update_apply():
+    """Start the update process in a background thread."""
+    with _update_lock:
+        if _update_state['running']:
+            return jsonify({'error': 'Update already in progress'}), 409
+        _update_state.update({'running': True, 'log': [], 'phase': 'starting', 'error': None})
+    data = request.get_json(force=True) or {}
+    service_name = data.get('service_name') or _detect_service_name()
+    log_audit(get_db(), 'APP_UPDATE_START', 'system', None,
+              detail=f'service={service_name} by={session.get("username")}')
+    try:
+        get_db().commit()
+        get_db().close()
+    except Exception:
+        pass
+    t = threading.Thread(target=_run_update, args=(service_name,), daemon=True)
+    t.start()
+    syslog_logger.info(f'APP_UPDATE_START service={service_name} by={session.get("username")}')
+    return jsonify({'success': True, 'service': service_name})
+
+
+@app.route('/api/update/status')
+@admin_required
+def update_status_api():
+    return jsonify({
+        'phase':   _update_state['phase'],
+        'running': _update_state['running'],
+        'log':     _update_state['log'],
+        'error':   _update_state['error'],
+    })
+
+
+@app.route('/settings/update/detect-service')
+@admin_required
+def detect_service():
+    return jsonify({'service': _detect_service_name()})
+
+
+# ─── User Registration & Recovery ─────────────────────────────────────────────
+
+def _send_simple_email(to_addr, subject, body_text, body_html=None):
+    """Send a plain email using the configured provider (reuses app email infra)."""
+    try:
+        _send_email(to_addr, subject, body_text, body_html)
+        return True
+    except Exception as e:
+        app.logger.error(f'Email send failed to {to_addr}: {e}')
+        return False
+
+def _send_email(to_addr, subject, plain, html=None):
+    """Dispatch via SMTP or direct MX depending on settings."""
+    provider = get_app_setting('email_provider', 'smtp')
+    from_addr = get_app_setting('smtp_from', 'noreply@localhost')
+    if provider == 'smtp':
+        _send_email_smtp(from_addr, [to_addr], subject, plain, html)
+    else:
+        _send_email_direct(from_addr, [to_addr], subject, plain, html)
+
+
+def _register_route():
+    if session.get('user_id'):
+        return redirect(url_for('dashboard'))
+    error = None
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip().lower()
+        display_name = request.form.get('display_name', '').strip()
+        email = request.form.get('email', '').strip().lower()
+        password = request.form.get('password', '')
+        confirm  = request.form.get('confirm_password', '')
+        score    = int(request.form.get('captcha_score', 0))
+
+        if score < 1:
+            error = 'Please complete the mini-game challenge first.'
+        elif not username or not email or not password:
+            error = 'All fields are required.'
+        elif password != confirm:
+            error = 'Passwords do not match.'
+        elif len(password) < 8:
+            error = 'Password must be at least 8 characters.'
+        elif not re.match(r'^[a-z0-9_.-]{3,32}$', username):
+            error = 'Username: 3-32 characters, letters/numbers/._- only.'
+        else:
+            db = get_db()
+            existing = db.execute('SELECT id FROM users WHERE username=?', (username,)).fetchone()
+            if existing:
+                error = 'That username or email is not available.'
+            else:
+                existing_pending = db.execute(
+                    'SELECT id FROM user_pending_registration WHERE username=?', (username,)).fetchone()
+                if existing_pending:
+                    error = 'That username or email is not available.'
+                else:
+                    token = secrets.token_urlsafe(32)
+                    expires = datetime.utcnow() + timedelta(hours=24)
+                    pw_hash = generate_password_hash(password)
+                    try:
+                        db.execute("""
+                            INSERT INTO user_pending_registration
+                              (username, display_name, email, password_hash, confirm_token, token_expires)
+                            VALUES (?,?,?,?,?,?)
+                        """, (username, display_name, email, pw_hash, token, expires.isoformat()))
+                        db.commit()
+                        confirm_url = url_for('confirm_email', token=token, _external=True)
+                        _send_simple_email(
+                            email,
+                            '3·2·1→THEATER: Confirm Your Email',
+                            f'Click the link to confirm your email address:\n{confirm_url}\n\nThis link expires in 24 hours.',
+                            f'<p>Click the link below to confirm your email address:</p>'
+                            f'<p><a href="{confirm_url}">{confirm_url}</a></p>'
+                            f'<p>This link expires in 24 hours.</p>'
+                        )
+                        syslog_logger.info(f'REGISTER_PENDING username={username} email={email}')
+                        # Notify admins of new pending registration
+                        try:
+                            _adb = get_db()
+                            _admins = _adb.execute(
+                                "SELECT email FROM users WHERE role='admin' AND email != '' AND email IS NOT NULL"
+                            ).fetchall()
+                            _adb.close()
+                            _settings_url = url_for('settings', _external=True) + '#registrations'
+                            for _adm in _admins:
+                                _send_simple_email(
+                                    _adm['email'],
+                                    '3\u00b72\u00b71\u2192THEATER: New Registration Pending',
+                                    f'A new account registration is awaiting your approval.\n\n'
+                                    f'Username: {username}\nDisplay name: {display_name or "(none)"}\nEmail: {email}\n\n'
+                                    f'Review and approve at:\n{_settings_url}',
+                                )
+                        except Exception:
+                            pass
+                        db.close()
+                        return render_template('register.html',
+                                               success='Registration submitted! Check your email to confirm, then wait for admin approval.',
+                                               user=None)
+                    except Exception as exc:
+                        app.logger.error(f'Registration error: {exc}')
+                        error = 'Registration failed due to a server error. Please try again.'
+                    finally:
+                        try:
+                            db.close()
+                        except Exception:
+                            pass
+    return render_template('register.html', error=error, user=None)
+
+
+if _limiter_available and limiter:
+    @app.route('/register', methods=['GET', 'POST'])
+    @limiter.limit("10 per minute", methods=["POST"])
+    def register():
+        return _register_route()
+else:
+    @app.route('/register', methods=['GET', 'POST'])
+    def register():
+        return _register_route()
+
+
+@app.route('/confirm-email/<token>')
+def confirm_email(token):
+    db = get_db()
+    reg = db.execute(
+        'SELECT * FROM user_pending_registration WHERE confirm_token=?', (token,)
+    ).fetchone()
+    if not reg:
+        db.close()
+        return render_template('register.html', error='Invalid or expired confirmation link.', user=None)
+    if datetime.fromisoformat(reg['token_expires']) < datetime.utcnow():
+        db.execute('DELETE FROM user_pending_registration WHERE id=?', (reg['id'],))
+        db.commit()
+        db.close()
+        return render_template('register.html', error='Confirmation link expired. Please register again.', user=None)
+    db.execute('UPDATE user_pending_registration SET email_confirmed=1 WHERE id=?', (reg['id'],))
+    db.commit()
+    syslog_logger.info(f'EMAIL_CONFIRMED username={reg["username"]}')
+    db.close()
+    return render_template('register.html',
+                           success='Email confirmed! Your account is now awaiting admin approval.',
+                           user=None)
+
+
+@app.route('/settings/pending-registrations')
+@admin_required
+def pending_registrations():
+    db = get_db()
+    rows = db.execute("""
+        SELECT * FROM user_pending_registration
+        WHERE email_confirmed=1 AND admin_approved=0
+        ORDER BY created_at
+    """).fetchall()
+    db.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/settings/pending-registrations/<int:reg_id>/approve', methods=['POST'])
+@admin_required
+def approve_registration(reg_id):
+    data = request.get_json(force=True) or {}
+    role = data.get('role', 'user')
+    db = get_db()
+    reg = db.execute('SELECT * FROM user_pending_registration WHERE id=?', (reg_id,)).fetchone()
+    if not reg:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+    try:
+        db.execute("""
+            INSERT INTO users (username, display_name, email, password_hash, role, email_confirmed)
+            VALUES (?,?,?,?,?,1)
+        """, (reg['username'], reg['display_name'] or reg['username'],
+              reg['email'], reg['password_hash'], role))
+        db.commit()
+        uid = db.execute('SELECT id FROM users WHERE username=?', (reg['username'],)).fetchone()['id']
+        db.execute('DELETE FROM user_pending_registration WHERE id=?', (reg_id,))
+        db.commit()
+        log_audit(db, 'USER_APPROVED', 'user', uid,
+                  detail=f'username={reg["username"]} role={role} approved_by={session.get("username")}')
+        db.commit()
+        _send_simple_email(
+            reg['email'],
+            '3·2·1→THEATER: Account Approved',
+            f'Your account "{reg["username"]}" has been approved. You can now log in.',
+        )
+        syslog_logger.info(f'USER_APPROVED username={reg["username"]} role={role} by={session.get("username")}')
+        db.close()
+        return jsonify({'success': True})
+    except DBIntegrityError:
+        db.close()
+        return jsonify({'error': 'Username already exists'}), 409
+
+
+@app.route('/settings/pending-registrations/<int:reg_id>/deny', methods=['POST'])
+@admin_required
+def deny_registration(reg_id):
+    db = get_db()
+    reg = db.execute('SELECT * FROM user_pending_registration WHERE id=?', (reg_id,)).fetchone()
+    if reg:
+        db.execute('DELETE FROM user_pending_registration WHERE id=?', (reg_id,))
+        db.commit()
+        _send_simple_email(
+            reg['email'],
+            '3·2·1→THEATER: Registration Declined',
+            f'Your registration request for "{reg["username"]}" was not approved.',
+        )
+        syslog_logger.info(f'USER_DENIED username={reg["username"]} by={session.get("username")}')
+    db.close()
+    return jsonify({'success': True})
+
+
+def _forgot_password_route():
+    if session.get('user_id'):
+        return redirect(url_for('dashboard'))
+    sent = False
+    error = None
+    if request.method == 'POST':
+        identifier = request.form.get('identifier', '').strip()
+        score = int(request.form.get('captcha_score', 0))
+        if score < 1:
+            error = 'Please complete the mini-game challenge first.'
+        elif not identifier:
+            error = 'Enter your username or email.'
+        else:
+            db = get_db()
+            user = db.execute(
+                'SELECT * FROM users WHERE username=? OR email=?', (identifier, identifier)
+            ).fetchone()
+            # Always show success even if user not found (security best practice)
+            if user and user.get('email'):
+                token = secrets.token_urlsafe(48)
+                expires = datetime.utcnow() + timedelta(hours=2)
+                # Invalidate old tokens
+                db.execute('UPDATE password_reset_tokens SET used=1 WHERE user_id=? AND used=0',
+                           (user['id'],))
+                db.execute("""
+                    INSERT INTO password_reset_tokens (user_id, token, expires_at)
+                    VALUES (?,?,?)
+                """, (user['id'], token, expires.isoformat()))
+                db.commit()
+                reset_url = url_for('reset_password', token=token, _external=True)
+                _send_simple_email(
+                    user['email'],
+                    '3·2·1→THEATER: Password Reset',
+                    f'Click the link below to reset your password (expires in 2 hours):\n{reset_url}\n\n'
+                    f'If you did not request this, ignore this email.',
+                    f'<p><a href="{reset_url}">{reset_url}</a></p>'
+                    f'<p>This link expires in 2 hours. If you did not request this, ignore this email.</p>'
+                )
+                syslog_logger.info(f'PASSWORD_RESET_REQUEST user={user["username"]}')
+            db.close()
+            sent = True
+    return render_template('forgot_password.html', sent=sent, error=error, user=None)
+
+
+if _limiter_available and limiter:
+    @app.route('/forgot-password', methods=['GET', 'POST'])
+    @limiter.limit("5 per minute", methods=["POST"])
+    def forgot_password():
+        return _forgot_password_route()
+else:
+    @app.route('/forgot-password', methods=['GET', 'POST'])
+    def forgot_password():
+        return _forgot_password_route()
+
+
+@app.route('/reset-password/<token>', methods=['GET', 'POST'])
+def reset_password(token):
+    if session.get('user_id'):
+        return redirect(url_for('dashboard'))
+    db = get_db()
+    rec = db.execute(
+        'SELECT * FROM password_reset_tokens WHERE token=? AND used=0', (token,)
+    ).fetchone()
+    if not rec or datetime.fromisoformat(rec['expires_at']) < datetime.utcnow():
+        db.close()
+        return render_template('forgot_password.html',
+                               error='This reset link has expired or already been used.', user=None)
+    error = None
+    if request.method == 'POST':
+        password = request.form.get('password', '')
+        confirm  = request.form.get('confirm_password', '')
+        if len(password) < 8:
+            error = 'Password must be at least 8 characters.'
+        elif password != confirm:
+            error = 'Passwords do not match.'
+        else:
+            pw_hash = generate_password_hash(password)
+            db.execute('UPDATE users SET password_hash=? WHERE id=?', (pw_hash, rec['user_id']))
+            db.execute('UPDATE password_reset_tokens SET used=1 WHERE token=?', (token,))
+            db.commit()
+            user_row = db.execute('SELECT username FROM users WHERE id=?', (rec['user_id'],)).fetchone()
+            log_audit(db, 'PASSWORD_RESET_COMPLETE', 'user', rec['user_id'])
+            db.commit()
+            syslog_logger.info(f'PASSWORD_RESET_COMPLETE user={user_row["username"] if user_row else rec["user_id"]}')
+            db.close()
+            flash('Password reset successfully. You can now log in.', 'success')
+            return redirect(url_for('login'))
+    db.close()
+    return render_template('forgot_password.html', token=token, reset_mode=True, error=error, user=None)
+
+
+# ─── Site-Wide Messaging ───────────────────────────────────────────────────────
+
+def get_active_messages(user_id=None, msg_type=None):
+    """Return active, non-dismissed, non-expired messages."""
+    db = get_db()
+    now = datetime.utcnow().isoformat()
+    rows = db.execute("""
+        SELECT m.*,
+               CASE WHEN d.user_id IS NOT NULL THEN 1 ELSE 0 END as dismissed
+        FROM site_messages m
+        LEFT JOIN site_message_dismissals d ON d.message_id = m.id AND d.user_id = ?
+        WHERE m.is_active = 1
+          AND (m.expires_at IS NULL OR m.expires_at > ?)
+          AND (m.scheduled_for IS NULL OR m.scheduled_for <= ?)
+          AND (? IS NULL OR m.msg_type = ?)
+        ORDER BY m.created_at DESC
+    """, (user_id or 0, now, now, msg_type, msg_type)).fetchall()
+    db.close()
+    return [dict(r) for r in rows if not r['dismissed'] or r['dismissible_by'] == 'admin']
+
+
+@app.route('/api/messages')
+@login_required
+def get_messages_api():
+    msg_type = request.args.get('type')
+    msgs = get_active_messages(session['user_id'], msg_type)
+    # Filter out already dismissed for users
+    result = [m for m in msgs if not m['dismissed']]
+    return jsonify(result)
+
+
+@app.route('/api/messages/<int:msg_id>/dismiss', methods=['POST'])
+@login_required
+def dismiss_message(msg_id):
+    db = get_db()
+    msg = db.execute('SELECT * FROM site_messages WHERE id=?', (msg_id,)).fetchone()
+    if not msg:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+    if msg['dismissible_by'] == 'admin' and session.get('user_role') != 'admin':
+        db.close()
+        return jsonify({'error': 'Only admins can dismiss this message'}), 403
+    try:
+        db.execute('INSERT OR IGNORE INTO site_message_dismissals (message_id, user_id) VALUES (?,?)',
+                   (msg_id, session['user_id']))
+        db.commit()
+    except Exception:
+        pass
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/messages', methods=['GET'])
+@admin_required
+def messages_list():
+    db = get_db()
+    rows = db.execute("""
+        SELECT m.*, u.display_name as author
+        FROM site_messages m
+        LEFT JOIN users u ON u.id = m.created_by
+        ORDER BY m.created_at DESC
+    """).fetchall()
+    db.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/settings/messages', methods=['POST'])
+@admin_required
+def message_create():
+    data = request.get_json(force=True) or {}
+    title = (data.get('title') or '').strip()
+    body_html = _sanitize_html((data.get('body_html') or '').strip())
+    if not title:
+        return jsonify({'error': 'Title required'}), 400
+    db = get_db()
+    db.execute("""
+        INSERT INTO site_messages
+          (title, body_html, msg_type, dismissible_by, expires_at, scheduled_for,
+           is_active, show_on_login, created_by)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    """, (
+        title, body_html,
+        data.get('msg_type', 'motd'),
+        data.get('dismissible_by', 'user'),
+        data.get('expires_at') or None,
+        data.get('scheduled_for') or None,
+        1 if data.get('is_active', True) else 0,
+        1 if data.get('show_on_login') else 0,
+        session['user_id'],
+    ))
+    db.commit()
+    row = db.execute('SELECT * FROM site_messages ORDER BY id DESC LIMIT 1').fetchone()
+    log_audit(db, 'MESSAGE_CREATE', 'site_message', row['id'], detail=title)
+    db.commit()
+    syslog_logger.info(f'MESSAGE_CREATE title="{title}" type={data.get("msg_type","motd")} by={session.get("username")}')
+    result = dict(row)
+    db.close()
+    return jsonify(result), 201
+
+
+@app.route('/settings/messages/<int:msg_id>', methods=['PUT'])
+@admin_required
+def message_edit(msg_id):
+    data = request.get_json(force=True) or {}
+    db = get_db()
+    db.execute("""
+        UPDATE site_messages SET
+          title=?, body_html=?, msg_type=?, dismissible_by=?,
+          expires_at=?, scheduled_for=?, is_active=?, show_on_login=?
+        WHERE id=?
+    """, (
+        (data.get('title') or '').strip(),
+        _sanitize_html((data.get('body_html') or '').strip()),
+        data.get('msg_type', 'motd'),
+        data.get('dismissible_by', 'user'),
+        data.get('expires_at') or None,
+        data.get('scheduled_for') or None,
+        1 if data.get('is_active', True) else 0,
+        1 if data.get('show_on_login') else 0,
+        msg_id,
+    ))
+    db.commit()
+    log_audit(db, 'MESSAGE_EDIT', 'site_message', msg_id, detail=data.get('title', ''))
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/messages/<int:msg_id>', methods=['DELETE'])
+@admin_required
+def message_delete(msg_id):
+    db = get_db()
+    db.execute('DELETE FROM site_messages WHERE id=?', (msg_id,))
+    db.commit()
+    log_audit(db, 'MESSAGE_DELETE', 'site_message', msg_id)
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/messages/<int:msg_id>/dismiss-all', methods=['POST'])
+@admin_required
+def message_dismiss_all(msg_id):
+    """Admin globally deactivates (removes) a message for everyone."""
+    db = get_db()
+    db.execute('UPDATE site_messages SET is_active=0 WHERE id=?', (msg_id,))
+    db.commit()
+    log_audit(db, 'MESSAGE_DISMISS_ALL', 'site_message', msg_id)
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+# ─── AI Session Management ─────────────────────────────────────────────────────
+
+def _get_ai_slot_limit():
+    return int(get_app_setting('ai_max_sessions', '2'))
+
+def _count_active_ai_sessions():
+    """Count running AI sessions, pruning stale ones (>5 min) first."""
+    db = get_db()
+    cutoff = (datetime.utcnow() - timedelta(minutes=5)).isoformat()
+    db.execute("""
+        UPDATE ai_sessions SET status='timeout', ended_at=CURRENT_TIMESTAMP
+        WHERE status='running' AND started_at < ?
+    """, (cutoff,))
+    db.commit()
+    count = db.execute("SELECT COUNT(*) FROM ai_sessions WHERE status='running'").fetchone()[0]
+    db.close()
+    return count
+
+def _claim_ai_session(show_id):
+    """Reserve a slot. Returns (session_id, None) or (None, error)."""
+    db = get_db()
+    limit = _get_ai_slot_limit()
+    count = _count_active_ai_sessions()
+    if count >= limit:
+        db.close()
+        return None, f'All {limit} AI processing slots are busy. Please try again in a moment.'
+    db.execute("""
+        INSERT INTO ai_sessions (user_id, show_id, status)
+        VALUES (?,?,'running')
+    """, (session.get('user_id'), show_id))
+    db.commit()
+    sid = db.execute('SELECT id FROM ai_sessions ORDER BY id DESC LIMIT 1').fetchone()['id']
+    db.close()
+    return sid, None
+
+def _release_ai_session(session_id):
+    if not session_id:
+        return
+    db = get_db()
+    db.execute("""
+        UPDATE ai_sessions SET status='done', ended_at=CURRENT_TIMESTAMP WHERE id=?
+    """, (session_id,))
+    db.commit()
+    db.close()
+
+
+@app.route('/api/ai/slots')
+@login_required
+def ai_slots_status():
+    """Return current AI slot availability for dynamic UI."""
+    limit = _get_ai_slot_limit()
+    count = _count_active_ai_sessions()
+    return jsonify({
+        'limit': limit,
+        'active': count,
+        'available': max(0, limit - count),
+        'busy': count >= limit,
+    })
+
+
+# ─── Asset Availability Dashboard ─────────────────────────────────────────────
+
+@app.route('/dashboards')
+@login_required
+def dashboards_list():
+    db = get_db()
+    rows = db.execute("""
+        SELECT d.*, u.display_name as owner_name
+        FROM asset_dashboards d
+        JOIN users u ON u.id = d.user_id
+        WHERE d.user_id = ? OR d.is_public = 1
+        ORDER BY d.user_id = ? DESC, d.name
+    """, (session['user_id'], session['user_id'])).fetchall()
+    db.close()
+    return render_template('dashboards.html',
+                           dashboards=[dict(r) for r in rows],
+                           user=get_current_user())
+
+
+@app.route('/dashboards/new', methods=['POST'])
+@login_required
+def dashboard_create():
+    data = request.get_json(force=True) or {}
+    name = (data.get('name') or 'My Dashboard').strip()
+    slug = secrets.token_urlsafe(12) if data.get('is_public') else None
+    db = get_db()
+    db.execute("""
+        INSERT INTO asset_dashboards (user_id, name, is_public, public_slug, layout, config_json)
+        VALUES (?,?,?,?,?,?)
+    """, (session['user_id'], name,
+          1 if data.get('is_public') else 0,
+          slug,
+          data.get('layout', 'combined'),
+          json.dumps(data.get('config', {}))))
+    db.commit()
+    row = db.execute('SELECT * FROM asset_dashboards ORDER BY id DESC LIMIT 1').fetchone()
+    db.close()
+    return jsonify(dict(row)), 201
+
+
+@app.route('/dashboards/<int:dash_id>')
+@login_required
+def dashboard_view(dash_id):
+    db = get_db()
+    d = db.execute('SELECT * FROM asset_dashboards WHERE id=?', (dash_id,)).fetchone()
+    if not d:
+        db.close()
+        abort(404)
+    if d['user_id'] != session['user_id'] and not d['is_public']:
+        if session.get('user_role') != 'admin':
+            db.close()
+            abort(403)
+    cats = db.execute('SELECT * FROM asset_categories ORDER BY sort_order, name').fetchall()
+    types = db.execute("""
+        SELECT at.*, ac.name as category_name
+        FROM asset_types at
+        JOIN asset_categories ac ON ac.id = at.category_id
+        ORDER BY ac.sort_order, at.sort_order, at.name
+    """).fetchall()
+    db.close()
+    config = json.loads(d['config_json'] or '{}')
+    return render_template('dashboard_view.html',
+                           dash=dict(d),
+                           categories=[dict(c) for c in cats],
+                           asset_types=[{k: v for k, v in dict(t).items() if k != 'photo'} for t in types],
+                           config=config,
+                           user=get_current_user())
+
+
+@app.route('/dashboards/<int:dash_id>', methods=['PUT'])
+@login_required
+def dashboard_edit(dash_id):
+    db = get_db()
+    d = db.execute('SELECT * FROM asset_dashboards WHERE id=?', (dash_id,)).fetchone()
+    if not d or d['user_id'] != session['user_id']:
+        db.close()
+        abort(403)
+    data = request.get_json(force=True) or {}
+    slug = d['public_slug']
+    if data.get('is_public') and not slug:
+        slug = secrets.token_urlsafe(12)
+    db.execute("""
+        UPDATE asset_dashboards SET name=?, is_public=?, public_slug=?,
+               layout=?, config_json=?, updated_at=CURRENT_TIMESTAMP
+        WHERE id=?
+    """, (
+        (data.get('name') or 'My Dashboard').strip(),
+        1 if data.get('is_public') else 0,
+        slug if data.get('is_public') else None,
+        data.get('layout', 'combined'),
+        json.dumps(data.get('config', {})),
+        dash_id,
+    ))
+    db.commit()
+    db.close()
+    return jsonify({'success': True, 'slug': slug})
+
+
+@app.route('/dashboards/<int:dash_id>', methods=['DELETE'])
+@login_required
+def dashboard_delete(dash_id):
+    db = get_db()
+    d = db.execute('SELECT user_id FROM asset_dashboards WHERE id=?', (dash_id,)).fetchone()
+    if not d or (d['user_id'] != session['user_id'] and session.get('user_role') != 'admin'):
+        db.close()
+        abort(403)
+    db.execute('DELETE FROM asset_dashboards WHERE id=?', (dash_id,))
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/d/<slug>')
+def public_dashboard(slug):
+    """Public dashboard — no login required."""
+    db = get_db()
+    d = db.execute(
+        'SELECT * FROM asset_dashboards WHERE public_slug=? AND is_public=1', (slug,)
+    ).fetchone()
+    if not d:
+        db.close()
+        abort(404)
+    cats = db.execute('SELECT * FROM asset_categories ORDER BY sort_order, name').fetchall()
+    types = db.execute("""
+        SELECT at.*, ac.name as category_name
+        FROM asset_types at
+        JOIN asset_categories ac ON ac.id = at.category_id
+        ORDER BY ac.sort_order, at.sort_order, at.name
+    """).fetchall()
+    db.close()
+    config = json.loads(d['config_json'] or '{}')
+    return render_template('dashboard_view.html',
+                           dash=dict(d),
+                           categories=[dict(c) for c in cats],
+                           asset_types=[{k: v for k, v in dict(t).items() if k != 'photo'} for t in types],
+                           config=config,
+                           public=True,
+                           user=None)
+
+
+# ─── Asset Reports ─────────────────────────────────────────────────────────────
+
+@app.route('/reports/assets')
+@admin_required
+def asset_reports():
+    db = get_db()
+    companies = db.execute("""
+        SELECT DISTINCT ad.field_value as company
+        FROM advance_data ad
+        WHERE ad.field_key = 'performance_company' AND ad.field_value != ''
+        ORDER BY ad.field_value
+    """).fetchall()
+    db.close()
+    return render_template('asset_reports.html',
+                           companies=[r['company'] for r in companies],
+                           user=get_current_user())
+
+
+@app.route('/api/reports/assets')
+@admin_required
+def asset_reports_data():
+    company = request.args.get('company', '')
+    date_from = request.args.get('from', '')
+    date_to   = request.args.get('to', '')
+    db = get_db()
+
+    params = []
+    where = []
+
+    if company:
+        where.append("""
+            s.id IN (
+                SELECT show_id FROM advance_data
+                WHERE field_key='performance_company' AND field_value=?
+            )
+        """)
+        params.append(company)
+
+    if date_from:
+        where.append("COALESCE(s.show_date, '9999') >= ?")
+        params.append(date_from)
+    if date_to:
+        where.append("COALESCE(s.show_date, '0000') <= ?")
+        params.append(date_to)
+
+    where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
+
+    rows = db.execute(f"""
+        SELECT sa.id, sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end,
+               at.name as type_name, at.manufacturer, at.model,
+               ac.name as category_name,
+               s.id as show_id, s.name as show_name, s.show_date,
+               (sa.quantity * sa.locked_price) as line_total,
+               (SELECT field_value FROM advance_data
+                WHERE show_id=s.id AND field_key='performance_company') as performance_company
+        FROM show_assets sa
+        JOIN asset_types at ON at.id = sa.asset_type_id
+        JOIN asset_categories ac ON ac.id = at.category_id
+        JOIN shows s ON s.id = sa.show_id
+        {where_sql}
+        ORDER BY s.show_date DESC, ac.name, at.name
+    """, params).fetchall()
+
+    total_revenue = sum(r['line_total'] or 0 for r in rows)
+    db.close()
+    return jsonify({
+        'rows': [dict(r) for r in rows],
+        'total_revenue': total_revenue,
+        'count': len(rows),
+    })
 
 
 # ─── Error Handlers ───────────────────────────────────────────────────────────

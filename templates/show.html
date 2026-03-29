@@ -119,7 +119,7 @@
     <span class="save-status" id="save-status"></span>
     <button type="button" class="btn btn-ghost btn-sm" onclick="openHistory()" title="Version history">History</button>
     {% if not restricted and ollama_enabled %}
-    <button type="button" class="btn btn-ghost btn-sm" onclick="openAiExtract()" title="Extract field values from a document using AI">AI Extract</button>
+    <button type="button" class="btn btn-ghost btn-sm" id="ai-extract-btn" onclick="openAiExtract()" title="Extract field values from a document using AI">AI Extract</button>
     {% endif %}
     {% if not restricted %}
     <button class="btn btn-primary" id="save-btn" onclick="saveActive()">Save</button>
@@ -152,6 +152,14 @@
         {% endif %}
         <div id="ai-upload-msg" style="display:none;font-size:12px;margin-top:8px"></div>
         <div id="ai-progress-log" style="display:none;margin-top:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-family:var(--font-mono);font-size:12px;line-height:1.7;max-height:130px;overflow-y:auto;color:var(--text-dim)"></div>
+        <div id="ai-game-section" style="display:none;margin-top:12px">
+          <div style="font-size:11px;color:var(--text-dim);margin-bottom:5px;text-align:center;letter-spacing:.05em">PLAY WHILE YOU WAIT</div>
+          <div id="ai-dino-container" style="background:var(--bg-card);border:1px solid var(--border);border-radius:6px;overflow:hidden;position:relative;height:100px;cursor:pointer;user-select:none" onclick="aiDinoJump()" tabindex="0">
+            <canvas id="ai-dino-canvas" width="540" height="100" style="width:100%;height:100px;display:block"></canvas>
+            <div id="ai-dino-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:11px;color:var(--text-dim);text-align:center;pointer-events:none">Click or Space to play</div>
+          </div>
+          <div id="ai-dino-score" style="font-size:11px;color:var(--text-dim);margin-top:4px;text-align:center"></div>
+        </div>
         <button class="btn btn-primary" onclick="runAiExtract()" style="margin-top:8px">Extract Fields</button>
       </div>
       <div id="ai-results-section" style="display:none">
@@ -172,6 +180,7 @@
   <button class="tab-btn {% if tab == 'advance' %}active{% endif %}" onclick="switchTab('advance')">Advance Sheet</button>
   <button class="tab-btn {% if tab == 'schedule' %}active{% endif %}" onclick="switchTab('schedule')">Production Schedule</button>
   <button class="tab-btn {% if tab == 'staffing' %}active{% endif %}" onclick="switchTab('staffing')">Labor Requests</button>
+  <button class="tab-btn {% if tab == 'assets' %}active{% endif %}" onclick="switchTab('assets')">Assets</button>
   <button class="tab-btn {% if tab == 'postnotes' %}active{% endif %}" onclick="switchTab('postnotes')">Post-Show Notes</button>
   <button class="tab-btn {% if tab == 'comments' %}active{% endif %}" onclick="switchTab('comments')">
     Comments
@@ -673,6 +682,458 @@ const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
 {# Seed labor table with existing position_ids for JS to select #}
 <script>
 window._laborRequestsData = {{ labor_requests_data | tojson }};
+</script>
+
+
+{# ════════════════════════════════════════════════════════════════════════════ #}
+{#                              ASSETS TAB                                       #}
+{# ════════════════════════════════════════════════════════════════════════════ #}
+<div id="tab-assets" class="tab-pane {% if tab == 'assets' %}active{% endif %}">
+
+  {# ── Show Assets Header ─────────────────────────────────────────────────── #}
+  <div class="form-section-header" style="display:flex;align-items:center;padding:12px 0 8px 0;gap:8px">
+    <span class="section-icon">◈</span>
+    <span style="font-weight:600;font-size:13px;letter-spacing:.05em">GEAR &amp; ASSETS</span>
+    <div class="ml-auto" style="display:flex;gap:6px;align-items:center">
+      <span id="assets-total-cost" style="font-size:12px;color:var(--text-dim);margin-right:8px"></span>
+      <a href="/shows/{{ show.id }}/assets/invoice.pdf" target="_blank" class="btn btn-sm btn-ghost" title="Download PDF invoice">Invoice PDF</a>
+      {% if is_content_admin_user and not restricted %}
+      <button class="btn btn-sm btn-primary" onclick="openAssetSearch()">+ Add Asset</button>
+      <button class="btn btn-sm btn-ghost" onclick="openExternalRentalModal()">+ External Rental</button>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ── Asset List ─────────────────────────────────────────────────────────── #}
+  <div id="assets-container">
+    <div id="assets-list-wrap">
+      <table class="data-table" id="assets-table" style="display:none">
+        <thead>
+          <tr>
+            <th>Category</th>
+            <th>Item</th>
+            <th>Qty</th>
+            <th>Rental Period</th>
+            <th>Unit Price</th>
+            <th>Line Total</th>
+            <th>Notes</th>
+            {% if is_content_admin_user %}<th style="width:80px"></th>{% endif %}
+          </tr>
+        </thead>
+        <tbody id="assets-tbody"></tbody>
+      </table>
+      <p id="assets-empty-msg" style="padding:24px;text-align:center;color:var(--text-dim);font-size:13px">
+        No assets have been added to this show yet.
+      </p>
+    </div>
+
+    {# ── External Rentals Section ─────────────────────────────────────────── #}
+    <div id="external-rentals-wrap" style="display:none;margin-top:20px">
+      <div class="form-section-header" style="padding:8px 0 6px;font-size:12px;letter-spacing:.05em">
+        <span class="section-icon">◈</span> EXTERNAL RENTALS
+      </div>
+      <table class="data-table" id="ext-rentals-table">
+        <thead>
+          <tr>
+            <th>Description</th>
+            <th>Cost</th>
+            <th>PDF</th>
+            {% if is_content_admin_user %}<th style="width:60px"></th>{% endif %}
+          </tr>
+        </thead>
+        <tbody id="ext-rentals-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>{# end tab-assets #}
+
+{# ── Asset Search Modal ───────────────────────────────────────────────────── #}
+<div id="asset-search-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAssetSearch()">
+  <div class="modal-card" style="max-width:720px;max-height:90vh;display:flex;flex-direction:column">
+    <div class="modal-header">
+      Add Asset to Show
+      <button onclick="closeAssetSearch()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body" style="overflow-y:auto;flex:1">
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <input type="text" id="asset-search-input" class="field-input" placeholder="Search by name, category, manufacturer…" oninput="filterAssetSearch()" style="flex:1">
+        <select id="asset-cat-filter" class="field-input" style="width:160px" onchange="filterAssetSearch()">
+          <option value="">All Categories</option>
+          {% for cat in asset_categories %}
+          <option value="{{ cat.id }}">{{ cat.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div id="asset-search-results" style="min-height:120px"></div>
+    </div>
+  </div>
+</div>
+
+{# ── Asset Add Detail Modal ───────────────────────────────────────────────── #}
+<div id="asset-add-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAssetAddModal()">
+  <div class="modal-card" style="max-width:480px">
+    <div class="modal-header">
+      Add <span id="asset-add-title"></span>
+      <button onclick="closeAssetAddModal()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="asset-add-type-id">
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field-group">
+          <label class="field-label">QUANTITY</label>
+          <input type="number" id="asset-add-qty" class="field-input" value="1" min="1">
+        </div>
+        <div class="field-group">
+          <label class="field-label">UNIT PRICE (locked)</label>
+          <input type="text" id="asset-add-price" class="field-input" placeholder="0.00">
+        </div>
+        <div class="field-group">
+          <label class="field-label">RENTAL START</label>
+          <input type="date" id="asset-add-start" class="field-input">
+        </div>
+        <div class="field-group">
+          <label class="field-label">RENTAL END</label>
+          <input type="date" id="asset-add-end" class="field-input">
+        </div>
+        <div class="field-group" style="grid-column:span 2">
+          <label class="field-label">NOTES</label>
+          <input type="text" id="asset-add-notes" class="field-input" placeholder="Optional notes…">
+        </div>
+        {% if is_content_admin_user %}
+        <div class="field-group" style="grid-column:span 2">
+          <label class="checkbox-label">
+            <input type="checkbox" id="asset-add-hidden">
+            Hide from production managers (admin only)
+          </label>
+        </div>
+        {% endif %}
+      </div>
+      <div id="asset-avail-info" style="margin-top:10px;font-size:12px;color:var(--text-dim)"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+        <button class="btn btn-ghost" onclick="closeAssetAddModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitAddAsset()">Add to Show</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── External Rental Modal ────────────────────────────────────────────────── #}
+<div id="ext-rental-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeExternalRentalModal()">
+  <div class="modal-card" style="max-width:480px">
+    <div class="modal-header">
+      Add External Rental
+      <button onclick="closeExternalRentalModal()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-group">
+        <label class="field-label">DESCRIPTION</label>
+        <input type="text" id="er-description" class="field-input" placeholder="e.g. TAIT Automation Package">
+      </div>
+      <div class="field-group">
+        <label class="field-label">COST ($)</label>
+        <input type="number" id="er-cost" class="field-input" value="0" min="0" step="0.01">
+      </div>
+      <div class="field-group">
+        <label class="field-label">RENTAL PDF (optional)</label>
+        <input type="file" id="er-pdf" class="field-input" accept=".pdf">
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+        <button class="btn btn-ghost" onclick="closeExternalRentalModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitExternalRental()">Add</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Assets Tab JS ─────────────────────────────────────────────────────────────
+(function() {
+  const SHOW_ID = {{ show.id }};
+  const IS_ADMIN = {{ 'true' if is_content_admin_user else 'false' }};
+  let _allAssetTypes = null;
+  let _currentAssetTypeId = null;
+
+  // Load asset types lazily
+  async function _loadAssetTypes() {
+    if (_allAssetTypes !== null) return _allAssetTypes;
+    const r = await fetch('/api/asset-types', {headers:{'X-Requested-With':'XMLHttpRequest'}});
+    _allAssetTypes = await r.json();
+    return _allAssetTypes;
+  }
+
+  // Load and render the assets tab
+  window.loadAssetsTab = async function() {
+    const r = await fetch(`/shows/${SHOW_ID}/assets`, {headers:{'X-Requested-With':'XMLHttpRequest'}});
+    const data = await r.json();
+    renderAssets(data.assets || [], data.external_rentals || []);
+  };
+
+  function renderAssets(assets, extRentals) {
+    const tbody = document.getElementById('assets-tbody');
+    const table = document.getElementById('assets-table');
+    const emptyMsg = document.getElementById('assets-empty-msg');
+    tbody.innerHTML = '';
+
+    if (assets.length === 0) {
+      table.style.display = 'none';
+      emptyMsg.style.display = '';
+    } else {
+      table.style.display = '';
+      emptyMsg.style.display = 'none';
+      assets.forEach(a => {
+        const lineTotal = (a.locked_price * a.quantity).toFixed(2);
+        const hiddenBadge = a.is_hidden ? ' <span style="font-size:10px;color:var(--accent);background:rgba(245,127,32,.12);padding:1px 5px;border-radius:3px;margin-left:4px">HIDDEN</span>' : '';
+        const label = [a.manufacturer, a.model].filter(Boolean).join(' ') || a.type_name;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td style="color:var(--text-dim);font-size:11px">${esc(a.category_name)}</td>
+          <td>${esc(label)}${hiddenBadge}</td>
+          <td>${a.quantity}</td>
+          <td style="font-size:11px">${a.rental_start||'—'} → ${a.rental_end||'—'}</td>
+          <td>$${Number(a.locked_price).toFixed(2)}</td>
+          <td>$${lineTotal}</td>
+          <td style="font-size:11px;color:var(--text-dim)">${esc(a.notes||'')}</td>
+          ${IS_ADMIN ? `<td>
+            ${IS_ADMIN ? `<button class="btn btn-xs btn-ghost" onclick="toggleAssetHidden(${a.id},${a.is_hidden})" title="${a.is_hidden?'Unhide':'Hide'}">${a.is_hidden?'Show':'Hide'}</button>` : ''}
+            <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="removeAsset(${a.id})">✕</button>
+          </td>` : ''}
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    // External rentals
+    const erWrap = document.getElementById('external-rentals-wrap');
+    const erTbody = document.getElementById('ext-rentals-tbody');
+    erTbody.innerHTML = '';
+    if (extRentals.length > 0) {
+      erWrap.style.display = '';
+      extRentals.forEach(er => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${esc(er.description)}</td>
+          <td>$${Number(er.cost).toFixed(2)}</td>
+          <td>${er.pdf_filename ? `<a href="/shows/${SHOW_ID}/external-rentals/${er.id}/pdf" target="_blank" style="font-size:11px">View PDF</a>` : '—'}</td>
+          ${IS_ADMIN ? `<td><button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="removeExternalRental(${er.id})">✕</button></td>` : ''}
+        `;
+        erTbody.appendChild(tr);
+      });
+    } else {
+      erWrap.style.display = 'none';
+    }
+
+    // Total cost
+    const assetTotal = assets.reduce((s,a) => s + a.locked_price * a.quantity, 0);
+    const erTotal = extRentals.reduce((s,er) => s + Number(er.cost), 0);
+    const grandTotal = assetTotal + erTotal;
+    document.getElementById('assets-total-cost').textContent =
+      grandTotal > 0 ? `Total: $${grandTotal.toFixed(2)}` : '';
+  }
+
+  function esc(s) {
+    return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // ── Asset Search ─────────────────────────────────────────────────────────
+  window.openAssetSearch = async function() {
+    document.getElementById('asset-search-modal').style.display = 'flex';
+    document.getElementById('asset-search-input').value = '';
+    document.getElementById('asset-cat-filter').value = '';
+    await _loadAssetTypes();
+    renderAssetSearchResults('', '');
+    setTimeout(() => document.getElementById('asset-search-input').focus(), 100);
+  };
+
+  window.closeAssetSearch = function() {
+    document.getElementById('asset-search-modal').style.display = 'none';
+  };
+
+  window.filterAssetSearch = function() {
+    const q = document.getElementById('asset-search-input').value;
+    const cat = document.getElementById('asset-cat-filter').value;
+    renderAssetSearchResults(q, cat);
+  };
+
+  async function renderAssetSearchResults(q, catId) {
+    const types = await _loadAssetTypes();
+    const container = document.getElementById('asset-search-results');
+    const lq = q.toLowerCase();
+    const filtered = types.filter(t => {
+      if (catId && String(t.category_id) !== String(catId)) return false;
+      const haystack = [t.name, t.category_name, t.manufacturer, t.model, t.parent_name].join(' ').toLowerCase();
+      return !lq || haystack.includes(lq);
+    });
+
+    if (filtered.length === 0) {
+      container.innerHTML = '<p style="padding:20px;text-align:center;color:var(--text-dim);font-size:13px">No items found.</p>';
+      return;
+    }
+
+    // Group by category
+    const byCat = {};
+    filtered.forEach(t => {
+      const k = t.category_name;
+      if (!byCat[k]) byCat[k] = [];
+      byCat[k].push(t);
+    });
+
+    let html = '<div style="display:flex;flex-direction:column;gap:12px">';
+    for (const [cat, items] of Object.entries(byCat)) {
+      html += `<div><div style="font-size:10px;font-weight:600;letter-spacing:.08em;color:var(--text-dim);margin-bottom:4px;text-transform:uppercase">${esc(cat)}</div>`;
+      html += '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+      items.forEach(t => {
+        const label = [t.manufacturer, t.model].filter(Boolean).join(' ') || t.name;
+        const sub = t.manufacturer ? t.name : '';
+        html += `<button class="btn btn-ghost btn-sm" style="text-align:left;white-space:normal" onclick="selectAssetType(${t.id}, '${esc(label).replace(/'/g,"\\'")}', ${t.rental_cost || 0})">
+          <div style="font-weight:500">${esc(label)}</div>
+          ${sub ? `<div style="font-size:10px;color:var(--text-dim)">${esc(sub)}</div>` : ''}
+          <div style="font-size:10px;color:var(--text-dim)">$${Number(t.rental_cost||0).toFixed(2)}/show${t.is_consumable ? ' · consumable' : ''}</div>
+        </button>`;
+      });
+      html += '</div></div>';
+    }
+    html += '</div>';
+    container.innerHTML = html;
+  }
+
+  // ── Asset Add Detail ──────────────────────────────────────────────────────
+  window.selectAssetType = async function(typeId, label, price) {
+    _currentAssetTypeId = typeId;
+    document.getElementById('asset-add-type-id').value = typeId;
+    document.getElementById('asset-add-title').textContent = label;
+    document.getElementById('asset-add-price').value = Number(price).toFixed(2);
+    document.getElementById('asset-add-qty').value = 1;
+    document.getElementById('asset-add-notes').value = '';
+    if (document.getElementById('asset-add-hidden'))
+      document.getElementById('asset-add-hidden').checked = false;
+
+    // Default rental dates from show performances
+    const perfs = {{ performances | tojson }};
+    if (perfs.length > 0) {
+      document.getElementById('asset-add-start').value = perfs[0].perf_date || '';
+      document.getElementById('asset-add-end').value = perfs[perfs.length-1].perf_date || '';
+    }
+
+    closeAssetSearch();
+    document.getElementById('asset-add-modal').style.display = 'flex';
+
+    // Load availability
+    document.getElementById('asset-avail-info').textContent = 'Checking availability…';
+    try {
+      const start = document.getElementById('asset-add-start').value;
+      const end   = document.getElementById('asset-add-end').value;
+      const r = await fetch(`/api/asset-types/${typeId}/availability?start=${start}&end=${end}`, {
+        headers:{'X-Requested-With':'XMLHttpRequest'}
+      });
+      const av = await r.json();
+      if (av.unlimited) {
+        document.getElementById('asset-avail-info').textContent = 'Consumable — unlimited stock.';
+      } else {
+        const avClass = av.available > 0 ? 'color:#48BB78' : 'color:#FC8181';
+        document.getElementById('asset-avail-info').innerHTML =
+          `<span>Stock: ${av.total_items} total · ${av.in_maintenance} maintenance · ${av.reserve_count} reserved · ${av.total_reserved} allocated</span> — ` +
+          `<strong style="${avClass}">${av.available} available</strong>`;
+      }
+    } catch(e) {
+      document.getElementById('asset-avail-info').textContent = '';
+    }
+  };
+
+  window.closeAssetAddModal = function() {
+    document.getElementById('asset-add-modal').style.display = 'none';
+  };
+
+  window.submitAddAsset = async function() {
+    const typeId = document.getElementById('asset-add-type-id').value;
+    const qty = parseInt(document.getElementById('asset-add-qty').value) || 1;
+    const price = parseFloat(document.getElementById('asset-add-price').value) || 0;
+    const start = document.getElementById('asset-add-start').value;
+    const end   = document.getElementById('asset-add-end').value;
+    const notes = document.getElementById('asset-add-notes').value;
+    const hidden = document.getElementById('asset-add-hidden')?.checked || false;
+
+    const r = await fetch(`/shows/${SHOW_ID}/assets`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+      body: JSON.stringify({asset_type_id: typeId, quantity: qty, locked_price: price,
+                            rental_start: start, rental_end: end, notes, is_hidden: hidden})
+    });
+    if (r.ok) {
+      closeAssetAddModal();
+      loadAssetsTab();
+    } else {
+      const e = await r.json();
+      alert(e.error || 'Failed to add asset');
+    }
+  };
+
+  window.removeAsset = async function(saId) {
+    if (!confirm('Remove this asset from the show?')) return;
+    await fetch(`/shows/${SHOW_ID}/assets/${saId}`, {
+      method: 'DELETE',
+      headers: {'X-Requested-With':'XMLHttpRequest'}
+    });
+    loadAssetsTab();
+  };
+
+  window.toggleAssetHidden = async function(saId, isHidden) {
+    await fetch(`/shows/${SHOW_ID}/assets/${saId}/toggle-hidden`, {
+      method: 'POST',
+      headers: {'X-Requested-With':'XMLHttpRequest'}
+    });
+    loadAssetsTab();
+  };
+
+  // ── External Rentals ──────────────────────────────────────────────────────
+  window.openExternalRentalModal = function() {
+    document.getElementById('er-description').value = '';
+    document.getElementById('er-cost').value = '0';
+    document.getElementById('er-pdf').value = '';
+    document.getElementById('ext-rental-modal').style.display = 'flex';
+  };
+
+  window.closeExternalRentalModal = function() {
+    document.getElementById('ext-rental-modal').style.display = 'none';
+  };
+
+  window.submitExternalRental = async function() {
+    const desc = document.getElementById('er-description').value.trim();
+    const cost = document.getElementById('er-cost').value;
+    const pdfFile = document.getElementById('er-pdf').files[0];
+    if (!desc) { alert('Description required'); return; }
+
+    const fd = new FormData();
+    fd.append('description', desc);
+    fd.append('cost', cost);
+    if (pdfFile) fd.append('pdf', pdfFile);
+
+    const r = await fetch(`/shows/${SHOW_ID}/external-rentals`, {
+      method: 'POST',
+      headers: {'X-Requested-With':'XMLHttpRequest'},
+      body: fd
+    });
+    if (r.ok) {
+      closeExternalRentalModal();
+      loadAssetsTab();
+    } else {
+      const e = await r.json();
+      alert(e.error || 'Failed to add external rental');
+    }
+  };
+
+  window.removeExternalRental = async function(erId) {
+    if (!confirm('Remove this external rental?')) return;
+    await fetch(`/shows/${SHOW_ID}/external-rentals/${erId}`, {
+      method: 'DELETE',
+      headers: {'X-Requested-With':'XMLHttpRequest'}
+    });
+    loadAssetsTab();
+  };
+
+  // Auto-load when tab is activated (switchTab calls loadAssetsTab)
+  if ('{{ tab }}' === 'assets') { loadAssetsTab(); }
+})();
 </script>
 
 
@@ -1463,6 +1924,25 @@ async function emailPdf(showId, pdfType, btn) {
     btn.innerHTML = orig; btn.disabled = false;
   }
 }
+
+{% if not restricted and ollama_enabled %}
+// ── AI slot polling — disable button when all slots busy ──────────────────────
+(function pollAiSlots() {
+  const btn = document.getElementById('ai-extract-btn');
+  if (!btn) return;
+  fetch('/api/ai/slots').then(r => r.json()).then(d => {
+    if (d.busy) {
+      btn.disabled = true;
+      btn.title = `AI busy — ${d.active}/${d.limit} slots in use`;
+      btn.textContent = 'AI Busy…';
+    } else {
+      btn.disabled = false;
+      btn.title = 'Extract field values from a document using AI';
+      btn.textContent = 'AI Extract';
+    }
+  }).catch(() => {}).finally(() => setTimeout(pollAiSlots, 5000));
+})();
+{% endif %}
 
 </script>
 {% endblock %}
