@@ -5352,9 +5352,9 @@ def asset_type_add():
     db.execute("""
         INSERT INTO asset_types
           (category_id, parent_type_id, name, manufacturer, model,
-           storage_location, rental_cost, reserve_count, is_consumable, track_quantity,
+           storage_location, rental_cost, weekly_rate, reserve_count, is_consumable, track_quantity,
            supplier_name, supplier_contact, sort_order)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         category_id,
         data.get('parent_type_id') or None,
@@ -5363,6 +5363,7 @@ def asset_type_add():
         (data.get('model') or '').strip(),
         (data.get('storage_location') or '').strip(),
         float(data.get('rental_cost') or 0),
+        float(data.get('weekly_rate') or 0),
         int(data.get('reserve_count') or 0),
         1 if data.get('is_consumable') else 0,
         1 if data.get('track_quantity', True) else 0,
@@ -5392,7 +5393,7 @@ def asset_type_edit(type_id):
     db.execute("""
         UPDATE asset_types SET
           name=?, manufacturer=?, model=?, storage_location=?,
-          rental_cost=?, reserve_count=?, is_consumable=?, track_quantity=?,
+          rental_cost=?, weekly_rate=?, reserve_count=?, is_consumable=?, track_quantity=?,
           supplier_name=?, supplier_contact=?,
           category_id=?, parent_type_id=?
         WHERE id=?
@@ -5402,6 +5403,7 @@ def asset_type_edit(type_id):
         (data.get('model') or '').strip(),
         (data.get('storage_location') or '').strip(),
         float(data.get('rental_cost') or 0),
+        float(data.get('weekly_rate') or 0),
         int(data.get('reserve_count') or 0),
         1 if data.get('is_consumable') else 0,
         1 if data.get('track_quantity', True) else 0,
@@ -5546,7 +5548,8 @@ def asset_item_edit(item_id):
     db.execute("""
         UPDATE asset_items SET
           barcode=?, condition=?, year_purchased=?, purchase_value=?,
-          depreciation_years=?, warranty_expires=?
+          depreciation_years=?, warranty_expires=?,
+          depreciation_start_date=?, replacement_cost=?, is_container=?
         WHERE id=?
     """, (
         (data.get('barcode') or '').strip(),
@@ -5555,10 +5558,49 @@ def asset_item_edit(item_id):
         _float_or_none(data.get('purchase_value')),
         _int_or_none(data.get('depreciation_years')),
         (data.get('warranty_expires') or '').strip() or None,
+        (data.get('depreciation_start_date') or '').strip() or None,
+        _float_or_none(data.get('replacement_cost')),
+        1 if data.get('is_container') else 0,
         item_id,
     ))
     db.commit()
     log_audit(db, 'ASSET_ITEM_EDIT', 'asset_item', item_id)
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/asset-items/<int:item_id>/contents', methods=['GET'])
+@admin_required
+def asset_item_contents(item_id):
+    """List items contained within a container item."""
+    db = get_db()
+    rows = db.execute("""
+        SELECT ai.*, at.name as type_name
+        FROM asset_items ai
+        JOIN asset_types at ON at.id = ai.asset_type_id
+        WHERE ai.container_item_id = ?
+        ORDER BY at.name, ai.barcode
+    """, (item_id,)).fetchall()
+    db.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/settings/asset-items/<int:item_id>/set-container', methods=['POST'])
+@admin_required
+def asset_item_set_container(item_id):
+    """Assign an item to a container (or clear its container)."""
+    data = request.get_json() or {}
+    container_item_id = data.get('container_item_id') or None
+    db = get_db()
+    # Prevent an item from being its own container
+    if container_item_id and int(container_item_id) == item_id:
+        db.close()
+        return jsonify({'error': 'An item cannot contain itself'}), 400
+    db.execute('UPDATE asset_items SET container_item_id=? WHERE id=?', (container_item_id, item_id))
+    db.commit()
+    log_audit(db, 'ASSET_ITEM_CONTAINER', 'asset_item', item_id,
+              detail=f'container_item_id={container_item_id}')
     db.commit()
     db.close()
     return jsonify({'success': True})

@@ -339,6 +339,7 @@ CREATE TABLE IF NOT EXISTS asset_types (
     photo_mime       TEXT DEFAULT '',
     storage_location TEXT DEFAULT '',
     rental_cost      REAL DEFAULT 0.0,
+    weekly_rate      REAL DEFAULT 0.0,
     reserve_count    INTEGER DEFAULT 0,
     is_consumable    INTEGER DEFAULT 0,
     track_quantity   INTEGER DEFAULT 1,
@@ -351,17 +352,21 @@ CREATE TABLE IF NOT EXISTS asset_types (
 );
 
 CREATE TABLE IF NOT EXISTS asset_items (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    asset_type_id     INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
-    barcode           TEXT DEFAULT '',
-    status            TEXT DEFAULT 'available',
-    condition         TEXT DEFAULT 'good',
-    year_purchased    INTEGER DEFAULT NULL,
-    purchase_value    REAL DEFAULT NULL,
-    depreciation_years INTEGER DEFAULT NULL,
-    warranty_expires  DATE DEFAULT NULL,
-    sort_order        INTEGER DEFAULT 0,
-    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_type_id           INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
+    barcode                 TEXT DEFAULT '',
+    status                  TEXT DEFAULT 'available',
+    condition               TEXT DEFAULT 'good',
+    year_purchased          INTEGER DEFAULT NULL,
+    purchase_value          REAL DEFAULT NULL,
+    depreciation_years      INTEGER DEFAULT NULL,
+    warranty_expires        DATE DEFAULT NULL,
+    depreciation_start_date DATE DEFAULT NULL,
+    replacement_cost        REAL DEFAULT NULL,
+    is_container            INTEGER DEFAULT 0,
+    container_item_id       INTEGER REFERENCES asset_items(id) ON DELETE SET NULL,
+    sort_order              INTEGER DEFAULT 0,
+    created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS asset_logs (
@@ -1162,6 +1167,7 @@ def migrate_db():
             photo_mime       TEXT DEFAULT '',
             storage_location TEXT DEFAULT '',
             rental_cost      REAL DEFAULT 0.0,
+            weekly_rate      REAL DEFAULT 0.0,
             reserve_count    INTEGER DEFAULT 0,
             is_consumable    INTEGER DEFAULT 0,
             track_quantity   INTEGER DEFAULT 1,
@@ -1174,12 +1180,21 @@ def migrate_db():
         );
 
         CREATE TABLE IF NOT EXISTS asset_items (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            asset_type_id     INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
-            barcode           TEXT DEFAULT '',
-            status            TEXT DEFAULT 'available',
-            sort_order        INTEGER DEFAULT 0,
-            created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset_type_id           INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
+            barcode                 TEXT DEFAULT '',
+            status                  TEXT DEFAULT 'available',
+            condition               TEXT DEFAULT 'good',
+            year_purchased          INTEGER DEFAULT NULL,
+            purchase_value          REAL DEFAULT NULL,
+            depreciation_years      INTEGER DEFAULT NULL,
+            warranty_expires        DATE DEFAULT NULL,
+            depreciation_start_date DATE DEFAULT NULL,
+            replacement_cost        REAL DEFAULT NULL,
+            is_container            INTEGER DEFAULT 0,
+            container_item_id       INTEGER REFERENCES asset_items(id) ON DELETE SET NULL,
+            sort_order              INTEGER DEFAULT 0,
+            created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS asset_maintenance (
@@ -1254,6 +1269,12 @@ def migrate_db():
         "ALTER TABLE asset_items ADD COLUMN purchase_value REAL DEFAULT NULL",
         "ALTER TABLE asset_items ADD COLUMN depreciation_years INTEGER DEFAULT NULL",
         "ALTER TABLE asset_items ADD COLUMN warranty_expires DATE DEFAULT NULL",
+        # Excel import / container support
+        "ALTER TABLE asset_types ADD COLUMN weekly_rate REAL DEFAULT 0.0",
+        "ALTER TABLE asset_items ADD COLUMN depreciation_start_date DATE DEFAULT NULL",
+        "ALTER TABLE asset_items ADD COLUMN replacement_cost REAL DEFAULT NULL",
+        "ALTER TABLE asset_items ADD COLUMN is_container INTEGER DEFAULT 0",
+        "ALTER TABLE asset_items ADD COLUMN container_item_id INTEGER REFERENCES asset_items(id) ON DELETE SET NULL",
     ]:
         try:
             conn.execute(alter_sql)
