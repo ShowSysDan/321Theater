@@ -16,6 +16,7 @@ Options:
 import argparse
 import glob
 import os
+import shutil
 import sqlite3
 import sys
 from datetime import datetime, date
@@ -119,6 +120,10 @@ def main():
     dry_run = args.dry_run
     if dry_run:
         print("DRY RUN — no changes will be written.\n")
+    else:
+        bak = db_path + '.bak'
+        shutil.copy2(db_path, bak)
+        print(f"Database backed up to: {bak}\n")
 
     print(f"Loading {os.path.basename(inventory_path)}...")
     inventory_rows = load_xlsx(inventory_path)
@@ -205,7 +210,9 @@ def main():
         parent_type_id = cat_pairs.get((inv_type, category))
 
         manufacturer = _str(r.get('Manufacturer'))
-        model = _str(r.get('ManufacturerPartNumber')) or _str(r.get('SubCategory'))
+        model = _str(r.get('ManufacturerPartNumber'))
+        # SubCategory is a category grouper (e.g. "Epson Lens"), not a specific model.
+        # Description (name) already identifies the type, so don't use SubCategory as fallback.
         rental_cost = _float(r.get('DailyRate'))
         weekly_rate = _float(r.get('WeeklyRate'))
         inactive = r.get('Inactive')
