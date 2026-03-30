@@ -454,7 +454,8 @@ function renderTree() {
 }
 
 function renderTypeRow(t) {
-  const label = [t.manufacturer, t.model].filter(Boolean).join(' ') || t.name;
+  const label = t.name;  // Description is always the primary title
+  const brandModel = [t.manufacturer, t.model].filter(Boolean).join(' ');
   const thumb = t.photo ? `<img src="/asset-types/${t.id}/photo" class="asset-type-thumb" alt="">` :
     `<div class="asset-type-thumb" style="display:flex;align-items:center;justify-content:center;color:var(--text-dim);font-size:18px">◈</div>`;
   const isRetired = !!t.is_retired;
@@ -467,7 +468,7 @@ function renderTypeRow(t) {
           ${esc(label)}
           ${isRetired ? '<span style="font-size:10px;font-weight:600;color:#FC814A;text-decoration:none;margin-left:6px">RETIRED</span>' : ''}
         </div>
-        ${t.manufacturer ? `<div class="asset-type-meta">${esc(t.name)}</div>` : ''}
+        ${brandModel ? `<div class="asset-type-meta">${esc(brandModel)}</div>` : ''}
         <div class="asset-type-meta">
           ${t.item_count} units · ${t.reserve_count} reserved · $${Number(t.rental_cost||0).toFixed(2)}/day${t.weekly_rate ? ' · $'+Number(t.weekly_rate).toFixed(2)+'/wk' : ''}
           ${t.storage_location ? ' · ' + esc(t.storage_location) : ''}

@@ -1023,8 +1023,8 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       html += `<div><div style="font-size:10px;font-weight:600;letter-spacing:.08em;color:var(--text-dim);margin-bottom:4px;text-transform:uppercase">${esc(cat)}</div>`;
       html += '<div style="display:flex;flex-wrap:wrap;gap:6px">';
       items.forEach(t => {
-        const label = [t.manufacturer, t.model].filter(Boolean).join(' ') || t.name;
-        const sub = t.manufacturer ? t.name : '';
+        const label = t.name;  // Description is always the primary title
+        const sub = [t.manufacturer, t.model].filter(Boolean).join(' ');
         const rateLabel = t.weekly_rate > 0
           ? `$${Number(t.rental_cost||0).toFixed(2)}/day · $${Number(t.weekly_rate||0).toFixed(2)}/wk`
           : `$${Number(t.rental_cost||0).toFixed(2)}/day`;
