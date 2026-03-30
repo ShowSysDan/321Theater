@@ -3,14 +3,7 @@
 
 {% block head %}
 <style>
-/* ── Crew Tracker Layout ──────────────────────────────────────── */
-.crew-tracker-wrap {
-  overflow-x: auto;
-  margin-top: 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
+/* ── Sticky skill-matrix columns & rows ─────────────────────────── */
 .crew-grid {
   border-collapse: collapse;
   width: 100%;
@@ -147,7 +140,7 @@
   gap: 6px;
 }
 
-/* Edit modal */
+/* Edit modal skill grid — built by JS, must keep these class names */
 .crew-edit-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -170,149 +163,155 @@
 .crew-edit-item.qualified { border-color: var(--accent); background: var(--accent-glow); }
 .crew-edit-item input[type="checkbox"] { accent-color: var(--accent); }
 .crew-edit-category {
-  font-size: 10px; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.08em; color: var(--accent); margin-top: 12px; margin-bottom: 4px;
-}
-
-/* Sort toolbar */
-.tracker-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin-top: 12px;
+  margin-bottom: 4px;
 }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="page-header">
-  <div>
-    <h1 class="page-title">Skill Tracker</h1>
-    <p class="page-sub">Track which positions each technician is qualified for</p>
-  </div>
-  <div class="header-actions">
-    <a href="{{ url_for('settings') }}#technicians" class="btn btn-ghost btn-sm">Manage Technicians</a>
-    <a href="{{ url_for('settings') }}#positions" class="btn btn-ghost btn-sm">Manage Positions</a>
-  </div>
-</div>
+<div class="p-6 md:p-8">
 
-{% if not all_positions %}
-<div class="form-section">
-  <div class="form-section-body" style="text-align:center;padding:32px">
-    <p class="text-dim">No job positions have been configured yet.</p>
-    <a href="{{ url_for('settings') }}#positions" class="btn btn-primary" style="margin-top:12px">Go to Settings → Job Positions</a>
+  {# ── Page header ──────────────────────────────────────────────── #}
+  <div class="flex justify-between items-start mb-6">
+    <div>
+      <h1 class="text-2xl font-bold tracking-wide">Skill Tracker</h1>
+      <p class="text-sm text-base-content/60 mt-1">Track which positions each technician is qualified for</p>
+    </div>
+    <div class="flex items-center gap-3">
+      <a href="{{ url_for('settings') }}#technicians" class="btn btn-ghost btn-sm">Manage Technicians</a>
+      <a href="{{ url_for('settings') }}#positions" class="btn btn-ghost btn-sm">Manage Positions</a>
+    </div>
   </div>
-</div>
-{% elif not members %}
-<div class="form-section">
-  <div class="form-section-body" style="text-align:center;padding:32px">
-    <p class="text-dim">No technicians have been added yet.</p>
-    <a href="{{ url_for('settings') }}#technicians" class="btn btn-primary" style="margin-top:12px">Go to Settings → Technicians</a>
+
+  {% if not all_positions %}
+  <div class="card bg-base-200 border border-base-300">
+    <div class="card-body items-center text-center py-10">
+      <p class="text-base-content/50">No job positions have been configured yet.</p>
+      <a href="{{ url_for('settings') }}#positions" class="btn btn-primary btn-sm mt-3">Go to Settings → Job Positions</a>
+    </div>
   </div>
-</div>
-{% else %}
+  {% elif not members %}
+  <div class="card bg-base-200 border border-base-300">
+    <div class="card-body items-center text-center py-10">
+      <p class="text-base-content/50">No technicians have been added yet.</p>
+      <a href="{{ url_for('settings') }}#technicians" class="btn btn-primary btn-sm mt-3">Go to Settings → Technicians</a>
+    </div>
+  </div>
+  {% else %}
 
-<div class="tracker-toolbar">
-  <span class="text-dim tracker-count" id="tracker-count">{{ members|length }} technicians &nbsp;·&nbsp; {{ all_positions|length }} positions</span>
-  <button class="btn btn-ghost btn-sm" onclick="sortCrewAlpha(false)">Sort A–Z</button>
-  <button class="btn btn-ghost btn-sm" onclick="sortCrewAlpha(true)">Sort Z–A</button>
-  <button class="btn btn-ghost btn-sm" onclick="sortCrewByCategory()">Sort by Category</button>
-  <select id="skill-filter" class="field-input field-input-sm" style="width:auto;min-width:160px" onchange="filterBySkill(this.value)">
-    <option value="">— Show all —</option>
-    {% for cat in categories %}{% if cat.positions %}
-    <optgroup label="{{ cat.name }}">
-      {% for pos in cat.positions %}<option value="{{ pos.id }}">{{ pos.name }}</option>{% endfor %}
-    </optgroup>
-    {% endif %}{% endfor %}
-    {% if uncategorized_positions %}
-    <optgroup label="Other">
-      {% for pos in uncategorized_positions %}<option value="{{ pos.id }}">{{ pos.name }}</option>{% endfor %}
-    </optgroup>
-    {% endif %}
-  </select>
-</div>
-
-<div class="crew-tracker-wrap">
-<table class="crew-grid" id="crew-grid">
-  <thead>
-    {# Row 1: category spans #}
-    <tr>
-      <th class="name-col cat-header" rowspan="2"
-          style="text-align:left;vertical-align:middle;padding:0 12px;font-size:10px;color:var(--text-muted);border-left:none;">
-        TECHNICIAN
-      </th>
-      {% for cat in categories %}
-        {% if cat.positions %}
-        <th class="cat-header" colspan="{{ cat.positions|length }}">{{ cat.name }}</th>
-        {% endif %}
-      {% endfor %}
+  {# ── Toolbar ──────────────────────────────────────────────────── #}
+  <div class="flex flex-wrap items-center gap-3 mb-4">
+    <span class="text-sm text-base-content/50 tracker-count" id="tracker-count">
+      {{ members|length }} technicians &nbsp;·&nbsp; {{ all_positions|length }} positions
+    </span>
+    <button class="btn btn-ghost btn-sm" onclick="sortCrewAlpha(false)">Sort A–Z</button>
+    <button class="btn btn-ghost btn-sm" onclick="sortCrewAlpha(true)">Sort Z–A</button>
+    <button class="btn btn-ghost btn-sm" onclick="sortCrewByCategory()">Sort by Category</button>
+    <select id="skill-filter" class="select select-bordered select-sm" style="min-width:160px" onchange="filterBySkill(this.value)">
+      <option value="">— Show all —</option>
+      {% for cat in categories %}{% if cat.positions %}
+      <optgroup label="{{ cat.name }}">
+        {% for pos in cat.positions %}<option value="{{ pos.id }}">{{ pos.name }}</option>{% endfor %}
+      </optgroup>
+      {% endif %}{% endfor %}
       {% if uncategorized_positions %}
-      <th class="cat-header" colspan="{{ uncategorized_positions|length }}">Other</th>
+      <optgroup label="Other">
+        {% for pos in uncategorized_positions %}<option value="{{ pos.id }}">{{ pos.name }}</option>{% endfor %}
+      </optgroup>
       {% endif %}
-    </tr>
-    {# Row 2: position names #}
-    <tr>
-      {% for cat in categories %}
-        {% for pos in cat.positions %}
-        <th class="pos-header" data-pid="{{ pos.id }}"><span title="{{ pos.name }}">{{ pos.name }}</span></th>
-        {% endfor %}
-      {% endfor %}
-      {% for pos in uncategorized_positions %}
-      <th class="pos-header" data-pid="{{ pos.id }}"><span title="{{ pos.name }}">{{ pos.name }}</span></th>
-      {% endfor %}
-    </tr>
-  </thead>
-  <tbody id="crew-tbody">
-    {% for m in members %}
-    <tr data-mid="{{ m.id }}" data-name="{{ m.name|lower }}">
-      <td class="name-col crew-name-cell">
-        <div class="crew-actions">
-          <span>{{ m.name }}</span>
-          <button class="btn btn-xs btn-ghost"
-                  data-name="{{ m.name }}" data-quals="{{ m.qualifications|tojson }}"
-                  onclick="openEditModal(this)"
-                  title="Edit qualifications" style="flex-shrink:0">✎</button>
-        </div>
-      </td>
-      {% for cat in categories %}
-        {% for pos in cat.positions %}
-        {% set qualified = pos.id in m.qualifications %}
-        <td>
-          <div class="skill-cell" data-mid="{{ m.id }}" data-pid="{{ pos.id }}" title="{{ pos.name }}">
-            <div class="skill-dot {{ 'qualified' if qualified else '' }}"></div>
-          </div>
-        </td>
-        {% endfor %}
-      {% endfor %}
-      {% for pos in uncategorized_positions %}
-      {% set qualified = pos.id in m.qualifications %}
-      <td>
-        <div class="skill-cell" data-mid="{{ m.id }}" data-pid="{{ pos.id }}" title="{{ pos.name }}">
-          <div class="skill-dot {{ 'qualified' if qualified else '' }}"></div>
-        </div>
-      </td>
-      {% endfor %}
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-</div>
+    </select>
+  </div>
 
-{% endif %}
+  {# ── Skill matrix ─────────────────────────────────────────────── #}
+  <div class="overflow-x-auto border border-base-300 rounded-lg mt-2">
+    <table class="crew-grid" id="crew-grid">
+      <thead>
+        {# Row 1: category spans #}
+        <tr>
+          <th class="name-col cat-header" rowspan="2"
+              style="text-align:left;vertical-align:middle;padding:0 12px;font-size:10px;color:var(--text-muted);border-left:none;">
+            TECHNICIAN
+          </th>
+          {% for cat in categories %}
+            {% if cat.positions %}
+            <th class="cat-header" colspan="{{ cat.positions|length }}">{{ cat.name }}</th>
+            {% endif %}
+          {% endfor %}
+          {% if uncategorized_positions %}
+          <th class="cat-header" colspan="{{ uncategorized_positions|length }}">Other</th>
+          {% endif %}
+        </tr>
+        {# Row 2: position names #}
+        <tr>
+          {% for cat in categories %}
+            {% for pos in cat.positions %}
+            <th class="pos-header" data-pid="{{ pos.id }}"><span title="{{ pos.name }}">{{ pos.name }}</span></th>
+            {% endfor %}
+          {% endfor %}
+          {% for pos in uncategorized_positions %}
+          <th class="pos-header" data-pid="{{ pos.id }}"><span title="{{ pos.name }}">{{ pos.name }}</span></th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody id="crew-tbody">
+        {% for m in members %}
+        <tr data-mid="{{ m.id }}" data-name="{{ m.name|lower }}">
+          <td class="name-col crew-name-cell">
+            <div class="crew-actions">
+              <span>{{ m.name }}</span>
+              <button class="btn btn-xs btn-ghost"
+                      data-name="{{ m.name }}" data-quals="{{ m.qualifications|tojson }}"
+                      onclick="openEditModal(this)"
+                      title="Edit qualifications" style="flex-shrink:0">✎</button>
+            </div>
+          </td>
+          {% for cat in categories %}
+            {% for pos in cat.positions %}
+            {% set qualified = pos.id in m.qualifications %}
+            <td>
+              <div class="skill-cell" data-mid="{{ m.id }}" data-pid="{{ pos.id }}" title="{{ pos.name }}">
+                <div class="skill-dot {{ 'qualified' if qualified else '' }}"></div>
+              </div>
+            </td>
+            {% endfor %}
+          {% endfor %}
+          {% for pos in uncategorized_positions %}
+          {% set qualified = pos.id in m.qualifications %}
+          <td>
+            <div class="skill-cell" data-mid="{{ m.id }}" data-pid="{{ pos.id }}" title="{{ pos.name }}">
+              <div class="skill-dot {{ 'qualified' if qualified else '' }}"></div>
+            </div>
+          </td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 
-{# ── Edit Qualifications Modal ────────────────────────────────── #}
-<div id="crew-edit-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeEditModal()">
-  <div class="modal-card" style="max-width:680px;max-height:85vh;overflow-y:auto">
-    <div class="modal-header">
-      Edit Qualifications — <span id="modal-crew-name"></span>
-      <button onclick="closeEditModal()" class="modal-close">×</button>
-    </div>
-    <div class="modal-body" id="modal-body">
-    </div>
-    <div style="padding:16px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">
-      <button class="btn btn-ghost" onclick="closeEditModal()">Close</button>
+  {% endif %}
+
+  {# ── Edit Qualifications Modal ─────────────────────────────────── #}
+  <div id="crew-edit-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeEditModal()">
+    <div class="modal-card" style="max-width:680px;max-height:85vh;overflow-y:auto">
+      <div class="modal-header">
+        Edit Qualifications — <span id="modal-crew-name"></span>
+        <button onclick="closeEditModal()" class="modal-close">×</button>
+      </div>
+      <div class="modal-body" id="modal-body">
+      </div>
+      <div style="padding:16px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn btn-ghost btn-sm" onclick="closeEditModal()">Close</button>
+      </div>
     </div>
   </div>
+
 </div>
 
 <script>
@@ -475,3 +474,23 @@ function sortCrewByCategory() {
 }
 </script>
 {% endblock %}
+
+{#
+CSS rules in static/css/style.css that appear to be ONLY used by crew_tracker.html
+(and can potentially be removed once migration is fully verified):
+
+  .tracker-toolbar         — replaced by Tailwind flex/gap utilities
+  .page-header             — replaced by flex justify-between items-start mb-6
+  .page-title              — replaced by text-2xl font-bold tracking-wide
+  .page-sub                — replaced by text-sm text-base-content/60 mt-1
+  .header-actions          — replaced by flex items-center gap-3
+  .form-section            — the empty-state cards are now DaisyUI .card/.card-body
+  .form-section-body       — same as above
+  .text-dim                — replaced by text-base-content/50 (or /60)
+
+  NOTE: .modal-overlay / .modal-card / .modal-header / .modal-body / .modal-close
+  are still used by other templates (settings.html etc.) — DO NOT remove those.
+
+  NOTE: .btn, .btn-ghost, .btn-primary, .btn-sm, .btn-xs are still used globally
+  via style.css — DO NOT remove those (DaisyUI overrides them as well).
+#}
