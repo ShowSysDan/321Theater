@@ -20,11 +20,11 @@
 
 {# ── Tab Switcher ── #}
 <div style="display:flex;gap:0;border-bottom:2px solid var(--border);margin-bottom:16px">
-  <button id="tab-btn-assets" onclick="switchTab('assets')"
+  <button id="tab-btn-assets" type="button" onclick="switchAssetsTab('assets')"
           style="padding:9px 20px;background:none;border:none;border-bottom:2px solid var(--accent);margin-bottom:-2px;color:var(--fg);font-size:13px;font-weight:600;cursor:pointer;letter-spacing:.02em">
     Assets
   </button>
-  <button id="tab-btn-systems" onclick="switchTab('systems')"
+  <button id="tab-btn-systems" type="button" onclick="switchAssetsTab('systems')"
           style="padding:9px 20px;background:none;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;color:var(--text-dim);font-size:13px;font-weight:600;cursor:pointer;letter-spacing:.02em">
     Systems &amp; Packages
   </button>
@@ -431,7 +431,7 @@ async function loadTypes() {
 let _activeTab = 'assets';
 let _selectedSystemId = null;
 
-window.switchTab = function(tab) {
+window.switchAssetsTab = function(tab) {
   _activeTab = tab;
   document.getElementById('tab-assets-content').style.display  = tab === 'assets'  ? '' : 'none';
   document.getElementById('tab-systems-content').style.display = tab === 'systems' ? '' : 'none';
@@ -524,7 +524,7 @@ window.openNewSystemModal = function(asPackage) {
 };
 
 window.goToSystem = function(sysId) {
-  switchTab('systems');
+  switchAssetsTab('systems');
   showSystemDetail(sysId);
 };
 
