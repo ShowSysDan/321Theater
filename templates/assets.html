@@ -373,6 +373,7 @@ window.toggleShowRetired = async function(checked) {
 };
 
 function renderTree() {
+  if (!_allTypes) return;  // data not loaded yet
   const container = document.getElementById('asset-tree');
   const empty = document.getElementById('asset-tree-empty');
   container.innerHTML = '';
@@ -459,25 +460,26 @@ function renderTypeRow(t) {
   const thumb = t.photo ? `<img src="/asset-types/${t.id}/photo" class="asset-type-thumb" alt="">` :
     `<div class="asset-type-thumb" style="display:flex;align-items:center;justify-content:center;color:var(--text-dim);font-size:18px">◈</div>`;
   const isRetired = !!t.is_retired;
+  const isKit = !!t.is_kit;
   const retiredStyle = isRetired ? 'opacity:.45;' : '';
+  const rateLabel = t.weekly_rate ? `$${Number(t.rental_cost||0).toFixed(2)}/day · $${Number(t.weekly_rate).toFixed(2)}/wk` : `$${Number(t.rental_cost||0).toFixed(2)}/day`;
+  const metaLine = isKit
+    ? `Kit · ${rateLabel}`
+    : `${t.item_count} units · ${t.reserve_count} reserved · ${rateLabel}${t.storage_location ? ' · ' + esc(t.storage_location) : ''}${t.is_consumable ? ' · <em>consumable</em>' : ''}${isRetired && t.retired_at ? ' · retired ' + t.retired_at.slice(0,10) : ''}`;
   return `
     <div class="asset-type-row" style="${retiredStyle}">
       ${thumb}
       <div style="flex:1;min-width:0">
         <div class="asset-type-name" style="${isRetired?'text-decoration:line-through;color:var(--text-dim)':''}">
           ${esc(label)}
+          ${isKit ? '<span style="font-size:10px;font-weight:700;background:rgba(245,127,32,0.18);color:var(--accent);border-radius:3px;padding:1px 5px;margin-left:6px;letter-spacing:.04em">KIT</span>' : ''}
           ${isRetired ? '<span style="font-size:10px;font-weight:600;color:#FC814A;text-decoration:none;margin-left:6px">RETIRED</span>' : ''}
         </div>
         ${brandModel ? `<div class="asset-type-meta">${esc(brandModel)}</div>` : ''}
-        <div class="asset-type-meta">
-          ${t.item_count} units · ${t.reserve_count} reserved · $${Number(t.rental_cost||0).toFixed(2)}/day${t.weekly_rate ? ' · $'+Number(t.weekly_rate).toFixed(2)+'/wk' : ''}
-          ${t.storage_location ? ' · ' + esc(t.storage_location) : ''}
-          ${t.is_consumable ? ' · <em>consumable</em>' : ''}
-          ${isRetired && t.retired_at ? ' · retired ' + t.retired_at.slice(0,10) : ''}
-        </div>
+        <div class="asset-type-meta">${metaLine}</div>
       </div>
       <div style="display:flex;gap:4px;flex-shrink:0">
-        <button class="btn btn-xs btn-ghost" onclick="openItemsModal(${t.id},'${esc(label).replace(/'/g,"\\'")}')">Items (${t.item_count})</button>
+        ${!isKit ? `<button class="btn btn-xs btn-ghost" onclick="openItemsModal(${t.id},'${esc(label).replace(/'/g,"\\'")}')">Items (${t.item_count})</button>` : ''}
         ${!isRetired ? `<button class="btn btn-xs btn-ghost" onclick="openTypeModal(${t.id})">Edit</button>` : ''}
         ${!isRetired ? `<button class="btn btn-xs btn-ghost" style="color:#FC814A" onclick="retireType(${t.id})" title="Retire this type and all its units">Retire</button>` : ''}
       </div>

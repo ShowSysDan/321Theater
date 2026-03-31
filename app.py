@@ -5750,6 +5750,10 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
     if not type_row:
         return None
 
+    # Kit types have no tracked physical units — treat as always available
+    if type_row['is_kit']:
+        return {'unlimited': True, 'kit': True}
+
     total_items = db.execute(
         "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=? AND status != 'retired'",
         (asset_type_id,)
