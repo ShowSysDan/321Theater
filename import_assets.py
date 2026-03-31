@@ -133,6 +133,12 @@ def main():
     item_rows = load_xlsx(items_path)
     print(f"  {len(item_rows)} item rows\n")
 
+    # Backup database before any writes
+    if not dry_run:
+        bak_path = db_path + '.bak'
+        shutil.copy2(db_path, bak_path)
+        print(f"Backup created: {bak_path}\n")
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys = ON')
@@ -218,6 +224,8 @@ def main():
         inactive = r.get('Inactive')
         is_retired = 1 if (inactive is True or _str(inactive).upper() == 'TRUE') else 0
         is_consumable = 1 if inv_type == 'Consumable' else 0
+        classification = _str(r.get('ClassificationDescription')).upper()
+        is_kit = 1 if classification == 'CONTAINER' else 0
 
         type_key = (inv_type, category)
         type_sort[type_key] = type_sort.get(type_key, 0) + 1
@@ -229,10 +237,10 @@ def main():
             conn.execute("""
                 INSERT INTO asset_types
                   (category_id, parent_type_id, name, manufacturer, model,
-                   rental_cost, weekly_rate, is_retired, is_consumable, sort_order)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
+                   rental_cost, weekly_rate, is_retired, is_consumable, is_kit, sort_order)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """, (cat_id, parent_type_id, name, manufacturer, model,
-                  rental_cost, weekly_rate, is_retired, is_consumable, so))
+                  rental_cost, weekly_rate, is_retired, is_consumable, is_kit, so))
             conn.commit()
             row = conn.execute('SELECT id FROM asset_types ORDER BY id DESC LIMIT 1').fetchone()
             type_id = row['id']

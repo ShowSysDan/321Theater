@@ -346,6 +346,7 @@ CREATE TABLE IF NOT EXISTS asset_types (
     weekly_rate      REAL DEFAULT 0.0,
     reserve_count    INTEGER DEFAULT 0,
     is_consumable    INTEGER DEFAULT 0,
+    is_kit           INTEGER DEFAULT 0,
     track_quantity   INTEGER DEFAULT 1,
     supplier_name    TEXT DEFAULT '',
     supplier_contact TEXT DEFAULT '',
@@ -1174,6 +1175,7 @@ def migrate_db():
             weekly_rate      REAL DEFAULT 0.0,
             reserve_count    INTEGER DEFAULT 0,
             is_consumable    INTEGER DEFAULT 0,
+            is_kit           INTEGER DEFAULT 0,
             track_quantity   INTEGER DEFAULT 1,
             supplier_name    TEXT DEFAULT '',
             supplier_contact TEXT DEFAULT '',
@@ -1280,6 +1282,7 @@ def migrate_db():
         "ALTER TABLE shows ADD COLUMN load_out_time TEXT DEFAULT ''",
         # Excel import / container support
         "ALTER TABLE asset_types ADD COLUMN weekly_rate REAL DEFAULT 0.0",
+        "ALTER TABLE asset_types ADD COLUMN is_kit INTEGER DEFAULT 0",
         "ALTER TABLE asset_items ADD COLUMN depreciation_start_date DATE DEFAULT NULL",
         "ALTER TABLE asset_items ADD COLUMN replacement_cost REAL DEFAULT NULL",
         "ALTER TABLE asset_items ADD COLUMN is_container INTEGER DEFAULT 0",
