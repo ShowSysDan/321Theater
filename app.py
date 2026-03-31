@@ -5500,24 +5500,6 @@ def asset_type_photo(type_id):
     return resp
 
 
-# ─── Asset Manager — Container Items (for assignment dropdown) ────────────────
-
-@app.route('/api/asset-items/containers')
-@login_required
-def asset_items_containers():
-    """Return all items marked as containers, for the Assign to Container dropdown."""
-    db = get_db()
-    rows = db.execute("""
-        SELECT ai.id, ai.barcode, ai.status, at.name as type_name
-        FROM asset_items ai
-        JOIN asset_types at ON at.id = ai.asset_type_id
-        WHERE ai.is_container = 1 AND ai.status != 'retired'
-        ORDER BY at.name, ai.barcode
-    """).fetchall()
-    db.close()
-    return jsonify([dict(r) for r in rows])
-
-
 # ─── Asset Manager — System/Package Members ──────────────────────────────────
 
 @app.route('/settings/asset-types/<int:type_id>/members', methods=['GET'])
