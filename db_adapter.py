@@ -244,7 +244,7 @@ def read_db_settings(database_path):
         return {}
 
 
-_SAFE_IDENTIFIER_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+_SAFE_IDENTIFIER_RE = re.compile(r'^[a-zA-Z0-9_]+$')
 
 
 def _validate_identifier(name, label='identifier'):
