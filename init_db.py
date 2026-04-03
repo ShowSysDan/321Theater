@@ -1496,6 +1496,7 @@ CREATE TABLE IF NOT EXISTS shows (
     status TEXT DEFAULT 'active',
     advance_version INTEGER DEFAULT 0,
     schedule_version INTEGER DEFAULT 0,
+    performance_company TEXT DEFAULT '',
     created_by INTEGER REFERENCES users(id),
     last_saved_by INTEGER REFERENCES users(id),
     last_saved_at TIMESTAMP,
@@ -1556,6 +1557,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     phone TEXT DEFAULT '',
     email TEXT DEFAULT '',
     sort_order INTEGER DEFAULT 0,
+    report_recipient INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -1692,6 +1694,275 @@ CREATE TABLE IF NOT EXISTS schedule_template_rows (
     description TEXT DEFAULT '',
     notes       TEXT DEFAULT ''
 );
+
+-- ── Labor & Crew ──────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS position_categories (
+    id         SERIAL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS job_positions (
+    id          SERIAL PRIMARY KEY,
+    category_id INTEGER REFERENCES position_categories(id) ON DELETE SET NULL,
+    name        TEXT NOT NULL,
+    sort_order  INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS labor_requests (
+    id             SERIAL PRIMARY KEY,
+    show_id        INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    position_id    INTEGER REFERENCES job_positions(id) ON DELETE SET NULL,
+    in_time        TEXT DEFAULT '',
+    out_time       TEXT DEFAULT '',
+    requested_name TEXT DEFAULT '',
+    sort_order     INTEGER DEFAULT 0,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS crew_members (
+    id         SERIAL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS crew_qualifications (
+    crew_member_id INTEGER NOT NULL REFERENCES crew_members(id) ON DELETE CASCADE,
+    position_id    INTEGER NOT NULL REFERENCES job_positions(id) ON DELETE CASCADE,
+    PRIMARY KEY (crew_member_id, position_id)
+);
+
+-- ── Audit & Versioning ────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          SERIAL PRIMARY KEY,
+    timestamp   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    username    TEXT NOT NULL DEFAULT '',
+    action      TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id   TEXT,
+    show_id     INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+    before_json TEXT,
+    after_json  TEXT,
+    ip_address  TEXT,
+    detail      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_show_id ON audit_log(show_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_action  ON audit_log(action);
+CREATE INDEX IF NOT EXISTS idx_audit_log_ts      ON audit_log(timestamp);
+
+CREATE TABLE IF NOT EXISTS comment_versions (
+    id         SERIAL PRIMARY KEY,
+    comment_id INTEGER NOT NULL REFERENCES show_comments(id) ON DELETE CASCADE,
+    body       TEXT NOT NULL,
+    edited_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    edited_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS email_send_log (
+    id               SERIAL PRIMARY KEY,
+    show_id          INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    pdf_type         TEXT NOT NULL,
+    trigger_type     TEXT NOT NULL,
+    days_before      INTEGER,
+    sent_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    sent_by          TEXT DEFAULT '',
+    recipient_count  INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_send_log_show ON email_send_log(show_id, pdf_type, sent_at);
+
+-- ── Asset Manager ─────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS warehouse_locations (
+    id         SERIAL PRIMARY KEY,
+    name       TEXT UNIQUE NOT NULL,
+    sort_order INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS asset_categories (
+    id         SERIAL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS asset_types (
+    id               SERIAL PRIMARY KEY,
+    category_id      INTEGER NOT NULL REFERENCES asset_categories(id) ON DELETE CASCADE,
+    parent_type_id   INTEGER REFERENCES asset_types(id) ON DELETE SET NULL,
+    name             TEXT NOT NULL,
+    manufacturer     TEXT DEFAULT '',
+    model            TEXT DEFAULT '',
+    photo            BYTEA,
+    photo_mime       TEXT DEFAULT '',
+    storage_location TEXT DEFAULT '',
+    rental_cost      REAL DEFAULT 0.0,
+    weekly_rate      REAL DEFAULT 0.0,
+    reserve_count    INTEGER DEFAULT 0,
+    is_consumable    INTEGER DEFAULT 0,
+    is_system        INTEGER DEFAULT 0,
+    is_package       INTEGER DEFAULT 0,
+    track_quantity   INTEGER DEFAULT 1,
+    supplier_name    TEXT DEFAULT '',
+    supplier_contact TEXT DEFAULT '',
+    is_retired       INTEGER DEFAULT 0,
+    retired_at       TIMESTAMP DEFAULT NULL,
+    sort_order       INTEGER DEFAULT 0,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS asset_items (
+    id                      SERIAL PRIMARY KEY,
+    asset_type_id           INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
+    barcode                 TEXT DEFAULT '',
+    status                  TEXT DEFAULT 'available',
+    condition               TEXT DEFAULT 'good',
+    year_purchased          INTEGER DEFAULT NULL,
+    purchase_value          REAL DEFAULT NULL,
+    depreciation_years      INTEGER DEFAULT NULL,
+    warranty_expires        DATE DEFAULT NULL,
+    depreciation_start_date DATE DEFAULT NULL,
+    replacement_cost        REAL DEFAULT NULL,
+    is_container            INTEGER DEFAULT 0,
+    container_item_id       INTEGER REFERENCES asset_items(id) ON DELETE SET NULL,
+    sort_order              INTEGER DEFAULT 0,
+    created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS asset_logs (
+    id            SERIAL PRIMARY KEY,
+    asset_item_id INTEGER NOT NULL REFERENCES asset_items(id) ON DELETE CASCADE,
+    user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    log_date      DATE NOT NULL,
+    log_type      TEXT NOT NULL DEFAULT 'note',
+    body          TEXT NOT NULL DEFAULT '',
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS asset_maintenance (
+    id            SERIAL PRIMARY KEY,
+    asset_item_id INTEGER NOT NULL REFERENCES asset_items(id) ON DELETE CASCADE,
+    removed_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    reason        TEXT DEFAULT '',
+    notes         TEXT DEFAULT '',
+    status        TEXT DEFAULT 'in_progress',
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    resolved_at   TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS show_assets (
+    id             SERIAL PRIMARY KEY,
+    show_id        INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    asset_type_id  INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
+    quantity       INTEGER DEFAULT 1,
+    rental_start   DATE,
+    rental_end     DATE,
+    locked_price   REAL DEFAULT 0.0,
+    is_hidden      INTEGER DEFAULT 0,
+    notes          TEXT DEFAULT '',
+    added_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS show_external_rentals (
+    id           SERIAL PRIMARY KEY,
+    show_id      INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    description  TEXT NOT NULL DEFAULT '',
+    cost         REAL DEFAULT 0.0,
+    pdf_data     BYTEA,
+    pdf_filename TEXT DEFAULT '',
+    sort_order   INTEGER DEFAULT 0,
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_show_assets_show   ON show_assets(show_id);
+CREATE INDEX IF NOT EXISTS idx_show_assets_type   ON show_assets(asset_type_id);
+CREATE INDEX IF NOT EXISTS idx_asset_items_type   ON asset_items(asset_type_id);
+CREATE INDEX IF NOT EXISTS idx_asset_maint_item   ON asset_maintenance(asset_item_id);
+CREATE INDEX IF NOT EXISTS idx_asset_logs_item    ON asset_logs(asset_item_id);
+CREATE INDEX IF NOT EXISTS idx_asset_logs_date    ON asset_logs(log_date);
+
+-- ── User Registration & Recovery ─────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS user_pending_registration (
+    id             SERIAL PRIMARY KEY,
+    username       TEXT UNIQUE NOT NULL,
+    display_name   TEXT DEFAULT '',
+    email          TEXT NOT NULL,
+    password_hash  TEXT NOT NULL,
+    confirm_token  TEXT UNIQUE NOT NULL,
+    token_expires  TIMESTAMP NOT NULL,
+    email_confirmed INTEGER DEFAULT 0,
+    admin_approved  INTEGER DEFAULT 0,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id         SERIAL PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token      TEXT UNIQUE NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    used       INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ── Site-Wide Messaging ───────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS site_messages (
+    id              SERIAL PRIMARY KEY,
+    title           TEXT NOT NULL DEFAULT '',
+    body_html       TEXT NOT NULL DEFAULT '',
+    msg_type        TEXT NOT NULL DEFAULT 'motd',
+    is_active       INTEGER DEFAULT 1,
+    show_on_login   INTEGER DEFAULT 0,
+    dismissible_by  TEXT DEFAULT 'user',
+    expires_at      TIMESTAMP,
+    scheduled_for   TIMESTAMP,
+    created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS site_message_dismissals (
+    message_id   INTEGER NOT NULL REFERENCES site_messages(id) ON DELETE CASCADE,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    dismissed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (message_id, user_id)
+);
+
+-- ── Asset Dashboard ───────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS asset_dashboards (
+    id          SERIAL PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL DEFAULT 'My Dashboard',
+    is_public   INTEGER DEFAULT 0,
+    public_slug TEXT UNIQUE,
+    layout      TEXT DEFAULT 'combined',
+    config_json TEXT DEFAULT '{}',
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_dashboards_user ON asset_dashboards(user_id);
+CREATE INDEX IF NOT EXISTS idx_asset_dashboards_slug ON asset_dashboards(public_slug);
+
+-- ── AI Session Tracking ───────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS ai_sessions (
+    id         SERIAL PRIMARY KEY,
+    user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    show_id    INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ended_at   TIMESTAMP,
+    status     TEXT DEFAULT 'running'
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_sessions_status ON ai_sessions(status);
 """
 
 

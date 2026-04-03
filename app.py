@@ -4260,7 +4260,7 @@ def test_database_connection():
         if ok:
             return jsonify({'success': True, 'message': 'Connected to PostgreSQL successfully.'})
         app.logger.warning(f'PostgreSQL test failed: {err}')
-        return jsonify({'success': False, 'message': 'PostgreSQL connection failed. Check host, port, credentials, and schema.'})
+        return jsonify({'success': False, 'message': err or 'PostgreSQL connection failed. Check host, port, credentials, and schema.'})
 
     return jsonify({'success': False, 'message': 'Unknown database type.'})
 
