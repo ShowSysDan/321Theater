@@ -109,7 +109,7 @@
     </p>
     {% if last_saved_display_name %}
     <p class="last-saved-hint">Last saved by <strong>{{ last_saved_display_name }}</strong>
-      {% if last_saved_at %} · {{ last_saved_at[:16].replace('T',' ') }}{% endif %}
+      {% if last_saved_at %} · {{ (last_saved_at|string)[:16].replace('T',' ') }}{% endif %}
     </p>
     {% endif %}
   </div>
@@ -1372,7 +1372,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
             <td><span class="type-badge type-{{ e.export_type }}">{{ e.export_type.upper() }}</span></td>
             <td><span class="mono">v{{ e.version }}</span></td>
             <td>{{ e.exporter or '—' }}</td>
-            <td class="text-dim">{{ e.exported_at[:16].replace('T',' ') }}</td>
+            <td class="text-dim">{{ (e.exported_at|string)[:16].replace('T',' ') }}</td>
             <td>
               {% if e.pdf_data %}
               <a href="{{ url_for('download_export_history', show_id=show.id, log_id=e.id) }}"

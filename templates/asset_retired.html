@@ -48,7 +48,7 @@
             {% if t.storage_location %} · {{ t.storage_location }}{% endif %}
             {% if t.rental_cost %} · ${{ '%.2f'|format(t.rental_cost) }}/show{% endif %}
             · {{ t.total_items }} unit{{ 's' if t.total_items != 1 }} total
-            {% if t.retired_at %} · retired {{ t.retired_at[:10] }}{% endif %}
+            {% if t.retired_at %} · retired {{ (t.retired_at|string)[:10] }}{% endif %}
           </div>
           {% if t.supplier_name %}
           <div style="font-size:11px;color:var(--text-dim)">Supplier: {{ t.supplier_name }}{% if t.supplier_contact %} — {{ t.supplier_contact }}{% endif %}</div>
@@ -108,7 +108,7 @@
             <a href="#" onclick="loadItemLog({{ item.id }}, this); return false" style="font-size:11px;color:var(--accent)">{{ item.log_count }} entr{{ 'y' if item.log_count == 1 else 'ies' }}</a>
             {% else %}—{% endif %}
           </td>
-          <td style="padding:7px 10px;color:var(--text-dim)">{{ item.created_at[:10] if item.created_at else '—' }}</td>
+          <td style="padding:7px 10px;color:var(--text-dim)">{{ (item.created_at|string)[:10] if item.created_at else '—' }}</td>
         </tr>
         {% if item.log_count > 0 %}
         <tr id="item-log-row-{{ item.id }}" style="display:none">
