@@ -72,7 +72,7 @@
       {% for e in entries %}
       <tr class="audit-row {% if e.before_json or e.after_json %}has-diff{% endif %}"
           data-id="{{ e.id }}">
-        <td class="text-dim" style="white-space:nowrap">{{ e.timestamp[:19] if e.timestamp else '—' }}</td>
+        <td class="text-dim" style="white-space:nowrap">{{ (e.timestamp|string)[:19] if e.timestamp else '—' }}</td>
         <td><strong>{{ e.display_name }}</strong></td>
         <td>
           <span class="action-badge action-{{ e.action.split('_')[0].lower() }}">{{ e.action }}</span>

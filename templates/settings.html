@@ -175,7 +175,7 @@
               <span class="role-badge role-{{ u.role }}">{{ u.role.upper() }}</span>
               {% if u.is_readonly %}<span style="font-size:9px;background:rgba(148,163,184,.15);color:#94A3B8;border:1px solid rgba(148,163,184,.3);border-radius:99px;padding:2px 6px;margin-left:4px;font-weight:600">READ-ONLY</span>{% endif %}
             </td>
-            <td class="text-dim text-sm">{{ u.created_at[:10] if u.created_at else '—' }}</td>
+            <td class="text-dim text-sm">{{ (u.created_at|string)[:10] if u.created_at else '—' }}</td>
             <td>
               <div class="action-btns">
                 {% if user.role == 'admin' %}
@@ -784,7 +784,7 @@
             <td class="mono">{{ r.username }}</td>
             <td>{{ r.display_name or '—' }}</td>
             <td class="text-sm">{{ r.email }}</td>
-            <td class="text-dim text-sm">{{ r.created_at[:10] if r.created_at else '—' }}</td>
+            <td class="text-dim text-sm">{{ (r.created_at|string)[:10] if r.created_at else '—' }}</td>
             <td>{% if r.email_confirmed %}<span style="color:#22C55E">✓ Yes</span>{% else %}<span style="color:#FBBF24">Pending</span>{% endif %}</td>
             <td>
               <div class="action-btns">
