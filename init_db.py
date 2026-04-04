@@ -1747,6 +1747,8 @@ CREATE TABLE IF NOT EXISTS labor_requests (
     position_id    INTEGER REFERENCES job_positions(id) ON DELETE SET NULL,
     in_time        TEXT DEFAULT '',
     out_time       TEXT DEFAULT '',
+    break_start    TEXT DEFAULT '',
+    break_end      TEXT DEFAULT '',
     requested_name TEXT DEFAULT '',
     sort_order     INTEGER DEFAULT 0,
     created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -1838,6 +1840,7 @@ CREATE TABLE IF NOT EXISTS asset_types (
     is_consumable    INTEGER DEFAULT 0,
     is_system        INTEGER DEFAULT 0,
     is_package       INTEGER DEFAULT 0,
+    is_kit           INTEGER DEFAULT 0,
     track_quantity   INTEGER DEFAULT 1,
     supplier_name    TEXT DEFAULT '',
     supplier_contact TEXT DEFAULT '',
@@ -1861,6 +1864,7 @@ CREATE TABLE IF NOT EXISTS asset_items (
     replacement_cost        REAL DEFAULT NULL,
     is_container            INTEGER DEFAULT 0,
     container_item_id       INTEGER REFERENCES asset_items(id) ON DELETE SET NULL,
+    system_type_id          INTEGER REFERENCES asset_types(id) ON DELETE SET NULL,
     sort_order              INTEGER DEFAULT 0,
     created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -2241,10 +2245,20 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
             stats[table] = {'copied': 0, 'skipped': len(rows), 'note': 'no matching columns'}
             continue
 
+        # Self-referential FK columns (e.g. asset_items.container_item_id → asset_items.id)
+        # must be NULLed on first pass, then updated after all rows are inserted.
+        SELF_REF_COLS = {
+            'asset_items': ['container_item_id'],
+        }
+        self_ref = SELF_REF_COLS.get(table, [])
+        deferred_updates = []  # (id, col, value) tuples for second pass
+
         cols_str = ', '.join(f'"{c}"' for c in common_cols)
         placeholders = ', '.join(['%s'] * len(common_cols))
         # Build index map for extracting only common columns from each row
         col_indices = [sqlite_cols.index(c) for c in common_cols]
+        # Index of 'id' column for deferred updates
+        id_col_idx = common_cols.index('id') if 'id' in common_cols else None
 
         copied = 0
         skipped = 0
@@ -2252,8 +2266,15 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
 
         for row in rows:
             values = []
-            for idx in col_indices:
+            for i, idx in enumerate(col_indices):
                 v = row[idx]
+                col_name = common_cols[i]
+                # NULL out self-referential FK columns, defer to second pass
+                if col_name in self_ref and v is not None:
+                    row_id = row[sqlite_cols.index('id')] if 'id' in sqlite_cols else None
+                    if row_id is not None:
+                        deferred_updates.append((row_id, col_name, v))
+                    v = None
                 # Convert SQLite bytes to psycopg2 Binary for BYTEA columns
                 if isinstance(v, bytes):
                     import psycopg2
@@ -2268,8 +2289,9 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
                     f'INSERT INTO "{table}" ({cols_str}) VALUES ({placeholders}) ON CONFLICT DO NOTHING',
                     values
                 )
+                row_count = pg_cur.rowcount  # capture BEFORE releasing savepoint
                 pg_cur.execute("RELEASE SAVEPOINT row_sp")
-                if pg_cur.rowcount > 0:
+                if row_count > 0:
                     copied += 1
                 else:
                     skipped += 1
@@ -2280,8 +2302,17 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
                 if len(errors) < 3:
                     errors.append(str(e).split('\n')[0])
 
+        # Second pass: restore self-referential FK values
+        for row_id, col_name, val in deferred_updates:
+            try:
+                pg_cur.execute(f'UPDATE "{table}" SET "{col_name}" = %s WHERE id = %s', (val, row_id))
+            except Exception:
+                pass
+
         pg_conn.commit()
         stat = {'copied': copied, 'skipped': skipped}
+        if deferred_updates:
+            stat['deferred_fk'] = len(deferred_updates)
         if errors:
             stat['errors'] = errors
             print(f"    ⚠ {table}: {len(errors)}+ row errors, first: {errors[0][:120]}")
