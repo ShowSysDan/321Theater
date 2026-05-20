@@ -250,8 +250,26 @@ function switchTab(name) {
       _pollAdvanceSync();
       markAdvanceRead();
     } else {
+      // Pull fresh advance values from the server first so any tab that
+      // mirrors / derives from advance data reflects the latest edits
+      // without a hard page refresh.
+      _pollAdvanceSync().finally(() => {
+        if (name === 'schedule' && typeof _syncScheduleMirrors === 'function') {
+          _syncScheduleMirrors();
+        }
+        if (name === 'staffing') {
+          if (typeof window.ensureLaborDaysFromLoadRange === 'function') {
+            window.ensureLaborDaysFromLoadRange();
+          }
+          if (typeof window._initQuickFillDefaults === 'function') {
+            window._initQuickFillDefaults();
+          }
+          if (typeof window.validateShowWithinLoadRange === 'function') {
+            window.validateShowWithinLoadRange();
+          }
+        }
+      });
       _pollHeartbeat();
-      if (name === 'schedule' && typeof _syncScheduleMirrors === 'function') _syncScheduleMirrors();
       if (name === 'comments') loadComments();
       if (name === 'export')   { loadAttachments(); loadReadReceipts(); }
       if (name === 'assets' && typeof loadAssetsTab === 'function') loadAssetsTab();

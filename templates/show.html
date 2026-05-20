@@ -696,8 +696,8 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
         ] %}
         <div class="field-group">
           <label class="field-label">{{ label }}</label>
-          <div class="field-input" style="background:var(--bg-hover);color:var(--text-muted);cursor:default">
-            {{ adv(key) or '—' }}
+          <div class="field-input sched-adv-mirror" data-adv-key="{{ key }}" style="background:var(--bg-hover);color:var(--text-muted);cursor:default">
+            {{ adv(key) | multi or '—' }}
           </div>
           <p class="field-hint" style="font-size:10px;color:var(--text-muted);margin-top:3px">From Advance Sheet</p>
         </div>
@@ -2795,6 +2795,12 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       }
     });
   });
+
+  // Expose helpers so switchTab() (in app.js) can refresh labor-tab state
+  // when the user flips back from the Advance Sheet without forcing a reload.
+  window.ensureLaborDaysFromLoadRange = ensureLaborDaysFromLoadRange;
+  window._initQuickFillDefaults       = _initQuickFillDefaults;
+  window.validateShowWithinLoadRange  = validateShowWithinLoadRange;
 
   /* ── Day-level actions ───────────────────────────────── */
 

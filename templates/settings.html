@@ -1742,20 +1742,24 @@
 {% endif %}
 
 <div id="edit-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeEditModal()">
-  <div class="modal-card">
+  <div class="modal-card modal-card-wide">
     <div class="modal-header">Edit Contact <button onclick="closeEditModal()" class="modal-close">×</button></div>
     <div class="modal-body">
       <input type="hidden" id="edit-id">
-      <div class="field-group"><label class="field-label">NAME</label><input type="text" id="edit-name" class="field-input"></div>
-      <div class="field-group"><label class="field-label">TITLE</label><input type="text" id="edit-title" class="field-input"></div>
-      <div class="field-group">
-        <label class="field-label">DEPARTMENT</label>
-        <select id="edit-dept" class="field-input">
-          <option value="">— None —</option>
-          {% for d in departments %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
-        </select>
+      <div class="form-row cols-2">
+        <div class="field-group"><label class="field-label">NAME</label><input type="text" id="edit-name" class="field-input"></div>
+        <div class="field-group"><label class="field-label">TITLE</label><input type="text" id="edit-title" class="field-input"></div>
       </div>
-      <div class="field-group"><label class="field-label">PHONE</label><input type="text" id="edit-phone" class="field-input"></div>
+      <div class="form-row cols-2">
+        <div class="field-group">
+          <label class="field-label">DEPARTMENT</label>
+          <select id="edit-dept" class="field-input">
+            <option value="">— None —</option>
+            {% for d in departments %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field-group"><label class="field-label">PHONE</label><input type="text" id="edit-phone" class="field-input"></div>
+      </div>
       <div class="field-group"><label class="field-label">EMAIL</label><input type="email" id="edit-email" class="field-input"></div>
       {% if user.role == 'admin' %}
       <div class="field-group" style="margin-top:4px">

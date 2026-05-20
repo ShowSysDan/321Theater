@@ -747,6 +747,7 @@ input[type=checkbox].oh-check:disabled {
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 .modal-overlay.hidden { display: none; }
 .modal-card { background: var(--bg-card); border: 1px solid var(--border-light); border-radius: var(--radius-lg); width: 480px; max-width: 90vw; overflow: hidden; }
+.modal-card.modal-card-wide { width: 640px; }
 .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 22px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 16px; }
 .modal-close { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--text-muted); }
 .modal-close:hover { color: var(--red); }
