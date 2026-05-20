@@ -430,6 +430,10 @@
 <script>
 const SCHED_PERFORMANCES = {{ performances | tojson }};
 const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
+// Expose on window so app.js helpers (which load before this script runs)
+// can reach them reliably from the global scope.
+window.SCHED_PERFORMANCES = SCHED_PERFORMANCES;
+window.SCHED_TEMPLATES = SCHED_TEMPLATES;
 // Mutable so the labor-tab dropdowns can react to live venue edits on the
 // Advance Sheet. Read everywhere via window.SHOW_VENUE.
 window.SHOW_VENUE = {{ show.venue | tojson }};
@@ -696,8 +700,8 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
         ] %}
         <div class="field-group">
           <label class="field-label">{{ label }}</label>
-          <div class="field-input" style="background:var(--bg-hover);color:var(--text-muted);cursor:default">
-            {{ adv(key) or '—' }}
+          <div class="field-input sched-adv-mirror" data-adv-key="{{ key }}" style="background:var(--bg-hover);color:var(--text-muted);cursor:default">
+            {{ adv(key) | multi or '—' }}
           </div>
           <p class="field-hint" style="font-size:10px;color:var(--text-muted);margin-top:3px">From Advance Sheet</p>
         </div>
@@ -2052,6 +2056,9 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     closePerfForm();
     _refreshPerfRow(json.performance, !id);
     _updateHeaderDate();
+    // Re-sync the Schedule tab's day structure so a newly added performance
+    // (or edited date) shows up as a new day tab/pane without a reload.
+    if (typeof _syncScheduleStructure === 'function') _syncScheduleStructure();
     showSaveToast('✓ Saved');
   }
   async function deletePerf(id) {
@@ -2063,6 +2070,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     if (row) row.remove();
     _checkPerfEmpty();
     _updateHeaderDate();
+    if (typeof _syncScheduleStructure === 'function') _syncScheduleStructure();
     showSaveToast('✓ Saved');
   }
   function _refreshPerfRow(p, isNew) {
@@ -2795,6 +2803,12 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       }
     });
   });
+
+  // Expose helpers so switchTab() (in app.js) can refresh labor-tab state
+  // when the user flips back from the Advance Sheet without forcing a reload.
+  window.ensureLaborDaysFromLoadRange = ensureLaborDaysFromLoadRange;
+  window._initQuickFillDefaults       = _initQuickFillDefaults;
+  window.validateShowWithinLoadRange  = validateShowWithinLoadRange;
 
   /* ── Day-level actions ───────────────────────────────── */
 

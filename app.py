@@ -2094,6 +2094,82 @@ def auto_archive_past_shows():
     db.close()
 
 
+def _build_schedule_days(db, show_id, show_row=None):
+    """
+    Build the canonical list of schedule "days" for a show: one entry per
+    calendar date that has either a performance or falls inside the
+    load-in → load-out window. Used by both view_show() (Jinja render)
+    and the JSON sync endpoint that lets the Schedule tab pick up newly
+    added performances without a full page reload.
+    """
+    if show_row is None:
+        show_row = db.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
+    performances = db.execute("""
+        SELECT * FROM show_performances WHERE show_id = ?
+        ORDER BY CASE WHEN perf_date IS NULL THEN 1 ELSE 0 END, perf_date, perf_time, id
+    """, (show_id,)).fetchall()
+    performances = [dict(p) for p in performances]
+    for _p in performances:
+        _pd = _p.get('perf_date')
+        if _pd is not None and not isinstance(_pd, str):
+            try: _p['perf_date'] = _pd.strftime('%Y-%m-%d')
+            except AttributeError: _p['perf_date'] = str(_pd)
+
+    schedule_days = []
+    _date_to_idx = {}
+    for _p in performances:
+        key = _p.get('perf_date') or f"__null_{_p['id']}"
+        idx = _date_to_idx.get(key)
+        if idx is None:
+            idx = len(schedule_days)
+            _date_to_idx[key] = idx
+            schedule_days.append({
+                'perf_date': _p.get('perf_date'),
+                'date_key': _p.get('perf_date') or key,
+                'perfs': [],
+                'perf_ids': [],
+            })
+        schedule_days[idx]['perfs'].append(_p)
+        schedule_days[idx]['perf_ids'].append(_p['id'])
+
+    def _iso(v):
+        s = str(v) if v is not None else ''
+        return s[:10] if s else ''
+    _li = _iso(show_row['load_in_date']) if show_row else ''
+    _lo = _iso(show_row['load_out_date']) if show_row else ''
+    if _li and _lo:
+        try:
+            from datetime import date as _date, timedelta as _td
+            _d1 = _date.fromisoformat(_li)
+            _d2 = _date.fromisoformat(_lo)
+            if _d2 >= _d1:
+                _cur = _d1
+                while _cur <= _d2:
+                    _k = _cur.isoformat()
+                    if _k not in _date_to_idx:
+                        _date_to_idx[_k] = len(schedule_days)
+                        schedule_days.append({
+                            'perf_date': _k,
+                            'date_key': _k,
+                            'perfs': [],
+                            'perf_ids': [],
+                        })
+                    _cur = _cur + _td(days=1)
+        except (ValueError, TypeError):
+            pass
+
+    def _sort_key(d):
+        pd = d.get('perf_date')
+        return (0, pd) if pd else (1, d.get('date_key') or '')
+    schedule_days.sort(key=_sort_key)
+
+    for d in schedule_days:
+        d['primary_perf_id'] = d['perf_ids'][0] if d['perf_ids'] else None
+        if not d.get('date_key'):
+            d['date_key'] = d.get('perf_date') or f"__null_{d['primary_perf_id']}"
+    return performances, schedule_days
+
+
 def _sync_show_primary_date(db, show_id):
     """Keep shows.show_date/show_time in sync with the earliest performance."""
     first = db.execute("""
@@ -2745,75 +2821,9 @@ def show_page(show_id):
     ).fetchall()
     notes_data = {r['field_key']: r['field_value'] for r in note_rows}
 
-    # Performances
-    performances = db.execute("""
-        SELECT * FROM show_performances WHERE show_id = ?
-        ORDER BY CASE WHEN perf_date IS NULL THEN 1 ELSE 0 END, perf_date, perf_time, id
-    """, (show_id,)).fetchall()
-    performances = [dict(p) for p in performances]
-    for _p in performances:
-        _pd = _p.get('perf_date')
-        if _pd is not None and not isinstance(_pd, str):
-            try: _p['perf_date'] = _pd.strftime('%Y-%m-%d')
-            except AttributeError: _p['perf_date'] = str(_pd)
-
-    # Group performances by date, then extend with every date in the
-    # load-in → load-out range so the schedule has a day tab for each
-    # calendar day of the production.
-    schedule_days = []
-    _date_to_idx = {}
-    for _p in performances:
-        key = _p.get('perf_date') or f"__null_{_p['id']}"
-        idx = _date_to_idx.get(key)
-        if idx is None:
-            idx = len(schedule_days)
-            _date_to_idx[key] = idx
-            schedule_days.append({
-                'perf_date': _p.get('perf_date'),
-                'date_key': _p.get('perf_date') or key,
-                'perfs': [],
-                'perf_ids': [],
-            })
-        schedule_days[idx]['perfs'].append(_p)
-        schedule_days[idx]['perf_ids'].append(_p['id'])
-
-    # Add any load-in → load-out calendar dates not already covered by a perf
-    def _iso(v):
-        s = str(v) if v is not None else ''
-        return s[:10] if s else ''
-    _li = _iso(show['load_in_date'])
-    _lo = _iso(show['load_out_date'])
-    if _li and _lo:
-        try:
-            from datetime import date as _date, timedelta as _td
-            _d1 = _date.fromisoformat(_li)
-            _d2 = _date.fromisoformat(_lo)
-            if _d2 >= _d1:
-                _cur = _d1
-                while _cur <= _d2:
-                    _k = _cur.isoformat()
-                    if _k not in _date_to_idx:
-                        _date_to_idx[_k] = len(schedule_days)
-                        schedule_days.append({
-                            'perf_date': _k,
-                            'date_key': _k,
-                            'perfs': [],
-                            'perf_ids': [],
-                        })
-                    _cur = _cur + _td(days=1)
-        except (ValueError, TypeError):
-            pass
-
-    # Sort days by calendar date (unscheduled/null keys sort last)
-    def _sort_key(d):
-        pd = d.get('perf_date')
-        return (0, pd) if pd else (1, d.get('date_key') or '')
-    schedule_days.sort(key=_sort_key)
-
-    for d in schedule_days:
-        d['primary_perf_id'] = d['perf_ids'][0] if d['perf_ids'] else None
-        if not d.get('date_key'):
-            d['date_key'] = d.get('perf_date') or f"__null_{d['primary_perf_id']}"
+    # Performances and per-day groupings (one entry per calendar date covered
+    # by either a performance or the load-in → load-out window).
+    performances, schedule_days = _build_schedule_days(db, show_id, show)
 
     # Export log
     exports = db.execute("""
@@ -3861,6 +3871,27 @@ def sync_advance(show_id):
         'fields':       {r['field_key']: r['field_value'] for r in changed_rows},
         'active_users': others,
     })
+
+
+@app.route('/shows/<int:show_id>/schedule-state')
+@login_required
+def schedule_state(show_id):
+    """
+    Return the canonical schedule day structure so the Schedule tab can pick
+    up newly added/removed performances and load-range changes without a
+    full page reload. Only the day skeleton is returned — individual row
+    edits stay local to the user's DOM until they're saved.
+    """
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    db = get_db()
+    show = db.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
+    if not show:
+        db.close()
+        return jsonify({'success': False, 'error': 'Not found.'}), 404
+    _, schedule_days = _build_schedule_days(db, show_id, show)
+    db.close()
+    return jsonify({'success': True, 'schedule_days': schedule_days})
 
 
 @app.route('/shows/<int:show_id>/heartbeat', methods=['POST'])

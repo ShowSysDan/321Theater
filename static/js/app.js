@@ -225,7 +225,18 @@ function _showOtherSavedBanner(savedAt) {
 }
 
 /* ── Tab Switching ─────────────────────────────────────────────── */
-function switchTab(name) {
+async function switchTab(name) {
+  // If there's a debounced save pending against the *previous* tab, flush
+  // it now so it lands at the correct endpoint (saveActive() resolves
+  // against the current activeTab). Otherwise an in-flight advance edit
+  // would be POSTed to /save/schedule after the switch — and the new tab's
+  // structure-sync fetch would also race ahead of the save.
+  let pendingSave = null;
+  if (_isDirty && saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    pendingSave = saveActive();
+  }
   activeTab = name;
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -247,11 +258,11 @@ function switchTab(name) {
   // Immediately update presence and load tab-specific data
   if (SHOW_ID) {
     if (name === 'advance') {
+      if (pendingSave) await pendingSave.catch(() => {});
       _pollAdvanceSync();
       markAdvanceRead();
     } else {
       _pollHeartbeat();
-      if (name === 'schedule' && typeof _syncScheduleMirrors === 'function') _syncScheduleMirrors();
       if (name === 'comments') loadComments();
       if (name === 'export')   { loadAttachments(); loadReadReceipts(); }
       if (name === 'assets' && typeof loadAssetsTab === 'function') loadAssetsTab();
@@ -260,6 +271,25 @@ function switchTab(name) {
       // without a full page reload.
       if (name === 'staffing' && typeof window._refreshLaborPositionsForVenue === 'function') {
         window._refreshLaborPositionsForVenue(true);
+      }
+      // Wait for any pending save to land so the server sees the latest
+      // advance/load-range edits before we re-pull derived state.
+      if (pendingSave) await pendingSave.catch(() => {});
+      await _pollAdvanceSync();
+      if (name === 'schedule') {
+        if (typeof _syncScheduleMirrors === 'function') _syncScheduleMirrors();
+        if (typeof _syncScheduleStructure === 'function') _syncScheduleStructure();
+      }
+      if (name === 'staffing') {
+        if (typeof window.ensureLaborDaysFromLoadRange === 'function') {
+          window.ensureLaborDaysFromLoadRange();
+        }
+        if (typeof window._initQuickFillDefaults === 'function') {
+          window._initQuickFillDefaults();
+        }
+        if (typeof window.validateShowWithinLoadRange === 'function') {
+          window.validateShowWithinLoadRange();
+        }
       }
     }
   }
@@ -479,10 +509,11 @@ function fmtDate(s) {
 
 function saveActive() {
   clearTimeout(saveTimer);
-  if (activeTab === 'advance')   saveAdvance();
-  if (activeTab === 'schedule')  saveSchedule();
-  if (activeTab === 'postnotes') savePostNotes();
-  if (activeTab === 'staffing' && typeof saveLaborAll === 'function') saveLaborAll();
+  if (activeTab === 'advance')   return saveAdvance();
+  if (activeTab === 'schedule')  return saveSchedule();
+  if (activeTab === 'postnotes') return savePostNotes();
+  if (activeTab === 'staffing' && typeof saveLaborAll === 'function') return saveLaborAll();
+  return Promise.resolve();
 }
 
 /* ── Advance Form ──────────────────────────────────────────────── */
@@ -927,6 +958,262 @@ function _bindRowDrag(tr) {
 
 function _initRowDrag() {
   document.querySelectorAll('.schedule-row').forEach(tr => _bindRowDrag(tr));
+}
+
+/* ── Schedule Day Structure Sync ───────────────────────────────────────
+   When the user adds / removes performances on the Advance Sheet or edits
+   the load-in / load-out range, the Schedule tab's day-tab structure must
+   grow/shrink to match. We fetch the canonical day list from the server
+   and update the DOM in place — never removing a pane that exists locally,
+   so unsaved row edits are never destroyed. */
+
+async function _syncScheduleStructure() {
+  if (!SHOW_ID) return;
+  const form = document.getElementById('schedule-form');
+  if (!form) return;
+  try {
+    const r = await fetch(`/shows/${SHOW_ID}/schedule-state`);
+    if (!r.ok) return;
+    const d = await r.json();
+    if (!d || !d.success) return;
+    _renderScheduleDays(d.schedule_days || []);
+  } catch (_) { /* fail silently */ }
+}
+
+/* MM/DD slice used in day-tab labels (matches the Jinja "(d.perf_date|string)[5:] | replace('-','/')" expression). */
+function _shortDateLabel(iso) {
+  if (!iso) return '';
+  return String(iso).slice(5).replace('-', '/');
+}
+
+function _renderScheduleDays(days) {
+  const form = document.getElementById('schedule-form');
+  if (!form || !days.length) return;  // empty → leave fallback HTML alone
+
+  // Index existing panes by data-day-key. Capture the fallback pane (no
+  // data-day-key) so we can promote it into the first day if needed.
+  const existing = {};
+  let fallback = null;
+  form.querySelectorAll('.sched-day-pane').forEach(p => {
+    const key = p.dataset.dayKey || '';
+    if (key) existing[key] = p;
+    else fallback = p;
+  });
+
+  // Promote the fallback pane into the first day's pane so any unsaved rows
+  // the user added before any performance existed move with them.
+  if (fallback && !existing[days[0].date_key]) {
+    const firstKey = days[0].date_key;
+    fallback.dataset.dayKey = firstKey;
+    fallback.dataset.perfId = days[0].primary_perf_id || '';
+    const tbody = fallback.querySelector('tbody');
+    if (tbody) tbody.id = `schedule-rows-${firstKey}`;
+    // The fallback pane's footer buttons were rendered with dayKey=null —
+    // re-bind them to the new date_key so clicking "+ Add Row" targets the
+    // promoted day's tbody. (The header is fully replaced below by
+    // _updateDayPaneHeader, which handles the toolbar buttons.)
+    const footer = fallback.querySelector('.form-section-footer');
+    if (footer) {
+      const dk = JSON.stringify(firstKey);
+      footer.innerHTML = `
+        <button type="button" class="btn btn-ghost btn-sm" onclick='addScheduleRow(${dk})'>+ Add Row</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick='sortSchedRowsByTime(${dk})'>⇅ Sort by time</button>
+      `;
+    }
+    existing[firstKey] = fallback;
+  }
+
+  // Build / refresh each pane in the order the server gave us, then re-insert
+  // them so chronological order is preserved even when a new earlier date is
+  // added between existing ones.
+  const ordered = days.map((d, idx) => {
+    if (existing[d.date_key]) {
+      _updateDayPaneHeader(existing[d.date_key], d, idx + 1, days.length);
+      return existing[d.date_key];
+    }
+    return _buildDayPane(d, idx + 1, days.length);
+  });
+
+  // Find a stable anchor sibling: the element just before the first existing
+  // day pane (typically the VENUE section or the day-tabs container). New
+  // panes get inserted after it in server order. Orphan panes (in the DOM
+  // but not in the server list) are left in place — they may hold unsaved
+  // rows the user wants to keep.
+  const firstPane = form.querySelector('.sched-day-pane');
+  let prev = firstPane ? firstPane.previousElementSibling : null;
+  ordered.forEach(p => {
+    if (p.parentElement) p.parentElement.removeChild(p);
+    if (prev && prev.parentElement) {
+      prev.insertAdjacentElement('afterend', p);
+    } else if (firstPane && firstPane.parentElement) {
+      firstPane.parentElement.insertBefore(p, firstPane);
+    } else {
+      form.appendChild(p);
+    }
+    prev = p;
+  });
+
+  _syncDayTabs(form, days);
+  _syncCopyDropdowns(days);
+}
+
+function _buildPaneHeader(d, dayNum, totalDays) {
+  const perfTimes = (d.perfs || []).filter(p => p.perf_time).map(p => parseTimeToHHMM(p.perf_time));
+  const dateLabel = totalDays > 1 ? ` — DAY ${dayNum}${d.perf_date ? ': ' + _esc(d.perf_date) : ''}` : '';
+  const timesLabel = perfTimes.length
+    ? ` <span class="text-dim" style="font-weight:400">(${perfTimes.map(_esc).join(', ')})</span>`
+    : '';
+  const keyArg = JSON.stringify(d.date_key);
+  let actions = '';
+  if (!RESTRICTED) {
+    const templates = window.SCHED_TEMPLATES || [];
+    const tmplDrop = templates.length ? `
+      <select class="field-input" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
+              onchange='applySchedTemplate(this.value, ${keyArg}); this.value=""'>
+        <option value="">Apply template…</option>
+        ${templates.map(t => `<option value="${_esc(t.id)}">${_esc(t.name)}</option>`).join('')}
+      </select>` : '';
+    // Copy-from dropdown is populated by _syncCopyDropdowns so it always
+    // reflects the current day list.
+    const copyDrop = totalDays > 1 ? `
+      <select class="field-input sched-copy-from" data-self-key="${_esc(d.date_key)}"
+              style="width:auto;font-size:11px;padding:3px 6px;height:auto"
+              onchange='copySchedDay(this.value, ${keyArg}); this.value=""'>
+        <option value="">Copy from…</option>
+      </select>` : '';
+    const pullTimeBtn = perfTimes.length ? `
+      <button type="button" class="btn btn-sm btn-ghost"
+              onclick='pullAdvanceTime(${keyArg}, ${JSON.stringify(perfTimes)})'>Pull time${perfTimes.length > 1 ? 's' : ''}</button>` : '';
+    actions = `
+      <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-wrap:wrap">
+        ${tmplDrop}
+        ${copyDrop}
+        ${pullTimeBtn}
+        <button type="button" class="btn btn-sm btn-ghost" onclick='sortSchedRowsByTime(${keyArg})' title="Sort rows by start time">⇅ Sort</button>
+        <button type="button" class="btn btn-sm btn-ghost" onclick='addScheduleRow(${keyArg})'>+ Add Row</button>
+      </div>`;
+  }
+  return `
+    <div class="form-section-header">
+      <span class="section-icon">◈</span>
+      TIMELINE${dateLabel}${timesLabel}
+      ${actions}
+    </div>`;
+}
+
+function _updateDayPaneHeader(pane, d, dayNum, totalDays) {
+  const header = pane.querySelector('.form-section-header');
+  if (!header) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = _buildPaneHeader(d, dayNum, totalDays).trim();
+  const fresh = tmp.firstElementChild;
+  if (fresh) header.replaceWith(fresh);
+}
+
+function _buildDayPane(d, dayNum, totalDays) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'sched-day-pane hidden';
+  wrapper.dataset.dayKey = d.date_key;
+  wrapper.dataset.perfId = d.primary_perf_id || '';
+  wrapper.style.display = 'none';
+  const keyArg = JSON.stringify(d.date_key);
+  const dragCol = RESTRICTED ? '' : '<th style="width:24px"></th>';
+  const delCol  = RESTRICTED ? '' : '<th style="width:40px"></th>';
+  const footer  = RESTRICTED ? '' : `
+      <div class="form-section-footer">
+        <button type="button" class="btn btn-ghost btn-sm" onclick='addScheduleRow(${keyArg})'>+ Add Row</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick='sortSchedRowsByTime(${keyArg})'>⇅ Sort by time</button>
+      </div>`;
+  wrapper.innerHTML = `
+    <div class="form-section">
+      ${_buildPaneHeader(d, dayNum, totalDays)}
+      <div class="form-section-body no-pad">
+        <table class="schedule-table">
+          <thead>
+            <tr>
+              ${dragCol}
+              <th style="width:100px">START</th>
+              <th style="width:100px">END</th>
+              <th>DESCRIPTION</th>
+              <th style="width:160px">NOTES</th>
+              ${delCol}
+            </tr>
+          </thead>
+          <tbody id="schedule-rows-${_esc(d.date_key)}"></tbody>
+        </table>
+      </div>
+      ${footer}
+    </div>`;
+  return wrapper;
+}
+
+function _syncDayTabs(form, days) {
+  let container = form.querySelector('.sched-day-tabs');
+  if (days.length <= 1) {
+    if (container) container.style.display = 'none';
+    // Single day: make the one server pane visible; hide any orphans so the
+    // tab doesn't show two timelines stacked on top of each other.
+    if (days.length === 1) {
+      const onlyKey = days[0].date_key;
+      form.querySelectorAll('.sched-day-pane').forEach(p => {
+        const show = (p.dataset.dayKey || '') === onlyKey;
+        p.classList.toggle('hidden', !show);
+        p.style.display = show ? '' : 'none';
+      });
+    }
+    return;
+  }
+  if (!container) {
+    container = document.createElement('div');
+    container.className = 'sched-day-tabs';
+    container.style.cssText = 'display:flex;gap:6px;padding:0 0 0 0;margin-bottom:0';
+    const firstPane = form.querySelector('.sched-day-pane');
+    if (firstPane) firstPane.parentElement.insertBefore(container, firstPane);
+  } else {
+    container.style.display = 'flex';
+  }
+
+  // Preserve the currently visible day if it still exists, otherwise fall
+  // back to the first day.
+  const visible = Array.from(form.querySelectorAll('.sched-day-pane'))
+    .find(p => !p.classList.contains('hidden') && p.style.display !== 'none');
+  let activeKey = visible?.dataset.dayKey || '';
+  if (!days.some(d => d.date_key === activeKey)) activeKey = days[0].date_key;
+
+  container.innerHTML = '';
+  days.forEach((d, idx) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    const isActive = d.date_key === activeKey;
+    btn.className = `btn btn-sm ${isActive ? 'btn-primary' : 'btn-ghost'} sched-day-tab`;
+    btn.dataset.dayKey = d.date_key;
+    btn.dataset.perfId = d.primary_perf_id || '';
+    btn.setAttribute('onclick', `switchSchedDay(${JSON.stringify(d.date_key)}, this)`);
+    btn.textContent = `DAY ${idx + 1}` + (d.perf_date ? ` · ${_shortDateLabel(d.perf_date)}` : '');
+    container.appendChild(btn);
+  });
+
+  // Hide/show panes to match the active day.
+  form.querySelectorAll('.sched-day-pane').forEach(p => {
+    const k = p.dataset.dayKey || '';
+    const show = k === activeKey;
+    p.classList.toggle('hidden', !show);
+    p.style.display = show ? '' : 'none';
+  });
+}
+
+function _syncCopyDropdowns(days) {
+  if (days.length <= 1) return;
+  document.querySelectorAll('.sched-day-pane .sched-copy-from').forEach(sel => {
+    const selfKey = sel.dataset.selfKey || '';
+    const opts = ['<option value="">Copy from…</option>'];
+    days.forEach((d, idx) => {
+      if (d.date_key === selfKey) return;
+      const label = `Day ${idx + 1}${d.perf_date ? ' (' + _shortDateLabel(d.perf_date) + ')' : ''}`;
+      opts.push(`<option value="${_esc(d.date_key)}">${_esc(label)}</option>`);
+    });
+    sel.innerHTML = opts.join('');
+  });
 }
 
 function switchSchedDay(dayKey, btn) {
