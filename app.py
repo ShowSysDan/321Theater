@@ -5207,6 +5207,9 @@ def settings():
     pay_rate_levels = [dict(r) for r in db3.execute(
         'SELECT * FROM pay_rate_levels ORDER BY sort_order, name'
     ).fetchall()] if _can_manage_crew else []
+    labor_billable_items = [dict(r) for r in db3.execute(
+        'SELECT * FROM labor_billable_items ORDER BY sort_order, name'
+    ).fetchall()] if _can_manage_crew else []
     db3.close()
 
     db_settings = {
@@ -5286,6 +5289,7 @@ def settings():
                            contact_venues=contact_venues,
                            crew_members_list=crew_members_list,
                            pay_rate_levels=pay_rate_levels,
+                           labor_billable_items=labor_billable_items,
                            wifi_network=all_settings.get('wifi_network', ''),
                            wifi_password=all_settings.get('wifi_password', ''),
                            upload_max_mb=all_settings.get('upload_max_mb', '20'),
@@ -8256,7 +8260,12 @@ def reorder_labor_requests(show_id):
 # ─── Labor Scheduler ─────────────────────────────────────────────────────────
 
 def _calc_labor_cost_for_show(db, show_id):
-    """Return labor line items and total cost for a show."""
+    """Return labor line items and total cost for a show.
+
+    Includes both hourly labor lines and per-crew billable extras
+    (configured in Settings → Per-Crew Billable Items). Each extra is
+    multiplied by the number of scheduled labor lines on the show.
+    """
     rows = db.execute("""
         SELECT lr.id, lr.work_date, lr.in_time, lr.out_time,
                lr.break_start, lr.break_end, lr.break2_start, lr.break2_end,
@@ -8274,6 +8283,7 @@ def _calc_labor_cost_for_show(db, show_id):
 
     lines = []
     total = 0.0
+    scheduled_count = 0
     for r in rows:
         hours = _calc_hours(r['in_time'], r['out_time'],
                             r['break_start'], r['break_end'],
@@ -8281,6 +8291,8 @@ def _calc_labor_cost_for_show(db, show_id):
         rate = r['override_rate'] if r['override_rate'] is not None else (r['level_rate'] or 0)
         cost = round(hours * rate, 2)
         total += cost
+        if r['is_scheduled']:
+            scheduled_count += 1
         lines.append({
             'id': r['id'],
             'work_date': r['work_date'],
@@ -8294,6 +8306,32 @@ def _calc_labor_cost_for_show(db, show_id):
             'level_name': r['level_name'] or '',
             'is_scheduled': bool(r['is_scheduled']),
         })
+
+    if scheduled_count > 0:
+        billable_items = db.execute(
+            'SELECT id, name, cost_per_crew FROM labor_billable_items '
+            'ORDER BY sort_order, name'
+        ).fetchall()
+        for item in billable_items:
+            cost_each = float(item['cost_per_crew'] or 0)
+            line_total = round(cost_each * scheduled_count, 2)
+            total += line_total
+            lines.append({
+                'id': f"billable-{item['id']}",
+                'work_date': '',
+                'position_name': item['name'] or '',
+                'tech_name': '',
+                'in_time': '',
+                'out_time': '',
+                'hours': scheduled_count,
+                'hourly_rate': cost_each,
+                'line_total': line_total,
+                'level_name': '',
+                'is_scheduled': True,
+                'is_billable_extra': True,
+                'crew_count': scheduled_count,
+            })
+
     return lines, round(total, 2)
 
 
@@ -10354,6 +10392,62 @@ def toggle_crew_qualification():
     db.close()
     syslog_logger.info(f"TECHNICIAN_{action} crew_member_id={crew_member_id} position_id={position_id} by={session.get('username')}")
     return jsonify({'success': True, 'has': has})
+
+
+# ─── Per-Crew Billable Items (auto-added to every show's labor cost) ──────────
+
+@app.route('/settings/labor-billable-items/add', methods=['POST'])
+@scheduler_required
+def add_labor_billable_item():
+    data = request.get_json(force=True) or {}
+    name = data.get('name', '').strip()
+    cost = float(data.get('cost_per_crew') or 0)
+    if not name:
+        return jsonify({'success': False, 'error': 'Name is required.'}), 400
+    db = get_db()
+    max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM labor_billable_items').fetchone()[0]
+    cur = db.execute(
+        'INSERT INTO labor_billable_items (name, cost_per_crew, sort_order) VALUES (?,?,?)',
+        (name, cost, max_order + 10)
+    )
+    bid = cur.lastrowid
+    log_audit_change(db, 'LABOR_BILLABLE_ADD', 'labor_billable_item', bid,
+                     detail=f'{name} ${cost}/crew', table='labor_billable_items')
+    db.commit(); db.close()
+    syslog_logger.info(f"LABOR_BILLABLE_ADD id={bid} name={name!r} cost={cost} by={session.get('username')}")
+    return jsonify({'success': True, 'id': bid, 'name': name, 'cost_per_crew': cost})
+
+
+@app.route('/settings/labor-billable-items/<int:bid>/edit', methods=['POST'])
+@scheduler_required
+def edit_labor_billable_item(bid):
+    data = request.get_json(force=True) or {}
+    name = data.get('name', '').strip()
+    cost = float(data.get('cost_per_crew') or 0)
+    if not name:
+        return jsonify({'success': False, 'error': 'Name is required.'}), 400
+    db = get_db()
+    before = _snapshot_row(db, 'labor_billable_items', bid)
+    db.execute('UPDATE labor_billable_items SET name=?, cost_per_crew=? WHERE id=?',
+               (name, cost, bid))
+    after = _snapshot_row(db, 'labor_billable_items', bid)
+    log_audit(db, 'LABOR_BILLABLE_EDIT', 'labor_billable_item', bid,
+              detail=f'{name} ${cost}/crew', before=before, after=after)
+    db.commit(); db.close()
+    syslog_logger.info(f"LABOR_BILLABLE_EDIT id={bid} name={name!r} cost={cost} by={session.get('username')}")
+    return jsonify({'success': True})
+
+
+@app.route('/settings/labor-billable-items/<int:bid>/delete', methods=['POST'])
+@scheduler_required
+def delete_labor_billable_item(bid):
+    db = get_db()
+    before = _snapshot_row(db, 'labor_billable_items', bid)
+    db.execute('DELETE FROM labor_billable_items WHERE id=?', (bid,))
+    log_audit(db, 'LABOR_BILLABLE_DELETE', 'labor_billable_item', bid, before=before)
+    db.commit(); db.close()
+    syslog_logger.info(f"LABOR_BILLABLE_DELETE id={bid} by={session.get('username')}")
+    return jsonify({'success': True})
 
 
 # ─── Asset Manager — Warehouse Locations ──────────────────────────────────────

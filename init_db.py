@@ -366,6 +366,16 @@ CREATE TABLE IF NOT EXISTS crew_qualifications (
     PRIMARY KEY (crew_member_id, position_id)
 );
 
+-- Extra billable lines that get auto-added to every show's labor cost.
+-- Quantity = number of scheduled labor lines on the show (e.g. $8/crew parking).
+CREATE TABLE IF NOT EXISTS labor_billable_items (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL,
+    cost_per_crew REAL DEFAULT 0.0,
+    sort_order    INTEGER DEFAULT 0,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Overhead & Project Crew (labor not tied to any show)
 --
 -- Projects are the equivalent of "arts groups" for overhead/project crew —
@@ -1463,6 +1473,14 @@ def migrate_db():
             PRIMARY KEY (crew_member_id, position_id)
         );
 
+        CREATE TABLE IF NOT EXISTS labor_billable_items (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT NOT NULL,
+            cost_per_crew REAL DEFAULT 0.0,
+            sort_order    INTEGER DEFAULT 0,
+            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS overhead_projects (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             name          TEXT UNIQUE NOT NULL,
@@ -2370,6 +2388,14 @@ CREATE TABLE IF NOT EXISTS crew_qualifications (
     crew_member_id INTEGER NOT NULL REFERENCES crew_members(id) ON DELETE CASCADE,
     position_id    INTEGER NOT NULL REFERENCES job_positions(id) ON DELETE CASCADE,
     PRIMARY KEY (crew_member_id, position_id)
+);
+
+CREATE TABLE IF NOT EXISTS labor_billable_items (
+    id            SERIAL PRIMARY KEY,
+    name          TEXT NOT NULL,
+    cost_per_crew REAL DEFAULT 0.0,
+    sort_order    INTEGER DEFAULT 0,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS overhead_projects (

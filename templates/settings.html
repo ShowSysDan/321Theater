@@ -1374,6 +1374,51 @@
   </div>
 
   </div>{# end .two-col #}
+
+  {# ── Per-Crew Billable Items ─────────────────────────────────────────────── #}
+  <div class="form-section">
+    <div class="form-section-header">
+      <span class="section-icon">◈</span> PER-CREW BILLABLE ITEMS
+      <span class="section-count ml-auto text-dim">{{ labor_billable_items|length }} items</span>
+    </div>
+    <div class="form-section-body" style="border-bottom:1px solid var(--border)">
+      <h3 class="sub-section-label">ADD BILLABLE ITEM</h3>
+      <p class="text-dim text-sm" style="margin:0 0 8px 0">
+        Each item is added automatically to every show's labor cost, multiplied by the number of scheduled labor lines on that show. Use for per-crew charges like parking.
+      </p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="new-billable-name" class="field-input" placeholder="Item name (e.g. Parking)" style="max-width:260px">
+        <div style="display:flex;align-items:center;gap:4px">
+          <span style="font-size:12px;color:var(--text-dim)">$</span>
+          <input type="number" id="new-billable-cost" class="field-input" placeholder="0.00" step="0.01" min="0" style="max-width:100px">
+          <span style="font-size:12px;color:var(--text-dim)">/crew</span>
+        </div>
+        <button class="btn btn-primary" onclick="addBillableItem()">Add Item</button>
+      </div>
+      <div id="billable-msg" class="field-msg" style="display:none;margin-top:6px"></div>
+    </div>
+    <div class="form-section-body no-pad">
+      <table class="data-table">
+        <thead><tr><th>ITEM NAME</th><th style="text-align:right">COST PER CREW</th><th style="width:80px">ACTIONS</th></tr></thead>
+        <tbody id="billable-items-tbody">
+          {% for item in labor_billable_items %}
+          <tr data-bid="{{ item.id }}">
+            <td id="billable-name-{{ item.id }}">{{ item.name }}</td>
+            <td id="billable-cost-{{ item.id }}" style="text-align:right" class="mono">${{ '%.2f' | format(item.cost_per_crew) }}</td>
+            <td>
+              <div class="action-btns">
+                <button class="btn btn-xs btn-ghost" onclick="editBillableItem(this)">✎</button>
+                <button class="btn btn-xs btn-danger-ghost" onclick="deleteBillableItem({{ item.id }})">×</button>
+              </div>
+            </td>
+          </tr>
+          {% else %}
+          <tr id="billable-empty"><td colspan="3" class="text-dim" style="text-align:center;padding:16px">No per-crew billable items configured.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 {% endif %}
 
@@ -3551,6 +3596,101 @@ async function deleteCrewMember(mid) {
   if (d.success) {
     document.querySelector(`#crew-tbody tr[data-mid="${mid}"]`)?.remove();
   } else alert(d.error || 'Error deleting technician.');
+}
+
+/* ── Per-Crew Billable Items ─────────────────────────────────── */
+async function addBillableItem() {
+  const name = document.getElementById('new-billable-name').value.trim();
+  const cost = parseFloat(document.getElementById('new-billable-cost').value) || 0;
+  if (!name) return;
+  const msg = document.getElementById('billable-msg');
+  const r = await fetch('/settings/labor-billable-items/add', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, cost_per_crew: cost})
+  });
+  const d = await r.json();
+  msg.style.display = '';
+  if (d.success) {
+    msg.className = 'field-msg field-msg-success'; msg.textContent = 'Item added.';
+    document.getElementById('new-billable-name').value = '';
+    document.getElementById('new-billable-cost').value = '';
+    document.getElementById('billable-empty')?.remove();
+    const tr = document.createElement('tr'); tr.dataset.bid = d.id;
+    tr.innerHTML = `<td id="billable-name-${d.id}">${_esc(d.name)}</td>
+      <td id="billable-cost-${d.id}" style="text-align:right" class="mono">$${parseFloat(d.cost_per_crew).toFixed(2)}</td>
+      <td><div class="action-btns">
+        <button class="btn btn-xs btn-ghost" onclick="editBillableItem(this)">✎</button>
+        <button class="btn btn-xs btn-danger-ghost" onclick="deleteBillableItem(${d.id})">×</button>
+      </div></td>`;
+    document.getElementById('billable-items-tbody').appendChild(tr);
+  } else {
+    msg.className = 'field-msg field-msg-error'; msg.textContent = d.error || 'Error.';
+  }
+}
+
+function editBillableItem(btn) {
+  const tr = btn.closest('tr');
+  const bid = tr.dataset.bid;
+  const nameEl = document.getElementById('billable-name-' + bid);
+  const costEl = document.getElementById('billable-cost-' + bid);
+  if (!nameEl || nameEl.querySelector('input')) return;
+  const origName = nameEl.textContent.trim();
+  const origCostText = costEl.textContent.trim().replace(/[^0-9.]/g, '');
+  nameEl.innerHTML = `<input type="text" class="field-input field-input-sm" style="max-width:220px" value="${_esc(origName)}">`;
+  costEl.innerHTML = `<input type="number" class="field-input field-input-sm" style="max-width:90px;text-align:right" step="0.01" min="0" value="${origCostText}">`;
+  const nameInp = nameEl.querySelector('input');
+  const costInp = costEl.querySelector('input');
+  let saving = false;
+  const revert = () => {
+    nameEl.textContent = origName;
+    costEl.textContent = `$${parseFloat(origCostText).toFixed(2)}`;
+  };
+  const save = async () => {
+    if (saving) return;
+    const newName = nameInp.value.trim();
+    const newCost = parseFloat(costInp.value) || 0;
+    if (!newName) { revert(); return; }
+    saving = true;
+    const r = await fetch(`/settings/labor-billable-items/${bid}/edit`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: newName, cost_per_crew: newCost})
+    });
+    const d = await r.json();
+    if (d.success) {
+      nameEl.textContent = newName;
+      costEl.textContent = `$${newCost.toFixed(2)}`;
+    } else {
+      revert();
+      alert(d.error || 'Error updating item.');
+    }
+  };
+  const handleBlur = (e) => {
+    if (e.relatedTarget && tr.contains(e.relatedTarget)) return;
+    setTimeout(save, 50);
+  };
+  const handleKey = e => {
+    if (e.key === 'Enter') save();
+    if (e.key === 'Escape') revert();
+  };
+  nameInp.addEventListener('blur', handleBlur);
+  costInp.addEventListener('blur', handleBlur);
+  nameInp.addEventListener('keydown', handleKey);
+  costInp.addEventListener('keydown', handleKey);
+  nameInp.focus();
+  nameInp.select();
+}
+
+async function deleteBillableItem(bid) {
+  if (!confirm('Delete this billable item? It will be removed from all show labor cost calculations.')) return;
+  const r = await fetch(`/settings/labor-billable-items/${bid}/delete`, {method: 'POST'});
+  const d = await r.json();
+  if (d.success) {
+    document.querySelector(`#billable-items-tbody tr[data-bid="${bid}"]`)?.remove();
+    const tbody = document.getElementById('billable-items-tbody');
+    if (tbody && !tbody.children.length) {
+      tbody.innerHTML = '<tr id="billable-empty"><td colspan="3" class="text-dim" style="text-align:center;padding:16px">No per-crew billable items configured.</td></tr>';
+    }
+  } else alert(d.error || 'Error deleting item.');
 }
 
 /* ── Email Tab ──────────────────────────────────────────────────── */
