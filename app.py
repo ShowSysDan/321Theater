@@ -4054,12 +4054,21 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
 
 
 def _collect_advance_field_attachments(show_id, base_url):
-    """Fetch all show_attachments tied to file_upload advance-form fields, in
-    advance-form section/field order. Convert each to PDF bytes (wrapping
-    images and Word docs in a generated cover page). Returns a list of PDF
-    byte-strings ready to append to the advance PDF."""
+    """Build the list of PDF byte-strings to append to the advance PDF.
+
+    Includes:
+      1. Files attached to file_upload advance-form fields (in section/field order)
+      2. General files from the show's Files tab (field_key IS NULL)
+      3. An "omitted files" index page listing any attachments that can't be
+         rendered inline (video/audio/archives), shown last.
+
+    Each renderable file is converted to PDF via the appropriate path
+    (passthrough for PDFs, image embed, plain-text wrap, or LibreOffice for
+    Office / OpenDocument formats). Files we can't render are not dropped —
+    they get listed on the trailing index page.
+    """
     db = get_db()
-    rows = db.execute("""
+    field_rows = db.execute("""
         SELECT sa.id, sa.filename, sa.mime_type, sa.file_data, sa.s3_key,
                sa.field_key, sa.description, sa.created_at,
                ff.label AS field_label, fs.label AS section_label,
@@ -4072,10 +4081,20 @@ def _collect_advance_field_attachments(show_id, base_url):
           AND ff.field_type = 'file_upload'
         ORDER BY fs.sort_order, ff.sort_order, sa.created_at
     """, (show_id,)).fetchall()
+    general_rows = db.execute("""
+        SELECT id, filename, mime_type, file_data, s3_key,
+               field_key, description, created_at,
+               NULL AS field_label, NULL AS section_label
+        FROM show_attachments
+        WHERE show_id = ?
+          AND (field_key IS NULL OR field_key = '')
+        ORDER BY created_at, id
+    """, (show_id,)).fetchall()
     db.close()
 
     extras = []
-    for r in rows:
+    omitted = []
+    for r in list(field_rows) + list(general_rows):
         try:
             data = None
             if r['s3_key']:
@@ -4087,57 +4106,257 @@ def _collect_advance_field_attachments(show_id, base_url):
                 data = bytes(r['file_data'])
             if not data:
                 continue
-            mime = (r['mime_type'] or '').lower()
-            fname = (r['filename'] or '').lower()
-            if 'pdf' in mime or fname.endswith('.pdf'):
-                extras.append(data)
-                continue
-            wrapper = _render_attachment_wrapper_pdf(
-                data, mime, r['filename'],
+            pdf_bytes = _convert_attachment_to_pdf(
+                data, r['mime_type'], r['filename'],
                 section_label=r['section_label'],
                 field_label=r['field_label'],
                 description=r['description'] or '',
-                base_url=base_url
+                base_url=base_url,
             )
-            if wrapper:
-                extras.append(wrapper)
+            if pdf_bytes:
+                extras.append(pdf_bytes)
+            else:
+                omitted.append({
+                    'filename':    r['filename'] or '(untitled)',
+                    'mime_type':   r['mime_type'] or '',
+                    'description': r['description'] or '',
+                    'section':     r['section_label'] or '',
+                    'field':       r['field_label'] or '',
+                })
         except Exception as e:
             app.logger.warning(f"Could not append attachment {r['id']} to PDF: {e}")
+            omitted.append({
+                'filename':    r['filename'] or '(untitled)',
+                'mime_type':   r['mime_type'] or '',
+                'description': r['description'] or '',
+                'section':     r['section_label'] or '',
+                'field':       r['field_label'] or '',
+            })
+
+    if omitted:
+        index_pdf = _render_omitted_files_index_pdf(omitted, base_url)
+        if index_pdf:
+            extras.append(index_pdf)
     return extras
+
+
+# ─── Attachment → PDF conversion pipeline ─────────────────────────────────────
+
+_OFFICE_EXTS = {
+    'doc', 'docx', 'odt', 'rtf',
+    'ppt', 'pptx', 'odp',
+    'xls', 'xlsx', 'ods',
+}
+_IMAGE_EXTS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'tiff', 'tif', 'svg'}
+_TEXT_EXTS  = {'txt', 'md', 'markdown', 'csv', 'log', 'tsv'}
+
+
+def _file_ext(filename):
+    if not filename or '.' not in filename:
+        return ''
+    return filename.lower().rsplit('.', 1)[-1]
+
+
+def _convert_attachment_to_pdf(data, mime, filename, section_label,
+                               field_label, description, base_url):
+    """Try every available path to turn an attachment into PDF bytes.
+    Returns PDF bytes on success, None when the file is non-renderable
+    (videos, audio, archives) — caller should list it on the omitted index."""
+    mime = (mime or '').lower()
+    ext  = _file_ext(filename or '')
+
+    if 'pdf' in mime or ext == 'pdf':
+        return data
+
+    if mime.startswith('image/') or ext in _IMAGE_EXTS:
+        return _render_attachment_wrapper_pdf(
+            data, mime, filename, section_label, field_label, description, base_url)
+
+    if mime.startswith('text/') or ext in _TEXT_EXTS:
+        return _render_attachment_wrapper_pdf(
+            data, mime, filename, section_label, field_label, description, base_url)
+
+    if (ext in _OFFICE_EXTS
+            or 'wordprocessingml' in mime
+            or 'opendocument'      in mime
+            or 'msword'            in mime
+            or 'ms-excel'          in mime
+            or 'spreadsheetml'     in mime
+            or 'ms-powerpoint'     in mime
+            or 'presentationml'    in mime
+            or 'rtf'               in mime):
+        pdf = _libreoffice_convert_to_pdf(data, filename)
+        if pdf:
+            return pdf
+        # LibreOffice failed — fall back to lossy text extract for docx so
+        # the file at least shows up in some form.
+        if ext == 'docx' or 'wordprocessingml' in mime:
+            return _render_attachment_wrapper_pdf(
+                data, mime, filename, section_label, field_label, description, base_url)
+
+    return None
+
+
+def _libreoffice_convert_to_pdf(data, filename):
+    """Convert an Office / OpenDocument file to PDF via LibreOffice headless.
+    Each call uses an isolated user-installation dir so concurrent requests
+    don't collide on the shared profile lock. Returns PDF bytes or None."""
+    try:
+        import subprocess, tempfile, os
+        from werkzeug.utils import secure_filename as _sf
+        safe = _sf(filename or '') or 'document'
+        ext = _file_ext(filename or '')
+        if ext and not safe.lower().endswith('.' + ext):
+            safe = f'{safe}.{ext}'
+        with tempfile.TemporaryDirectory(prefix='lo-conv-') as workdir:
+            src_path = os.path.join(workdir, safe)
+            with open(src_path, 'wb') as f:
+                f.write(data)
+            profile_dir = os.path.join(workdir, 'profile')
+            os.makedirs(profile_dir, exist_ok=True)
+            result = subprocess.run(
+                [
+                    'soffice',
+                    f'-env:UserInstallation=file://{profile_dir}',
+                    '--headless', '--nologo', '--nofirststartwizard',
+                    '--convert-to', 'pdf',
+                    '--outdir', workdir,
+                    src_path,
+                ],
+                capture_output=True, timeout=90,
+            )
+            if result.returncode != 0:
+                app.logger.warning(
+                    f"LibreOffice convert failed for {filename}: "
+                    f"rc={result.returncode} stderr={result.stderr[:200]!r}")
+                return None
+            for fn in os.listdir(workdir):
+                if fn.lower().endswith('.pdf') and fn != safe:
+                    with open(os.path.join(workdir, fn), 'rb') as f:
+                        return f.read()
+        return None
+    except FileNotFoundError:
+        app.logger.warning("LibreOffice (soffice) not installed — cannot convert office files")
+        return None
+    except Exception as e:
+        app.logger.warning(f"LibreOffice convert error for {filename}: {e}")
+        return None
+
+
+def _render_omitted_files_index_pdf(omitted, base_url):
+    """Build a single trailing index page listing attachments that couldn't be
+    embedded (video, audio, archives, unknown). Returns PDF bytes or None."""
+    if not omitted:
+        return None
+    try:
+        from markupsafe import escape as _e
+        rows_html = []
+        for item in omitted:
+            ctx_bits = []
+            if item.get('section'):
+                ctx_bits.append(str(_e(item['section'])))
+            if item.get('field'):
+                ctx_bits.append(str(_e(item['field'])))
+            ctx = ' › '.join(ctx_bits) if ctx_bits else '<span class="muted">Files tab</span>'
+            desc = str(_e(item['description'])) if item.get('description') else ''
+            mime = str(_e(item['mime_type'])) if item.get('mime_type') else 'unknown type'
+            rows_html.append(
+                f'<tr>'
+                f'<td class="fn">{str(_e(item["filename"]))}</td>'
+                f'<td class="ctx">{ctx}</td>'
+                f'<td class="mt">{mime}</td>'
+                f'</tr>'
+                + (f'<tr class="desc-row"><td colspan="3" class="desc">{desc}</td></tr>' if desc else '')
+            )
+        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+            @page {{ size: letter; margin: 0.6in 0.55in; }}
+            body {{ font-family: Arial, Helvetica, sans-serif; font-size: 9pt; color: #1a1a1a; }}
+            h1 {{ font-size: 14pt; margin: 0 0 4px 0; }}
+            .lede {{ font-size: 9pt; color: #555; margin-bottom: 14px;
+                     border-bottom: 2px solid #000; padding-bottom: 8px; }}
+            table {{ width: 100%; border-collapse: collapse; }}
+            th {{ text-align: left; font-size: 8pt; letter-spacing: 0.06em;
+                  text-transform: uppercase; color: #B8840A;
+                  border-bottom: 1px solid #ccc; padding: 4px 6px; }}
+            td {{ padding: 5px 6px; border-bottom: 1px solid #eee; vertical-align: top; }}
+            td.fn {{ font-weight: 600; }}
+            td.ctx {{ font-size: 8pt; color: #444; }}
+            td.mt {{ font-size: 8pt; color: #666; font-family: 'Courier New', monospace; }}
+            tr.desc-row td.desc {{ font-size: 8pt; color: #555; padding-left: 14px;
+                                   border-bottom: 1px solid #eee; }}
+            .muted {{ color: #999; font-style: italic; }}
+        </style></head><body>
+            <h1>Files Omitted From This Advance</h1>
+            <div class="lede">
+                The files listed below are attached to this show but could not be
+                embedded in the PDF (typically video, audio, or other binary formats).
+                Download them from the show's Files tab.
+            </div>
+            <table>
+                <thead><tr><th>Filename</th><th>Location</th><th>Type</th></tr></thead>
+                <tbody>{''.join(rows_html)}</tbody>
+            </table>
+        </body></html>"""
+        from weasyprint import HTML as WP_HTML
+        return WP_HTML(string=html, base_url=base_url).write_pdf()
+    except Exception as e:
+        app.logger.warning(f"Omitted-files index render failed: {e}")
+        return None
 
 
 def _render_attachment_wrapper_pdf(data, mime, filename, section_label,
                                    field_label, description, base_url):
     """Build a single-section HTML page for a non-PDF attachment and render
-    it via WeasyPrint. Supports image/* (embeds the image) and DOCX (extracts
-    text). Other types render a placeholder page noting the file is attached
-    separately. Returns PDF bytes or None on failure."""
+    it via WeasyPrint. Supports image/*, plain text, and DOCX (text extract
+    fallback). Returns PDF bytes or None on failure.
+
+    section_label / field_label are None for files uploaded via the show's
+    Files tab; in that case the cover page is labelled "FILES TAB" instead.
+    """
     try:
         import base64
         from io import BytesIO
+        from markupsafe import escape as _e
+        mime    = (mime or '').lower()
+        ext     = _file_ext(filename or '')
         section = (section_label or '').strip()
         flabel  = (field_label or filename or '').strip()
         desc    = (description or '').strip()
         body_html = ''
+        # When there's no form-field context we tag the page as a general
+        # files-tab attachment so the reader can tell where it came from.
+        if not section and not field_label:
+            section = 'Files Tab'
 
-        if mime.startswith('image/'):
+        if mime.startswith('image/') or ext in _IMAGE_EXTS:
+            img_mime = mime if mime.startswith('image/') else f'image/{ext if ext != "jpg" else "jpeg"}'
             b64 = base64.b64encode(data).decode('ascii')
-            body_html = f'<img src="data:{mime};base64,{b64}" style="max-width:100%;max-height:9in;display:block;margin:0 auto">'
-        elif filename.lower().endswith('.docx') or 'wordprocessingml' in mime:
+            body_html = f'<img src="data:{img_mime};base64,{b64}" style="max-width:100%;max-height:9in;display:block;margin:0 auto">'
+        elif mime.startswith('text/') or ext in _TEXT_EXTS:
+            try:
+                text = data.decode('utf-8', errors='replace')
+            except Exception:
+                text = ''
+            body_html = (
+                '<pre style="font-family:\'Courier New\',monospace;font-size:9pt;'
+                'line-height:1.35;white-space:pre-wrap;word-wrap:break-word">'
+                + str(_e(text))
+                + '</pre>'
+            )
+        elif ext == 'docx' or 'wordprocessingml' in mime:
             try:
                 import docx as _docx
                 document = _docx.Document(BytesIO(data))
                 paras = [p.text for p in document.paragraphs if p.text.strip()]
-                from markupsafe import escape as _e
                 body_html = '<div style="font-size:10pt;line-height:1.4;white-space:pre-wrap">' + \
                             '<br><br>'.join(str(_e(p)) for p in paras) + '</div>'
                 if not paras:
                     body_html = '<p style="color:#666">[Word document had no extractable text — original file is attached to the show.]</p>'
             except Exception as e:
                 app.logger.warning(f"DOCX text extract failed: {e}")
-                body_html = f'<p style="color:#666">[Word document <strong>{filename}</strong> could not be embedded — original file is attached to the show.]</p>'
+                body_html = f'<p style="color:#666">[Word document <strong>{str(_e(filename))}</strong> could not be embedded — original file is attached to the show.]</p>'
         else:
-            body_html = f'<p style="color:#666">[File <strong>{filename}</strong> ({mime or "unknown type"}) is attached to the show but cannot be rendered inline. Download it from the show\'s Files tab.]</p>'
+            body_html = f'<p style="color:#666">[File <strong>{str(_e(filename))}</strong> ({str(_e(mime or "unknown type"))}) is attached to the show but cannot be rendered inline. Download it from the show\'s Files tab.]</p>'
 
         html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
             @page {{ size: letter; margin: 0.6in 0.55in; }}
@@ -4149,11 +4368,11 @@ def _render_attachment_wrapper_pdf(data, mime, filename, section_label,
             .desc {{ font-size: 9pt; color: #333; margin-bottom: 12px; padding: 6px 10px; background: #f5f5f5; border-left: 3px solid #B8840A; }}
         </style></head><body>
             <div class="head">
-                {f'<div class="section">{section}</div>' if section else ''}
-                <div class="title">{flabel}</div>
-                <div class="meta">Attached file: {filename}</div>
+                {f'<div class="section">{str(_e(section))}</div>' if section else ''}
+                <div class="title">{str(_e(flabel))}</div>
+                <div class="meta">Attached file: {str(_e(filename))}</div>
             </div>
-            {f'<div class="desc">{desc}</div>' if desc else ''}
+            {f'<div class="desc">{str(_e(desc))}</div>' if desc else ''}
             {body_html}
         </body></html>"""
 
