@@ -2588,10 +2588,13 @@ async function openPdfFormFiller(fieldKey, label) {
   if (statusEl)   statusEl.textContent = '';
   if (bodyEl)     bodyEl.innerHTML = '<div class="pdf-filler-loading">Loading PDF…</div>';
   if (downloadEl) { downloadEl.style.display = 'none'; downloadEl.onclick = null; }
-  // Show the modal — clearing inline display lets the .modal-overlay
-  // CSS (display:flex) take over. Also force the !important-friendly
-  // class in case some other code added .hidden or display:none.
-  modal.style.display = '';
+  // Show the modal by removing the .pdf-filler-hidden class. We use a
+  // class instead of style.display because the base .modal-overlay sets
+  // display:flex via CSS, and an inline display:none was sometimes
+  // *not* being removed cleanly on reopen, leaving an invisible
+  // full-viewport overlay that swallowed clicks on the page below.
+  modal.style.removeProperty('display');
+  modal.classList.remove('pdf-filler-hidden');
   modal.classList.remove('hidden');
   try {
     const r = await fetch(`/shows/${SHOW_ID}/pdf-form/${encodeURIComponent(fieldKey)}/data`,
@@ -2840,7 +2843,12 @@ function closePdfFormFiller() {
   const modal    = document.getElementById('pdf-filler-modal');
   const bodyEl   = document.getElementById('pdf-filler-body');
   const download = document.getElementById('pdf-filler-download');
-  if (modal)    modal.style.display = 'none';
+  if (modal) {
+    // Belt + suspenders: class flip is the primary mechanism, but clear
+    // any inline display so prior code paths can't keep the overlay live.
+    modal.classList.add('pdf-filler-hidden');
+    modal.style.removeProperty('display');
+  }
   if (bodyEl)   bodyEl.innerHTML = '';
   if (download) { download.style.display = 'none'; download.onclick = null; }
   _pdfFillerState = null;

@@ -218,7 +218,10 @@
   </aside>
 
   {# ── PDF Form Filler Modal (used by the pdf_form advance field) ──────── #}
-  <div id="pdf-filler-modal" class="modal-overlay" style="display:none"
+  {# Start hidden via the .pdf-filler-hidden class rather than inline
+     style:display so JS can toggle visibility with a class flip (more
+     resistant to CSS rule ordering than style.display = ''). #}
+  <div id="pdf-filler-modal" class="modal-overlay pdf-filler-hidden"
        onclick="if(event.target===this)closePdfFormFiller()">
     <div class="modal-card pdf-filler-card">
       <div class="modal-header">
