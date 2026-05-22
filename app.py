@@ -2636,7 +2636,11 @@ def _sync_contact_for_user(db, user_id, *, display_name=None, email=None,
             db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=?", tuple(params))
         return
 
-    # Fresh insert.
+    # Fresh insert. The partial unique index on contacts(user_id) WHERE
+    # user_id IS NOT NULL means a concurrent worker may have already
+    # inserted a row for this user between our SELECT above and this
+    # INSERT. Treat that as a benign no-op — the other worker's row is
+    # equivalent and the next call will see it via the `linked` branch.
     try:
         db.execute(
             """INSERT INTO contacts (name, title, department, phone, email,
@@ -2646,6 +2650,8 @@ def _sync_contact_for_user(db, user_id, *, display_name=None, email=None,
                 VALUES (?,?,?,?,?,0,0,0,0,0,NULL,?)""",
             (name_val or 'Unnamed user', '', '', '', email_val, user_id)
         )
+    except (sqlite3.IntegrityError, DBIntegrityError):
+        pass  # concurrent worker beat us to it — exactly the case the index exists for
     except Exception as e:
         app.logger.warning(f'_sync_contact_for_user insert failed for user {user_id}: {e}')
 

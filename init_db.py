@@ -149,6 +149,12 @@ CREATE TABLE IF NOT EXISTS contacts (
     user_id             INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+-- Partial unique index: at most one contact per user. The backfill that runs
+-- on every Gunicorn worker would otherwise race (SELECT-then-INSERT with no
+-- constraint), so the constraint is the authoritative dedup. Multiple raw
+-- contacts (user_id IS NULL) are still allowed.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_user_unique
+    ON contacts(user_id) WHERE user_id IS NOT NULL;
 
 -- Debounced field-change alert state. One row per (show_id, field_key) for
 -- fields that have alert_departments / alert_contact_ids configured. When a
@@ -1563,6 +1569,30 @@ def migrate_db():
         except Exception:
             pass  # Column already exists
 
+    # Dedupe any duplicate contacts that may have been created by the
+    # pre-index backfill race (multiple workers inserting concurrently for
+    # the same user_id). Keep the oldest row, unlink the rest. Must run
+    # *before* creating the unique index below.
+    try:
+        conn.execute("""
+            UPDATE contacts SET user_id = NULL
+             WHERE user_id IS NOT NULL
+               AND id NOT IN (
+                   SELECT MIN(id) FROM contacts
+                    WHERE user_id IS NOT NULL
+                    GROUP BY user_id
+               )
+        """)
+    except Exception:
+        pass
+    try:
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_user_unique
+                ON contacts(user_id) WHERE user_id IS NOT NULL
+        """)
+    except Exception:
+        pass
+
     # Backfill original_locked_price for legacy rows where the column was just
     # added. Use the current locked_price as the best-available "original" so
     # the Reset button has something to restore to for pre-migration lines.
@@ -2370,6 +2400,10 @@ CREATE TABLE IF NOT EXISTS contacts (
     user_id              INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+-- Partial unique index: at most one contact per user (NULLs allowed).
+-- Authoritative dedup for the per-worker user→contact backfill race.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_user_unique
+    ON contacts(user_id) WHERE user_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS export_log (
     id SERIAL PRIMARY KEY,
@@ -3413,6 +3447,26 @@ def migrate_db_postgres():
             """)
         except Exception as e:
             print(f"[migrate_pg] original_locked_price backfill warning: {e}")
+
+        # Dedupe contacts that may have been duplicated by the pre-index
+        # user→contact backfill race, then create the partial unique index
+        # so future inserts can't double up.
+        try:
+            cur.execute(f"""
+                UPDATE "{app_schema}".contacts SET user_id = NULL
+                 WHERE user_id IS NOT NULL
+                   AND id NOT IN (
+                       SELECT MIN(id) FROM "{app_schema}".contacts
+                        WHERE user_id IS NOT NULL
+                        GROUP BY user_id
+                   )
+            """)
+            cur.execute(f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_user_unique
+                    ON "{app_schema}".contacts(user_id) WHERE user_id IS NOT NULL
+            """)
+        except Exception as e:
+            print(f"[migrate_pg] contacts user_id dedupe/index warning: {e}")
 
         # Backfill shows.cast_count / shows.crew_count from any existing
         # post_show_notes rows. Postgres-friendly numeric guard via regex.
