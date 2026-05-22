@@ -363,6 +363,27 @@ def from_json_filter(value):
         return []
 
 
+@app.template_filter('autolink')
+def autolink_filter(value):
+    """Escape HTML, turn raw http(s) URLs into clickable links, and preserve
+    line breaks. Used by the 'notes' field type so admins can paste
+    instructions + links into a plain textarea and have them render cleanly
+    in the advance form."""
+    if not value:
+        return ''
+    import re as _re
+    from markupsafe import Markup, escape
+    text = str(value)
+    escaped = escape(text)  # turns < > & into entities, returns Markup
+    url_re = _re.compile(r'(https?://[^\s<>"\']+)')
+    linked = url_re.sub(
+        lambda m: f'<a href="{m.group(1)}" target="_blank" rel="noopener">{m.group(1)}</a>',
+        str(escaped)
+    )
+    linked = linked.replace('\n', '<br>')
+    return Markup(linked)
+
+
 @app.template_filter('multi')
 def multi_filter(value, sep=', '):
     """Render a multi-select value cleanly. Accepts either a JSON-encoded
@@ -1325,6 +1346,17 @@ def get_form_fields_for_template():
                 fd['options'] = []
         else:
             fd['options'] = []
+        # Decode alert config so templates/JS get plain arrays.
+        raw_d = fd.get('alert_departments')
+        try:
+            fd['alert_departments'] = json.loads(raw_d) if raw_d else []
+        except (json.JSONDecodeError, TypeError):
+            fd['alert_departments'] = []
+        raw_c = fd.get('alert_contact_ids')
+        try:
+            fd['alert_contact_ids'] = json.loads(raw_c) if raw_c else []
+        except (json.JSONDecodeError, TypeError):
+            fd['alert_contact_ids'] = []
         field_map.setdefault(fd['section_id'], []).append(fd)
 
     result = []
@@ -2060,10 +2092,25 @@ def start_scheduler():
         # PDF emails: leader-gated inside run_scheduled_pdf_emails() so
         # recipients never receive a duplicate when multiple instances run.
         scheduler.add_job(run_scheduled_pdf_emails, 'interval', hours=1, id='pdf_email_check')
+        # Field-change alerts: leader-gated. Picks up debounced pending
+        # alerts every 10 min and sends them once the value has been
+        # quiet long enough.
+        scheduler.add_job(run_field_change_alerts, 'interval', minutes=10,
+                          id='field_change_alerts')
         scheduler.start()
+        # Backfill contact↔user link once on boot.
+        try:
+            _backfill_contacts_from_users()
+        except Exception as e:
+            app.logger.warning(f'contact-user backfill skipped: {e}')
         return scheduler
     except ImportError:
         app.logger.warning('APScheduler not installed — backups disabled.')
+        # Still backfill contact↔user link even without APScheduler.
+        try:
+            _backfill_contacts_from_users()
+        except Exception as e:
+            app.logger.warning(f'contact-user backfill skipped: {e}')
         return None
 
 
@@ -2229,6 +2276,393 @@ def _snapshot_form_history(db, show_id, form_type, snapshot_data):
             ORDER BY saved_at DESC LIMIT 50
           )
     """, (show_id, form_type, show_id, form_type))
+
+
+# ─── Field-Change Alert / Notification Helpers ────────────────────────────────
+
+def _hash_field_value(v):
+    """Stable hash for change-detection. Uses sha1 of the string form."""
+    import hashlib
+    return hashlib.sha1((v or '').encode('utf-8', errors='replace')).hexdigest()
+
+
+def _stage_field_alerts(db, show_id, data, prev_values, actor_user_id):
+    """Compare submitted values to prior DB values and stage pending alerts
+    for any alert-enabled field whose value changed.
+
+    A 'change' is a difference in the hash of the trimmed string form. If a
+    field's pending value already equals the last_alerted_hash, the pending
+    state is cleared (the value bounced back so no email is owed)."""
+    keys = [str(k) for k in data.keys()]
+    if not keys:
+        return
+    placeholders = ','.join('?' for _ in keys)
+    alert_rows = db.execute(
+        f"""SELECT field_key, label, alert_departments, alert_contact_ids
+              FROM form_fields
+             WHERE field_key IN ({placeholders})
+               AND (alert_departments IS NOT NULL OR alert_contact_ids IS NOT NULL)
+               AND field_type != 'notes'""",
+        tuple(keys)
+    ).fetchall()
+    if not alert_rows:
+        return
+
+    for row in alert_rows:
+        key = row['field_key']
+        new_val = '' if data.get(key) is None else str(data.get(key)).strip()
+        prev_val = (prev_values.get(key) or '').strip()
+        if new_val == prev_val:
+            continue  # actual save didn't change anything
+
+        new_hash = _hash_field_value(new_val)
+        state = db.execute(
+            'SELECT * FROM field_alert_state WHERE show_id=? AND field_key=?',
+            (show_id, key)
+        ).fetchone()
+
+        if state and state['last_alerted_hash'] == new_hash:
+            # Value bounced back to whatever was last alerted — clear pending.
+            db.execute(
+                """UPDATE field_alert_state
+                      SET pending_value=NULL, pending_prev_value=NULL,
+                          pending_hash=NULL, pending_updated_at=NULL,
+                          pending_updated_by=NULL
+                    WHERE show_id=? AND field_key=?""",
+                (show_id, key)
+            )
+            continue
+
+        # Upsert pending. SQLite & PG both honor INSERT OR REPLACE-like
+        # behavior here via "ON CONFLICT" — fall back to delete-then-insert
+        # for the lowest common denominator.
+        if state:
+            # Preserve the *original* prev_value if a pending alert is still
+            # in flight (so the email reports the real "from" value, not an
+            # intermediate one the user typed in between).
+            pending_prev = state['pending_prev_value'] if state['pending_prev_value'] is not None else prev_val
+            db.execute(
+                """UPDATE field_alert_state
+                      SET pending_value=?, pending_prev_value=?,
+                          pending_hash=?, pending_updated_at=CURRENT_TIMESTAMP,
+                          pending_updated_by=?
+                    WHERE show_id=? AND field_key=?""",
+                (new_val, pending_prev, new_hash, actor_user_id, show_id, key)
+            )
+        else:
+            db.execute(
+                """INSERT INTO field_alert_state
+                      (show_id, field_key, pending_value, pending_prev_value,
+                       pending_hash, pending_updated_at, pending_updated_by)
+                    VALUES (?,?,?,?,?,CURRENT_TIMESTAMP,?)""",
+                (show_id, key, new_val, prev_val, new_hash, actor_user_id)
+            )
+
+
+def _resolve_alert_recipients(db, alert_departments, alert_contact_ids):
+    """Resolve a field's alert config into (contact_rows, user_ids).
+
+    contact_rows is a list of dicts with email, name, user_id — used to build
+    the email recipient list. user_ids is a set of users to notify in-app
+    (only contacts linked to a system user get an in-app notification)."""
+    contact_rows = []
+    seen_contact_ids = set()
+
+    if alert_departments:
+        try:
+            depts = json.loads(alert_departments) if isinstance(alert_departments, str) else alert_departments
+        except (json.JSONDecodeError, TypeError):
+            depts = []
+        if depts:
+            placeholders = ','.join('?' for _ in depts)
+            for c in db.execute(
+                f"SELECT id, name, email, user_id FROM contacts "
+                f"WHERE department IN ({placeholders})",
+                tuple(depts)
+            ).fetchall():
+                if c['id'] in seen_contact_ids:
+                    continue
+                seen_contact_ids.add(c['id'])
+                contact_rows.append(dict(c))
+
+    if alert_contact_ids:
+        try:
+            cids = json.loads(alert_contact_ids) if isinstance(alert_contact_ids, str) else alert_contact_ids
+        except (json.JSONDecodeError, TypeError):
+            cids = []
+        cids = [int(x) for x in cids if str(x).strip().isdigit()]
+        if cids:
+            placeholders = ','.join('?' for _ in cids)
+            for c in db.execute(
+                f"SELECT id, name, email, user_id FROM contacts WHERE id IN ({placeholders})",
+                tuple(cids)
+            ).fetchall():
+                if c['id'] in seen_contact_ids:
+                    continue
+                seen_contact_ids.add(c['id'])
+                contact_rows.append(dict(c))
+
+    user_ids = {c['user_id'] for c in contact_rows if c.get('user_id')}
+    return contact_rows, user_ids
+
+
+def create_notification(db, user_id, title, body='', link_url=None,
+                        kind='system', show_id=None, field_key=None):
+    """Insert one notification row. Safe to call inside any handler — caller
+    owns the commit. user_id may be None (skipped)."""
+    if not user_id:
+        return
+    try:
+        db.execute(
+            """INSERT INTO notifications
+                 (user_id, kind, title, body, link_url, show_id, field_key)
+               VALUES (?,?,?,?,?,?,?)""",
+            (int(user_id), kind, title or '', body or '', link_url, show_id, field_key)
+        )
+    except Exception as e:
+        app.logger.warning(f'create_notification failed for user {user_id}: {e}')
+
+
+# Debounce window: a pending alert is only sent if no further edits have
+# arrived within this many minutes. Matches the "10-min job, 5-min quiet"
+# product decision.
+_FIELD_ALERT_QUIET_MINUTES = 5
+
+
+def run_field_change_alerts():
+    """Scheduled every 10 minutes (leader-gated). Sends queued field-change
+    alerts whose pending value has been quiet long enough."""
+    if not am_i_leader():
+        return
+    db = get_db()
+    try:
+        # Pick up pending rows where the latest edit is older than the quiet
+        # window. SQLite stores timestamps as text — use the canonical helper
+        # so both backends compare correctly.
+        rows = db.execute(
+            """SELECT s.id AS state_id, s.show_id, s.field_key,
+                      s.pending_value, s.pending_prev_value, s.pending_hash,
+                      s.pending_updated_by, s.last_alerted_hash,
+                      f.label, f.alert_departments, f.alert_contact_ids,
+                      sh.name AS show_name
+                 FROM field_alert_state s
+                 JOIN form_fields f ON f.field_key = s.field_key
+            LEFT JOIN shows sh ON sh.id = s.show_id
+                WHERE s.pending_hash IS NOT NULL
+                  AND s.pending_updated_at IS NOT NULL"""
+        ).fetchall()
+    except Exception as e:
+        app.logger.warning(f'run_field_change_alerts query failed: {e}')
+        db.close()
+        return
+
+    if not rows:
+        db.close()
+        return
+
+    now = datetime.utcnow()
+    base_url = (get_app_setting('public_base_url', '') or '').rstrip('/')
+
+    for r in rows:
+        # Parse the pending_updated_at timestamp into a datetime so we can
+        # compare against the quiet window. Both backends return either a
+        # datetime (psycopg) or an ISO string (sqlite3); coerce.
+        state_row = db.execute(
+            'SELECT pending_updated_at FROM field_alert_state WHERE id=?',
+            (r['state_id'],)
+        ).fetchone()
+        if not state_row or not state_row['pending_updated_at']:
+            continue
+        pu = state_row['pending_updated_at']
+        try:
+            if isinstance(pu, str):
+                dt = datetime.fromisoformat(pu.replace('Z', '').replace('T', ' ').split('.')[0])
+            else:
+                dt = pu
+        except Exception:
+            continue
+        if (now - dt).total_seconds() < _FIELD_ALERT_QUIET_MINUTES * 60:
+            continue  # not quiet enough yet
+
+        if r['pending_hash'] == r['last_alerted_hash']:
+            # Defensive — cleared concurrently. Drop the pending state.
+            db.execute(
+                """UPDATE field_alert_state
+                      SET pending_value=NULL, pending_prev_value=NULL,
+                          pending_hash=NULL, pending_updated_at=NULL,
+                          pending_updated_by=NULL
+                    WHERE id=?""", (r['state_id'],)
+            )
+            db.commit()
+            continue
+
+        contact_rows, user_ids = _resolve_alert_recipients(
+            db, r['alert_departments'], r['alert_contact_ids']
+        )
+        emails = sorted({(c['email'] or '').strip() for c in contact_rows if c.get('email')})
+
+        show_name = r['show_name'] or f"Show #{r['show_id']}"
+        field_label = r['label'] or r['field_key']
+        prev_disp = r['pending_prev_value'] if r['pending_prev_value'] not in (None, '') else '(empty)'
+        new_disp  = r['pending_value']      if r['pending_value']      not in (None, '') else '(empty)'
+
+        subj = f"[{show_name}] {field_label} updated"
+        body_text = (
+            f"{field_label} was changed on the advance for {show_name}.\n\n"
+            f"Old value: {prev_disp}\n"
+            f"New value: {new_disp}\n\n"
+        )
+        link_path = url_for('show_page', show_id=r['show_id']) if r['show_id'] else None
+        link_url = (base_url + link_path) if (base_url and link_path) else (link_path or '')
+        if link_url:
+            body_text += f"Open the show: {link_url}\n"
+
+        # Send email (best-effort). Skip cleanly if no email recipients.
+        if emails:
+            try:
+                _send_email(
+                    subj, emails, body_text=body_text,
+                    error_context={'pdf_type': 'field_alert',
+                                   'show_id': r['show_id'],
+                                   'triggered_by': 'field_alert_job',
+                                   'purpose': 'field_change_alert'}
+                )
+            except Exception as e:
+                app.logger.warning(f'field alert email send failed: {e}')
+
+        # In-app notifications for every linked user account.
+        for uid in user_ids:
+            create_notification(
+                db, uid,
+                title=f"{field_label} updated on {show_name}",
+                body=f"{prev_disp} → {new_disp}",
+                link_url=link_path,
+                kind='field_alert',
+                show_id=r['show_id'],
+                field_key=r['field_key']
+            )
+
+        # Mark alerted; clear pending.
+        db.execute(
+            """UPDATE field_alert_state
+                  SET last_alerted_value=?, last_alerted_hash=?,
+                      last_alerted_at=CURRENT_TIMESTAMP,
+                      pending_value=NULL, pending_prev_value=NULL,
+                      pending_hash=NULL, pending_updated_at=NULL,
+                      pending_updated_by=NULL
+                WHERE id=?""",
+            (r['pending_value'], r['pending_hash'], r['state_id'])
+        )
+        db.commit()
+    db.close()
+
+
+# ─── Contact ↔ User Sync ─────────────────────────────────────────────────────
+
+def _sync_contact_for_user(db, user_id, *, display_name=None, email=None,
+                           also_unlink_others=True):
+    """Ensure a contact row exists and stays in sync for the given user.
+
+    - If a contact with user_id == user_id exists, update its name + email
+      (only when non-empty values were supplied).
+    - Otherwise: try to match an existing contact by email (preferred) or
+      name; if found, attach user_id. If no match, create a fresh contact.
+    - When also_unlink_others is True (default), any other contacts that
+      were linked to this user get unlinked first to maintain the
+      one-contact-per-user invariant."""
+    if not user_id:
+        return
+    # Fetch current user fields if not supplied
+    if display_name is None or email is None:
+        u = db.execute(
+            'SELECT display_name, username, email FROM users WHERE id=?', (user_id,)
+        ).fetchone()
+        if not u:
+            return
+        if display_name is None:
+            display_name = u['display_name'] or u['username']
+        if email is None:
+            email = (u['email'] or '')
+
+    name_val = (display_name or '').strip()
+    email_val = (email or '').strip()
+
+    linked = db.execute(
+        'SELECT id FROM contacts WHERE user_id=? ORDER BY id LIMIT 1', (user_id,)
+    ).fetchone()
+
+    if linked:
+        # Update name + email (but only if user has them). Keep existing
+        # department / recipient flags / phone untouched.
+        sets = []
+        params = []
+        if name_val:
+            sets.append('name=?'); params.append(name_val)
+        if email_val:
+            sets.append('email=?'); params.append(email_val)
+        if sets:
+            params.append(linked['id'])
+            db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=?", tuple(params))
+        return
+
+    # Try to match an existing contact by email or name to avoid duplicates.
+    match = None
+    if email_val:
+        match = db.execute(
+            'SELECT id FROM contacts WHERE LOWER(email)=LOWER(?) AND (user_id IS NULL) LIMIT 1',
+            (email_val,)
+        ).fetchone()
+    if not match and name_val:
+        match = db.execute(
+            'SELECT id FROM contacts WHERE LOWER(name)=LOWER(?) AND (user_id IS NULL) LIMIT 1',
+            (name_val,)
+        ).fetchone()
+
+    if match:
+        db.execute('UPDATE contacts SET user_id=? WHERE id=?', (user_id, match['id']))
+        # Also push name/email through so the contact reflects the user.
+        sets = []
+        params = []
+        if name_val:
+            sets.append('name=?'); params.append(name_val)
+        if email_val:
+            sets.append('email=?'); params.append(email_val)
+        if sets:
+            params.append(match['id'])
+            db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=?", tuple(params))
+        return
+
+    # Fresh insert.
+    try:
+        db.execute(
+            """INSERT INTO contacts (name, title, department, phone, email,
+                                     report_recipient, advance_recipient,
+                                     production_recipient, postnotes_recipient,
+                                     system_recipient, venue_filter, user_id)
+                VALUES (?,?,?,?,?,0,0,0,0,0,NULL,?)""",
+            (name_val or 'Unnamed user', '', '', '', email_val, user_id)
+        )
+    except Exception as e:
+        app.logger.warning(f'_sync_contact_for_user insert failed for user {user_id}: {e}')
+
+
+def _backfill_contacts_from_users():
+    """One-shot: ensure every user has a corresponding contact row. Safe to
+    run repeatedly — sync helper is idempotent. Called from start_scheduler
+    so it runs once per worker on startup."""
+    try:
+        db = get_db()
+        users = db.execute('SELECT id, display_name, username, email FROM users').fetchall()
+        for u in users:
+            _sync_contact_for_user(
+                db, u['id'],
+                display_name=u['display_name'] or u['username'],
+                email=u['email'] or ''
+            )
+        db.commit()
+        db.close()
+    except Exception as e:
+        app.logger.warning(f'_backfill_contacts_from_users failed: {e}')
 
 
 def log_audit(db, action, entity_type, entity_id=None, show_id=None,
@@ -2941,6 +3375,21 @@ def save_advance(show_id):
         ).fetchall()
     }
 
+    # Snapshot the *current* values for every key we're about to write — used
+    # later to detect changes on alert-enabled fields. Read-before-write keeps
+    # the diff scoped to this save (later writes during alert flush won't
+    # confuse the detector).
+    submitted_keys = list(data.keys())
+    prev_values = {}
+    if submitted_keys:
+        placeholders = ','.join('?' for _ in submitted_keys)
+        for row in db.execute(
+            f"SELECT field_key, field_value FROM advance_data "
+            f"WHERE show_id=? AND field_key IN ({placeholders})",
+            tuple([show_id] + submitted_keys)
+        ).fetchall():
+            prev_values[row['field_key']] = row['field_value'] or ''
+
     for key, value in data.items():
         db.execute("""
             INSERT OR REPLACE INTO advance_data (show_id, field_key, field_value, updated_at)
@@ -2992,6 +3441,14 @@ def save_advance(show_id):
     db.execute("""
         UPDATE shows SET last_saved_by=?, last_saved_at=CURRENT_TIMESTAMP WHERE id=?
     """, (session['user_id'], show_id))
+
+    # Stage field-change alerts (debounced — actual send happens in the
+    # 10-min background job). Only fields that have alert_departments or
+    # alert_contact_ids configured are considered.
+    try:
+        _stage_field_alerts(db, show_id, data, prev_values, session.get('user_id'))
+    except Exception as e:
+        app.logger.warning(f'_stage_field_alerts failed for show {show_id}: {e}')
 
     # Version snapshot
     _snapshot_form_history(db, show_id, 'advance', {'advance_data': data})
@@ -5624,6 +6081,13 @@ def edit_contact(cid):
 def delete_contact(cid):
     db = get_db()
     before = _snapshot_row(db, 'contacts', cid)
+    if before and before.get('user_id'):
+        db.close()
+        return jsonify({
+            'success': False,
+            'error': 'This contact is linked to a user account. '
+                     'Delete the user (or unlink the user) first.'
+        }), 400
     name = before['name'] if before else str(cid)
     log_audit(db, 'CONTACT_DELETE', 'contact', cid, detail=name, before=before)
     db.execute('DELETE FROM contacts WHERE id=?', (cid,))
@@ -5663,7 +6127,11 @@ def add_user():
         cur = db.execute("""INSERT INTO users (username, password_hash, display_name, role, email, is_readonly)
                       VALUES (?, ?, ?, ?, ?, ?)""",
                    (username, generate_password_hash(password), display, role, email, is_readonly))
-        log_audit(db, 'USER_CREATE', 'user', cur.lastrowid, detail=f'{username} role={role}')
+        new_uid = cur.lastrowid
+        log_audit(db, 'USER_CREATE', 'user', new_uid, detail=f'{username} role={role}')
+        # Auto-create / link a contact row so the new user shows up in
+        # contact pickers without manual data entry.
+        _sync_contact_for_user(db, new_uid, display_name=display, email=email)
         db.commit()
         flash(f'User "{username}" created.', 'success')
         syslog_logger.info(f"USER_CREATE username={username} role={role} by={session.get('username')}")
@@ -5739,6 +6207,9 @@ def edit_user(uid):
               detail=(f'role={role} readonly={is_readonly} scheduler={is_scheduler} '
                       f'asset_mgr={is_asset_manager} doc_viewer={is_document_viewer} '
                       f'by={session.get("username")}'))
+    # Keep the linked contact row's name + email in sync with this user.
+    _sync_contact_for_user(db, uid, display_name=display_name or row['username'],
+                           email=email)
     db.commit()
     db.close()
     syslog_logger.info(
@@ -6004,14 +6475,19 @@ def add_form_field():
     max_order = db.execute(
         'SELECT MAX(sort_order) FROM form_fields WHERE section_id=?', (section_id,)
     ).fetchone()[0] or 0
+    alert_depts = data.get('alert_departments') or []
+    alert_contacts = data.get('alert_contact_ids') or []
+    alert_depts_json    = json.dumps(alert_depts)    if alert_depts    else None
+    alert_contacts_json = json.dumps([int(c) for c in alert_contacts if str(c).strip().isdigit()]) if alert_contacts else None
     try:
         cur = db.execute("""
             INSERT INTO form_fields
             (section_id, field_key, label, field_type, sort_order,
              options_json, contact_dept, conditional_show_when,
              help_text, placeholder, width_hint, is_notes_field, ai_hint,
-             display_as, allow_multi, auto_select_visible, hide_from_pdf, upload_button_only)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             display_as, allow_multi, auto_select_visible, hide_from_pdf, upload_button_only,
+             notes_content, alert_departments, alert_contact_ids)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (section_id, field_key, label,
               data.get('field_type','text'), max_order + 10,
               options_json,
@@ -6026,7 +6502,10 @@ def add_form_field():
               1 if data.get('allow_multi') else 0,
               1 if data.get('auto_select_visible') else 0,
               1 if data.get('hide_from_pdf') else 0,
-              1 if data.get('upload_button_only') else 0))
+              1 if data.get('upload_button_only') else 0,
+              data.get('notes_content') or None,
+              alert_depts_json,
+              alert_contacts_json))
         fid = cur.lastrowid
         log_audit_change(db, 'FIELD_ADD', 'form_field', fid, detail=field_key,
                          table='form_fields')
@@ -6047,12 +6526,17 @@ def edit_form_field(fid):
     options_json = json.dumps(options) if options else None
     db = get_db()
     before = _snapshot_row(db, 'form_fields', fid)
+    alert_depts = data.get('alert_departments') or []
+    alert_contacts = data.get('alert_contact_ids') or []
+    alert_depts_json    = json.dumps(alert_depts)    if alert_depts    else None
+    alert_contacts_json = json.dumps([int(c) for c in alert_contacts if str(c).strip().isdigit()]) if alert_contacts else None
     db.execute("""
         UPDATE form_fields SET
             section_id=?, label=?, field_type=?,
             options_json=?, contact_dept=?, conditional_show_when=?,
             help_text=?, placeholder=?, width_hint=?, is_notes_field=?, ai_hint=?,
-            display_as=?, allow_multi=?, auto_select_visible=?, hide_from_pdf=?, upload_button_only=?
+            display_as=?, allow_multi=?, auto_select_visible=?, hide_from_pdf=?, upload_button_only=?,
+            notes_content=?, alert_departments=?, alert_contact_ids=?
         WHERE id=?
     """, (data.get('section_id'), data.get('label',''),
           data.get('field_type','text'), options_json,
@@ -6066,6 +6550,9 @@ def edit_form_field(fid):
           1 if data.get('auto_select_visible') else 0,
           1 if data.get('hide_from_pdf') else 0,
           1 if data.get('upload_button_only') else 0,
+          data.get('notes_content') or None,
+          alert_depts_json,
+          alert_contacts_json,
           fid))
     after = _snapshot_row(db, 'form_fields', fid)
     log_audit(db, 'FIELD_EDIT', 'form_field', fid, detail=data.get('label',''),
@@ -6721,6 +7208,90 @@ def api_users():
     ).fetchall()
     db.close()
     return jsonify([dict(u) for u in users])
+
+
+# ─── Notifications (in-app bell) ──────────────────────────────────────────────
+
+@app.route('/api/notifications')
+@login_required
+def api_notifications():
+    """Return the current user's notifications (last 30 days, newest first)
+    plus the unread count for the badge."""
+    uid = session.get('user_id')
+    if not uid:
+        return jsonify({'notifications': [], 'unread': 0})
+    db = get_db()
+    rows = db.execute(
+        """SELECT id, kind, title, body, link_url, show_id, field_key,
+                  created_at, read_at
+             FROM notifications
+            WHERE user_id=?
+            ORDER BY created_at DESC
+            LIMIT 100""",
+        (uid,)
+    ).fetchall()
+    unread = db.execute(
+        'SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND read_at IS NULL',
+        (uid,)
+    ).fetchone()['n']
+    db.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        # Coerce datetime fields to ISO strings for the client.
+        for k in ('created_at', 'read_at'):
+            v = d.get(k)
+            if v is not None and not isinstance(v, str):
+                try: d[k] = v.isoformat()
+                except Exception: d[k] = str(v)
+        out.append(d)
+    return jsonify({'notifications': out, 'unread': int(unread or 0)})
+
+
+@app.route('/api/notifications/unread-count')
+@login_required
+def api_notifications_unread_count():
+    """Lightweight endpoint for the bell badge — polled frequently."""
+    uid = session.get('user_id')
+    if not uid:
+        return jsonify({'unread': 0})
+    db = get_db()
+    row = db.execute(
+        'SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND read_at IS NULL',
+        (uid,)
+    ).fetchone()
+    db.close()
+    return jsonify({'unread': int((row['n'] if row else 0) or 0)})
+
+
+@app.route('/api/notifications/<int:nid>/read', methods=['POST'])
+@login_required
+def api_notifications_mark_read(nid):
+    uid = session.get('user_id')
+    db = get_db()
+    db.execute(
+        'UPDATE notifications SET read_at=CURRENT_TIMESTAMP '
+        'WHERE id=? AND user_id=? AND read_at IS NULL',
+        (nid, uid)
+    )
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/api/notifications/read-all', methods=['POST'])
+@login_required
+def api_notifications_mark_all_read():
+    uid = session.get('user_id')
+    db = get_db()
+    db.execute(
+        'UPDATE notifications SET read_at=CURRENT_TIMESTAMP '
+        'WHERE user_id=? AND read_at IS NULL',
+        (uid,)
+    )
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
 
 
 @app.route('/api/shows')
@@ -13370,6 +13941,11 @@ def approve_registration(reg_id):
         db.commit()
         log_audit(db, 'USER_APPROVED', 'user', uid,
                   detail=f'username={reg["username"]} role={role} approved_by={session.get("username")}')
+        _sync_contact_for_user(
+            db, uid,
+            display_name=reg['display_name'] or reg['username'],
+            email=reg['email'] or ''
+        )
         db.commit()
         _send_simple_email_async(
             reg['email'],

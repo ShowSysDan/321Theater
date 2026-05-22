@@ -35,7 +35,17 @@
    option values like "Judson's Live". #}
 {% set cur = advance_data.get(field.field_key, '') %}
 
-{% if field.field_type == 'checkbox' %}
+{% if field.field_type == 'notes' %}
+  {# 'notes' field type: read-only instructional block. Renders text + auto-linked
+     URLs from notes_content. Lives on screen only — never written to advance_data
+     and never printed on the PDF. #}
+  <div class="adv-notes-block adv-field-wrapper" style="grid-column:span 12"
+       {% if field.conditional_show_when %}data-show-when="{{ field.conditional_show_when }}"{% endif %}>
+    {% if field.label %}<div class="adv-notes-label">{{ field.label }}</div>{% endif %}
+    <div class="adv-notes-body">{{ (field.notes_content or '') | autolink | safe }}</div>
+  </div>
+
+{% elif field.field_type == 'checkbox' %}
   <label class="checkbox-label adv-field-wrapper" style="grid-column:{{ span }}" {% if field.conditional_show_when %}data-show-when="{{ field.conditional_show_when }}"{% endif %}>
     <input type="checkbox" class="adv-checkbox adv-field" data-key="{{ field.field_key }}"
            {% if cur == 'true' %}checked{% endif %} {% if restricted %}disabled{% endif %}>

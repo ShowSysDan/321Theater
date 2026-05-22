@@ -116,9 +116,18 @@
       {% if section %}
         {% set ns = namespace(has_content=false, notes_fields=[], regular_rows=[]) %}
         {% for field in section.fields %}
-          {% if layout.field_visible(skey, field.field_key) and not field.hide_from_pdf %}
+          {# The 'notes' field type is screen-only (instructions / links shown
+             while editing). Never include it in the printed advance. #}
+          {% if field.field_type != 'notes' and layout.field_visible(skey, field.field_key) and not field.hide_from_pdf %}
             {% set val = d.get(field.field_key, '')|string|trim %}
-            {% if val and val not in ['-','—','None','none','false',''] %}
+            {% if field.field_type == 'yes_no' %}
+              {# Only 'Yes' counts as printable content for yes/no — '-', No,
+                 and blanks are skipped so unanswered prompts don't pad out the
+                 paperwork. #}
+              {% if val == 'Yes' %}
+                {% set ns.has_content = true %}
+              {% endif %}
+            {% elif val and val not in ['-','—','None','none','false',''] %}
               {% set ns.has_content = true %}
             {% endif %}
             {% if field.is_notes_field %}
@@ -146,7 +155,9 @@
                 </tr>
                 {% endif %}
               {% elif field.field_type == 'yes_no' %}
-                {% if val and val not in ['','-','—','None','none'] %}
+                {# Only render Yes answers — blanks and No clutter the
+                   advance without adding info. #}
+                {% if val == 'Yes' %}
                 <tr>
                   <td class="lbl">{{ _flbl }}</td>
                   <td class="val">{{ val }}</td>

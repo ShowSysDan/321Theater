@@ -114,7 +114,13 @@
           {% set _vf_list = c.venue_filter | from_json %}
           <tr data-id="{{ c.id }}" data-dept="{{ c.department }}" data-recipient="{{ '1' if c.report_recipient else '0' }}" data-venue-filter="{{ c.venue_filter or '' }}">
             <td class="contact-name">
-              <div style="font-weight:500" data-field="name">{{ c.name }}</div>
+              <div style="font-weight:500" data-field="name">
+                {{ c.name }}
+                {% if c.user_id %}
+                <span style="font-size:9px;background:rgba(0,170,255,.15);color:#5db8ff;padding:1px 5px;border-radius:3px;letter-spacing:.05em;margin-left:4px;vertical-align:middle"
+                      title="Auto-synced from system user — name and email are kept in sync with the user account">USER</span>
+                {% endif %}
+              </div>
               {% if c.title %}<div class="text-dim" style="font-size:11px" data-field="title">{{ c.title }}</div>{% endif %}
               {% if c.email %}<div style="font-size:11px;color:var(--accent)" data-field="email"><a href="mailto:{{ c.email }}" style="color:var(--accent)">{{ c.email }}</a></div>{% endif %}
               {% if _vf_list %}
@@ -1920,6 +1926,7 @@
             <option value="contact_dropdown">contact_dropdown</option>
             <option value="arts_group_dropdown">arts_group (dropdown + new entry)</option>
             <option value="file_upload">file_upload (PDF / image / Word — appended to advance PDF)</option>
+            <option value="notes">notes (instructions/text/links — screen only, not on PDF)</option>
           </select>
         </div>
         <div class="field-group">
@@ -1975,6 +1982,48 @@
             <option value="">— None —</option>
             {% for d in departments %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
           </select>
+        </div>
+      </div>
+      <div class="notes-content-group" style="display:none">
+        <div class="field-group">
+          <label class="field-label">NOTES BODY</label>
+          <textarea name="notes_content" class="field-input field-textarea" rows="5"
+                    placeholder="e.g. Reach out to box office at least 2 weeks before the show — https://example.com/checklist"></textarea>
+          <p class="field-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px">
+            Renders as a read-only instructional block on the advance form. URLs are auto-linked.
+            This field type is <strong>screen only</strong> — it never prints on the advance PDF.
+          </p>
+        </div>
+      </div>
+      <div class="field-group field-alert-group">
+        <label class="field-label">CHANGE ALERTS <span class="text-dim" style="font-size:10px">(optional)</span></label>
+        <p class="field-hint" style="font-size:11px;color:var(--text-muted);margin:0 0 6px">
+          When this field's value changes on a show, email the selected departments + people
+          and drop a notification in their in-app bell. Alerts are debounced (10-min job,
+          5-min quiet window) so rapid retypes and toggles don't fire duplicates.
+        </p>
+        <div style="display:flex;gap:12px;flex-wrap:wrap">
+          <div style="flex:1;min-width:200px">
+            <label class="field-label" style="font-size:10px">DEPARTMENTS</label>
+            <div class="alert-dept-list" style="display:flex;flex-direction:column;gap:3px;max-height:120px;overflow-y:auto;border:1px solid var(--border);padding:6px 8px;border-radius:4px">
+              {% for d in departments %}
+              <label class="checkbox-label" style="font-size:12px">
+                <input type="checkbox" data-alert-dept value="{{ d }}"> {{ d }}
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+          <div style="flex:1;min-width:200px">
+            <label class="field-label" style="font-size:10px">SPECIFIC CONTACTS</label>
+            <div class="alert-contact-list" style="display:flex;flex-direction:column;gap:3px;max-height:120px;overflow-y:auto;border:1px solid var(--border);padding:6px 8px;border-radius:4px">
+              {% for c in (contacts if contacts is defined else []) %}
+              <label class="checkbox-label" style="font-size:12px">
+                <input type="checkbox" data-alert-contact value="{{ c.id }}">
+                {{ c.name }}{% if c.department %} <span class="text-dim" style="font-size:10px">({{ c.department }})</span>{% endif %}
+              </label>
+              {% endfor %}
+            </div>
+          </div>
         </div>
       </div>
       <div class="field-group">

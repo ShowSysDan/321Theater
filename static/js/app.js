@@ -1896,6 +1896,11 @@ function openFieldModal(fid, sectionId) {
     if (typeof form.reset === 'function') form.reset();
     else form.querySelectorAll('input,select,textarea').forEach(el => { el.value = el.defaultValue || ''; });
   }
+  // form.reset() handles named checkboxes, but the alert checkboxes are
+  // identified by data-* attributes and won't be touched — clear them
+  // manually so a fresh "Add Field" modal doesn't inherit prior selections.
+  modal.querySelectorAll('input[data-alert-dept], input[data-alert-contact]')
+    .forEach(el => { el.checked = false; });
 
   if (fid) {
     // Load existing field data
@@ -1938,6 +1943,17 @@ function _populateFieldModal(field) {
       }).join('\n');
     }
   }
+  // Restore alert config from arrays delivered by /api/form-fields.
+  const alertDepts = field.alert_departments || [];
+  const alertContacts = (field.alert_contact_ids || []).map(String);
+  modal.querySelectorAll('input[data-alert-dept]').forEach(el => {
+    el.checked = alertDepts.includes(el.value);
+  });
+  modal.querySelectorAll('input[data-alert-contact]').forEach(el => {
+    el.checked = alertContacts.includes(String(el.value));
+  });
+  const notesEl = modal.querySelector('[name="notes_content"]');
+  if (notesEl) notesEl.value = field.notes_content || '';
   _toggleFieldTypeOptions(field.field_type);
 }
 
@@ -1948,10 +1964,15 @@ function _toggleFieldTypeOptions(type) {
   const deptGroup = modal.querySelector('.contact-dept-group');
   const ynGroup = modal.querySelector('.yes-no-display-group');
   const uploadGroup = modal.querySelector('.upload-button-only-group');
+  const notesGroup = modal.querySelector('.notes-content-group');
+  const alertGroup = modal.querySelector('.field-alert-group');
   if (optGroup) optGroup.style.display = (type === 'select') ? '' : 'none';
   if (deptGroup) deptGroup.style.display = (type === 'contact_dropdown') ? '' : 'none';
   if (ynGroup) ynGroup.style.display = (type === 'yes_no') ? '' : 'none';
   if (uploadGroup) uploadGroup.style.display = (type === 'file_upload') ? '' : 'none';
+  if (notesGroup) notesGroup.style.display = (type === 'notes') ? '' : 'none';
+  // Alerts don't make sense for 'notes' (it has no per-show value).
+  if (alertGroup) alertGroup.style.display = (type === 'notes') ? 'none' : '';
 }
 
 function closeFieldModal() {
@@ -1979,6 +2000,13 @@ async function saveField() {
     const cond  = line.slice(idx + 1).trim();
     return cond ? {value, show_when: cond} : value;
   });
+  // Collect alert config — empty arrays mean "no alerts on this field".
+  data.alert_departments = Array.from(
+    modal.querySelectorAll('input[data-alert-dept]:checked')
+  ).map(el => el.value);
+  data.alert_contact_ids = Array.from(
+    modal.querySelectorAll('input[data-alert-contact]:checked')
+  ).map(el => Number(el.value));
   if (data.section_id) data.section_id = Number(data.section_id);
 
   const url = _editFieldId
@@ -2354,6 +2382,136 @@ function toggleTheme() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({theme: next}),
   }).catch(() => {});
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   NOTIFICATION BELL
+═══════════════════════════════════════════════════════════════ */
+
+const _NOTIF_POLL_MS = 60000; // 60 s — bell badge refresh cadence
+let _notifPollTimer = null;
+let _notifPanelOpen = false;
+
+function _escNotif(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function _formatNotifTime(iso) {
+  if (!iso) return '';
+  let d;
+  try { d = new Date(iso.replace(' ', 'T') + (iso.endsWith('Z') ? '' : 'Z')); }
+  catch (e) { return ''; }
+  if (!d || isNaN(d.getTime())) return '';
+  const now = new Date();
+  const diff = Math.floor((now - d) / 1000);
+  if (diff < 60)   return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)} min ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} h ago`;
+  if (diff < 7*86400) return `${Math.floor(diff / 86400)} d ago`;
+  return d.toLocaleDateString();
+}
+
+async function refreshNotifBadge() {
+  try {
+    const r = await fetch('/api/notifications/unread-count', {credentials: 'same-origin'});
+    if (!r.ok) return;
+    const j = await r.json();
+    const badge = document.getElementById('notif-bell-badge');
+    if (!badge) return;
+    const n = Math.max(0, parseInt(j.unread || 0, 10));
+    if (n > 0) {
+      badge.textContent = n > 99 ? '99+' : String(n);
+      badge.hidden = false;
+    } else {
+      badge.hidden = true;
+    }
+  } catch (e) { /* ignore — offline / not authenticated */ }
+}
+
+async function _loadNotifPanel() {
+  const list = document.getElementById('notif-panel-list');
+  if (!list) return;
+  list.innerHTML = '<div class="notif-empty">Loading…</div>';
+  try {
+    const r = await fetch('/api/notifications', {credentials: 'same-origin'});
+    if (!r.ok) throw new Error('fetch failed');
+    const j = await r.json();
+    if (!j.notifications || !j.notifications.length) {
+      list.innerHTML = '<div class="notif-empty">No notifications yet.</div>';
+    } else {
+      list.innerHTML = j.notifications.map(n => {
+        const cls = n.read_at ? 'notif-item' : 'notif-item unread';
+        const t = _formatNotifTime(n.created_at);
+        const titleHtml = _escNotif(n.title || '');
+        const bodyHtml  = n.body ? `<div class="notif-item-body">${_escNotif(n.body)}</div>` : '';
+        const inner = `
+          <div class="notif-item-title">${titleHtml}</div>
+          ${bodyHtml}
+          <div class="notif-item-meta">${_escNotif(t)} · ${_escNotif(n.kind)}</div>
+        `;
+        if (n.link_url) {
+          return `<a href="${_escNotif(n.link_url)}" class="${cls}" data-nid="${n.id}" onclick="markNotifRead(${n.id})">${inner}</a>`;
+        }
+        return `<div class="${cls}" data-nid="${n.id}" onclick="markNotifRead(${n.id})">${inner}</div>`;
+      }).join('');
+    }
+    const badge = document.getElementById('notif-bell-badge');
+    if (badge) {
+      if (j.unread > 0) { badge.textContent = j.unread > 99 ? '99+' : String(j.unread); badge.hidden = false; }
+      else badge.hidden = true;
+    }
+  } catch (e) {
+    list.innerHTML = '<div class="notif-empty">Unable to load notifications.</div>';
+  }
+}
+
+function toggleNotifPanel(ev) {
+  if (ev) ev.stopPropagation();
+  const panel = document.getElementById('notif-panel');
+  if (!panel) return;
+  _notifPanelOpen = !_notifPanelOpen;
+  panel.hidden = !_notifPanelOpen;
+  if (_notifPanelOpen) _loadNotifPanel();
+}
+
+async function markNotifRead(nid) {
+  try {
+    await fetch(`/api/notifications/${nid}/read`, {method: 'POST', credentials: 'same-origin'});
+  } catch (e) {}
+  refreshNotifBadge();
+}
+
+async function markAllNotifRead() {
+  try {
+    await fetch('/api/notifications/read-all', {method: 'POST', credentials: 'same-origin'});
+  } catch (e) {}
+  _loadNotifPanel();
+  refreshNotifBadge();
+}
+
+// Close the panel when clicking outside of it (but allow clicks inside the
+// panel — including links — to behave normally first).
+document.addEventListener('click', (e) => {
+  if (!_notifPanelOpen) return;
+  const panel = document.getElementById('notif-panel');
+  const bell = document.getElementById('notif-bell-btn');
+  if (!panel || !bell) return;
+  if (panel.contains(e.target) || bell.contains(e.target)) return;
+  _notifPanelOpen = false;
+  panel.hidden = true;
+});
+
+// Start the badge polling once the page is ready.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => {
+    refreshNotifBadge();
+    _notifPollTimer = setInterval(refreshNotifBadge, _NOTIF_POLL_MS);
+  });
+} else {
+  refreshNotifBadge();
+  _notifPollTimer = setInterval(refreshNotifBadge, _NOTIF_POLL_MS);
 }
 
 /* ═══════════════════════════════════════════════════════════════
