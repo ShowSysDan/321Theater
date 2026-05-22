@@ -242,6 +242,8 @@
       {% if show.show_time %} · {{ show.show_time }}{% endif %}
       {% if show.venue %} · {{ show.venue }}{% endif %}
       {% if show.status == 'archived' %}<span class="badge-archived">ARCHIVED</span>{% endif %}
+      {% if show.is_test %}<span class="badge-archived" style="background:#7d4baf"
+            title="Marked as test/demo — excluded from reports">TEST</span>{% endif %}
       {% if restricted %}<span class="badge-archived" style="background:#4A5568">VIEW ONLY</span>{% endif %}
     </p>
     {% if last_saved_display_name %}
@@ -255,6 +257,14 @@
     <span id="presence-indicator" class="presence-indicator" hidden></span>
     <span class="save-status" id="save-status"></span>
     <button type="button" class="btn btn-ghost btn-sm" onclick="openHistory()" title="Version history">History</button>
+    {% if session.get('user_role') in ('admin','staff') or session.get('is_content_admin') %}
+    <button type="button" class="btn btn-ghost btn-sm" id="test-mode-btn"
+            data-is-test="{{ '1' if show.is_test else '0' }}"
+            title="Flag as test / demo so reports can exclude this show"
+            onclick="toggleShowTestMode(this, {{ show.id }})">
+      {{ 'Unmark test' if show.is_test else 'Mark as test' }}
+    </button>
+    {% endif %}
     {% if not restricted and ollama_enabled %}
     <button type="button" class="btn btn-ghost btn-sm" id="ai-extract-btn" onclick="openAiExtract()" title="Extract field values from a document using AI">AI Extract</button>
     {% endif %}

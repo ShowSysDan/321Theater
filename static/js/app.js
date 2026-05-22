@@ -2706,6 +2706,31 @@ async function savePdfFormFiller(isAuto) {
   }
 }
 
+async function toggleShowTestMode(btn, showId) {
+  const cur = btn.dataset.isTest === '1';
+  const next = !cur;
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/shows/${showId}/test-mode`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify({is_test: next})
+    });
+    const j = await r.json();
+    if (j.success) {
+      btn.dataset.isTest = next ? '1' : '0';
+      btn.textContent = next ? 'Unmark test' : 'Mark as test';
+    } else {
+      alert(j.error || 'Failed to update test flag.');
+    }
+  } catch (e) {
+    alert('Network error.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function closePdfFormFiller() {
   if (_pdfFillerSaveTimer) clearTimeout(_pdfFillerSaveTimer);
   // Final save on close if there were pending edits.

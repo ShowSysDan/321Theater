@@ -6756,13 +6756,20 @@ def upload_pdf_template():
     description = (request.form.get('description') or '').strip()
     if not f or not f.filename:
         return jsonify({'success': False, 'error': 'No PDF provided.'}), 400
-    raw = f.read()
-    if not raw[:4] == b'%PDF':
-        return jsonify({'success': False, 'error': 'File does not look like a PDF.'}), 400
+    # Reject by Content-Length up front so we don't read a multi-GB body
+    # into memory before discovering it's too large. The body length check
+    # below is a backstop for clients that omit/lie about the header.
     max_size = _get_upload_max()
+    cl = request.content_length or 0
+    if cl and cl > max_size:
+        max_mb = max_size // (1024 * 1024)
+        return jsonify({'success': False, 'error': f'PDF too large (max {max_mb} MB).'}), 413
+    raw = f.read(max_size + 1)
     if len(raw) > max_size:
         max_mb = max_size // (1024 * 1024)
         return jsonify({'success': False, 'error': f'PDF too large (max {max_mb} MB).'}), 413
+    if not raw[:4] == b'%PDF':
+        return jsonify({'success': False, 'error': 'File does not look like a PDF.'}), 400
     if not name:
         name = (f.filename or 'Untitled PDF').rsplit('.', 1)[0]
     page_count = _count_pdf_pages(raw)
