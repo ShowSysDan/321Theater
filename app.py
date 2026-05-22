@@ -363,6 +363,27 @@ def from_json_filter(value):
         return []
 
 
+@app.template_filter('autolink')
+def autolink_filter(value):
+    """Escape HTML, turn raw http(s) URLs into clickable links, and preserve
+    line breaks. Used by the 'notes' field type so admins can paste
+    instructions + links into a plain textarea and have them render cleanly
+    in the advance form."""
+    if not value:
+        return ''
+    import re as _re
+    from markupsafe import Markup, escape
+    text = str(value)
+    escaped = escape(text)  # turns < > & into entities, returns Markup
+    url_re = _re.compile(r'(https?://[^\s<>"\']+)')
+    linked = url_re.sub(
+        lambda m: f'<a href="{m.group(1)}" target="_blank" rel="noopener">{m.group(1)}</a>',
+        str(escaped)
+    )
+    linked = linked.replace('\n', '<br>')
+    return Markup(linked)
+
+
 @app.template_filter('multi')
 def multi_filter(value, sep=', '):
     """Render a multi-select value cleanly. Accepts either a JSON-encoded
@@ -423,7 +444,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.11.0'
+APP_VERSION = '2.12.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -1325,6 +1346,17 @@ def get_form_fields_for_template():
                 fd['options'] = []
         else:
             fd['options'] = []
+        # Decode alert config so templates/JS get plain arrays.
+        raw_d = fd.get('alert_departments')
+        try:
+            fd['alert_departments'] = json.loads(raw_d) if raw_d else []
+        except (json.JSONDecodeError, TypeError):
+            fd['alert_departments'] = []
+        raw_c = fd.get('alert_contact_ids')
+        try:
+            fd['alert_contact_ids'] = json.loads(raw_c) if raw_c else []
+        except (json.JSONDecodeError, TypeError):
+            fd['alert_contact_ids'] = []
         field_map.setdefault(fd['section_id'], []).append(fd)
 
     result = []
@@ -2060,10 +2092,25 @@ def start_scheduler():
         # PDF emails: leader-gated inside run_scheduled_pdf_emails() so
         # recipients never receive a duplicate when multiple instances run.
         scheduler.add_job(run_scheduled_pdf_emails, 'interval', hours=1, id='pdf_email_check')
+        # Field-change alerts: leader-gated. Picks up debounced pending
+        # alerts every 10 min and sends them once the value has been
+        # quiet long enough.
+        scheduler.add_job(run_field_change_alerts, 'interval', minutes=10,
+                          id='field_change_alerts')
         scheduler.start()
+        # Backfill contact↔user link once on boot.
+        try:
+            _backfill_contacts_from_users()
+        except Exception as e:
+            app.logger.warning(f'contact-user backfill skipped: {e}')
         return scheduler
     except ImportError:
         app.logger.warning('APScheduler not installed — backups disabled.')
+        # Still backfill contact↔user link even without APScheduler.
+        try:
+            _backfill_contacts_from_users()
+        except Exception as e:
+            app.logger.warning(f'contact-user backfill skipped: {e}')
         return None
 
 
@@ -2229,6 +2276,397 @@ def _snapshot_form_history(db, show_id, form_type, snapshot_data):
             ORDER BY saved_at DESC LIMIT 50
           )
     """, (show_id, form_type, show_id, form_type))
+
+
+# ─── Field-Change Alert / Notification Helpers ────────────────────────────────
+
+def _hash_field_value(v):
+    """Stable hash for change-detection. Uses sha1 of the string form."""
+    import hashlib
+    return hashlib.sha1((v or '').encode('utf-8', errors='replace')).hexdigest()
+
+
+def _stage_field_alerts(db, show_id, data, prev_values, actor_user_id):
+    """Compare submitted values to prior DB values and stage pending alerts
+    for any alert-enabled field whose value changed.
+
+    A 'change' is a difference in the hash of the trimmed string form. If a
+    field's pending value already equals the last_alerted_hash, the pending
+    state is cleared (the value bounced back so no email is owed)."""
+    keys = [str(k) for k in data.keys()]
+    if not keys:
+        return
+    placeholders = ','.join('?' for _ in keys)
+    alert_rows = db.execute(
+        f"""SELECT field_key, label, alert_departments, alert_contact_ids
+              FROM form_fields
+             WHERE field_key IN ({placeholders})
+               AND (alert_departments IS NOT NULL OR alert_contact_ids IS NOT NULL)
+               AND field_type != 'notes'""",
+        tuple(keys)
+    ).fetchall()
+    if not alert_rows:
+        return
+
+    for row in alert_rows:
+        key = row['field_key']
+        new_val = '' if data.get(key) is None else str(data.get(key)).strip()
+        prev_val = (prev_values.get(key) or '').strip()
+        if new_val == prev_val:
+            continue  # actual save didn't change anything
+
+        new_hash = _hash_field_value(new_val)
+        state = db.execute(
+            'SELECT * FROM field_alert_state WHERE show_id=? AND field_key=?',
+            (show_id, key)
+        ).fetchone()
+
+        if state and state['last_alerted_hash'] == new_hash:
+            # Value bounced back to whatever was last alerted — clear pending.
+            db.execute(
+                """UPDATE field_alert_state
+                      SET pending_value=NULL, pending_prev_value=NULL,
+                          pending_hash=NULL, pending_updated_at=NULL,
+                          pending_updated_by=NULL
+                    WHERE show_id=? AND field_key=?""",
+                (show_id, key)
+            )
+            continue
+
+        # Upsert pending. SQLite & PG both honor INSERT OR REPLACE-like
+        # behavior here via "ON CONFLICT" — fall back to delete-then-insert
+        # for the lowest common denominator.
+        if state:
+            # Preserve the *original* prev_value if a pending alert is still
+            # in flight (so the email reports the real "from" value, not an
+            # intermediate one the user typed in between).
+            pending_prev = state['pending_prev_value'] if state['pending_prev_value'] is not None else prev_val
+            db.execute(
+                """UPDATE field_alert_state
+                      SET pending_value=?, pending_prev_value=?,
+                          pending_hash=?, pending_updated_at=CURRENT_TIMESTAMP,
+                          pending_updated_by=?
+                    WHERE show_id=? AND field_key=?""",
+                (new_val, pending_prev, new_hash, actor_user_id, show_id, key)
+            )
+        else:
+            db.execute(
+                """INSERT INTO field_alert_state
+                      (show_id, field_key, pending_value, pending_prev_value,
+                       pending_hash, pending_updated_at, pending_updated_by)
+                    VALUES (?,?,?,?,?,CURRENT_TIMESTAMP,?)""",
+                (show_id, key, new_val, prev_val, new_hash, actor_user_id)
+            )
+
+
+def _resolve_alert_recipients(db, alert_departments, alert_contact_ids):
+    """Resolve a field's alert config into (contact_rows, user_ids).
+
+    contact_rows is a list of dicts with email, name, user_id — used to build
+    the email recipient list. user_ids is a set of users to notify in-app
+    (only contacts linked to a system user get an in-app notification)."""
+    contact_rows = []
+    seen_contact_ids = set()
+
+    if alert_departments:
+        try:
+            depts = json.loads(alert_departments) if isinstance(alert_departments, str) else alert_departments
+        except (json.JSONDecodeError, TypeError):
+            depts = []
+        if depts:
+            placeholders = ','.join('?' for _ in depts)
+            for c in db.execute(
+                f"SELECT id, name, email, user_id FROM contacts "
+                f"WHERE department IN ({placeholders})",
+                tuple(depts)
+            ).fetchall():
+                if c['id'] in seen_contact_ids:
+                    continue
+                seen_contact_ids.add(c['id'])
+                contact_rows.append(dict(c))
+
+    if alert_contact_ids:
+        try:
+            cids = json.loads(alert_contact_ids) if isinstance(alert_contact_ids, str) else alert_contact_ids
+        except (json.JSONDecodeError, TypeError):
+            cids = []
+        cids = [int(x) for x in cids if str(x).strip().isdigit()]
+        if cids:
+            placeholders = ','.join('?' for _ in cids)
+            for c in db.execute(
+                f"SELECT id, name, email, user_id FROM contacts WHERE id IN ({placeholders})",
+                tuple(cids)
+            ).fetchall():
+                if c['id'] in seen_contact_ids:
+                    continue
+                seen_contact_ids.add(c['id'])
+                contact_rows.append(dict(c))
+
+    user_ids = {c['user_id'] for c in contact_rows if c.get('user_id')}
+    return contact_rows, user_ids
+
+
+def create_notification(db, user_id, title, body='', link_url=None,
+                        kind='system', show_id=None, field_key=None):
+    """Insert one notification row. Safe to call inside any handler — caller
+    owns the commit. user_id may be None (skipped)."""
+    if not user_id:
+        return
+    try:
+        db.execute(
+            """INSERT INTO notifications
+                 (user_id, kind, title, body, link_url, show_id, field_key)
+               VALUES (?,?,?,?,?,?,?)""",
+            (int(user_id), kind, title or '', body or '', link_url, show_id, field_key)
+        )
+    except Exception as e:
+        app.logger.warning(f'create_notification failed for user {user_id}: {e}')
+
+
+# Debounce window: a pending alert is only sent if no further edits have
+# arrived within this many minutes. Matches the "10-min job, 5-min quiet"
+# product decision.
+_FIELD_ALERT_QUIET_MINUTES = 5
+
+
+def run_field_change_alerts():
+    """Scheduled every 10 minutes (leader-gated). Sends queued field-change
+    alerts whose pending value has been quiet long enough."""
+    if not am_i_leader():
+        return
+    db = get_db()
+    try:
+        # Pick up pending rows where the latest edit is older than the quiet
+        # window. SQLite stores timestamps as text — use the canonical helper
+        # so both backends compare correctly.
+        rows = db.execute(
+            """SELECT s.id AS state_id, s.show_id, s.field_key,
+                      s.pending_value, s.pending_prev_value, s.pending_hash,
+                      s.pending_updated_by, s.last_alerted_hash,
+                      f.label, f.alert_departments, f.alert_contact_ids,
+                      sh.name AS show_name
+                 FROM field_alert_state s
+                 JOIN form_fields f ON f.field_key = s.field_key
+            LEFT JOIN shows sh ON sh.id = s.show_id
+                WHERE s.pending_hash IS NOT NULL
+                  AND s.pending_updated_at IS NOT NULL"""
+        ).fetchall()
+    except Exception as e:
+        app.logger.warning(f'run_field_change_alerts query failed: {e}')
+        db.close()
+        return
+
+    if not rows:
+        db.close()
+        return
+
+    now = datetime.utcnow()
+    base_url = (get_app_setting('public_base_url', '') or '').rstrip('/')
+
+    for r in rows:
+        # Parse the pending_updated_at timestamp into a datetime so we can
+        # compare against the quiet window. Both backends return either a
+        # datetime (psycopg) or an ISO string (sqlite3); coerce.
+        state_row = db.execute(
+            'SELECT pending_updated_at FROM field_alert_state WHERE id=?',
+            (r['state_id'],)
+        ).fetchone()
+        if not state_row or not state_row['pending_updated_at']:
+            continue
+        pu = state_row['pending_updated_at']
+        try:
+            if isinstance(pu, str):
+                dt = datetime.fromisoformat(pu.replace('Z', '').replace('T', ' ').split('.')[0])
+            else:
+                dt = pu
+        except Exception:
+            continue
+        if (now - dt).total_seconds() < _FIELD_ALERT_QUIET_MINUTES * 60:
+            continue  # not quiet enough yet
+
+        if r['pending_hash'] == r['last_alerted_hash']:
+            # Defensive — cleared concurrently. Drop the pending state.
+            db.execute(
+                """UPDATE field_alert_state
+                      SET pending_value=NULL, pending_prev_value=NULL,
+                          pending_hash=NULL, pending_updated_at=NULL,
+                          pending_updated_by=NULL
+                    WHERE id=?""", (r['state_id'],)
+            )
+            db.commit()
+            continue
+
+        contact_rows, user_ids = _resolve_alert_recipients(
+            db, r['alert_departments'], r['alert_contact_ids']
+        )
+        emails = sorted({(c['email'] or '').strip() for c in contact_rows if c.get('email')})
+
+        show_name = r['show_name'] or f"Show #{r['show_id']}"
+        field_label = r['label'] or r['field_key']
+        prev_disp = r['pending_prev_value'] if r['pending_prev_value'] not in (None, '') else '(empty)'
+        new_disp  = r['pending_value']      if r['pending_value']      not in (None, '') else '(empty)'
+
+        subj = f"[{show_name}] {field_label} updated"
+        body_text = (
+            f"{field_label} was changed on the advance for {show_name}.\n\n"
+            f"Old value: {prev_disp}\n"
+            f"New value: {new_disp}\n\n"
+        )
+        link_path = url_for('show_page', show_id=r['show_id']) if r['show_id'] else None
+        link_url = (base_url + link_path) if (base_url and link_path) else (link_path or '')
+        if link_url:
+            body_text += f"Open the show: {link_url}\n"
+
+        # Send email (best-effort). Skip cleanly if no email recipients.
+        if emails:
+            try:
+                _send_email(
+                    subj, emails, body_text=body_text,
+                    error_context={'pdf_type': 'field_alert',
+                                   'show_id': r['show_id'],
+                                   'triggered_by': 'field_alert_job',
+                                   'purpose': 'field_change_alert'}
+                )
+            except Exception as e:
+                app.logger.warning(f'field alert email send failed: {e}')
+
+        # In-app notifications for every linked user account.
+        for uid in user_ids:
+            create_notification(
+                db, uid,
+                title=f"{field_label} updated on {show_name}",
+                body=f"{prev_disp} → {new_disp}",
+                link_url=link_path,
+                kind='field_alert',
+                show_id=r['show_id'],
+                field_key=r['field_key']
+            )
+
+        # Mark alerted; clear pending.
+        db.execute(
+            """UPDATE field_alert_state
+                  SET last_alerted_value=?, last_alerted_hash=?,
+                      last_alerted_at=CURRENT_TIMESTAMP,
+                      pending_value=NULL, pending_prev_value=NULL,
+                      pending_hash=NULL, pending_updated_at=NULL,
+                      pending_updated_by=NULL
+                WHERE id=?""",
+            (r['pending_value'], r['pending_hash'], r['state_id'])
+        )
+        syslog_logger.info(
+            f"FIELD_ALERT_SENT show_id={r['show_id']} field={r['field_key']!r} "
+            f"emails={len(emails)} notified_users={len(user_ids)}"
+        )
+        db.commit()
+    db.close()
+
+
+# ─── Contact ↔ User Sync ─────────────────────────────────────────────────────
+
+def _sync_contact_for_user(db, user_id, *, display_name=None, email=None,
+                           also_unlink_others=True):
+    """Ensure a contact row exists and stays in sync for the given user.
+
+    - If a contact with user_id == user_id exists, update its name + email
+      (only when non-empty values were supplied).
+    - Otherwise: try to match an existing contact by email (preferred) or
+      name; if found, attach user_id. If no match, create a fresh contact.
+    - When also_unlink_others is True (default), any other contacts that
+      were linked to this user get unlinked first to maintain the
+      one-contact-per-user invariant."""
+    if not user_id:
+        return
+    # Fetch current user fields if not supplied
+    if display_name is None or email is None:
+        u = db.execute(
+            'SELECT display_name, username, email FROM users WHERE id=?', (user_id,)
+        ).fetchone()
+        if not u:
+            return
+        if display_name is None:
+            display_name = u['display_name'] or u['username']
+        if email is None:
+            email = (u['email'] or '')
+
+    name_val = (display_name or '').strip()
+    email_val = (email or '').strip()
+
+    linked = db.execute(
+        'SELECT id FROM contacts WHERE user_id=? ORDER BY id LIMIT 1', (user_id,)
+    ).fetchone()
+
+    if linked:
+        # Update name + email (but only if user has them). Keep existing
+        # department / recipient flags / phone untouched.
+        sets = []
+        params = []
+        if name_val:
+            sets.append('name=?'); params.append(name_val)
+        if email_val:
+            sets.append('email=?'); params.append(email_val)
+        if sets:
+            params.append(linked['id'])
+            db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=?", tuple(params))
+        return
+
+    # Try to match an existing contact by email or name to avoid duplicates.
+    match = None
+    if email_val:
+        match = db.execute(
+            'SELECT id FROM contacts WHERE LOWER(email)=LOWER(?) AND (user_id IS NULL) LIMIT 1',
+            (email_val,)
+        ).fetchone()
+    if not match and name_val:
+        match = db.execute(
+            'SELECT id FROM contacts WHERE LOWER(name)=LOWER(?) AND (user_id IS NULL) LIMIT 1',
+            (name_val,)
+        ).fetchone()
+
+    if match:
+        db.execute('UPDATE contacts SET user_id=? WHERE id=?', (user_id, match['id']))
+        # Also push name/email through so the contact reflects the user.
+        sets = []
+        params = []
+        if name_val:
+            sets.append('name=?'); params.append(name_val)
+        if email_val:
+            sets.append('email=?'); params.append(email_val)
+        if sets:
+            params.append(match['id'])
+            db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=?", tuple(params))
+        return
+
+    # Fresh insert.
+    try:
+        db.execute(
+            """INSERT INTO contacts (name, title, department, phone, email,
+                                     report_recipient, advance_recipient,
+                                     production_recipient, postnotes_recipient,
+                                     system_recipient, venue_filter, user_id)
+                VALUES (?,?,?,?,?,0,0,0,0,0,NULL,?)""",
+            (name_val or 'Unnamed user', '', '', '', email_val, user_id)
+        )
+    except Exception as e:
+        app.logger.warning(f'_sync_contact_for_user insert failed for user {user_id}: {e}')
+
+
+def _backfill_contacts_from_users():
+    """One-shot: ensure every user has a corresponding contact row. Safe to
+    run repeatedly — sync helper is idempotent. Called from start_scheduler
+    so it runs once per worker on startup."""
+    try:
+        db = get_db()
+        users = db.execute('SELECT id, display_name, username, email FROM users').fetchall()
+        for u in users:
+            _sync_contact_for_user(
+                db, u['id'],
+                display_name=u['display_name'] or u['username'],
+                email=u['email'] or ''
+            )
+        db.commit()
+        db.close()
+    except Exception as e:
+        app.logger.warning(f'_backfill_contacts_from_users failed: {e}')
 
 
 def log_audit(db, action, entity_type, entity_id=None, show_id=None,
@@ -2887,9 +3325,21 @@ def show_page(show_id):
     # Asset categories (for the Assets tab)
     asset_cats = db2.execute('SELECT * FROM asset_categories ORDER BY sort_order, name').fetchall()
     asset_categories_for_tab = [dict(c) for c in asset_cats]
+
+    # PDF-form submission status per field_key (for the pdf_form button chip).
+    pdf_form_status = {}
+    try:
+        for r in db2.execute(
+            'SELECT field_key, status FROM pdf_submissions WHERE show_id=?', (show_id,)
+        ).fetchall():
+            pdf_form_status[r['field_key']] = r['status']
+    except Exception:
+        pdf_form_status = {}
+
     db2.close()
 
     return render_template('show.html',
+                           pdf_form_status=pdf_form_status,
                            show=show,
                            tab=tab,
                            advance_data=advance_data,
@@ -2940,6 +3390,21 @@ def save_advance(show_id):
             "SELECT field_key FROM form_fields WHERE field_type='arts_group_dropdown'"
         ).fetchall()
     }
+
+    # Snapshot the *current* values for every key we're about to write — used
+    # later to detect changes on alert-enabled fields. Read-before-write keeps
+    # the diff scoped to this save (later writes during alert flush won't
+    # confuse the detector).
+    submitted_keys = list(data.keys())
+    prev_values = {}
+    if submitted_keys:
+        placeholders = ','.join('?' for _ in submitted_keys)
+        for row in db.execute(
+            f"SELECT field_key, field_value FROM advance_data "
+            f"WHERE show_id=? AND field_key IN ({placeholders})",
+            tuple([show_id] + submitted_keys)
+        ).fetchall():
+            prev_values[row['field_key']] = row['field_value'] or ''
 
     for key, value in data.items():
         db.execute("""
@@ -2992,6 +3457,14 @@ def save_advance(show_id):
     db.execute("""
         UPDATE shows SET last_saved_by=?, last_saved_at=CURRENT_TIMESTAMP WHERE id=?
     """, (session['user_id'], show_id))
+
+    # Stage field-change alerts (debounced — actual send happens in the
+    # 10-min background job). Only fields that have alert_departments or
+    # alert_contact_ids configured are considered.
+    try:
+        _stage_field_alerts(db, show_id, data, prev_values, session.get('user_id'))
+    except Exception as e:
+        app.logger.warning(f'_stage_field_alerts failed for show {show_id}: {e}')
 
     # Version snapshot
     _snapshot_form_history(db, show_id, 'advance', {'advance_data': data})
@@ -4979,6 +5452,100 @@ def restore_show(show_id):
     return redirect(url_for('dashboard'))
 
 
+@app.route('/shows/<int:show_id>/test-mode', methods=['POST'])
+@staff_or_admin_required
+def toggle_show_test_mode(show_id):
+    """Flag a show as test/demo so reporting can exclude it. Idempotent."""
+    if session.get('user_role') != 'admin' and not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    data = request.get_json(force=True) or {}
+    is_test = 1 if data.get('is_test') else 0
+    db = get_db()
+    db.execute('UPDATE shows SET is_test=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+               (is_test, show_id))
+    log_audit(db, 'SHOW_TEST_FLAG', 'show', show_id, show_id=show_id,
+              detail=f'is_test={is_test}')
+    db.commit(); db.close()
+    syslog_logger.info(f"SHOW_TEST_FLAG show_id={show_id} is_test={is_test} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'is_test': bool(is_test)})
+
+
+@app.route('/settings/shows/bulk-archive', methods=['POST'])
+@admin_required
+def bulk_archive_shows():
+    """Mass archive — accepts {show_ids: [...]} or {filter: 'past_30_days'}."""
+    data = request.get_json(force=True) or {}
+    raw_ids = data.get('show_ids') or []
+    ids = [int(x) for x in raw_ids if str(x).strip().lstrip('-').isdigit()]
+    if not ids:
+        return jsonify({'success': False, 'error': 'No show_ids provided.'}), 400
+    db = get_db()
+    placeholders = ','.join('?' for _ in ids)
+    rows = db.execute(
+        f"SELECT id, name FROM shows WHERE id IN ({placeholders}) AND status='active'",
+        tuple(ids)
+    ).fetchall()
+    archived = [r['id'] for r in rows]
+    if archived:
+        db.execute(
+            f"UPDATE shows SET status='archived', updated_at=CURRENT_TIMESTAMP "
+            f"WHERE id IN ({','.join('?' for _ in archived)})",
+            tuple(archived)
+        )
+        for r in rows:
+            log_audit(db, 'SHOW_ARCHIVE', 'show', r['id'], show_id=r['id'],
+                      detail=f'bulk: {r["name"]}')
+    db.commit(); db.close()
+    syslog_logger.info(f"SHOW_BULK_ARCHIVE count={len(archived)} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'archived': archived})
+
+
+@app.route('/settings/shows/bulk-delete', methods=['POST'])
+@admin_required
+def bulk_delete_shows():
+    """Hard-delete shows (cascades to advance_data, schedule, etc.)."""
+    data = request.get_json(force=True) or {}
+    raw_ids = data.get('show_ids') or []
+    ids = [int(x) for x in raw_ids if str(x).strip().lstrip('-').isdigit()]
+    if not ids:
+        return jsonify({'success': False, 'error': 'No show_ids provided.'}), 400
+    confirm = (data.get('confirm') or '').strip().upper()
+    if confirm != 'DELETE':
+        return jsonify({'success': False,
+                        'error': 'Bulk delete requires confirm="DELETE".'}), 400
+    db = get_db()
+    placeholders = ','.join('?' for _ in ids)
+    rows = db.execute(
+        f"SELECT id, name FROM shows WHERE id IN ({placeholders})",
+        tuple(ids)
+    ).fetchall()
+    deleted_ids = [r['id'] for r in rows]
+    for r in rows:
+        log_audit(db, 'SHOW_DELETE', 'show', r['id'], show_id=r['id'],
+                  detail=f'bulk: {r["name"]}')
+    # Cascade is handled by foreign keys; the shows row drop fires the rest.
+    if deleted_ids:
+        # Notifications use ON DELETE SET NULL on show_id (they're per-user
+        # records, not per-show) — but their body text still mentions the
+        # deleted show. Scrub them explicitly so the values aren't preserved
+        # in the bell forever.
+        del_ph = ','.join('?' for _ in deleted_ids)
+        db.execute(
+            f"DELETE FROM notifications WHERE show_id IN ({del_ph})",
+            tuple(deleted_ids)
+        )
+        db.execute(
+            f"DELETE FROM shows WHERE id IN ({del_ph})",
+            tuple(deleted_ids)
+        )
+    db.commit(); db.close()
+    syslog_logger.info(f"SHOW_BULK_DELETE count={len(deleted_ids)} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'deleted': deleted_ids})
+
+
 @app.route('/shows/<int:show_id>/delete', methods=['POST'])
 @admin_required
 def delete_show(show_id):
@@ -4986,7 +5553,11 @@ def delete_show(show_id):
     show = db.execute('SELECT name FROM shows WHERE id=?', (show_id,)).fetchone()
     show_name = show['name'] if show else str(show_id)
     for tbl in ['advance_data', 'schedule_rows', 'schedule_meta',
-                'post_show_notes', 'export_log', 'form_history', 'show_group_access']:
+                'post_show_notes', 'export_log', 'form_history', 'show_group_access',
+                # Field-alert state and per-user notifications carry text
+                # mentioning the show — scrub them explicitly so they don't
+                # linger after the show row is gone.
+                'field_alert_state', 'notifications', 'pdf_submissions']:
         db.execute(f'DELETE FROM {tbl} WHERE show_id=?', (show_id,))
     db.execute('DELETE FROM shows WHERE id=?', (show_id,))
     log_audit(db, 'SHOW_DELETE', 'show', show_id, detail=show_name)
@@ -5624,6 +6195,13 @@ def edit_contact(cid):
 def delete_contact(cid):
     db = get_db()
     before = _snapshot_row(db, 'contacts', cid)
+    if before and before.get('user_id'):
+        db.close()
+        return jsonify({
+            'success': False,
+            'error': 'This contact is linked to a user account. '
+                     'Delete the user (or unlink the user) first.'
+        }), 400
     name = before['name'] if before else str(cid)
     log_audit(db, 'CONTACT_DELETE', 'contact', cid, detail=name, before=before)
     db.execute('DELETE FROM contacts WHERE id=?', (cid,))
@@ -5663,7 +6241,11 @@ def add_user():
         cur = db.execute("""INSERT INTO users (username, password_hash, display_name, role, email, is_readonly)
                       VALUES (?, ?, ?, ?, ?, ?)""",
                    (username, generate_password_hash(password), display, role, email, is_readonly))
-        log_audit(db, 'USER_CREATE', 'user', cur.lastrowid, detail=f'{username} role={role}')
+        new_uid = cur.lastrowid
+        log_audit(db, 'USER_CREATE', 'user', new_uid, detail=f'{username} role={role}')
+        # Auto-create / link a contact row so the new user shows up in
+        # contact pickers without manual data entry.
+        _sync_contact_for_user(db, new_uid, display_name=display, email=email)
         db.commit()
         flash(f'User "{username}" created.', 'success')
         syslog_logger.info(f"USER_CREATE username={username} role={role} by={session.get('username')}")
@@ -5739,6 +6321,9 @@ def edit_user(uid):
               detail=(f'role={role} readonly={is_readonly} scheduler={is_scheduler} '
                       f'asset_mgr={is_asset_manager} doc_viewer={is_document_viewer} '
                       f'by={session.get("username")}'))
+    # Keep the linked contact row's name + email in sync with this user.
+    _sync_contact_for_user(db, uid, display_name=display_name or row['username'],
+                           email=email)
     db.commit()
     db.close()
     syslog_logger.info(
@@ -6004,14 +6589,21 @@ def add_form_field():
     max_order = db.execute(
         'SELECT MAX(sort_order) FROM form_fields WHERE section_id=?', (section_id,)
     ).fetchone()[0] or 0
+    alert_depts = data.get('alert_departments') or []
+    alert_contacts = data.get('alert_contact_ids') or []
+    alert_depts_json    = json.dumps(alert_depts)    if alert_depts    else None
+    alert_contacts_json = json.dumps([int(c) for c in alert_contacts if str(c).strip().isdigit()]) if alert_contacts else None
+    pdf_tid = data.get('pdf_template_id')
+    pdf_tid = int(pdf_tid) if pdf_tid and str(pdf_tid).strip().isdigit() else None
     try:
         cur = db.execute("""
             INSERT INTO form_fields
             (section_id, field_key, label, field_type, sort_order,
              options_json, contact_dept, conditional_show_when,
              help_text, placeholder, width_hint, is_notes_field, ai_hint,
-             display_as, allow_multi, auto_select_visible, hide_from_pdf, upload_button_only)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             display_as, allow_multi, auto_select_visible, hide_from_pdf, upload_button_only,
+             notes_content, alert_departments, alert_contact_ids, pdf_template_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (section_id, field_key, label,
               data.get('field_type','text'), max_order + 10,
               options_json,
@@ -6026,7 +6618,11 @@ def add_form_field():
               1 if data.get('allow_multi') else 0,
               1 if data.get('auto_select_visible') else 0,
               1 if data.get('hide_from_pdf') else 0,
-              1 if data.get('upload_button_only') else 0))
+              1 if data.get('upload_button_only') else 0,
+              data.get('notes_content') or None,
+              alert_depts_json,
+              alert_contacts_json,
+              pdf_tid))
         fid = cur.lastrowid
         log_audit_change(db, 'FIELD_ADD', 'form_field', fid, detail=field_key,
                          table='form_fields')
@@ -6047,12 +6643,19 @@ def edit_form_field(fid):
     options_json = json.dumps(options) if options else None
     db = get_db()
     before = _snapshot_row(db, 'form_fields', fid)
+    alert_depts = data.get('alert_departments') or []
+    alert_contacts = data.get('alert_contact_ids') or []
+    alert_depts_json    = json.dumps(alert_depts)    if alert_depts    else None
+    alert_contacts_json = json.dumps([int(c) for c in alert_contacts if str(c).strip().isdigit()]) if alert_contacts else None
+    pdf_tid = data.get('pdf_template_id')
+    pdf_tid = int(pdf_tid) if pdf_tid and str(pdf_tid).strip().isdigit() else None
     db.execute("""
         UPDATE form_fields SET
             section_id=?, label=?, field_type=?,
             options_json=?, contact_dept=?, conditional_show_when=?,
             help_text=?, placeholder=?, width_hint=?, is_notes_field=?, ai_hint=?,
-            display_as=?, allow_multi=?, auto_select_visible=?, hide_from_pdf=?, upload_button_only=?
+            display_as=?, allow_multi=?, auto_select_visible=?, hide_from_pdf=?, upload_button_only=?,
+            notes_content=?, alert_departments=?, alert_contact_ids=?, pdf_template_id=?
         WHERE id=?
     """, (data.get('section_id'), data.get('label',''),
           data.get('field_type','text'), options_json,
@@ -6066,6 +6669,10 @@ def edit_form_field(fid):
           1 if data.get('auto_select_visible') else 0,
           1 if data.get('hide_from_pdf') else 0,
           1 if data.get('upload_button_only') else 0,
+          data.get('notes_content') or None,
+          alert_depts_json,
+          alert_contacts_json,
+          pdf_tid,
           fid))
     after = _snapshot_row(db, 'form_fields', fid)
     log_audit(db, 'FIELD_EDIT', 'form_field', fid, detail=data.get('label',''),
@@ -6097,6 +6704,509 @@ def reorder_form_fields():
         db.execute('UPDATE form_fields SET sort_order=? WHERE id=?', (i * 10, fid))
     db.commit(); db.close()
     return jsonify({'success': True})
+
+
+# ─── PDF Form Templates (settings + filler) ───────────────────────────────────
+
+def _pdf_template_bytes(row):
+    """Resolve a pdf_templates row to raw PDF bytes (BLOB or S3)."""
+    if row.get('s3_key') if isinstance(row, dict) else row['s3_key']:
+        key = row['s3_key']
+        try:
+            return s3_storage.download_file(key)
+        except Exception as e:
+            app.logger.warning(f'pdf template s3 fetch failed for {key}: {e}')
+    raw = row['pdf_data']
+    if raw is None:
+        return b''
+    return bytes(raw)
+
+
+def _count_pdf_pages(pdf_bytes):
+    """Best-effort page count. Returns 1 if we can't read it."""
+    try:
+        import fitz
+        with fitz.open(stream=pdf_bytes, filetype='pdf') as doc:
+            return doc.page_count
+    except Exception:
+        try:
+            from pdfrw import PdfReader
+            from io import BytesIO
+            return len(PdfReader(BytesIO(pdf_bytes)).pages)
+        except Exception:
+            return 1
+
+
+@app.route('/settings/pdf-templates')
+@content_admin_required
+def pdf_templates_list():
+    db = get_db()
+    rows = db.execute(
+        """SELECT id, name, description, page_count, fields_json,
+                  created_by, created_at, updated_at
+             FROM pdf_templates
+            ORDER BY name"""
+    ).fetchall()
+    templates = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d['field_count'] = len(json.loads(d.get('fields_json') or '[]'))
+        except (json.JSONDecodeError, TypeError):
+            d['field_count'] = 0
+        templates.append(d)
+    db.close()
+    return render_template('pdf_templates.html',
+                           templates=templates,
+                           user=get_current_user())
+
+
+@app.route('/settings/pdf-templates/upload', methods=['POST'])
+@content_admin_required
+def upload_pdf_template():
+    f = request.files.get('file')
+    name = (request.form.get('name') or '').strip()
+    description = (request.form.get('description') or '').strip()
+    if not f or not f.filename:
+        return jsonify({'success': False, 'error': 'No PDF provided.'}), 400
+    # Reject by Content-Length up front so we don't read a multi-GB body
+    # into memory before discovering it's too large. The body length check
+    # below is a backstop for clients that omit/lie about the header.
+    max_size = _get_upload_max()
+    cl = request.content_length or 0
+    if cl and cl > max_size:
+        max_mb = max_size // (1024 * 1024)
+        return jsonify({'success': False, 'error': f'PDF too large (max {max_mb} MB).'}), 413
+    raw = f.read(max_size + 1)
+    if len(raw) > max_size:
+        max_mb = max_size // (1024 * 1024)
+        return jsonify({'success': False, 'error': f'PDF too large (max {max_mb} MB).'}), 413
+    if not raw[:4] == b'%PDF':
+        return jsonify({'success': False, 'error': 'File does not look like a PDF.'}), 400
+    if not name:
+        name = (f.filename or 'Untitled PDF').rsplit('.', 1)[0]
+    page_count = _count_pdf_pages(raw)
+    db = get_db()
+    cur = db.execute(
+        """INSERT INTO pdf_templates (name, description, pdf_data, fields_json,
+                                       page_count, created_by, updated_at)
+            VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+        (name, description, raw, '[]', page_count, session.get('user_id'))
+    )
+    tid = cur.lastrowid
+    log_audit(db, 'PDF_TEMPLATE_CREATE', 'pdf_template', tid, detail=name)
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"PDF_TEMPLATE_CREATE id={tid} name={name!r} bytes={len(raw)} "
+        f"pages={page_count} by={session.get('username')}"
+    )
+    return jsonify({'success': True, 'id': tid})
+
+
+@app.route('/settings/pdf-templates/<int:tid>/edit')
+@content_admin_required
+def edit_pdf_template(tid):
+    db = get_db()
+    row = db.execute(
+        'SELECT id, name, description, fields_json, page_count FROM pdf_templates WHERE id=?', (tid,)
+    ).fetchone()
+    db.close()
+    if not row:
+        abort(404)
+    tdata = dict(row)
+    # Parse fields_json server-side so the template can pass it through
+    # Jinja's `tojson` filter — `tojson` HTML-escapes the JSON for safe
+    # embedding inside a <script> block, which `| safe` does not.
+    try:
+        tdata['fields_parsed'] = json.loads(tdata.get('fields_json') or '[]')
+    except (json.JSONDecodeError, TypeError):
+        tdata['fields_parsed'] = []
+    return render_template('pdf_template_edit.html',
+                           template=tdata,
+                           user=get_current_user())
+
+
+@app.route('/settings/pdf-templates/<int:tid>/pdf')
+@login_required
+def pdf_template_file(tid):
+    """Serve the raw template PDF. Used by the builder (content_admin) and
+    by the per-show filler. Document-viewer / read-only users are blocked
+    because they shouldn't be able to enumerate template IDs to download
+    arbitrary PDFs the org has uploaded — the filler page itself is also
+    gated by can_access_show()."""
+    if session.get('is_document_viewer'):
+        abort(403)
+    db = get_db()
+    row = db.execute(
+        'SELECT pdf_data, s3_key, name FROM pdf_templates WHERE id=?', (tid,)
+    ).fetchone()
+    db.close()
+    if not row:
+        abort(404)
+    raw = _pdf_template_bytes(row)
+    if not raw:
+        abort(404)
+    resp = make_response(raw)
+    resp.headers['Content-Type'] = 'application/pdf'
+    resp.headers['Content-Disposition'] = f'inline; filename="{secure_filename(row["name"] or "template")}.pdf"'
+    return resp
+
+
+@app.route('/settings/pdf-templates/<int:tid>/fields', methods=['POST'])
+@content_admin_required
+def save_pdf_template_fields(tid):
+    data = request.get_json(force=True) or {}
+    fields = data.get('fields', [])
+    if not isinstance(fields, list):
+        return jsonify({'success': False, 'error': 'fields must be a list.'}), 400
+    # Light schema check + normalize
+    clean = []
+    for i, f in enumerate(fields):
+        if not isinstance(f, dict):
+            continue
+        nm = (f.get('name') or f.get('field_key') or '').strip()
+        if not nm:
+            nm = f'field_{i+1}'
+        clean.append({
+            'name':  nm,
+            'label': (f.get('label') or nm).strip(),
+            'type':  (f.get('type') or 'text'),
+            'page':  int(f.get('page', 0)),
+            'x':     float(f.get('x', 0)),
+            'y':     float(f.get('y', 0)),
+            'w':     float(f.get('w', 100)),
+            'h':     float(f.get('h', 20)),
+            'font_size': float(f.get('font_size', 10)),
+        })
+    db = get_db()
+    db.execute(
+        'UPDATE pdf_templates SET fields_json=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        (json.dumps(clean), tid)
+    )
+    log_audit(db, 'PDF_TEMPLATE_FIELDS', 'pdf_template', tid,
+              detail=f'fields={len(clean)}')
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"PDF_TEMPLATE_FIELDS id={tid} count={len(clean)} "
+        f"by={session.get('username')}"
+    )
+    return jsonify({'success': True, 'fields': clean})
+
+
+@app.route('/settings/pdf-templates/<int:tid>/rename', methods=['POST'])
+@content_admin_required
+def rename_pdf_template(tid):
+    data = request.get_json(force=True) or {}
+    name = (data.get('name') or '').strip()
+    description = (data.get('description') or '').strip()
+    if not name:
+        return jsonify({'success': False, 'error': 'Name required.'}), 400
+    db = get_db()
+    db.execute(
+        'UPDATE pdf_templates SET name=?, description=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        (name, description, tid)
+    )
+    db.commit(); db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/pdf-templates/<int:tid>/delete', methods=['POST'])
+@content_admin_required
+def delete_pdf_template(tid):
+    db = get_db()
+    # Refuse if any form_fields still reference this template.
+    refs = db.execute(
+        'SELECT field_key FROM form_fields WHERE pdf_template_id=?', (tid,)
+    ).fetchall()
+    if refs:
+        db.close()
+        return jsonify({
+            'success': False,
+            'error': 'In use by form fields: '
+                     + ', '.join(r['field_key'] for r in refs)
+                     + '. Re-point or delete those fields first.'
+        }), 400
+    before = _snapshot_row(db, 'pdf_templates', tid)
+    log_audit(db, 'PDF_TEMPLATE_DELETE', 'pdf_template', tid,
+              detail=before['name'] if before else str(tid), before=before)
+    db.execute('DELETE FROM pdf_templates WHERE id=?', (tid,))
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"PDF_TEMPLATE_DELETE id={tid} name={(before['name'] if before else '?')!r} "
+        f"by={session.get('username')}"
+    )
+    return jsonify({'success': True})
+
+
+@app.route('/api/pdf-templates')
+@login_required
+def api_pdf_templates():
+    """Lightweight list for the field-modal template picker."""
+    db = get_db()
+    rows = db.execute(
+        'SELECT id, name, description, page_count FROM pdf_templates ORDER BY name'
+    ).fetchall()
+    db.close()
+    return jsonify([dict(r) for r in rows])
+
+
+# ─── PDF Form filler (per-show) ──────────────────────────────────────────────
+
+def _get_pdf_field_for_show(db, show_id, field_key):
+    """Look up the form_fields row for a pdf_form field used by show_id."""
+    row = db.execute(
+        """SELECT id, field_key, label, field_type, pdf_template_id,
+                  alert_departments, alert_contact_ids
+             FROM form_fields
+            WHERE field_key=? AND field_type='pdf_form'""",
+        (field_key,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+@app.route('/shows/<int:show_id>/pdf-form/<field_key>/data')
+@login_required
+def pdf_form_data(show_id, field_key):
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'error': 'Access denied.'}), 403
+    db = get_db()
+    field = _get_pdf_field_for_show(db, show_id, field_key)
+    if not field or not field.get('pdf_template_id'):
+        db.close()
+        return jsonify({'error': 'Field not found or no template bound.'}), 404
+    tmpl = db.execute(
+        'SELECT id, name, description, fields_json, page_count FROM pdf_templates WHERE id=?',
+        (field['pdf_template_id'],)
+    ).fetchone()
+    if not tmpl:
+        db.close()
+        return jsonify({'error': 'Template missing.'}), 404
+    sub = db.execute(
+        'SELECT values_json, status, template_fields_snapshot, last_saved_at FROM pdf_submissions '
+        'WHERE show_id=? AND field_key=?',
+        (show_id, field_key)
+    ).fetchone()
+    db.close()
+    try:
+        template_fields = json.loads(tmpl['fields_json'] or '[]')
+    except (json.JSONDecodeError, TypeError):
+        template_fields = []
+    if sub:
+        try:
+            values = json.loads(sub['values_json'] or '{}')
+        except (json.JSONDecodeError, TypeError):
+            values = {}
+        # If a frozen snapshot exists, use it (so old submissions stay coherent
+        # even after the template is edited).
+        if sub['template_fields_snapshot']:
+            try:
+                template_fields = json.loads(sub['template_fields_snapshot'])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        last_saved = sub['last_saved_at']
+        status = sub['status']
+    else:
+        values = {}
+        last_saved = None
+        status = 'draft'
+    if last_saved is not None and not isinstance(last_saved, str):
+        try: last_saved = last_saved.isoformat()
+        except Exception: last_saved = str(last_saved)
+    return jsonify({
+        'template': {
+            'id': tmpl['id'],
+            'name': tmpl['name'],
+            'description': tmpl['description'],
+            'page_count': tmpl['page_count'],
+            'fields': template_fields,
+        },
+        'submission': {
+            'values': values,
+            'status': status,
+            'last_saved_at': last_saved,
+        },
+        'field': {
+            'label': field['label'],
+            'field_key': field['field_key'],
+        },
+        'pdf_url': url_for('pdf_template_file', tid=tmpl['id']),
+    })
+
+
+@app.route('/shows/<int:show_id>/pdf-form/<field_key>/save', methods=['POST'])
+@login_required
+def pdf_form_save(show_id, field_key):
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_restricted'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    data = request.get_json(force=True) or {}
+    values = data.get('values') or {}
+    if not isinstance(values, dict):
+        return jsonify({'success': False, 'error': 'values must be an object.'}), 400
+    db = get_db()
+    field = _get_pdf_field_for_show(db, show_id, field_key)
+    if not field or not field.get('pdf_template_id'):
+        db.close()
+        return jsonify({'success': False, 'error': 'Field not found or no template bound.'}), 404
+    template_id = field['pdf_template_id']
+    # Snapshot template field config on first save so later template edits
+    # don't break this submission.
+    existing = db.execute(
+        'SELECT id, template_fields_snapshot FROM pdf_submissions WHERE show_id=? AND field_key=?',
+        (show_id, field_key)
+    ).fetchone()
+    if existing and existing['template_fields_snapshot']:
+        snapshot = existing['template_fields_snapshot']
+    else:
+        tmpl = db.execute(
+            'SELECT fields_json FROM pdf_templates WHERE id=?', (template_id,)
+        ).fetchone()
+        snapshot = tmpl['fields_json'] if tmpl else '[]'
+
+    values_json = json.dumps(values)
+    if existing:
+        db.execute(
+            """UPDATE pdf_submissions
+                  SET values_json=?, last_saved_by=?, last_saved_at=CURRENT_TIMESTAMP,
+                      template_fields_snapshot=?
+                WHERE id=?""",
+            (values_json, session.get('user_id'), snapshot, existing['id'])
+        )
+    else:
+        db.execute(
+            """INSERT INTO pdf_submissions
+                 (show_id, field_key, template_id, template_fields_snapshot,
+                  values_json, status, last_saved_by, last_saved_at)
+               VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            (show_id, field_key, template_id, snapshot, values_json,
+             'draft', session.get('user_id'))
+        )
+    # Mirror a marker into advance_data so anything that reads advance values
+    # (search, history snapshots) can see the form was touched. We don't
+    # store the full values there — just a non-empty string so existing
+    # "has any answers" checks pick it up.
+    db.execute(
+        """INSERT OR REPLACE INTO advance_data (show_id, field_key, field_value, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)""",
+        (show_id, field_key, '[pdf_form]' if values else '')
+    )
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"PDF_FORM_SAVE show_id={show_id} field={field_key!r} "
+        f"value_count={len(values)} by={session.get('username')}"
+    )
+    return jsonify({'success': True})
+
+
+@app.route('/shows/<int:show_id>/pdf-form/<field_key>/export')
+@login_required
+def pdf_form_export(show_id, field_key):
+    """Render the filled PDF (stamp values onto the template) and return it."""
+    if not can_access_show(session['user_id'], show_id):
+        abort(403)
+    db = get_db()
+    field = _get_pdf_field_for_show(db, show_id, field_key)
+    if not field or not field.get('pdf_template_id'):
+        db.close()
+        abort(404)
+    tmpl = db.execute(
+        'SELECT id, name, pdf_data, s3_key, fields_json FROM pdf_templates WHERE id=?',
+        (field['pdf_template_id'],)
+    ).fetchone()
+    if not tmpl:
+        db.close()
+        abort(404)
+    sub = db.execute(
+        'SELECT values_json, template_fields_snapshot FROM pdf_submissions '
+        'WHERE show_id=? AND field_key=?',
+        (show_id, field_key)
+    ).fetchone()
+    db.close()
+    try:
+        values = json.loads(sub['values_json'] or '{}') if sub else {}
+    except (json.JSONDecodeError, TypeError):
+        values = {}
+    # Prefer the frozen snapshot so the values land in the rects they were
+    # placed in at save time.
+    fields_src = (sub['template_fields_snapshot'] if sub and sub['template_fields_snapshot']
+                  else tmpl['fields_json']) or '[]'
+    try:
+        fields = json.loads(fields_src)
+    except (json.JSONDecodeError, TypeError):
+        fields = []
+    raw = _pdf_template_bytes(dict(tmpl))
+    if not raw:
+        abort(404)
+    filled = _stamp_pdf_form(raw, fields, values)
+    resp = make_response(filled)
+    resp.headers['Content-Type'] = 'application/pdf'
+    safe_name = secure_filename((tmpl['name'] or 'form') + '_' + str(show_id))
+    resp.headers['Content-Disposition'] = f'inline; filename="{safe_name}.pdf"'
+    syslog_logger.info(
+        f"PDF_FORM_EXPORT show_id={show_id} field={field_key!r} "
+        f"template_id={tmpl['id']} by={session.get('username')}"
+    )
+    return resp
+
+
+def _stamp_pdf_form(pdf_bytes, fields, values):
+    """Overlay text + checkbox marks onto pdf_bytes per fields/values.
+
+    fields: [{name, type, page, x, y, w, h, font_size?}, ...]
+    values: {field_name: value, ...}
+
+    Returns new PDF bytes. Uses PyMuPDF; falls back to returning the
+    original bytes if PyMuPDF isn't installed."""
+    try:
+        import fitz
+    except ImportError:
+        app.logger.warning('PyMuPDF unavailable — returning unstamped template.')
+        return pdf_bytes
+
+    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    try:
+        for f in fields:
+            v = values.get(f.get('name'))
+            if v in (None, ''):
+                continue
+            pg_idx = int(f.get('page', 0))
+            if pg_idx < 0 or pg_idx >= doc.page_count:
+                continue
+            page = doc[pg_idx]
+            rect = fitz.Rect(
+                float(f['x']),
+                float(f['y']),
+                float(f['x']) + float(f['w']),
+                float(f['y']) + float(f['h']),
+            )
+            ftype = (f.get('type') or 'text').lower()
+            if ftype == 'checkbox':
+                if str(v).lower() in ('1', 'true', 'yes', 'on', 'checked'):
+                    # Draw an X mark centered in the rect. We use 'X' instead
+                    # of '✓' because the default base14 font shipped with
+                    # PyMuPDF doesn't include the check glyph and the
+                    # substitution box looks worse than a plain X.
+                    fs = min(rect.height, rect.width) * 0.9
+                    page.insert_textbox(
+                        rect, 'X',
+                        fontsize=fs,
+                        align=fitz.TEXT_ALIGN_CENTER,
+                        color=(0, 0, 0)
+                    )
+            else:
+                font_size = float(f.get('font_size') or 10)
+                # insert_textbox returns negative if the text overflows; we
+                # don't shrink-to-fit here, we just clip.
+                page.insert_textbox(
+                    rect, str(v),
+                    fontsize=font_size,
+                    color=(0, 0, 0)
+                )
+        out = doc.tobytes()
+    finally:
+        doc.close()
+    return out
 
 
 @app.route('/settings/form-sections/add', methods=['POST'])
@@ -6721,6 +7831,90 @@ def api_users():
     ).fetchall()
     db.close()
     return jsonify([dict(u) for u in users])
+
+
+# ─── Notifications (in-app bell) ──────────────────────────────────────────────
+
+@app.route('/api/notifications')
+@login_required
+def api_notifications():
+    """Return the current user's notifications (last 30 days, newest first)
+    plus the unread count for the badge."""
+    uid = session.get('user_id')
+    if not uid:
+        return jsonify({'notifications': [], 'unread': 0})
+    db = get_db()
+    rows = db.execute(
+        """SELECT id, kind, title, body, link_url, show_id, field_key,
+                  created_at, read_at
+             FROM notifications
+            WHERE user_id=?
+            ORDER BY created_at DESC
+            LIMIT 100""",
+        (uid,)
+    ).fetchall()
+    unread = db.execute(
+        'SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND read_at IS NULL',
+        (uid,)
+    ).fetchone()['n']
+    db.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        # Coerce datetime fields to ISO strings for the client.
+        for k in ('created_at', 'read_at'):
+            v = d.get(k)
+            if v is not None and not isinstance(v, str):
+                try: d[k] = v.isoformat()
+                except Exception: d[k] = str(v)
+        out.append(d)
+    return jsonify({'notifications': out, 'unread': int(unread or 0)})
+
+
+@app.route('/api/notifications/unread-count')
+@login_required
+def api_notifications_unread_count():
+    """Lightweight endpoint for the bell badge — polled frequently."""
+    uid = session.get('user_id')
+    if not uid:
+        return jsonify({'unread': 0})
+    db = get_db()
+    row = db.execute(
+        'SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND read_at IS NULL',
+        (uid,)
+    ).fetchone()
+    db.close()
+    return jsonify({'unread': int((row['n'] if row else 0) or 0)})
+
+
+@app.route('/api/notifications/<int:nid>/read', methods=['POST'])
+@login_required
+def api_notifications_mark_read(nid):
+    uid = session.get('user_id')
+    db = get_db()
+    db.execute(
+        'UPDATE notifications SET read_at=CURRENT_TIMESTAMP '
+        'WHERE id=? AND user_id=? AND read_at IS NULL',
+        (nid, uid)
+    )
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/api/notifications/read-all', methods=['POST'])
+@login_required
+def api_notifications_mark_all_read():
+    uid = session.get('user_id')
+    db = get_db()
+    db.execute(
+        'UPDATE notifications SET read_at=CURRENT_TIMESTAMP '
+        'WHERE user_id=? AND read_at IS NULL',
+        (uid,)
+    )
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
 
 
 @app.route('/api/shows')
@@ -13370,6 +14564,11 @@ def approve_registration(reg_id):
         db.commit()
         log_audit(db, 'USER_APPROVED', 'user', uid,
                   detail=f'username={reg["username"]} role={role} approved_by={session.get("username")}')
+        _sync_contact_for_user(
+            db, uid,
+            display_name=reg['display_name'] or reg['username'],
+            email=reg['email'] or ''
+        )
         db.commit()
         _send_simple_email_async(
             reg['email'],

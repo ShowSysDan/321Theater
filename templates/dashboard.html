@@ -77,9 +77,13 @@
     </div>
     <div class="venue-col-body">
       {% for s in shows %}
-      <a class="show-card" href="{{ url_for('show_page', show_id=s.id, tab='advance') }}"
-         data-search="{{ (s.name ~ ' ' ~ (s.venue or ''))|lower }}" data-date="{{ s.show_date or '' }}">
-        <div class="show-card-name">{{ s.name }}</div>
+      <a class="show-card{% if s.is_test %} show-card-test{% endif %}" href="{{ url_for('show_page', show_id=s.id, tab='advance') }}"
+         data-search="{{ (s.name ~ ' ' ~ (s.venue or ''))|lower }}" data-date="{{ s.show_date or '' }}"
+         data-is-test="{{ '1' if s.is_test else '0' }}">
+        <div class="show-card-name">
+          {{ s.name }}
+          {% if s.is_test %}<span class="test-badge" title="Test / demo — excluded from reports">TEST</span>{% endif %}
+        </div>
         <div class="show-card-dates">
           {% if s.performances and s.performances|length > 1 %}
             {% for p in s.performances %}

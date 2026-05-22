@@ -35,7 +35,53 @@
    option values like "Judson's Live". #}
 {% set cur = advance_data.get(field.field_key, '') %}
 
-{% if field.field_type == 'checkbox' %}
+{% if field.field_type == 'notes' %}
+  {# 'notes' field type: read-only instructional block. Renders text + auto-linked
+     URLs from notes_content. Lives on screen only — never written to advance_data
+     and never printed on the PDF. #}
+  <div class="adv-notes-block adv-field-wrapper" style="grid-column:span 12"
+       {% if field.conditional_show_when %}data-show-when="{{ field.conditional_show_when }}"{% endif %}>
+    {% if field.label %}<div class="adv-notes-label">{{ field.label }}</div>{% endif %}
+    <div class="adv-notes-body">{{ (field.notes_content or '') | autolink | safe }}</div>
+  </div>
+
+{% elif field.field_type == 'pdf_form' %}
+  {# 'pdf_form' field type: button that opens a popup with the bound PDF
+     template and positioned inputs for each placed field. Values save via
+     a separate endpoint; the export endpoint stamps them into the PDF. #}
+  <div class="adv-pdf-form-block adv-field-wrapper" style="grid-column:span 12"
+       {% if field.conditional_show_when %}data-show-when="{{ field.conditional_show_when }}"{% endif %}>
+    <div class="adv-pdf-form-row">
+      <div class="adv-pdf-form-meta">
+        <div class="adv-pdf-form-label">{{ field.label }}</div>
+        <div class="adv-pdf-form-status" data-pdf-status="{{ field.field_key }}">
+          {% set _pf_status = (pdf_form_status.get(field.field_key) if pdf_form_status is defined else '') %}
+          {% if _pf_status == 'submitted' %}
+          <span class="pdf-chip pdf-chip-ok">Filled</span>
+          {% elif _pf_status == 'draft' %}
+          <span class="pdf-chip pdf-chip-draft">Draft saved</span>
+          {% else %}
+          <span class="pdf-chip pdf-chip-empty">Not started</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="adv-pdf-form-actions">
+        <button type="button" class="btn btn-sm btn-primary"
+                onclick="openPdfFormFiller('{{ field.field_key }}', '{{ field.label|e }}')"
+                {% if not field.pdf_template_id %}disabled title="No PDF template bound — pick one in Settings → Form Fields"{% endif %}>
+          {% if _pf_status %}Edit form →{% else %}Fill out form →{% endif %}
+        </button>
+        {% if field.pdf_template_id and _pf_status %}
+        <a class="btn btn-sm btn-ghost" target="_blank"
+           href="{{ url_for('pdf_form_export', show_id=show.id, field_key=field.field_key) }}">
+          Download filled PDF
+        </a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+{% elif field.field_type == 'checkbox' %}
   <label class="checkbox-label adv-field-wrapper" style="grid-column:{{ span }}" {% if field.conditional_show_when %}data-show-when="{{ field.conditional_show_when }}"{% endif %}>
     <input type="checkbox" class="adv-checkbox adv-field" data-key="{{ field.field_key }}"
            {% if cur == 'true' %}checked{% endif %} {% if restricted %}disabled{% endif %}>
@@ -196,6 +242,8 @@
       {% if show.show_time %} · {{ show.show_time }}{% endif %}
       {% if show.venue %} · {{ show.venue }}{% endif %}
       {% if show.status == 'archived' %}<span class="badge-archived">ARCHIVED</span>{% endif %}
+      {% if show.is_test %}<span class="badge-archived" style="background:#7d4baf"
+            title="Marked as test/demo — excluded from reports">TEST</span>{% endif %}
       {% if restricted %}<span class="badge-archived" style="background:#4A5568">VIEW ONLY</span>{% endif %}
     </p>
     {% if last_saved_display_name %}
@@ -209,6 +257,14 @@
     <span id="presence-indicator" class="presence-indicator" hidden></span>
     <span class="save-status" id="save-status"></span>
     <button type="button" class="btn btn-ghost btn-sm" onclick="openHistory()" title="Version history">History</button>
+    {% if session.get('user_role') in ('admin','staff') or session.get('is_content_admin') %}
+    <button type="button" class="btn btn-ghost btn-sm" id="test-mode-btn"
+            data-is-test="{{ '1' if show.is_test else '0' }}"
+            title="Flag as test / demo so reports can exclude this show"
+            onclick="toggleShowTestMode(this, {{ show.id }})">
+      {{ 'Unmark test' if show.is_test else 'Mark as test' }}
+    </button>
+    {% endif %}
     {% if not restricted and ollama_enabled %}
     <button type="button" class="btn btn-ghost btn-sm" id="ai-extract-btn" onclick="openAiExtract()" title="Extract field values from a document using AI">AI Extract</button>
     {% endif %}

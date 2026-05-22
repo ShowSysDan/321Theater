@@ -1896,6 +1896,11 @@ function openFieldModal(fid, sectionId) {
     if (typeof form.reset === 'function') form.reset();
     else form.querySelectorAll('input,select,textarea').forEach(el => { el.value = el.defaultValue || ''; });
   }
+  // form.reset() handles named checkboxes, but the alert checkboxes are
+  // identified by data-* attributes and won't be touched — clear them
+  // manually so a fresh "Add Field" modal doesn't inherit prior selections.
+  modal.querySelectorAll('input[data-alert-dept], input[data-alert-contact]')
+    .forEach(el => { el.checked = false; });
 
   if (fid) {
     // Load existing field data
@@ -1938,6 +1943,17 @@ function _populateFieldModal(field) {
       }).join('\n');
     }
   }
+  // Restore alert config from arrays delivered by /api/form-fields.
+  const alertDepts = field.alert_departments || [];
+  const alertContacts = (field.alert_contact_ids || []).map(String);
+  modal.querySelectorAll('input[data-alert-dept]').forEach(el => {
+    el.checked = alertDepts.includes(el.value);
+  });
+  modal.querySelectorAll('input[data-alert-contact]').forEach(el => {
+    el.checked = alertContacts.includes(String(el.value));
+  });
+  const notesEl = modal.querySelector('[name="notes_content"]');
+  if (notesEl) notesEl.value = field.notes_content || '';
   _toggleFieldTypeOptions(field.field_type);
 }
 
@@ -1948,10 +1964,38 @@ function _toggleFieldTypeOptions(type) {
   const deptGroup = modal.querySelector('.contact-dept-group');
   const ynGroup = modal.querySelector('.yes-no-display-group');
   const uploadGroup = modal.querySelector('.upload-button-only-group');
+  const notesGroup = modal.querySelector('.notes-content-group');
+  const alertGroup = modal.querySelector('.field-alert-group');
+  const pdfGroup   = modal.querySelector('.pdf-template-group');
   if (optGroup) optGroup.style.display = (type === 'select') ? '' : 'none';
   if (deptGroup) deptGroup.style.display = (type === 'contact_dropdown') ? '' : 'none';
   if (ynGroup) ynGroup.style.display = (type === 'yes_no') ? '' : 'none';
   if (uploadGroup) uploadGroup.style.display = (type === 'file_upload') ? '' : 'none';
+  if (notesGroup) notesGroup.style.display = (type === 'notes') ? '' : 'none';
+  if (pdfGroup) pdfGroup.style.display = (type === 'pdf_form') ? '' : 'none';
+  // Alerts apply to single-value fields; 'notes' has no value, and 'pdf_form'
+  // is a multi-field document that would otherwise fire alerts on every key.
+  if (alertGroup) alertGroup.style.display = (type === 'notes' || type === 'pdf_form') ? 'none' : '';
+  if (type === 'pdf_form') _populatePdfTemplatePicker();
+}
+
+async function _populatePdfTemplatePicker() {
+  const sel = document.getElementById('field-modal-pdf-template');
+  if (!sel) return;
+  const current = sel.value;
+  if (!sel.dataset.loaded) {
+    try {
+      const r = await fetch('/api/pdf-templates', {credentials: 'same-origin'});
+      const list = await r.json();
+      const opts = ['<option value="">— Select a template —</option>'];
+      for (const t of (list || [])) {
+        opts.push(`<option value="${t.id}">${(t.name || '').replace(/</g, '&lt;')}</option>`);
+      }
+      sel.innerHTML = opts.join('');
+      sel.dataset.loaded = '1';
+    } catch (e) { /* leave empty */ }
+  }
+  if (current) sel.value = current;
 }
 
 function closeFieldModal() {
@@ -1979,6 +2023,13 @@ async function saveField() {
     const cond  = line.slice(idx + 1).trim();
     return cond ? {value, show_when: cond} : value;
   });
+  // Collect alert config — empty arrays mean "no alerts on this field".
+  data.alert_departments = Array.from(
+    modal.querySelectorAll('input[data-alert-dept]:checked')
+  ).map(el => el.value);
+  data.alert_contact_ids = Array.from(
+    modal.querySelectorAll('input[data-alert-contact]:checked')
+  ).map(el => Number(el.value));
   if (data.section_id) data.section_id = Number(data.section_id);
 
   const url = _editFieldId
@@ -2354,6 +2405,341 @@ function toggleTheme() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({theme: next}),
   }).catch(() => {});
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   NOTIFICATION BELL
+═══════════════════════════════════════════════════════════════ */
+
+const _NOTIF_POLL_MS = 60000; // 60 s — bell badge refresh cadence
+let _notifPollTimer = null;
+let _notifPanelOpen = false;
+
+function _escNotif(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function _formatNotifTime(iso) {
+  if (!iso) return '';
+  let d;
+  try { d = new Date(iso.replace(' ', 'T') + (iso.endsWith('Z') ? '' : 'Z')); }
+  catch (e) { return ''; }
+  if (!d || isNaN(d.getTime())) return '';
+  const now = new Date();
+  const diff = Math.floor((now - d) / 1000);
+  if (diff < 60)   return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)} min ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} h ago`;
+  if (diff < 7*86400) return `${Math.floor(diff / 86400)} d ago`;
+  return d.toLocaleDateString();
+}
+
+async function refreshNotifBadge() {
+  try {
+    const r = await fetch('/api/notifications/unread-count', {credentials: 'same-origin'});
+    if (!r.ok) return;
+    const j = await r.json();
+    const badge = document.getElementById('notif-bell-badge');
+    if (!badge) return;
+    const n = Math.max(0, parseInt(j.unread || 0, 10));
+    if (n > 0) {
+      badge.textContent = n > 99 ? '99+' : String(n);
+      badge.hidden = false;
+    } else {
+      badge.hidden = true;
+    }
+  } catch (e) { /* ignore — offline / not authenticated */ }
+}
+
+async function _loadNotifPanel() {
+  const list = document.getElementById('notif-panel-list');
+  if (!list) return;
+  list.innerHTML = '<div class="notif-empty">Loading…</div>';
+  try {
+    const r = await fetch('/api/notifications', {credentials: 'same-origin'});
+    if (!r.ok) throw new Error('fetch failed');
+    const j = await r.json();
+    if (!j.notifications || !j.notifications.length) {
+      list.innerHTML = '<div class="notif-empty">No notifications yet.</div>';
+    } else {
+      list.innerHTML = j.notifications.map(n => {
+        const cls = n.read_at ? 'notif-item' : 'notif-item unread';
+        const t = _formatNotifTime(n.created_at);
+        const titleHtml = _escNotif(n.title || '');
+        const bodyHtml  = n.body ? `<div class="notif-item-body">${_escNotif(n.body)}</div>` : '';
+        const inner = `
+          <div class="notif-item-title">${titleHtml}</div>
+          ${bodyHtml}
+          <div class="notif-item-meta">${_escNotif(t)} · ${_escNotif(n.kind)}</div>
+        `;
+        if (n.link_url) {
+          return `<a href="${_escNotif(n.link_url)}" class="${cls}" data-nid="${n.id}" onclick="markNotifRead(${n.id})">${inner}</a>`;
+        }
+        return `<div class="${cls}" data-nid="${n.id}" onclick="markNotifRead(${n.id})">${inner}</div>`;
+      }).join('');
+    }
+    const badge = document.getElementById('notif-bell-badge');
+    if (badge) {
+      if (j.unread > 0) { badge.textContent = j.unread > 99 ? '99+' : String(j.unread); badge.hidden = false; }
+      else badge.hidden = true;
+    }
+  } catch (e) {
+    list.innerHTML = '<div class="notif-empty">Unable to load notifications.</div>';
+  }
+}
+
+function toggleNotifPanel(ev) {
+  if (ev) ev.stopPropagation();
+  const panel = document.getElementById('notif-panel');
+  if (!panel) return;
+  _notifPanelOpen = !_notifPanelOpen;
+  panel.hidden = !_notifPanelOpen;
+  if (_notifPanelOpen) _loadNotifPanel();
+}
+
+async function markNotifRead(nid) {
+  try {
+    await fetch(`/api/notifications/${nid}/read`, {method: 'POST', credentials: 'same-origin'});
+  } catch (e) {}
+  refreshNotifBadge();
+}
+
+async function markAllNotifRead() {
+  try {
+    await fetch('/api/notifications/read-all', {method: 'POST', credentials: 'same-origin'});
+  } catch (e) {}
+  _loadNotifPanel();
+  refreshNotifBadge();
+}
+
+// Close the panel when clicking outside of it (but allow clicks inside the
+// panel — including links — to behave normally first).
+document.addEventListener('click', (e) => {
+  if (!_notifPanelOpen) return;
+  const panel = document.getElementById('notif-panel');
+  const bell = document.getElementById('notif-bell-btn');
+  if (!panel || !bell) return;
+  if (panel.contains(e.target) || bell.contains(e.target)) return;
+  _notifPanelOpen = false;
+  panel.hidden = true;
+});
+
+// Start the badge polling once the page is ready.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => {
+    refreshNotifBadge();
+    _notifPollTimer = setInterval(refreshNotifBadge, _NOTIF_POLL_MS);
+  });
+} else {
+  refreshNotifBadge();
+  _notifPollTimer = setInterval(refreshNotifBadge, _NOTIF_POLL_MS);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PDF FORM FILLER (popup on the advance for pdf_form fields)
+═══════════════════════════════════════════════════════════════ */
+
+const _PDF_FILLER_SCALE = 1.3;
+let _pdfFillerState = null;  // {show_id, field_key, fields, values, pdf_url}
+let _pdfFillerSaveTimer = null;
+
+function _ensurePdfJs() {
+  return new Promise((resolve, reject) => {
+    if (window.pdfjsLib) return resolve(window.pdfjsLib);
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.onload = () => {
+      if (window.pdfjsLib) {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        resolve(window.pdfjsLib);
+      } else reject(new Error('pdf.js failed to load'));
+    };
+    s.onerror = () => reject(new Error('pdf.js script error'));
+    document.head.appendChild(s);
+  });
+}
+
+async function openPdfFormFiller(fieldKey, label) {
+  if (typeof SHOW_ID === 'undefined' || !SHOW_ID) return;
+  const modal = document.getElementById('pdf-filler-modal');
+  if (!modal) return;
+  document.getElementById('pdf-filler-title').textContent = label || 'PDF Form';
+  document.getElementById('pdf-filler-status').textContent = '';
+  document.getElementById('pdf-filler-body').innerHTML =
+    '<div class="pdf-filler-loading">Loading PDF…</div>';
+  modal.style.display = '';
+  try {
+    const r = await fetch(`/shows/${SHOW_ID}/pdf-form/${encodeURIComponent(fieldKey)}/data`,
+                          {credentials: 'same-origin'});
+    if (!r.ok) {
+      const t = await r.text();
+      document.getElementById('pdf-filler-body').innerHTML =
+        `<div class="pdf-filler-error">${t || 'Failed to load.'}</div>`;
+      return;
+    }
+    const data = await r.json();
+    _pdfFillerState = {
+      show_id: SHOW_ID,
+      field_key: fieldKey,
+      fields: data.template.fields || [],
+      values: data.submission.values || {},
+      pdf_url: data.pdf_url,
+    };
+    document.getElementById('pdf-filler-download').style.display = '';
+    document.getElementById('pdf-filler-download').onclick = () => {
+      window.open(`/shows/${SHOW_ID}/pdf-form/${encodeURIComponent(fieldKey)}/export`, '_blank');
+    };
+    await _renderPdfFillerPages();
+  } catch (e) {
+    document.getElementById('pdf-filler-body').innerHTML =
+      '<div class="pdf-filler-error">Network error.</div>';
+  }
+}
+
+async function _renderPdfFillerPages() {
+  const body = document.getElementById('pdf-filler-body');
+  body.innerHTML = '<div class="pdf-filler-loading">Rendering PDF…</div>';
+  await _ensurePdfJs();
+  const pdf = await pdfjsLib.getDocument(_pdfFillerState.pdf_url).promise;
+  body.innerHTML = '';
+  const fieldsByPage = {};
+  for (const f of _pdfFillerState.fields) {
+    (fieldsByPage[f.page] = fieldsByPage[f.page] || []).push(f);
+  }
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const viewport = page.getViewport({scale: _PDF_FILLER_SCALE});
+    const pageDiv = document.createElement('div');
+    pageDiv.className = 'pdf-filler-page';
+    pageDiv.style.width  = viewport.width + 'px';
+    pageDiv.style.height = viewport.height + 'px';
+    const canvas = document.createElement('canvas');
+    canvas.width  = viewport.width;
+    canvas.height = viewport.height;
+    pageDiv.appendChild(canvas);
+    body.appendChild(pageDiv);
+    await page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
+    const overlay = document.createElement('div');
+    overlay.className = 'pdf-filler-overlay';
+    pageDiv.appendChild(overlay);
+    for (const f of (fieldsByPage[p - 1] || [])) {
+      const el = _makePdfFillerInput(f, _pdfFillerState.values[f.name]);
+      overlay.appendChild(el);
+    }
+  }
+}
+
+function _makePdfFillerInput(f, current) {
+  const s = _PDF_FILLER_SCALE;
+  const wrap = document.createElement('div');
+  wrap.className = 'pdf-filler-input-wrap';
+  wrap.style.left   = (f.x * s) + 'px';
+  wrap.style.top    = (f.y * s) + 'px';
+  wrap.style.width  = (f.w * s) + 'px';
+  wrap.style.height = (f.h * s) + 'px';
+  let el;
+  if (f.type === 'checkbox') {
+    el = document.createElement('input');
+    el.type = 'checkbox';
+    el.checked = (current === true || current === '1' || current === 'true' || current === 'on');
+    el.addEventListener('change', () => {
+      _pdfFillerState.values[f.name] = el.checked;
+      _scheduleFillerAutoSave();
+    });
+  } else if (f.type === 'multiline') {
+    el = document.createElement('textarea');
+    el.value = current ?? '';
+    el.style.fontSize = ((f.font_size || 9) * 1.1) + 'px';
+    el.addEventListener('input', () => {
+      _pdfFillerState.values[f.name] = el.value;
+      _scheduleFillerAutoSave();
+    });
+  } else {
+    el = document.createElement('input');
+    el.type = (f.type === 'date') ? 'date' : 'text';
+    el.value = current ?? '';
+    el.style.fontSize = ((f.font_size || 10) * 1.1) + 'px';
+    el.addEventListener('input', () => {
+      _pdfFillerState.values[f.name] = el.value;
+      _scheduleFillerAutoSave();
+    });
+  }
+  el.title = f.label || f.name;
+  el.className = 'pdf-filler-input';
+  wrap.appendChild(el);
+  return wrap;
+}
+
+function _scheduleFillerAutoSave() {
+  if (_pdfFillerSaveTimer) clearTimeout(_pdfFillerSaveTimer);
+  document.getElementById('pdf-filler-status').textContent = 'Unsaved…';
+  _pdfFillerSaveTimer = setTimeout(() => savePdfFormFiller(true), 800);
+}
+
+async function savePdfFormFiller(isAuto) {
+  if (!_pdfFillerState) return;
+  const status = document.getElementById('pdf-filler-status');
+  status.textContent = 'Saving…';
+  try {
+    const r = await fetch(
+      `/shows/${_pdfFillerState.show_id}/pdf-form/${encodeURIComponent(_pdfFillerState.field_key)}/save`,
+      {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({values: _pdfFillerState.values})
+      }
+    );
+    const j = await r.json();
+    if (j.success) {
+      status.textContent = 'Saved.';
+      const chip = document.querySelector(`[data-pdf-status="${_pdfFillerState.field_key}"]`);
+      if (chip) chip.innerHTML = '<span class="pdf-chip pdf-chip-draft">Draft saved</span>';
+    } else {
+      status.textContent = j.error || 'Save failed.';
+    }
+  } catch (e) {
+    status.textContent = 'Network error.';
+  }
+}
+
+async function toggleShowTestMode(btn, showId) {
+  const cur = btn.dataset.isTest === '1';
+  const next = !cur;
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/shows/${showId}/test-mode`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify({is_test: next})
+    });
+    const j = await r.json();
+    if (j.success) {
+      btn.dataset.isTest = next ? '1' : '0';
+      btn.textContent = next ? 'Unmark test' : 'Mark as test';
+    } else {
+      alert(j.error || 'Failed to update test flag.');
+    }
+  } catch (e) {
+    alert('Network error.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function closePdfFormFiller() {
+  if (_pdfFillerSaveTimer) clearTimeout(_pdfFillerSaveTimer);
+  // Final save on close if there were pending edits.
+  if (document.getElementById('pdf-filler-status').textContent === 'Unsaved…') {
+    savePdfFormFiller(false);
+  }
+  document.getElementById('pdf-filler-modal').style.display = 'none';
+  document.getElementById('pdf-filler-body').innerHTML = '';
+  _pdfFillerState = null;
 }
 
 /* ═══════════════════════════════════════════════════════════════

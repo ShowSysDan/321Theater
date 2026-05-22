@@ -605,6 +605,142 @@ html[data-theme="light"] select.field-input {
 .notes-body { margin-top: 6px; }
 .notes-body.hidden { display: none; }
 
+/* ── Test-Mode Badge ─────────────────────────────────────────────── */
+.test-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: .06em;
+  background: rgba(125,75,175,.18);
+  color: #b18ade;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.show-card.show-card-test { border-style: dashed; }
+
+/* ── PDF-Form Field Type (advance form) ──────────────────────────── */
+.adv-pdf-form-block {
+  background: rgba(0,170,255,0.05);
+  border-left: 3px solid #5db8ff;
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin: 4px 0;
+}
+.adv-pdf-form-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.adv-pdf-form-meta { flex: 1 1 auto; min-width: 200px; }
+.adv-pdf-form-label {
+  font-size: 11px;
+  letter-spacing: .06em;
+  font-weight: 700;
+  color: #5db8ff;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.adv-pdf-form-status .pdf-chip {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 3px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.pdf-chip-empty { background: rgba(255,255,255,0.08); color: var(--text-dim); }
+.pdf-chip-draft { background: rgba(246,173,85,0.18); color: #F6AD55; }
+.pdf-chip-ok    { background: rgba(64,200,120,0.18); color: #40c878; }
+.adv-pdf-form-actions { display: flex; gap: 6px; align-items: center; }
+
+/* ── PDF Filler Modal ────────────────────────────────────────────── */
+.pdf-filler-card {
+  max-width: 95vw;
+  width: 1100px;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+}
+.pdf-filler-card .modal-body {
+  overflow: auto;
+  background: var(--bg-hover);
+  padding: 16px;
+  flex: 1 1 auto;
+  min-height: 300px;
+}
+.pdf-filler-loading,
+.pdf-filler-error {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-dim);
+}
+.pdf-filler-error { color: #ff7777; }
+.pdf-filler-page {
+  position: relative;
+  background: white;
+  box-shadow: 0 4px 12px rgba(0,0,0,.25);
+  margin: 0 auto 16px;
+}
+.pdf-filler-page canvas { display: block; }
+.pdf-filler-overlay {
+  position: absolute;
+  inset: 0;
+}
+.pdf-filler-input-wrap {
+  position: absolute;
+  box-sizing: border-box;
+}
+.pdf-filler-input {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 1px 4px;
+  border: 1px dashed rgba(0,170,255,0.55);
+  background: rgba(0,170,255,0.06);
+  color: #111;
+  font-family: var(--font-main);
+  resize: none;
+  outline: none;
+}
+.pdf-filler-input:focus {
+  border-color: rgba(0,170,255,1);
+  background: rgba(0,170,255,0.12);
+}
+.pdf-filler-input[type="checkbox"] {
+  width: 100%; height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+
+/* ── Notes / Instructions Field Type ─────────────────────────────── */
+.adv-notes-block {
+  background: rgba(245, 127, 32, 0.06);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin: 4px 0;
+}
+.adv-notes-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.adv-notes-body {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: normal;
+}
+.adv-notes-body a { color: var(--accent); text-decoration: underline; }
+.adv-notes-body a:hover { color: var(--accent-strong, var(--accent)); }
+
 /* ── Tab Navigation ──────────────────────────────────────────────── */
 .tab-nav {
   display: flex; flex-wrap: wrap; gap: 2px; margin-bottom: 20px;
@@ -1089,6 +1225,123 @@ html[data-theme="light"] .login-page {
   background: var(--accent-glow);
 }
 .theme-toggle-btn svg { width: 16px; height: 16px; }
+
+/* ── Notification Bell + Panel ───────────────────────────────────── */
+.notif-bell-btn { position: relative; }
+.notif-bell-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  letter-spacing: 0;
+  line-height: 1;
+  font-family: var(--font-main);
+  pointer-events: none;
+}
+.notif-panel {
+  position: fixed;
+  bottom: 60px;
+  left: 12px;
+  z-index: 1000;
+  width: 340px;
+  max-height: 70vh;
+  background: var(--bg-card, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.35);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: var(--font-main);
+}
+.notif-panel[hidden] { display: none; }
+.notif-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.notif-panel-mark-all {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  letter-spacing: 0.03em;
+}
+.notif-panel-mark-all:hover { color: var(--accent); border-color: var(--accent); }
+.notif-panel-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.notif-panel-close:hover { color: var(--accent); }
+.notif-panel-list {
+  overflow-y: auto;
+  flex: 1 1 auto;
+  padding: 4px 0;
+}
+.notif-empty {
+  padding: 24px 14px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.notif-item {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.35;
+  cursor: pointer;
+  display: block;
+  color: var(--text);
+  text-decoration: none;
+}
+.notif-item:hover { background: var(--bg-hover); }
+.notif-item.unread {
+  background: rgba(245,127,32,0.05);
+  border-left: 3px solid var(--accent);
+  padding-left: 11px;
+}
+.notif-item-title {
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+.notif-item-body {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 3px;
+}
+.notif-item-meta {
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 0.03em;
+}
 
 /* ── Field Presence Chips ─────────────────────────────────────────── */
 .field-presence-row {

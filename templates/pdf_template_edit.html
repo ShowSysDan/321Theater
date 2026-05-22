@@ -1,0 +1,482 @@
+{% extends "base.html" %}
+{% block title %}PDF Builder — {{ template.name }}{% endblock %}
+
+{% block content %}
+<div class="page-header" style="display:flex;align-items:start;gap:16px">
+  <div style="flex:1">
+    <a href="{{ url_for('pdf_templates_list') }}" class="back-link">← All templates</a>
+    <h1 class="page-title pdf-tpl-title" contenteditable="true"
+        oninput="markDirty()"
+        onblur="renamePdfTemplate(this.textContent.trim())">{{ template.name }}</h1>
+    <p class="page-sub" style="margin-top:4px">
+      Click-and-drag on the page to place a field. Click a placed field to rename, change
+      type, or delete it. Coordinates are stored in PDF points so they stamp cleanly on
+      export.
+    </p>
+  </div>
+  <div class="pdf-tpl-toolbar">
+    <button class="btn btn-primary" onclick="saveTemplateFields()">Save</button>
+    <span id="pdf-save-status" class="text-dim" style="font-size:11px;display:block;margin-top:4px">All changes saved.</span>
+  </div>
+</div>
+
+<div class="pdf-builder-wrap">
+  <div class="pdf-builder-sidebar">
+    <h3 style="font-size:11px;letter-spacing:.06em;color:var(--text-muted);margin:0 0 8px">FIELDS</h3>
+    <ol id="pdf-field-list" class="pdf-field-list">
+      <li class="pdf-field-empty">No fields placed yet.</li>
+    </ol>
+    <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
+      <label style="font-size:11px;color:var(--text-dim);letter-spacing:.05em">DEFAULT NEW-FIELD TYPE</label>
+      <select id="pdf-default-type" class="field-input" style="font-size:12px">
+        <option value="text">text</option>
+        <option value="multiline">multiline</option>
+        <option value="date">date</option>
+        <option value="checkbox">checkbox</option>
+      </select>
+    </div>
+    <p class="field-hint" style="font-size:10px;color:var(--text-dim);margin-top:14px">
+      Tip: click an existing field on the page to edit it. Drag a corner to resize. Click outside to deselect.
+    </p>
+  </div>
+  <div class="pdf-builder-stage">
+    <div id="pdf-pages" class="pdf-pages"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
+        integrity="sha512-VHFAaJtRYZS8gZSh4caoQOO0z+akQ+TGYxKWyAr+aBh1QFE9eHEKSqGAm0XLfXcm/v6BqaUW3OnRfQzfTzWMpA=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script>
+const TEMPLATE_ID  = {{ template.id }};
+const PDF_URL      = "{{ url_for('pdf_template_file', tid=template.id) }}";
+const SAVE_URL     = `/settings/pdf-templates/${TEMPLATE_ID}/fields`;
+const RENAME_URL   = `/settings/pdf-templates/${TEMPLATE_ID}/rename`;
+// `template.fields_json` is a JSON string we control, but field labels are
+// user-supplied. We parse on the server, dump back through Jinja's `tojson`
+// so `<`/`>`/`&` are escaped for safe embedding inside this <script> block.
+const INITIAL_FIELDS = {{ template.fields_parsed | tojson }};
+const PDF_SCALE = 1.5;  // also used on the filler page
+
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+let _fields = [];      // [{name, label, type, page, x, y, w, h, font_size}]
+let _selected = null;  // index into _fields, or null
+let _dirty = false;
+let _pages = [];       // [{ viewport, pageDiv }]
+
+function markDirty() {
+  _dirty = true;
+  document.getElementById('pdf-save-status').textContent = 'Unsaved changes…';
+}
+
+function markClean() {
+  _dirty = false;
+  document.getElementById('pdf-save-status').textContent = 'All changes saved.';
+}
+
+async function renamePdfTemplate(name) {
+  if (!name) return;
+  await fetch(RENAME_URL, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, description: ''})
+  });
+}
+
+async function loadPdf() {
+  const pdf = await pdfjsLib.getDocument(PDF_URL).promise;
+  const container = document.getElementById('pdf-pages');
+  container.innerHTML = '';
+  _pages = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const viewport = page.getViewport({scale: PDF_SCALE});
+    const pageDiv = document.createElement('div');
+    pageDiv.className = 'pdf-page';
+    pageDiv.style.width  = viewport.width + 'px';
+    pageDiv.style.height = viewport.height + 'px';
+    pageDiv.dataset.pageIndex = (p - 1);
+    const canvas = document.createElement('canvas');
+    canvas.width  = viewport.width;
+    canvas.height = viewport.height;
+    pageDiv.appendChild(canvas);
+    const overlay = document.createElement('div');
+    overlay.className = 'pdf-overlay';
+    pageDiv.appendChild(overlay);
+    container.appendChild(pageDiv);
+    await page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
+    _pages.push({viewport, pageDiv, overlay});
+    _wireDrawing(overlay, p - 1);
+  }
+  _fields = (INITIAL_FIELDS || []).map(f => Object.assign({}, f));
+  redrawFields();
+  renderFieldList();
+}
+
+function _wireDrawing(overlay, pageIndex) {
+  let start = null;
+  let preview = null;
+  overlay.addEventListener('mousedown', (e) => {
+    if (e.target.classList.contains('pdf-field')) return;  // clicked existing
+    const rect = overlay.getBoundingClientRect();
+    start = {x: e.clientX - rect.left, y: e.clientY - rect.top};
+    preview = document.createElement('div');
+    preview.className = 'pdf-field pdf-field-preview';
+    preview.style.left = start.x + 'px';
+    preview.style.top  = start.y + 'px';
+    preview.style.width = '0px';
+    preview.style.height = '0px';
+    overlay.appendChild(preview);
+  });
+  overlay.addEventListener('mousemove', (e) => {
+    if (!start || !preview) return;
+    const rect = overlay.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const x0 = Math.min(start.x, x), y0 = Math.min(start.y, y);
+    const w = Math.abs(x - start.x), h = Math.abs(y - start.y);
+    preview.style.left = x0 + 'px';
+    preview.style.top  = y0 + 'px';
+    preview.style.width = w + 'px';
+    preview.style.height = h + 'px';
+  });
+  overlay.addEventListener('mouseup', (e) => {
+    if (!start || !preview) return;
+    const rect = overlay.getBoundingClientRect();
+    const x  = e.clientX - rect.left;
+    const y  = e.clientY - rect.top;
+    const x0 = Math.min(start.x, x), y0 = Math.min(start.y, y);
+    const w  = Math.abs(x - start.x), h = Math.abs(y - start.y);
+    overlay.removeChild(preview);
+    preview = null; start = null;
+    if (w < 6 || h < 6) return;  // too tiny, treat as click
+    const type = document.getElementById('pdf-default-type').value || 'text';
+    const idx = _fields.length;
+    const nm = `field_${idx + 1}`;
+    _fields.push({
+      name: nm,
+      label: nm,
+      type,
+      page: pageIndex,
+      x: x0 / PDF_SCALE,
+      y: y0 / PDF_SCALE,
+      w: w  / PDF_SCALE,
+      h: h  / PDF_SCALE,
+      font_size: type === 'multiline' ? 9 : 10,
+    });
+    markDirty();
+    redrawFields();
+    renderFieldList();
+    selectField(idx);
+  });
+}
+
+function redrawFields() {
+  for (const {overlay} of _pages) {
+    overlay.querySelectorAll('.pdf-field').forEach(el => el.remove());
+  }
+  _fields.forEach((f, i) => {
+    const pg = _pages[f.page];
+    if (!pg) return;
+    const div = document.createElement('div');
+    div.className = 'pdf-field';
+    if (i === _selected) div.classList.add('pdf-field-selected');
+    div.style.left   = (f.x * PDF_SCALE) + 'px';
+    div.style.top    = (f.y * PDF_SCALE) + 'px';
+    div.style.width  = (f.w * PDF_SCALE) + 'px';
+    div.style.height = (f.h * PDF_SCALE) + 'px';
+    div.dataset.idx = i;
+    div.innerHTML = `<span class="pdf-field-label">${escapeHtml(f.label || f.name)}</span>
+                     <span class="pdf-field-resize" data-resize="se"></span>`;
+    div.addEventListener('mousedown', (e) => {
+      if (e.target.dataset.resize) { startResize(e, i); return; }
+      startDrag(e, i);
+    });
+    pg.overlay.appendChild(div);
+  });
+}
+
+function renderFieldList() {
+  const list = document.getElementById('pdf-field-list');
+  if (!_fields.length) {
+    list.innerHTML = '<li class="pdf-field-empty">No fields placed yet.</li>';
+    return;
+  }
+  list.innerHTML = _fields.map((f, i) => `
+    <li class="pdf-field-row ${i === _selected ? 'sel' : ''}" data-idx="${i}">
+      <div class="pdf-field-row-head" onclick="selectField(${i})">
+        <span class="pdf-field-row-name">${escapeHtml(f.label || f.name)}</span>
+        <span class="pdf-field-row-type">${escapeHtml(f.type)}</span>
+      </div>
+      ${i === _selected ? `
+      <div class="pdf-field-row-edit">
+        <label>Name (key)
+          <input type="text" value="${escapeHtml(f.name)}" oninput="updateField(${i}, 'name', this.value)">
+        </label>
+        <label>Label
+          <input type="text" value="${escapeHtml(f.label)}" oninput="updateField(${i}, 'label', this.value)">
+        </label>
+        <label>Type
+          <select onchange="updateField(${i}, 'type', this.value)">
+            <option value="text"${f.type==='text'?' selected':''}>text</option>
+            <option value="multiline"${f.type==='multiline'?' selected':''}>multiline</option>
+            <option value="date"${f.type==='date'?' selected':''}>date</option>
+            <option value="checkbox"${f.type==='checkbox'?' selected':''}>checkbox</option>
+          </select>
+        </label>
+        <label>Font size
+          <input type="number" min="6" max="48" step="0.5"
+                 value="${f.font_size || 10}"
+                 oninput="updateField(${i}, 'font_size', parseFloat(this.value) || 10)">
+        </label>
+        <button class="btn btn-xs btn-danger-ghost" onclick="deleteField(${i})">Delete field</button>
+      </div>` : ''}
+    </li>
+  `).join('');
+}
+
+function selectField(i) {
+  _selected = (_selected === i ? null : i);
+  redrawFields();
+  renderFieldList();
+}
+
+function updateField(i, key, val) {
+  if (i < 0 || i >= _fields.length) return;
+  _fields[i][key] = val;
+  markDirty();
+  redrawFields();
+}
+
+function deleteField(i) {
+  if (i < 0 || i >= _fields.length) return;
+  if (!confirm('Delete this field?')) return;
+  _fields.splice(i, 1);
+  if (_selected === i) _selected = null;
+  markDirty();
+  redrawFields();
+  renderFieldList();
+}
+
+function startDrag(e, i) {
+  e.preventDefault();
+  const f = _fields[i];
+  const startX = e.clientX, startY = e.clientY;
+  const origX = f.x, origY = f.y;
+  function onMove(ev) {
+    const dx = (ev.clientX - startX) / PDF_SCALE;
+    const dy = (ev.clientY - startY) / PDF_SCALE;
+    f.x = Math.max(0, origX + dx);
+    f.y = Math.max(0, origY + dy);
+    redrawFields();
+  }
+  function onUp() {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    markDirty();
+    renderFieldList();
+  }
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+  _selected = i;
+}
+
+function startResize(e, i) {
+  e.preventDefault(); e.stopPropagation();
+  const f = _fields[i];
+  const startX = e.clientX, startY = e.clientY;
+  const origW = f.w, origH = f.h;
+  function onMove(ev) {
+    const dx = (ev.clientX - startX) / PDF_SCALE;
+    const dy = (ev.clientY - startY) / PDF_SCALE;
+    f.w = Math.max(8, origW + dx);
+    f.h = Math.max(8, origH + dy);
+    redrawFields();
+  }
+  function onUp() {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    markDirty();
+    renderFieldList();
+  }
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+async function saveTemplateFields() {
+  document.getElementById('pdf-save-status').textContent = 'Saving…';
+  const r = await fetch(SAVE_URL, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({fields: _fields})
+  });
+  const j = await r.json();
+  if (j.success) {
+    _fields = j.fields;
+    markClean();
+    renderFieldList();
+  } else {
+    document.getElementById('pdf-save-status').textContent = j.error || 'Save failed.';
+  }
+}
+
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Block accidental navigation while there are unsaved field changes.
+window.addEventListener('beforeunload', (e) => {
+  if (_dirty) { e.preventDefault(); e.returnValue = ''; }
+});
+
+loadPdf();
+</script>
+
+<style>
+.pdf-tpl-toolbar { text-align: right; min-width: 160px; }
+.pdf-tpl-title { outline: none; border-bottom: 1px dashed transparent; padding-bottom: 2px; }
+.pdf-tpl-title:focus { border-bottom-color: var(--accent); }
+
+.pdf-builder-wrap {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin-top: 16px;
+  min-height: 600px;
+}
+.pdf-builder-sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  background: var(--bg-card, var(--bg-hover));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px;
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+}
+.pdf-builder-stage {
+  flex: 1;
+  background: var(--bg-hover);
+  border-radius: 6px;
+  padding: 16px;
+  overflow-x: auto;
+}
+.pdf-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: center;
+}
+.pdf-page {
+  position: relative;
+  background: white;
+  box-shadow: 0 4px 12px rgba(0,0,0,.25);
+}
+.pdf-page canvas { display: block; }
+.pdf-overlay {
+  position: absolute;
+  inset: 0;
+  cursor: crosshair;
+}
+.pdf-field {
+  position: absolute;
+  border: 2px solid rgba(245, 127, 32, 0.85);
+  background: rgba(245, 127, 32, 0.12);
+  box-sizing: border-box;
+  cursor: move;
+  overflow: hidden;
+  user-select: none;
+}
+.pdf-field:hover { background: rgba(245, 127, 32, 0.18); }
+.pdf-field-selected {
+  border-color: rgba(0, 170, 255, 0.95);
+  background: rgba(0, 170, 255, 0.15);
+}
+.pdf-field-preview {
+  border-style: dashed;
+  pointer-events: none;
+}
+.pdf-field-label {
+  position: absolute;
+  top: 1px;
+  left: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  color: rgba(0,0,0,0.85);
+  background: rgba(255,255,255,0.7);
+  padding: 0 3px;
+  border-radius: 2px;
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: calc(100% - 6px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pdf-field-resize {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 10px;
+  height: 10px;
+  background: var(--accent);
+  border-radius: 2px;
+  cursor: nwse-resize;
+}
+
+.pdf-field-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 12px;
+}
+.pdf-field-list .pdf-field-empty {
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 8px 0;
+}
+.pdf-field-row {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 6px;
+  background: var(--bg);
+}
+.pdf-field-row.sel { border-color: var(--accent); }
+.pdf-field-row-head {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+.pdf-field-row-name { font-weight: 600; }
+.pdf-field-row-type { color: var(--text-dim); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
+.pdf-field-row-edit {
+  border-top: 1px solid var(--border);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pdf-field-row-edit label {
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: .04em;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pdf-field-row-edit input, .pdf-field-row-edit select {
+  font-size: 12px;
+  padding: 4px 6px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 3px;
+}
+</style>
+{% endblock %}

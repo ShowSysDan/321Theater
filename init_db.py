@@ -71,6 +71,9 @@ CREATE TABLE IF NOT EXISTS shows (
     cast_count INTEGER DEFAULT NULL,
     crew_count INTEGER DEFAULT NULL,
     performance_company TEXT DEFAULT '',
+    -- 1 = exclude from financial / activity reports. Use for trainings,
+    -- demos, and dry runs so they don't pollute totals.
+    is_test INTEGER DEFAULT 0,
     created_by INTEGER REFERENCES users(id),
     last_saved_by INTEGER REFERENCES users(id),
     last_saved_at TIMESTAMP,
@@ -140,8 +143,52 @@ CREATE TABLE IF NOT EXISTS contacts (
     -- JSON list of venue names this contact should receive emails for.
     -- NULL or empty list = no restriction (all venues, current default).
     venue_filter        TEXT DEFAULT NULL,
+    -- If non-NULL, this contact is auto-synced from a system user account.
+    -- Editing the linked user updates name + email here. Deleting the user
+    -- clears the link but leaves the contact row in place.
+    user_id             INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Debounced field-change alert state. One row per (show_id, field_key) for
+-- fields that have alert_departments / alert_contact_ids configured. When a
+-- save changes the value, pending_* is set; the background job sends the
+-- email + in-app notification once the value has been quiet for the
+-- configured debounce window (so rapid retypes / toggles don't spam).
+CREATE TABLE IF NOT EXISTS field_alert_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    show_id INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    field_key TEXT NOT NULL,
+    last_alerted_value TEXT DEFAULT NULL,
+    last_alerted_hash  TEXT DEFAULT NULL,
+    last_alerted_at    TIMESTAMP DEFAULT NULL,
+    pending_value      TEXT DEFAULT NULL,
+    pending_prev_value TEXT DEFAULT NULL,
+    pending_hash       TEXT DEFAULT NULL,
+    pending_updated_at TIMESTAMP DEFAULT NULL,
+    pending_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    UNIQUE(show_id, field_key)
+);
+CREATE INDEX IF NOT EXISTS idx_field_alert_pending
+    ON field_alert_state(pending_updated_at);
+
+-- In-app notification bell. One row per (recipient user, event).
+CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL DEFAULT 'system',
+    title TEXT NOT NULL,
+    body TEXT DEFAULT '',
+    link_url TEXT DEFAULT NULL,
+    show_id INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+    field_key TEXT DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    read_at TIMESTAMP DEFAULT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
+    ON notifications(user_id, read_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_created
+    ON notifications(user_id, created_at);
 
 CREATE TABLE IF NOT EXISTS export_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,8 +254,53 @@ CREATE TABLE IF NOT EXISTS form_fields (
     allow_multi INTEGER DEFAULT 0,
     auto_select_visible INTEGER DEFAULT 0,
     hide_from_pdf INTEGER DEFAULT 0,
-    upload_button_only INTEGER DEFAULT 0
+    upload_button_only INTEGER DEFAULT 0,
+    -- 'notes' field type uses notes_content as the instructional body
+    -- (renders as a read-only info block on the form, hidden from PDF).
+    notes_content TEXT DEFAULT NULL,
+    -- Per-field change-alert config. JSON arrays of department names and
+    -- contact IDs that should be emailed (and notified in-app) when the
+    -- value changes. Debounced by the field_alert_state machinery.
+    alert_departments TEXT DEFAULT NULL,
+    alert_contact_ids TEXT DEFAULT NULL,
+    -- 'pdf_form' field type binds to a row in pdf_templates. NULL for
+    -- every other field type.
+    pdf_template_id INTEGER DEFAULT NULL
 );
+
+-- Reusable fillable-PDF templates. The PDF lives in pdf_data (small) or
+-- s3_key (large); fields_json is the array of placed input rects produced
+-- by the in-app builder. Used by the 'pdf_form' field type.
+CREATE TABLE IF NOT EXISTS pdf_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    pdf_data BLOB,
+    s3_key TEXT DEFAULT NULL,
+    fields_json TEXT DEFAULT '[]',
+    page_count INTEGER DEFAULT 1,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Per-show submissions for a pdf_form field. UNIQUE(show_id, field_key)
+-- because each show has one filled copy per field. template_fields_snapshot
+-- freezes the field definitions at first save so later template edits
+-- don't invalidate existing submissions.
+CREATE TABLE IF NOT EXISTS pdf_submissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    show_id INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    field_key TEXT NOT NULL,
+    template_id INTEGER REFERENCES pdf_templates(id) ON DELETE SET NULL,
+    template_fields_snapshot TEXT DEFAULT NULL,
+    values_json TEXT DEFAULT '{}',
+    status TEXT DEFAULT 'draft',
+    last_saved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    last_saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(show_id, field_key)
+);
+CREATE INDEX IF NOT EXISTS idx_pdf_submissions_show ON pdf_submissions(show_id);
 
 CREATE TABLE IF NOT EXISTS form_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1202,8 +1294,39 @@ def migrate_db():
             is_notes_field INTEGER DEFAULT 0,
             ai_hint TEXT DEFAULT NULL,
             display_as TEXT DEFAULT NULL,
-            allow_multi INTEGER DEFAULT 0
+            allow_multi INTEGER DEFAULT 0,
+            notes_content TEXT DEFAULT NULL,
+            alert_departments TEXT DEFAULT NULL,
+            alert_contact_ids TEXT DEFAULT NULL,
+            pdf_template_id INTEGER DEFAULT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS pdf_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            pdf_data BLOB,
+            s3_key TEXT DEFAULT NULL,
+            fields_json TEXT DEFAULT '[]',
+            page_count INTEGER DEFAULT 1,
+            created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS pdf_submissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            show_id INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+            field_key TEXT NOT NULL,
+            template_id INTEGER REFERENCES pdf_templates(id) ON DELETE SET NULL,
+            template_fields_snapshot TEXT DEFAULT NULL,
+            values_json TEXT DEFAULT '{}',
+            status TEXT DEFAULT 'draft',
+            last_saved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            last_saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(show_id, field_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_pdf_submissions_show ON pdf_submissions(show_id);
 
         CREATE TABLE IF NOT EXISTS form_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1304,6 +1427,68 @@ def migrate_db():
             read_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(show_id, user_id)
         );
+
+        CREATE TABLE IF NOT EXISTS field_alert_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            show_id INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+            field_key TEXT NOT NULL,
+            last_alerted_value TEXT DEFAULT NULL,
+            last_alerted_hash  TEXT DEFAULT NULL,
+            last_alerted_at    TIMESTAMP DEFAULT NULL,
+            pending_value      TEXT DEFAULT NULL,
+            pending_prev_value TEXT DEFAULT NULL,
+            pending_hash       TEXT DEFAULT NULL,
+            pending_updated_at TIMESTAMP DEFAULT NULL,
+            pending_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            UNIQUE(show_id, field_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_field_alert_pending
+            ON field_alert_state(pending_updated_at);
+
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL DEFAULT 'system',
+            title TEXT NOT NULL,
+            body TEXT DEFAULT '',
+            link_url TEXT DEFAULT NULL,
+            show_id INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+            field_key TEXT DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            read_at TIMESTAMP DEFAULT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
+            ON notifications(user_id, read_at);
+        CREATE INDEX IF NOT EXISTS idx_notifications_user_created
+            ON notifications(user_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS pdf_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            pdf_data BLOB,
+            s3_key TEXT DEFAULT NULL,
+            fields_json TEXT DEFAULT '[]',
+            page_count INTEGER DEFAULT 1,
+            created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS pdf_submissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            show_id INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+            field_key TEXT NOT NULL,
+            template_id INTEGER REFERENCES pdf_templates(id) ON DELETE SET NULL,
+            template_fields_snapshot TEXT DEFAULT NULL,
+            values_json TEXT DEFAULT '{}',
+            status TEXT DEFAULT 'draft',
+            last_saved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            last_saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(show_id, field_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_pdf_submissions_show
+            ON pdf_submissions(show_id);
     """)
 
     # ALTER TABLE for new columns (SQLite errors if column already exists)
@@ -1334,6 +1519,12 @@ def migrate_db():
         'ALTER TABLE form_fields ADD COLUMN auto_select_visible INTEGER DEFAULT 0',
         'ALTER TABLE form_fields ADD COLUMN hide_from_pdf INTEGER DEFAULT 0',
         'ALTER TABLE form_fields ADD COLUMN upload_button_only INTEGER DEFAULT 0',
+        'ALTER TABLE form_fields ADD COLUMN notes_content TEXT DEFAULT NULL',
+        'ALTER TABLE form_fields ADD COLUMN alert_departments TEXT DEFAULT NULL',
+        'ALTER TABLE form_fields ADD COLUMN alert_contact_ids TEXT DEFAULT NULL',
+        'ALTER TABLE form_fields ADD COLUMN pdf_template_id INTEGER DEFAULT NULL',
+        'ALTER TABLE contacts ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL',
+        'ALTER TABLE shows ADD COLUMN is_test INTEGER DEFAULT 0',
         'ALTER TABLE schedule_meta_fields ADD COLUMN show_in_contacts INTEGER DEFAULT 0',
         "ALTER TABLE labor_requests ADD COLUMN break_start TEXT DEFAULT ''",
         "ALTER TABLE labor_requests ADD COLUMN break_end TEXT DEFAULT ''",
@@ -2108,6 +2299,7 @@ CREATE TABLE IF NOT EXISTS shows (
     cast_count INTEGER DEFAULT NULL,
     crew_count INTEGER DEFAULT NULL,
     performance_company TEXT DEFAULT '',
+    is_test INTEGER DEFAULT 0,
     created_by INTEGER REFERENCES users(id),
     last_saved_by INTEGER REFERENCES users(id),
     last_saved_at TIMESTAMP,
@@ -2175,6 +2367,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     postnotes_recipient  INTEGER DEFAULT 0,
     system_recipient     INTEGER DEFAULT 0,
     venue_filter         TEXT DEFAULT NULL,
+    user_id              INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -2227,8 +2420,73 @@ CREATE TABLE IF NOT EXISTS form_fields (
     allow_multi INTEGER DEFAULT 0,
     auto_select_visible INTEGER DEFAULT 0,
     hide_from_pdf INTEGER DEFAULT 0,
-    upload_button_only INTEGER DEFAULT 0
+    upload_button_only INTEGER DEFAULT 0,
+    notes_content TEXT DEFAULT NULL,
+    alert_departments TEXT DEFAULT NULL,
+    alert_contact_ids TEXT DEFAULT NULL,
+    pdf_template_id INTEGER DEFAULT NULL
 );
+
+CREATE TABLE IF NOT EXISTS pdf_templates (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    pdf_data BYTEA,
+    s3_key TEXT DEFAULT NULL,
+    fields_json TEXT DEFAULT '[]',
+    page_count INTEGER DEFAULT 1,
+    created_by INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS pdf_submissions (
+    id SERIAL PRIMARY KEY,
+    show_id INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    field_key TEXT NOT NULL,
+    template_id INTEGER REFERENCES pdf_templates(id) ON DELETE SET NULL,
+    template_fields_snapshot TEXT DEFAULT NULL,
+    values_json TEXT DEFAULT '{}',
+    status TEXT DEFAULT 'draft',
+    last_saved_by INTEGER,
+    last_saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(show_id, field_key)
+);
+CREATE INDEX IF NOT EXISTS idx_pdf_submissions_show ON pdf_submissions(show_id);
+
+CREATE TABLE IF NOT EXISTS field_alert_state (
+    id SERIAL PRIMARY KEY,
+    show_id INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    field_key TEXT NOT NULL,
+    last_alerted_value TEXT DEFAULT NULL,
+    last_alerted_hash  TEXT DEFAULT NULL,
+    last_alerted_at    TIMESTAMP DEFAULT NULL,
+    pending_value      TEXT DEFAULT NULL,
+    pending_prev_value TEXT DEFAULT NULL,
+    pending_hash       TEXT DEFAULT NULL,
+    pending_updated_at TIMESTAMP DEFAULT NULL,
+    pending_updated_by INTEGER,
+    UNIQUE(show_id, field_key)
+);
+CREATE INDEX IF NOT EXISTS idx_field_alert_pending
+    ON field_alert_state(pending_updated_at);
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'system',
+    title TEXT NOT NULL,
+    body TEXT DEFAULT '',
+    link_url TEXT DEFAULT NULL,
+    show_id INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+    field_key TEXT DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    read_at TIMESTAMP DEFAULT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
+    ON notifications(user_id, read_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_created
+    ON notifications(user_id, created_at);
 
 CREATE TABLE IF NOT EXISTS form_history (
     id SERIAL PRIMARY KEY,
@@ -3059,6 +3317,12 @@ def migrate_db_postgres():
             f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS auto_select_visible INTEGER DEFAULT 0',
             f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS hide_from_pdf INTEGER DEFAULT 0',
             f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS upload_button_only INTEGER DEFAULT 0',
+            f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS notes_content TEXT DEFAULT NULL',
+            f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS alert_departments TEXT DEFAULT NULL',
+            f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS alert_contact_ids TEXT DEFAULT NULL',
+            f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS pdf_template_id INTEGER DEFAULT NULL',
+            f'ALTER TABLE "{app_schema}".contacts ADD COLUMN IF NOT EXISTS user_id INTEGER',
+            f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS is_test INTEGER DEFAULT 0',
             f'ALTER TABLE "{app_schema}".schedule_meta_fields ADD COLUMN IF NOT EXISTS show_in_contacts INTEGER DEFAULT 0',
             f"ALTER TABLE \"{app_schema}\".labor_requests ADD COLUMN IF NOT EXISTS break_start TEXT DEFAULT ''",
             f"ALTER TABLE \"{app_schema}\".labor_requests ADD COLUMN IF NOT EXISTS break_end TEXT DEFAULT ''",
