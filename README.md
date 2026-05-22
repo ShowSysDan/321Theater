@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `2.13.2`**
+**Current version: `2.13.3`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
