@@ -724,6 +724,11 @@ html[data-theme="light"] select.field-input {
 }
 
 /* ── PDF Filler Modal ────────────────────────────────────────────── */
+/* Hard hide. Using !important so the base .modal-overlay's display:flex
+   can't keep the overlay live after close — an invisible-but-active
+   overlay swallows clicks on the page underneath. */
+.pdf-filler-hidden { display: none !important; }
+
 .pdf-filler-card {
   /* Override the base .modal-card's 480px / 90vw bounds with !important so
      a stale browser cache or future specificity tweak can't shrink the

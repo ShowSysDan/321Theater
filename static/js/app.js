@@ -1901,6 +1901,10 @@ function openFieldModal(fid, sectionId) {
   // manually so a fresh "Add Field" modal doesn't inherit prior selections.
   modal.querySelectorAll('input[data-alert-dept], input[data-alert-contact]')
     .forEach(el => { el.checked = false; });
+  // Clear any stale pendingValue on the PDF template picker so a fresh
+  // Add Field modal doesn't pick up the previously-edited field's binding.
+  const pdfSel = modal.querySelector('[name="pdf_template_id"]');
+  if (pdfSel) delete pdfSel.dataset.pendingValue;
 
   if (fid) {
     // Load existing field data
@@ -1928,6 +1932,16 @@ function _populateFieldModal(field) {
     if (!el) continue;
     if (el.type === 'checkbox') el.checked = !!v;
     else el.value = v ?? '';
+  }
+  // The PDF template picker is populated async from /api/pdf-templates,
+  // so setting <select>.value = "3" above silently drops if option 3
+  // hasn't been fetched yet. Stash the desired ID on a data attribute;
+  // _populatePdfTemplatePicker re-applies it after options arrive. Saving
+  // the field before the user touches the picker therefore preserves the
+  // binding instead of clearing it to NULL.
+  const pdfSel = modal.querySelector('[name="pdf_template_id"]');
+  if (pdfSel && field.pdf_template_id != null && field.pdf_template_id !== '') {
+    pdfSel.dataset.pendingValue = String(field.pdf_template_id);
   }
   if (field.options && field.options.length) {
     const optEl = modal.querySelector('[name="options_text"]');
@@ -1982,6 +1996,11 @@ function _toggleFieldTypeOptions(type) {
 async function _populatePdfTemplatePicker() {
   const sel = document.getElementById('field-modal-pdf-template');
   if (!sel) return;
+  // Capture both the current rendered value AND any pendingValue that
+  // _populateFieldModal left for us. pendingValue covers the case where
+  // we're opening an existing field whose pdf_template_id couldn't be
+  // applied yet because the <option> didn't exist.
+  const pending = sel.dataset.pendingValue || '';
   const current = sel.value;
   if (!sel.dataset.loaded) {
     try {
@@ -1995,7 +2014,13 @@ async function _populatePdfTemplatePicker() {
       sel.dataset.loaded = '1';
     } catch (e) { /* leave empty */ }
   }
-  if (current) sel.value = current;
+  // pendingValue wins if set — it reflects the field's actual saved
+  // binding. Otherwise keep whatever the user/select had.
+  const target = pending || current;
+  if (target) sel.value = target;
+  // Consume the pendingValue so a later re-toggle doesn't clobber a
+  // deliberate user change.
+  if (pending) delete sel.dataset.pendingValue;
 }
 
 function closeFieldModal() {
@@ -2588,10 +2613,13 @@ async function openPdfFormFiller(fieldKey, label) {
   if (statusEl)   statusEl.textContent = '';
   if (bodyEl)     bodyEl.innerHTML = '<div class="pdf-filler-loading">Loading PDF…</div>';
   if (downloadEl) { downloadEl.style.display = 'none'; downloadEl.onclick = null; }
-  // Show the modal — clearing inline display lets the .modal-overlay
-  // CSS (display:flex) take over. Also force the !important-friendly
-  // class in case some other code added .hidden or display:none.
-  modal.style.display = '';
+  // Show the modal by removing the .pdf-filler-hidden class. We use a
+  // class instead of style.display because the base .modal-overlay sets
+  // display:flex via CSS, and an inline display:none was sometimes
+  // *not* being removed cleanly on reopen, leaving an invisible
+  // full-viewport overlay that swallowed clicks on the page below.
+  modal.style.removeProperty('display');
+  modal.classList.remove('pdf-filler-hidden');
   modal.classList.remove('hidden');
   try {
     const r = await fetch(`/shows/${SHOW_ID}/pdf-form/${encodeURIComponent(fieldKey)}/data`,
@@ -2840,7 +2868,12 @@ function closePdfFormFiller() {
   const modal    = document.getElementById('pdf-filler-modal');
   const bodyEl   = document.getElementById('pdf-filler-body');
   const download = document.getElementById('pdf-filler-download');
-  if (modal)    modal.style.display = 'none';
+  if (modal) {
+    // Belt + suspenders: class flip is the primary mechanism, but clear
+    // any inline display so prior code paths can't keep the overlay live.
+    modal.classList.add('pdf-filler-hidden');
+    modal.style.removeProperty('display');
+  }
   if (bodyEl)   bodyEl.innerHTML = '';
   if (download) { download.style.display = 'none'; download.onclick = null; }
   _pdfFillerState = null;
