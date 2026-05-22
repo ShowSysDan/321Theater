@@ -44,9 +44,7 @@
   </div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
-        integrity="sha512-VHFAaJtRYZS8gZSh4caoQOO0z+akQ+TGYxKWyAr+aBh1QFE9eHEKSqGAm0XLfXcm/v6BqaUW3OnRfQzfTzWMpA=="
-        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="{{ url_for('static', filename='js/vendor/pdfjs/pdf.js') }}"></script>
 <script>
 const TEMPLATE_ID  = {{ template.id }};
 const PDF_URL      = "{{ url_for('pdf_template_file', tid=template.id) }}";
@@ -59,7 +57,7 @@ const INITIAL_FIELDS = {{ template.fields_parsed | tojson }};
 const PDF_SCALE = 1.5;  // also used on the filler page
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
-  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  "{{ url_for('static', filename='js/vendor/pdfjs/pdf.worker.js') }}";
 
 let _fields = [];      // [{name, label, type, page, x, y, w, h, font_size}]
 let _selected = null;  // index into _fields, or null

@@ -2546,14 +2546,17 @@ let _pdfFillerState = null;  // {show_id, field_key, fields, values, pdf_url}
 let _pdfFillerSaveTimer = null;
 
 function _ensurePdfJs() {
+  // Loads the self-hosted pdf.js bundle (static/js/vendor/pdfjs). We
+  // intentionally don't fall back to a CDN — deployments may run
+  // air-gapped and external script loads would break the filler.
   return new Promise((resolve, reject) => {
     if (window.pdfjsLib) return resolve(window.pdfjsLib);
     const s = document.createElement('script');
-    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.src = '/static/js/vendor/pdfjs/pdf.js';
     s.onload = () => {
       if (window.pdfjsLib) {
         window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+          '/static/js/vendor/pdfjs/pdf.worker.js';
         resolve(window.pdfjsLib);
       } else reject(new Error('pdf.js failed to load'));
     };
