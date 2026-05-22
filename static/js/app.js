@@ -2566,20 +2566,39 @@ function _ensurePdfJs() {
 }
 
 async function openPdfFormFiller(fieldKey, label) {
-  if (typeof SHOW_ID === 'undefined' || !SHOW_ID) return;
+  if (typeof SHOW_ID === 'undefined' || !SHOW_ID) {
+    console.warn('openPdfFormFiller: SHOW_ID not defined');
+    return;
+  }
   const modal = document.getElementById('pdf-filler-modal');
-  if (!modal) return;
-  document.getElementById('pdf-filler-title').textContent = label || 'PDF Form';
-  document.getElementById('pdf-filler-status').textContent = '';
-  document.getElementById('pdf-filler-body').innerHTML =
-    '<div class="pdf-filler-loading">Loading PDF…</div>';
+  if (!modal) {
+    console.warn('openPdfFormFiller: #pdf-filler-modal missing from DOM');
+    return;
+  }
+  // Aggressive reset: any prior open could have left stale state behind
+  // (pending autosave timer, half-rendered PDF, lingering onclick on the
+  // download button). Clear everything so each open is fresh.
+  if (_pdfFillerSaveTimer) { clearTimeout(_pdfFillerSaveTimer); _pdfFillerSaveTimer = null; }
+  _pdfFillerState = null;
+  const titleEl    = document.getElementById('pdf-filler-title');
+  const statusEl   = document.getElementById('pdf-filler-status');
+  const bodyEl     = document.getElementById('pdf-filler-body');
+  const downloadEl = document.getElementById('pdf-filler-download');
+  if (titleEl)    titleEl.textContent = label || 'PDF Form';
+  if (statusEl)   statusEl.textContent = '';
+  if (bodyEl)     bodyEl.innerHTML = '<div class="pdf-filler-loading">Loading PDF…</div>';
+  if (downloadEl) { downloadEl.style.display = 'none'; downloadEl.onclick = null; }
+  // Show the modal — clearing inline display lets the .modal-overlay
+  // CSS (display:flex) take over. Also force the !important-friendly
+  // class in case some other code added .hidden or display:none.
   modal.style.display = '';
+  modal.classList.remove('hidden');
   try {
     const r = await fetch(`/shows/${SHOW_ID}/pdf-form/${encodeURIComponent(fieldKey)}/data`,
                           {credentials: 'same-origin'});
     if (!r.ok) {
       const t = await r.text();
-      document.getElementById('pdf-filler-body').innerHTML =
+      if (bodyEl) bodyEl.innerHTML =
         `<div class="pdf-filler-error">${t || 'Failed to load.'}</div>`;
       return;
     }
@@ -2608,14 +2627,17 @@ async function openPdfFormFiller(fieldKey, label) {
       values: values,
       pdf_url: data.pdf_url,
     };
-    document.getElementById('pdf-filler-download').style.display = '';
-    document.getElementById('pdf-filler-download').onclick = () => {
-      window.open(`/shows/${SHOW_ID}/pdf-form/${encodeURIComponent(fieldKey)}/export`, '_blank');
-    };
+    if (downloadEl) {
+      downloadEl.style.display = '';
+      downloadEl.onclick = () => {
+        window.open(`/shows/${SHOW_ID}/pdf-form/${encodeURIComponent(fieldKey)}/export`, '_blank');
+      };
+    }
     await _renderPdfFillerPages();
   } catch (e) {
-    document.getElementById('pdf-filler-body').innerHTML =
-      '<div class="pdf-filler-error">Network error.</div>';
+    console.error('openPdfFormFiller error:', e);
+    if (bodyEl) bodyEl.innerHTML =
+      '<div class="pdf-filler-error">Network error. Check the browser console.</div>';
   }
 }
 
@@ -2745,28 +2767,37 @@ function _scheduleFillerAutoSave() {
 
 async function savePdfFormFiller(isAuto) {
   if (!_pdfFillerState) return;
+  // Capture the values we need BEFORE awaiting fetch — the user might
+  // close the modal mid-flight, which nulls _pdfFillerState. Without
+  // these locals the post-fetch code crashes on null.field_key and the
+  // unhandled exception can leave the modal in a state where the next
+  // open looks broken in the console.
+  const showId    = _pdfFillerState.show_id;
+  const fieldKey  = _pdfFillerState.field_key;
+  const valuesSnap = JSON.parse(JSON.stringify(_pdfFillerState.values));
   const status = document.getElementById('pdf-filler-status');
-  status.textContent = 'Saving…';
+  if (status) status.textContent = 'Saving…';
   try {
     const r = await fetch(
-      `/shows/${_pdfFillerState.show_id}/pdf-form/${encodeURIComponent(_pdfFillerState.field_key)}/save`,
+      `/shows/${showId}/pdf-form/${encodeURIComponent(fieldKey)}/save`,
       {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         credentials: 'same-origin',
-        body: JSON.stringify({values: _pdfFillerState.values})
+        body: JSON.stringify({values: valuesSnap})
       }
     );
     const j = await r.json();
     if (j.success) {
-      status.textContent = 'Saved.';
-      const chip = document.querySelector(`[data-pdf-status="${_pdfFillerState.field_key}"]`);
+      if (status) status.textContent = 'Saved.';
+      const chip = document.querySelector(`[data-pdf-status="${fieldKey}"]`);
       if (chip) chip.innerHTML = '<span class="pdf-chip pdf-chip-draft">Draft saved</span>';
     } else {
-      status.textContent = j.error || 'Save failed.';
+      if (status) status.textContent = j.error || 'Save failed.';
     }
   } catch (e) {
-    status.textContent = 'Network error.';
+    console.warn('savePdfFormFiller error:', e);
+    if (status) status.textContent = 'Network error.';
   }
 }
 
@@ -2796,13 +2827,22 @@ async function toggleShowTestMode(btn, showId) {
 }
 
 function closePdfFormFiller() {
-  if (_pdfFillerSaveTimer) clearTimeout(_pdfFillerSaveTimer);
-  // Final save on close if there were pending edits.
-  if (document.getElementById('pdf-filler-status').textContent === 'Unsaved…') {
-    savePdfFormFiller(false);
-  }
-  document.getElementById('pdf-filler-modal').style.display = 'none';
-  document.getElementById('pdf-filler-body').innerHTML = '';
+  if (_pdfFillerSaveTimer) { clearTimeout(_pdfFillerSaveTimer); _pdfFillerSaveTimer = null; }
+  // Final save on close if there were pending edits. Fire-and-forget — we
+  // don't await, so the close completes immediately and the modal can be
+  // reopened even while the save is still in flight.
+  try {
+    const status = document.getElementById('pdf-filler-status');
+    if (status && status.textContent === 'Unsaved…') {
+      savePdfFormFiller(false);
+    }
+  } catch (e) { console.warn('closePdfFormFiller pre-save error:', e); }
+  const modal    = document.getElementById('pdf-filler-modal');
+  const bodyEl   = document.getElementById('pdf-filler-body');
+  const download = document.getElementById('pdf-filler-download');
+  if (modal)    modal.style.display = 'none';
+  if (bodyEl)   bodyEl.innerHTML = '';
+  if (download) { download.style.display = 'none'; download.onclick = null; }
   _pdfFillerState = null;
 }
 
