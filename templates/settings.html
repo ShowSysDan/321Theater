@@ -343,6 +343,7 @@
     <button class="tab-btn active" id="ftab-btn-advance" onclick="switchFieldsTab('advance')">Advance Fields</button>
     <button class="tab-btn" id="ftab-btn-schedule" onclick="switchFieldsTab('schedule')">Schedule Fields</button>
     <button class="tab-btn" id="ftab-btn-templates" onclick="switchFieldsTab('templates')">Day Templates</button>
+    <a class="tab-btn" href="{{ url_for('pdf_templates_list') }}" style="text-decoration:none">PDF Form Templates →</a>
   </div>
 
   {# ── Page 1: Advance Form Fields ──────────────────────────────────────── #}
@@ -1927,6 +1928,7 @@
             <option value="arts_group_dropdown">arts_group (dropdown + new entry)</option>
             <option value="file_upload">file_upload (PDF / image / Word — appended to advance PDF)</option>
             <option value="notes">notes (instructions/text/links — screen only, not on PDF)</option>
+            <option value="pdf_form">pdf_form (fillable PDF template — opens in a popup)</option>
           </select>
         </div>
         <div class="field-group">
@@ -1992,6 +1994,19 @@
           <p class="field-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px">
             Renders as a read-only instructional block on the advance form. URLs are auto-linked.
             This field type is <strong>screen only</strong> — it never prints on the advance PDF.
+          </p>
+        </div>
+      </div>
+      <div class="pdf-template-group" style="display:none">
+        <div class="field-group">
+          <label class="field-label">PDF TEMPLATE *</label>
+          <select name="pdf_template_id" class="field-input" id="field-modal-pdf-template">
+            <option value="">— Select a template —</option>
+          </select>
+          <p class="field-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px">
+            On the advance, this field renders as a button — clicking opens a popup with the PDF
+            and positioned inputs for each placed field. Manage templates in
+            <a href="{{ url_for('pdf_templates_list') }}" style="color:var(--accent)">Settings → PDF Form Templates</a>.
           </p>
         </div>
       </div>

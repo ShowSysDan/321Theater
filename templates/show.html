@@ -45,6 +45,42 @@
     <div class="adv-notes-body">{{ (field.notes_content or '') | autolink | safe }}</div>
   </div>
 
+{% elif field.field_type == 'pdf_form' %}
+  {# 'pdf_form' field type: button that opens a popup with the bound PDF
+     template and positioned inputs for each placed field. Values save via
+     a separate endpoint; the export endpoint stamps them into the PDF. #}
+  <div class="adv-pdf-form-block adv-field-wrapper" style="grid-column:span 12"
+       {% if field.conditional_show_when %}data-show-when="{{ field.conditional_show_when }}"{% endif %}>
+    <div class="adv-pdf-form-row">
+      <div class="adv-pdf-form-meta">
+        <div class="adv-pdf-form-label">{{ field.label }}</div>
+        <div class="adv-pdf-form-status" data-pdf-status="{{ field.field_key }}">
+          {% set _pf_status = (pdf_form_status.get(field.field_key) if pdf_form_status is defined else '') %}
+          {% if _pf_status == 'submitted' %}
+          <span class="pdf-chip pdf-chip-ok">Filled</span>
+          {% elif _pf_status == 'draft' %}
+          <span class="pdf-chip pdf-chip-draft">Draft saved</span>
+          {% else %}
+          <span class="pdf-chip pdf-chip-empty">Not started</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="adv-pdf-form-actions">
+        <button type="button" class="btn btn-sm btn-primary"
+                onclick="openPdfFormFiller('{{ field.field_key }}', '{{ field.label|e }}')"
+                {% if not field.pdf_template_id %}disabled title="No PDF template bound — pick one in Settings → Form Fields"{% endif %}>
+          {% if _pf_status %}Edit form →{% else %}Fill out form →{% endif %}
+        </button>
+        {% if field.pdf_template_id and _pf_status %}
+        <a class="btn btn-sm btn-ghost" target="_blank"
+           href="{{ url_for('pdf_form_export', show_id=show.id, field_key=field.field_key) }}">
+          Download filled PDF
+        </a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
 {% elif field.field_type == 'checkbox' %}
   <label class="checkbox-label adv-field-wrapper" style="grid-column:{{ span }}" {% if field.conditional_show_when %}data-show-when="{{ field.conditional_show_when }}"{% endif %}>
     <input type="checkbox" class="adv-checkbox adv-field" data-key="{{ field.field_key }}"

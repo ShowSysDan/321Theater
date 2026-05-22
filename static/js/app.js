@@ -1966,13 +1966,36 @@ function _toggleFieldTypeOptions(type) {
   const uploadGroup = modal.querySelector('.upload-button-only-group');
   const notesGroup = modal.querySelector('.notes-content-group');
   const alertGroup = modal.querySelector('.field-alert-group');
+  const pdfGroup   = modal.querySelector('.pdf-template-group');
   if (optGroup) optGroup.style.display = (type === 'select') ? '' : 'none';
   if (deptGroup) deptGroup.style.display = (type === 'contact_dropdown') ? '' : 'none';
   if (ynGroup) ynGroup.style.display = (type === 'yes_no') ? '' : 'none';
   if (uploadGroup) uploadGroup.style.display = (type === 'file_upload') ? '' : 'none';
   if (notesGroup) notesGroup.style.display = (type === 'notes') ? '' : 'none';
-  // Alerts don't make sense for 'notes' (it has no per-show value).
-  if (alertGroup) alertGroup.style.display = (type === 'notes') ? 'none' : '';
+  if (pdfGroup) pdfGroup.style.display = (type === 'pdf_form') ? '' : 'none';
+  // Alerts apply to single-value fields; 'notes' has no value, and 'pdf_form'
+  // is a multi-field document that would otherwise fire alerts on every key.
+  if (alertGroup) alertGroup.style.display = (type === 'notes' || type === 'pdf_form') ? 'none' : '';
+  if (type === 'pdf_form') _populatePdfTemplatePicker();
+}
+
+async function _populatePdfTemplatePicker() {
+  const sel = document.getElementById('field-modal-pdf-template');
+  if (!sel) return;
+  const current = sel.value;
+  if (!sel.dataset.loaded) {
+    try {
+      const r = await fetch('/api/pdf-templates', {credentials: 'same-origin'});
+      const list = await r.json();
+      const opts = ['<option value="">— Select a template —</option>'];
+      for (const t of (list || [])) {
+        opts.push(`<option value="${t.id}">${(t.name || '').replace(/</g, '&lt;')}</option>`);
+      }
+      sel.innerHTML = opts.join('');
+      sel.dataset.loaded = '1';
+    } catch (e) { /* leave empty */ }
+  }
+  if (current) sel.value = current;
 }
 
 function closeFieldModal() {
@@ -2512,6 +2535,186 @@ if (document.readyState === 'loading') {
 } else {
   refreshNotifBadge();
   _notifPollTimer = setInterval(refreshNotifBadge, _NOTIF_POLL_MS);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PDF FORM FILLER (popup on the advance for pdf_form fields)
+═══════════════════════════════════════════════════════════════ */
+
+const _PDF_FILLER_SCALE = 1.3;
+let _pdfFillerState = null;  // {show_id, field_key, fields, values, pdf_url}
+let _pdfFillerSaveTimer = null;
+
+function _ensurePdfJs() {
+  return new Promise((resolve, reject) => {
+    if (window.pdfjsLib) return resolve(window.pdfjsLib);
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.onload = () => {
+      if (window.pdfjsLib) {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        resolve(window.pdfjsLib);
+      } else reject(new Error('pdf.js failed to load'));
+    };
+    s.onerror = () => reject(new Error('pdf.js script error'));
+    document.head.appendChild(s);
+  });
+}
+
+async function openPdfFormFiller(fieldKey, label) {
+  if (typeof SHOW_ID === 'undefined' || !SHOW_ID) return;
+  const modal = document.getElementById('pdf-filler-modal');
+  if (!modal) return;
+  document.getElementById('pdf-filler-title').textContent = label || 'PDF Form';
+  document.getElementById('pdf-filler-status').textContent = '';
+  document.getElementById('pdf-filler-body').innerHTML =
+    '<div class="pdf-filler-loading">Loading PDF…</div>';
+  modal.style.display = '';
+  try {
+    const r = await fetch(`/shows/${SHOW_ID}/pdf-form/${encodeURIComponent(fieldKey)}/data`,
+                          {credentials: 'same-origin'});
+    if (!r.ok) {
+      const t = await r.text();
+      document.getElementById('pdf-filler-body').innerHTML =
+        `<div class="pdf-filler-error">${t || 'Failed to load.'}</div>`;
+      return;
+    }
+    const data = await r.json();
+    _pdfFillerState = {
+      show_id: SHOW_ID,
+      field_key: fieldKey,
+      fields: data.template.fields || [],
+      values: data.submission.values || {},
+      pdf_url: data.pdf_url,
+    };
+    document.getElementById('pdf-filler-download').style.display = '';
+    document.getElementById('pdf-filler-download').onclick = () => {
+      window.open(`/shows/${SHOW_ID}/pdf-form/${encodeURIComponent(fieldKey)}/export`, '_blank');
+    };
+    await _renderPdfFillerPages();
+  } catch (e) {
+    document.getElementById('pdf-filler-body').innerHTML =
+      '<div class="pdf-filler-error">Network error.</div>';
+  }
+}
+
+async function _renderPdfFillerPages() {
+  const body = document.getElementById('pdf-filler-body');
+  body.innerHTML = '<div class="pdf-filler-loading">Rendering PDF…</div>';
+  await _ensurePdfJs();
+  const pdf = await pdfjsLib.getDocument(_pdfFillerState.pdf_url).promise;
+  body.innerHTML = '';
+  const fieldsByPage = {};
+  for (const f of _pdfFillerState.fields) {
+    (fieldsByPage[f.page] = fieldsByPage[f.page] || []).push(f);
+  }
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const viewport = page.getViewport({scale: _PDF_FILLER_SCALE});
+    const pageDiv = document.createElement('div');
+    pageDiv.className = 'pdf-filler-page';
+    pageDiv.style.width  = viewport.width + 'px';
+    pageDiv.style.height = viewport.height + 'px';
+    const canvas = document.createElement('canvas');
+    canvas.width  = viewport.width;
+    canvas.height = viewport.height;
+    pageDiv.appendChild(canvas);
+    body.appendChild(pageDiv);
+    await page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
+    const overlay = document.createElement('div');
+    overlay.className = 'pdf-filler-overlay';
+    pageDiv.appendChild(overlay);
+    for (const f of (fieldsByPage[p - 1] || [])) {
+      const el = _makePdfFillerInput(f, _pdfFillerState.values[f.name]);
+      overlay.appendChild(el);
+    }
+  }
+}
+
+function _makePdfFillerInput(f, current) {
+  const s = _PDF_FILLER_SCALE;
+  const wrap = document.createElement('div');
+  wrap.className = 'pdf-filler-input-wrap';
+  wrap.style.left   = (f.x * s) + 'px';
+  wrap.style.top    = (f.y * s) + 'px';
+  wrap.style.width  = (f.w * s) + 'px';
+  wrap.style.height = (f.h * s) + 'px';
+  let el;
+  if (f.type === 'checkbox') {
+    el = document.createElement('input');
+    el.type = 'checkbox';
+    el.checked = (current === true || current === '1' || current === 'true' || current === 'on');
+    el.addEventListener('change', () => {
+      _pdfFillerState.values[f.name] = el.checked;
+      _scheduleFillerAutoSave();
+    });
+  } else if (f.type === 'multiline') {
+    el = document.createElement('textarea');
+    el.value = current ?? '';
+    el.style.fontSize = ((f.font_size || 9) * 1.1) + 'px';
+    el.addEventListener('input', () => {
+      _pdfFillerState.values[f.name] = el.value;
+      _scheduleFillerAutoSave();
+    });
+  } else {
+    el = document.createElement('input');
+    el.type = (f.type === 'date') ? 'date' : 'text';
+    el.value = current ?? '';
+    el.style.fontSize = ((f.font_size || 10) * 1.1) + 'px';
+    el.addEventListener('input', () => {
+      _pdfFillerState.values[f.name] = el.value;
+      _scheduleFillerAutoSave();
+    });
+  }
+  el.title = f.label || f.name;
+  el.className = 'pdf-filler-input';
+  wrap.appendChild(el);
+  return wrap;
+}
+
+function _scheduleFillerAutoSave() {
+  if (_pdfFillerSaveTimer) clearTimeout(_pdfFillerSaveTimer);
+  document.getElementById('pdf-filler-status').textContent = 'Unsaved…';
+  _pdfFillerSaveTimer = setTimeout(() => savePdfFormFiller(true), 800);
+}
+
+async function savePdfFormFiller(isAuto) {
+  if (!_pdfFillerState) return;
+  const status = document.getElementById('pdf-filler-status');
+  status.textContent = 'Saving…';
+  try {
+    const r = await fetch(
+      `/shows/${_pdfFillerState.show_id}/pdf-form/${encodeURIComponent(_pdfFillerState.field_key)}/save`,
+      {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({values: _pdfFillerState.values})
+      }
+    );
+    const j = await r.json();
+    if (j.success) {
+      status.textContent = 'Saved.';
+      const chip = document.querySelector(`[data-pdf-status="${_pdfFillerState.field_key}"]`);
+      if (chip) chip.innerHTML = '<span class="pdf-chip pdf-chip-draft">Draft saved</span>';
+    } else {
+      status.textContent = j.error || 'Save failed.';
+    }
+  } catch (e) {
+    status.textContent = 'Network error.';
+  }
+}
+
+function closePdfFormFiller() {
+  if (_pdfFillerSaveTimer) clearTimeout(_pdfFillerSaveTimer);
+  // Final save on close if there were pending edits.
+  if (document.getElementById('pdf-filler-status').textContent === 'Unsaved…') {
+    savePdfFormFiller(false);
+  }
+  document.getElementById('pdf-filler-modal').style.display = 'none';
+  document.getElementById('pdf-filler-body').innerHTML = '';
+  _pdfFillerState = null;
 }
 
 /* ═══════════════════════════════════════════════════════════════

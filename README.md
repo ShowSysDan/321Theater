@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `2.11.0`**
+**Current version: `2.12.0`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -78,6 +78,10 @@ Version history:
    - [Registration Approval](#registration-approval)
    - [Groups & Show Access](#groups--show-access)
    - [Form Field Customisation](#form-field-customisation)
+   - [PDF Form Templates](#pdf-form-templates)
+   - [Notification Bell](#notification-bell)
+   - [Contacts ↔ Users](#contacts--users)
+   - [Test Mode & Bulk Archive / Delete](#test-mode--bulk-archive--delete)
    - [Site-Wide Messages](#site-wide-messages)
    - [In-App Updates](#in-app-updates)
    - [Venues & Radio Channels](#venues--radio-channels)
@@ -514,13 +518,57 @@ Settings → Form Fields (admin or content_admin).
 - Add fields and sections
 - Changes are immediate across all shows
 
-Field types: `text`, `textarea`, `date`, `time`, `number`, `yes_no`, `select`, `checkbox`, `contact_dropdown`
+Field types: `text`, `textarea`, `date`, `time`, `number`, `yes_no`, `select`, `checkbox`, `contact_dropdown`, `arts_group_dropdown`, `file_upload`, `notes`, `pdf_form`
 
 Conditional: `field_key=Value` (e.g. `runner_needed=Yes`)
 
 **Multi-select fields** have two extras:
 - **Allow multiple selections** — render as a checkbox popover instead of a single-pick dropdown. Values are stored as a JSON array.
 - **Auto-check visible options when 2 or fewer are shown** — once a conditional filter narrows the list to 1 or 2 visible options, those options are pre-checked. Won't override a selection the user has already touched.
+
+**`notes` field type** — read-only instructional block on the advance form for instructions, links, etc. The body lives in the field config (Notes Body), URLs are auto-linked, and the block never prints on the advance PDF.
+
+**`pdf_form` field type** — references a PDF template (see *PDF Form Templates* below). On the advance, the field renders as a "Fill out form →" button; clicking opens a popup with the PDF and positioned inputs for each placed field. Values auto-save; the export endpoint stamps them into a downloadable filled PDF.
+
+**`yes_no` on the PDF** — only `Yes` answers are printed on the advance PDF. Blank/`No` answers are skipped to keep paperwork uncluttered.
+
+**Change Alerts (per field)** — any non-`notes`/non-`pdf_form` field can be configured to alert one or more **departments** and/or named **contacts** when its value changes. Alerts are debounced: a background job runs every 10 minutes and only sends after the value has been quiet for 5 minutes, so rapid retypes and toggle-backs don't fire duplicate emails. Recipients linked to a system user also get an in-app notification.
+
+### PDF Form Templates
+
+Settings → Form Fields → **PDF Form Templates →** (admin or content_admin).
+
+- Upload a PDF (any flat / non-fillable PDF works)
+- Drag rectangles onto the page to place fields; click an existing field to rename, change type (`text`/`multiline`/`date`/`checkbox`), or resize
+- Save — the placements are stored as PDF-point coordinates so they stamp cleanly on export
+- Reference the template from a `pdf_form` field on the advance
+
+Each submission is scoped per (show, field). The first save snapshots the field config so later template edits don't invalidate existing submissions. Filled PDFs are streamed back as `application/pdf`.
+
+### Notification Bell
+
+A bell next to the dark/light toggle in the sidebar shows in-app notifications. The badge polls every 60 seconds; clicking opens a panel with the latest 100 entries, supports per-item mark-as-read and a "mark all read" action.
+
+Notification kinds today:
+- `field_alert` — a field with Change Alerts configured was updated on a show this user is associated with (via contact link).
+
+The notifications table is generic (`kind/title/body/link_url`) so future event types — approvals, mentions, schedule changes — can be added without schema changes.
+
+### Contacts ↔ Users
+
+Every system user has a matching `contacts` row, used for emails and the field-alert recipient pickers. Behavior:
+
+- Creating a user auto-creates a linked contact (name + email pre-filled).
+- Editing a user syncs the linked contact's name + email.
+- On boot, a one-time backfill ensures every existing user has a contact row.
+- The contacts list shows a `USER` badge on linked rows; deleting one is blocked from the UI (delete the user instead).
+
+### Test Mode & Bulk Archive / Delete
+
+- **`is_test` flag on shows** — mark a show as a test / demo so reports can filter it out.
+  - Endpoint: `POST /shows/<id>/test-mode` with `{ "is_test": true|false }`
+- **Bulk archive** — `POST /settings/shows/bulk-archive` with `{ "show_ids": [...] }`
+- **Bulk delete** — `POST /settings/shows/bulk-delete` with `{ "show_ids": [...], "confirm": "DELETE" }` (admin only, requires the literal `DELETE` confirm string).
 
 ### Venues & Radio Channels
 

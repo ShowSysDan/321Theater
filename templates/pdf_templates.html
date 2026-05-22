@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}PDF Form Templates — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <a href="{{ url_for('settings') }}" class="back-link">← All Settings</a>
+    <h1 class="page-title">PDF Form Templates</h1>
+    <p class="page-sub">
+      Upload a PDF, drag field boxes onto it, and reference it as a <code>pdf_form</code>
+      field on the advance. Users fill out the form in a popup and the values are stamped
+      onto the PDF on export.
+    </p>
+  </div>
+</div>
+
+<div class="form-section">
+  <div class="form-section-header">
+    <span class="section-icon">◈</span> UPLOAD NEW TEMPLATE
+  </div>
+  <div class="form-section-body">
+    <form id="pdf-upload-form" enctype="multipart/form-data"
+          onsubmit="event.preventDefault(); uploadPdfTemplate();">
+      <div class="form-row cols-2">
+        <div class="field-group">
+          <label class="field-label">TEMPLATE NAME *</label>
+          <input type="text" name="name" class="field-input"
+                 placeholder="e.g. Catering Order — WDT" required>
+        </div>
+        <div class="field-group">
+          <label class="field-label">PDF FILE *</label>
+          <input type="file" name="file" accept="application/pdf,.pdf" class="field-input" required>
+        </div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">DESCRIPTION (optional)</label>
+        <input type="text" name="description" class="field-input"
+               placeholder="What this form is for, who fills it out, etc.">
+      </div>
+      <div class="form-row">
+        <button class="btn btn-primary" type="submit">Upload PDF</button>
+        <span id="pdf-upload-status" class="text-dim" style="font-size:12px;margin-left:10px"></span>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="form-section">
+  <div class="form-section-header">
+    <span class="section-icon">◈</span> EXISTING TEMPLATES
+  </div>
+  <div class="form-section-body no-pad">
+    {% if templates %}
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>NAME</th>
+          <th>DESCRIPTION</th>
+          <th style="width:80px;text-align:center">PAGES</th>
+          <th style="width:80px;text-align:center">FIELDS</th>
+          <th style="width:150px">UPDATED</th>
+          <th style="width:200px;white-space:nowrap">ACTIONS</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in templates %}
+        <tr data-id="{{ t.id }}">
+          <td><strong>{{ t.name }}</strong></td>
+          <td class="text-dim" style="font-size:12px">{{ t.description or '—' }}</td>
+          <td style="text-align:center">{{ t.page_count }}</td>
+          <td style="text-align:center">{{ t.field_count }}</td>
+          <td class="text-dim" style="font-size:11px">{{ t.updated_at }}</td>
+          <td>
+            <div class="action-btns">
+              <a class="btn btn-xs btn-ghost" href="{{ url_for('edit_pdf_template', tid=t.id) }}">Open builder</a>
+              <a class="btn btn-xs btn-ghost" href="{{ url_for('pdf_template_file', tid=t.id) }}" target="_blank">PDF</a>
+              <button class="btn btn-xs btn-danger-ghost" onclick="deletePdfTemplate({{ t.id }})">×</button>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div style="padding:24px;text-align:center;color:var(--text-dim)">
+      No templates yet. Upload a PDF above to get started.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+async function uploadPdfTemplate() {
+  const form = document.getElementById('pdf-upload-form');
+  const data = new FormData(form);
+  const status = document.getElementById('pdf-upload-status');
+  status.textContent = 'Uploading…';
+  try {
+    const r = await fetch('{{ url_for("upload_pdf_template") }}', {method: 'POST', body: data});
+    const j = await r.json();
+    if (!j.success) {
+      status.textContent = j.error || 'Upload failed.';
+      return;
+    }
+    window.location.href = `/settings/pdf-templates/${j.id}/edit`;
+  } catch (e) {
+    status.textContent = 'Network error.';
+  }
+}
+
+async function deletePdfTemplate(tid) {
+  if (!confirm('Delete this template? Form fields that reference it will need to be re-pointed first.')) return;
+  const r = await fetch(`/settings/pdf-templates/${tid}/delete`, {method: 'POST'});
+  const j = await r.json();
+  if (j.success) location.reload();
+  else alert(j.error || 'Delete failed.');
+}
+</script>
+{% endblock %}

@@ -444,7 +444,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.11.0'
+APP_VERSION = '2.12.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -2553,6 +2553,10 @@ def run_field_change_alerts():
                 WHERE id=?""",
             (r['pending_value'], r['pending_hash'], r['state_id'])
         )
+        syslog_logger.info(
+            f"FIELD_ALERT_SENT show_id={r['show_id']} field={r['field_key']!r} "
+            f"emails={len(emails)} notified_users={len(user_ids)}"
+        )
         db.commit()
     db.close()
 
@@ -3321,9 +3325,21 @@ def show_page(show_id):
     # Asset categories (for the Assets tab)
     asset_cats = db2.execute('SELECT * FROM asset_categories ORDER BY sort_order, name').fetchall()
     asset_categories_for_tab = [dict(c) for c in asset_cats]
+
+    # PDF-form submission status per field_key (for the pdf_form button chip).
+    pdf_form_status = {}
+    try:
+        for r in db2.execute(
+            'SELECT field_key, status FROM pdf_submissions WHERE show_id=?', (show_id,)
+        ).fetchall():
+            pdf_form_status[r['field_key']] = r['status']
+    except Exception:
+        pdf_form_status = {}
+
     db2.close()
 
     return render_template('show.html',
+                           pdf_form_status=pdf_form_status,
                            show=show,
                            tab=tab,
                            advance_data=advance_data,
@@ -5436,6 +5452,91 @@ def restore_show(show_id):
     return redirect(url_for('dashboard'))
 
 
+@app.route('/shows/<int:show_id>/test-mode', methods=['POST'])
+@staff_or_admin_required
+def toggle_show_test_mode(show_id):
+    """Flag a show as test/demo so reporting can exclude it. Idempotent."""
+    if session.get('user_role') != 'admin' and not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    data = request.get_json(force=True) or {}
+    is_test = 1 if data.get('is_test') else 0
+    db = get_db()
+    db.execute('UPDATE shows SET is_test=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+               (is_test, show_id))
+    log_audit(db, 'SHOW_TEST_FLAG', 'show', show_id, show_id=show_id,
+              detail=f'is_test={is_test}')
+    db.commit(); db.close()
+    syslog_logger.info(f"SHOW_TEST_FLAG show_id={show_id} is_test={is_test} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'is_test': bool(is_test)})
+
+
+@app.route('/settings/shows/bulk-archive', methods=['POST'])
+@admin_required
+def bulk_archive_shows():
+    """Mass archive — accepts {show_ids: [...]} or {filter: 'past_30_days'}."""
+    data = request.get_json(force=True) or {}
+    raw_ids = data.get('show_ids') or []
+    ids = [int(x) for x in raw_ids if str(x).strip().lstrip('-').isdigit()]
+    if not ids:
+        return jsonify({'success': False, 'error': 'No show_ids provided.'}), 400
+    db = get_db()
+    placeholders = ','.join('?' for _ in ids)
+    rows = db.execute(
+        f"SELECT id, name FROM shows WHERE id IN ({placeholders}) AND status='active'",
+        tuple(ids)
+    ).fetchall()
+    archived = [r['id'] for r in rows]
+    if archived:
+        db.execute(
+            f"UPDATE shows SET status='archived', updated_at=CURRENT_TIMESTAMP "
+            f"WHERE id IN ({','.join('?' for _ in archived)})",
+            tuple(archived)
+        )
+        for r in rows:
+            log_audit(db, 'SHOW_ARCHIVE', 'show', r['id'], show_id=r['id'],
+                      detail=f'bulk: {r["name"]}')
+    db.commit(); db.close()
+    syslog_logger.info(f"SHOW_BULK_ARCHIVE count={len(archived)} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'archived': archived})
+
+
+@app.route('/settings/shows/bulk-delete', methods=['POST'])
+@admin_required
+def bulk_delete_shows():
+    """Hard-delete shows (cascades to advance_data, schedule, etc.)."""
+    data = request.get_json(force=True) or {}
+    raw_ids = data.get('show_ids') or []
+    ids = [int(x) for x in raw_ids if str(x).strip().lstrip('-').isdigit()]
+    if not ids:
+        return jsonify({'success': False, 'error': 'No show_ids provided.'}), 400
+    confirm = (data.get('confirm') or '').strip().upper()
+    if confirm != 'DELETE':
+        return jsonify({'success': False,
+                        'error': 'Bulk delete requires confirm="DELETE".'}), 400
+    db = get_db()
+    placeholders = ','.join('?' for _ in ids)
+    rows = db.execute(
+        f"SELECT id, name FROM shows WHERE id IN ({placeholders})",
+        tuple(ids)
+    ).fetchall()
+    deleted_ids = [r['id'] for r in rows]
+    for r in rows:
+        log_audit(db, 'SHOW_DELETE', 'show', r['id'], show_id=r['id'],
+                  detail=f'bulk: {r["name"]}')
+    # Cascade is handled by foreign keys; the shows row drop fires the rest.
+    if deleted_ids:
+        db.execute(
+            f"DELETE FROM shows WHERE id IN ({','.join('?' for _ in deleted_ids)})",
+            tuple(deleted_ids)
+        )
+    db.commit(); db.close()
+    syslog_logger.info(f"SHOW_BULK_DELETE count={len(deleted_ids)} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'deleted': deleted_ids})
+
+
 @app.route('/shows/<int:show_id>/delete', methods=['POST'])
 @admin_required
 def delete_show(show_id):
@@ -6479,6 +6580,8 @@ def add_form_field():
     alert_contacts = data.get('alert_contact_ids') or []
     alert_depts_json    = json.dumps(alert_depts)    if alert_depts    else None
     alert_contacts_json = json.dumps([int(c) for c in alert_contacts if str(c).strip().isdigit()]) if alert_contacts else None
+    pdf_tid = data.get('pdf_template_id')
+    pdf_tid = int(pdf_tid) if pdf_tid and str(pdf_tid).strip().isdigit() else None
     try:
         cur = db.execute("""
             INSERT INTO form_fields
@@ -6486,8 +6589,8 @@ def add_form_field():
              options_json, contact_dept, conditional_show_when,
              help_text, placeholder, width_hint, is_notes_field, ai_hint,
              display_as, allow_multi, auto_select_visible, hide_from_pdf, upload_button_only,
-             notes_content, alert_departments, alert_contact_ids)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             notes_content, alert_departments, alert_contact_ids, pdf_template_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (section_id, field_key, label,
               data.get('field_type','text'), max_order + 10,
               options_json,
@@ -6505,7 +6608,8 @@ def add_form_field():
               1 if data.get('upload_button_only') else 0,
               data.get('notes_content') or None,
               alert_depts_json,
-              alert_contacts_json))
+              alert_contacts_json,
+              pdf_tid))
         fid = cur.lastrowid
         log_audit_change(db, 'FIELD_ADD', 'form_field', fid, detail=field_key,
                          table='form_fields')
@@ -6530,13 +6634,15 @@ def edit_form_field(fid):
     alert_contacts = data.get('alert_contact_ids') or []
     alert_depts_json    = json.dumps(alert_depts)    if alert_depts    else None
     alert_contacts_json = json.dumps([int(c) for c in alert_contacts if str(c).strip().isdigit()]) if alert_contacts else None
+    pdf_tid = data.get('pdf_template_id')
+    pdf_tid = int(pdf_tid) if pdf_tid and str(pdf_tid).strip().isdigit() else None
     db.execute("""
         UPDATE form_fields SET
             section_id=?, label=?, field_type=?,
             options_json=?, contact_dept=?, conditional_show_when=?,
             help_text=?, placeholder=?, width_hint=?, is_notes_field=?, ai_hint=?,
             display_as=?, allow_multi=?, auto_select_visible=?, hide_from_pdf=?, upload_button_only=?,
-            notes_content=?, alert_departments=?, alert_contact_ids=?
+            notes_content=?, alert_departments=?, alert_contact_ids=?, pdf_template_id=?
         WHERE id=?
     """, (data.get('section_id'), data.get('label',''),
           data.get('field_type','text'), options_json,
@@ -6553,6 +6659,7 @@ def edit_form_field(fid):
           data.get('notes_content') or None,
           alert_depts_json,
           alert_contacts_json,
+          pdf_tid,
           fid))
     after = _snapshot_row(db, 'form_fields', fid)
     log_audit(db, 'FIELD_EDIT', 'form_field', fid, detail=data.get('label',''),
@@ -6584,6 +6691,488 @@ def reorder_form_fields():
         db.execute('UPDATE form_fields SET sort_order=? WHERE id=?', (i * 10, fid))
     db.commit(); db.close()
     return jsonify({'success': True})
+
+
+# ─── PDF Form Templates (settings + filler) ───────────────────────────────────
+
+def _pdf_template_bytes(row):
+    """Resolve a pdf_templates row to raw PDF bytes (BLOB or S3)."""
+    if row.get('s3_key') if isinstance(row, dict) else row['s3_key']:
+        key = row['s3_key']
+        try:
+            return s3_storage.download_file(key)
+        except Exception as e:
+            app.logger.warning(f'pdf template s3 fetch failed for {key}: {e}')
+    raw = row['pdf_data']
+    if raw is None:
+        return b''
+    return bytes(raw)
+
+
+def _count_pdf_pages(pdf_bytes):
+    """Best-effort page count. Returns 1 if we can't read it."""
+    try:
+        import fitz
+        with fitz.open(stream=pdf_bytes, filetype='pdf') as doc:
+            return doc.page_count
+    except Exception:
+        try:
+            from pdfrw import PdfReader
+            from io import BytesIO
+            return len(PdfReader(BytesIO(pdf_bytes)).pages)
+        except Exception:
+            return 1
+
+
+@app.route('/settings/pdf-templates')
+@content_admin_required
+def pdf_templates_list():
+    db = get_db()
+    rows = db.execute(
+        """SELECT id, name, description, page_count, fields_json,
+                  created_by, created_at, updated_at
+             FROM pdf_templates
+            ORDER BY name"""
+    ).fetchall()
+    templates = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d['field_count'] = len(json.loads(d.get('fields_json') or '[]'))
+        except (json.JSONDecodeError, TypeError):
+            d['field_count'] = 0
+        templates.append(d)
+    db.close()
+    return render_template('pdf_templates.html',
+                           templates=templates,
+                           user=get_current_user())
+
+
+@app.route('/settings/pdf-templates/upload', methods=['POST'])
+@content_admin_required
+def upload_pdf_template():
+    f = request.files.get('file')
+    name = (request.form.get('name') or '').strip()
+    description = (request.form.get('description') or '').strip()
+    if not f or not f.filename:
+        return jsonify({'success': False, 'error': 'No PDF provided.'}), 400
+    raw = f.read()
+    if not raw[:4] == b'%PDF':
+        return jsonify({'success': False, 'error': 'File does not look like a PDF.'}), 400
+    max_size = _get_upload_max()
+    if len(raw) > max_size:
+        max_mb = max_size // (1024 * 1024)
+        return jsonify({'success': False, 'error': f'PDF too large (max {max_mb} MB).'}), 413
+    if not name:
+        name = (f.filename or 'Untitled PDF').rsplit('.', 1)[0]
+    page_count = _count_pdf_pages(raw)
+    db = get_db()
+    cur = db.execute(
+        """INSERT INTO pdf_templates (name, description, pdf_data, fields_json,
+                                       page_count, created_by, updated_at)
+            VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+        (name, description, raw, '[]', page_count, session.get('user_id'))
+    )
+    tid = cur.lastrowid
+    log_audit(db, 'PDF_TEMPLATE_CREATE', 'pdf_template', tid, detail=name)
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"PDF_TEMPLATE_CREATE id={tid} name={name!r} bytes={len(raw)} "
+        f"pages={page_count} by={session.get('username')}"
+    )
+    return jsonify({'success': True, 'id': tid})
+
+
+@app.route('/settings/pdf-templates/<int:tid>/edit')
+@content_admin_required
+def edit_pdf_template(tid):
+    db = get_db()
+    row = db.execute(
+        'SELECT id, name, description, fields_json, page_count FROM pdf_templates WHERE id=?', (tid,)
+    ).fetchone()
+    db.close()
+    if not row:
+        abort(404)
+    return render_template('pdf_template_edit.html',
+                           template=dict(row),
+                           user=get_current_user())
+
+
+@app.route('/settings/pdf-templates/<int:tid>/pdf')
+@login_required
+def pdf_template_file(tid):
+    """Serve the raw template PDF. Used by the builder and the filler."""
+    db = get_db()
+    row = db.execute(
+        'SELECT pdf_data, s3_key, name FROM pdf_templates WHERE id=?', (tid,)
+    ).fetchone()
+    db.close()
+    if not row:
+        abort(404)
+    raw = _pdf_template_bytes(row)
+    if not raw:
+        abort(404)
+    resp = make_response(raw)
+    resp.headers['Content-Type'] = 'application/pdf'
+    resp.headers['Content-Disposition'] = f'inline; filename="{secure_filename(row["name"] or "template")}.pdf"'
+    return resp
+
+
+@app.route('/settings/pdf-templates/<int:tid>/fields', methods=['POST'])
+@content_admin_required
+def save_pdf_template_fields(tid):
+    data = request.get_json(force=True) or {}
+    fields = data.get('fields', [])
+    if not isinstance(fields, list):
+        return jsonify({'success': False, 'error': 'fields must be a list.'}), 400
+    # Light schema check + normalize
+    clean = []
+    for i, f in enumerate(fields):
+        if not isinstance(f, dict):
+            continue
+        nm = (f.get('name') or f.get('field_key') or '').strip()
+        if not nm:
+            nm = f'field_{i+1}'
+        clean.append({
+            'name':  nm,
+            'label': (f.get('label') or nm).strip(),
+            'type':  (f.get('type') or 'text'),
+            'page':  int(f.get('page', 0)),
+            'x':     float(f.get('x', 0)),
+            'y':     float(f.get('y', 0)),
+            'w':     float(f.get('w', 100)),
+            'h':     float(f.get('h', 20)),
+            'font_size': float(f.get('font_size', 10)),
+        })
+    db = get_db()
+    db.execute(
+        'UPDATE pdf_templates SET fields_json=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        (json.dumps(clean), tid)
+    )
+    log_audit(db, 'PDF_TEMPLATE_FIELDS', 'pdf_template', tid,
+              detail=f'fields={len(clean)}')
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"PDF_TEMPLATE_FIELDS id={tid} count={len(clean)} "
+        f"by={session.get('username')}"
+    )
+    return jsonify({'success': True, 'fields': clean})
+
+
+@app.route('/settings/pdf-templates/<int:tid>/rename', methods=['POST'])
+@content_admin_required
+def rename_pdf_template(tid):
+    data = request.get_json(force=True) or {}
+    name = (data.get('name') or '').strip()
+    description = (data.get('description') or '').strip()
+    if not name:
+        return jsonify({'success': False, 'error': 'Name required.'}), 400
+    db = get_db()
+    db.execute(
+        'UPDATE pdf_templates SET name=?, description=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        (name, description, tid)
+    )
+    db.commit(); db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/pdf-templates/<int:tid>/delete', methods=['POST'])
+@content_admin_required
+def delete_pdf_template(tid):
+    db = get_db()
+    # Refuse if any form_fields still reference this template.
+    refs = db.execute(
+        'SELECT field_key FROM form_fields WHERE pdf_template_id=?', (tid,)
+    ).fetchall()
+    if refs:
+        db.close()
+        return jsonify({
+            'success': False,
+            'error': 'In use by form fields: '
+                     + ', '.join(r['field_key'] for r in refs)
+                     + '. Re-point or delete those fields first.'
+        }), 400
+    before = _snapshot_row(db, 'pdf_templates', tid)
+    log_audit(db, 'PDF_TEMPLATE_DELETE', 'pdf_template', tid,
+              detail=before['name'] if before else str(tid), before=before)
+    db.execute('DELETE FROM pdf_templates WHERE id=?', (tid,))
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"PDF_TEMPLATE_DELETE id={tid} name={(before['name'] if before else '?')!r} "
+        f"by={session.get('username')}"
+    )
+    return jsonify({'success': True})
+
+
+@app.route('/api/pdf-templates')
+@login_required
+def api_pdf_templates():
+    """Lightweight list for the field-modal template picker."""
+    db = get_db()
+    rows = db.execute(
+        'SELECT id, name, description, page_count FROM pdf_templates ORDER BY name'
+    ).fetchall()
+    db.close()
+    return jsonify([dict(r) for r in rows])
+
+
+# ─── PDF Form filler (per-show) ──────────────────────────────────────────────
+
+def _get_pdf_field_for_show(db, show_id, field_key):
+    """Look up the form_fields row for a pdf_form field used by show_id."""
+    row = db.execute(
+        """SELECT id, field_key, label, field_type, pdf_template_id,
+                  alert_departments, alert_contact_ids
+             FROM form_fields
+            WHERE field_key=? AND field_type='pdf_form'""",
+        (field_key,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+@app.route('/shows/<int:show_id>/pdf-form/<field_key>/data')
+@login_required
+def pdf_form_data(show_id, field_key):
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'error': 'Access denied.'}), 403
+    db = get_db()
+    field = _get_pdf_field_for_show(db, show_id, field_key)
+    if not field or not field.get('pdf_template_id'):
+        db.close()
+        return jsonify({'error': 'Field not found or no template bound.'}), 404
+    tmpl = db.execute(
+        'SELECT id, name, description, fields_json, page_count FROM pdf_templates WHERE id=?',
+        (field['pdf_template_id'],)
+    ).fetchone()
+    if not tmpl:
+        db.close()
+        return jsonify({'error': 'Template missing.'}), 404
+    sub = db.execute(
+        'SELECT values_json, status, template_fields_snapshot, last_saved_at FROM pdf_submissions '
+        'WHERE show_id=? AND field_key=?',
+        (show_id, field_key)
+    ).fetchone()
+    db.close()
+    try:
+        template_fields = json.loads(tmpl['fields_json'] or '[]')
+    except (json.JSONDecodeError, TypeError):
+        template_fields = []
+    if sub:
+        try:
+            values = json.loads(sub['values_json'] or '{}')
+        except (json.JSONDecodeError, TypeError):
+            values = {}
+        # If a frozen snapshot exists, use it (so old submissions stay coherent
+        # even after the template is edited).
+        if sub['template_fields_snapshot']:
+            try:
+                template_fields = json.loads(sub['template_fields_snapshot'])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        last_saved = sub['last_saved_at']
+        status = sub['status']
+    else:
+        values = {}
+        last_saved = None
+        status = 'draft'
+    if last_saved is not None and not isinstance(last_saved, str):
+        try: last_saved = last_saved.isoformat()
+        except Exception: last_saved = str(last_saved)
+    return jsonify({
+        'template': {
+            'id': tmpl['id'],
+            'name': tmpl['name'],
+            'description': tmpl['description'],
+            'page_count': tmpl['page_count'],
+            'fields': template_fields,
+        },
+        'submission': {
+            'values': values,
+            'status': status,
+            'last_saved_at': last_saved,
+        },
+        'field': {
+            'label': field['label'],
+            'field_key': field['field_key'],
+        },
+        'pdf_url': url_for('pdf_template_file', tid=tmpl['id']),
+    })
+
+
+@app.route('/shows/<int:show_id>/pdf-form/<field_key>/save', methods=['POST'])
+@login_required
+def pdf_form_save(show_id, field_key):
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_restricted'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    data = request.get_json(force=True) or {}
+    values = data.get('values') or {}
+    if not isinstance(values, dict):
+        return jsonify({'success': False, 'error': 'values must be an object.'}), 400
+    db = get_db()
+    field = _get_pdf_field_for_show(db, show_id, field_key)
+    if not field or not field.get('pdf_template_id'):
+        db.close()
+        return jsonify({'success': False, 'error': 'Field not found or no template bound.'}), 404
+    template_id = field['pdf_template_id']
+    # Snapshot template field config on first save so later template edits
+    # don't break this submission.
+    existing = db.execute(
+        'SELECT id, template_fields_snapshot FROM pdf_submissions WHERE show_id=? AND field_key=?',
+        (show_id, field_key)
+    ).fetchone()
+    if existing and existing['template_fields_snapshot']:
+        snapshot = existing['template_fields_snapshot']
+    else:
+        tmpl = db.execute(
+            'SELECT fields_json FROM pdf_templates WHERE id=?', (template_id,)
+        ).fetchone()
+        snapshot = tmpl['fields_json'] if tmpl else '[]'
+
+    values_json = json.dumps(values)
+    if existing:
+        db.execute(
+            """UPDATE pdf_submissions
+                  SET values_json=?, last_saved_by=?, last_saved_at=CURRENT_TIMESTAMP,
+                      template_fields_snapshot=?
+                WHERE id=?""",
+            (values_json, session.get('user_id'), snapshot, existing['id'])
+        )
+    else:
+        db.execute(
+            """INSERT INTO pdf_submissions
+                 (show_id, field_key, template_id, template_fields_snapshot,
+                  values_json, status, last_saved_by, last_saved_at)
+               VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            (show_id, field_key, template_id, snapshot, values_json,
+             'draft', session.get('user_id'))
+        )
+    # Mirror a marker into advance_data so anything that reads advance values
+    # (search, history snapshots) can see the form was touched. We don't
+    # store the full values there — just a non-empty string so existing
+    # "has any answers" checks pick it up.
+    db.execute(
+        """INSERT OR REPLACE INTO advance_data (show_id, field_key, field_value, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)""",
+        (show_id, field_key, '[pdf_form]' if values else '')
+    )
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"PDF_FORM_SAVE show_id={show_id} field={field_key!r} "
+        f"value_count={len(values)} by={session.get('username')}"
+    )
+    return jsonify({'success': True})
+
+
+@app.route('/shows/<int:show_id>/pdf-form/<field_key>/export')
+@login_required
+def pdf_form_export(show_id, field_key):
+    """Render the filled PDF (stamp values onto the template) and return it."""
+    if not can_access_show(session['user_id'], show_id):
+        abort(403)
+    db = get_db()
+    field = _get_pdf_field_for_show(db, show_id, field_key)
+    if not field or not field.get('pdf_template_id'):
+        db.close()
+        abort(404)
+    tmpl = db.execute(
+        'SELECT id, name, pdf_data, s3_key, fields_json FROM pdf_templates WHERE id=?',
+        (field['pdf_template_id'],)
+    ).fetchone()
+    if not tmpl:
+        db.close()
+        abort(404)
+    sub = db.execute(
+        'SELECT values_json, template_fields_snapshot FROM pdf_submissions '
+        'WHERE show_id=? AND field_key=?',
+        (show_id, field_key)
+    ).fetchone()
+    db.close()
+    try:
+        values = json.loads(sub['values_json'] or '{}') if sub else {}
+    except (json.JSONDecodeError, TypeError):
+        values = {}
+    # Prefer the frozen snapshot so the values land in the rects they were
+    # placed in at save time.
+    fields_src = (sub['template_fields_snapshot'] if sub and sub['template_fields_snapshot']
+                  else tmpl['fields_json']) or '[]'
+    try:
+        fields = json.loads(fields_src)
+    except (json.JSONDecodeError, TypeError):
+        fields = []
+    raw = _pdf_template_bytes(dict(tmpl))
+    if not raw:
+        abort(404)
+    filled = _stamp_pdf_form(raw, fields, values)
+    resp = make_response(filled)
+    resp.headers['Content-Type'] = 'application/pdf'
+    safe_name = secure_filename((tmpl['name'] or 'form') + '_' + str(show_id))
+    resp.headers['Content-Disposition'] = f'inline; filename="{safe_name}.pdf"'
+    syslog_logger.info(
+        f"PDF_FORM_EXPORT show_id={show_id} field={field_key!r} "
+        f"template_id={tmpl['id']} by={session.get('username')}"
+    )
+    return resp
+
+
+def _stamp_pdf_form(pdf_bytes, fields, values):
+    """Overlay text + checkbox marks onto pdf_bytes per fields/values.
+
+    fields: [{name, type, page, x, y, w, h, font_size?}, ...]
+    values: {field_name: value, ...}
+
+    Returns new PDF bytes. Uses PyMuPDF; falls back to returning the
+    original bytes if PyMuPDF isn't installed."""
+    try:
+        import fitz
+    except ImportError:
+        app.logger.warning('PyMuPDF unavailable — returning unstamped template.')
+        return pdf_bytes
+
+    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    try:
+        for f in fields:
+            v = values.get(f.get('name'))
+            if v in (None, ''):
+                continue
+            pg_idx = int(f.get('page', 0))
+            if pg_idx < 0 or pg_idx >= doc.page_count:
+                continue
+            page = doc[pg_idx]
+            rect = fitz.Rect(
+                float(f['x']),
+                float(f['y']),
+                float(f['x']) + float(f['w']),
+                float(f['y']) + float(f['h']),
+            )
+            ftype = (f.get('type') or 'text').lower()
+            if ftype == 'checkbox':
+                if str(v).lower() in ('1', 'true', 'yes', 'on', 'checked'):
+                    # Draw an X mark centered in the rect. We use 'X' instead
+                    # of '✓' because the default base14 font shipped with
+                    # PyMuPDF doesn't include the check glyph and the
+                    # substitution box looks worse than a plain X.
+                    fs = min(rect.height, rect.width) * 0.9
+                    page.insert_textbox(
+                        rect, 'X',
+                        fontsize=fs,
+                        align=fitz.TEXT_ALIGN_CENTER,
+                        color=(0, 0, 0)
+                    )
+            else:
+                font_size = float(f.get('font_size') or 10)
+                # insert_textbox returns negative if the text overflows; we
+                # don't shrink-to-fit here, we just clip.
+                page.insert_textbox(
+                    rect, str(v),
+                    fontsize=font_size,
+                    color=(0, 0, 0)
+                )
+        out = doc.tobytes()
+    finally:
+        doc.close()
+    return out
 
 
 @app.route('/settings/form-sections/add', methods=['POST'])

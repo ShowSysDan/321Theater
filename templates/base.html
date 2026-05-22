@@ -217,6 +217,26 @@
     </div>
   </aside>
 
+  {# ── PDF Form Filler Modal (used by the pdf_form advance field) ──────── #}
+  <div id="pdf-filler-modal" class="modal-overlay" style="display:none"
+       onclick="if(event.target===this)closePdfFormFiller()">
+    <div class="modal-card pdf-filler-card">
+      <div class="modal-header">
+        <span id="pdf-filler-title">PDF Form</span>
+        <span id="pdf-filler-status" class="text-dim" style="font-size:11px;margin-left:auto"></span>
+        <button onclick="closePdfFormFiller()" class="modal-close" type="button">×</button>
+      </div>
+      <div class="modal-body" id="pdf-filler-body">
+        <div class="pdf-filler-loading">Loading PDF…</div>
+      </div>
+      <div class="modal-footer" style="gap:8px">
+        <button class="btn btn-ghost" type="button" onclick="closePdfFormFiller()">Close</button>
+        <button class="btn btn-ghost" type="button" id="pdf-filler-download" style="display:none">Download filled PDF</button>
+        <button class="btn btn-primary" type="button" onclick="savePdfFormFiller()">Save</button>
+      </div>
+    </div>
+  </div>
+
   {# ── Notification Panel (pops out of the sidebar bell) ────────────────── #}
   <div id="notif-panel" class="notif-panel" hidden>
     <div class="notif-panel-head">
