@@ -725,11 +725,12 @@ html[data-theme="light"] select.field-input {
 
 /* ── PDF Filler Modal ────────────────────────────────────────────── */
 .pdf-filler-card {
-  /* Wide enough for a US Letter PDF rendered at scale 1.6 (~979 px wide)
-     plus padding, capped at 98vw so it doesn't collide with browser
-     chrome. Older spec used a 1100 px cap that clipped the PDF. */
-  width: 98vw;
-  max-width: 1500px;
+  /* Override the base .modal-card's 480px / 90vw bounds with !important so
+     a stale browser cache or future specificity tweak can't shrink the
+     PDF preview back down. We want the PDF page to render full-width. */
+  width: 98vw !important;
+  max-width: none !important;
+  min-width: 320px;
   max-height: 94vh;
   display: flex;
   flex-direction: column;

@@ -444,7 +444,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.13.1'
+APP_VERSION = '2.13.2'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -7152,13 +7152,21 @@ def pdf_form_export(show_id, field_key):
     except (json.JSONDecodeError, TypeError):
         values = {}
     # Prefer the frozen snapshot so the values land in the rects they were
-    # placed in at save time.
-    fields_src = (sub['template_fields_snapshot'] if sub and sub['template_fields_snapshot']
-                  else tmpl['fields_json']) or '[]'
+    # placed in at save time. Fall back to the current template if the
+    # snapshot is missing or empty — better to stamp at possibly-shifted
+    # coords than to produce a blank PDF.
+    snapshot = (sub['template_fields_snapshot'] if sub else None) or ''
     try:
-        fields = json.loads(fields_src)
+        snap_fields = json.loads(snapshot) if snapshot else []
     except (json.JSONDecodeError, TypeError):
-        fields = []
+        snap_fields = []
+    if snap_fields:
+        fields = snap_fields
+    else:
+        try:
+            fields = json.loads(tmpl['fields_json'] or '[]')
+        except (json.JSONDecodeError, TypeError):
+            fields = []
     raw = _pdf_template_bytes(dict(tmpl))
     if not raw:
         abort(404)
@@ -7182,9 +7190,14 @@ def pdf_form_export(show_id, field_key):
     resp.headers['Content-Type'] = 'application/pdf'
     safe_name = secure_filename((tmpl['name'] or 'form') + '_' + str(show_id))
     resp.headers['Content-Disposition'] = f'inline; filename="{safe_name}.pdf"'
+    # Filled PDFs change every time the user saves; tell the browser not to
+    # serve a stale cached copy after an edit.
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+    resp.headers['Pragma'] = 'no-cache'
     syslog_logger.info(
         f"PDF_FORM_EXPORT show_id={show_id} field={field_key!r} "
-        f"template_id={tmpl['id']} by={session.get('username')}"
+        f"template_id={tmpl['id']} bytes={len(filled)} fields={len(fields)} "
+        f"values={len(values)} by={session.get('username')}"
     )
     return resp
 
