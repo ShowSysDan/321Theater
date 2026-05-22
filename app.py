@@ -5527,8 +5527,17 @@ def bulk_delete_shows():
                   detail=f'bulk: {r["name"]}')
     # Cascade is handled by foreign keys; the shows row drop fires the rest.
     if deleted_ids:
+        # Notifications use ON DELETE SET NULL on show_id (they're per-user
+        # records, not per-show) — but their body text still mentions the
+        # deleted show. Scrub them explicitly so the values aren't preserved
+        # in the bell forever.
+        del_ph = ','.join('?' for _ in deleted_ids)
         db.execute(
-            f"DELETE FROM shows WHERE id IN ({','.join('?' for _ in deleted_ids)})",
+            f"DELETE FROM notifications WHERE show_id IN ({del_ph})",
+            tuple(deleted_ids)
+        )
+        db.execute(
+            f"DELETE FROM shows WHERE id IN ({del_ph})",
             tuple(deleted_ids)
         )
     db.commit(); db.close()
@@ -5544,7 +5553,11 @@ def delete_show(show_id):
     show = db.execute('SELECT name FROM shows WHERE id=?', (show_id,)).fetchone()
     show_name = show['name'] if show else str(show_id)
     for tbl in ['advance_data', 'schedule_rows', 'schedule_meta',
-                'post_show_notes', 'export_log', 'form_history', 'show_group_access']:
+                'post_show_notes', 'export_log', 'form_history', 'show_group_access',
+                # Field-alert state and per-user notifications carry text
+                # mentioning the show — scrub them explicitly so they don't
+                # linger after the show row is gone.
+                'field_alert_state', 'notifications', 'pdf_submissions']:
         db.execute(f'DELETE FROM {tbl} WHERE show_id=?', (show_id,))
     db.execute('DELETE FROM shows WHERE id=?', (show_id,))
     log_audit(db, 'SHOW_DELETE', 'show', show_id, detail=show_name)
@@ -6800,15 +6813,29 @@ def edit_pdf_template(tid):
     db.close()
     if not row:
         abort(404)
+    tdata = dict(row)
+    # Parse fields_json server-side so the template can pass it through
+    # Jinja's `tojson` filter — `tojson` HTML-escapes the JSON for safe
+    # embedding inside a <script> block, which `| safe` does not.
+    try:
+        tdata['fields_parsed'] = json.loads(tdata.get('fields_json') or '[]')
+    except (json.JSONDecodeError, TypeError):
+        tdata['fields_parsed'] = []
     return render_template('pdf_template_edit.html',
-                           template=dict(row),
+                           template=tdata,
                            user=get_current_user())
 
 
 @app.route('/settings/pdf-templates/<int:tid>/pdf')
 @login_required
 def pdf_template_file(tid):
-    """Serve the raw template PDF. Used by the builder and the filler."""
+    """Serve the raw template PDF. Used by the builder (content_admin) and
+    by the per-show filler. Document-viewer / read-only users are blocked
+    because they shouldn't be able to enumerate template IDs to download
+    arbitrary PDFs the org has uploaded — the filler page itself is also
+    gated by can_access_show()."""
+    if session.get('is_document_viewer'):
+        abort(403)
     db = get_db()
     row = db.execute(
         'SELECT pdf_data, s3_key, name FROM pdf_templates WHERE id=?', (tid,)

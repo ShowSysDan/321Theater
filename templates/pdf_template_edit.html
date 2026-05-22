@@ -52,7 +52,10 @@ const TEMPLATE_ID  = {{ template.id }};
 const PDF_URL      = "{{ url_for('pdf_template_file', tid=template.id) }}";
 const SAVE_URL     = `/settings/pdf-templates/${TEMPLATE_ID}/fields`;
 const RENAME_URL   = `/settings/pdf-templates/${TEMPLATE_ID}/rename`;
-const INITIAL_FIELDS = {{ template.fields_json | safe }};
+// `template.fields_json` is a JSON string we control, but field labels are
+// user-supplied. We parse on the server, dump back through Jinja's `tojson`
+// so `<`/`>`/`&` are escaped for safe embedding inside this <script> block.
+const INITIAL_FIELDS = {{ template.fields_parsed | tojson }};
 const PDF_SCALE = 1.5;  // also used on the filler page
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
