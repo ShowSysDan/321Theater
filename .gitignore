@@ -5,7 +5,11 @@
 # SQLite database (production data)
 advance.db
 advance.db.bak
+advance.db-shm
+advance.db-wal
 showadvance.db
+showadvance.db-shm
+showadvance.db-wal
 
 # Environment file (SECRET_KEY and other secrets)
 .env

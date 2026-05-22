@@ -3,6 +3,7 @@ dpc Advance Sheet App — Flask Backend
 Run: python app.py  (after running init_db.py first)
 """
 import os
+import sys
 import sqlite3
 import json
 import math
@@ -444,7 +445,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.13.2'
+APP_VERSION = '2.13.3'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -488,7 +489,20 @@ DEPARTMENTS = ['Production', 'Programming', 'Event Manager', 'Education Team',
 
 syslog_logger = logging.getLogger('showadvance')
 syslog_logger.setLevel(logging.INFO)
+# Always emit to stderr so events land in journalctl / docker logs /
+# whatever the runtime captures. The remote SysLogHandler below is
+# layered on top when Settings → Syslog is configured. Without this,
+# every syslog_logger.info() call disappeared into a NullHandler when
+# remote forwarding wasn't enabled — which is the default.
+_syslog_stream_handler = logging.StreamHandler()
+_syslog_stream_handler.setFormatter(
+    logging.Formatter('showadvance: %(levelname)s %(message)s')
+)
+syslog_logger.addHandler(_syslog_stream_handler)
+# Keep at least one no-op handler around in case something later strips
+# the stream handler — prevents "No handlers could be found" warnings.
 syslog_logger.addHandler(logging.NullHandler())
+syslog_logger.propagate = False  # don't double-log through the root logger
 _syslog_handler = None
 
 
@@ -7185,7 +7199,21 @@ def pdf_form_export(show_id, field_key):
         ).fetchall():
             advance_values[row['field_key']] = row['field_value']
         db2.close()
-    filled = _stamp_pdf_form(raw, fields, values, advance_values=advance_values)
+    try:
+        filled = _stamp_pdf_form(raw, fields, values, advance_values=advance_values)
+    except PdfStampLibraryMissing as e:
+        # Surface the actual problem to the user instead of silently
+        # returning an unstamped template that looks like a successful blank.
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'remediation': (
+                'On the server: cd /opt/321theater (or your install dir), '
+                'then run: source venv/bin/activate && '
+                'pip install -r requirements.txt && '
+                'sudo systemctl restart 321theater'
+            ),
+        }), 503
     resp = make_response(filled)
     resp.headers['Content-Type'] = 'application/pdf'
     safe_name = secure_filename((tmpl['name'] or 'form') + '_' + str(show_id))
@@ -7212,6 +7240,12 @@ _SIGNATURE_FONTS = {
 _FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'fonts')
 
 
+class PdfStampLibraryMissing(RuntimeError):
+    """Raised when PyMuPDF (fitz) isn't installed. Callers turn this into a
+    503 with a clear message so the user sees the actual problem instead of
+    downloading an unstamped 'success'."""
+
+
 def _stamp_pdf_form(pdf_bytes, fields, values, advance_values=None):
     """Overlay text + checkbox marks + signatures onto pdf_bytes.
 
@@ -7220,13 +7254,21 @@ def _stamp_pdf_form(pdf_bytes, fields, values, advance_values=None):
     advance_values: {advance_field_key: value} used as fallback for any
         field that has a `source_key` and no explicit submission value.
 
-    Returns new PDF bytes. Uses PyMuPDF; falls back to returning the
-    original bytes if PyMuPDF isn't installed."""
+    Returns new PDF bytes. Raises PdfStampLibraryMissing if PyMuPDF isn't
+    installed — callers must surface that to the user instead of silently
+    returning the original template."""
     try:
         import fitz
     except ImportError:
-        app.logger.warning('PyMuPDF unavailable — returning unstamped template.')
-        return pdf_bytes
+        app.logger.error(
+            'PyMuPDF (fitz) is not installed — PDF stamping is broken. '
+            "Run: source venv/bin/activate && pip install -r requirements.txt"
+        )
+        syslog_logger.error('PDF_STAMP_LIB_MISSING module=fitz')
+        raise PdfStampLibraryMissing(
+            'PDF stamping library (PyMuPDF / fitz) is not installed on this server. '
+            'Ask the admin to run: source venv/bin/activate && pip install -r requirements.txt'
+        )
 
     advance_values = advance_values or {}
     today_str = datetime.utcnow().strftime('%Y-%m-%d')
@@ -15576,6 +15618,29 @@ if os.path.exists(DATABASE):
         migrate_db_postgres()
     except Exception as _mig_err:
         print(f"[startup] Migration warning: {_mig_err}")
+
+# Loud preflight checks for runtime dependencies that aren't import-required
+# but break specific features when missing. PyMuPDF is the new addition for
+# the PDF form stamp pipeline — without it, every PDF export comes back as
+# the unstamped template, which previously failed silently.
+try:
+    import fitz as _fitz_check  # noqa: F401
+    syslog_logger.info(f'startup: PyMuPDF available (v{_fitz_check.__version__})')
+except ImportError:
+    _msg = (
+        '⚠ PyMuPDF (fitz) is NOT installed — PDF form exports will FAIL.\n'
+        '  Fix on this server:\n'
+        '    cd ' + os.path.dirname(os.path.abspath(__file__)) + '\n'
+        '    source venv/bin/activate\n'
+        '    pip install -r requirements.txt\n'
+        '    sudo systemctl restart 321theater   # or whatever your service is named'
+    )
+    print(_msg, file=sys.stderr, flush=True)
+    try:
+        app.logger.error(_msg.replace('\n', ' | '))
+        syslog_logger.error('startup: PyMuPDF MISSING — PDF stamp pipeline broken')
+    except Exception:
+        pass
 
 # Start backup scheduler (guarded against Flask reloader double-start)
 _scheduler = None
