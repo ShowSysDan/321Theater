@@ -2584,11 +2584,28 @@ async function openPdfFormFiller(fieldKey, label) {
       return;
     }
     const data = await r.json();
+    // Pre-fill from advance: any PDF field with a `source_key` that doesn't
+    // already have a saved value picks up the current advance value as its
+    // default. The user can still edit it; their edit will be persisted to
+    // values_json. `today` fields fall back to local today if unset.
+    const values = data.submission.values || {};
+    const advance = data.advance_values || {};
+    const todayIso = new Date().toISOString().slice(0, 10);
+    for (const f of (data.template.fields || [])) {
+      const hasStored = Object.prototype.hasOwnProperty.call(values, f.name)
+                        && values[f.name] !== '' && values[f.name] !== null;
+      if (!hasStored && f.source_key && advance[f.source_key] !== undefined) {
+        values[f.name] = advance[f.source_key];
+      }
+      if (!hasStored && f.type === 'today' && !values[f.name]) {
+        values[f.name] = todayIso;
+      }
+    }
     _pdfFillerState = {
       show_id: SHOW_ID,
       field_key: fieldKey,
       fields: data.template.fields || [],
-      values: data.submission.values || {},
+      values: values,
       pdf_url: data.pdf_url,
     };
     document.getElementById('pdf-filler-download').style.display = '';
@@ -2635,14 +2652,56 @@ async function _renderPdfFillerPages() {
   }
 }
 
+const _PDF_SIG_FONTS = [
+  {key: 'caveat',         label: 'Caveat'},
+  {key: 'dancing_script', label: 'Dancing'},
+  {key: 'great_vibes',    label: 'Great Vibes'},
+];
+
 function _makePdfFillerInput(f, current) {
   const s = _PDF_FILLER_SCALE;
   const wrap = document.createElement('div');
-  wrap.className = 'pdf-filler-input-wrap';
   wrap.style.left   = (f.x * s) + 'px';
   wrap.style.top    = (f.y * s) + 'px';
   wrap.style.width  = (f.w * s) + 'px';
   wrap.style.height = (f.h * s) + 'px';
+  if (f.type === 'signature') {
+    wrap.className = 'pdf-sig-wrap';
+    const cur = (current && typeof current === 'object') ? current : {};
+    const text = cur.text || (typeof current === 'string' ? current : '');
+    const font = (cur.font || 'caveat').toLowerCase();
+    const fontSize = (f.font_size || 18) * 1.1;
+    const preview = document.createElement('div');
+    preview.className = 'pdf-sig-preview sig-font-' + font;
+    preview.style.fontSize = fontSize + 'px';
+    preview.textContent = text;
+    const controls = document.createElement('div');
+    controls.className = 'pdf-sig-controls';
+    const txt = document.createElement('input');
+    txt.type = 'text';
+    txt.placeholder = 'Type your name';
+    txt.value = text;
+    const sel = document.createElement('select');
+    for (const fo of _PDF_SIG_FONTS) {
+      const o = document.createElement('option');
+      o.value = fo.key; o.textContent = fo.label;
+      if (fo.key === font) o.selected = true;
+      sel.appendChild(o);
+    }
+    function update() {
+      const v = {text: txt.value.trim(), font: sel.value};
+      _pdfFillerState.values[f.name] = v;
+      preview.textContent = v.text;
+      preview.className = 'pdf-sig-preview sig-font-' + v.font;
+      _scheduleFillerAutoSave();
+    }
+    txt.addEventListener('input', update);
+    sel.addEventListener('change', update);
+    controls.appendChild(txt); controls.appendChild(sel);
+    wrap.appendChild(preview); wrap.appendChild(controls);
+    return wrap;
+  }
+  wrap.className = 'pdf-filler-input-wrap';
   let el;
   if (f.type === 'checkbox') {
     el = document.createElement('input');
@@ -2662,7 +2721,9 @@ function _makePdfFillerInput(f, current) {
     });
   } else {
     el = document.createElement('input');
-    el.type = (f.type === 'date') ? 'date' : 'text';
+    // 'today' and 'date' both render as date pickers — 'today' is just
+    // pre-filled with today's date from the data-prep step above.
+    el.type = (f.type === 'date' || f.type === 'today') ? 'date' : 'text';
     el.value = current ?? '';
     el.style.fontSize = ((f.font_size || 10) * 1.1) + 'px';
     el.addEventListener('input', () => {

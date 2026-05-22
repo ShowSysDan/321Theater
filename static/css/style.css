@@ -657,6 +657,72 @@ html[data-theme="light"] select.field-input {
 .pdf-chip-ok    { background: rgba(64,200,120,0.18); color: #40c878; }
 .adv-pdf-form-actions { display: flex; gap: 6px; align-items: center; }
 
+/* ── Cursive (signature) Fonts — self-hosted under static/fonts/ ── */
+@font-face {
+  font-family: 'sigCaveat';
+  src: url('/static/fonts/Caveat.ttf') format('truetype');
+  font-display: swap;
+}
+@font-face {
+  font-family: 'sigDancing';
+  src: url('/static/fonts/DancingScript.ttf') format('truetype');
+  font-display: swap;
+}
+@font-face {
+  font-family: 'sigGreatVibes';
+  src: url('/static/fonts/GreatVibes.ttf') format('truetype');
+  font-display: swap;
+}
+.sig-font-caveat        { font-family: 'sigCaveat', cursive; }
+.sig-font-dancing_script { font-family: 'sigDancing', cursive; }
+.sig-font-great_vibes   { font-family: 'sigGreatVibes', cursive; }
+
+/* Signature widget inside the filler modal */
+.pdf-sig-wrap {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  background: rgba(0,170,255,0.06);
+  border: 1px dashed rgba(0,170,255,0.55);
+  overflow: hidden;
+}
+.pdf-sig-preview {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 6px;
+  color: #1a3a66;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.pdf-sig-controls {
+  display: flex;
+  gap: 2px;
+  padding: 1px 2px;
+  background: rgba(255,255,255,0.9);
+  border-top: 1px solid rgba(0,170,255,0.35);
+}
+.pdf-sig-controls input {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  padding: 1px 4px;
+  border: none;
+  background: transparent;
+  color: #111;
+  outline: none;
+}
+.pdf-sig-controls select {
+  font-size: 10px;
+  padding: 0 2px;
+  border: none;
+  background: rgba(0,170,255,0.08);
+  color: #111;
+  cursor: pointer;
+}
+
 /* ── PDF Filler Modal ────────────────────────────────────────────── */
 .pdf-filler-card {
   max-width: 95vw;

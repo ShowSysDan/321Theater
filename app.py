@@ -444,7 +444,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.12.0'
+APP_VERSION = '2.13.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -6883,6 +6883,9 @@ def save_pdf_template_fields(tid):
             'w':     float(f.get('w', 100)),
             'h':     float(f.get('h', 20)),
             'font_size': float(f.get('font_size', 10)),
+            # Optional: pre-fill this PDF field from an advance form
+            # field on the same show. Blank means no auto-pull.
+            'source_key': (f.get('source_key') or '').strip() or None,
         })
     db = get_db()
     db.execute(
@@ -6992,11 +6995,25 @@ def pdf_form_data(show_id, field_key):
         'WHERE show_id=? AND field_key=?',
         (show_id, field_key)
     ).fetchone()
-    db.close()
+    # Pull current advance values for any source_key referenced by this
+    # template — used client-side to pre-fill PDF fields that haven't been
+    # saved yet.
     try:
         template_fields = json.loads(tmpl['fields_json'] or '[]')
     except (json.JSONDecodeError, TypeError):
         template_fields = []
+    source_keys = sorted({f['source_key'] for f in template_fields
+                          if f.get('source_key')})
+    advance_values = {}
+    if source_keys:
+        placeholders = ','.join('?' for _ in source_keys)
+        for row in db.execute(
+            f"SELECT field_key, field_value FROM advance_data "
+            f"WHERE show_id=? AND field_key IN ({placeholders})",
+            tuple([show_id] + source_keys)
+        ).fetchall():
+            advance_values[row['field_key']] = row['field_value']
+    db.close()
     if sub:
         try:
             values = json.loads(sub['values_json'] or '{}')
@@ -7031,6 +7048,7 @@ def pdf_form_data(show_id, field_key):
             'status': status,
             'last_saved_at': last_saved,
         },
+        'advance_values': advance_values,
         'field': {
             'label': field['label'],
             'field_key': field['field_key'],
@@ -7144,7 +7162,22 @@ def pdf_form_export(show_id, field_key):
     raw = _pdf_template_bytes(dict(tmpl))
     if not raw:
         abort(404)
-    filled = _stamp_pdf_form(raw, fields, values)
+    # Pull advance values for any source_key referenced by this template so
+    # `_stamp_pdf_form` can fall back to them for fields the user didn't
+    # explicitly override in the filler.
+    advance_values = {}
+    source_keys = sorted({f['source_key'] for f in fields if f.get('source_key')})
+    if source_keys:
+        db2 = get_db()
+        placeholders = ','.join('?' for _ in source_keys)
+        for row in db2.execute(
+            f"SELECT field_key, field_value FROM advance_data "
+            f"WHERE show_id=? AND field_key IN ({placeholders})",
+            tuple([show_id] + source_keys)
+        ).fetchall():
+            advance_values[row['field_key']] = row['field_value']
+        db2.close()
+    filled = _stamp_pdf_form(raw, fields, values, advance_values=advance_values)
     resp = make_response(filled)
     resp.headers['Content-Type'] = 'application/pdf'
     safe_name = secure_filename((tmpl['name'] or 'form') + '_' + str(show_id))
@@ -7156,11 +7189,23 @@ def pdf_form_export(show_id, field_key):
     return resp
 
 
-def _stamp_pdf_form(pdf_bytes, fields, values):
-    """Overlay text + checkbox marks onto pdf_bytes per fields/values.
+# Map of signature font keys to (TTF filename, fitz fontname). The TTF lives
+# under static/fonts/ so the bundle is air-gap-safe.
+_SIGNATURE_FONTS = {
+    'caveat':         ('Caveat.ttf',         'sigCaveat'),
+    'dancing_script': ('DancingScript.ttf',  'sigDancing'),
+    'great_vibes':    ('GreatVibes.ttf',     'sigGreatVibes'),
+}
+_FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'fonts')
 
-    fields: [{name, type, page, x, y, w, h, font_size?}, ...]
+
+def _stamp_pdf_form(pdf_bytes, fields, values, advance_values=None):
+    """Overlay text + checkbox marks + signatures onto pdf_bytes.
+
+    fields: [{name, type, page, x, y, w, h, font_size?, source_key?}, ...]
     values: {field_name: value, ...}
+    advance_values: {advance_field_key: value} used as fallback for any
+        field that has a `source_key` and no explicit submission value.
 
     Returns new PDF bytes. Uses PyMuPDF; falls back to returning the
     original bytes if PyMuPDF isn't installed."""
@@ -7170,10 +7215,41 @@ def _stamp_pdf_form(pdf_bytes, fields, values):
         app.logger.warning('PyMuPDF unavailable — returning unstamped template.')
         return pdf_bytes
 
+    advance_values = advance_values or {}
+    today_str = datetime.utcnow().strftime('%Y-%m-%d')
     doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    # PyMuPDF requires fonts to be registered per-page. We lazy-register
+    # signature fonts the first time they're used on a page.
+    _registered = {}  # (page_idx, fontkey) -> True
+
+    def _register_sig_font(page, page_idx, key):
+        cache_key = (page_idx, key)
+        if cache_key in _registered:
+            return _SIGNATURE_FONTS[key][1]
+        ttf_name, fitz_name = _SIGNATURE_FONTS[key]
+        ttf_path = os.path.join(_FONTS_DIR, ttf_name)
+        if not os.path.exists(ttf_path):
+            return None
+        try:
+            page.insert_font(fontname=fitz_name, fontfile=ttf_path)
+            _registered[cache_key] = True
+            return fitz_name
+        except Exception as e:
+            app.logger.warning(f'signature font register failed {ttf_name}: {e}')
+            return None
+
     try:
         for f in fields:
-            v = values.get(f.get('name'))
+            name = f.get('name')
+            ftype = (f.get('type') or 'text').lower()
+            # Resolve effective value: explicit submission > source_key
+            # pull from advance > nothing.
+            v = values.get(name)
+            if (v is None or v == '') and f.get('source_key'):
+                v = advance_values.get(f['source_key'])
+            # 'today' has an implicit default of UTC today if nothing else.
+            if ftype == 'today' and (v is None or v == ''):
+                v = today_str
             if v in (None, ''):
                 continue
             pg_idx = int(f.get('page', 0))
@@ -7186,7 +7262,7 @@ def _stamp_pdf_form(pdf_bytes, fields, values):
                 float(f['x']) + float(f['w']),
                 float(f['y']) + float(f['h']),
             )
-            ftype = (f.get('type') or 'text').lower()
+
             if ftype == 'checkbox':
                 if str(v).lower() in ('1', 'true', 'yes', 'on', 'checked'):
                     # Draw an X mark centered in the rect. We use 'X' instead
@@ -7200,7 +7276,28 @@ def _stamp_pdf_form(pdf_bytes, fields, values):
                         align=fitz.TEXT_ALIGN_CENTER,
                         color=(0, 0, 0)
                     )
+            elif ftype == 'signature':
+                # Stored as {text, font} (object) — fall back to bare string
+                # for legacy submissions.
+                if isinstance(v, dict):
+                    sig_text = (v.get('text') or '').strip()
+                    sig_font = (v.get('font') or 'caveat').strip().lower()
+                else:
+                    sig_text = str(v).strip()
+                    sig_font = 'caveat'
+                if not sig_text:
+                    continue
+                if sig_font not in _SIGNATURE_FONTS:
+                    sig_font = 'caveat'
+                fitz_font = _register_sig_font(page, pg_idx, sig_font)
+                font_size = float(f.get('font_size') or 18)
+                kwargs = dict(fontsize=font_size, color=(0, 0, 0.4))
+                if fitz_font:
+                    kwargs['fontname'] = fitz_font
+                # Missing font → silently fall through to base14 helv
+                page.insert_textbox(rect, sig_text, **kwargs)
             else:
+                # text / multiline / date / today / anything else
                 font_size = float(f.get('font_size') or 10)
                 # insert_textbox returns negative if the text overflows; we
                 # don't shrink-to-fit here, we just clip.

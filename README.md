@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `2.12.0`**
+**Current version: `2.13.0`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -539,9 +539,15 @@ Conditional: `field_key=Value` (e.g. `runner_needed=Yes`)
 Settings → Form Fields → **PDF Form Templates →** (admin or content_admin).
 
 - Upload a PDF (any flat / non-fillable PDF works)
-- Drag rectangles onto the page to place fields; click an existing field to rename, change type (`text`/`multiline`/`date`/`checkbox`), or resize
+- Drag rectangles onto the page to place fields; click an existing field to rename, change type, or resize
+- Field types: `text`, `multiline`, `date` (selectable), `today` (auto-fills with today's date), `checkbox`, `signature` (cursive)
+- **Pull from advance** — each PDF field can be linked to an advance form field by key. On every show, the PDF field is pre-filled with that show's current advance value. Users can still override it; their override is persisted to the submission.
+- Use the **View advance field keys** button in the builder sidebar to see every available `field_key` + label without leaving the page
+- Changes **auto-save** ~1.5 s after the last edit, with a save toast
 - Save — the placements are stored as PDF-point coordinates so they stamp cleanly on export
 - Reference the template from a `pdf_form` field on the advance
+
+**Signature fields** render in the filler as a text input + font picker (Caveat, Dancing Script, Great Vibes — all self-hosted under `static/fonts/`, OFL-licensed). The signature is stamped on export using the chosen cursive font registered with PyMuPDF.
 
 Each submission is scoped per (show, field). The first save snapshots the field config so later template edits don't invalidate existing submissions. Filled PDFs are streamed back as `application/pdf`.
 
