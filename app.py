@@ -444,7 +444,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.13.0'
+APP_VERSION = '2.13.1'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -7270,11 +7270,12 @@ def _stamp_pdf_form(pdf_bytes, fields, values, advance_values=None):
                     # PyMuPDF doesn't include the check glyph and the
                     # substitution box looks worse than a plain X.
                     fs = min(rect.height, rect.width) * 0.9
-                    page.insert_textbox(
-                        rect, 'X',
-                        fontsize=fs,
-                        align=fitz.TEXT_ALIGN_CENTER,
-                        color=(0, 0, 0)
+                    # Position the X near the rect's center using insert_text
+                    # (positional). insert_textbox silently drops text that
+                    # overflows the rect — bad for tight checkbox squares.
+                    page.insert_text(
+                        (rect.x0 + rect.width * 0.15, rect.y1 - rect.height * 0.15),
+                        'X', fontsize=fs, color=(0, 0, 0)
                     )
             elif ftype == 'signature':
                 # Stored as {text, font} (object) — fall back to bare string
@@ -7291,18 +7292,35 @@ def _stamp_pdf_form(pdf_bytes, fields, values, advance_values=None):
                     sig_font = 'caveat'
                 fitz_font = _register_sig_font(page, pg_idx, sig_font)
                 font_size = float(f.get('font_size') or 18)
+                # Place baseline near the bottom of the rect so the cursive
+                # text sits naturally on the signature line. insert_text is
+                # positional — no width clipping — so a long name doesn't
+                # disappear into a too-small rect.
                 kwargs = dict(fontsize=font_size, color=(0, 0, 0.4))
                 if fitz_font:
                     kwargs['fontname'] = fitz_font
-                # Missing font → silently fall through to base14 helv
-                page.insert_textbox(rect, sig_text, **kwargs)
-            else:
-                # text / multiline / date / today / anything else
+                baseline = (rect.x0 + 2, rect.y1 - max(2, rect.height * 0.15))
+                page.insert_text(baseline, sig_text, **kwargs)
+            elif ftype == 'multiline':
+                # Multi-line text — use insert_textbox so it wraps inside
+                # the rect. Overflow still drops silently here, but the
+                # author intentionally sized the rect for wrap.
                 font_size = float(f.get('font_size') or 10)
-                # insert_textbox returns negative if the text overflows; we
-                # don't shrink-to-fit here, we just clip.
                 page.insert_textbox(
                     rect, str(v),
+                    fontsize=font_size,
+                    color=(0, 0, 0)
+                )
+            else:
+                # text / date / today / unknown → single-line, positional.
+                # Using insert_text instead of insert_textbox guarantees the
+                # value lands on the page even if the rect is narrower than
+                # the text (which is the common case — users draw rects on
+                # printed-form fields that are sized for a few words).
+                font_size = float(f.get('font_size') or 10)
+                baseline = (rect.x0 + 2, rect.y1 - max(2, rect.height * 0.2))
+                page.insert_text(
+                    baseline, str(v),
                     fontsize=font_size,
                     color=(0, 0, 0)
                 )
