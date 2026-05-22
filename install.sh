@@ -75,6 +75,25 @@ step "Installing Python dependencies..."
 "$PIP" install -r "${APP_DIR}/requirements.txt" --quiet
 info "Dependencies installed."
 
+# ── LibreOffice (recommended; enables Office/OpenDocument → PDF append) ───────
+# Used by the advance PDF generator to embed .doc/.docx/.odt/.rtf/.ppt/.pptx/
+# .odp/.xls/.xlsx/.ods uploads. Without these packages, those files are
+# listed on the trailing "omitted files" index page instead of embedded.
+if dpkg -s libreoffice-writer >/dev/null 2>&1; then
+    info "LibreOffice writer already installed — skipping."
+elif [ "$(id -u)" -eq 0 ] && command -v apt-get &>/dev/null; then
+    step "Installing LibreOffice (headless) for Office-document → PDF conversion..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress \
+        2>&1 | tail -5 || warn "LibreOffice install skipped (apt-get failed)."
+    if command -v soffice &>/dev/null; then
+        info "LibreOffice installed: $(soffice --version 2>/dev/null | head -1)"
+    fi
+else
+    warn "LibreOffice writer/calc/impress not detected. To embed Office/OpenDocument uploads in the advance PDF,"
+    warn "  install: sudo apt-get install -y libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress"
+fi
+
 # ── Backup directories ────────────────────────────────────────────────────────
 step "Creating backup directories..."
 mkdir -p "${APP_DIR}/backups/hourly"

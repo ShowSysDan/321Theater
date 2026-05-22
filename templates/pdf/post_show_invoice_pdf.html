@@ -145,6 +145,18 @@
     </thead>
     <tbody>
       {% for l in labor_lines %}
+      {% if l.is_billable_extra %}
+      <tr>
+        <td class="text-dim">—</td>
+        <td>{{ l.position_name or '—' }} <span class="text-dim">(per crew)</span></td>
+        <td class="text-dim">{{ l.crew_count }} scheduled crew</td>
+        <td class="num text-dim">—</td>
+        <td class="num text-dim">—</td>
+        <td class="num">× {{ l.crew_count }}</td>
+        <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/crew</td>
+        <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
+      </tr>
+      {% else %}
       <tr{% if not l.is_scheduled %} class="unscheduled"{% endif %}>
         <td class="text-dim">{{ l.work_date or '—' }}</td>
         <td>{{ l.position_name or '—' }}</td>
@@ -162,6 +174,7 @@
         <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/hr</td>
         <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
       </tr>
+      {% endif %}
       {% endfor %}
       <tr class="total-row">
         <td colspan="7" class="num">Labor Subtotal</td>
