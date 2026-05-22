@@ -210,6 +210,92 @@ button.section-label:hover { color: var(--text); }
 .show-card-actions { display: flex; gap: 6px; padding: 9px 14px; background: var(--bg-surface); border-top: 1px solid var(--border); flex-wrap: wrap; }
 .empty-state { text-align: center; padding: 48px; color: var(--text-muted); }
 .empty-state p { margin-top: 16px; font-size: 14px; }
+
+/* ── Happening Today ────────────────────────────────────────────────────── */
+.today-box {
+  margin: 0 0 22px;
+  padding: 14px 16px 16px;
+  background: linear-gradient(135deg, rgba(245,127,32,.10) 0%, rgba(240,78,35,.06) 50%, var(--bg-card) 100%);
+  border: 1px solid var(--accent-dim);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: 0 2px 18px rgba(245,127,32,.10), inset 0 1px 0 rgba(255,255,255,.02);
+  position: relative;
+  overflow: hidden;
+}
+.today-box::before {
+  content: '';
+  position: absolute;
+  top: -40px; right: -40px;
+  width: 180px; height: 180px;
+  background: radial-gradient(circle, rgba(245,127,32,.15) 0%, transparent 70%);
+  pointer-events: none;
+}
+.today-box-header {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 12px; position: relative; z-index: 1;
+}
+.today-box-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--accent);
+}
+.today-box-date {
+  font-size: 11px; color: var(--text-dim); font-family: var(--font-mono);
+  letter-spacing: .04em;
+}
+.today-box-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+  position: relative; z-index: 1;
+}
+.today-card {
+  display: block; text-decoration: none;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  transition: border-color .15s, background .15s, box-shadow .15s, transform .15s;
+}
+.today-card:hover {
+  border-color: var(--accent);
+  background: var(--bg-surface);
+  box-shadow: 0 4px 14px rgba(0,0,0,.3);
+  transform: translateY(-1px);
+  text-decoration: none;
+}
+.today-card-test { opacity: .75; }
+.today-card-tags {
+  display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px;
+}
+.today-card-tag {
+  font-size: 9px; font-weight: 700; letter-spacing: .06em;
+  padding: 2px 6px; border-radius: 3px;
+  background: rgba(245,127,32,.18); color: var(--accent);
+  text-transform: uppercase;
+}
+.today-card-tag.tag-show-day        { background: var(--accent); color: #000; }
+.today-card-tag.tag-performance     { background: rgba(74,158,255,.22); color: var(--blue); }
+.today-card-tag.tag-load-in         { background: rgba(34,197,94,.18); color: var(--green); }
+.today-card-tag.tag-load-out        { background: rgba(239,68,68,.18); color: var(--red); }
+.today-card-tag.tag-in-production   { background: rgba(234,179,8,.18); color: var(--yellow); }
+.today-card-tag.tag-test            { background: rgba(144,144,144,.2); color: var(--text-dim); }
+.today-card-name {
+  font-size: 14px; font-weight: 600; color: var(--text);
+  line-height: 1.3; margin-bottom: 8px; word-wrap: break-word;
+}
+.today-card-meta {
+  display: flex; flex-direction: column; gap: 3px;
+}
+.today-card-row {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--text-dim);
+  line-height: 1.4;
+}
+.today-card-row svg { color: var(--text-muted); flex-shrink: 0; }
+.today-card-row span { word-break: break-word; }
+.today-card-empty { color: var(--text-muted); font-style: italic; font-size: 11px; }
 .toggle-archived { text-decoration: none; }
 
 /* ── Dashboard Toolbar ──────────────────────────────────────────── */

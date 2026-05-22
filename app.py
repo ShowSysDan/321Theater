@@ -3100,6 +3100,75 @@ def dashboard():
     active = _attach_perfs(active)
     archived = _attach_perfs(archived)
 
+    # ── "Happening Today" — shows where today falls in load-in/out, matches the
+    # show date, or matches any performance date. For each, surface the venue,
+    # production manager (from advance_data), and today's crew call times.
+    today_iso = date.today().isoformat()
+    today_show_ids = {s['id'] for s in active
+                      if (s.get('show_date') == today_iso)
+                      or (s.get('load_in_date') and s.get('load_out_date')
+                          and s['load_in_date'] <= today_iso <= s['load_out_date'])
+                      or any((p.get('perf_date') == today_iso) for p in s.get('performances') or [])}
+
+    today_shows = []
+    if today_show_ids:
+        ids_ph = ','.join('?' * len(today_show_ids))
+        ids_params = list(today_show_ids)
+        pm_rows = db.execute(
+            f"SELECT show_id, field_value FROM advance_data "
+            f"WHERE field_key='production_manager' AND show_id IN ({ids_ph})",
+            ids_params,
+        ).fetchall()
+        pm_by_show = {r['show_id']: (r['field_value'] or '').strip() for r in pm_rows}
+
+        # Crew call times = unique in_times from labor_requests scheduled for
+        # today (work_date) or for shows whose show_date is today when
+        # work_date is NULL.
+        call_rows = db.execute(
+            f"SELECT lr.show_id, lr.in_time "
+            f"FROM labor_requests lr JOIN shows s ON s.id = lr.show_id "
+            f"WHERE lr.show_id IN ({ids_ph}) AND lr.in_time != '' "
+            f"  AND COALESCE(lr.work_date, s.show_date) = ?",
+            ids_params + [today_iso],
+        ).fetchall()
+        calls_by_show = {}
+        for r in call_rows:
+            calls_by_show.setdefault(r['show_id'], set()).add(r['in_time'])
+
+        for s in active:
+            if s['id'] not in today_show_ids:
+                continue
+            # Classify why this show is today
+            tags = []
+            if s.get('show_date') == today_iso:
+                tags.append('Show Day')
+            todays_perfs = [p for p in (s.get('performances') or [])
+                            if p.get('perf_date') == today_iso]
+            if todays_perfs and 'Show Day' not in tags:
+                tags.append('Performance')
+            if s.get('load_in_date') == today_iso:
+                tags.append('Load-In')
+            elif s.get('load_out_date') == today_iso:
+                tags.append('Load-Out')
+            elif (s.get('load_in_date') and s.get('load_out_date')
+                  and s['load_in_date'] < today_iso < s['load_out_date']
+                  and not tags):
+                tags.append('In Production')
+
+            today_shows.append({
+                'id': s['id'],
+                'name': s['name'],
+                'venue': s.get('venue') or '',
+                'is_test': s.get('is_test') or 0,
+                'pm': pm_by_show.get(s['id'], ''),
+                'crew_calls': sorted(calls_by_show.get(s['id'], set())),
+                'perf_times': [p.get('perf_time') for p in todays_perfs if p.get('perf_time')],
+                'tags': tags or ['Today'],
+            })
+        # Show day / performance first, then load-in, then in-production, then load-out
+        _tag_order = {'Show Day': 0, 'Performance': 1, 'Load-In': 2, 'In Production': 3, 'Load-Out': 4, 'Today': 5}
+        today_shows.sort(key=lambda t: (_tag_order.get(t['tags'][0], 9), (t['name'] or '').lower()))
+
     db.close()
     restricted = session.get('is_restricted', False)
 
@@ -3135,6 +3204,8 @@ def dashboard():
                            active_shows=active,
                            archived_shows=archived,
                            venue_groups=venue_groups,
+                           today_shows=today_shows,
+                           today_iso=today_iso,
                            restricted=restricted,
                            home_layout=home_layout,
                            home_density=home_density,
