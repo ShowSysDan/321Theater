@@ -671,6 +671,7 @@ CREATE TABLE IF NOT EXISTS asset_types (
     is_retired       INTEGER DEFAULT 0,
     retired_at       TIMESTAMP DEFAULT NULL,
     hide_from_pm     INTEGER DEFAULT 0,
+    allow_unit_selection INTEGER DEFAULT 0,
     sort_order       INTEGER DEFAULT 0,
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -719,6 +720,7 @@ CREATE TABLE IF NOT EXISTS show_assets (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     show_id        INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
     asset_type_id  INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
+    asset_item_id  INTEGER REFERENCES asset_items(id) ON DELETE SET NULL,
     quantity       INTEGER DEFAULT 1,
     rental_start   DATE,
     rental_end     DATE,
@@ -752,6 +754,7 @@ CREATE TABLE IF NOT EXISTS asset_type_system_members (
 
 CREATE INDEX IF NOT EXISTS idx_show_assets_show   ON show_assets(show_id);
 CREATE INDEX IF NOT EXISTS idx_show_assets_type   ON show_assets(asset_type_id);
+CREATE INDEX IF NOT EXISTS idx_show_assets_item   ON show_assets(asset_item_id);
 CREATE INDEX IF NOT EXISTS idx_asset_items_type   ON asset_items(asset_type_id);
 CREATE INDEX IF NOT EXISTS idx_asset_maint_item   ON asset_maintenance(asset_item_id);
 CREATE INDEX IF NOT EXISTS idx_asset_logs_item    ON asset_logs(asset_item_id);
@@ -1910,6 +1913,7 @@ def migrate_db():
             is_retired       INTEGER DEFAULT 0,
             retired_at       TIMESTAMP DEFAULT NULL,
             hide_from_pm     INTEGER DEFAULT 0,
+            allow_unit_selection INTEGER DEFAULT 0,
             sort_order       INTEGER DEFAULT 0,
             created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -1947,6 +1951,7 @@ def migrate_db():
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
             show_id        INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
             asset_type_id  INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
+            asset_item_id  INTEGER REFERENCES asset_items(id) ON DELETE SET NULL,
             quantity       INTEGER DEFAULT 1,
             rental_start   DATE,
             rental_end     DATE,
@@ -2039,6 +2044,10 @@ def migrate_db():
         "CREATE INDEX IF NOT EXISTS idx_asset_items_sys ON asset_items(system_type_id)",
         # Asset type default hide-from-PM flag
         "ALTER TABLE asset_types ADD COLUMN hide_from_pm INTEGER DEFAULT 0",
+        # Allow PM/asset manager to pick a specific unit (asset_item) when adding to a show
+        "ALTER TABLE asset_types ADD COLUMN allow_unit_selection INTEGER DEFAULT 0",
+        "ALTER TABLE show_assets ADD COLUMN asset_item_id INTEGER REFERENCES asset_items(id) ON DELETE SET NULL",
+        "CREATE INDEX IF NOT EXISTS idx_show_assets_item ON show_assets(asset_item_id)",
         # Per-contact email type recipients
         "ALTER TABLE contacts ADD COLUMN advance_recipient INTEGER DEFAULT 0",
         "ALTER TABLE contacts ADD COLUMN production_recipient INTEGER DEFAULT 0",
@@ -2905,6 +2914,7 @@ CREATE TABLE IF NOT EXISTS asset_types (
     is_retired       INTEGER DEFAULT 0,
     retired_at       TIMESTAMP DEFAULT NULL,
     hide_from_pm     INTEGER DEFAULT 0,
+    allow_unit_selection INTEGER DEFAULT 0,
     sort_order       INTEGER DEFAULT 0,
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -2953,6 +2963,7 @@ CREATE TABLE IF NOT EXISTS show_assets (
     id             SERIAL PRIMARY KEY,
     show_id        INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
     asset_type_id  INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
+    asset_item_id  INTEGER REFERENCES asset_items(id) ON DELETE SET NULL,
     quantity       INTEGER DEFAULT 1,
     rental_start   DATE,
     rental_end     DATE,
@@ -2985,6 +2996,7 @@ CREATE TABLE IF NOT EXISTS asset_type_system_members (
 
 CREATE INDEX IF NOT EXISTS idx_show_assets_show   ON show_assets(show_id);
 CREATE INDEX IF NOT EXISTS idx_show_assets_type   ON show_assets(asset_type_id);
+CREATE INDEX IF NOT EXISTS idx_show_assets_item   ON show_assets(asset_item_id);
 CREATE INDEX IF NOT EXISTS idx_asset_items_type   ON asset_items(asset_type_id);
 CREATE INDEX IF NOT EXISTS idx_asset_maint_item   ON asset_maintenance(asset_item_id);
 CREATE INDEX IF NOT EXISTS idx_asset_logs_item    ON asset_logs(asset_item_id);
@@ -3314,6 +3326,9 @@ def migrate_db_postgres():
             f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS is_package INTEGER DEFAULT 0',
             f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS photo_s3_key TEXT DEFAULT NULL',
             f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS hide_from_pm INTEGER DEFAULT 0',
+            f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS allow_unit_selection INTEGER DEFAULT 0',
+            f'ALTER TABLE "{app_schema}".show_assets ADD COLUMN IF NOT EXISTS asset_item_id INTEGER REFERENCES "{app_schema}".asset_items(id) ON DELETE SET NULL',
+            f'CREATE INDEX IF NOT EXISTS idx_show_assets_item ON "{app_schema}".show_assets(asset_item_id)',
             f'ALTER TABLE "{app_schema}".contacts ADD COLUMN IF NOT EXISTS advance_recipient INTEGER DEFAULT 0',
             f'ALTER TABLE "{app_schema}".contacts ADD COLUMN IF NOT EXISTS production_recipient INTEGER DEFAULT 0',
             f'ALTER TABLE "{app_schema}".contacts ADD COLUMN IF NOT EXISTS postnotes_recipient INTEGER DEFAULT 0',

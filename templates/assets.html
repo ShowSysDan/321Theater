@@ -233,6 +233,7 @@
         <div class="field-group" style="grid-column:span 2;display:flex;gap:20px;align-items:center">
           <label class="checkbox-label"><input type="checkbox" id="type-consumable"> Consumable item</label>
           <label class="checkbox-label"><input type="checkbox" id="type-track-qty" checked> Track by quantity</label>
+          <label class="checkbox-label"><input type="checkbox" id="type-allow-unit-selection"> Allow unit selection <span style="font-size:10px;color:var(--text-dim)">(PM can pin a specific unit, e.g. by model number)</span></label>
         </div>
         <div class="field-group" style="grid-column:span 2;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px">
           <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim);margin-bottom:8px">TYPE CLASSIFICATION</div>
@@ -1893,6 +1894,7 @@ window.openTypeModal = async function(id, defaultCatId) {
       document.getElementById('type-is-system').checked = !!t.is_system;
       document.getElementById('type-is-package').checked = !!t.is_package;
       document.getElementById('type-hide-from-pm').checked = !!t.hide_from_pm;
+      document.getElementById('type-allow-unit-selection').checked = !!t.allow_unit_selection;
       document.getElementById('type-photo-preview').innerHTML = t.photo
         ? `<img src="/asset-types/${t.id}/photo" style="height:60px;border-radius:4px;object-fit:cover">` : '';
     }
@@ -1913,6 +1915,7 @@ window.openTypeModal = async function(id, defaultCatId) {
     document.getElementById('type-is-system').checked = false;
     document.getElementById('type-is-package').checked = false;
     document.getElementById('type-hide-from-pm').checked = false;
+    document.getElementById('type-allow-unit-selection').checked = false;
     document.getElementById('type-photo-preview').innerHTML = '';
     document.getElementById('type-photo').value = '';
   }
@@ -1950,6 +1953,7 @@ window.saveType = async function() {
     is_system: document.getElementById('type-is-system').checked,
     is_package: document.getElementById('type-is-package').checked,
     hide_from_pm: document.getElementById('type-hide-from-pm').checked,
+    allow_unit_selection: document.getElementById('type-allow-unit-selection').checked,
   };
   if (!payload.name || !payload.category_id) { alert('Name and category required'); return; }
   const url = id ? `/settings/asset-types/${id}` : '/settings/asset-types';
