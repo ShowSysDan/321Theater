@@ -248,21 +248,47 @@ function redrawFields() {
     const pg = _pages[f.page];
     if (!pg) return;
     const div = document.createElement('div');
-    div.className = 'pdf-field';
+    div.className = 'pdf-field pdf-field-type-' + (f.type || 'text');
     if (i === _selected) div.classList.add('pdf-field-selected');
     div.style.left   = (f.x * PDF_SCALE) + 'px';
     div.style.top    = (f.y * PDF_SCALE) + 'px';
     div.style.width  = (f.w * PDF_SCALE) + 'px';
     div.style.height = (f.h * PDF_SCALE) + 'px';
     div.dataset.idx = i;
-    div.innerHTML = `<span class="pdf-field-label">${escapeHtml(f.label || f.name)}</span>
-                     <span class="pdf-field-resize" data-resize="se"></span>`;
+    div.innerHTML = _previewMarkup(f) +
+      `<span class="pdf-field-label">${escapeHtml(f.label || f.name)}</span>
+       <span class="pdf-field-resize" data-resize="se"></span>`;
     div.addEventListener('mousedown', (e) => {
       if (e.target.dataset.resize) { startResize(e, i); return; }
       startDrag(e, i);
     });
     pg.overlay.appendChild(div);
   });
+}
+
+function _previewMarkup(f) {
+  // In-place simulation of what the stamp will look like in the actual
+  // PDF — same font size scaled to the builder zoom, same family for
+  // signature fields. Lets authors eyeball whether their chosen
+  // font_size fits the rect before they save.
+  const fontSize = (parseFloat(f.font_size) || 10) * PDF_SCALE;
+  const sample = f.label || f.name || 'Sample text';
+  if (f.type === 'checkbox') {
+    const sz = Math.max(8, Math.min(f.w * PDF_SCALE, f.h * PDF_SCALE) * 0.85);
+    return `<div class="pdf-field-preview pdf-field-preview-checkbox"
+                  style="font-size:${sz}px">X</div>`;
+  }
+  if (f.type === 'signature') {
+    return `<div class="pdf-field-preview pdf-field-preview-sig sig-font-caveat"
+                  style="font-size:${fontSize}px">${escapeHtml(sample)}</div>`;
+  }
+  if (f.type === 'multiline') {
+    return `<div class="pdf-field-preview pdf-field-preview-multi"
+                  style="font-size:${fontSize}px">${escapeHtml(sample)}</div>`;
+  }
+  // text / date / today / fallback
+  return `<div class="pdf-field-preview"
+                style="font-size:${fontSize}px">${escapeHtml(sample)}</div>`;
 }
 
 function renderFieldList() {
@@ -532,6 +558,38 @@ loadPdf();
   background: var(--accent);
   border-radius: 2px;
   cursor: nwse-resize;
+}
+
+/* Inline preview of what the stamp will look like in the actual PDF —
+   exact font_size, with the cursive face for signatures. */
+.pdf-field-preview {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-start;
+  padding: 0 2px 1px 3px;
+  color: rgba(0,0,0,0.78);
+  line-height: 1;
+  font-family: 'Helvetica', Arial, sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  pointer-events: none;  /* clicks pass through to the field rect for drag */
+}
+.pdf-field-preview-checkbox {
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  padding: 0;
+}
+.pdf-field-preview-multi {
+  white-space: normal;
+  align-items: flex-start;
+  padding: 2px 3px;
+  overflow: hidden;
+}
+.pdf-field-preview-sig {
+  color: rgba(0,0,100,0.78);
 }
 
 .pdf-field-list {

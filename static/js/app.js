@@ -2541,7 +2541,7 @@ if (document.readyState === 'loading') {
    PDF FORM FILLER (popup on the advance for pdf_form fields)
 ═══════════════════════════════════════════════════════════════ */
 
-const _PDF_FILLER_SCALE = 1.3;
+const _PDF_FILLER_SCALE = 1.6;
 let _pdfFillerState = null;  // {show_id, field_key, fields, values, pdf_url}
 let _pdfFillerSaveTimer = null;
 
