@@ -4308,7 +4308,9 @@ def _render_attachment_wrapper_pdf(data, mime, filename, section_label,
                                    field_label, description, base_url):
     """Build a single-section HTML page for a non-PDF attachment and render
     it via WeasyPrint. Supports image/*, plain text, and DOCX (text extract
-    fallback). Returns PDF bytes or None on failure.
+    fallback). Returns PDF bytes when actual content can be embedded, or
+    None when there's nothing meaningful to render — callers route None
+    results onto the trailing omitted-files index instead.
 
     section_label / field_label are None for files uploaded via the show's
     Files tab; in that case the cover page is labelled "FILES TAB" instead.
@@ -4322,7 +4324,7 @@ def _render_attachment_wrapper_pdf(data, mime, filename, section_label,
         section = (section_label or '').strip()
         flabel  = (field_label or filename or '').strip()
         desc    = (description or '').strip()
-        body_html = ''
+        body_html = None
         # When there's no form-field context we tag the page as a general
         # files-tab attachment so the reader can tell where it came from.
         if not section and not field_label:
@@ -4334,9 +4336,11 @@ def _render_attachment_wrapper_pdf(data, mime, filename, section_label,
             body_html = f'<img src="data:{img_mime};base64,{b64}" style="max-width:100%;max-height:9in;display:block;margin:0 auto">'
         elif mime.startswith('text/') or ext in _TEXT_EXTS:
             try:
-                text = data.decode('utf-8', errors='replace')
+                text = data.decode('utf-8', errors='replace').strip()
             except Exception:
                 text = ''
+            if not text:
+                return None
             body_html = (
                 '<pre style="font-family:\'Courier New\',monospace;font-size:9pt;'
                 'line-height:1.35;white-space:pre-wrap;word-wrap:break-word">'
@@ -4348,15 +4352,18 @@ def _render_attachment_wrapper_pdf(data, mime, filename, section_label,
                 import docx as _docx
                 document = _docx.Document(BytesIO(data))
                 paras = [p.text for p in document.paragraphs if p.text.strip()]
+                if not paras:
+                    return None
                 body_html = '<div style="font-size:10pt;line-height:1.4;white-space:pre-wrap">' + \
                             '<br><br>'.join(str(_e(p)) for p in paras) + '</div>'
-                if not paras:
-                    body_html = '<p style="color:#666">[Word document had no extractable text — original file is attached to the show.]</p>'
             except Exception as e:
-                app.logger.warning(f"DOCX text extract failed: {e}")
-                body_html = f'<p style="color:#666">[Word document <strong>{str(_e(filename))}</strong> could not be embedded — original file is attached to the show.]</p>'
+                app.logger.warning(f"DOCX text extract failed for {filename}: {e}")
+                return None
         else:
-            body_html = f'<p style="color:#666">[File <strong>{str(_e(filename))}</strong> ({str(_e(mime or "unknown type"))}) is attached to the show but cannot be rendered inline. Download it from the show\'s Files tab.]</p>'
+            return None
+
+        if not body_html:
+            return None
 
         html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
             @page {{ size: letter; margin: 0.6in 0.55in; }}
