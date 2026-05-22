@@ -31,13 +31,24 @@
       <select id="pdf-default-type" class="field-input" style="font-size:12px">
         <option value="text">text</option>
         <option value="multiline">multiline</option>
-        <option value="date">date</option>
+        <option value="date">date (selectable)</option>
+        <option value="today">today (auto-fills date)</option>
         <option value="checkbox">checkbox</option>
+        <option value="signature">signature (cursive)</option>
       </select>
     </div>
     <p class="field-hint" style="font-size:10px;color:var(--text-dim);margin-top:14px">
       Tip: click an existing field on the page to edit it. Drag a corner to resize. Click outside to deselect.
+      Changes auto-save after a short pause.
     </p>
+    <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
+      <button type="button" class="btn btn-sm btn-ghost" onclick="openAdvanceKeyList()" style="width:100%;font-size:11px">
+        View advance field keys
+      </button>
+      <p class="field-hint" style="font-size:10px;color:var(--text-dim);margin-top:6px">
+        Use the <strong>Pull from advance</strong> picker on a field to pre-fill it with the value of an advance form field on each show.
+      </p>
+    </div>
   </div>
   <div class="pdf-builder-stage">
     <div id="pdf-pages" class="pdf-pages"></div>
@@ -59,19 +70,77 @@ const PDF_SCALE = 1.5;  // also used on the filler page
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "{{ url_for('static', filename='js/vendor/pdfjs/pdf.worker.js') }}";
 
-let _fields = [];      // [{name, label, type, page, x, y, w, h, font_size}]
+let _fields = [];      // [{name, label, type, page, x, y, w, h, font_size, source_key?}]
 let _selected = null;  // index into _fields, or null
 let _dirty = false;
 let _pages = [];       // [{ viewport, pageDiv }]
+let _advanceFields = []; // [{field_key, label, ...}] from /api/form-fields
+let _autoSaveTimer = null;
 
 function markDirty() {
   _dirty = true;
   document.getElementById('pdf-save-status').textContent = 'Unsaved changes…';
+  // Debounced auto-save — gives users ~1.5s to keep typing without saving
+  // every keystroke. Save also fires on blur via beforeunload guard.
+  if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
+  _autoSaveTimer = setTimeout(() => saveTemplateFields(true), 1500);
 }
 
 function markClean() {
   _dirty = false;
   document.getElementById('pdf-save-status').textContent = 'All changes saved.';
+}
+
+function _advanceFieldOptions(selected) {
+  // Render <option> markup for the "Pull from advance" picker.
+  return _advanceFields.map(f =>
+    `<option value="${escapeHtml(f.field_key)}"${f.field_key === selected ? ' selected' : ''}>${escapeHtml(f.label)} (${escapeHtml(f.field_key)})</option>`
+  ).join('');
+}
+
+async function _loadAdvanceFields() {
+  try {
+    const r = await fetch('/api/form-fields', {credentials: 'same-origin'});
+    if (!r.ok) return;
+    const sections = await r.json();
+    const flat = [];
+    for (const sec of sections) {
+      for (const f of (sec.fields || [])) {
+        // Skip field types that don't carry a string value (pdf_form is
+        // recursive; notes is static; file_upload is a file). Everything
+        // else is fair game for pre-fill.
+        if (['pdf_form', 'notes', 'file_upload'].includes(f.field_type)) continue;
+        flat.push({field_key: f.field_key, label: f.label || f.field_key, field_type: f.field_type});
+      }
+    }
+    flat.sort((a, b) => a.label.localeCompare(b.label));
+    _advanceFields = flat;
+  } catch (e) { /* leave empty */ }
+}
+
+function openAdvanceKeyList() {
+  if (!_advanceFields.length) {
+    alert('No advance fields available (or still loading).');
+    return;
+  }
+  const rows = _advanceFields.map(f =>
+    `${f.field_key.padEnd(28)} — ${f.label}  [${f.field_type}]`
+  ).join('\n');
+  alert('Available advance field keys (key — label [type]):\n\n' + rows);
+}
+
+function _showSaveToast(msg) {
+  let toast = document.getElementById('pdf-save-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'pdf-save-toast';
+    toast.className = 'pdf-save-toast';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = msg;
+  toast.classList.add('show');
+  clearTimeout(toast._hide);
+  toast._hide = setTimeout(() => toast.classList.remove('show'), 1600);
 }
 
 async function renamePdfTemplate(name) {
@@ -220,8 +289,16 @@ function renderFieldList() {
           <select onchange="updateField(${i}, 'type', this.value)">
             <option value="text"${f.type==='text'?' selected':''}>text</option>
             <option value="multiline"${f.type==='multiline'?' selected':''}>multiline</option>
-            <option value="date"${f.type==='date'?' selected':''}>date</option>
+            <option value="date"${f.type==='date'?' selected':''}>date (selectable)</option>
+            <option value="today"${f.type==='today'?' selected':''}>today (auto)</option>
             <option value="checkbox"${f.type==='checkbox'?' selected':''}>checkbox</option>
+            <option value="signature"${f.type==='signature'?' selected':''}>signature</option>
+          </select>
+        </label>
+        <label>Pull from advance (optional)
+          <select onchange="updateField(${i}, 'source_key', this.value || null)" data-source-key-select>
+            <option value="">— none —</option>
+            ${_advanceFieldOptions(f.source_key || '')}
           </select>
         </label>
         <label>Font size
@@ -303,20 +380,26 @@ function startResize(e, i) {
   document.addEventListener('mouseup', onUp);
 }
 
-async function saveTemplateFields() {
+async function saveTemplateFields(isAuto) {
+  if (_autoSaveTimer) { clearTimeout(_autoSaveTimer); _autoSaveTimer = null; }
   document.getElementById('pdf-save-status').textContent = 'Saving…';
-  const r = await fetch(SAVE_URL, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({fields: _fields})
-  });
-  const j = await r.json();
-  if (j.success) {
-    _fields = j.fields;
-    markClean();
-    renderFieldList();
-  } else {
-    document.getElementById('pdf-save-status').textContent = j.error || 'Save failed.';
+  try {
+    const r = await fetch(SAVE_URL, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({fields: _fields})
+    });
+    const j = await r.json();
+    if (j.success) {
+      _fields = j.fields;
+      markClean();
+      renderFieldList();
+      _showSaveToast(isAuto ? 'Auto-saved' : 'Saved');
+    } else {
+      document.getElementById('pdf-save-status').textContent = j.error || 'Save failed.';
+    }
+  } catch (e) {
+    document.getElementById('pdf-save-status').textContent = 'Network error — will retry on next change.';
   }
 }
 
@@ -331,8 +414,32 @@ window.addEventListener('beforeunload', (e) => {
   if (_dirty) { e.preventDefault(); e.returnValue = ''; }
 });
 
+// Kick off both in parallel — advance field list is needed for the
+// "Pull from advance" dropdown, PDF render is needed for placement.
+_loadAdvanceFields();
 loadPdf();
 </script>
+<style>
+.pdf-save-toast {
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  padding: 8px 14px;
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.3);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity .25s, transform .25s;
+  pointer-events: none;
+  z-index: 2000;
+}
+.pdf-save-toast.show { opacity: 1; transform: translateY(0); }
+</style>
 
 <style>
 .pdf-tpl-toolbar { text-align: right; min-width: 160px; }
