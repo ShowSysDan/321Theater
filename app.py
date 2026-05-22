@@ -445,7 +445,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.13.5'
+APP_VERSION = '2.13.6'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -6669,6 +6669,19 @@ def edit_form_field(fid):
     alert_contacts_json = json.dumps([int(c) for c in alert_contacts if str(c).strip().isdigit()]) if alert_contacts else None
     pdf_tid = data.get('pdf_template_id')
     pdf_tid = int(pdf_tid) if pdf_tid and str(pdf_tid).strip().isdigit() else None
+    # Safety net: if this is a pdf_form field and the payload didn't include
+    # a usable template id (key missing, blank, or 0), DON'T overwrite the
+    # existing binding with NULL. A client-side race could submit blank
+    # because the picker's options hadn't finished loading when the modal
+    # opened, silently un-binding the template. Preserve the prior id;
+    # genuine unbinding requires either:
+    #   - changing field_type away from pdf_form (handled — pdf_tid still
+    #     becomes None), or
+    #   - sending a different non-blank pdf_template_id explicitly.
+    if (pdf_tid is None
+            and data.get('field_type') == 'pdf_form'
+            and before and before.get('pdf_template_id')):
+        pdf_tid = before['pdf_template_id']
     db.execute("""
         UPDATE form_fields SET
             section_id=?, label=?, field_type=?,
