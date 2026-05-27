@@ -33,6 +33,58 @@
 </div>
 {% endif %}
 
+{# ── Happening Today ──────────────────────────────────────────────────────── #}
+{% if today_shows %}
+<section class="today-box" aria-label="Happening today">
+  <div class="today-box-header">
+    <div class="today-box-title">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="flex-shrink:0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      <span>Happening Today</span>
+    </div>
+    <div class="today-box-date">{{ today_iso }} · {{ today_shows|length }} show{{ '' if today_shows|length == 1 else 's' }}</div>
+  </div>
+  <div class="today-box-grid">
+    {% for t in today_shows %}
+    <a class="today-card{% if t.is_test %} today-card-test{% endif %}" href="{{ url_for('show_page', show_id=t.id, tab='advance') }}">
+      <div class="today-card-tags">
+        {% for tag in t.tags %}
+        <span class="today-card-tag tag-{{ tag|replace(' ', '-')|lower }}">{{ tag }}</span>
+        {% endfor %}
+        {% if t.is_test %}<span class="today-card-tag tag-test">TEST</span>{% endif %}
+      </div>
+      <div class="today-card-name">{{ t.name }}</div>
+      <div class="today-card-meta">
+        <div class="today-card-row" title="Venue">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M3 21h18M3 7h18M5 7v14M19 7v14M9 11h2M13 11h2M9 15h2M13 15h2"/></svg>
+          <span>{{ t.venue or '—' }}</span>
+        </div>
+        <div class="today-card-row" title="Production Manager">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <span>{% if t.pm %}{{ t.pm }}{% else %}<em class="today-card-empty">No PM</em>{% endif %}</span>
+        </div>
+        {% if t.perf_times %}
+        <div class="today-card-row" title="Performance times">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <span>{% for pt in t.perf_times %}{{ pt | hhmm }}{% if not loop.last %}, {% endif %}{% endfor %}</span>
+        </div>
+        {% endif %}
+        <div class="today-card-row" title="Crew calls">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <span>
+            {% if t.crew_calls %}
+              {% for c in t.crew_calls %}{{ c | hhmm }}{% if not loop.last %}, {% endif %}{% endfor %}
+            {% else %}
+              <em class="today-card-empty">No crew calls</em>
+            {% endif %}
+          </span>
+        </div>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 {% if venue_groups %}
 
 {# ── Toolbar ──────────────────────────────────────────────────────────────── #}

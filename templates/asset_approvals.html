@@ -333,6 +333,13 @@
     <div class="modal-body">
       <input type="hidden" id="appr-add-show-id">
       <input type="hidden" id="appr-add-type-id">
+      <div id="appr-add-unit-row" class="field-group" style="display:none;margin-bottom:10px">
+        <label class="field-label">UNIT</label>
+        <select id="appr-add-unit" class="field-input" onchange="onApprUnitChange()">
+          <option value="">Any available unit (from pool)</option>
+        </select>
+        <div style="font-size:10px;color:var(--text-dim);margin-top:2px">Pin to a specific unit — booking removes it from the pool for these dates.</div>
+      </div>
       <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px">
         <div class="field-group">
           <label class="field-label">QUANTITY</label>
@@ -680,6 +687,14 @@ async function selectApprAssetType(typeId, label, price, weeklyRate, isSystem) {
   }
   document.getElementById('appr-add-price').value = calcPrice.toFixed(2);
 
+  // Reset unit picker before fetching availability.
+  const apprUnitRow = document.getElementById('appr-add-unit-row');
+  const apprUnitSel = document.getElementById('appr-add-unit');
+  if (apprUnitRow) apprUnitRow.style.display = 'none';
+  if (apprUnitSel) apprUnitSel.innerHTML = '<option value="">Any available unit (from pool)</option>';
+  const apprQty = document.getElementById('appr-add-qty');
+  if (apprQty) { apprQty.readOnly = false; apprQty.style.opacity = ''; }
+
   closeApprAssetSearch();
   document.getElementById('appr-asset-add-modal').style.display = 'flex';
 
@@ -702,7 +717,50 @@ async function selectApprAssetType(typeId, label, price, weeklyRate, isSystem) {
         `Stock: ${av.total_items} total · ${av.in_maintenance} maintenance · ${av.reserve_count} reserved · ${av.total_reserved} allocated — ` +
         `<strong style="${avClass}">${av.available} available</strong>`;
     }
+    _populateApprUnitPicker(av);
   } catch(e) { availDiv.textContent = ''; }
+  updateApprAddState();
+}
+
+function _populateApprUnitPicker(av) {
+  const unitRow = document.getElementById('appr-add-unit-row');
+  const unitSel = document.getElementById('appr-add-unit');
+  if (!unitRow || !unitSel) return;
+  if (!av || !av.allow_unit_selection || !Array.isArray(av.units) || av.units.length === 0) {
+    unitRow.style.display = 'none';
+    unitSel.innerHTML = '<option value="">Any available unit (from pool)</option>';
+    return;
+  }
+  let html = '<option value="">Any available unit (from pool)</option>';
+  av.units.forEach(u => {
+    const label = u.barcode ? `${u.barcode} (#${u.id})` : `#${u.id}`;
+    let suffix = '';
+    let disabled = '';
+    if (u.in_maintenance) { suffix = ' — in maintenance'; disabled = ' disabled'; }
+    else if (u.booked) {
+      const b = (u.bookings && u.bookings[0]) || {};
+      suffix = ` — booked${b.show_name ? ' for ' + b.show_name : ''}`;
+      disabled = ' disabled';
+    } else { suffix = ' — available'; }
+    html += `<option value="${u.id}"${disabled}>${label}${suffix}</option>`;
+  });
+  unitSel.innerHTML = html;
+  unitSel.value = '';
+  unitRow.style.display = '';
+}
+
+function onApprUnitChange() {
+  const sel = document.getElementById('appr-add-unit');
+  const qtyInput = document.getElementById('appr-add-qty');
+  if (!sel || !qtyInput) return;
+  if (sel.value) {
+    qtyInput.value = 1;
+    qtyInput.readOnly = true;
+    qtyInput.style.opacity = '.6';
+  } else {
+    qtyInput.readOnly = false;
+    qtyInput.style.opacity = '';
+  }
   updateApprAddState();
 }
 
@@ -722,7 +780,10 @@ function updateApprAddState() {
 async function submitApprAsset() {
   const showId = document.getElementById('appr-add-show-id').value;
   const typeId = document.getElementById('appr-add-type-id').value;
-  const qty    = parseInt(document.getElementById('appr-add-qty').value) || 1;
+  const unitSel = document.getElementById('appr-add-unit');
+  const pinnedUnitId = unitSel && unitSel.value ? parseInt(unitSel.value, 10) : null;
+  let qty = parseInt(document.getElementById('appr-add-qty').value) || 1;
+  if (pinnedUnitId) qty = 1;
   const price  = parseFloat(document.getElementById('appr-add-price').value) || 0;
   const start  = document.getElementById('appr-add-start').value;
   const end    = document.getElementById('appr-add-end').value;
@@ -730,11 +791,13 @@ async function submitApprAsset() {
 
   const btn = document.getElementById('appr-add-submit-btn');
   btn.disabled = true;
+  const payload = {asset_type_id: typeId, quantity: qty, locked_price: price,
+                   rental_start: start, rental_end: end, notes};
+  if (pinnedUnitId) payload.asset_item_id = pinnedUnitId;
   const r = await fetch(`/shows/${showId}/assets`, {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({asset_type_id: typeId, quantity: qty, locked_price: price,
-                          rental_start: start, rental_end: end, notes})
+    body: JSON.stringify(payload)
   });
   btn.disabled = false;
   if (!r.ok) {

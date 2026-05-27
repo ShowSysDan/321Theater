@@ -3100,6 +3100,75 @@ def dashboard():
     active = _attach_perfs(active)
     archived = _attach_perfs(archived)
 
+    # ── "Happening Today" — shows where today falls in load-in/out, matches the
+    # show date, or matches any performance date. For each, surface the venue,
+    # production manager (from advance_data), and today's crew call times.
+    today_iso = date.today().isoformat()
+    today_show_ids = {s['id'] for s in active
+                      if (s.get('show_date') == today_iso)
+                      or (s.get('load_in_date') and s.get('load_out_date')
+                          and s['load_in_date'] <= today_iso <= s['load_out_date'])
+                      or any((p.get('perf_date') == today_iso) for p in s.get('performances') or [])}
+
+    today_shows = []
+    if today_show_ids:
+        ids_ph = ','.join('?' * len(today_show_ids))
+        ids_params = list(today_show_ids)
+        pm_rows = db.execute(
+            f"SELECT show_id, field_value FROM advance_data "
+            f"WHERE field_key='production_manager' AND show_id IN ({ids_ph})",
+            ids_params,
+        ).fetchall()
+        pm_by_show = {r['show_id']: (r['field_value'] or '').strip() for r in pm_rows}
+
+        # Crew call times = unique in_times from labor_requests scheduled for
+        # today (work_date) or for shows whose show_date is today when
+        # work_date is NULL.
+        call_rows = db.execute(
+            f"SELECT lr.show_id, lr.in_time "
+            f"FROM labor_requests lr JOIN shows s ON s.id = lr.show_id "
+            f"WHERE lr.show_id IN ({ids_ph}) AND lr.in_time != '' "
+            f"  AND COALESCE(lr.work_date, s.show_date) = ?",
+            ids_params + [today_iso],
+        ).fetchall()
+        calls_by_show = {}
+        for r in call_rows:
+            calls_by_show.setdefault(r['show_id'], set()).add(r['in_time'])
+
+        for s in active:
+            if s['id'] not in today_show_ids:
+                continue
+            # Classify why this show is today
+            tags = []
+            if s.get('show_date') == today_iso:
+                tags.append('Show Day')
+            todays_perfs = [p for p in (s.get('performances') or [])
+                            if p.get('perf_date') == today_iso]
+            if todays_perfs and 'Show Day' not in tags:
+                tags.append('Performance')
+            if s.get('load_in_date') == today_iso:
+                tags.append('Load-In')
+            elif s.get('load_out_date') == today_iso:
+                tags.append('Load-Out')
+            elif (s.get('load_in_date') and s.get('load_out_date')
+                  and s['load_in_date'] < today_iso < s['load_out_date']
+                  and not tags):
+                tags.append('In Production')
+
+            today_shows.append({
+                'id': s['id'],
+                'name': s['name'],
+                'venue': s.get('venue') or '',
+                'is_test': s.get('is_test') or 0,
+                'pm': pm_by_show.get(s['id'], ''),
+                'crew_calls': sorted(calls_by_show.get(s['id'], set())),
+                'perf_times': [p.get('perf_time') for p in todays_perfs if p.get('perf_time')],
+                'tags': tags or ['Today'],
+            })
+        # Show day / performance first, then load-in, then in-production, then load-out
+        _tag_order = {'Show Day': 0, 'Performance': 1, 'Load-In': 2, 'In Production': 3, 'Load-Out': 4, 'Today': 5}
+        today_shows.sort(key=lambda t: (_tag_order.get(t['tags'][0], 9), (t['name'] or '').lower()))
+
     db.close()
     restricted = session.get('is_restricted', False)
 
@@ -3135,6 +3204,8 @@ def dashboard():
                            active_shows=active,
                            archived_shows=archived,
                            venue_groups=venue_groups,
+                           today_shows=today_shows,
+                           today_iso=today_iso,
                            restricted=restricted,
                            home_layout=home_layout,
                            home_density=home_density,
@@ -12297,8 +12368,9 @@ def asset_type_add():
         INSERT INTO asset_types
           (category_id, parent_type_id, name, manufacturer, model,
            storage_location, rental_cost, weekly_rate, reserve_count, is_consumable, track_quantity,
-           supplier_name, supplier_contact, is_system, is_package, hide_from_pm, sort_order)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           supplier_name, supplier_contact, is_system, is_package, hide_from_pm,
+           allow_unit_selection, sort_order)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         category_id,
         data.get('parent_type_id') or None,
@@ -12316,6 +12388,7 @@ def asset_type_add():
         1 if data.get('is_system') else 0,
         1 if data.get('is_package') else 0,
         1 if data.get('hide_from_pm') else 0,
+        1 if data.get('allow_unit_selection') else 0,
         max_order + 1,
     ))
     db.commit()
@@ -12342,7 +12415,8 @@ def asset_type_edit(type_id):
           name=?, manufacturer=?, model=?, storage_location=?,
           rental_cost=?, weekly_rate=?, reserve_count=?, is_consumable=?, track_quantity=?,
           supplier_name=?, supplier_contact=?,
-          category_id=?, parent_type_id=?, is_system=?, is_package=?, hide_from_pm=?
+          category_id=?, parent_type_id=?, is_system=?, is_package=?, hide_from_pm=?,
+          allow_unit_selection=?
         WHERE id=?
     """, (
         name,
@@ -12361,6 +12435,7 @@ def asset_type_edit(type_id):
         1 if data.get('is_system') else 0,
         1 if data.get('is_package') else 0,
         1 if data.get('hide_from_pm') else 0,
+        1 if data.get('allow_unit_selection') else 0,
         type_id,
     ))
     db.commit()
@@ -12850,6 +12925,9 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
       in_maintenance — items currently in maintenance
       available     — items available for the date range (may be negative)
       shows         — list of shows requesting this asset with quantities
+      units         — per-unit availability when start/end given and the
+                      type has allow_unit_selection (one entry per asset_item)
+      booked_item_ids — set of item ids already pinned to an overlapping show
     """
     type_row = db.execute('SELECT * FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
     if not type_row:
@@ -12882,7 +12960,11 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
             'unlimited': True,
         }
 
-    # Shows requesting this asset (optionally filtered by date range overlap)
+    # Shows requesting this asset (optionally filtered by date range overlap).
+    # Specific-unit bookings (sa.asset_item_id IS NOT NULL) still occupy a row
+    # in show_assets with quantity=1 — so they're already counted in
+    # total_reserved below. We surface them separately so the UI can render
+    # per-unit state.
     params = [asset_type_id]
     date_filter = ''
     if start_date and end_date:
@@ -12892,6 +12974,7 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
     shows = db.execute(f"""
         SELECT sa.id, sa.show_id, sa.quantity, sa.rental_start, sa.rental_end,
                sa.is_hidden, sa.locked_price, sa.original_locked_price,
+               sa.asset_item_id,
                s.name as show_name
         FROM show_assets sa
         JOIN shows s ON s.id = sa.show_id
@@ -12902,6 +12985,41 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
     total_reserved = sum(r['quantity'] for r in shows)
     available = total_items - in_maintenance - reserve_count - total_reserved
 
+    booked_item_ids = {r['asset_item_id'] for r in shows if r['asset_item_id']}
+
+    units = []
+    if type_row['allow_unit_selection'] and start_date and end_date:
+        item_rows = db.execute("""
+            SELECT id, barcode, status
+            FROM asset_items
+            WHERE asset_type_id=? AND status != 'retired'
+            ORDER BY sort_order, id
+        """, (asset_type_id,)).fetchall()
+        # Map item_id → list of overlapping show bookings, so the UI can
+        # explain why a unit is unavailable.
+        bookings_by_item = {}
+        for r in shows:
+            if r['asset_item_id']:
+                bookings_by_item.setdefault(r['asset_item_id'], []).append({
+                    'show_id': r['show_id'],
+                    'show_name': r['show_name'],
+                    'rental_start': r['rental_start'],
+                    'rental_end': r['rental_end'],
+                })
+        for it in item_rows:
+            iid = it['id']
+            is_maint = it['status'] == 'maintenance'
+            bookings = bookings_by_item.get(iid, [])
+            units.append({
+                'id': iid,
+                'barcode': it['barcode'] or '',
+                'status': it['status'],
+                'in_maintenance': bool(is_maint),
+                'booked': bool(bookings),
+                'available': not (is_maint or bookings),
+                'bookings': bookings,
+            })
+
     return {
         'total_items': total_items,
         'reserve_count': reserve_count,
@@ -12910,6 +13028,9 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
         'available': available,
         'shows': [dict(r) for r in shows],
         'unlimited': False,
+        'allow_unit_selection': bool(type_row['allow_unit_selection']),
+        'units': units,
+        'booked_item_ids': list(booked_item_ids),
     }
 
 
@@ -13321,11 +13442,13 @@ def show_assets_list(show_id):
 
     rows = db.execute("""
         SELECT sa.*, at.name as type_name, at.is_consumable, at.manufacturer, at.model,
-               at.rental_cost as current_price,
-               ac.name as category_name
+               at.rental_cost as current_price, at.allow_unit_selection,
+               ac.name as category_name,
+               ai.barcode as unit_barcode, ai.status as unit_status
         FROM show_assets sa
         JOIN asset_types at ON at.id = sa.asset_type_id
         JOIN asset_categories ac ON ac.id = at.category_id
+        LEFT JOIN asset_items ai ON ai.id = sa.asset_item_id
         WHERE sa.show_id = ?
           AND (? = 1 OR sa.is_hidden = 0)
         ORDER BY ac.name, at.name, sa.created_at
@@ -13384,6 +13507,11 @@ def show_asset_add(show_id):
     data = request.get_json() or {}
     asset_type_id = data.get('asset_type_id')
     quantity = int(data.get('quantity') or 1)
+    asset_item_id_raw = data.get('asset_item_id')
+    try:
+        asset_item_id = int(asset_item_id_raw) if asset_item_id_raw not in (None, '', 'null') else None
+    except (TypeError, ValueError):
+        asset_item_id = None
     if not asset_type_id or quantity < 1:
         return jsonify({'error': 'asset_type_id and quantity required'}), 400
 
@@ -13400,7 +13528,43 @@ def show_asset_add(show_id):
     rental_start = data.get('rental_start') or default_start
     rental_end   = data.get('rental_end')   or default_end
 
-    type_row = db.execute('SELECT rental_cost, weekly_rate, hide_from_pm FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
+    type_row = db.execute('SELECT rental_cost, weekly_rate, hide_from_pm, allow_unit_selection FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
+
+    # If a specific unit was requested, validate it belongs to this type, is
+    # bookable, and isn't already pinned to an overlapping show. Specific-unit
+    # bookings are always qty=1 regardless of what was submitted.
+    if asset_item_id is not None:
+        if not type_row or not type_row['allow_unit_selection']:
+            db.close()
+            return jsonify({'error': 'This asset type does not allow specific unit selection.'}), 400
+        item_row = db.execute(
+            'SELECT id, asset_type_id, status, barcode FROM asset_items WHERE id=?',
+            (asset_item_id,)
+        ).fetchone()
+        if not item_row or item_row['asset_type_id'] != asset_type_id:
+            db.close()
+            return jsonify({'error': 'Selected unit does not belong to this asset type.'}), 400
+        if item_row['status'] == 'retired':
+            db.close()
+            return jsonify({'error': 'Selected unit is retired and cannot be booked.'}), 400
+        if item_row['status'] == 'maintenance':
+            db.close()
+            return jsonify({'error': 'Selected unit is in maintenance and cannot be booked.'}), 400
+        conflict = db.execute("""
+            SELECT sa.id, s.name as show_name, sa.rental_start, sa.rental_end
+            FROM show_assets sa
+            JOIN shows s ON s.id = sa.show_id
+            WHERE sa.asset_item_id=?
+              AND sa.rental_end >= ? AND sa.rental_start <= ?
+        """, (asset_item_id, rental_start, rental_end)).fetchone()
+        if conflict:
+            unit_label = item_row['barcode'] or f'#{asset_item_id}'
+            db.close()
+            return jsonify({
+                'error': f'Unit {unit_label} is already booked for "{conflict["show_name"]}" '
+                         f'({conflict["rental_start"]} → {conflict["rental_end"]}).',
+            }), 409
+        quantity = 1
     # Price override is only honoured for asset managers (the approval portal).
     # Regular users adding from the show page always get the rate-card price —
     # the approver is the only role allowed to manipulate prices.
@@ -13449,10 +13613,10 @@ def show_asset_add(show_id):
 
     db.execute("""
         INSERT INTO show_assets
-          (show_id, asset_type_id, quantity, rental_start, rental_end,
+          (show_id, asset_type_id, asset_item_id, quantity, rental_start, rental_end,
            locked_price, original_locked_price, is_hidden, notes, added_by)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
-    """, (show_id, asset_type_id, quantity, rental_start, rental_end,
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    """, (show_id, asset_type_id, asset_item_id, quantity, rental_start, rental_end,
           locked_price, locked_price, is_hidden,
           (data.get('notes') or '').strip(), session['user_id']))
     db.commit()
@@ -13482,8 +13646,11 @@ def show_asset_add(show_id):
             'requested': quantity,
         }), 409
 
+    audit_detail = f'type_id={asset_type_id} qty={quantity}'
+    if asset_item_id is not None:
+        audit_detail += f' unit_id={asset_item_id}'
     log_audit(db, 'ASSET_ADDED_TO_SHOW', 'show_asset', row['id'], show_id=show_id,
-              detail=f'type_id={asset_type_id} qty={quantity}')
+              detail=audit_detail)
     _reset_asset_approval(db, show_id, 'asset_added')
     db.commit()
     syslog_logger.info(f"ASSET_ADDED_TO_SHOW show_id={show_id} type_id={asset_type_id} qty={quantity} by={session.get('username')}")
@@ -13517,6 +13684,29 @@ def show_asset_edit(show_id, sa_id):
     rental_end   = data['rental_end']   if 'rental_end'   in data else existing['rental_end']
     is_hidden    = (1 if data.get('is_hidden') else 0) if 'is_hidden' in data else existing['is_hidden']
     notes        = (data.get('notes') or '').strip()  if 'notes'      in data else existing['notes']
+
+    # Unit-pinned rows: qty is always 1, and the new date window must not
+    # collide with another show that has booked this specific unit.
+    if existing['asset_item_id']:
+        quantity = 1
+        conflict = db.execute("""
+            SELECT sa.id, s.name as show_name, sa.rental_start, sa.rental_end
+            FROM show_assets sa
+            JOIN shows s ON s.id = sa.show_id
+            WHERE sa.asset_item_id=? AND sa.id != ?
+              AND sa.rental_end >= ? AND sa.rental_start <= ?
+        """, (existing['asset_item_id'], sa_id, rental_start, rental_end)).fetchone()
+        if conflict:
+            unit_label = db.execute(
+                'SELECT barcode FROM asset_items WHERE id=?', (existing['asset_item_id'],)
+            ).fetchone()
+            unit_label = (unit_label['barcode'] if unit_label and unit_label['barcode']
+                          else f"#{existing['asset_item_id']}")
+            db.close()
+            return jsonify({
+                'error': f'Unit {unit_label} is already booked for "{conflict["show_name"]}" '
+                         f'({conflict["rental_start"]} → {conflict["rental_end"]}).',
+            }), 409
 
     # Server-side availability enforcement. _get_asset_availability sums the
     # CURRENT show_assets rows (which include this one) — back out this row's
