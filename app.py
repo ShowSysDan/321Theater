@@ -3069,6 +3069,12 @@ def dashboard():
             archived = []
 
     # Attach full performance list per show (for multi-date display on card)
+    def _norm_date(v):
+        if v is None or isinstance(v, str):
+            return v
+        try: return v.strftime('%Y-%m-%d')
+        except AttributeError: return str(v)
+
     def _attach_perfs(rows):
         if not rows:
             return []
@@ -3083,16 +3089,15 @@ def dashboard():
         ).fetchall()
         by_show = {}
         for p in perfs:
-            pd = p['perf_date']
-            if pd is not None and not isinstance(pd, str):
-                try: pd = pd.strftime('%Y-%m-%d')
-                except AttributeError: pd = str(pd)
             by_show.setdefault(p['show_id'], []).append(
-                {'perf_date': pd, 'perf_time': p['perf_time']}
+                {'perf_date': _norm_date(p['perf_date']), 'perf_time': p['perf_time']}
             )
         out = []
         for r in rows:
             d = dict(r)
+            for k in ('show_date', 'load_in_date', 'load_out_date'):
+                if k in d:
+                    d[k] = _norm_date(d[k])
             d['performances'] = by_show.get(r['id'], [])
             out.append(d)
         return out
