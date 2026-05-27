@@ -1264,7 +1264,7 @@
             {% for pos in job_positions %}
             <tr data-pid="{{ pos.id }}">
               <td id="pos-name-{{ pos.id }}">{{ pos.name }}</td>
-              <td class="text-dim" id="pos-venue-{{ pos.id }}" data-venue="{{ pos.venue or '' }}">{{ pos.venue or '—' }}</td>
+              <td class="text-dim" id="pos-venue-{{ pos.id }}" data-venue="{{ pos.venue or '' }}">{{ pos.venue or 'All' }}</td>
               <td class="text-dim" id="pos-cat-{{ pos.id }}" data-cat-id="{{ pos.category_id or '' }}">{{ pos.category_name or '—' }}</td>
               <td id="pos-rate-{{ pos.id }}" style="text-align:right" class="mono text-dim">{% if pos.override_rate is not none and pos.override_rate != '' %}${{ '%.2f' | format(pos.override_rate) }}/hr{% else %}—{% endif %}</td>
               <td>
@@ -3338,7 +3338,7 @@ async function addPosition() {
     const rateLabel = override_rate !== null ? `$${override_rate.toFixed(2)}/hr` : '—';
     const tr = document.createElement('tr'); tr.dataset.pid = d.id;
     tr.innerHTML = `<td id="pos-name-${d.id}">${_esc(d.name)}</td>
-      <td class="text-dim" id="pos-venue-${d.id}" data-venue="${_esc(venue)}">${_esc(venue) || '—'}</td>
+      <td class="text-dim" id="pos-venue-${d.id}" data-venue="${_esc(venue)}">${_esc(venue) || 'All'}</td>
       <td class="text-dim" id="pos-cat-${d.id}" data-cat-id="${category_id || ''}">${_esc(catName)}</td>
       <td id="pos-rate-${d.id}" style="text-align:right" class="mono text-dim">${rateLabel}</td>
       <td><div class="action-btns">
@@ -3416,7 +3416,7 @@ function editPosition(btn) {
     const d = await r.json();
     if (d.success) {
       nameEl.textContent = name;
-      venueEl.textContent = venue || '—'; venueEl.dataset.venue = venue || '';
+      venueEl.textContent = venue || 'All'; venueEl.dataset.venue = venue || '';
       const catName = cSel.options[cSel.selectedIndex]?.text || '—';
       catEl.textContent = catName; catEl.dataset.catId = category_id || '';
       rateEl.textContent = override_rate !== null ? `$${override_rate.toFixed(2)}/hr` : '—';

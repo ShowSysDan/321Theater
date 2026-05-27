@@ -10346,6 +10346,12 @@ def api_labor_scheduler_update(rid):
     updates = []
     params = []
     detail_parts = []
+    if 'position_id' in data:
+        pid = data.get('position_id')
+        pid = int(pid) if pid else None
+        updates.append('position_id=?')
+        params.append(pid)
+        detail_parts.append(f"position_id={pid}")
     if 'is_scheduled' in data:
         updates.append('is_scheduled=?')
         params.append(1 if data.get('is_scheduled') else 0)
