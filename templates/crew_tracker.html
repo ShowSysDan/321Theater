@@ -110,20 +110,30 @@
 }
 
 /* Training/class column — flagged with a blue tint so the eye can pick it
-   out at a glance from regular show positions. */
+   out at a glance from regular show positions. The header is sticky, so its
+   background must stay fully opaque or the body cells scrolling underneath
+   show through. We layer the blue tint over the surface colour with a
+   linear-gradient so the result is opaque but still visibly tinted. */
 .crew-grid .pos-header.is-training {
-  background: rgba(74,158,255,.10);
+  background-color: var(--bg-surface);
+  background-image: linear-gradient(rgba(74,158,255,.18), rgba(74,158,255,.18));
   border-bottom: 2px solid var(--blue);
 }
 .crew-grid .pos-header.is-training span { color: var(--blue); }
+/* Body cells in a training column: same trick — opaque row-stripe base with
+   the blue tint as a non-transparent overlay. Keeps the dots clearly in
+   front and prevents any stacking-context bleed. */
 .crew-grid td.is-training-col {
-  background: rgba(74,158,255,.05);
+  background-color: var(--bg-card);
+  background-image: linear-gradient(rgba(74,158,255,.08), rgba(74,158,255,.08));
 }
 .crew-grid tbody tr:nth-child(even) td.is-training-col {
-  background: rgba(74,158,255,.08);
+  background-color: var(--bg-surface);
+  background-image: linear-gradient(rgba(74,158,255,.10), rgba(74,158,255,.10));
 }
 .crew-grid tbody tr:hover td.is-training-col {
-  background: rgba(74,158,255,.14);
+  background-color: var(--bg-hover);
+  background-image: linear-gradient(rgba(74,158,255,.16), rgba(74,158,255,.16));
 }
 .tracker-legend {
   display: inline-flex;
