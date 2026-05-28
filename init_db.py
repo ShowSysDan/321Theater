@@ -456,12 +456,14 @@ CREATE TABLE IF NOT EXISTS crew_members (
     name           TEXT NOT NULL,
     rate_level_id  INTEGER REFERENCES pay_rate_levels(id) ON DELETE SET NULL,
     sort_order     INTEGER DEFAULT 0,
+    training_notes TEXT DEFAULT '',
     created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS crew_qualifications (
     crew_member_id INTEGER NOT NULL REFERENCES crew_members(id) ON DELETE CASCADE,
     position_id    INTEGER NOT NULL REFERENCES job_positions(id) ON DELETE CASCADE,
+    status         INTEGER DEFAULT 2,
     PRIMARY KEY (crew_member_id, position_id)
 );
 
@@ -1690,12 +1692,14 @@ def migrate_db():
             name          TEXT NOT NULL,
             rate_level_id INTEGER REFERENCES pay_rate_levels(id) ON DELETE SET NULL,
             sort_order    INTEGER DEFAULT 0,
+            training_notes TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS crew_qualifications (
             crew_member_id INTEGER NOT NULL REFERENCES crew_members(id) ON DELETE CASCADE,
             position_id    INTEGER NOT NULL REFERENCES job_positions(id) ON DELETE CASCADE,
+            status         INTEGER DEFAULT 2,
             PRIMARY KEY (crew_member_id, position_id)
         );
 
@@ -2076,6 +2080,11 @@ def migrate_db():
         "ALTER TABLE job_positions ADD COLUMN venue TEXT DEFAULT NULL",
         # Training/class positions — tracked in skill tracker, hidden from labor requests/scheduler
         "ALTER TABLE job_positions ADD COLUMN is_training INTEGER DEFAULT 0",
+        # Qualification status: 1=in_progress (half dot), 2=qualified (full dot). Row presence
+        # still means "has progress" — absence means not started.
+        "ALTER TABLE crew_qualifications ADD COLUMN status INTEGER DEFAULT 2",
+        # Per-technician training notes — only shown in the Edit Qualifications dialog.
+        "ALTER TABLE crew_members ADD COLUMN training_notes TEXT DEFAULT ''",
         # Arts group contact & notes fields
         "ALTER TABLE arts_groups ADD COLUMN primary_contact_name TEXT DEFAULT ''",
         "ALTER TABLE arts_groups ADD COLUMN primary_contact_email TEXT DEFAULT ''",
@@ -2683,16 +2692,18 @@ CREATE TABLE IF NOT EXISTS labor_requests (
 );
 
 CREATE TABLE IF NOT EXISTS crew_members (
-    id            SERIAL PRIMARY KEY,
-    name          TEXT NOT NULL,
-    rate_level_id INTEGER REFERENCES pay_rate_levels(id) ON DELETE SET NULL,
-    sort_order    INTEGER DEFAULT 0,
-    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id             SERIAL PRIMARY KEY,
+    name           TEXT NOT NULL,
+    rate_level_id  INTEGER REFERENCES pay_rate_levels(id) ON DELETE SET NULL,
+    sort_order     INTEGER DEFAULT 0,
+    training_notes TEXT DEFAULT '',
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS crew_qualifications (
     crew_member_id INTEGER NOT NULL REFERENCES crew_members(id) ON DELETE CASCADE,
     position_id    INTEGER NOT NULL REFERENCES job_positions(id) ON DELETE CASCADE,
+    status         INTEGER DEFAULT 2,
     PRIMARY KEY (crew_member_id, position_id)
 );
 
@@ -3352,6 +3363,8 @@ def migrate_db_postgres():
             f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS override_rate REAL DEFAULT NULL',
             f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS venue TEXT DEFAULT NULL',
             f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS is_training INTEGER DEFAULT 0',
+            f'ALTER TABLE "{app_schema}".crew_qualifications ADD COLUMN IF NOT EXISTS status INTEGER DEFAULT 2',
+            f'ALTER TABLE "{app_schema}".crew_members ADD COLUMN IF NOT EXISTS training_notes TEXT DEFAULT \'\'',
             f'ALTER TABLE "{app_schema}".form_sections ADD COLUMN IF NOT EXISTS default_open INTEGER DEFAULT 1',
             f'ALTER TABLE "{app_schema}".form_sections ADD COLUMN IF NOT EXISTS asset_category_id INTEGER REFERENCES "{app_schema}".asset_categories(id) ON DELETE SET NULL',
             f'''CREATE TABLE IF NOT EXISTS "{app_schema}".arts_groups (
