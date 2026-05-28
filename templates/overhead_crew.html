@@ -604,8 +604,10 @@
   function buildPositionSelect(selectEl, selectedId, placeholder) {
     selectEl.innerHTML = `<option value="">${placeholder || '— Position —'}</option>`;
     if (!_positions) return;
+    // Training/class positions live in the Skill Tracker only — skip here.
+    const eligible = _positions.filter(p => !p.is_training);
     const byCat = {};
-    _positions.forEach(p => {
+    eligible.forEach(p => {
       const c = p.category_name || 'Other';
       if (!byCat[c]) byCat[c] = [];
       byCat[c].push(p);
@@ -620,6 +622,17 @@
         og.appendChild(opt);
       });
       selectEl.appendChild(og);
+    }
+    // Preserve a legacy/training selection so existing rows keep their label.
+    if (selectedId && !selectEl.querySelector(`option[value="${selectedId}"]`)) {
+      const ghost = _positions.find(p => String(p.id) === String(selectedId));
+      if (ghost) {
+        const opt = document.createElement('option');
+        opt.value = ghost.id;
+        opt.textContent = ghost.name + (ghost.is_training ? ' (training)' : '');
+        opt.selected = true;
+        selectEl.appendChild(opt);
+      }
     }
   }
   /* Build the Requested Tech dropdown. If a position is given, qualified

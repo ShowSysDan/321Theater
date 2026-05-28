@@ -265,8 +265,10 @@
   function buildPositionSelect(selectEl, selectedId) {
     selectEl.innerHTML = '<option value="">— Position —</option>';
     if (!_positions) return;
+    // Training/class positions live in the Skill Tracker only — skip here.
+    const eligible = _positions.filter(p => !p.is_training);
     const byCat = {};
-    _positions.forEach(p => {
+    eligible.forEach(p => {
       const c = p.category_name || 'Other';
       if (!byCat[c]) byCat[c] = [];
       byCat[c].push(p);
@@ -282,6 +284,18 @@
         og.appendChild(opt);
       });
       selectEl.appendChild(og);
+    }
+    // Preserve a legacy/training selection so the row keeps its value visible.
+    if (selectedId && !selectEl.querySelector(`option[value="${selectedId}"]`)) {
+      const ghost = _positions.find(p => String(p.id) === String(selectedId));
+      if (ghost) {
+        const opt = document.createElement('option');
+        opt.value = ghost.id;
+        const tag = ghost.is_training ? ' (training)' : (ghost.venue ? ` (${ghost.venue})` : '');
+        opt.textContent = ghost.name + tag;
+        opt.selected = true;
+        selectEl.appendChild(opt);
+      }
     }
   }
 
