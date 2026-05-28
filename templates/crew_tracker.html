@@ -403,7 +403,13 @@
       {% for cat in categories %}
         {% for pos in cat.positions %}
         {% set st = m.qualification_status.get(pos.id, 0) %}
-        {% set dot_class = 'qualified' if st == 2 else ('in-progress' if st == 1 else '') %}
+        {# In-progress (half) state only applies to training positions; show
+           positions stay binary (empty or qualified). #}
+        {% if pos.is_training %}
+          {% set dot_class = 'qualified' if st == 2 else ('in-progress' if st == 1 else '') %}
+        {% else %}
+          {% set dot_class = 'qualified' if st > 0 else '' %}
+        {% endif %}
         <td data-pid="{{ pos.id }}"{% if pos.is_training %} class="is-training-col"{% endif %}>
           <div class="skill-cell" data-mid="{{ m.id }}" data-pid="{{ pos.id }}" title="{{ pos.name }}{% if pos.is_training %} (training / class){% endif %}">
             <div class="skill-dot {{ dot_class }}"></div>
@@ -413,7 +419,11 @@
       {% endfor %}
       {% for pos in uncategorized_positions %}
       {% set st = m.qualification_status.get(pos.id, 0) %}
-      {% set dot_class = 'qualified' if st == 2 else ('in-progress' if st == 1 else '') %}
+      {% if pos.is_training %}
+        {% set dot_class = 'qualified' if st == 2 else ('in-progress' if st == 1 else '') %}
+      {% else %}
+        {% set dot_class = 'qualified' if st > 0 else '' %}
+      {% endif %}
       <td data-pid="{{ pos.id }}"{% if pos.is_training %} class="is-training-col"{% endif %}>
         <div class="skill-cell" data-mid="{{ m.id }}" data-pid="{{ pos.id }}" title="{{ pos.name }}{% if pos.is_training %} (training / class){% endif %}">
           <div class="skill-dot {{ dot_class }}"></div>
@@ -437,7 +447,9 @@
       <button onclick="closeEditModal()" class="modal-close">×</button>
     </div>
     <div style="padding:8px 18px 0;font-size:11px;color:var(--text-dim)">
-      Click a position to cycle: <span class="edit-dot" style="display:inline-block;vertical-align:middle"></span> none →
+      Show positions: click to toggle qualified.
+      Training positions cycle:
+      <span class="edit-dot" style="display:inline-block;vertical-align:middle"></span> none →
       <span class="edit-dot" style="display:inline-block;vertical-align:middle;background:linear-gradient(90deg,var(--accent) 0 50%,transparent 50% 100%);border-color:var(--accent)"></span> in&nbsp;progress →
       <span class="edit-dot" style="display:inline-block;vertical-align:middle;background:var(--accent);border-color:var(--accent)"></span> qualified
     </div>
@@ -509,7 +521,11 @@ function openEditModal(btn) {
 
     for (const pos of group.positions) {
       const item = document.createElement('div');
-      const initial = statuses[pos.id] || 0;
+      // Normalize: show positions can't be in-progress — coerce 1 → 2 in case
+      // a row exists with the wrong status (e.g. flipped from training back
+      // to show after a tech was mid-training).
+      let initial = statuses[pos.id] || 0;
+      if (!pos.is_training && initial === 1) initial = 2;
       const classes = ['crew-edit-item'];
       if (initial === 1) classes.push('in-progress');
       else if (initial === 2) classes.push('qualified');
@@ -517,7 +533,9 @@ function openEditModal(btn) {
       item.className = classes.join(' ');
       item.dataset.pid = pos.id;
       item.dataset.status = String(initial);
-      item.title = 'Click to cycle: none → in progress → qualified';
+      item.title = pos.is_training
+        ? 'Click to cycle: none → in progress → qualified'
+        : 'Click to toggle qualified';
 
       const dot = document.createElement('span');
       dot.className = 'edit-dot';
@@ -537,7 +555,10 @@ function openEditModal(btn) {
 
       item.addEventListener('click', async () => {
         const prev = parseInt(item.dataset.status, 10) || 0;
-        const next = (prev + 1) % 3;  // 0 → 1 → 2 → 0
+        // Training positions cycle 0 → 1 → 2 → 0; show positions toggle 0 ↔ 2.
+        const next = pos.is_training
+          ? (prev + 1) % 3
+          : (prev === 0 ? 2 : 0);
         item.dataset.status = String(next);
         _applyStatusClass(item, next);
         // Optimistically update grid dot too.
