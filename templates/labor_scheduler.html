@@ -23,6 +23,10 @@
   }
   .sched-check-cell { text-align: center; }
   .sched-check-cell input[type=checkbox] { width: 18px; height: 18px; cursor: pointer; }
+  .sched-training-cell { text-align: center; padding: 2px 4px !important; }
+  .sched-training-cell input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--blue, #4a9eff); }
+  .training-shift-row { background: rgba(74, 158, 255, 0.08); }
+  .training-shift-row.scheduled-row { background: rgba(74, 158, 255, 0.14); }
   .scheduled-row { background: rgba(72, 187, 120, 0.08); }
   .sched-time-input {
     width: 74px;
@@ -314,10 +318,15 @@
     tr.dataset.rid = lr.id;
     tr.dataset.endpointBase = endpointBase || '/api/labor-scheduler';
     if (lr.is_scheduled) tr.classList.add('scheduled-row');
+    if (lr.is_training_shift) tr.classList.add('training-shift-row');
     tr.innerHTML = `
       <td class="sched-check-cell">
         <input type="checkbox" class="sched-check" ${lr.is_scheduled ? 'checked' : ''}
                onchange="window.__scheduler.onScheduledToggle(this)">
+      </td>
+      <td class="sched-training-cell" title="Training shift — this tech is shadowing/learning on this position">
+        <input type="checkbox" class="sched-training" ${lr.is_training_shift ? 'checked' : ''}
+               onchange="window.__scheduler.onTrainingShiftToggle(this)">
       </td>
       <td style="font-size:12px;color:var(--text-dim)">${escapeHtml(lr.work_date || '—')}</td>
       <td>
@@ -428,7 +437,8 @@
       table.innerHTML = `
         <thead>
           <tr>
-            <th style="width:52px;text-align:center">SCHED ✓</th>
+            <th style="width:52px;text-align:center" title="Scheduled — counts toward staffing">SCHED ✓</th>
+            <th style="width:46px;text-align:center" title="Training shift — extra body on this position for learning, doesn't replace the staffed tech">TRAIN</th>
             <th style="width:110px">DATE</th>
             <th style="min-width:160px">POSITION</th>
             <th style="width:72px">IN</th>
@@ -500,7 +510,8 @@
       table.innerHTML = `
         <thead>
           <tr>
-            <th style="width:52px;text-align:center">SCHED ✓</th>
+            <th style="width:52px;text-align:center" title="Scheduled — counts toward staffing">SCHED ✓</th>
+            <th style="width:46px;text-align:center" title="Training shift — extra body on this position for learning, doesn't replace the staffed tech">TRAIN</th>
             <th style="width:110px">DATE</th>
             <th style="min-width:160px">POSITION</th>
             <th style="width:72px">IN</th>
@@ -607,6 +618,17 @@
     if (!res || !res.success) {
       checkbox.checked = !val;
       tr.classList.toggle('scheduled-row', !val);
+    }
+  }
+
+  async function onTrainingShiftToggle(checkbox) {
+    const tr = checkbox.closest('tr');
+    const val = checkbox.checked;
+    tr.classList.toggle('training-shift-row', val);
+    const res = await putSchedulerUpdate(tr, { is_training_shift: val });
+    if (!res || !res.success) {
+      checkbox.checked = !val;
+      tr.classList.toggle('training-shift-row', !val);
     }
   }
 
@@ -895,7 +917,7 @@
     if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
-  window.__scheduler = { onScheduledToggle, onCrewChange, onPositionChange, onTimeChange, addRow, addOverheadRow, removeRow, saveAll, saveShowNotes, saveGroupNotes,
+  window.__scheduler = { onScheduledToggle, onTrainingShiftToggle, onCrewChange, onPositionChange, onTimeChange, addRow, addOverheadRow, removeRow, saveAll, saveShowNotes, saveGroupNotes,
                          openAddShow, closeAddShow, submitAddShow, onPickShow };
   window.loadScheduler = loadScheduler;
 

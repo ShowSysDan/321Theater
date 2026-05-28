@@ -10110,6 +10110,7 @@ def labor_overview():
             lr.in_time, lr.out_time,
             lr.break_start, lr.break_end, lr.break2_start, lr.break2_end,
             lr.is_scheduled,
+            COALESCE(lr.is_training_shift, 0) AS is_training_shift,
             cm.name AS scheduled_tech,
             lr.requested_name AS requested_tech,
             s.labor_notes AS group_notes,
@@ -10139,6 +10140,7 @@ def labor_overview():
             r.in_time, r.out_time,
             r.break_start, r.break_end, r.break2_start, r.break2_end,
             r.is_scheduled,
+            COALESCE(r.is_training_shift, 0) AS is_training_shift,
             cm.name AS scheduled_tech,
             r.requested_name AS requested_tech,
             COALESCE(NULLIF(g.project_notes, ''), p.project_notes, '') AS group_notes,
@@ -10180,6 +10182,7 @@ def labor_overview():
             'out_time': r['out_time'] or '',
             'tech': r['scheduled_tech'] or (r['requested_tech'] or ''),
             'is_scheduled': bool(r['is_scheduled']),
+            'is_training_shift': bool(r['is_training_shift']),
             'pm': r['pm_name'] or '',
             'group_notes': (r['group_notes'] or '').strip() if r['group_notes'] else '',
             'color': '',
@@ -10204,6 +10207,7 @@ def labor_overview():
             'out_time': r['out_time'] or '',
             'tech': r['scheduled_tech'] or (r['requested_tech'] or ''),
             'is_scheduled': bool(r['is_scheduled']),
+            'is_training_shift': bool(r['is_training_shift']),
             'pm': r['contact_name'] or '',
             'group_notes': (r['group_notes'] or '').strip() if r['group_notes'] else '',
             'color': r['project_color'] or '',
@@ -10262,6 +10266,7 @@ def api_labor_scheduler_list():
                lr.in_time, lr.out_time,
                lr.break_start, lr.break_end, lr.break2_start, lr.break2_end,
                lr.requested_name, lr.notes, lr.is_scheduled,
+               COALESCE(lr.is_training_shift, 0) AS is_training_shift,
                lr.scheduled_crew_member_id, lr.sort_order,
                jp.name as position_name,
                pc.name as category_name,
@@ -10358,6 +10363,7 @@ def api_labor_scheduler_list():
                r.in_time, r.out_time,
                r.break_start, r.break_end, r.break2_start, r.break2_end,
                r.requested_name, r.notes, r.is_scheduled,
+               COALESCE(r.is_training_shift, 0) AS is_training_shift,
                r.scheduled_crew_member_id, r.sort_order,
                jp.name AS position_name,
                pc.name AS category_name,
@@ -10435,6 +10441,10 @@ def api_labor_scheduler_update(rid):
         updates.append('is_scheduled=?')
         params.append(1 if data.get('is_scheduled') else 0)
         detail_parts.append(f"is_scheduled={1 if data.get('is_scheduled') else 0}")
+    if 'is_training_shift' in data:
+        updates.append('is_training_shift=?')
+        params.append(1 if data.get('is_training_shift') else 0)
+        detail_parts.append(f"is_training_shift={1 if data.get('is_training_shift') else 0}")
     if 'scheduled_crew_member_id' in data:
         cmid = data.get('scheduled_crew_member_id')
         cmid = int(cmid) if cmid else None
@@ -11402,6 +11412,9 @@ def api_overhead_request_update(rid):
     if 'is_scheduled' in data:
         updates.append('is_scheduled=?'); params.append(1 if data.get('is_scheduled') else 0)
         detail_parts.append(f"sched={1 if data.get('is_scheduled') else 0}")
+    if 'is_training_shift' in data:
+        updates.append('is_training_shift=?'); params.append(1 if data.get('is_training_shift') else 0)
+        detail_parts.append(f"training_shift={1 if data.get('is_training_shift') else 0}")
     if 'scheduled_crew_member_id' in data:
         cmid = data.get('scheduled_crew_member_id')
         cmid = int(cmid) if cmid else None

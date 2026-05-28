@@ -66,6 +66,20 @@
   .lo-time.empty { color: var(--text-muted); }
   .lo-tech.unscheduled { color: var(--text-muted); font-style: italic; }
   .lo-pm { color: var(--text-dim); font-size: 11.5px; }
+  .lo-training-row { background: rgba(74, 158, 255, 0.06); }
+  .lo-training-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 5px;
+    font-family: var(--font-cond, inherit);
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--blue, #4a9eff);
+    background: rgba(74, 158, 255, 0.14);
+    border: 1px solid rgba(74, 158, 255, 0.32);
+    border-radius: 3px;
+    vertical-align: middle;
+  }
   .lo-empty { padding: 18px; text-align: center; color: var(--text-muted); font-size: 12px; }
 
   .lo-color-dot {
@@ -160,7 +174,7 @@
         </td>
       </tr>
       {% endif %}
-      <tr class="lo-row-{{ r.kind }}">
+      <tr class="lo-row-{{ r.kind }}{% if r.is_training_shift %} lo-training-row{% endif %}">
         <td class="lo-name">
           {% if r.color %}<span class="lo-color-dot" style="background: {{ r.color }}"></span>{% endif %}
           {% if r.kind == 'show' %}
@@ -171,7 +185,7 @@
           {% endif %}
         </td>
         <td class="lo-venue">{{ r.venue }}</td>
-        <td>{{ r.position }}</td>
+        <td>{{ r.position }}{% if r.is_training_shift %}<span class="lo-training-badge" title="Training shift — shadowing/learning, doesn't replace the staffed tech">Training</span>{% endif %}</td>
         <td class="lo-time {% if not r.in_time %}empty{% endif %}">{{ r.in_time or '—' }}</td>
         <td class="lo-time {% if not r.break_start %}empty{% endif %}">{{ r.break_start or '—' }}</td>
         <td class="lo-time {% if not r.break_end %}empty{% endif %}">{{ r.break_end or '—' }}</td>
