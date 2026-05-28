@@ -2476,9 +2476,10 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
   function _buildPositionSelect(selectEl, selectedId) {
     selectEl.innerHTML = '<option value="">— Select Position —</option>';
-    // Filter to positions assigned to this show's venue, or positions with no venue (universal)
+    // Filter to positions assigned to this show's venue, or positions with no venue (universal).
+    // Training/class positions are excluded — they only show up in the Skill Tracker.
     const venue = window.SHOW_VENUE || '';
-    const filtered = _laborPositions.filter(p => !p.venue || p.venue === venue);
+    const filtered = _laborPositions.filter(p => !p.is_training && (!p.venue || p.venue === venue));
     const cats = {};
     for (const p of filtered) {
       const cat = p.category_name || 'Other';
@@ -2497,13 +2498,16 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       }
       selectEl.appendChild(og);
     }
-    // If a position is already selected but was filtered out, keep it visible
+    // If a position is already selected but was filtered out (different venue
+    // or flipped to training after the fact), keep it visible so the row
+    // doesn't silently lose its assignment.
     if (selectedId && !selectEl.querySelector(`option[value="${selectedId}"]`)) {
       const ghost = _laborPositions.find(p => p.id == selectedId);
       if (ghost) {
         const opt = document.createElement('option');
         opt.value = ghost.id;
-        opt.textContent = ghost.name + (ghost.venue ? ` (${ghost.venue})` : '');
+        const tag = ghost.is_training ? ' (training)' : (ghost.venue ? ` (${ghost.venue})` : '');
+        opt.textContent = ghost.name + tag;
         opt.selected = true;
         selectEl.appendChild(opt);
       }

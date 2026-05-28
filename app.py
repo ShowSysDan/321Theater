@@ -9640,7 +9640,8 @@ def _ai_extract_impl(show_id):
 def api_job_positions():
     db = get_db()
     rows = db.execute("""
-        SELECT jp.id, jp.category_id, pc.name as category_name, jp.name, jp.venue, jp.sort_order
+        SELECT jp.id, jp.category_id, pc.name as category_name, jp.name, jp.venue,
+               jp.sort_order, COALESCE(jp.is_training, 0) AS is_training
         FROM job_positions jp
         LEFT JOIN position_categories pc ON jp.category_id = pc.id
         ORDER BY pc.sort_order, jp.sort_order, jp.id
@@ -9724,21 +9725,22 @@ def add_job_position():
         return jsonify({'success': False, 'error': 'Name is required.'}), 400
     category_id = data.get('category_id') or None
     venue = (data.get('venue') or '').strip() or None
+    is_training = 1 if data.get('is_training') else 0
     db = get_db()
     max_order = db.execute('SELECT MAX(sort_order) FROM job_positions').fetchone()[0] or 0
     override_rate = data.get('override_rate')
     override_rate = float(override_rate) if override_rate not in (None, '') else None
     cur = db.execute(
-        'INSERT INTO job_positions (category_id, name, venue, override_rate, sort_order) VALUES (?, ?, ?, ?, ?)',
-        (category_id, name, venue, override_rate, max_order + 10)
+        'INSERT INTO job_positions (category_id, name, venue, override_rate, sort_order, is_training) VALUES (?, ?, ?, ?, ?, ?)',
+        (category_id, name, venue, override_rate, max_order + 10, is_training)
     )
     pid = cur.lastrowid
     log_audit_change(db, 'JOB_POSITION_ADD', 'job_position', pid, detail=name,
                      table='job_positions')
     db.commit()
     db.close()
-    syslog_logger.info(f"JOB_POSITION_ADD id={pid} name={name!r} category_id={category_id} by={session.get('username')}")
-    return jsonify({'success': True, 'id': pid, 'name': name})
+    syslog_logger.info(f"JOB_POSITION_ADD id={pid} name={name!r} category_id={category_id} is_training={is_training} by={session.get('username')}")
+    return jsonify({'success': True, 'id': pid, 'name': name, 'is_training': is_training})
 
 
 @app.route('/settings/job-positions/<int:pid>/edit', methods=['POST'])
@@ -9752,18 +9754,19 @@ def edit_job_position(pid):
     venue = (data.get('venue') or '').strip() or None
     override_rate = data.get('override_rate')
     override_rate = float(override_rate) if override_rate not in (None, '') else None
+    is_training = 1 if data.get('is_training') else 0
     db = get_db()
     before = _snapshot_row(db, 'job_positions', pid)
     db.execute(
-        'UPDATE job_positions SET name=?, category_id=?, venue=?, override_rate=? WHERE id=?',
-        (name, category_id, venue, override_rate, pid)
+        'UPDATE job_positions SET name=?, category_id=?, venue=?, override_rate=?, is_training=? WHERE id=?',
+        (name, category_id, venue, override_rate, is_training, pid)
     )
     after = _snapshot_row(db, 'job_positions', pid)
     log_audit(db, 'JOB_POSITION_EDIT', 'job_position', pid, detail=name,
               before=before, after=after)
     db.commit()
     db.close()
-    syslog_logger.info(f"JOB_POSITION_EDIT id={pid} name={name!r} category_id={category_id} by={session.get('username')}")
+    syslog_logger.info(f"JOB_POSITION_EDIT id={pid} name={name!r} category_id={category_id} is_training={is_training} by={session.get('username')}")
     return jsonify({'success': True})
 
 

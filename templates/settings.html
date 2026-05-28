@@ -1255,18 +1255,25 @@
           </div>
           <button class="btn btn-primary" onclick="addPosition()" style="align-self:flex-end">Add</button>
         </div>
+        <div style="margin-top:8px;display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="new-pos-training" style="margin:0">
+          <label for="new-pos-training" style="font-size:12px;color:var(--text-dim);cursor:pointer">
+            Training / class only — track in Skill Tracker, hide from labor requests &amp; scheduler
+          </label>
+        </div>
         <div id="pos-msg" class="field-msg" style="display:none;margin-top:6px"></div>
       </div>
       <div class="form-section-body no-pad">
         <table class="data-table" id="positions-table">
-          <thead><tr><th>POSITION NAME</th><th>VENUE</th><th>CATEGORY</th><th style="text-align:right">RATE</th><th style="width:70px">ACTIONS</th></tr></thead>
+          <thead><tr><th>POSITION NAME</th><th>VENUE</th><th>CATEGORY</th><th style="text-align:right">RATE</th><th style="width:80px">TYPE</th><th style="width:70px">ACTIONS</th></tr></thead>
           <tbody id="positions-tbody">
             {% for pos in job_positions %}
-            <tr data-pid="{{ pos.id }}">
+            <tr data-pid="{{ pos.id }}" data-training="{{ '1' if pos.is_training else '0' }}">
               <td id="pos-name-{{ pos.id }}">{{ pos.name }}</td>
               <td class="text-dim" id="pos-venue-{{ pos.id }}" data-venue="{{ pos.venue or '' }}">{{ pos.venue or 'All' }}</td>
               <td class="text-dim" id="pos-cat-{{ pos.id }}" data-cat-id="{{ pos.category_id or '' }}">{{ pos.category_name or '—' }}</td>
               <td id="pos-rate-{{ pos.id }}" style="text-align:right" class="mono text-dim">{% if pos.override_rate is not none and pos.override_rate != '' %}${{ '%.2f' | format(pos.override_rate) }}/hr{% else %}—{% endif %}</td>
+              <td id="pos-type-{{ pos.id }}">{% if pos.is_training %}<span class="pos-training-badge">Training</span>{% else %}<span class="text-dim">Show</span>{% endif %}</td>
               <td>
                 <div class="action-btns">
                   <button class="btn btn-xs btn-ghost" onclick="editPosition(this)">✎</button>
@@ -1275,7 +1282,7 @@
               </td>
             </tr>
             {% else %}
-            <tr id="pos-empty"><td colspan="5" class="text-dim" style="text-align:center;padding:16px">No positions yet.</td></tr>
+            <tr id="pos-empty"><td colspan="6" class="text-dim" style="text-align:center;padding:16px">No positions yet.</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -3321,11 +3328,12 @@ async function addPosition() {
   const catName = catSel.options[catSel.selectedIndex]?.text || '—';
   const overrideRateVal = document.getElementById('new-pos-rate').value;
   const override_rate = overrideRateVal !== '' ? parseFloat(overrideRateVal) : null;
+  const is_training = document.getElementById('new-pos-training').checked;
   if (!name) return;
   const msg = document.getElementById('pos-msg');
   const r = await fetch('/settings/job-positions/add', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({name, venue: venue || null, category_id, override_rate})
+    body: JSON.stringify({name, venue: venue || null, category_id, override_rate, is_training})
   });
   const d = await r.json();
   msg.style.display = '';
@@ -3333,14 +3341,17 @@ async function addPosition() {
     msg.className = 'field-msg field-msg-success'; msg.textContent = 'Position added.';
     document.getElementById('new-pos-name').value = '';
     document.getElementById('new-pos-rate').value = '';
+    document.getElementById('new-pos-training').checked = false;
     document.getElementById('pos-empty')?.remove();
     const tbody = document.getElementById('positions-tbody');
     const rateLabel = override_rate !== null ? `$${override_rate.toFixed(2)}/hr` : '—';
-    const tr = document.createElement('tr'); tr.dataset.pid = d.id;
+    const typeLabel = is_training ? '<span class="pos-training-badge">Training</span>' : '<span class="text-dim">Show</span>';
+    const tr = document.createElement('tr'); tr.dataset.pid = d.id; tr.dataset.training = is_training ? '1' : '0';
     tr.innerHTML = `<td id="pos-name-${d.id}">${_esc(d.name)}</td>
       <td class="text-dim" id="pos-venue-${d.id}" data-venue="${_esc(venue)}">${_esc(venue) || 'All'}</td>
       <td class="text-dim" id="pos-cat-${d.id}" data-cat-id="${category_id || ''}">${_esc(catName)}</td>
       <td id="pos-rate-${d.id}" style="text-align:right" class="mono text-dim">${rateLabel}</td>
+      <td id="pos-type-${d.id}">${typeLabel}</td>
       <td><div class="action-btns">
         <button class="btn btn-xs btn-ghost" onclick="editPosition(this)">✎</button>
         <button class="btn btn-xs btn-danger-ghost" onclick="deletePosition(${d.id})">×</button>
@@ -3358,6 +3369,7 @@ function editPosition(btn) {
   const venueEl = document.getElementById('pos-venue-' + pid);
   const catEl   = document.getElementById('pos-cat-'   + pid);
   const rateEl  = document.getElementById('pos-rate-'  + pid);
+  const typeEl  = document.getElementById('pos-type-'  + pid);
   if (!nameEl || nameEl.querySelector('input')) return;
   const origName     = nameEl.textContent.trim();
   const origVenue    = venueEl?.dataset.venue || '';
@@ -3366,6 +3378,8 @@ function editPosition(btn) {
   const origCatText  = catEl?.textContent.trim() || '—';
   const origRateText = rateEl?.textContent.trim() || '—';
   const origRateVal  = origRateText !== '—' ? origRateText.replace(/[^0-9.]/g,'') : '';
+  const origTraining = tr.dataset.training === '1';
+  const origTypeHtml = typeEl?.innerHTML || '';
 
   nameEl.innerHTML = '';
   const inp = document.createElement('input');
@@ -3401,17 +3415,34 @@ function editPosition(btn) {
   rateInp.step = '0.01'; rateInp.min = '0';
   rateInp.className = 'field-input field-input-sm'; rateInp.style.cssText = 'width:70px;text-align:right';
 
-  const restore = () => { nameEl.textContent = origName; venueEl.textContent = origVenueText; venueEl.dataset.venue = origVenue; catEl.textContent = origCatText; catEl.dataset.catId = origCatId; rateEl.textContent = origRateText; };
+  const trainingWrap = document.createElement('label');
+  trainingWrap.style.cssText = 'display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-dim);cursor:pointer';
+  trainingWrap.title = 'Training / class only — track in Skill Tracker, hide from labor';
+  const trainingCb = document.createElement('input');
+  trainingCb.type = 'checkbox'; trainingCb.checked = origTraining;
+  trainingCb.style.margin = '0';
+  trainingWrap.appendChild(trainingCb);
+  trainingWrap.appendChild(document.createTextNode('Training'));
+  if (typeEl) { typeEl.innerHTML = ''; typeEl.appendChild(trainingWrap); }
+
+  const restore = () => {
+    nameEl.textContent = origName;
+    venueEl.textContent = origVenueText; venueEl.dataset.venue = origVenue;
+    catEl.textContent = origCatText; catEl.dataset.catId = origCatId;
+    rateEl.textContent = origRateText;
+    if (typeEl) typeEl.innerHTML = origTypeHtml;
+  };
   const save = async () => {
     const name = inp.value.trim();
     const venue = vSel.value || null;
     const category_id = cSel.value || null;
     const rateStr = rateInp.value.trim();
     const override_rate = rateStr !== '' ? parseFloat(rateStr) : null;
+    const is_training = trainingCb.checked;
     if (!name) { restore(); return; }
     const r = await fetch(`/settings/job-positions/${pid}/edit`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name, venue, category_id, override_rate})
+      body: JSON.stringify({name, venue, category_id, override_rate, is_training})
     });
     const d = await r.json();
     if (d.success) {
@@ -3420,15 +3451,19 @@ function editPosition(btn) {
       const catName = cSel.options[cSel.selectedIndex]?.text || '—';
       catEl.textContent = catName; catEl.dataset.catId = category_id || '';
       rateEl.textContent = override_rate !== null ? `$${override_rate.toFixed(2)}/hr` : '—';
+      tr.dataset.training = is_training ? '1' : '0';
+      if (typeEl) typeEl.innerHTML = is_training
+        ? '<span class="pos-training-badge">Training</span>'
+        : '<span class="text-dim">Show</span>';
     } else { restore(); alert(d.error || 'Error updating position.'); }
   };
   const onKey = e => { if (e.key === 'Enter') { e.preventDefault(); save(); } if (e.key === 'Escape') restore(); };
-  [inp, vSel, cSel, rateInp].forEach(el => el.addEventListener('keydown', onKey));
+  [inp, vSel, cSel, rateInp, trainingCb].forEach(el => el.addEventListener('keydown', onKey));
   let _t = null;
   const sched = () => { _t = setTimeout(save, 200); };
   const cancel = () => clearTimeout(_t);
-  [inp, vSel, cSel, rateInp].forEach(el => { el.addEventListener('blur', sched); el.addEventListener('focus', cancel); });
-  [vSel, cSel].forEach(el => el.addEventListener('change', () => { cancel(); save(); }));
+  [inp, vSel, cSel, rateInp, trainingCb].forEach(el => { el.addEventListener('blur', sched); el.addEventListener('focus', cancel); });
+  [vSel, cSel, trainingCb].forEach(el => el.addEventListener('change', () => { cancel(); save(); }));
   nameEl.appendChild(inp); venueEl.appendChild(vSel); catEl.appendChild(cSel);
   if (rateEl) { rateEl.innerHTML = ''; rateEl.appendChild(rateInp); }
   inp.focus(); inp.select();
@@ -3441,7 +3476,7 @@ async function deletePosition(pid) {
   if (d.success) {
     document.querySelector(`#positions-tbody tr[data-pid="${pid}"]`)?.remove();
     if (!document.querySelector('#positions-tbody tr')) {
-      const td = document.createElement('td'); td.colSpan = 5; td.className = 'text-dim';
+      const td = document.createElement('td'); td.colSpan = 6; td.className = 'text-dim';
       td.style.textAlign = 'center'; td.style.padding = '16px';
       td.textContent = 'No positions yet.';
       const tr = document.createElement('tr'); tr.id = 'pos-empty'; tr.appendChild(td);

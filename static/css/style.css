@@ -989,6 +989,7 @@ html[data-theme="light"] select.field-input {
 .role-staff { background: rgba(74,158,255,.12); color: var(--blue); }
 .role-user  { background: var(--bg-surface); color: var(--text-dim); }
 .dept-badge { display: inline-block; padding: 2px 7px; border-radius: 3px; font-size: 11px; background: var(--bg-surface); color: var(--text-dim); border: 1px solid var(--border); }
+.pos-training-badge { display: inline-block; padding: 2px 7px; border-radius: 3px; font-family: var(--font-cond); font-size: 10px; font-weight: 700; letter-spacing: 0.08em; background: rgba(74,158,255,.14); color: var(--blue); border: 1px solid rgba(74,158,255,.32); text-transform: uppercase; }
 .recipient-dot {
   display: inline-block; width: 12px; height: 12px; border-radius: 50%;
   border: 2px solid var(--border-light); background: transparent; flex-shrink: 0;

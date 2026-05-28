@@ -109,6 +109,39 @@
   padding: 0 4px;
 }
 
+/* Training/class column — flagged with a blue tint so the eye can pick it
+   out at a glance from regular show positions. */
+.crew-grid .pos-header.is-training {
+  background: rgba(74,158,255,.10);
+  border-bottom: 2px solid var(--blue);
+}
+.crew-grid .pos-header.is-training span { color: var(--blue); }
+.crew-grid td.is-training-col {
+  background: rgba(74,158,255,.05);
+}
+.crew-grid tbody tr:nth-child(even) td.is-training-col {
+  background: rgba(74,158,255,.08);
+}
+.crew-grid tbody tr:hover td.is-training-col {
+  background: rgba(74,158,255,.14);
+}
+.tracker-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-left: auto;
+}
+.tracker-legend .swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: rgba(74,158,255,.18);
+  border: 1px solid rgba(74,158,255,.4);
+}
+
 /* Grid cells */
 .crew-grid td {
   border-bottom: 1px solid var(--border);
@@ -184,7 +217,9 @@
 }
 .crew-edit-item:hover { background: var(--bg-hover); }
 .crew-edit-item.qualified { border-color: var(--accent); background: var(--accent-glow); }
+.crew-edit-item.is-training { border-left: 3px solid var(--blue); }
 .crew-edit-item input[type="checkbox"] { accent-color: var(--accent); }
+.crew-edit-item .training-tag { font-size: 9px; color: var(--blue); margin-left: 6px; letter-spacing: 0.08em; text-transform: uppercase; }
 .crew-edit-category {
   font-size: 10px; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.08em; color: var(--accent); margin-top: 12px; margin-bottom: 4px;
@@ -233,19 +268,25 @@
   <button class="btn btn-ghost btn-sm" onclick="sortCrewAlpha(false)">Sort A–Z</button>
   <button class="btn btn-ghost btn-sm" onclick="sortCrewAlpha(true)">Sort Z–A</button>
   <button class="btn btn-ghost btn-sm" onclick="sortCrewByCategory()">Sort by Category</button>
+  <select id="type-filter" class="field-input field-input-sm" style="width:auto;min-width:160px" onchange="filterByType(this.value)" title="Show / training filter">
+    <option value="all">All positions</option>
+    <option value="show">Show positions only</option>
+    <option value="training">Training / classes only</option>
+  </select>
   <select id="skill-filter" class="field-input field-input-sm" style="width:auto;min-width:160px" onchange="filterBySkill(this.value)">
-    <option value="">— Show all —</option>
+    <option value="">— Show all skills —</option>
     {% for cat in categories %}{% if cat.positions %}
     <optgroup label="{{ cat.name }}">
-      {% for pos in cat.positions %}<option value="{{ pos.id }}">{{ pos.name }}</option>{% endfor %}
+      {% for pos in cat.positions %}<option value="{{ pos.id }}" data-training="{{ '1' if pos.is_training else '0' }}">{{ pos.name }}{% if pos.is_training %} (training){% endif %}</option>{% endfor %}
     </optgroup>
     {% endif %}{% endfor %}
     {% if uncategorized_positions %}
     <optgroup label="Other">
-      {% for pos in uncategorized_positions %}<option value="{{ pos.id }}">{{ pos.name }}</option>{% endfor %}
+      {% for pos in uncategorized_positions %}<option value="{{ pos.id }}" data-training="{{ '1' if pos.is_training else '0' }}">{{ pos.name }}{% if pos.is_training %} (training){% endif %}</option>{% endfor %}
     </optgroup>
     {% endif %}
   </select>
+  <span class="tracker-legend"><span class="swatch"></span> Training / class column</span>
 </div>
 
 <div class="crew-tracker-wrap">
@@ -271,11 +312,11 @@
       <th class="name-col" style="border-left:none;border-bottom:1px solid var(--border);"></th>
       {% for cat in categories %}
         {% for pos in cat.positions %}
-        <th class="pos-header" data-pid="{{ pos.id }}"><span title="{{ pos.name }}">{{ pos.name }}</span></th>
+        <th class="pos-header{% if pos.is_training %} is-training{% endif %}" data-pid="{{ pos.id }}" data-training="{{ '1' if pos.is_training else '0' }}"><span title="{{ pos.name }}{% if pos.is_training %} (training / class){% endif %}">{{ pos.name }}</span></th>
         {% endfor %}
       {% endfor %}
       {% for pos in uncategorized_positions %}
-      <th class="pos-header" data-pid="{{ pos.id }}"><span title="{{ pos.name }}">{{ pos.name }}</span></th>
+      <th class="pos-header{% if pos.is_training %} is-training{% endif %}" data-pid="{{ pos.id }}" data-training="{{ '1' if pos.is_training else '0' }}"><span title="{{ pos.name }}{% if pos.is_training %} (training / class){% endif %}">{{ pos.name }}</span></th>
       {% endfor %}
     </tr>
   </thead>
@@ -296,8 +337,8 @@
       {% for cat in categories %}
         {% for pos in cat.positions %}
         {% set qualified = pos.id in m.qualifications %}
-        <td>
-          <div class="skill-cell" data-mid="{{ m.id }}" data-pid="{{ pos.id }}" title="{{ pos.name }}">
+        <td data-pid="{{ pos.id }}"{% if pos.is_training %} class="is-training-col"{% endif %}>
+          <div class="skill-cell" data-mid="{{ m.id }}" data-pid="{{ pos.id }}" title="{{ pos.name }}{% if pos.is_training %} (training / class){% endif %}">
             <div class="skill-dot {{ 'qualified' if qualified else '' }}"></div>
           </div>
         </td>
@@ -305,8 +346,8 @@
       {% endfor %}
       {% for pos in uncategorized_positions %}
       {% set qualified = pos.id in m.qualifications %}
-      <td>
-        <div class="skill-cell" data-mid="{{ m.id }}" data-pid="{{ pos.id }}" title="{{ pos.name }}">
+      <td data-pid="{{ pos.id }}"{% if pos.is_training %} class="is-training-col"{% endif %}>
+        <div class="skill-cell" data-mid="{{ m.id }}" data-pid="{{ pos.id }}" title="{{ pos.name }}{% if pos.is_training %} (training / class){% endif %}">
           <div class="skill-dot {{ 'qualified' if qualified else '' }}"></div>
         </div>
       </td>
@@ -373,7 +414,10 @@ function openEditModal(btn) {
 
     for (const pos of group.positions) {
       const item = document.createElement('label');
-      item.className = 'crew-edit-item' + (qualSet.has(pos.id) ? ' qualified' : '');
+      const classes = ['crew-edit-item'];
+      if (qualSet.has(pos.id)) classes.push('qualified');
+      if (pos.is_training) classes.push('is-training');
+      item.className = classes.join(' ');
       item.dataset.pid = pos.id;
 
       const cb = document.createElement('input');
@@ -417,6 +461,12 @@ function openEditModal(btn) {
 
       item.appendChild(cb);
       item.appendChild(document.createTextNode(pos.name));
+      if (pos.is_training) {
+        const tag = document.createElement('span');
+        tag.className = 'training-tag';
+        tag.textContent = 'Training';
+        item.appendChild(tag);
+      }
       grid.appendChild(item);
     }
     body.appendChild(grid);
@@ -440,28 +490,90 @@ function sortCrewAlpha(reverse) {
   rows.forEach(r => tbody.appendChild(r));
 }
 
+const TOTAL_MEMBERS = {{ members|length }};
+
+function _visiblePositionsCount() {
+  let n = 0;
+  document.querySelectorAll('#crew-grid thead tr:nth-child(2) th.pos-header').forEach(th => {
+    if (th.style.display !== 'none') n++;
+  });
+  return n;
+}
+
+function _refreshCount() {
+  const countEl = document.getElementById('tracker-count');
+  if (!countEl) return;
+  const visiblePos = _visiblePositionsCount();
+  const skillSel = document.getElementById('skill-filter');
+  const posId = skillSel ? skillSel.value : '';
+  if (posId) {
+    let visibleMembers = 0;
+    document.querySelectorAll('#crew-tbody tr').forEach(tr => {
+      if (tr.style.display !== 'none') visibleMembers++;
+    });
+    const posName = skillSel.selectedOptions[0]?.text || '';
+    countEl.innerHTML = `${visibleMembers} of ${TOTAL_MEMBERS} technicians qualified for <strong>${posName}</strong> &nbsp;·&nbsp; ${visiblePos} positions`;
+  } else {
+    countEl.innerHTML = `${TOTAL_MEMBERS} technicians &nbsp;·&nbsp; ${visiblePos} positions`;
+  }
+}
+
 function filterBySkill(posId) {
   const tbody = document.getElementById('crew-tbody');
-  let visible = 0;
   tbody.querySelectorAll('tr').forEach(tr => {
     if (!posId) {
       tr.style.display = '';
-      visible++;
       return;
     }
     const quals = JSON.parse(tr.dataset.quals || '[]');
-    const show = quals.includes(parseInt(posId));
-    tr.style.display = show ? '' : 'none';
-    if (show) visible++;
+    tr.style.display = quals.includes(parseInt(posId)) ? '' : 'none';
   });
-  const total = {{ members|length }};
-  const posName = posId ? document.getElementById('skill-filter').selectedOptions[0]?.text : null;
-  const countEl = document.getElementById('tracker-count');
-  if (posId) {
-    countEl.innerHTML = `${visible} of ${total} technicians qualified for <strong>${posName}</strong> &nbsp;·&nbsp; {{ all_positions|length }} positions`;
-  } else {
-    countEl.innerHTML = `${total} technicians &nbsp;·&nbsp; {{ all_positions|length }} positions`;
-  }
+  _refreshCount();
+}
+
+/* Show only show-positions, only training/classes, or all.
+   Hides position columns (header + body cell) and any now-empty category
+   header so the grid stays compact. */
+function filterByType(mode) {
+  const grid = document.getElementById('crew-grid');
+  if (!grid) return;
+  const headerRow = grid.querySelector('thead tr:first-child');
+  const posHeaders = grid.querySelectorAll('thead tr:nth-child(2) th.pos-header');
+  const visiblePidSet = new Set();
+  posHeaders.forEach(th => {
+    const isTraining = th.dataset.training === '1';
+    let show;
+    if (mode === 'training') show = isTraining;
+    else if (mode === 'show') show = !isTraining;
+    else show = true;
+    th.style.display = show ? '' : 'none';
+    if (show) visiblePidSet.add(th.dataset.pid);
+  });
+  grid.querySelectorAll('tbody td[data-pid]').forEach(td => {
+    td.style.display = visiblePidSet.has(td.dataset.pid) ? '' : 'none';
+  });
+  // Recompute colspan of each category header from its original span so the
+  // top row collapses cleanly when columns are hidden.
+  const catHeaders = headerRow.querySelectorAll('th.cat-header:not(.name-col)');
+  const flatHeaders = Array.from(posHeaders);
+  let posIndex = 0;
+  catHeaders.forEach(ch => {
+    const origSpan = parseInt(ch.dataset.origSpan || ch.getAttribute('colspan') || '1', 10);
+    if (!ch.dataset.origSpan) ch.dataset.origSpan = String(origSpan);
+    let visibleInCat = 0;
+    for (let i = 0; i < origSpan; i++) {
+      const h = flatHeaders[posIndex + i];
+      if (h && h.style.display !== 'none') visibleInCat++;
+    }
+    if (visibleInCat === 0) {
+      ch.style.display = 'none';
+    } else {
+      ch.style.display = '';
+      ch.setAttribute('colspan', String(visibleInCat));
+    }
+    posIndex += origSpan;
+  });
+  _refreshCount();
 }
 
 function sortCrewByCategory() {

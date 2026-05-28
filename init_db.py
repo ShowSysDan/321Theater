@@ -421,7 +421,8 @@ CREATE TABLE IF NOT EXISTS job_positions (
     name          TEXT NOT NULL,
     venue         TEXT DEFAULT NULL,
     override_rate REAL DEFAULT NULL,
-    sort_order    INTEGER DEFAULT 0
+    sort_order    INTEGER DEFAULT 0,
+    is_training   INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS labor_requests (
@@ -1662,7 +1663,8 @@ def migrate_db():
             category_id   INTEGER REFERENCES position_categories(id) ON DELETE SET NULL,
             name          TEXT NOT NULL,
             override_rate REAL DEFAULT NULL,
-            sort_order    INTEGER DEFAULT 0
+            sort_order    INTEGER DEFAULT 0,
+            is_training   INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS labor_requests (
@@ -2072,6 +2074,8 @@ def migrate_db():
         "ALTER TABLE job_positions ADD COLUMN override_rate REAL DEFAULT NULL",
         # Venue field on job positions (replaces is_venue category approach)
         "ALTER TABLE job_positions ADD COLUMN venue TEXT DEFAULT NULL",
+        # Training/class positions — tracked in skill tracker, hidden from labor requests/scheduler
+        "ALTER TABLE job_positions ADD COLUMN is_training INTEGER DEFAULT 0",
         # Arts group contact & notes fields
         "ALTER TABLE arts_groups ADD COLUMN primary_contact_name TEXT DEFAULT ''",
         "ALTER TABLE arts_groups ADD COLUMN primary_contact_email TEXT DEFAULT ''",
@@ -2656,7 +2660,8 @@ CREATE TABLE IF NOT EXISTS job_positions (
     category_id   INTEGER REFERENCES position_categories(id) ON DELETE SET NULL,
     name          TEXT NOT NULL,
     override_rate REAL DEFAULT NULL,
-    sort_order    INTEGER DEFAULT 0
+    sort_order    INTEGER DEFAULT 0,
+    is_training   INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS labor_requests (
@@ -3346,6 +3351,7 @@ def migrate_db_postgres():
             f'ALTER TABLE "{app_schema}".crew_members ADD COLUMN IF NOT EXISTS rate_level_id INTEGER',
             f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS override_rate REAL DEFAULT NULL',
             f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS venue TEXT DEFAULT NULL',
+            f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS is_training INTEGER DEFAULT 0',
             f'ALTER TABLE "{app_schema}".form_sections ADD COLUMN IF NOT EXISTS default_open INTEGER DEFAULT 1',
             f'ALTER TABLE "{app_schema}".form_sections ADD COLUMN IF NOT EXISTS asset_category_id INTEGER REFERENCES "{app_schema}".asset_categories(id) ON DELETE SET NULL',
             f'''CREATE TABLE IF NOT EXISTS "{app_schema}".arts_groups (
