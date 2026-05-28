@@ -478,6 +478,16 @@ CREATE TABLE IF NOT EXISTS labor_billable_items (
     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Which billable items apply to which show. Row presence = item is charged.
+-- On show creation we seed all current items so the legacy "applies to every
+-- show" behaviour is preserved; the PM can then deselect on the show's
+-- staffing tab.
+CREATE TABLE IF NOT EXISTS show_labor_billable_items (
+    show_id          INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    billable_item_id INTEGER NOT NULL REFERENCES labor_billable_items(id) ON DELETE CASCADE,
+    PRIMARY KEY (show_id, billable_item_id)
+);
+
 -- Overhead & Project Crew (labor not tied to any show)
 --
 -- Projects are the equivalent of "arts groups" for overhead/project crew —
@@ -1714,6 +1724,12 @@ def migrate_db():
             created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS show_labor_billable_items (
+            show_id          INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+            billable_item_id INTEGER NOT NULL REFERENCES labor_billable_items(id) ON DELETE CASCADE,
+            PRIMARY KEY (show_id, billable_item_id)
+        );
+
         CREATE TABLE IF NOT EXISTS overhead_projects (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             name          TEXT UNIQUE NOT NULL,
@@ -2094,6 +2110,18 @@ def migrate_db():
         # as the staffed slot.
         "ALTER TABLE labor_requests ADD COLUMN is_training_shift INTEGER DEFAULT 0",
         "ALTER TABLE overhead_labor_requests ADD COLUMN is_training_shift INTEGER DEFAULT 0",
+        # Per-show billable items selection — PM picks which "per-crew" extras
+        # apply to a given show instead of every item applying to every show.
+        """CREATE TABLE IF NOT EXISTS show_labor_billable_items (
+            show_id          INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+            billable_item_id INTEGER NOT NULL REFERENCES labor_billable_items(id) ON DELETE CASCADE,
+            PRIMARY KEY (show_id, billable_item_id)
+        )""",
+        # Seed every existing show with every existing item so the prior
+        # "applies to every show" behaviour stays intact post-migration. The
+        # OR IGNORE handles re-running the migration safely.
+        """INSERT OR IGNORE INTO show_labor_billable_items (show_id, billable_item_id)
+           SELECT s.id, b.id FROM shows s CROSS JOIN labor_billable_items b""",
         # Arts group contact & notes fields
         "ALTER TABLE arts_groups ADD COLUMN primary_contact_name TEXT DEFAULT ''",
         "ALTER TABLE arts_groups ADD COLUMN primary_contact_email TEXT DEFAULT ''",
@@ -2723,6 +2751,12 @@ CREATE TABLE IF NOT EXISTS labor_billable_items (
     cost_per_crew REAL DEFAULT 0.0,
     sort_order    INTEGER DEFAULT 0,
     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS show_labor_billable_items (
+    show_id          INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    billable_item_id INTEGER NOT NULL REFERENCES labor_billable_items(id) ON DELETE CASCADE,
+    PRIMARY KEY (show_id, billable_item_id)
 );
 
 CREATE TABLE IF NOT EXISTS overhead_projects (
@@ -3378,6 +3412,16 @@ def migrate_db_postgres():
             f'ALTER TABLE "{app_schema}".crew_members ADD COLUMN IF NOT EXISTS training_notes TEXT DEFAULT \'\'',
             f'ALTER TABLE "{app_schema}".labor_requests ADD COLUMN IF NOT EXISTS is_training_shift INTEGER DEFAULT 0',
             f'ALTER TABLE "{app_schema}".overhead_labor_requests ADD COLUMN IF NOT EXISTS is_training_shift INTEGER DEFAULT 0',
+            f'''CREATE TABLE IF NOT EXISTS "{app_schema}".show_labor_billable_items (
+                show_id          INTEGER NOT NULL REFERENCES "{app_schema}".shows(id) ON DELETE CASCADE,
+                billable_item_id INTEGER NOT NULL REFERENCES "{app_schema}".labor_billable_items(id) ON DELETE CASCADE,
+                PRIMARY KEY (show_id, billable_item_id)
+            )''',
+            f'''INSERT INTO "{app_schema}".show_labor_billable_items (show_id, billable_item_id)
+                SELECT s.id, b.id
+                FROM "{app_schema}".shows s
+                CROSS JOIN "{app_schema}".labor_billable_items b
+                ON CONFLICT DO NOTHING''',
             f'ALTER TABLE "{app_schema}".form_sections ADD COLUMN IF NOT EXISTS default_open INTEGER DEFAULT 1',
             f'ALTER TABLE "{app_schema}".form_sections ADD COLUMN IF NOT EXISTS asset_category_id INTEGER REFERENCES "{app_schema}".asset_categories(id) ON DELETE SET NULL',
             f'''CREATE TABLE IF NOT EXISTS "{app_schema}".arts_groups (

@@ -3290,6 +3290,7 @@ def new_show():
                 VALUES (?, ?, ?, 0)
             """, (show_id, show_date, show_time))
 
+        _seed_show_billable_items(db, show_id)
         log_audit(db, 'SHOW_CREATE', 'show', show_id, show_id=show_id,
                   after={'name': name, 'show_date': show_date, 'venue': venue})
         db.commit()
@@ -9947,6 +9948,28 @@ def reorder_labor_requests(show_id):
 
 # ─── Labor Scheduler ─────────────────────────────────────────────────────────
 
+def _seed_show_billable_items(db, show_id):
+    """Attach every currently-configured billable item to a freshly-created
+    show, preserving the legacy "applies to every show" default. The PM can
+    deselect from the show's staffing tab."""
+    db.execute(
+        'INSERT OR IGNORE INTO show_labor_billable_items (show_id, billable_item_id) '
+        'SELECT ?, id FROM labor_billable_items',
+        (show_id,)
+    )
+
+
+def _attach_billable_item_to_active_shows(db, billable_item_id):
+    """When a new billable item is added in Settings, attach it to every
+    non-archived show so the existing per-show charge behaviour continues
+    without requiring PMs to opt-in for every show."""
+    db.execute(
+        'INSERT OR IGNORE INTO show_labor_billable_items (show_id, billable_item_id) '
+        "SELECT id, ? FROM shows WHERE COALESCE(status, 'active') != 'archived'",
+        (billable_item_id,)
+    )
+
+
 def _calc_labor_cost_for_show(db, show_id):
     """Return labor line items and total cost for a show.
 
@@ -9996,9 +10019,16 @@ def _calc_labor_cost_for_show(db, show_id):
         })
 
     if scheduled_count > 0:
+        # Only items the PM has selected for this show. Defaults are seeded
+        # at show-creation time so legacy "applies to every show" behaviour
+        # stays intact until the PM deselects something.
         billable_items = db.execute(
-            'SELECT id, name, cost_per_crew FROM labor_billable_items '
-            'ORDER BY sort_order, name'
+            'SELECT b.id, b.name, b.cost_per_crew '
+            'FROM labor_billable_items b '
+            'JOIN show_labor_billable_items sb '
+            '  ON sb.billable_item_id = b.id AND sb.show_id = ? '
+            'ORDER BY b.sort_order, b.name',
+            (show_id,)
         ).fetchall()
         for item in billable_items:
             cost_each = float(item['cost_per_crew'] or 0)
@@ -10068,6 +10098,69 @@ def show_labor_cost(show_id):
     lines, total = _calc_labor_cost_for_show(db, show_id)
     db.close()
     return jsonify({'lines': lines, 'total': total})
+
+
+@app.route('/shows/<int:show_id>/billable-items', methods=['GET'])
+@login_required
+def get_show_billable_items(show_id):
+    """List every configured billable item plus a `selected` flag indicating
+    whether it currently applies to this show."""
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    db = get_db()
+    rows = db.execute("""
+        SELECT b.id, b.name, b.cost_per_crew,
+               CASE WHEN sb.show_id IS NULL THEN 0 ELSE 1 END AS selected
+        FROM labor_billable_items b
+        LEFT JOIN show_labor_billable_items sb
+          ON sb.billable_item_id = b.id AND sb.show_id = ?
+        ORDER BY b.sort_order, b.name
+    """, (show_id,)).fetchall()
+    db.close()
+    return jsonify({'items': [dict(r) for r in rows]})
+
+
+@app.route('/shows/<int:show_id>/billable-items', methods=['PUT'])
+@login_required
+def set_show_billable_items(show_id):
+    """Replace the show's billable item selection with the provided ids."""
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_readonly') or session.get('is_restricted'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    data = request.get_json(force=True) or {}
+    raw_ids = data.get('billable_item_ids') or []
+    ids = []
+    for v in raw_ids:
+        try:
+            ids.append(int(v))
+        except (TypeError, ValueError):
+            continue
+    db = get_db()
+    if ids:
+        # Restrict to ids that actually exist in the catalogue.
+        placeholders = ','.join(['?'] * len(ids))
+        valid_rows = db.execute(
+            f'SELECT id FROM labor_billable_items WHERE id IN ({placeholders})',
+            ids
+        ).fetchall()
+        valid_ids = [r['id'] for r in valid_rows]
+    else:
+        valid_ids = []
+    db.execute('DELETE FROM show_labor_billable_items WHERE show_id=?', (show_id,))
+    for bid in valid_ids:
+        db.execute(
+            'INSERT INTO show_labor_billable_items (show_id, billable_item_id) VALUES (?, ?)',
+            (show_id, bid)
+        )
+    log_audit(db, 'SHOW_BILLABLES_EDIT', 'show', show_id, show_id=show_id,
+              detail=f'ids={valid_ids}')
+    db.commit()
+    db.close()
+    syslog_logger.info(
+        f"SHOW_BILLABLES_EDIT show_id={show_id} ids={valid_ids} by={session.get('username')}"
+    )
+    return jsonify({'success': True, 'selected_ids': valid_ids})
 
 
 @app.route('/labor-scheduler')
@@ -10606,6 +10699,7 @@ def api_labor_scheduler_create_show():
             (show_id, show_date, show_time)
         )
 
+    _seed_show_billable_items(db, show_id)
     log_audit(db, 'SHOW_CREATE', 'show', show_id, show_id=show_id,
               after={'name': name, 'show_date': show_date, 'venue': venue,
                      'via': 'labor_scheduler'})
@@ -12184,6 +12278,7 @@ def add_labor_billable_item():
         (name, cost, max_order + 10)
     )
     bid = cur.lastrowid
+    _attach_billable_item_to_active_shows(db, bid)
     log_audit_change(db, 'LABOR_BILLABLE_ADD', 'labor_billable_item', bid,
                      detail=f'{name} ${cost}/crew', table='labor_billable_items')
     db.commit(); db.close()
