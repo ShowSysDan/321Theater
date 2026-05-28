@@ -181,6 +181,13 @@
   background: var(--accent);
   border-color: var(--accent);
 }
+/* In-progress = half filled. Uses a hard-stop linear gradient so the left
+   side is the accent colour and the right side stays transparent — reads
+   clearly as "halfway done" next to the empty and full states. */
+.skill-dot.in-progress {
+  background: linear-gradient(90deg, var(--accent) 0 50%, transparent 50% 100%);
+  border-color: var(--accent);
+}
 
 /* Name cell */
 .crew-name-cell {
@@ -199,7 +206,7 @@
 /* Edit modal */
 .crew-edit-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 8px;
   margin-top: 8px;
 }
@@ -216,10 +223,69 @@
   transition: background 0.1s;
 }
 .crew-edit-item:hover { background: var(--bg-hover); }
+.crew-edit-item.in-progress { border-color: var(--accent-dim); background: rgba(245,127,32,0.06); }
 .crew-edit-item.qualified { border-color: var(--accent); background: var(--accent-glow); }
 .crew-edit-item.is-training { border-left: 3px solid var(--blue); }
-.crew-edit-item input[type="checkbox"] { accent-color: var(--accent); }
-.crew-edit-item .training-tag { font-size: 9px; color: var(--blue); margin-left: 6px; letter-spacing: 0.08em; text-transform: uppercase; }
+.crew-edit-item .training-tag { font-size: 9px; color: var(--blue); margin-left: auto; letter-spacing: 0.08em; text-transform: uppercase; }
+/* Clickable dot inside modal items — cycles none → in-progress → qualified → none */
+.edit-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border-light);
+  background: transparent;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.crew-edit-item.in-progress .edit-dot {
+  background: linear-gradient(90deg, var(--accent) 0 50%, transparent 50% 100%);
+  border-color: var(--accent);
+}
+.crew-edit-item.qualified .edit-dot {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.crew-edit-item .edit-name { flex: 1; }
+
+/* Per-tech training notes — rendered once at the bottom of the modal. */
+.crew-notes-section {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.crew-notes-section label {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.crew-notes-section textarea {
+  width: 100%;
+  min-height: 70px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  font-family: inherit;
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  resize: vertical;
+  box-sizing: border-box;
+}
+.crew-notes-section textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.crew-notes-section .crew-notes-status {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  min-height: 14px;
+}
 .crew-edit-category {
   font-size: 10px; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.08em; color: var(--accent); margin-top: 12px; margin-bottom: 4px;
@@ -322,13 +388,13 @@
   </thead>
   <tbody id="crew-tbody">
     {% for m in members %}
-    <tr data-mid="{{ m.id }}" data-name="{{ m.name|lower }}" data-quals="{{ m.qualifications|tojson }}">
+    <tr data-mid="{{ m.id }}" data-name="{{ m.name|lower }}" data-quals="{{ m.qualifications|tojson }}" data-statuses='{{ m.qualification_status|tojson }}' data-notes="{{ m.training_notes|e }}">
       <td class="name-col crew-name-cell">
         <div class="crew-actions">
           <span>{{ m.name }}</span>
           {% if can_edit %}
           <button class="btn btn-xs btn-ghost"
-                  data-name="{{ m.name }}" data-quals="{{ m.qualifications|tojson }}"
+                  data-name="{{ m.name }}"
                   onclick="openEditModal(this)"
                   title="Edit qualifications" style="flex-shrink:0">✎</button>
           {% endif %}
@@ -336,19 +402,21 @@
       </td>
       {% for cat in categories %}
         {% for pos in cat.positions %}
-        {% set qualified = pos.id in m.qualifications %}
+        {% set st = m.qualification_status.get(pos.id, 0) %}
+        {% set dot_class = 'qualified' if st == 2 else ('in-progress' if st == 1 else '') %}
         <td data-pid="{{ pos.id }}"{% if pos.is_training %} class="is-training-col"{% endif %}>
           <div class="skill-cell" data-mid="{{ m.id }}" data-pid="{{ pos.id }}" title="{{ pos.name }}{% if pos.is_training %} (training / class){% endif %}">
-            <div class="skill-dot {{ 'qualified' if qualified else '' }}"></div>
+            <div class="skill-dot {{ dot_class }}"></div>
           </div>
         </td>
         {% endfor %}
       {% endfor %}
       {% for pos in uncategorized_positions %}
-      {% set qualified = pos.id in m.qualifications %}
+      {% set st = m.qualification_status.get(pos.id, 0) %}
+      {% set dot_class = 'qualified' if st == 2 else ('in-progress' if st == 1 else '') %}
       <td data-pid="{{ pos.id }}"{% if pos.is_training %} class="is-training-col"{% endif %}>
         <div class="skill-cell" data-mid="{{ m.id }}" data-pid="{{ pos.id }}" title="{{ pos.name }}{% if pos.is_training %} (training / class){% endif %}">
-          <div class="skill-dot {{ 'qualified' if qualified else '' }}"></div>
+          <div class="skill-dot {{ dot_class }}"></div>
         </div>
       </td>
       {% endfor %}
@@ -363,12 +431,22 @@
 {% if can_edit %}
 {# ── Edit Qualifications Modal ────────────────────────────────── #}
 <div id="crew-edit-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeEditModal()">
-  <div class="modal-card" style="max-width:680px;max-height:85vh;overflow-y:auto">
+  <div class="modal-card" style="max-width:720px;max-height:85vh;overflow-y:auto">
     <div class="modal-header">
       Edit Qualifications — <span id="modal-crew-name"></span>
       <button onclick="closeEditModal()" class="modal-close">×</button>
     </div>
+    <div style="padding:8px 18px 0;font-size:11px;color:var(--text-dim)">
+      Click a position to cycle: <span class="edit-dot" style="display:inline-block;vertical-align:middle"></span> none →
+      <span class="edit-dot" style="display:inline-block;vertical-align:middle;background:linear-gradient(90deg,var(--accent) 0 50%,transparent 50% 100%);border-color:var(--accent)"></span> in&nbsp;progress →
+      <span class="edit-dot" style="display:inline-block;vertical-align:middle;background:var(--accent);border-color:var(--accent)"></span> qualified
+    </div>
     <div class="modal-body" id="modal-body">
+    </div>
+    <div class="crew-notes-section" style="padding:0 18px 18px">
+      <label for="modal-training-notes">Training notes</label>
+      <textarea id="modal-training-notes" placeholder="Track training progress for this technician — e.g. 'Audio console class 2 of 5 complete, next session 6/3'"></textarea>
+      <div class="crew-notes-status" id="modal-notes-status"></div>
     </div>
     <div style="padding:16px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">
       <button class="btn btn-ghost" onclick="closeEditModal()">Close</button>
@@ -382,20 +460,37 @@ const _categories = {{ categories|tojson }};
 const _uncategorized = {{ uncategorized_positions|tojson }};
 
 let _modalMemberId = null;
+let _modalNotesTimer = null;
+
+const _DOT_CLASS = {1: 'in-progress', 2: 'qualified'};
+function _applyStatusClass(el, status) {
+  el.classList.remove('in-progress', 'qualified');
+  if (status === 1) el.classList.add('in-progress');
+  else if (status === 2) el.classList.add('qualified');
+}
+
+function _readRowStatuses(tr) {
+  // data-statuses is a JSON object with stringified pid keys → status int.
+  try { return JSON.parse(tr.dataset.statuses || '{}'); }
+  catch { return {}; }
+}
+function _writeRowStatuses(tr, statuses) {
+  tr.dataset.statuses = JSON.stringify(statuses);
+  // Keep data-quals (list of pids with any status > 0) in sync for filter/sort.
+  tr.dataset.quals = JSON.stringify(Object.keys(statuses).map(k => parseInt(k, 10)));
+}
 
 function openEditModal(btn) {
   const tr = btn.closest('tr');
   const memberId = parseInt(tr.dataset.mid);
   const memberName = btn.dataset.name;
-  const qualifications = JSON.parse(btn.dataset.quals || '[]');
+  const statuses = _readRowStatuses(tr);  // {pid: status}
 
   _modalMemberId = memberId;
   document.getElementById('modal-crew-name').textContent = memberName;
 
   const body = document.getElementById('modal-body');
   body.innerHTML = '';
-
-  const qualSet = new Set(qualifications);
 
   const allGroups = [
     ..._categories.map(c => ({label: c.name, positions: c.positions})),
@@ -413,69 +508,123 @@ function openEditModal(btn) {
     grid.className = 'crew-edit-grid';
 
     for (const pos of group.positions) {
-      const item = document.createElement('label');
+      const item = document.createElement('div');
+      const initial = statuses[pos.id] || 0;
       const classes = ['crew-edit-item'];
-      if (qualSet.has(pos.id)) classes.push('qualified');
+      if (initial === 1) classes.push('in-progress');
+      else if (initial === 2) classes.push('qualified');
       if (pos.is_training) classes.push('is-training');
       item.className = classes.join(' ');
       item.dataset.pid = pos.id;
+      item.dataset.status = String(initial);
+      item.title = 'Click to cycle: none → in progress → qualified';
 
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = qualSet.has(pos.id);
-      cb.addEventListener('change', async () => {
-        const wasChecked = !cb.checked;
-        item.classList.toggle('qualified', cb.checked);
-        // Update grid dot
-        const dot = document.querySelector(`.skill-cell[data-mid="${memberId}"][data-pid="${pos.id}"] .skill-dot`);
-        if (dot) dot.classList.toggle('qualified', cb.checked);
-        try {
-          const r = await fetch('/api/crew-qualifications/toggle', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({crew_member_id: memberId, position_id: pos.id})
-          });
-          const d = await r.json();
-          if (!d.success) {
-            cb.checked = wasChecked;
-            item.classList.toggle('qualified', wasChecked);
-            if (dot) dot.classList.toggle('qualified', wasChecked);
-            showSaveToast('✗ ' + (d.error || 'Save failed'), 'error');
-          } else {
-            // Sync row-level data-quals so filter/sort works
-            let rqs = JSON.parse(tr.dataset.quals || '[]');
-            if (d.has) { if (!rqs.includes(pos.id)) rqs.push(pos.id); }
-            else { rqs = rqs.filter(q => q !== pos.id); }
-            tr.dataset.quals = JSON.stringify(rqs);
-            const editBtn = tr.querySelector('button[data-quals]');
-            if (editBtn) editBtn.dataset.quals = JSON.stringify(rqs);
-            showSaveToast('✓ Saved');
-          }
-        } catch(e) {
-          cb.checked = wasChecked;
-          item.classList.toggle('qualified', wasChecked);
-          if (dot) dot.classList.toggle('qualified', wasChecked);
-          showSaveToast('✗ Network error', 'error');
-        }
-      });
+      const dot = document.createElement('span');
+      dot.className = 'edit-dot';
 
-      item.appendChild(cb);
-      item.appendChild(document.createTextNode(pos.name));
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'edit-name';
+      nameSpan.textContent = pos.name;
+
+      item.appendChild(dot);
+      item.appendChild(nameSpan);
       if (pos.is_training) {
         const tag = document.createElement('span');
         tag.className = 'training-tag';
         tag.textContent = 'Training';
         item.appendChild(tag);
       }
+
+      item.addEventListener('click', async () => {
+        const prev = parseInt(item.dataset.status, 10) || 0;
+        const next = (prev + 1) % 3;  // 0 → 1 → 2 → 0
+        item.dataset.status = String(next);
+        _applyStatusClass(item, next);
+        // Optimistically update grid dot too.
+        const gridDot = document.querySelector(`.skill-cell[data-mid="${memberId}"][data-pid="${pos.id}"] .skill-dot`);
+        if (gridDot) _applyStatusClass(gridDot, next);
+        try {
+          const r = await fetch('/api/crew-qualifications/toggle', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({crew_member_id: memberId, position_id: pos.id, status: next})
+          });
+          const d = await r.json();
+          if (!d.success) {
+            // Roll back UI on failure.
+            item.dataset.status = String(prev);
+            _applyStatusClass(item, prev);
+            if (gridDot) _applyStatusClass(gridDot, prev);
+            showSaveToast('✗ ' + (d.error || 'Save failed'), 'error');
+            return;
+          }
+          // Sync row data attrs so filter/sort sees fresh values.
+          const updated = _readRowStatuses(tr);
+          if (next === 0) delete updated[pos.id];
+          else updated[pos.id] = next;
+          _writeRowStatuses(tr, updated);
+          showSaveToast('✓ Saved');
+        } catch (e) {
+          item.dataset.status = String(prev);
+          _applyStatusClass(item, prev);
+          if (gridDot) _applyStatusClass(gridDot, prev);
+          showSaveToast('✗ Network error', 'error');
+        }
+      });
+
       grid.appendChild(item);
     }
     body.appendChild(grid);
   }
 
+  // Per-tech training notes — load current value, debounce-save on input.
+  const notesEl = document.getElementById('modal-training-notes');
+  const statusEl = document.getElementById('modal-notes-status');
+  notesEl.value = tr.dataset.notes || '';
+  statusEl.textContent = '';
+  notesEl.oninput = () => {
+    statusEl.textContent = 'Saving…';
+    clearTimeout(_modalNotesTimer);
+    _modalNotesTimer = setTimeout(() => _saveTrainingNotes(memberId, tr, notesEl.value), 500);
+  };
+
   document.getElementById('crew-edit-modal').style.display = 'flex';
 }
 
+async function _saveTrainingNotes(memberId, tr, value) {
+  const statusEl = document.getElementById('modal-notes-status');
+  try {
+    const r = await fetch(`/api/crew-members/${memberId}/training-notes`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({training_notes: value})
+    });
+    const d = await r.json();
+    if (d.success) {
+      tr.dataset.notes = value;
+      statusEl.textContent = '✓ Saved';
+      setTimeout(() => { if (statusEl.textContent === '✓ Saved') statusEl.textContent = ''; }, 1500);
+    } else {
+      statusEl.textContent = '✗ ' + (d.error || 'Save failed');
+    }
+  } catch (e) {
+    statusEl.textContent = '✗ Network error';
+  }
+}
+
 function closeEditModal() {
+  // Flush any pending notes save so closing immediately doesn't drop a typo.
+  if (_modalNotesTimer) {
+    clearTimeout(_modalNotesTimer);
+    _modalNotesTimer = null;
+    const notesEl = document.getElementById('modal-training-notes');
+    if (_modalMemberId && notesEl) {
+      const tr = document.querySelector(`#crew-tbody tr[data-mid="${_modalMemberId}"]`);
+      if (tr && (tr.dataset.notes || '') !== notesEl.value) {
+        _saveTrainingNotes(_modalMemberId, tr, notesEl.value);
+      }
+    }
+  }
   document.getElementById('crew-edit-modal').style.display = 'none';
   _modalMemberId = null;
 }

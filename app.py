@@ -11859,15 +11859,24 @@ def crew_tracker():
         'SELECT * FROM crew_members ORDER BY sort_order, name'
     ).fetchall()
 
-    # Qualifications — build set of (crew_member_id, position_id)
-    quals = db.execute('SELECT crew_member_id, position_id FROM crew_qualifications').fetchall()
-    qual_set = {(q['crew_member_id'], q['position_id']) for q in quals}
+    # Qualifications — capture status per (crew_member_id, position_id) so the
+    # tracker can render in-progress dots alongside fully qualified ones.
+    quals = db.execute(
+        'SELECT crew_member_id, position_id, COALESCE(status, 2) AS status FROM crew_qualifications'
+    ).fetchall()
+    qual_status = {}
+    for q in quals:
+        qual_status[(q['crew_member_id'], q['position_id'])] = q['status']
 
-    # Build member rows with qual flags
+    # Build member rows with qual status map (pid → status). Keep a flat list
+    # of qualified pids for backwards-compatible filter/sort logic.
     member_rows = []
     for m in members:
         m_dict = dict(m)
-        m_dict['qualifications'] = [q[1] for q in qual_set if q[0] == m['id']]
+        statuses = {pid: st for (mid, pid), st in qual_status.items() if mid == m['id']}
+        m_dict['qualification_status'] = statuses
+        m_dict['qualifications'] = list(statuses.keys())
+        m_dict['training_notes'] = m_dict.get('training_notes') or ''
         member_rows.append(m_dict)
 
     db.close()
@@ -12057,35 +12066,82 @@ def reorder_crew_members():
 @app.route('/api/crew-qualifications/toggle', methods=['POST'])
 @scheduler_required
 def toggle_crew_qualification():
+    """Set or clear a crew_qualifications row.
+
+    Body accepts either:
+      - {crew_member_id, position_id, status}  status: 0 (clear), 1 (in_progress), 2 (qualified)
+      - {crew_member_id, position_id}          legacy 2-state toggle (kept for backwards compat)
+    """
     data = request.get_json(force=True) or {}
     crew_member_id = data.get('crew_member_id')
     position_id = data.get('position_id')
     if not crew_member_id or not position_id:
         return jsonify({'success': False, 'error': 'crew_member_id and position_id required.'}), 400
+    raw_status = data.get('status')
+    explicit = raw_status is not None
+    if explicit:
+        try:
+            status = int(raw_status)
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': 'status must be 0, 1, or 2.'}), 400
+        if status not in (0, 1, 2):
+            return jsonify({'success': False, 'error': 'status must be 0, 1, or 2.'}), 400
     db = get_db()
     existing = db.execute(
-        'SELECT 1 FROM crew_qualifications WHERE crew_member_id=? AND position_id=?',
+        'SELECT COALESCE(status, 2) AS status FROM crew_qualifications WHERE crew_member_id=? AND position_id=?',
         (crew_member_id, position_id)
     ).fetchone()
-    if existing:
+    if not explicit:
+        # Legacy toggle: flip presence
+        status = 0 if existing else 2
+    if status == 0:
         db.execute(
             'DELETE FROM crew_qualifications WHERE crew_member_id=? AND position_id=?',
             (crew_member_id, position_id)
         )
-        has = False
+    elif existing:
+        db.execute(
+            'UPDATE crew_qualifications SET status=? WHERE crew_member_id=? AND position_id=?',
+            (status, crew_member_id, position_id)
+        )
     else:
         db.execute(
-            'INSERT INTO crew_qualifications (crew_member_id, position_id) VALUES (?, ?)',
-            (crew_member_id, position_id)
+            'INSERT INTO crew_qualifications (crew_member_id, position_id, status) VALUES (?, ?, ?)',
+            (crew_member_id, position_id, status)
         )
-        has = True
-    action = 'QUAL_ADD' if has else 'QUAL_REMOVE'
+    if status == 0:
+        action = 'QUAL_REMOVE'
+    elif status == 1:
+        action = 'QUAL_PROGRESS'
+    else:
+        action = 'QUAL_ADD'
     log_audit(db, f'CREW_{action}', 'crew_qualification', crew_member_id,
-              detail=f'position_id={position_id}')
+              detail=f'position_id={position_id} status={status}')
     db.commit()
     db.close()
-    syslog_logger.info(f"TECHNICIAN_{action} crew_member_id={crew_member_id} position_id={position_id} by={session.get('username')}")
-    return jsonify({'success': True, 'has': has})
+    syslog_logger.info(f"TECHNICIAN_{action} crew_member_id={crew_member_id} position_id={position_id} status={status} by={session.get('username')}")
+    return jsonify({'success': True, 'has': status != 0, 'status': status})
+
+
+@app.route('/api/crew-members/<int:mid>/training-notes', methods=['POST'])
+@scheduler_required
+def save_crew_training_notes(mid):
+    """Persist per-technician training notes shown only in the Edit
+    Qualifications dialog."""
+    data = request.get_json(force=True) or {}
+    notes = (data.get('training_notes') or '').strip()
+    db = get_db()
+    exists = db.execute('SELECT 1 FROM crew_members WHERE id=?', (mid,)).fetchone()
+    if not exists:
+        db.close()
+        return jsonify({'success': False, 'error': 'Crew member not found.'}), 404
+    db.execute('UPDATE crew_members SET training_notes=? WHERE id=?', (notes, mid))
+    log_audit(db, 'CREW_TRAINING_NOTES_EDIT', 'crew_member', mid,
+              detail=f'len={len(notes)}')
+    db.commit()
+    db.close()
+    syslog_logger.info(f"CREW_TRAINING_NOTES_EDIT crew_member_id={mid} len={len(notes)} by={session.get('username')}")
+    return jsonify({'success': True})
 
 
 # ─── Per-Crew Billable Items (auto-added to every show's labor cost) ──────────
