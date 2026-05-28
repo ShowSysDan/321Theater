@@ -436,6 +436,7 @@ CREATE TABLE IF NOT EXISTS labor_requests (
     break_end                 TEXT DEFAULT '',
     requested_name            TEXT DEFAULT '',
     is_scheduled              INTEGER DEFAULT 0,
+    is_training_shift         INTEGER DEFAULT 0,
     scheduled_crew_member_id  INTEGER,
     scheduled_by              INTEGER REFERENCES users(id) ON DELETE SET NULL,
     scheduled_at              TIMESTAMP,
@@ -528,6 +529,7 @@ CREATE TABLE IF NOT EXISTS overhead_labor_requests (
     break_end                   TEXT DEFAULT '',
     requested_name              TEXT DEFAULT '',
     is_scheduled                INTEGER DEFAULT 0,
+    is_training_shift           INTEGER DEFAULT 0,
     scheduled_crew_member_id    INTEGER,
     scheduled_by                INTEGER REFERENCES users(id) ON DELETE SET NULL,
     scheduled_at                TIMESTAMP,
@@ -1680,6 +1682,7 @@ def migrate_db():
             break_end                 TEXT DEFAULT '',
             requested_name            TEXT DEFAULT '',
             is_scheduled              INTEGER DEFAULT 0,
+            is_training_shift         INTEGER DEFAULT 0,
             scheduled_crew_member_id  INTEGER,
             scheduled_by              INTEGER REFERENCES users(id) ON DELETE SET NULL,
             scheduled_at              TIMESTAMP,
@@ -1754,6 +1757,7 @@ def migrate_db():
             break_end                   TEXT DEFAULT '',
             requested_name              TEXT DEFAULT '',
             is_scheduled                INTEGER DEFAULT 0,
+            is_training_shift           INTEGER DEFAULT 0,
             scheduled_crew_member_id    INTEGER,
             scheduled_by                INTEGER REFERENCES users(id) ON DELETE SET NULL,
             scheduled_at                TIMESTAMP,
@@ -2085,6 +2089,11 @@ def migrate_db():
         "ALTER TABLE crew_qualifications ADD COLUMN status INTEGER DEFAULT 2",
         # Per-technician training notes — only shown in the Edit Qualifications dialog.
         "ALTER TABLE crew_members ADD COLUMN training_notes TEXT DEFAULT ''",
+        # Training-shift flag on labor lines: lets a scheduler park a trainee
+        # alongside the primary tech on the same position without it counting
+        # as the staffed slot.
+        "ALTER TABLE labor_requests ADD COLUMN is_training_shift INTEGER DEFAULT 0",
+        "ALTER TABLE overhead_labor_requests ADD COLUMN is_training_shift INTEGER DEFAULT 0",
         # Arts group contact & notes fields
         "ALTER TABLE arts_groups ADD COLUMN primary_contact_name TEXT DEFAULT ''",
         "ALTER TABLE arts_groups ADD COLUMN primary_contact_email TEXT DEFAULT ''",
@@ -2684,6 +2693,7 @@ CREATE TABLE IF NOT EXISTS labor_requests (
     break_end                 TEXT DEFAULT '',
     requested_name            TEXT DEFAULT '',
     is_scheduled              INTEGER DEFAULT 0,
+    is_training_shift         INTEGER DEFAULT 0,
     scheduled_crew_member_id  INTEGER,
     scheduled_by              INTEGER REFERENCES users(id) ON DELETE SET NULL,
     scheduled_at              TIMESTAMP,
@@ -2762,6 +2772,7 @@ CREATE TABLE IF NOT EXISTS overhead_labor_requests (
     break_end                   TEXT DEFAULT '',
     requested_name              TEXT DEFAULT '',
     is_scheduled                INTEGER DEFAULT 0,
+    is_training_shift           INTEGER DEFAULT 0,
     scheduled_crew_member_id    INTEGER,
     scheduled_by                INTEGER REFERENCES users(id) ON DELETE SET NULL,
     scheduled_at                TIMESTAMP,
@@ -3365,6 +3376,8 @@ def migrate_db_postgres():
             f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS is_training INTEGER DEFAULT 0',
             f'ALTER TABLE "{app_schema}".crew_qualifications ADD COLUMN IF NOT EXISTS status INTEGER DEFAULT 2',
             f'ALTER TABLE "{app_schema}".crew_members ADD COLUMN IF NOT EXISTS training_notes TEXT DEFAULT \'\'',
+            f'ALTER TABLE "{app_schema}".labor_requests ADD COLUMN IF NOT EXISTS is_training_shift INTEGER DEFAULT 0',
+            f'ALTER TABLE "{app_schema}".overhead_labor_requests ADD COLUMN IF NOT EXISTS is_training_shift INTEGER DEFAULT 0',
             f'ALTER TABLE "{app_schema}".form_sections ADD COLUMN IF NOT EXISTS default_open INTEGER DEFAULT 1',
             f'ALTER TABLE "{app_schema}".form_sections ADD COLUMN IF NOT EXISTS asset_category_id INTEGER REFERENCES "{app_schema}".asset_categories(id) ON DELETE SET NULL',
             f'''CREATE TABLE IF NOT EXISTS "{app_schema}".arts_groups (

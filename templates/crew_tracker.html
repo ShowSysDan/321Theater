@@ -172,21 +172,37 @@
   height: 16px;
   border-radius: 50%;
   border: 2px solid var(--border-light);
-  background: transparent;
+  /* Opaque interior so the dot sits visually in front of any column tint
+     (training columns, hover, etc.) instead of letting the tint bleed
+     through the transparent center. */
+  background: var(--bg-card);
   transition: all 0.15s;
   pointer-events: none;
   flex-shrink: 0;
 }
-.skill-dot.qualified {
+.crew-grid tbody tr:nth-child(even) .skill-dot {
+  background: var(--bg-surface);
+}
+.crew-grid tbody tr:hover .skill-dot {
+  background: var(--bg-hover);
+}
+.skill-dot.qualified,
+.crew-grid tbody tr:nth-child(even) .skill-dot.qualified,
+.crew-grid tbody tr:hover .skill-dot.qualified {
   background: var(--accent);
   border-color: var(--accent);
 }
-/* In-progress = half filled. Uses a hard-stop linear gradient so the left
-   side is the accent colour and the right side stays transparent — reads
-   clearly as "halfway done" next to the empty and full states. */
+/* In-progress = half filled. Hard-stop linear gradient: left half accent,
+   right half matches the row so the column tint doesn't bleed through. */
 .skill-dot.in-progress {
-  background: linear-gradient(90deg, var(--accent) 0 50%, transparent 50% 100%);
+  background: linear-gradient(90deg, var(--accent) 0 50%, var(--bg-card) 50% 100%);
   border-color: var(--accent);
+}
+.crew-grid tbody tr:nth-child(even) .skill-dot.in-progress {
+  background: linear-gradient(90deg, var(--accent) 0 50%, var(--bg-surface) 50% 100%);
+}
+.crew-grid tbody tr:hover .skill-dot.in-progress {
+  background: linear-gradient(90deg, var(--accent) 0 50%, var(--bg-hover) 50% 100%);
 }
 
 /* Name cell */
