@@ -24,7 +24,21 @@
   .sched-check-cell { text-align: center; }
   .sched-check-cell input[type=checkbox] { width: 18px; height: 18px; cursor: pointer; }
   .sched-training-cell { text-align: center; padding: 2px 4px !important; }
-  .sched-training-cell input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--blue, #4a9eff); }
+  .sched-training-dot {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    border: 2px solid var(--border-light);
+    background: var(--bg-card);
+    padding: 0;
+    cursor: pointer;
+    transition: all 0.15s;
+    vertical-align: middle;
+  }
+  .sched-training-dot:hover { border-color: var(--blue, #4a9eff); }
+  .sched-training-dot.active {
+    background: var(--blue, #4a9eff);
+    border-color: var(--blue, #4a9eff);
+  }
   .training-shift-row { background: rgba(74, 158, 255, 0.08); }
   .training-shift-row.scheduled-row { background: rgba(74, 158, 255, 0.14); }
   .scheduled-row { background: rgba(72, 187, 120, 0.08); }
@@ -324,9 +338,12 @@
         <input type="checkbox" class="sched-check" ${lr.is_scheduled ? 'checked' : ''}
                onchange="window.__scheduler.onScheduledToggle(this)">
       </td>
-      <td class="sched-training-cell" title="Training shift — this tech is shadowing/learning on this position">
-        <input type="checkbox" class="sched-training" ${lr.is_training_shift ? 'checked' : ''}
-               onchange="window.__scheduler.onTrainingShiftToggle(this)">
+      <td class="sched-training-cell">
+        <button type="button" class="sched-training-dot ${lr.is_training_shift ? 'active' : ''}"
+                title="Training shift — this tech is shadowing/learning on this position"
+                aria-label="Toggle training shift"
+                aria-pressed="${lr.is_training_shift ? 'true' : 'false'}"
+                onclick="window.__scheduler.onTrainingShiftToggle(this)"></button>
       </td>
       <td style="font-size:12px;color:var(--text-dim)">${escapeHtml(lr.work_date || '—')}</td>
       <td>
@@ -438,7 +455,7 @@
         <thead>
           <tr>
             <th style="width:52px;text-align:center" title="Scheduled — counts toward staffing">SCHED ✓</th>
-            <th style="width:46px;text-align:center" title="Training shift — extra body on this position for learning, doesn't replace the staffed tech">TRAIN</th>
+            <th style="width:84px;text-align:center;white-space:nowrap" title="Training shift — extra body on this position for learning, doesn't replace the staffed tech">IN TRAINING</th>
             <th style="width:110px">DATE</th>
             <th style="min-width:160px">POSITION</th>
             <th style="width:72px">IN</th>
@@ -511,7 +528,7 @@
         <thead>
           <tr>
             <th style="width:52px;text-align:center" title="Scheduled — counts toward staffing">SCHED ✓</th>
-            <th style="width:46px;text-align:center" title="Training shift — extra body on this position for learning, doesn't replace the staffed tech">TRAIN</th>
+            <th style="width:84px;text-align:center;white-space:nowrap" title="Training shift — extra body on this position for learning, doesn't replace the staffed tech">IN TRAINING</th>
             <th style="width:110px">DATE</th>
             <th style="min-width:160px">POSITION</th>
             <th style="width:72px">IN</th>
@@ -621,14 +638,18 @@
     }
   }
 
-  async function onTrainingShiftToggle(checkbox) {
-    const tr = checkbox.closest('tr');
-    const val = checkbox.checked;
-    tr.classList.toggle('training-shift-row', val);
-    const res = await putSchedulerUpdate(tr, { is_training_shift: val });
+  async function onTrainingShiftToggle(btn) {
+    const tr = btn.closest('tr');
+    const prev = btn.classList.contains('active');
+    const next = !prev;
+    btn.classList.toggle('active', next);
+    btn.setAttribute('aria-pressed', next ? 'true' : 'false');
+    tr.classList.toggle('training-shift-row', next);
+    const res = await putSchedulerUpdate(tr, { is_training_shift: next });
     if (!res || !res.success) {
-      checkbox.checked = !val;
-      tr.classList.toggle('training-shift-row', !val);
+      btn.classList.toggle('active', prev);
+      btn.setAttribute('aria-pressed', prev ? 'true' : 'false');
+      tr.classList.toggle('training-shift-row', prev);
     }
   }
 
