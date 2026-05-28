@@ -829,6 +829,19 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
     </div>
   </div>
 
+  {# Per-show billable extras picker — only renders when at least one extra
+     is configured in Settings → Per-Crew Billable Items. #}
+  <div id="labor-billables-section" style="display:none">
+    <div class="form-section">
+      <div class="form-section-header">
+        <span class="section-icon">◈</span> PER-CREW EXTRAS
+        <span class="text-dim" style="font-size:11px;font-weight:400;text-transform:none;letter-spacing:normal;margin-left:8px">Pick which extras get charged to this show</span>
+      </div>
+      <div class="form-section-body" id="labor-billables-body" style="display:flex;flex-wrap:wrap;gap:8px">
+      </div>
+    </div>
+  </div>
+
   {# Labor cost summary — loaded when tab opens #}
   <div id="labor-cost-section" style="display:none">
     <div class="form-section">
@@ -2841,6 +2854,73 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     if (added) _sortDayBlocks();
   }
 
+  async function loadBillableItemsPicker() {
+    const section = document.getElementById('labor-billables-section');
+    const body = document.getElementById('labor-billables-body');
+    if (!section || !body) return;
+    try {
+      const r = await fetch(`/shows/{{ show.id }}/billable-items`);
+      if (!r.ok) { section.style.display = 'none'; return; }
+      const d = await r.json();
+      const items = d.items || [];
+      if (!items.length) { section.style.display = 'none'; return; }
+      section.style.display = '';
+      body.innerHTML = '';
+      const restricted = {{ 'true' if session.get('is_restricted') or session.get('is_readonly') else 'false' }};
+      items.forEach(it => {
+        const lbl = document.createElement('label');
+        lbl.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;cursor:pointer;user-select:none' + (restricted ? ';opacity:.7;cursor:default' : '');
+        lbl.dataset.bid = it.id;
+        if (it.selected) lbl.style.borderColor = 'var(--accent)';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = !!it.selected;
+        cb.style.accentColor = 'var(--accent)';
+        if (restricted) cb.disabled = true;
+        cb.addEventListener('change', () => saveBillableSelection(lbl, cb));
+        const txt = document.createElement('span');
+        const cost = parseFloat(it.cost_per_crew || 0).toFixed(2);
+        txt.innerHTML = `${_esc(it.name)} <span class="text-dim" style="font-size:11px">$${cost}/crew</span>`;
+        lbl.appendChild(cb);
+        lbl.appendChild(txt);
+        body.appendChild(lbl);
+      });
+    } catch(e) { /* silently ignore */ }
+  }
+
+  // Tiny escape helper for inserted text (no global _esc on show.html).
+  function _esc(s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  async function saveBillableSelection(lbl, changedCb) {
+    const body = document.getElementById('labor-billables-body');
+    const ids = Array.from(body.querySelectorAll('label[data-bid]'))
+      .filter(l => l.querySelector('input[type=checkbox]').checked)
+      .map(l => parseInt(l.dataset.bid, 10));
+    try {
+      const r = await fetch(`/shows/{{ show.id }}/billable-items`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({billable_item_ids: ids}),
+      });
+      const d = await r.json();
+      if (!d.success) {
+        // Roll back the checkbox state on failure.
+        changedCb.checked = !changedCb.checked;
+        showSaveToast('✗ ' + (d.error || 'Save failed'), 'error');
+        return;
+      }
+      lbl.style.borderColor = changedCb.checked ? 'var(--accent)' : 'var(--border)';
+      showSaveToast('✓ Saved');
+      loadLaborCost();
+    } catch(e) {
+      changedCb.checked = !changedCb.checked;
+      showSaveToast('✗ Network error', 'error');
+    }
+  }
+
   async function loadLaborCost() {
     const section = document.getElementById('labor-cost-section');
     const tbody = document.getElementById('labor-cost-tbody');
@@ -2880,7 +2960,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
   }
 
   document.addEventListener('DOMContentLoaded', () => {
-    if (INITIAL_TAB === 'staffing') { initLaborTab(); loadLaborCost(); }
+    if (INITIAL_TAB === 'staffing') { initLaborTab(); loadBillableItemsPicker(); loadLaborCost(); }
     // When the user changes load-in / load-out in the Advance tab, extend the
     // Labor tab with a day block for each newly-covered date and re-check
     // the show-within-range validation warning.
@@ -2953,6 +3033,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       if (btn.getAttribute('onclick') && btn.getAttribute('onclick').includes('staffing') && !window._laborTabInited) {
         window._laborTabInited = true;
         initLaborTab();
+        loadBillableItemsPicker();
         loadLaborCost();
       }
     });
