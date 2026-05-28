@@ -12087,6 +12087,16 @@ def toggle_crew_qualification():
         if status not in (0, 1, 2):
             return jsonify({'success': False, 'error': 'status must be 0, 1, or 2.'}), 400
     db = get_db()
+    # In-progress only makes sense for training/class positions. For regular
+    # show positions we coerce 1 → 2 so the data stays consistent regardless
+    # of what the caller sent.
+    if explicit and status == 1:
+        pos_row = db.execute(
+            'SELECT COALESCE(is_training, 0) AS is_training FROM job_positions WHERE id=?',
+            (position_id,)
+        ).fetchone()
+        if pos_row and not pos_row['is_training']:
+            status = 2
     existing = db.execute(
         'SELECT COALESCE(status, 2) AS status FROM crew_qualifications WHERE crew_member_id=? AND position_id=?',
         (crew_member_id, position_id)
