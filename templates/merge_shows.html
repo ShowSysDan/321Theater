@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block title %}Merge Shows — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <a href="{{ url_for('dashboard') }}" class="back-link">← Dashboard</a>
+    <h1 class="page-title">Merge Duplicate Shows</h1>
+    <p class="page-sub">Move everything from a duplicate onto the show you keep, then delete the duplicate.</p>
+  </div>
+</div>
+
+<div class="form-page-card">
+  <div class="form-row cols-2">
+    <div class="field-group">
+      <label class="field-label">KEEP THIS SHOW (survives)</label>
+      <select id="keeper-select" class="field-input" onchange="loadPreview()"></select>
+    </div>
+    <div class="field-group">
+      <label class="field-label">DUPLICATE (absorbed &amp; deleted)</label>
+      <select id="source-select" class="field-input" onchange="loadPreview()"></select>
+    </div>
+  </div>
+  <p class="field-hint" style="font-size:11px;color:var(--text-muted)">
+    Labor, post-show labor, assets, external rentals, performances, comments and files move to the keeper
+    (labor keeps its date, so a second day becomes its own day block). Blank advance fields on the keeper are
+    filled from the duplicate. The labor scheduler is never changed.
+  </p>
+</div>
+
+<div id="merge-preview" style="display:none;margin-top:20px"></div>
+
+<div id="merge-confirm" class="form-page-card" style="display:none;margin-top:16px;border:1px solid var(--accent)">
+  <div class="field-group">
+    <label class="field-label" style="color:var(--accent)">CONFIRM MERGE</label>
+    <p class="field-hint" style="font-size:12px;margin-bottom:8px">
+      This permanently deletes the duplicate after moving its data. Type <strong>MERGE</strong> to confirm.
+    </p>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="text" id="confirm-input" class="field-input" placeholder="MERGE" style="max-width:160px" autocomplete="off">
+      <button class="btn btn-primary" id="merge-btn" onclick="doMerge()">Merge &amp; Delete Duplicate</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let SHOWS = [];
+
+async function loadShows() {
+  try {
+    const r = await fetch('/api/shows');
+    SHOWS = await r.json();
+  } catch (e) { SHOWS = []; }
+  const opt = s => `<option value="${s.id}">${_e(s.name)}${s.show_date ? ' — ' + s.show_date : ''}${s.status === 'archived' ? ' (archived)' : ''}</option>`;
+  const blank = '<option value="">— Select a show —</option>';
+  document.getElementById('keeper-select').innerHTML = blank + SHOWS.map(opt).join('');
+  document.getElementById('source-select').innerHTML = blank + SHOWS.map(opt).join('');
+}
+
+function _e(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+async function loadPreview() {
+  const keeper = document.getElementById('keeper-select').value;
+  const source = document.getElementById('source-select').value;
+  const box = document.getElementById('merge-preview');
+  const confirmBox = document.getElementById('merge-confirm');
+  if (!keeper || !source) { box.style.display = 'none'; confirmBox.style.display = 'none'; return; }
+  if (keeper === source) {
+    box.style.display = ''; confirmBox.style.display = 'none';
+    box.innerHTML = '<div class="form-page-card"><p class="text-dim" style="margin:0">Pick two different shows.</p></div>';
+    return;
+  }
+  box.style.display = ''; box.innerHTML = '<div class="form-page-card"><p class="text-dim" style="margin:0">Loading comparison…</p></div>';
+  let data;
+  try {
+    const r = await fetch(`/shows/${keeper}/merge-preview?source=${source}`);
+    data = await r.json();
+  } catch (e) { data = { success: false, error: 'Could not load comparison.' }; }
+  if (!data.success) {
+    box.innerHTML = `<div class="form-page-card"><p class="text-dim" style="margin:0">${_e(data.error || 'Error.')}</p></div>`;
+    confirmBox.style.display = 'none';
+    return;
+  }
+  renderPreview(data);
+  confirmBox.style.display = '';
+  document.getElementById('confirm-input').value = '';
+}
+
+function renderPreview(d) {
+  const head = (who, s) => `
+    <th style="text-align:left">
+      <div style="font-weight:700;color:var(--accent)">${who}</div>
+      <div>${_e(s.name)}</div>
+      <div class="text-dim" style="font-weight:400;font-size:11px">${_e(s.show_date || '—')} · ${_e(s.venue || '—')}</div>
+    </th>`;
+
+  // Counts (what moves)
+  const tbls = ['labor_requests','post_show_labor','show_assets','show_external_rentals','show_performances','show_comments','show_attachments'];
+  const countRows = tbls.map(t => {
+    const k = d.keeper.counts[t] || {label:t,count:0};
+    const s = d.source.counts[t] || {label:t,count:0};
+    if (!k.count && !s.count) return '';
+    return `<tr><td>${_e(k.label)}</td><td class="num">${k.count}</td>
+            <td class="num">${s.count}${s.count ? ' <span class="text-dim">→ moves</span>' : ''}</td></tr>`;
+  }).join('');
+
+  // Advance field diff
+  const fieldRows = (d.advance_fields || []).map(f => {
+    const fill = f.will_fill ? ' style="background:rgba(245,127,32,.10)"' : '';
+    const note = f.will_fill ? ' <span style="color:var(--accent);font-size:10px">← fills blank</span>'
+               : (f.differs ? ' <span class="text-dim" style="font-size:10px">(kept)</span>' : '');
+    return `<tr${fill}><td>${_e(f.label)}</td><td>${_e(f.keeper) || '<span class="text-dim">—</span>'}${note}</td>
+            <td class="text-dim">${_e(f.source) || '—'}</td></tr>`;
+  }).join('');
+
+  document.getElementById('merge-preview').innerHTML = `
+    <div class="form-section">
+      <div class="form-section-header"><span class="section-icon">◈</span> WHAT MOVES TO THE KEEPER</div>
+      <div class="form-section-body no-pad">
+        <table class="data-table" style="font-size:12px">
+          <thead><tr><th>Item</th>${head('KEEP', d.keeper)}${head('DUPLICATE', d.source)}</tr></thead>
+          <tbody>${countRows || '<tr><td colspan="3" class="text-dim" style="padding:12px">No attached records on either show.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="form-section" style="margin-top:16px">
+      <div class="form-section-header"><span class="section-icon">◈</span> ADVANCE FIELDS
+        <span class="text-dim" style="font-weight:400;text-transform:none;letter-spacing:normal;margin-left:8px;font-size:11px">
+          ${d.fill_count} blank field(s) on the keeper will be filled from the duplicate</span>
+      </div>
+      <div class="form-section-body no-pad">
+        <table class="data-table" style="font-size:12px">
+          <thead><tr><th>Field</th><th>Keeper (result)</th><th>Duplicate</th></tr></thead>
+          <tbody>${fieldRows || '<tr><td colspan="3" class="text-dim" style="padding:12px">No advance data on either show.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+async function doMerge() {
+  const keeper = document.getElementById('keeper-select').value;
+  const source = document.getElementById('source-select').value;
+  const confirm = document.getElementById('confirm-input').value;
+  if ((confirm || '').trim().toUpperCase() !== 'MERGE') { alert('Type MERGE to confirm.'); return; }
+  const btn = document.getElementById('merge-btn');
+  btn.disabled = true; btn.textContent = 'Merging…';
+  try {
+    const r = await fetch(`/shows/${keeper}/merge`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_id: parseInt(source, 10), confirm })
+    });
+    const d = await r.json();
+    if (!d.success) { alert(d.error || 'Merge failed.'); btn.disabled = false; btn.textContent = 'Merge & Delete Duplicate'; return; }
+    window.location.href = d.redirect || ('/shows/' + keeper);
+  } catch (e) {
+    alert('Merge failed.'); btn.disabled = false; btn.textContent = 'Merge & Delete Duplicate';
+  }
+}
+
+loadShows();
+</script>
+{% endblock %}

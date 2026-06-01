@@ -445,7 +445,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.13.6'
+APP_VERSION = '2.14.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -5650,25 +5650,246 @@ def bulk_delete_shows():
     return jsonify({'success': True, 'deleted': deleted_ids})
 
 
+# ── Per-show child tables NOT covered by ON DELETE CASCADE (or scrubbed
+#    explicitly so their text doesn't linger). Reassign-on-merge tables
+#    (labor_requests, show_assets, …) are deliberately absent: a merge moves
+#    those first; a plain delete lets the FK cascade drop them.
+_SHOW_PURGE_TABLES = ['advance_data', 'schedule_rows', 'schedule_meta',
+    'post_show_notes', 'export_log', 'form_history', 'show_group_access',
+    'field_alert_state', 'notifications', 'pdf_submissions']
+
+# Child tables a merge REASSIGNS from the duplicate to the keeper so their data
+# is preserved instead of being cascade-deleted with the duplicate.
+_SHOW_MERGE_MOVE_TABLES = ['labor_requests', 'post_show_labor', 'show_assets',
+    'show_external_rentals', 'show_performances', 'show_comments',
+    'show_attachments']
+
+# Friendly labels for the merge preview's "what will move" summary.
+_SHOW_MERGE_MOVE_LABELS = {
+    'labor_requests': 'Labor lines', 'post_show_labor': 'Post-show labor',
+    'show_assets': 'Assets', 'show_external_rentals': 'External rentals',
+    'show_performances': 'Performances', 'show_comments': 'Comments',
+    'show_attachments': 'Files',
+}
+
+# Advance fields stored as scalar columns on the shows row (vs the advance_data
+# EAV). Merge "fill blanks" applies to these too.
+_ADVANCE_SCALAR_FIELDS = [
+    ('performance_company', 'Performance Company'),
+    ('load_in_date',  'Load-In Date'),
+    ('load_in_time',  'Load-In Time'),
+    ('load_out_date', 'Load-Out Date'),
+    ('load_out_time', 'Load-Out Time'),
+]
+
+
+def _purge_show(db, show_id):
+    """Delete a show plus the child rows not handled by ON DELETE CASCADE.
+    Caller commits. Used by both delete_show and merge_shows."""
+    for tbl in _SHOW_PURGE_TABLES:
+        db.execute(f'DELETE FROM {tbl} WHERE show_id=?', (show_id,))
+    db.execute('DELETE FROM shows WHERE id=?', (show_id,))
+
+
+def _show_child_counts(db, show_id):
+    """Counts of the reassign-on-merge child rows for a show (merge preview)."""
+    out = {}
+    for tbl in _SHOW_MERGE_MOVE_TABLES:
+        n = db.execute(f'SELECT COUNT(*) AS c FROM {tbl} WHERE show_id=?',
+                       (show_id,)).fetchone()['c']
+        out[tbl] = {'label': _SHOW_MERGE_MOVE_LABELS[tbl], 'count': n}
+    return out
+
+
+def _advance_field_catalog():
+    """Ordered [(field_key, label)] for the advance EAV fields, from the form
+    definition."""
+    out = []
+    for sec in get_form_fields_for_template():
+        for f in sec.get('fields', []):
+            out.append((f['field_key'], f.get('label') or f['field_key']))
+    return out
+
+
 @app.route('/shows/<int:show_id>/delete', methods=['POST'])
 @admin_required
 def delete_show(show_id):
     db = get_db()
     show = db.execute('SELECT name FROM shows WHERE id=?', (show_id,)).fetchone()
     show_name = show['name'] if show else str(show_id)
-    for tbl in ['advance_data', 'schedule_rows', 'schedule_meta',
-                'post_show_notes', 'export_log', 'form_history', 'show_group_access',
-                # Field-alert state and per-user notifications carry text
-                # mentioning the show — scrub them explicitly so they don't
-                # linger after the show row is gone.
-                'field_alert_state', 'notifications', 'pdf_submissions']:
-        db.execute(f'DELETE FROM {tbl} WHERE show_id=?', (show_id,))
-    db.execute('DELETE FROM shows WHERE id=?', (show_id,))
+    _purge_show(db, show_id)
     log_audit(db, 'SHOW_DELETE', 'show', show_id, detail=show_name)
     db.commit(); db.close()
     syslog_logger.info(f"SHOW_DELETE show_id={show_id} by={session.get('username')}")
     flash('Show permanently deleted.', 'success')
     return redirect(url_for('dashboard'))
+
+
+# ─── Merge Duplicate Shows ────────────────────────────────────────────────────
+#
+# Two entries get created for one event; both have labor/assets attached so
+# neither can be safely deleted. Merge REASSIGNS the duplicate's child rows
+# (labor, assets, rentals, performances, comments, files) onto the keeper —
+# labor keeps its work_date so a second day lands as its own day block — fills
+# only the keeper's BLANK advance fields from the duplicate, then deletes the
+# now-empty duplicate. The labor scheduler is untouched.
+
+@app.route('/admin/merge-shows')
+@admin_required
+def merge_shows_page():
+    return render_template('merge_shows.html', user=get_current_user())
+
+
+@app.route('/shows/<int:keeper_id>/merge-preview')
+@admin_required
+def merge_shows_preview(keeper_id):
+    """Side-by-side comparison powering the merge screen: advance fields
+    (with which blanks will be filled) + child-row counts for both shows."""
+    try:
+        source_id = int(request.args.get('source', ''))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'A duplicate show is required.'}), 400
+    if source_id == keeper_id:
+        return jsonify({'success': False, 'error': 'Pick two different shows.'}), 400
+    db = get_db()
+    keeper = db.execute('SELECT * FROM shows WHERE id=?', (keeper_id,)).fetchone()
+    source = db.execute('SELECT * FROM shows WHERE id=?', (source_id,)).fetchone()
+    if not keeper or not source:
+        db.close()
+        return jsonify({'success': False, 'error': 'Show not found.'}), 404
+    keeper, source = dict(keeper), dict(source)
+
+    def _eav(sid):
+        return {r['field_key']: (r['field_value'] or '') for r in db.execute(
+            'SELECT field_key, field_value FROM advance_data WHERE show_id=?',
+            (sid,)).fetchall()}
+    k_eav, s_eav = _eav(keeper_id), _eav(source_id)
+
+    fields = []
+    for key, label in _advance_field_catalog():
+        kv, sv = (k_eav.get(key, '') or '').strip(), (s_eav.get(key, '') or '').strip()
+        if not kv and not sv:
+            continue
+        fields.append({'key': key, 'label': label, 'keeper': kv, 'source': sv,
+                       'will_fill': (not kv and bool(sv)), 'differs': (kv != sv)})
+    for key, label in _ADVANCE_SCALAR_FIELDS:
+        kv, sv = str(keeper.get(key) or '').strip(), str(source.get(key) or '').strip()
+        if not kv and not sv:
+            continue
+        fields.append({'key': key, 'label': label, 'keeper': kv, 'source': sv,
+                       'will_fill': (not kv and bool(sv)), 'differs': (kv != sv)})
+
+    out = {
+        'success': True,
+        'keeper': {'id': keeper_id, 'name': keeper.get('name'),
+                   'show_date': keeper.get('show_date'), 'venue': keeper.get('venue'),
+                   'counts': _show_child_counts(db, keeper_id)},
+        'source': {'id': source_id, 'name': source.get('name'),
+                   'show_date': source.get('show_date'), 'venue': source.get('venue'),
+                   'counts': _show_child_counts(db, source_id)},
+        'advance_fields': fields,
+        'fill_count': sum(1 for f in fields if f['will_fill']),
+    }
+    db.close()
+    return jsonify(out)
+
+
+@app.route('/shows/<int:keeper_id>/merge', methods=['POST'])
+@admin_required
+def merge_shows(keeper_id):
+    data = request.get_json(force=True) or {}
+    try:
+        source_id = int(data.get('source_id'))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'A duplicate show is required.'}), 400
+    if (data.get('confirm') or '').strip().upper() != 'MERGE':
+        return jsonify({'success': False, 'error': 'Type MERGE to confirm.'}), 400
+    if source_id == keeper_id:
+        return jsonify({'success': False, 'error': 'Pick two different shows.'}), 400
+    db = get_db()
+    keeper = db.execute('SELECT * FROM shows WHERE id=?', (keeper_id,)).fetchone()
+    source = db.execute('SELECT * FROM shows WHERE id=?', (source_id,)).fetchone()
+    if not keeper or not source:
+        db.close()
+        return jsonify({'success': False, 'error': 'Show not found.'}), 404
+    keeper, source = dict(keeper), dict(source)
+    try:
+        moved = {t: c['count'] for t, c in _show_child_counts(db, source_id).items()}
+        # 1. Reassign additive child rows onto the keeper.
+        for tbl in _SHOW_MERGE_MOVE_TABLES:
+            db.execute(f'UPDATE {tbl} SET show_id=? WHERE show_id=?', (keeper_id, source_id))
+        # 2. Preserve the duplicate's per-crew billable selections.
+        db.execute(
+            'INSERT OR IGNORE INTO show_labor_billable_items (show_id, billable_item_id) '
+            'SELECT ?, billable_item_id FROM show_labor_billable_items WHERE show_id=?',
+            (keeper_id, source_id))
+        # 3. Advance fill-blanks — EAV fields.
+        k_eav = {r['field_key']: (r['field_value'] or '') for r in db.execute(
+            'SELECT field_key, field_value FROM advance_data WHERE show_id=?',
+            (keeper_id,)).fetchall()}
+        filled = 0
+        for r in db.execute(
+            "SELECT field_key, field_value FROM advance_data "
+            "WHERE show_id=? AND COALESCE(field_value,'')<>''", (source_id,)).fetchall():
+            if not (k_eav.get(r['field_key']) or '').strip():
+                db.execute(
+                    'INSERT OR REPLACE INTO advance_data (show_id, field_key, field_value) '
+                    'VALUES (?, ?, ?)', (keeper_id, r['field_key'], r['field_value']))
+                filled += 1
+        # 4. Advance fill-blanks — scalar columns on the shows row.
+        sets, params = [], []
+        for key, _label in _ADVANCE_SCALAR_FIELDS:
+            if not str(keeper.get(key) or '').strip() and str(source.get(key) or '').strip():
+                sets.append(f'{key}=?'); params.append(source.get(key))
+        if sets:
+            params.append(keeper_id)
+            db.execute(f"UPDATE shows SET {', '.join(sets)} WHERE id=?", params)
+        # 5. Delete the now-emptied duplicate.
+        _purge_show(db, source_id)
+        log_audit(db, 'SHOW_MERGE', 'show', keeper_id, show_id=keeper_id,
+                  detail=f"absorbed show {source_id} ('{source.get('name')}'); "
+                         f"labor={moved.get('labor_requests')}, files={moved.get('show_attachments')}, "
+                         f"advance_filled={filled}")
+        db.commit()
+    except Exception as e:
+        try: db.rollback()
+        except Exception: pass
+        db.close()
+        app.logger.error(f'merge_shows keeper={keeper_id} source={source_id} failed: {e}')
+        return jsonify({'success': False, 'error': f'Merge failed: {e}'}), 500
+    db.close()
+    syslog_logger.info(f"SHOW_MERGE keeper={keeper_id} source={source_id} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'moved': moved, 'advance_filled': filled,
+                    'redirect': url_for('show_page', show_id=keeper_id)})
+
+
+@app.route('/shows/<int:show_id>/attachments/<int:aid>/move', methods=['POST'])
+@admin_required
+def move_attachment(show_id, aid):
+    """Re-home a single file to another show (used standalone and by merge)."""
+    data = request.get_json(force=True) or {}
+    try:
+        target_id = int(data.get('target_show_id'))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'A target show is required.'}), 400
+    if target_id == show_id:
+        return jsonify({'success': False, 'error': 'That file is already on this show.'}), 400
+    db = get_db()
+    att = db.execute('SELECT id FROM show_attachments WHERE id=? AND show_id=?',
+                     (aid, show_id)).fetchone()
+    target = db.execute('SELECT name FROM shows WHERE id=?', (target_id,)).fetchone()
+    if not att or not target:
+        db.close()
+        return jsonify({'success': False, 'error': 'File or target show not found.'}), 404
+    db.execute('UPDATE show_attachments SET show_id=? WHERE id=? AND show_id=?',
+               (target_id, aid, show_id))
+    log_audit(db, 'ATTACHMENT_MOVE', 'show_attachment', aid, show_id=show_id,
+              detail=f"moved to show {target_id} ('{target['name']}')")
+    db.commit(); db.close()
+    syslog_logger.info(f"ATTACHMENT_MOVE aid={aid} from={show_id} to={target_id} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'target_name': target['name']})
 
 
 # ─── Show Access (Groups ↔ Shows) ─────────────────────────────────────────────
