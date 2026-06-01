@@ -41,10 +41,10 @@
   <div class="header">
     <div>
       <div class="org-name">3·2·1→THEATER</div>
-      <div class="org-sub">{{ layout.label('header', 'Post-Show Invoice') }}</div>
+      <div class="org-sub">{{ layout.label('header', 'Final Invoice') }}</div>
     </div>
     <div class="doc-title">
-      <h1>Post-Show Invoice</h1>
+      <h1>Final Invoice</h1>
       <div class="doc-date">Generated {{ generated_date }}</div>
     </div>
   </div>
@@ -61,7 +61,7 @@
 
   {% elif skey == 'asset_rentals' %}
   {% if assets %}
-  <div class="section-title">{{ layout.label('asset_rentals', 'Asset Rentals') }}</div>
+  <div class="section-title">{{ layout.label('asset_rentals', 'Internal Assets') }}</div>
   <table style="font-size: {{ layout.font_size('asset_rentals', '11px') }}">
     <thead>
       <tr>
@@ -101,7 +101,7 @@
 
   {% elif skey == 'external_rentals' %}
   {% if external_rentals %}
-  <div class="section-title">{{ layout.label('external_rentals', 'External Rentals') }}</div>
+  <div class="section-title">{{ layout.label('external_rentals', 'External Assets & Costs') }}</div>
   <table style="font-size: {{ layout.font_size('external_rentals', '11px') }}">
     <thead>
       <tr>
@@ -120,7 +120,7 @@
       </tr>
       {% endfor %}
       <tr class="total-row">
-        <td class="num">External Rental Subtotal</td>
+        <td class="num">External Subtotal</td>
         <td class="num">${{ '%.2f' | format(external_subtotal) }}</td>
       </tr>
     </tbody>
@@ -129,15 +129,15 @@
 
   {% elif skey == 'labor' %}
   {% if labor_lines %}
-  <div class="section-title">{{ layout.label('labor', 'Labor') }}</div>
+  <div class="section-title">{{ layout.label('labor', 'Actual Labor') }}</div>
   <table style="font-size: {{ layout.font_size('labor', '11px') }}">
     <thead>
       <tr>
         <th>Date</th>
         <th>Position</th>
-        <th>Technician</th>
         <th class="num">In</th>
         <th class="num">Out</th>
+        <th>Breaks</th>
         <th class="num">Hours</th>
         <th class="num">Rate</th>
         <th class="num">Line Total</th>
@@ -149,27 +149,20 @@
       <tr>
         <td class="text-dim">—</td>
         <td>{{ l.position_name or '—' }} <span class="text-dim">(per crew)</span></td>
-        <td class="text-dim">{{ l.crew_count }} scheduled crew</td>
         <td class="num text-dim">—</td>
         <td class="num text-dim">—</td>
+        <td class="text-dim">{{ l.crew_count }} crew billed</td>
         <td class="num">× {{ l.crew_count }}</td>
         <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/crew</td>
         <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
       </tr>
       {% else %}
-      <tr{% if not l.is_scheduled %} class="unscheduled"{% endif %}>
+      <tr>
         <td class="text-dim">{{ l.work_date or '—' }}</td>
         <td>{{ l.position_name or '—' }}</td>
-        <td>
-          {% if l.is_scheduled %}
-            {{ l.tech_name }}
-            {% if l.level_name %}<br><span class="text-dim">{{ l.level_name }}</span>{% endif %}
-          {% else %}
-            <span class="text-dim">Unscheduled</span>
-          {% endif %}
-        </td>
         <td class="num text-dim">{{ l.in_time or '—' }}</td>
         <td class="num text-dim">{{ l.out_time or '—' }}</td>
+        <td class="text-dim">{{ l.breaks or '—' }}</td>
         <td class="num">{{ '%.2f' | format(l.hours) }}h</td>
         <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/hr</td>
         <td class="num">${{ '%.2f' | format(l.line_total) }}</td>

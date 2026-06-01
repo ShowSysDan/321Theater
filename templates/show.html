@@ -1657,7 +1657,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     <div class="form-section-header">
       <span class="section-icon">◈</span> POST-SHOW NOTES
       <div class="ml-auto" style="display:flex;gap:6px">
-        <a href="/shows/{{ show.id }}/post-show-invoice.pdf" target="_blank" class="btn btn-sm btn-ghost" title="Combined assets + labor invoice">Combined Invoice PDF</a>
+        <a href="/shows/{{ show.id }}/post-show-invoice.pdf" target="_blank" class="btn btn-sm btn-ghost" title="Final invoice: internal & external assets + actual labor + costs">Final Invoice PDF</a>
         <a href="{{ url_for('export_postnotes', show_id=show.id) }}" class="btn btn-sm btn-ghost" target="_blank">Export PDF</a>
         <button class="btn btn-sm btn-ghost" type="button" title="Generate post-show report and email to recipients"
                 onclick="emailPdf({{ show.id }}, 'postnotes', this)">
@@ -1721,6 +1721,60 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     </div>
   </div>
 
+  {# ── Actual Labor (billing) ──────────────────────────────────────────────
+     Snapshot of the SCHEDULED labor lines that the PM edits to bill ACTUALS.
+     Lives in post_show_labor — the labor scheduler is never touched. Lines
+     start blank → $0 until actuals are entered. Tech names never hit the
+     Final Invoice (scheduled name shown here only as a reference). #}
+  <div class="form-section" id="ps-labor-section">
+    <div class="form-section-header">
+      <span class="section-icon">◈</span> ACTUAL LABOR (BILLING)
+      {% if not restricted %}
+      <div class="action-btns ml-auto" style="display:flex;gap:6px">
+        <button type="button" class="btn btn-sm btn-ghost" id="ps-pull-btn" onclick="pullScheduledLabor()"
+                title="Copy the scheduled labor lines from the Labor Scheduler so you can record actual times">Pull Scheduled Labor</button>
+        <button type="button" class="btn btn-sm btn-primary" onclick="addPostShowLaborRow()">+ Add Line</button>
+      </div>
+      {% endif %}
+    </div>
+    <div class="form-section-body no-pad">
+      <p class="text-dim" style="padding:10px 14px 0;font-size:11px;margin:0">
+        Actual times bill the client. A line with no In/Out bills $0. Scheduled times are shown for reference only; the original schedule is never changed.
+      </p>
+      <div style="overflow-x:auto">
+      <table class="data-table" id="ps-labor-table" style="font-size:12px;min-width:980px">
+        <thead>
+          <tr>
+            <th>Position</th>
+            <th>Scheduled (ref)</th>
+            <th>Actual In</th>
+            <th>Actual Out</th>
+            <th>Lunch 1 Start</th>
+            <th>Lunch 1 End</th>
+            <th>Lunch 2 Start</th>
+            <th>Lunch 2 End</th>
+            <th style="text-align:right">Hours</th>
+            <th style="text-align:right">Rate</th>
+            <th style="text-align:right">Cost</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="ps-labor-tbody"></tbody>
+        <tfoot>
+          <tr style="font-weight:600;border-top:2px solid var(--border)">
+            <td colspan="10" style="text-align:right;padding:8px 10px">ACTUAL LABOR TOTAL</td>
+            <td style="text-align:right;padding:8px 10px;color:var(--accent)" id="ps-labor-total">$0.00</td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+      </div>
+      <p class="text-dim" id="ps-labor-empty" style="padding:16px;text-align:center;display:none">
+        {% if restricted %}No actual labor recorded.{% else %}Click <strong>Pull Scheduled Labor</strong> to bring over the scheduled lines, or <strong>+ Add Line</strong> to add one manually.{% endif %}
+      </p>
+    </div>
+  </div>
+
   {# Read-only production schedule timeline for reference #}
   {% if schedule_rows %}
   <div class="form-section">
@@ -1750,6 +1804,11 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
 </form>
 </div>{# end tab-postnotes #}
+
+{# Seed post-show actual-labor rows for initPostShowLaborTab() in JS #}
+<script>
+window._postShowLaborData = {{ post_show_labor_data | tojson }};
+</script>
 
 
 {# ════════════════════════════════════════════════════════════════════════════ #}
@@ -3027,17 +3086,226 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       '<ul>' + offenders.map(s => `<li>${s}</li>`).join('') + '</ul>';
     banner.style.display = '';
   }
+  /* ── Post-Show Actual Labor (billing) ─────────────────────────
+     A snapshot of the show's SCHEDULED labor lines that the PM edits to
+     bill ACTUALS. Lives in its own table (post_show_labor) so the labor
+     scheduler is never touched. Times start blank → $0 until entered.
+     The scheduled tech name shows here as reference only — never on the
+     Final Invoice. Reuses _loadLaborPositions/_buildPositionSelect. */
+
+  async function initPostShowLaborTab() {
+    await _loadLaborPositions();
+    _renderPostShowLabor();
+  }
+
+  function _psNum(v) { return Number(v || 0); }
+  function _psRate(v) { return (v === null || v === undefined || v === '') ? '' : _psNum(v).toFixed(2); }
+
+  function _psSchedRef(r) {
+    const seg = [];
+    if (r.sched_in_time || r.sched_out_time)
+      seg.push((r.sched_in_time || '?') + '–' + (r.sched_out_time || '?'));
+    const lunch = [];
+    if (r.sched_break_start && r.sched_break_end) lunch.push(r.sched_break_start + '–' + r.sched_break_end);
+    if (r.sched_break2_start && r.sched_break2_end) lunch.push(r.sched_break2_start + '–' + r.sched_break2_end);
+    if (lunch.length) seg.push('L ' + lunch.join(', '));
+    let s = seg.join('  ');
+    if (r.sched_crew_name) s = (s ? s + ' · ' : '') + r.sched_crew_name;
+    return s || '—';
+  }
+
+  function _renderPostShowLabor() {
+    const tbody = document.getElementById('ps-labor-tbody');
+    if (!tbody) return;
+    const rows = window._postShowLaborData || [];
+    tbody.innerHTML = '';
+    const empty = document.getElementById('ps-labor-empty');
+    if (!rows.length) { if (empty) empty.style.display = ''; }
+    else { if (empty) empty.style.display = 'none'; rows.forEach(r => _renderPostShowLaborRow(tbody, r)); }
+    _updatePostShowLaborTotal();
+  }
+
+  function _renderPostShowLaborRow(tbody, r) {
+    const tr = document.createElement('tr');
+    tr.dataset.id = r.id;
+
+    const posTd = document.createElement('td');
+    const sel = document.createElement('select');
+    sel.className = 'field-input field-input-sm';
+    sel.dataset.field = 'position_id';
+    _buildPositionSelect(sel, r.position_id || null);
+    if (RESTRICTED) sel.disabled = true;
+    sel.addEventListener('change', () => _savePostShowLabor(r.id, { position_id: sel.value || null }, tr));
+    posTd.appendChild(sel);
+    tr.appendChild(posTd);
+
+    const refTd = document.createElement('td');
+    refTd.className = 'text-dim';
+    refTd.style.whiteSpace = 'nowrap';
+    refTd.textContent = _psSchedRef(r);
+    tr.appendChild(refTd);
+
+    ['in_time', 'out_time', 'break_start', 'break_end', 'break2_start', 'break2_end'].forEach(field => {
+      const td = document.createElement('td');
+      const inp = document.createElement('input');
+      inp.type = 'text'; inp.maxLength = 5; inp.placeholder = 'HH:MM';
+      inp.className = 'field-input field-input-sm';
+      inp.style.width = '64px';
+      inp.dataset.field = field;
+      inp.value = r[field] || '';
+      if (RESTRICTED) inp.disabled = true;
+      inp.addEventListener('change', () => {
+        const patch = {}; patch[field] = inp.value;
+        _savePostShowLabor(r.id, patch, tr);
+      });
+      td.appendChild(inp);
+      tr.appendChild(td);
+    });
+
+    const hoursTd = document.createElement('td');
+    hoursTd.className = 'num ps-hours';
+    hoursTd.style.textAlign = 'right';
+    hoursTd.textContent = _psNum(r.hours).toFixed(2);
+    tr.appendChild(hoursTd);
+
+    const rateTd = document.createElement('td');
+    rateTd.style.textAlign = 'right';
+    const rateInp = document.createElement('input');
+    rateInp.type = 'text'; rateInp.className = 'field-input field-input-sm';
+    rateInp.style.width = '70px'; rateInp.style.textAlign = 'right';
+    rateInp.dataset.field = 'pay_rate_snapshot';
+    rateInp.value = _psRate(r.pay_rate_snapshot);
+    if (RESTRICTED) rateInp.disabled = true;
+    rateInp.addEventListener('change', () => _savePostShowLabor(r.id, { pay_rate_snapshot: rateInp.value }, tr));
+    rateTd.appendChild(rateInp);
+    tr.appendChild(rateTd);
+
+    const costTd = document.createElement('td');
+    costTd.className = 'num ps-cost';
+    costTd.style.textAlign = 'right';
+    costTd.textContent = '$' + _psNum(r.line_cost).toFixed(2);
+    tr.appendChild(costTd);
+
+    const delTd = document.createElement('td');
+    if (!RESTRICTED) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'btn btn-sm btn-ghost'; b.title = 'Remove line';
+      b.textContent = '✕';
+      b.addEventListener('click', () => _deletePostShowLabor(r.id, tr));
+      delTd.appendChild(b);
+    }
+    tr.appendChild(delTd);
+
+    tbody.appendChild(tr);
+    return tr;
+  }
+
+  function _applyPostShowRow(id, row, tr) {
+    const arr = window._postShowLaborData || [];
+    const i = arr.findIndex(x => x.id === id);
+    if (i >= 0) arr[i] = row;
+    if (tr) {
+      const h = tr.querySelector('.ps-hours'); if (h) h.textContent = _psNum(row.hours).toFixed(2);
+      const c = tr.querySelector('.ps-cost'); if (c) c.textContent = '$' + _psNum(row.line_cost).toFixed(2);
+      const rate = tr.querySelector('input[data-field="pay_rate_snapshot"]');
+      if (rate && document.activeElement !== rate) rate.value = _psRate(row.pay_rate_snapshot);
+    }
+    _updatePostShowLaborTotal();
+  }
+
+  function _updatePostShowLaborTotal() {
+    const arr = window._postShowLaborData || [];
+    let total = 0;
+    arr.forEach(r => { total += _psNum(r.line_cost); });
+    const el = document.getElementById('ps-labor-total');
+    if (el) el.textContent = '$' + total.toFixed(2);
+  }
+
+  async function _savePostShowLabor(id, patch, tr) {
+    try {
+      const resp = await fetch(`/shows/${SHOW_ID}/post-show-labor/${id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      const data = await resp.json();
+      if (!data.success) { alert('Error saving: ' + (data.error || 'Unknown')); return; }
+      if (data.row) _applyPostShowRow(id, data.row, tr);
+    } catch (e) { /* transient network error — leave row as-is */ }
+  }
+
+  async function _deletePostShowLabor(id, tr) {
+    if (!confirm('Remove this labor line from the Post-Show invoice? (The schedule is not affected.)')) return;
+    const resp = await fetch(`/shows/${SHOW_ID}/post-show-labor/${id}`, { method: 'DELETE' });
+    const data = await resp.json();
+    if (!data.success) { alert('Error: ' + (data.error || 'Unknown')); return; }
+    window._postShowLaborData = (window._postShowLaborData || []).filter(x => x.id !== id);
+    tr.remove();
+    if (!(window._postShowLaborData || []).length) {
+      const empty = document.getElementById('ps-labor-empty'); if (empty) empty.style.display = '';
+    }
+    _updatePostShowLaborTotal();
+  }
+
+  async function addPostShowLaborRow() {
+    await _loadLaborPositions();
+    const resp = await fetch(`/shows/${SHOW_ID}/post-show-labor`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    const data = await resp.json();
+    if (!data.success) { alert('Error adding line: ' + (data.error || 'Unknown')); return; }
+    const row = {
+      id: data.id, position_id: null, work_date: null,
+      sched_in_time: '', sched_out_time: '', sched_break_start: '', sched_break_end: '',
+      sched_break2_start: '', sched_break2_end: '', sched_crew_name: '',
+      in_time: '', out_time: '', break_start: '', break_end: '', break2_start: '', break2_end: '',
+      pay_rate_snapshot: null, hours: 0, line_cost: 0,
+    };
+    (window._postShowLaborData = window._postShowLaborData || []).push(row);
+    const empty = document.getElementById('ps-labor-empty'); if (empty) empty.style.display = 'none';
+    const tr = _renderPostShowLaborRow(document.getElementById('ps-labor-tbody'), row);
+    tr.querySelector('select[data-field="position_id"]')?.focus();
+  }
+
+  async function pullScheduledLabor() {
+    const btn = document.getElementById('ps-pull-btn');
+    if (btn) btn.disabled = true;
+    try {
+      const resp = await fetch(`/shows/${SHOW_ID}/post-show-labor/pull`, { method: 'POST' });
+      const data = await resp.json();
+      if (!data.success) { alert('Error: ' + (data.error || 'Unknown')); return; }
+      window._postShowLaborData = data.rows || [];
+      await _loadLaborPositions();
+      _renderPostShowLabor();
+      alert(data.added
+        ? `Pulled ${data.added} scheduled line(s).`
+        : 'No new scheduled lines to pull. Only lines marked Scheduled in the Labor Scheduler are pulled.');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
   window._laborTabInited = false;
+  window._postShowLaborInited = false;
   document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      if (btn.getAttribute('onclick') && btn.getAttribute('onclick').includes('staffing') && !window._laborTabInited) {
+      const oc = btn.getAttribute('onclick') || '';
+      if (oc.includes('staffing') && !window._laborTabInited) {
         window._laborTabInited = true;
         initLaborTab();
         loadBillableItemsPicker();
         loadLaborCost();
       }
+      if (oc.includes('postnotes') && !window._postShowLaborInited) {
+        window._postShowLaborInited = true;
+        initPostShowLaborTab();
+      }
     });
   });
+  // Deep-link / server-rendered active tab: init the grid if we land on Post-Show.
+  if (INITIAL_TAB === 'postnotes' && !window._postShowLaborInited) {
+    window._postShowLaborInited = true;
+    initPostShowLaborTab();
+  }
 
   // Expose helpers so switchTab() (in app.js) can refresh labor-tab state
   // when the user flips back from the Advance Sheet without forcing a reload.

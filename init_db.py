@@ -488,6 +488,37 @@ CREATE TABLE IF NOT EXISTS show_labor_billable_items (
     PRIMARY KEY (show_id, billable_item_id)
 );
 
+-- Post-Show actual labor — a snapshot of the show's SCHEDULED labor lines that
+-- the PM edits to bill ACTUALS, without ever touching the labor scheduler.
+-- Pulled from the Post-Show tab: scheduled times are copied into the sched_*
+-- columns (read-only reference); the PM enters the billable times in
+-- in_time/out_time/break*. Blank actuals compute 0 hours → $0. pay_rate_snapshot
+-- freezes the rate at pull time so later rate edits don't rewrite the invoice.
+CREATE TABLE IF NOT EXISTS post_show_labor (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    show_id            INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    source_request_id  INTEGER REFERENCES labor_requests(id) ON DELETE SET NULL,
+    position_id        INTEGER REFERENCES job_positions(id) ON DELETE SET NULL,
+    work_date          DATE,
+    sched_in_time      TEXT DEFAULT '',
+    sched_out_time     TEXT DEFAULT '',
+    sched_break_start  TEXT DEFAULT '',
+    sched_break_end    TEXT DEFAULT '',
+    sched_break2_start TEXT DEFAULT '',
+    sched_break2_end   TEXT DEFAULT '',
+    sched_crew_name    TEXT DEFAULT '',
+    in_time            TEXT DEFAULT '',
+    out_time           TEXT DEFAULT '',
+    break_start        TEXT DEFAULT '',
+    break_end          TEXT DEFAULT '',
+    break2_start       TEXT DEFAULT '',
+    break2_end         TEXT DEFAULT '',
+    pay_rate_snapshot  REAL DEFAULT NULL,
+    notes              TEXT DEFAULT '',
+    sort_order         INTEGER DEFAULT 0,
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Overhead & Project Crew (labor not tied to any show)
 --
 -- Projects are the equivalent of "arts groups" for overhead/project crew —
@@ -1815,6 +1846,32 @@ def migrate_db():
         CREATE INDEX IF NOT EXISTS idx_oh_groups_date ON overhead_labor_groups(work_date);
         CREATE INDEX IF NOT EXISTS idx_oh_requests_date ON overhead_labor_requests(work_date);
         CREATE INDEX IF NOT EXISTS idx_oh_requests_group ON overhead_labor_requests(group_id);
+
+        CREATE TABLE IF NOT EXISTS post_show_labor (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            show_id            INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+            source_request_id  INTEGER REFERENCES labor_requests(id) ON DELETE SET NULL,
+            position_id        INTEGER REFERENCES job_positions(id) ON DELETE SET NULL,
+            work_date          DATE,
+            sched_in_time      TEXT DEFAULT '',
+            sched_out_time     TEXT DEFAULT '',
+            sched_break_start  TEXT DEFAULT '',
+            sched_break_end    TEXT DEFAULT '',
+            sched_break2_start TEXT DEFAULT '',
+            sched_break2_end   TEXT DEFAULT '',
+            sched_crew_name    TEXT DEFAULT '',
+            in_time            TEXT DEFAULT '',
+            out_time           TEXT DEFAULT '',
+            break_start        TEXT DEFAULT '',
+            break_end          TEXT DEFAULT '',
+            break2_start       TEXT DEFAULT '',
+            break2_end         TEXT DEFAULT '',
+            pay_rate_snapshot  REAL DEFAULT NULL,
+            notes              TEXT DEFAULT '',
+            sort_order         INTEGER DEFAULT 0,
+            created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_psl_show ON post_show_labor(show_id);
     """)
 
     # Audit trail and comment versioning tables (safe to rerun)
@@ -2757,6 +2814,34 @@ CREATE TABLE IF NOT EXISTS show_labor_billable_items (
     show_id          INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
     billable_item_id INTEGER NOT NULL REFERENCES labor_billable_items(id) ON DELETE CASCADE,
     PRIMARY KEY (show_id, billable_item_id)
+);
+
+-- Post-Show actual labor — snapshot of the show's SCHEDULED labor lines that the
+-- PM edits to bill ACTUALS without touching the labor scheduler. See SQLite SCHEMA
+-- for full notes. Re-run by migrate_db_postgres() so existing PG DBs get it too.
+CREATE TABLE IF NOT EXISTS post_show_labor (
+    id                 SERIAL PRIMARY KEY,
+    show_id            INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    source_request_id  INTEGER REFERENCES labor_requests(id) ON DELETE SET NULL,
+    position_id        INTEGER REFERENCES job_positions(id) ON DELETE SET NULL,
+    work_date          DATE,
+    sched_in_time      TEXT DEFAULT '',
+    sched_out_time     TEXT DEFAULT '',
+    sched_break_start  TEXT DEFAULT '',
+    sched_break_end    TEXT DEFAULT '',
+    sched_break2_start TEXT DEFAULT '',
+    sched_break2_end   TEXT DEFAULT '',
+    sched_crew_name    TEXT DEFAULT '',
+    in_time            TEXT DEFAULT '',
+    out_time           TEXT DEFAULT '',
+    break_start        TEXT DEFAULT '',
+    break_end          TEXT DEFAULT '',
+    break2_start       TEXT DEFAULT '',
+    break2_end         TEXT DEFAULT '',
+    pay_rate_snapshot  REAL DEFAULT NULL,
+    notes              TEXT DEFAULT '',
+    sort_order         INTEGER DEFAULT 0,
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS overhead_projects (

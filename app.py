@@ -3419,6 +3419,9 @@ def show_page(show_id):
     """, (show_id,)).fetchall()
     labor_requests_data = [_normalize_row_dates(dict(r)) for r in labor_rows]
 
+    # Post-show actual labor (billing snapshot) for the Post-Show tab
+    post_show_labor_data = _post_show_labor_rows(db2, show_id)
+
     # Asset categories (for the Assets tab)
     asset_cats = db2.execute('SELECT * FROM asset_categories ORDER BY sort_order, name').fetchall()
     asset_categories_for_tab = [dict(c) for c in asset_cats]
@@ -3459,6 +3462,7 @@ def show_page(show_id):
                            global_wifi_password=global_wifi_password,
                            sched_templates=sched_templates,
                            labor_requests_data=labor_requests_data,
+                           post_show_labor_data=post_show_labor_data,
                            asset_categories=asset_categories_for_tab,
                            is_content_admin_user=session.get('is_content_admin', False),
                            can_edit_advance=can_edit_advance,
@@ -10163,6 +10167,297 @@ def set_show_billable_items(show_id):
     return jsonify({'success': True, 'selected_ids': valid_ids})
 
 
+# ─── Post-Show Actual Labor (billing) ────────────────────────────────────────
+#
+# A per-show snapshot of the SCHEDULED labor lines that the PM edits to bill
+# ACTUALS. Lives in its own table (post_show_labor) so the labor scheduler /
+# labor_requests are never mutated. Scheduled times are copied into sched_*
+# (read-only reference); the PM enters the billable times in in_time/out_time/
+# break*. A line with no actual times computes 0 hours → $0 ("bill zero until
+# entered"). pay_rate_snapshot is frozen at pull time so later rate changes
+# don't rewrite the invoice.
+
+_PSL_TIME_FIELDS = ('in_time', 'out_time', 'break_start', 'break_end',
+                    'break2_start', 'break2_end')
+
+
+def _resolve_labor_rate(db, position_id, crew_member_id):
+    """Resolve an hourly rate the same way _calc_labor_cost_for_show does:
+    a position override_rate wins, else the crew member's pay-level
+    hourly_rate, else 0."""
+    if position_id:
+        row = db.execute('SELECT override_rate FROM job_positions WHERE id=?',
+                         (position_id,)).fetchone()
+        if row and row['override_rate'] is not None:
+            return float(row['override_rate'])
+    if crew_member_id:
+        row = db.execute("""
+            SELECT prl.hourly_rate
+            FROM crew_members cm
+            LEFT JOIN pay_rate_levels prl ON prl.id = cm.rate_level_id
+            WHERE cm.id=?
+        """, (crew_member_id,)).fetchone()
+        if row and row['hourly_rate'] is not None:
+            return float(row['hourly_rate'])
+    return 0.0
+
+
+def _format_break_windows(d):
+    """Human-readable lunch/break windows for the invoice (e.g. '12:00–12:30')."""
+    parts = []
+    for s, e in (('break_start', 'break_end'), ('break2_start', 'break2_end')):
+        bs = (d.get(s) or '').strip()
+        be = (d.get(e) or '').strip()
+        if bs and be:
+            parts.append(f'{bs}–{be}')
+        elif bs:
+            parts.append(bs)
+    return ', '.join(parts)
+
+
+def _post_show_labor_rows(db, show_id):
+    """Fetch post_show_labor rows with position_name + computed hours/line_cost.
+    Hours come from the ACTUAL (billable) times; rate from the frozen snapshot."""
+    rows = db.execute("""
+        SELECT psl.*, jp.name AS position_name
+        FROM post_show_labor psl
+        LEFT JOIN job_positions jp ON jp.id = psl.position_id
+        WHERE psl.show_id = ?
+        ORDER BY psl.sort_order, psl.id
+    """, (show_id,)).fetchall()
+    out = []
+    for r in rows:
+        d = _normalize_row_dates(dict(r))
+        hours = _calc_hours(d.get('in_time'), d.get('out_time'),
+                            d.get('break_start'), d.get('break_end'),
+                            d.get('break2_start'), d.get('break2_end'))
+        rate = float(d.get('pay_rate_snapshot') or 0)
+        d['hours'] = round(hours, 2)
+        d['line_cost'] = round(hours * rate, 2)
+        out.append(d)
+    return out
+
+
+def _calc_post_show_labor_cost(db, show_id):
+    """Final-invoice labor: bill ACTUAL hours × frozen rate from post_show_labor.
+    Never exposes the technician name. Per-crew billable extras (e.g. parking)
+    are multiplied by the number of lines that have actual hours entered."""
+    rows = _post_show_labor_rows(db, show_id)
+    lines = []
+    total = 0.0
+    billed_count = 0
+    for d in rows:
+        cost = d['line_cost']
+        total += cost
+        if d['hours'] > 0:
+            billed_count += 1
+        lines.append({
+            'id': d['id'],
+            'work_date': d.get('work_date') or '',
+            'position_name': d.get('position_name') or '',
+            'in_time': d.get('in_time') or '',
+            'out_time': d.get('out_time') or '',
+            'breaks': _format_break_windows(d),
+            'hours': d['hours'],
+            'hourly_rate': float(d.get('pay_rate_snapshot') or 0),
+            'line_total': cost,
+        })
+
+    if billed_count > 0:
+        billable_items = db.execute(
+            'SELECT b.id, b.name, b.cost_per_crew '
+            'FROM labor_billable_items b '
+            'JOIN show_labor_billable_items sb '
+            '  ON sb.billable_item_id = b.id AND sb.show_id = ? '
+            'ORDER BY b.sort_order, b.name',
+            (show_id,)
+        ).fetchall()
+        for item in billable_items:
+            cost_each = float(item['cost_per_crew'] or 0)
+            line_total = round(cost_each * billed_count, 2)
+            total += line_total
+            lines.append({
+                'id': f"billable-{item['id']}",
+                'work_date': '', 'position_name': item['name'] or '',
+                'in_time': '', 'out_time': '', 'breaks': '',
+                'hours': billed_count,
+                'hourly_rate': cost_each,
+                'line_total': line_total,
+                'is_billable_extra': True,
+                'crew_count': billed_count,
+            })
+
+    return lines, round(total, 2)
+
+
+@app.route('/shows/<int:show_id>/post-show-labor', methods=['GET'])
+@login_required
+def get_post_show_labor(show_id):
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    db = get_db()
+    rows = _post_show_labor_rows(db, show_id)
+    db.close()
+    return jsonify(rows)
+
+
+@app.route('/shows/<int:show_id>/post-show-labor/pull', methods=['POST'])
+@login_required
+def pull_post_show_labor(show_id):
+    """Snapshot the show's SCHEDULED labor lines (is_scheduled=1) into
+    post_show_labor. Idempotent: lines already pulled (matched by
+    source_request_id) are skipped, so re-running only adds newly-scheduled
+    lines and never clobbers the PM's actuals or PM-added lines."""
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_restricted') or session.get('is_readonly'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    db = get_db()
+    existing = {r['source_request_id'] for r in db.execute(
+        'SELECT source_request_id FROM post_show_labor '
+        'WHERE show_id=? AND source_request_id IS NOT NULL', (show_id,)
+    ).fetchall()}
+    sched = db.execute("""
+        SELECT lr.*, cm.name AS scheduled_crew_name
+        FROM labor_requests lr
+        LEFT JOIN crew_members cm ON cm.id = lr.scheduled_crew_member_id
+        WHERE lr.show_id = ? AND lr.is_scheduled = 1
+        ORDER BY lr.sort_order, lr.id
+    """, (show_id,)).fetchall()
+    order = _max_sort_order(db, 'post_show_labor', 'show_id=?', (show_id,))
+    added = 0
+    for s in sched:
+        if s['id'] in existing:
+            continue
+        rate = _resolve_labor_rate(db, s['position_id'], s['scheduled_crew_member_id'])
+        db.execute("""
+            INSERT INTO post_show_labor
+                (show_id, source_request_id, position_id, work_date,
+                 sched_in_time, sched_out_time, sched_break_start, sched_break_end,
+                 sched_break2_start, sched_break2_end, sched_crew_name,
+                 pay_rate_snapshot, sort_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (show_id, s['id'], s['position_id'], s['work_date'],
+              s['in_time'], s['out_time'], s['break_start'], s['break_end'],
+              s['break2_start'], s['break2_end'], s['scheduled_crew_name'] or '',
+              rate, order))
+        order += 10
+        added += 1
+    log_audit(db, 'POST_SHOW_LABOR_PULL', 'show', show_id, show_id=show_id,
+              detail=f'added={added}')
+    db.commit()
+    rows = _post_show_labor_rows(db, show_id)
+    db.close()
+    syslog_logger.info(f"POST_SHOW_LABOR_PULL show_id={show_id} added={added} by={session.get('username')}")
+    return jsonify({'success': True, 'added': added, 'rows': rows})
+
+
+@app.route('/shows/<int:show_id>/post-show-labor', methods=['POST'])
+@login_required
+def add_post_show_labor(show_id):
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_restricted') or session.get('is_readonly'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    data = request.get_json(force=True) or {}
+    db = get_db()
+    position_id = data.get('position_id') or None
+    if position_id:
+        try:
+            position_id = int(position_id)
+        except (TypeError, ValueError):
+            position_id = None
+    rate = data.get('pay_rate_snapshot')
+    if rate in (None, ''):
+        rate = _resolve_labor_rate(db, position_id, None)
+    else:
+        try:
+            rate = float(rate)
+        except (TypeError, ValueError):
+            rate = _resolve_labor_rate(db, position_id, None)
+    order = _max_sort_order(db, 'post_show_labor', 'show_id=?', (show_id,))
+    cur = db.execute("""
+        INSERT INTO post_show_labor
+            (show_id, position_id, work_date,
+             in_time, out_time, break_start, break_end, break2_start, break2_end,
+             pay_rate_snapshot, notes, sort_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (show_id, position_id, data.get('work_date') or None,
+          _normalize_perf_time(data.get('in_time', '')),
+          _normalize_perf_time(data.get('out_time', '')),
+          _normalize_perf_time(data.get('break_start', '')),
+          _normalize_perf_time(data.get('break_end', '')),
+          _normalize_perf_time(data.get('break2_start', '')),
+          _normalize_perf_time(data.get('break2_end', '')),
+          rate, (data.get('notes') or '').strip(), order))
+    pid = cur.lastrowid
+    log_audit(db, 'POST_SHOW_LABOR_ADD', 'post_show_labor', pid, show_id=show_id)
+    db.commit()
+    db.close()
+    syslog_logger.info(f"POST_SHOW_LABOR_ADD show_id={show_id} id={pid} by={session.get('username')}")
+    return jsonify({'success': True, 'id': pid})
+
+
+@app.route('/shows/<int:show_id>/post-show-labor/<int:pid>', methods=['PUT'])
+@login_required
+def update_post_show_labor(show_id, pid):
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_restricted') or session.get('is_readonly'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    data = request.get_json(force=True) or {}
+    db = get_db()
+    updates, params = [], []
+    if 'position_id' in data:
+        pidv = data.get('position_id')
+        try:
+            pidv = int(pidv) if pidv else None
+        except (TypeError, ValueError):
+            pidv = None
+        updates.append('position_id=?'); params.append(pidv)
+    for f in _PSL_TIME_FIELDS:
+        if f in data:
+            updates.append(f'{f}=?'); params.append(_normalize_perf_time(data.get(f, '')))
+    if 'work_date' in data:
+        updates.append('work_date=?'); params.append(data.get('work_date') or None)
+    if 'notes' in data:
+        updates.append('notes=?'); params.append((data.get('notes') or '').strip())
+    if 'pay_rate_snapshot' in data:
+        rv = data.get('pay_rate_snapshot')
+        try:
+            rv = float(rv) if rv not in (None, '') else None
+        except (TypeError, ValueError):
+            rv = None
+        updates.append('pay_rate_snapshot=?'); params.append(rv)
+    if not updates:
+        db.close()
+        return jsonify({'success': False, 'error': 'No changes.'}), 400
+    params.extend([pid, show_id])
+    db.execute(f"UPDATE post_show_labor SET {', '.join(updates)} WHERE id=? AND show_id=?", params)
+    log_audit(db, 'POST_SHOW_LABOR_EDIT', 'post_show_labor', pid, show_id=show_id)
+    db.commit()
+    rows = _post_show_labor_rows(db, show_id)
+    db.close()
+    row = next((r for r in rows if r['id'] == pid), None)
+    return jsonify({'success': True, 'row': row})
+
+
+@app.route('/shows/<int:show_id>/post-show-labor/<int:pid>', methods=['DELETE'])
+@login_required
+def delete_post_show_labor(show_id, pid):
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_restricted') or session.get('is_readonly'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    db = get_db()
+    db.execute('DELETE FROM post_show_labor WHERE id=? AND show_id=?', (pid, show_id))
+    log_audit(db, 'POST_SHOW_LABOR_DELETE', 'post_show_labor', pid, show_id=show_id)
+    db.commit()
+    db.close()
+    syslog_logger.info(f"POST_SHOW_LABOR_DELETE show_id={show_id} id={pid} by={session.get('username')}")
+    return jsonify({'success': True})
+
+
 @app.route('/labor-scheduler')
 @scheduler_required
 def labor_scheduler():
@@ -14708,7 +15003,9 @@ def show_post_invoice(show_id):
     assets_subtotal   = sum((a['locked_price'] or 0) * a['quantity'] for a in assets_list)
     external_subtotal = sum(e['cost'] or 0 for e in ext_list)
 
-    labor_lines, labor_total = _calc_labor_cost_for_show(db, show_id)
+    # Final Invoice bills ACTUAL labor recorded on the Post-Show tab
+    # (post_show_labor), not the schedule. Tech names are never exposed.
+    labor_lines, labor_total = _calc_post_show_labor_cost(db, show_id)
     er_pdfs = _fetch_external_rental_pdfs(db, show_id)
     db.close()
 
