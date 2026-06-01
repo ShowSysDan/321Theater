@@ -577,20 +577,50 @@ def reload_syslog_handler():
 
 def get_app_setting(key, default=''):
     """
-    Fetch a single app_setting value.
-    Always reads from the SQLite bootstrap file so this is safe to call
-    at startup before the active DB connection type is resolved.
+    Fetch a single app_settings value from the ACTIVE database.
+
+    app_settings is owned by whichever DB the app is configured to use
+    (SQLite or PostgreSQL) — that is also where the Settings UI reads and
+    writes it (see settings() / save_*_settings via get_db()). Reading it
+    through get_db() here is what guarantees a value saved in the UI is the
+    same value the rest of the app — including background jobs like the
+    scheduled PDF emailer — actually sees. (Previously this read the local
+    SQLite bootstrap file unconditionally, so on a PostgreSQL deployment
+    every setting saved in the UI was invisible to this function, silently
+    defeating SMTP config, scheduled emails, etc.)
+
+    Only `db_type` (and the PG credentials in db_config.ini) live solely in
+    the SQLite bootstrap file; db_adapter resolves those before any
+    connection is opened, so they never depend on this function.
+
+    Falls back to a direct SQLite read if the active DB can't be reached
+    (very early startup or a transient outage), preserving the original
+    startup-safe behaviour.
     """
     if not os.path.exists(DATABASE):
         return default
     try:
-        _conn = sqlite3.connect(DATABASE)
-        _conn.row_factory = db_adapter._row_factory
-        row = _conn.execute('SELECT value FROM app_settings WHERE key=?', (key,)).fetchone()
-        _conn.close()
-        return row['value'] if row and row['value'] is not None else default
-    except Exception:
+        db = get_db()
+        try:
+            row = db.execute(
+                'SELECT value FROM app_settings WHERE key=?', (key,)
+            ).fetchone()
+        finally:
+            db.close()
+        if row and row['value'] is not None:
+            return row['value']
         return default
+    except Exception:
+        # Active DB unreachable — fall back to the SQLite bootstrap file so
+        # startup / outage paths still resolve to *a* value.
+        try:
+            _conn = sqlite3.connect(DATABASE)
+            _conn.row_factory = db_adapter._row_factory
+            row = _conn.execute('SELECT value FROM app_settings WHERE key=?', (key,)).fetchone()
+            _conn.close()
+            return row['value'] if row and row['value'] is not None else default
+        except Exception:
+            return default
 
 
 # ─── Database ─────────────────────────────────────────────────────────────────
@@ -2022,80 +2052,175 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
     return True, f'Sent to {len(recipients)} recipient(s).', len(recipients)
 
 
+def _as_date(v):
+    """Coerce a DB date value (str, datetime.date, or datetime.datetime) to a
+    plain date. Returns None if it can't be parsed. PostgreSQL hands back
+    date/datetime objects while SQLite hands back ISO strings, so callers must
+    not assume either."""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    try:
+        return date.fromisoformat(str(v)[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+def _scheduled_email_triggers():
+    """Read the enabled (pdf_type, trigger_days) scheduled-email triggers from
+    settings. Read-only; returns [] if nothing is enabled.
+
+    The production schedule intentionally has two independent triggers (e.g. a
+    10-day heads-up and a 1-day final), so the same pdf_type can appear twice
+    with different trigger_days."""
+    triggers = []
+    for pdf_type, enabled_key, days_key in (
+        ('advance',  'advance_email_enabled',    'advance_email_days_before'),
+        ('schedule', 'schedule_email_enabled_1', 'schedule_email_days_1'),
+        ('schedule', 'schedule_email_enabled_2', 'schedule_email_days_2'),
+    ):
+        if get_app_setting(enabled_key, '0') not in ('1', 'true'):
+            continue
+        try:
+            trigger_days = int(get_app_setting(days_key, '0'))
+        except (TypeError, ValueError):
+            continue
+        if trigger_days > 0:
+            triggers.append((pdf_type, trigger_days))
+    return triggers
+
+
+def _plan_scheduled_emails(db, target_date):
+    """Read-only: decide which documents a scheduled run on `target_date` would
+    send, mirroring run_scheduled_pdf_emails()'s selection logic exactly so the
+    Settings "next scheduled send" preview and the real job never disagree.
+
+    A trigger is "due" when 0 <= days_until <= trigger_days (not an exact
+    match), so a missed run — or a show entered after its trigger already
+    passed — still goes out instead of being skipped forever. Dedup is per
+    (show, pdf_type, trigger_days) across all time via email_send_log, so each
+    configured trigger sends once. If several triggers for the same document
+    are simultaneously overdue, one up-to-date PDF covers them all: we keep the
+    most imminent trigger and list the rest under 'also_satisfies'.
+
+    Returns a list of dicts sorted by urgency:
+      {show_id, show_name, pdf_type, trigger_days, days_until, also_satisfies}
+    """
+    triggers = _scheduled_email_triggers()
+    if not triggers:
+        return []
+
+    shows = db.execute(
+        "SELECT id, name, show_date FROM shows WHERE status='active'"
+    ).fetchall()
+    if not shows:
+        return []
+
+    perfs = db.execute(
+        "SELECT show_id, MIN(perf_date) AS first_perf "
+        "FROM show_performances GROUP BY show_id"
+    ).fetchall()
+    first_perf = {r['show_id']: r['first_perf'] for r in perfs}
+
+    show_ids = [s['id'] for s in shows]
+    placeholders = ','.join(['?'] * len(show_ids))
+    already_sent = set()
+    for r in db.execute(
+        f"SELECT show_id, pdf_type, days_before FROM email_send_log "
+        f"WHERE trigger_type='scheduled' AND show_id IN ({placeholders})",
+        tuple(show_ids)
+    ).fetchall():
+        already_sent.add((r['show_id'], r['pdf_type'], r['days_before']))
+
+    plan = []
+    for show_row in shows:
+        show_id = show_row['id']
+        perf_date = _as_date(first_perf.get(show_id)) or _as_date(show_row['show_date'])
+        if not perf_date:
+            continue
+        days_until = (perf_date - target_date).days
+
+        # Collect each document's due, not-yet-sent triggers.
+        due_by_doc = {}
+        for pdf_type, trigger_days in triggers:
+            if not (0 <= days_until <= trigger_days):
+                continue
+            if (show_id, pdf_type, trigger_days) in already_sent:
+                continue
+            due_by_doc.setdefault(pdf_type, []).append(trigger_days)
+
+        for pdf_type, due_days in due_by_doc.items():
+            send_trigger = min(due_days)  # most imminent reminder
+            plan.append({
+                'show_id': show_id,
+                'show_name': show_row['name'],
+                'pdf_type': pdf_type,
+                'trigger_days': send_trigger,
+                'days_until': days_until,
+                'also_satisfies': sorted(td for td in due_days if td != send_trigger),
+            })
+
+    plan.sort(key=lambda p: (p['days_until'], (p['show_name'] or '').lower(), p['pdf_type']))
+    return plan
+
+
 def run_scheduled_pdf_emails():
     """
-    APScheduler job: hourly tick.  Sends PDFs when the configured send hour
-    matches the current hour and no send has been recorded for this show/type/day.
+    APScheduler job: fires at the top of every hour. During the configured
+    send hour it emails each enabled document (advance / production schedule)
+    for any active show that has reached its trigger point and hasn't had that
+    trigger sent yet. See _plan_scheduled_emails() for the selection rules
+    (due-not-exact, all-time per-trigger dedup, catch-up on missed days).
     """
     if not am_i_leader():
         app.logger.info('PDF email check skipped — not cluster leader')
         return
-    send_hour = int(get_app_setting('pdf_email_send_hour', '6'))
+    try:
+        send_hour = int(get_app_setting('pdf_email_send_hour', '6'))
+    except (TypeError, ValueError):
+        send_hour = 6
     if datetime.now().hour != send_hour:
         return
 
     today = date.today()
-    today_str = today.isoformat()
-
     db = get_db()
-    shows = db.execute(
-        "SELECT id, name, show_date FROM shows WHERE status='active'"
-    ).fetchall()
+    try:
+        plan = _plan_scheduled_emails(db, today)
+    finally:
+        db.close()
+    if not plan:
+        return
 
-    # Pre-load first perf date per show
-    perfs = db.execute(
-        "SELECT show_id, MIN(perf_date) as first_perf FROM show_performances GROUP BY show_id"
-    ).fetchall()
-    first_perf = {r['show_id']: r['first_perf'] for r in perfs}
-
-    # Already sent today (to avoid duplicate sends within the same day)
-    sent_today = set()
-    for r in db.execute(
-        "SELECT show_id, pdf_type, days_before FROM email_send_log "
-        "WHERE trigger_type='scheduled' AND DATE(sent_at)=?", (today_str,)
-    ).fetchall():
-        sent_today.add((r['show_id'], r['pdf_type'], r['days_before']))
-
-    db.close()
-
-    configs = [
-        ('advance',  'advance_email_enabled',     'advance_email_days_before',  None),
-        ('schedule', 'schedule_email_enabled_1',  'schedule_email_days_1',      None),
-        ('schedule', 'schedule_email_enabled_2',  'schedule_email_days_2',      None),
-    ]
-
-    for show_row in shows:
-        show_id   = show_row['id']
-        perf_date_str = first_perf.get(show_id) or show_row['show_date']
-        if not perf_date_str:
-            continue
-        try:
-            perf_date = date.fromisoformat(perf_date_str)
-        except ValueError:
-            continue
-        days_until = (perf_date - today).days
-
-        for pdf_type, enabled_key, days_key, _ in configs:
-            if get_app_setting(enabled_key, '0') not in ('1', 'true'):
-                continue
-            try:
-                trigger_days = int(get_app_setting(days_key, '0'))
-            except ValueError:
-                continue
-            if trigger_days <= 0:
-                continue
-            if days_until != trigger_days:
-                continue
-            if (show_id, pdf_type, trigger_days) in sent_today:
-                continue
-
-            ok, msg, _ = _send_pdf_email(
-                show_id, pdf_type, 'system', days_before=trigger_days
-            )
-            app.logger.info(
-                f'Scheduled PDF email show={show_id} type={pdf_type} '
-                f'days_before={trigger_days}: {msg}'
-            )
+    for item in plan:
+        show_id = item['show_id']
+        pdf_type = item['pdf_type']
+        send_trigger = item['trigger_days']
+        ok, msg, _ = _send_pdf_email(
+            show_id, pdf_type, 'system', days_before=send_trigger
+        )
+        app.logger.info(
+            f"Scheduled PDF email show={show_id} type={pdf_type} "
+            f"days_before={send_trigger} days_until={item['days_until']}: {msg}"
+        )
+        # One up-to-date PDF covers every overdue trigger for this document.
+        # _send_pdf_email already logged send_trigger; record the superseded
+        # ones (recipient_count=0) so they don't re-fire on a later run.
+        if ok and item['also_satisfies']:
+            for td in item['also_satisfies']:
+                try:
+                    _db = get_db()
+                    _db.execute(
+                        "INSERT INTO email_send_log "
+                        "(show_id, pdf_type, trigger_type, days_before, sent_by, recipient_count) "
+                        "VALUES (?, ?, 'scheduled', ?, 'system', 0)",
+                        (show_id, pdf_type, td)
+                    )
+                    _db.commit(); _db.close()
+                except Exception as e:
+                    app.logger.warning(f'superseded trigger log failed: {e}')
 
 
 def start_scheduler():
@@ -2129,7 +2254,10 @@ def start_scheduler():
         scheduler.add_job(run_daily_backup, 'cron', hour=0, minute=0, id='daily_backup')
         # PDF emails: leader-gated inside run_scheduled_pdf_emails() so
         # recipients never receive a duplicate when multiple instances run.
-        scheduler.add_job(run_scheduled_pdf_emails, 'interval', hours=1, id='pdf_email_check')
+        # cron (top of every hour) — not interval — so the run aligns to the
+        # wall clock and a restart can't push the only tick out of the
+        # configured send hour and silently skip a day.
+        scheduler.add_job(run_scheduled_pdf_emails, 'cron', minute=0, id='pdf_email_check')
         # Field-change alerts: leader-gated. Picks up debounced pending
         # alerts every 10 min and sends them once the value has been
         # quiet long enough.
@@ -9604,6 +9732,68 @@ def save_pdf_email_settings():
     db.commit(); db.close()
     syslog_logger.info(f"SETTINGS_CHANGE key=pdf_emails by={session.get('username')}")
     return jsonify({'success': True})
+
+
+@app.route('/settings/pdf-emails/preview', methods=['GET'])
+@admin_required
+def pdf_email_preview():
+    """Preview the next scheduled auto-email run for the Settings page: when it
+    will fire and exactly which documents would go out, using the same planner
+    the real job uses. Reflects *saved* settings (save first to see changes)."""
+    try:
+        send_hour = int(get_app_setting('pdf_email_send_hour', '6'))
+    except (TypeError, ValueError):
+        send_hour = 6
+    send_hour = max(0, min(23, send_hour))
+
+    # Next wall-clock occurrence of the send hour (server local time, matching
+    # run_scheduled_pdf_emails). That run will see this date as its "today".
+    now = datetime.now()
+    next_send = now.replace(hour=send_hour, minute=0, second=0, microsecond=0)
+    if next_send <= now:
+        next_send += timedelta(days=1)
+    target_date = next_send.date()
+
+    any_enabled = any(
+        get_app_setting(k, '0') in ('1', 'true')
+        for k in ('advance_email_enabled',
+                  'schedule_email_enabled_1', 'schedule_email_enabled_2')
+    )
+
+    # Is an outbound path actually configured? (Same check _send_pdf_email makes.)
+    provider = get_app_setting('email_provider', 'smtp')
+    delivery_ok = True
+    if provider == 'smtp':
+        delivery_ok = bool(_get_smtp_settings().get('smtp_host'))
+
+    db = get_db()
+    try:
+        plan = _plan_scheduled_emails(db, target_date)
+    finally:
+        db.close()
+
+    type_label = {'advance': 'Advance Sheet', 'schedule': 'Production Schedule'}
+    items = [{
+        'show_id':      p['show_id'],
+        'show_name':    p['show_name'],
+        'doc':          type_label.get(p['pdf_type'], p['pdf_type']),
+        'pdf_type':     p['pdf_type'],
+        'trigger_days': p['trigger_days'],
+        'days_until':   p['days_until'],
+    } for p in plan]
+
+    hr12 = send_hour % 12 or 12
+    ampm = 'AM' if send_hour < 12 else 'PM'
+    next_send_human = next_send.strftime('%A, %b ') + str(next_send.day) + f' at {hr12}:00 {ampm}'
+
+    return jsonify({
+        'enabled':         any_enabled,
+        'delivery_ok':     delivery_ok,
+        'send_hour':       send_hour,
+        'next_send_iso':   next_send.isoformat(),
+        'next_send_human': next_send_human,
+        'items':           items,
+    })
 
 
 # ─── Cluster (multi-server heartbeat & leader election) ──────────────────────
