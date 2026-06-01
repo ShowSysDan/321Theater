@@ -2099,6 +2099,17 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
   font-weight: 600 !important;
   color: var(--text) !important;
 }
+/* Training / shadow shift: flagged on the staffing tab so everyone knows it
+   carries no cost and stays off show paperwork. */
+.labor-training-badge {
+  display: inline-block;
+  font-size: 9px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase;
+  padding: 1px 6px; border-radius: 999px;
+  background: #e6f0ff; color: #2b5fb3; border: 1px solid #b9d2f5;
+  vertical-align: middle; white-space: nowrap;
+}
+.labor-day-table tr.labor-training-row td { background: rgba(43, 95, 179, 0.05); }
 /* Show-level labor notes box (top of staffing tab) */
 .show-labor-notes-wrap {
   padding: 10px 14px 8px;
@@ -2631,7 +2642,17 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
       <td class="labor-scheduled-tech" title="Set by the labor scheduler"></td>
       ${RESTRICTED ? '' : '<td style="text-align:center"><button type="button" class="btn btn-xs btn-danger-ghost" onclick="removeLaborRow(this)" title="Remove">×</button></td>'}
     `;
-    tr.querySelector('.labor-scheduled-tech').textContent = scheduledTechText;
+    const schedTechCell = tr.querySelector('.labor-scheduled-tech');
+    schedTechCell.textContent = scheduledTechText;
+    if (lr.is_training_shift) {
+      tr.classList.add('labor-training-row');
+      const tbadge = document.createElement('span');
+      tbadge.className = 'labor-training-badge';
+      tbadge.textContent = 'Training';
+      tbadge.title = 'Training / shadow shift — no charge to the show and excluded from show paperwork';
+      schedTechCell.appendChild(document.createTextNode(' '));
+      schedTechCell.appendChild(tbadge);
+    }
     tbody.appendChild(tr);
 
     const posSel  = tr.querySelector('select[data-field="position_id"]');
@@ -3002,6 +3023,17 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
               <td style="text-align:right" class="mono">× ${qty}</td>
               <td style="text-align:right" class="mono">$${parseFloat(l.hourly_rate).toFixed(2)}/crew</td>
               <td style="text-align:right" class="mono">$${parseFloat(l.line_total).toFixed(2)}</td>
+            </tr>`;
+        }
+        if (l.is_training) {
+          return `
+            <tr style="color:var(--text-dim)">
+              <td class="text-dim text-sm">${l.work_date || '—'}</td>
+              <td>${l.position_name || '—'} <span class="labor-training-badge">Training</span></td>
+              <td>${l.tech_name || '—'}</td>
+              <td style="text-align:right">${parseFloat(l.hours).toFixed(2)}h</td>
+              <td style="text-align:right" class="text-dim">No charge</td>
+              <td style="text-align:right" class="mono">$0.00</td>
             </tr>`;
         }
         return `

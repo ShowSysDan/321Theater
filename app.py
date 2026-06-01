@@ -5108,9 +5108,11 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
         schedule_days = [{'perf': {'perf_date': show['show_date'], 'perf_time': show['show_time']},
                           'rows': rows_by_perf.get(None, []), 'day_num': 1}]
 
-    # Crew call times — unique in_times from labor_requests, sorted
+    # Crew call times — unique in_times from labor_requests, sorted. Training /
+    # shadow shifts are excluded so they never surface on show paperwork.
     labor_in_times = db.execute(
-        "SELECT in_time FROM labor_requests WHERE show_id=? AND in_time != '' ORDER BY in_time",
+        "SELECT in_time FROM labor_requests WHERE show_id=? AND in_time != '' "
+        "AND COALESCE(is_training_shift, 0) = 0 ORDER BY in_time",
         (show_id,)
     ).fetchall()
     crew_call_times = sorted(set(r['in_time'] for r in labor_in_times if r['in_time']))
@@ -10233,6 +10235,7 @@ def _calc_labor_cost_for_show(db, show_id):
         SELECT lr.id, lr.work_date, lr.in_time, lr.out_time,
                lr.break_start, lr.break_end, lr.break2_start, lr.break2_end,
                lr.is_scheduled, lr.scheduled_crew_member_id,
+               COALESCE(lr.is_training_shift, 0) AS is_training_shift,
                jp.name as position_name, jp.override_rate,
                cm.name as tech_name,
                prl.hourly_rate as level_rate, prl.name as level_name
@@ -10252,10 +10255,19 @@ def _calc_labor_cost_for_show(db, show_id):
                             r['break_start'], r['break_end'],
                             r['break2_start'], r['break2_end'])
         rate = r['override_rate'] if r['override_rate'] is not None else (r['level_rate'] or 0)
-        cost = round(hours * rate, 2)
-        total += cost
-        if r['is_scheduled']:
-            scheduled_count += 1
+        is_training = bool(r['is_training_shift'])
+        if is_training:
+            # Training / shadow shifts never bill the show: a trainee parked
+            # alongside the primary tech carries no cost and is excluded from
+            # the per-crew billable multiplier. The line is still returned so
+            # the staffing tab can show it, clearly flagged as a no-charge
+            # training shift.
+            cost = 0.0
+        else:
+            cost = round(hours * rate, 2)
+            total += cost
+            if r['is_scheduled']:
+                scheduled_count += 1
         lines.append({
             'id': r['id'],
             'work_date': r['work_date'],
@@ -10268,6 +10280,7 @@ def _calc_labor_cost_for_show(db, show_id):
             'line_total': cost,
             'level_name': r['level_name'] or '',
             'is_scheduled': bool(r['is_scheduled']),
+            'is_training': is_training,
         })
 
     if scheduled_count > 0:
@@ -10470,7 +10483,9 @@ def _post_show_labor_rows(db, show_id):
         SELECT psl.*, jp.name AS position_name
         FROM post_show_labor psl
         LEFT JOIN job_positions jp ON jp.id = psl.position_id
+        LEFT JOIN labor_requests lr ON lr.id = psl.source_request_id
         WHERE psl.show_id = ?
+          AND COALESCE(lr.is_training_shift, 0) = 0
         ORDER BY psl.sort_order, psl.id
     """, (show_id,)).fetchall()
     out = []
@@ -10568,6 +10583,7 @@ def _pull_scheduled_into_post_show(db, show_id):
         FROM labor_requests lr
         LEFT JOIN crew_members cm ON cm.id = lr.scheduled_crew_member_id
         WHERE lr.show_id = ? AND lr.is_scheduled = 1
+          AND COALESCE(lr.is_training_shift, 0) = 0
         ORDER BY lr.sort_order, lr.id
     """, (show_id,)).fetchall()
     order = _max_sort_order(db, 'post_show_labor', 'show_id=?', (show_id,))
