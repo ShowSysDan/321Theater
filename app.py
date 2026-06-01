@@ -1,6 +1,30 @@
 """
-dpc Advance Sheet App — Flask Backend
-Run: python app.py  (after running init_db.py first)
+3·2·1→THEATER (dpc Advance) — Flask backend (monolith).
+
+What this file is
+-----------------
+The application server for the production-management tool: auth/sessions,
+the per-show lifecycle (Advance Sheet → Production Schedule → Labor →
+Assets → Post-Show Notes), the cross-show Labor Scheduler, invoices/PDF
+export, the Asset Manager, admin/settings, and the JSON APIs the templates
+call. Data access goes through db_adapter (SQLite bootstrap file +
+optional PostgreSQL via db_config.ini); HTML lives in templates/, client
+JS in static/js/app.js.
+
+Conventions
+-----------
+- DB: `db = get_db()` … `db.close()`; `?` placeholders (db_adapter rewrites
+  for PostgreSQL); `INSERT OR REPLACE` is translated to PG upserts.
+- Auth: @login_required / @admin_required / @scheduler_required read flags
+  from `session`. Mutations call log_audit(...) and, for security/critical
+  actions, syslog_logger.* as well.
+- Schema changes live in init_db.py and auto-apply on startup (see the
+  migrate block near the bottom of this file).
+- APP_VERSION below is the single source of truth for the displayed version;
+  bump it (and the README changelog) with every change — MINOR for features,
+  PATCH for fixes.
+
+Run: python app.py   (after running init_db.py first)
 """
 import os
 import sys
@@ -445,7 +469,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.14.0'
+APP_VERSION = '2.14.1'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -15159,6 +15183,41 @@ def _fetch_external_rental_pdfs(db, show_id):
 
 
 
+def _fetch_show_assets_and_externals(db, show_id):
+    """Assets + external rentals for a show's invoices, with subtotals.
+    Shared by the asset invoice and the final (post-show) invoice so the
+    two stay in lock-step."""
+    assets = db.execute("""
+        SELECT sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end, sa.notes,
+               at.name as type_name, at.manufacturer, at.model,
+               ac.name as category_name
+        FROM show_assets sa
+        JOIN asset_types at ON at.id = sa.asset_type_id
+        JOIN asset_categories ac ON ac.id = at.category_id
+        WHERE sa.show_id = ? AND sa.is_hidden = 0
+        ORDER BY ac.sort_order, at.name
+    """, (show_id,)).fetchall()
+    external_rentals = db.execute("""
+        SELECT description, cost, pdf_filename
+        FROM show_external_rentals
+        WHERE show_id = ?
+        ORDER BY sort_order
+    """, (show_id,)).fetchall()
+    assets_list = [dict(a) for a in assets]
+    ext_list    = [dict(e) for e in external_rentals]
+    assets_subtotal   = sum((a['locked_price'] or 0) * a['quantity'] for a in assets_list)
+    external_subtotal = sum(e['cost'] or 0 for e in ext_list)
+    return assets_list, ext_list, assets_subtotal, external_subtotal
+
+
+def _show_performance_company(db, show_id):
+    """The show's performance-company value from the advance sheet (or '')."""
+    row = db.execute(
+        "SELECT field_value FROM advance_data WHERE show_id=? AND field_key='performance_company'",
+        (show_id,)).fetchone()
+    return row['field_value'] if row else ''
+
+
 @app.route('/shows/<int:show_id>/assets/invoice.pdf')
 @login_required
 def show_asset_invoice(show_id):
@@ -15171,34 +15230,9 @@ def show_asset_invoice(show_id):
         db.close()
         abort(404)
 
-    assets = db.execute("""
-        SELECT sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end, sa.notes,
-               at.name as type_name, at.manufacturer, at.model,
-               ac.name as category_name
-        FROM show_assets sa
-        JOIN asset_types at ON at.id = sa.asset_type_id
-        JOIN asset_categories ac ON ac.id = at.category_id
-        WHERE sa.show_id = ? AND sa.is_hidden = 0
-        ORDER BY ac.sort_order, at.name
-    """, (show_id,)).fetchall()
-
-    external_rentals = db.execute("""
-        SELECT description, cost, pdf_filename
-        FROM show_external_rentals
-        WHERE show_id = ?
-        ORDER BY sort_order
-    """, (show_id,)).fetchall()
-
-    perf_company_row = db.execute(
-        "SELECT field_value FROM advance_data WHERE show_id=? AND field_key='performance_company'",
-        (show_id,)
-    ).fetchone()
-    performance_company = perf_company_row['field_value'] if perf_company_row else ''
-
-    assets_list = [dict(a) for a in assets]
-    ext_list    = [dict(e) for e in external_rentals]
-    assets_subtotal  = sum((a['locked_price'] or 0) * a['quantity'] for a in assets_list)
-    external_subtotal = sum(e['cost'] or 0 for e in ext_list)
+    assets_list, ext_list, assets_subtotal, external_subtotal = \
+        _fetch_show_assets_and_externals(db, show_id)
+    performance_company = _show_performance_company(db, show_id)
     grand_total = assets_subtotal + external_subtotal
 
     html_str = render_template(
@@ -15248,34 +15282,9 @@ def show_post_invoice(show_id):
         db.close()
         abort(404)
 
-    assets = db.execute("""
-        SELECT sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end, sa.notes,
-               at.name as type_name, at.manufacturer, at.model,
-               ac.name as category_name
-        FROM show_assets sa
-        JOIN asset_types at ON at.id = sa.asset_type_id
-        JOIN asset_categories ac ON ac.id = at.category_id
-        WHERE sa.show_id = ? AND sa.is_hidden = 0
-        ORDER BY ac.sort_order, at.name
-    """, (show_id,)).fetchall()
-
-    external_rentals = db.execute("""
-        SELECT description, cost, pdf_filename
-        FROM show_external_rentals
-        WHERE show_id = ?
-        ORDER BY sort_order
-    """, (show_id,)).fetchall()
-
-    perf_company_row = db.execute(
-        "SELECT field_value FROM advance_data WHERE show_id=? AND field_key='performance_company'",
-        (show_id,)
-    ).fetchone()
-    performance_company = perf_company_row['field_value'] if perf_company_row else ''
-
-    assets_list = [dict(a) for a in assets]
-    ext_list    = [dict(e) for e in external_rentals]
-    assets_subtotal   = sum((a['locked_price'] or 0) * a['quantity'] for a in assets_list)
-    external_subtotal = sum(e['cost'] or 0 for e in ext_list)
+    assets_list, ext_list, assets_subtotal, external_subtotal = \
+        _fetch_show_assets_and_externals(db, show_id)
+    performance_company = _show_performance_company(db, show_id)
 
     # Final Invoice bills ACTUAL labor recorded on the Post-Show tab
     # (post_show_labor), not the schedule. Tech names are never exposed.
