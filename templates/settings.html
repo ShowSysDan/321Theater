@@ -1639,6 +1639,18 @@
     </div>
   </div>
 
+  {# Next scheduled send — preview of what the next automated run will do. #}
+  <div class="form-section mt-lg">
+    <div class="form-section-header" style="display:flex;align-items:center;gap:10px">
+      <span class="section-icon">◈</span> NEXT SCHEDULED SEND
+      <button class="btn btn-sm btn-ghost" style="margin-left:auto" onclick="loadPdfEmailPreview()">Refresh</button>
+    </div>
+    <div class="form-section-body">
+      <div id="pdf-email-preview" class="text-dim text-sm">Loading…</div>
+      <p class="field-hint" style="margin-top:10px">Based on saved settings, active shows, and what's already been sent. Save the schedule above to refresh this preview.</p>
+    </div>
+  </div>
+
   {# Email Send Errors — bounces, invalid addresses, SMTP failures, etc. #}
   <div class="form-section mt-lg" id="email-errors-section">
     <div class="form-section-header" style="display:flex;align-items:center;gap:10px">
@@ -3895,11 +3907,58 @@ async function savePdfEmailSettings() {
   const msg = document.getElementById('pdf-email-msg');
   msg.style.display = 'block';
   msg.textContent = d.success ? '✓ Email schedule saved.' : '✗ ' + (d.error || 'Error');
-  if (d.success) { showSaveToast('✓ Email schedule saved'); setTimeout(() => { msg.style.display='none'; }, 3000); }
+  if (d.success) {
+    showSaveToast('✓ Email schedule saved');
+    setTimeout(() => { msg.style.display='none'; }, 3000);
+    loadPdfEmailPreview();
+  }
+}
+
+// ── Next scheduled send preview ───────────────────────────────────────────────
+async function loadPdfEmailPreview() {
+  const box = document.getElementById('pdf-email-preview');
+  if (!box) return;
+  box.innerHTML = '<span style="opacity:.7">Loading…</span>';
+  let d;
+  try {
+    const resp = await fetch('/settings/pdf-emails/preview');
+    d = await resp.json();
+  } catch (e) {
+    box.innerHTML = '<span style="color:#F56565">Could not load preview.</span>';
+    return;
+  }
+  if (!d.enabled) {
+    box.innerHTML = '<span style="opacity:.8">Automatic sending is <strong>disabled</strong>. '
+      + 'Enable the Advance Sheet and/or Production Schedule auto-email above to schedule sends.</span>';
+    return;
+  }
+  let html = 'Next run: <strong>' + _emailErrEsc(d.next_send_human) + '</strong> '
+    + '<span style="opacity:.6">(server time)</span>';
+  if (!d.delivery_ok) {
+    html += '<div style="margin-top:8px;color:#F6AD55">⚠ No SMTP host or direct-MX delivery is configured '
+      + '(Settings → Email), so nothing will actually be delivered until that\'s set.</div>';
+  }
+  if (!d.items || d.items.length === 0) {
+    html += '<div style="margin-top:8px;opacity:.8">No documents are due at that run.</div>';
+  } else {
+    html += '<div style="margin-top:10px;margin-bottom:4px">At that run, these <strong>'
+      + d.items.length + '</strong> document(s) will be sent:</div>';
+    html += '<ul style="margin:0;padding-left:18px;line-height:1.7">';
+    d.items.forEach(it => {
+      const du = it.days_until;
+      const outLbl = du === 0 ? 'show day' : (du === 1 ? '1 day out' : du + ' days out');
+      html += '<li><strong>' + _emailErrEsc(it.show_name || ('Show #' + it.show_id)) + '</strong> — '
+        + _emailErrEsc(it.doc)
+        + ' <span style="opacity:.6">(' + outLbl + ' · ' + it.trigger_days + '-day trigger)</span></li>';
+    });
+    html += '</ul>';
+  }
+  box.innerHTML = html;
 }
 
 // Initialize email mode toggle on page load
 if (document.getElementById('email_provider')) toggleEmailMode();
+if (document.getElementById('pdf-email-preview')) loadPdfEmailPreview();
 
 // ── Email Send Errors panel ──────────────────────────────────────────────────
 function _emailErrEsc(s) {
