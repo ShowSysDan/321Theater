@@ -3419,7 +3419,10 @@ def show_page(show_id):
     """, (show_id,)).fetchall()
     labor_requests_data = [_normalize_row_dates(dict(r)) for r in labor_rows]
 
-    # Post-show actual labor (billing snapshot) for the Post-Show tab
+    # Post-show actual labor (billing snapshot) for the Post-Show tab.
+    # Auto-pulls scheduled labor (pre-filled with its times) on first access
+    # so the PM doesn't have to click anything to get started.
+    _ensure_post_show_labor(db2, show_id)
     post_show_labor_data = _post_show_labor_rows(db2, show_id)
 
     # Asset categories (for the Assets tab)
@@ -10301,18 +10304,16 @@ def get_post_show_labor(show_id):
     return jsonify(rows)
 
 
-@app.route('/shows/<int:show_id>/post-show-labor/pull', methods=['POST'])
-@login_required
-def pull_post_show_labor(show_id):
-    """Snapshot the show's SCHEDULED labor lines (is_scheduled=1) into
-    post_show_labor. Idempotent: lines already pulled (matched by
-    source_request_id) are skipped, so re-running only adds newly-scheduled
-    lines and never clobbers the PM's actuals or PM-added lines."""
-    if not can_access_show(session['user_id'], show_id):
-        return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted') or session.get('is_readonly'):
-        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
-    db = get_db()
+_PSL_INIT_KEY = '_post_show_labor_initialized'
+
+
+def _pull_scheduled_into_post_show(db, show_id):
+    """Insert post_show_labor rows for SCHEDULED labor_requests (is_scheduled=1)
+    not already pulled (matched by source_request_id). The scheduled in/out/lunch
+    times are copied into BOTH the read-only sched_* reference columns AND the
+    editable billable columns, so each line arrives PRE-FILLED for the PM to
+    tweak rather than starting blank. Never touches labor_requests. Returns the
+    number of lines added (the caller is responsible for committing)."""
     existing = {r['source_request_id'] for r in db.execute(
         'SELECT source_request_id FROM post_show_labor '
         'WHERE show_id=? AND source_request_id IS NOT NULL', (show_id,)
@@ -10335,14 +10336,66 @@ def pull_post_show_labor(show_id):
                 (show_id, source_request_id, position_id, work_date,
                  sched_in_time, sched_out_time, sched_break_start, sched_break_end,
                  sched_break2_start, sched_break2_end, sched_crew_name,
+                 in_time, out_time, break_start, break_end, break2_start, break2_end,
                  pay_rate_snapshot, sort_order)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (show_id, s['id'], s['position_id'], s['work_date'],
               s['in_time'], s['out_time'], s['break_start'], s['break_end'],
               s['break2_start'], s['break2_end'], s['scheduled_crew_name'] or '',
+              # editable (billable) times pre-filled from the schedule:
+              s['in_time'], s['out_time'], s['break_start'], s['break_end'],
+              s['break2_start'], s['break2_end'],
               rate, order))
         order += 10
         added += 1
+    return added
+
+
+def _ensure_post_show_labor(db, show_id):
+    """Auto-snapshot the show's scheduled labor into post_show_labor the FIRST
+    time the post-show data is accessed, so the PM never has to click anything.
+    A per-show marker in post_show_notes makes this run once — later PM
+    add/delete/edits are never undone on subsequent loads. Safe to call on any
+    read path; swallows errors so it can't break a page render."""
+    try:
+        marker = db.execute(
+            'SELECT field_value FROM post_show_notes WHERE show_id=? AND field_key=?',
+            (show_id, _PSL_INIT_KEY)
+        ).fetchone()
+        if marker:
+            return 0
+        added = _pull_scheduled_into_post_show(db, show_id)
+        if added:
+            db.execute(
+                'INSERT OR REPLACE INTO post_show_notes (show_id, field_key, field_value) '
+                'VALUES (?, ?, ?)',
+                (show_id, _PSL_INIT_KEY, '1')
+            )
+            db.commit()
+        return added
+    except Exception as e:
+        app.logger.warning(f'_ensure_post_show_labor show_id={show_id} failed: {e}')
+        return 0
+
+
+@app.route('/shows/<int:show_id>/post-show-labor/pull', methods=['POST'])
+@login_required
+def pull_post_show_labor(show_id):
+    """Re-sync: pull any newly-SCHEDULED labor lines into post_show_labor,
+    pre-filled with their scheduled times. Idempotent (matched by
+    source_request_id) — never clobbers the PM's edits or PM-added lines, and
+    never touches the labor scheduler."""
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_restricted') or session.get('is_readonly'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    db = get_db()
+    added = _pull_scheduled_into_post_show(db, show_id)
+    db.execute(
+        'INSERT OR REPLACE INTO post_show_notes (show_id, field_key, field_value) '
+        'VALUES (?, ?, ?)',
+        (show_id, _PSL_INIT_KEY, '1')
+    )
     log_audit(db, 'POST_SHOW_LABOR_PULL', 'show', show_id, show_id=show_id,
               detail=f'added={added}')
     db.commit()
@@ -15005,6 +15058,9 @@ def show_post_invoice(show_id):
 
     # Final Invoice bills ACTUAL labor recorded on the Post-Show tab
     # (post_show_labor), not the schedule. Tech names are never exposed.
+    # Ensure scheduled labor has been auto-snapshotted (first-access pull) so
+    # the invoice is correct even if the Post-Show tab was never opened.
+    _ensure_post_show_labor(db, show_id)
     labor_lines, labor_total = _calc_post_show_labor_cost(db, show_id)
     er_pdfs = _fetch_external_rental_pdfs(db, show_id)
     db.close()

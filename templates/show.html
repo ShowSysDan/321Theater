@@ -1732,14 +1732,14 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       {% if not restricted %}
       <div class="action-btns ml-auto" style="display:flex;gap:6px">
         <button type="button" class="btn btn-sm btn-ghost" id="ps-pull-btn" onclick="pullScheduledLabor()"
-                title="Copy the scheduled labor lines from the Labor Scheduler so you can record actual times">Pull Scheduled Labor</button>
+                title="Pull in any newly-scheduled labor lines (with their times). Your edits are kept.">Re-sync from Schedule</button>
         <button type="button" class="btn btn-sm btn-primary" onclick="addPostShowLaborRow()">+ Add Line</button>
       </div>
       {% endif %}
     </div>
     <div class="form-section-body no-pad">
       <p class="text-dim" style="padding:10px 14px 0;font-size:11px;margin:0">
-        Actual times bill the client. A line with no In/Out bills $0. Scheduled times are shown for reference only; the original schedule is never changed.
+        Scheduled labor is pulled in automatically with its times filled in — just tweak what actually happened. Edits here bill the client and never change the schedule. Use <strong>+ Add Line</strong> for extra crew.
       </p>
       <div style="overflow-x:auto">
       <table class="data-table" id="ps-labor-table" style="font-size:12px;min-width:980px">
@@ -1770,7 +1770,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       </table>
       </div>
       <p class="text-dim" id="ps-labor-empty" style="padding:16px;text-align:center;display:none">
-        {% if restricted %}No actual labor recorded.{% else %}Click <strong>Pull Scheduled Labor</strong> to bring over the scheduled lines, or <strong>+ Add Line</strong> to add one manually.{% endif %}
+        {% if restricted %}No actual labor recorded.{% else %}Scheduled labor appears here automatically once it's scheduled. Use <strong>+ Add Line</strong> for extra crew, or <strong>Re-sync from Schedule</strong> to pull newly-scheduled lines.{% endif %}
       </p>
     </div>
   </div>
@@ -3277,8 +3277,8 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
       await _loadLaborPositions();
       _renderPostShowLabor();
       alert(data.added
-        ? `Pulled ${data.added} scheduled line(s).`
-        : 'No new scheduled lines to pull. Only lines marked Scheduled in the Labor Scheduler are pulled.');
+        ? `Re-synced — pulled ${data.added} newly-scheduled line(s).`
+        : 'Already in sync with the schedule — no new scheduled lines to pull.');
     } finally {
       if (btn) btn.disabled = false;
     }
