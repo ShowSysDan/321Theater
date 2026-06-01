@@ -3203,6 +3203,9 @@ function renderAttachments(files) {
       ? `<span class="badge" style="background:rgba(184,132,10,.15);color:#B8840A;border:1px solid rgba(184,132,10,.3);font-size:10px;padding:1px 6px;border-radius:99px;margin-left:6px">↳ ${_esc(f.field_key)}</span>`
       : '';
     const desc = f.description ? ` · ${_esc(f.description)}` : '';
+    const moveBtn = (typeof IS_ADMIN !== 'undefined' && IS_ADMIN)
+      ? `<button class="btn btn-xs btn-ghost" onclick="moveAttachment(${f.id})" title="Move to another show">⇄</button>`
+      : '';
     return `
       <div class="attachment-item">
         <div class="attachment-icon">${_fileIcon(f.mime_type)}</div>
@@ -3210,6 +3213,7 @@ function renderAttachments(files) {
           <a href="/shows/${SHOW_ID}/attachments/${f.id}/download" class="attachment-name">${_esc(f.filename)}</a>${fieldBadge}
           <span class="attachment-meta">${size} · ${_esc(f.uploader)} · ${time}${desc}</span>
         </div>
+        ${moveBtn}
         <button class="btn btn-xs btn-danger-ghost" onclick="deleteAttachment(${f.id})" title="Remove">×</button>
       </div>`;
   }).join('');
@@ -3400,6 +3404,51 @@ async function deleteAttachment(aid) {
   const d = await resp.json();
   if (d.success) loadAttachments();
   else alert(d.error || 'Delete failed.');
+}
+
+// Admin: re-home a file to another show. Reuses the global modal styling.
+async function moveAttachment(aid) {
+  let shows = [];
+  try { shows = await (await fetch('/api/shows')).json(); } catch (e) { shows = []; }
+  shows = (shows || []).filter(s => String(s.id) !== String(SHOW_ID));
+  if (!shows.length) { alert('No other shows to move this file to.'); return; }
+  const opts = shows.map(s =>
+    `<option value="${s.id}">${_esc(s.name)}${s.show_date ? ' — ' + s.show_date : ''}${s.status === 'archived' ? ' (archived)' : ''}</option>`
+  ).join('');
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.style.display = 'flex';
+  overlay.innerHTML = `
+    <div class="modal-card" style="max-width:420px">
+      <div class="modal-header"><h3 class="modal-title">Move file to another show</h3>
+        <button type="button" class="modal-close" data-act="cancel">✕</button></div>
+      <div class="modal-body">
+        <label class="field-label">DESTINATION SHOW</label>
+        <select class="field-input" id="move-att-target">${opts}</select>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-ghost" data-act="cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" data-act="move">Move File</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay || e.target.getAttribute('data-act') === 'cancel') close();
+  });
+  overlay.querySelector('[data-act="move"]').addEventListener('click', async () => {
+    const target = overlay.querySelector('#move-att-target').value;
+    try {
+      const resp = await fetch(`/shows/${SHOW_ID}/attachments/${aid}/move`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_show_id: parseInt(target, 10) })
+      });
+      const d = await resp.json();
+      if (!d.success) { alert(d.error || 'Move failed.'); return; }
+      close();
+      loadAttachments();
+    } catch (e) { alert('Move failed.'); }
+  });
 }
 
 /* ═══════════════════════════════════════════════════════════════
