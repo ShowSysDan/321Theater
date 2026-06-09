@@ -399,13 +399,18 @@ def connect(database_path, settings=None):
             return DBConnection(conn, 'postgres', schema=app_schema)
         except ImportError:
             import logging
-            logging.getLogger('showadvance').warning(
-                'PostgreSQL configured but psycopg2 not installed — falling back to SQLite'
+            logging.getLogger('showadvance').error(
+                'PostgreSQL configured but psycopg2 not installed — falling back to '
+                'the SQLite bootstrap. The app is now reading STALE bootstrap data '
+                '(real app_settings/data live in PostgreSQL). Install psycopg2-binary.'
             )
         except Exception as e:
             import logging
-            logging.getLogger('showadvance').warning(
-                f'PostgreSQL connection failed — falling back to SQLite: {e}'
+            logging.getLogger('showadvance').error(
+                f'PostgreSQL connection FAILED — falling back to the SQLite bootstrap, '
+                f'which holds STALE settings/data (real data lives in PostgreSQL). '
+                f'Background jobs (e.g. scheduled emails) will misbehave until PG is '
+                f'reachable again: {e}'
             )
 
     # SQLite (default)

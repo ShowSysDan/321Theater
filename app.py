@@ -2169,30 +2169,70 @@ def _plan_scheduled_emails(db, target_date):
 
 def run_scheduled_pdf_emails():
     """
-    APScheduler job: fires at the top of every hour. During the configured
+    APScheduler job: fires at the top of every hour. At or after the configured
     send hour it emails each enabled document (advance / production schedule)
     for any active show that has reached its trigger point and hasn't had that
     trigger sent yet. See _plan_scheduled_emails() for the selection rules
     (due-not-exact, all-time per-trigger dedup, catch-up on missed days).
+
+    Runs in an APScheduler background thread (NO request context). Every early
+    return below is logged on purpose: silent no-ops here were why scheduled
+    emails could quietly stop while the Settings "Next scheduled send" preview
+    (which runs in a request, when PostgreSQL is reachable) still looked correct.
     """
     if not am_i_leader():
-        app.logger.info('PDF email check skipped — not cluster leader')
+        app.logger.info('Scheduled PDF email: skipped — not cluster leader')
         return
     try:
         send_hour = int(get_app_setting('pdf_email_send_hour', '6'))
     except (TypeError, ValueError):
         send_hour = 6
-    if datetime.now().hour != send_hour:
+    # Send at OR AFTER the configured hour (not an exact == match): a missed or
+    # delayed tick (APScheduler misfire, restart, brief PG outage) then still
+    # catches up later the same day. All-time dedup in _plan_scheduled_emails
+    # keeps every trigger to a single real send, and a failed send stays unlogged
+    # so it retries on the next hourly tick instead of being lost for the day.
+    cur_hour = datetime.now().hour
+    if cur_hour < send_hour:
         return
 
     today = date.today()
     db = get_db()
     try:
+        # This deployment runs on PostgreSQL. If get_db() silently fell back to
+        # the SQLite bootstrap (db_adapter.connect does this when PG is
+        # unreachable), app_settings read here are STALE/empty — e.g.
+        # advance_email_enabled defaults to '0' — so the planner would return []
+        # and we'd "skip" with no error. Detect the fallback by comparing the
+        # CONFIGURED backend against the one we actually got, and refuse to act
+        # on stale config: log loudly and retry next hour. (A genuine SQLite
+        # install — configured == actual == 'sqlite' — proceeds normally.)
+        configured_backend = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
+        active_backend = getattr(db, 'db_type', None)
+        if configured_backend == 'postgres' and active_backend != 'postgres':
+            app.logger.error(
+                'Scheduled PDF email: configured for postgres but active connection '
+                'is %r — PostgreSQL is unreachable so app_settings are STALE. Skipping '
+                'this run (auto-emails will not send until PG is reachable; retrying '
+                'next hour).',
+                active_backend
+            )
+            return
         plan = _plan_scheduled_emails(db, today)
     finally:
         db.close()
     if not plan:
+        app.logger.info(
+            'Scheduled PDF email: leader, hour=%s >= send_hour=%s, postgres OK, '
+            'but no documents are due+unsent for %s.',
+            cur_hour, send_hour, today.isoformat()
+        )
         return
+
+    app.logger.info(
+        'Scheduled PDF email: sending %d document(s) — hour=%s send_hour=%s date=%s.',
+        len(plan), cur_hour, send_hour, today.isoformat()
+    )
 
     for item in plan:
         show_id = item['show_id']
@@ -2256,8 +2296,14 @@ def start_scheduler():
         # recipients never receive a duplicate when multiple instances run.
         # cron (top of every hour) — not interval — so the run aligns to the
         # wall clock and a restart can't push the only tick out of the
-        # configured send hour and silently skip a day.
-        scheduler.add_job(run_scheduled_pdf_emails, 'cron', minute=0, id='pdf_email_check')
+        # configured send hour and silently skip a day. misfire_grace_time lets
+        # a tick that fires late (busy worker, brief pause) still run instead of
+        # being dropped by APScheduler's 1-second default; coalesce collapses
+        # multiple missed ticks into one. The job itself is idempotent (all-time
+        # dedup), so a late/duplicate fire never double-sends.
+        scheduler.add_job(run_scheduled_pdf_emails, 'cron', minute=0,
+                          id='pdf_email_check', misfire_grace_time=3600,
+                          coalesce=True)
         # Field-change alerts: leader-gated. Picks up debounced pending
         # alerts every 10 min and sends them once the value has been
         # quiet long enough.
