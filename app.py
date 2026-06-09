@@ -1869,33 +1869,23 @@ def _send_email(subject, recipients, body_text=None, body_html=None,
     return ok, msg
 
 
-def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_before=None):
+def _pdf_email_recipients(db, show_id, pdf_type):
+    """Resolve the recipient email list for a show's PDF email.
+
+    A contact receives the email when it is flagged for this pdf_type (or is a
+    general report_recipient), has a non-empty email, and its venue_filter
+    (a JSON list; empty/NULL = all venues) includes the show's venue. Corrupt
+    venue_filter JSON fails open (contact is kept) so a bad row never silently
+    drops a recipient.
+
+    Shared by _send_pdf_email() and the scheduled-email diagnostics so they
+    always agree on exactly who would receive a given document.
     """
-    Build a PDF (advance or schedule) and email it to all report recipients.
-
-    triggered_by : display string for the email body ('username' or 'system')
-    exported_by_id : user.id to log in export_log (None for scheduled sends)
-    days_before : int used for dedup key in email_send_log
-
-    Returns (success: bool, message: str, recipient_count: int)
-    """
-    provider = get_app_setting('email_provider', 'smtp')
-    if provider == 'smtp':
-        smtp_cfg = _get_smtp_settings()
-        if not smtp_cfg.get('smtp_host'):
-            return False, 'SMTP not configured.', 0
-
-    # Fetch recipients based on pdf_type. Filter again in Python by each
-    # contact's venue_filter (JSON list) — empty / NULL means "all venues".
-    db = get_db()
-    if pdf_type == 'advance':
-        recip_col = 'advance_recipient'
-    elif pdf_type == 'schedule':
-        recip_col = 'production_recipient'
-    elif pdf_type == 'postnotes':
-        recip_col = 'postnotes_recipient'
-    else:
-        recip_col = 'report_recipient'
+    recip_col = {
+        'advance':   'advance_recipient',
+        'schedule':  'production_recipient',
+        'postnotes': 'postnotes_recipient',
+    }.get(pdf_type, 'report_recipient')
     show_venue_row = db.execute(
         'SELECT venue FROM shows WHERE id=?', (show_id,)
     ).fetchone()
@@ -1905,8 +1895,6 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
         f"WHERE ({recip_col}=1 OR report_recipient=1) AND email != '' "
         f"ORDER BY name"
     ).fetchall()
-    db.close()
-
     recipients = []
     for r in rows:
         raw = r['venue_filter']
@@ -1926,6 +1914,32 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
             continue
         if show_venue in allowed:
             recipients.append(r['email'])
+    return recipients
+
+
+def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_before=None):
+    """
+    Build a PDF (advance or schedule) and email it to all report recipients.
+
+    triggered_by : display string for the email body ('username' or 'system')
+    exported_by_id : user.id to log in export_log (None for scheduled sends)
+    days_before : int used for dedup key in email_send_log
+
+    Returns (success: bool, message: str, recipient_count: int)
+    """
+    provider = get_app_setting('email_provider', 'smtp')
+    if provider == 'smtp':
+        smtp_cfg = _get_smtp_settings()
+        if not smtp_cfg.get('smtp_host'):
+            return False, 'SMTP not configured.', 0
+
+    # Fetch recipients based on pdf_type, honoring each contact's venue_filter
+    # (shared helper so the diagnostics agree on who would receive).
+    db = get_db()
+    try:
+        recipients = _pdf_email_recipients(db, show_id, pdf_type)
+    finally:
+        db.close()
 
     if not recipients:
         return False, 'No report recipients configured.', 0
@@ -2169,30 +2183,70 @@ def _plan_scheduled_emails(db, target_date):
 
 def run_scheduled_pdf_emails():
     """
-    APScheduler job: fires at the top of every hour. During the configured
+    APScheduler job: fires at the top of every hour. At or after the configured
     send hour it emails each enabled document (advance / production schedule)
     for any active show that has reached its trigger point and hasn't had that
     trigger sent yet. See _plan_scheduled_emails() for the selection rules
     (due-not-exact, all-time per-trigger dedup, catch-up on missed days).
+
+    Runs in an APScheduler background thread (NO request context). Every early
+    return below is logged on purpose: silent no-ops here were why scheduled
+    emails could quietly stop while the Settings "Next scheduled send" preview
+    (which runs in a request, when PostgreSQL is reachable) still looked correct.
     """
     if not am_i_leader():
-        app.logger.info('PDF email check skipped — not cluster leader')
+        app.logger.info('Scheduled PDF email: skipped — not cluster leader')
         return
     try:
         send_hour = int(get_app_setting('pdf_email_send_hour', '6'))
     except (TypeError, ValueError):
         send_hour = 6
-    if datetime.now().hour != send_hour:
+    # Send at OR AFTER the configured hour (not an exact == match): a missed or
+    # delayed tick (APScheduler misfire, restart, brief PG outage) then still
+    # catches up later the same day. All-time dedup in _plan_scheduled_emails
+    # keeps every trigger to a single real send, and a failed send stays unlogged
+    # so it retries on the next hourly tick instead of being lost for the day.
+    cur_hour = datetime.now().hour
+    if cur_hour < send_hour:
         return
 
     today = date.today()
     db = get_db()
     try:
+        # This deployment runs on PostgreSQL. If get_db() silently fell back to
+        # the SQLite bootstrap (db_adapter.connect does this when PG is
+        # unreachable), app_settings read here are STALE/empty — e.g.
+        # advance_email_enabled defaults to '0' — so the planner would return []
+        # and we'd "skip" with no error. Detect the fallback by comparing the
+        # CONFIGURED backend against the one we actually got, and refuse to act
+        # on stale config: log loudly and retry next hour. (A genuine SQLite
+        # install — configured == actual == 'sqlite' — proceeds normally.)
+        configured_backend = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
+        active_backend = getattr(db, 'db_type', None)
+        if configured_backend == 'postgres' and active_backend != 'postgres':
+            app.logger.error(
+                'Scheduled PDF email: configured for postgres but active connection '
+                'is %r — PostgreSQL is unreachable so app_settings are STALE. Skipping '
+                'this run (auto-emails will not send until PG is reachable; retrying '
+                'next hour).',
+                active_backend
+            )
+            return
         plan = _plan_scheduled_emails(db, today)
     finally:
         db.close()
     if not plan:
+        app.logger.info(
+            'Scheduled PDF email: leader, hour=%s >= send_hour=%s, postgres OK, '
+            'but no documents are due+unsent for %s.',
+            cur_hour, send_hour, today.isoformat()
+        )
         return
+
+    app.logger.info(
+        'Scheduled PDF email: sending %d document(s) — hour=%s send_hour=%s date=%s.',
+        len(plan), cur_hour, send_hour, today.isoformat()
+    )
 
     for item in plan:
         show_id = item['show_id']
@@ -2256,8 +2310,14 @@ def start_scheduler():
         # recipients never receive a duplicate when multiple instances run.
         # cron (top of every hour) — not interval — so the run aligns to the
         # wall clock and a restart can't push the only tick out of the
-        # configured send hour and silently skip a day.
-        scheduler.add_job(run_scheduled_pdf_emails, 'cron', minute=0, id='pdf_email_check')
+        # configured send hour and silently skip a day. misfire_grace_time lets
+        # a tick that fires late (busy worker, brief pause) still run instead of
+        # being dropped by APScheduler's 1-second default; coalesce collapses
+        # multiple missed ticks into one. The job itself is idempotent (all-time
+        # dedup), so a late/duplicate fire never double-sends.
+        scheduler.add_job(run_scheduled_pdf_emails, 'cron', minute=0,
+                          id='pdf_email_check', misfire_grace_time=3600,
+                          coalesce=True)
         # Field-change alerts: leader-gated. Picks up debounced pending
         # alerts every 10 min and sends them once the value has been
         # quiet long enough.
@@ -9793,6 +9853,101 @@ def pdf_email_preview():
         'next_send_iso':   next_send.isoformat(),
         'next_send_human': next_send_human,
         'items':           items,
+    })
+
+
+@app.route('/settings/pdf-emails/diagnose', methods=['GET'])
+@admin_required
+def pdf_email_diagnose():
+    """Definitive "why won't the SCHEDULED auto-email fire?" check. Read-only —
+    it sends nothing.
+
+    Manual sends (the per-show Email button) spawn their own thread and call
+    _send_pdf_email directly, bypassing APScheduler and the leader/hour gates —
+    so they can work perfectly while the scheduled job silently never fires.
+    This reports, for THIS worker, every gate run_scheduled_pdf_emails() must
+    pass:
+      1. Is the APScheduler cron job actually registered + scheduled here, and
+         in what timezone (vs. server local time)?
+      2. Is this worker the cluster leader? (the am_i_leader gate)
+      3. Does the send-hour gate pass right now?
+      4. Is the active DB really PostgreSQL, and is the plan non-empty?
+
+    Gunicorn round-robins requests across its 4 workers, so refresh a few times
+    to sample each worker's scheduler/leader view."""
+    now = datetime.now()
+    try:
+        send_hour = int(get_app_setting('pdf_email_send_hour', '6'))
+    except (TypeError, ValueError):
+        send_hour = 6
+
+    # 1. APScheduler state in THIS worker (each worker runs its own scheduler).
+    sched = globals().get('_scheduler')
+    sched_info = {'scheduler_started': sched is not None}
+    try:
+        if sched is not None:
+            job = sched.get_job('pdf_email_check')
+            sched_info.update({
+                'running':        bool(getattr(sched, 'running', False)),
+                'timezone':       str(getattr(sched, 'timezone', None)),
+                'job_registered': job is not None,
+                'job_next_run':   (job.next_run_time.isoformat()
+                                   if job and job.next_run_time else None),
+            })
+    except Exception as e:
+        sched_info['error'] = repr(e)
+
+    # 2. Cluster / leader state (global election + this worker's verdict).
+    cluster = get_cluster_status()
+
+    # 3. Active backend + the plan the real job would build right now.
+    configured_backend = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
+    db = get_db()
+    active_backend = getattr(db, 'db_type', None)
+    try:
+        plan = _plan_scheduled_emails(db, date.today())
+        # Resolve recipients per planned document. A due show whose venue has no
+        # matching recipients sends nothing AND is never logged (so it can't be
+        # deduped) — it reappears in the plan forever while no mail goes out.
+        for p in plan:
+            try:
+                p['_recipient_count'] = len(_pdf_email_recipients(db, p['show_id'], p['pdf_type']))
+            except Exception:
+                p['_recipient_count'] = None
+    finally:
+        db.close()
+
+    return jsonify({
+        'server_now':            now.isoformat(),
+        'server_hour':           now.hour,
+        'send_hour':             send_hour,
+        'hour_gate_passes_now':  now.hour >= send_hour,
+        'scheduler':             sched_info,
+        'this_worker_is_leader': cluster.get('is_leader'),
+        'cluster': {
+            'enabled':      cluster.get('enabled'),
+            'force_leader': cluster.get('force_leader'),
+            'leader_id':    cluster.get('leader_id'),
+            'leader_ip':    cluster.get('leader_ip'),
+            'self_id':      cluster.get('self_id'),
+            'peers':        cluster.get('peers'),
+        },
+        'db_backend': {
+            'configured':          configured_backend,
+            'active':              active_backend,
+            'fell_back_to_sqlite': (configured_backend == 'postgres'
+                                    and active_backend != 'postgres'),
+        },
+        'plan_count': len(plan),
+        'plan': [{
+            'show_id':         p['show_id'],
+            'show_name':       p['show_name'],
+            'pdf_type':        p['pdf_type'],
+            'days_until':      p['days_until'],
+            'trigger_days':    p['trigger_days'],
+            'recipient_count': p.get('_recipient_count'),
+            'would_send':      bool(p.get('_recipient_count')),
+        } for p in plan],
     })
 
 
