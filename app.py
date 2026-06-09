@@ -1869,33 +1869,23 @@ def _send_email(subject, recipients, body_text=None, body_html=None,
     return ok, msg
 
 
-def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_before=None):
+def _pdf_email_recipients(db, show_id, pdf_type):
+    """Resolve the recipient email list for a show's PDF email.
+
+    A contact receives the email when it is flagged for this pdf_type (or is a
+    general report_recipient), has a non-empty email, and its venue_filter
+    (a JSON list; empty/NULL = all venues) includes the show's venue. Corrupt
+    venue_filter JSON fails open (contact is kept) so a bad row never silently
+    drops a recipient.
+
+    Shared by _send_pdf_email() and the scheduled-email diagnostics so they
+    always agree on exactly who would receive a given document.
     """
-    Build a PDF (advance or schedule) and email it to all report recipients.
-
-    triggered_by : display string for the email body ('username' or 'system')
-    exported_by_id : user.id to log in export_log (None for scheduled sends)
-    days_before : int used for dedup key in email_send_log
-
-    Returns (success: bool, message: str, recipient_count: int)
-    """
-    provider = get_app_setting('email_provider', 'smtp')
-    if provider == 'smtp':
-        smtp_cfg = _get_smtp_settings()
-        if not smtp_cfg.get('smtp_host'):
-            return False, 'SMTP not configured.', 0
-
-    # Fetch recipients based on pdf_type. Filter again in Python by each
-    # contact's venue_filter (JSON list) — empty / NULL means "all venues".
-    db = get_db()
-    if pdf_type == 'advance':
-        recip_col = 'advance_recipient'
-    elif pdf_type == 'schedule':
-        recip_col = 'production_recipient'
-    elif pdf_type == 'postnotes':
-        recip_col = 'postnotes_recipient'
-    else:
-        recip_col = 'report_recipient'
+    recip_col = {
+        'advance':   'advance_recipient',
+        'schedule':  'production_recipient',
+        'postnotes': 'postnotes_recipient',
+    }.get(pdf_type, 'report_recipient')
     show_venue_row = db.execute(
         'SELECT venue FROM shows WHERE id=?', (show_id,)
     ).fetchone()
@@ -1905,8 +1895,6 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
         f"WHERE ({recip_col}=1 OR report_recipient=1) AND email != '' "
         f"ORDER BY name"
     ).fetchall()
-    db.close()
-
     recipients = []
     for r in rows:
         raw = r['venue_filter']
@@ -1926,6 +1914,32 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
             continue
         if show_venue in allowed:
             recipients.append(r['email'])
+    return recipients
+
+
+def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_before=None):
+    """
+    Build a PDF (advance or schedule) and email it to all report recipients.
+
+    triggered_by : display string for the email body ('username' or 'system')
+    exported_by_id : user.id to log in export_log (None for scheduled sends)
+    days_before : int used for dedup key in email_send_log
+
+    Returns (success: bool, message: str, recipient_count: int)
+    """
+    provider = get_app_setting('email_provider', 'smtp')
+    if provider == 'smtp':
+        smtp_cfg = _get_smtp_settings()
+        if not smtp_cfg.get('smtp_host'):
+            return False, 'SMTP not configured.', 0
+
+    # Fetch recipients based on pdf_type, honoring each contact's venue_filter
+    # (shared helper so the diagnostics agree on who would receive).
+    db = get_db()
+    try:
+        recipients = _pdf_email_recipients(db, show_id, pdf_type)
+    finally:
+        db.close()
 
     if not recipients:
         return False, 'No report recipients configured.', 0
@@ -9892,6 +9906,14 @@ def pdf_email_diagnose():
     active_backend = getattr(db, 'db_type', None)
     try:
         plan = _plan_scheduled_emails(db, date.today())
+        # Resolve recipients per planned document. A due show whose venue has no
+        # matching recipients sends nothing AND is never logged (so it can't be
+        # deduped) — it reappears in the plan forever while no mail goes out.
+        for p in plan:
+            try:
+                p['_recipient_count'] = len(_pdf_email_recipients(db, p['show_id'], p['pdf_type']))
+            except Exception:
+                p['_recipient_count'] = None
     finally:
         db.close()
 
@@ -9918,11 +9940,13 @@ def pdf_email_diagnose():
         },
         'plan_count': len(plan),
         'plan': [{
-            'show_id':      p['show_id'],
-            'show_name':    p['show_name'],
-            'pdf_type':     p['pdf_type'],
-            'days_until':   p['days_until'],
-            'trigger_days': p['trigger_days'],
+            'show_id':         p['show_id'],
+            'show_name':       p['show_name'],
+            'pdf_type':        p['pdf_type'],
+            'days_until':      p['days_until'],
+            'trigger_days':    p['trigger_days'],
+            'recipient_count': p.get('_recipient_count'),
+            'would_send':      bool(p.get('_recipient_count')),
         } for p in plan],
     })
 
