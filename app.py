@@ -55,7 +55,8 @@ import s3_storage
 import pdf_layouts
 
 from flask import (Flask, render_template, request, redirect, url_for,
-                   flash, session, jsonify, make_response, abort, send_file)
+                   flash, session, jsonify, make_response, abort, send_file,
+                   has_request_context)
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
@@ -4732,7 +4733,13 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
     from request.url_root) and in a background context (pass base_url='/').
     exported_by_id defaults to session['user_id'] when not supplied.
     """
-    if exported_by_id is None:
+    # Only consult the Flask session when there's a request to read it from.
+    # Background callers (scheduled emails run in an APScheduler thread with an
+    # app context but NO request context) pass exported_by_id explicitly, or
+    # leave it None so export_log.exported_by is logged NULL. Touching session
+    # here without a request context raises "Working outside of request
+    # context", which previously made every scheduled PDF email fail silently.
+    if exported_by_id is None and has_request_context():
         exported_by_id = session.get('user_id')
     if base_url is None:
         base_url = request.url_root
@@ -5190,7 +5197,13 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
     from request.url_root) and in a background context (pass base_url='/').
     exported_by_id defaults to session['user_id'] when not supplied.
     """
-    if exported_by_id is None:
+    # Only consult the Flask session when there's a request to read it from.
+    # Background callers (scheduled emails run in an APScheduler thread with an
+    # app context but NO request context) pass exported_by_id explicitly, or
+    # leave it None so export_log.exported_by is logged NULL. Touching session
+    # here without a request context raises "Working outside of request
+    # context", which previously made every scheduled PDF email fail silently.
+    if exported_by_id is None and has_request_context():
         exported_by_id = session.get('user_id')
     if base_url is None:
         base_url = request.url_root
@@ -5568,7 +5581,13 @@ def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
     same machinery (history download, S3 archival, scheduled email) works
     identically to advance/schedule. Returns (html, version, show_dict,
     pdf_bytes, log_id)."""
-    if exported_by_id is None:
+    # Only consult the Flask session when there's a request to read it from.
+    # Background callers (scheduled emails run in an APScheduler thread with an
+    # app context but NO request context) pass exported_by_id explicitly, or
+    # leave it None so export_log.exported_by is logged NULL. Touching session
+    # here without a request context raises "Working outside of request
+    # context", which previously made every scheduled PDF email fail silently.
+    if exported_by_id is None and has_request_context():
         exported_by_id = session.get('user_id')
     if base_url is None:
         base_url = request.url_root
