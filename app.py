@@ -9842,6 +9842,91 @@ def pdf_email_preview():
     })
 
 
+@app.route('/settings/pdf-emails/diagnose', methods=['GET'])
+@admin_required
+def pdf_email_diagnose():
+    """Definitive "why won't the SCHEDULED auto-email fire?" check. Read-only —
+    it sends nothing.
+
+    Manual sends (the per-show Email button) spawn their own thread and call
+    _send_pdf_email directly, bypassing APScheduler and the leader/hour gates —
+    so they can work perfectly while the scheduled job silently never fires.
+    This reports, for THIS worker, every gate run_scheduled_pdf_emails() must
+    pass:
+      1. Is the APScheduler cron job actually registered + scheduled here, and
+         in what timezone (vs. server local time)?
+      2. Is this worker the cluster leader? (the am_i_leader gate)
+      3. Does the send-hour gate pass right now?
+      4. Is the active DB really PostgreSQL, and is the plan non-empty?
+
+    Gunicorn round-robins requests across its 4 workers, so refresh a few times
+    to sample each worker's scheduler/leader view."""
+    now = datetime.now()
+    try:
+        send_hour = int(get_app_setting('pdf_email_send_hour', '6'))
+    except (TypeError, ValueError):
+        send_hour = 6
+
+    # 1. APScheduler state in THIS worker (each worker runs its own scheduler).
+    sched = globals().get('_scheduler')
+    sched_info = {'scheduler_started': sched is not None}
+    try:
+        if sched is not None:
+            job = sched.get_job('pdf_email_check')
+            sched_info.update({
+                'running':        bool(getattr(sched, 'running', False)),
+                'timezone':       str(getattr(sched, 'timezone', None)),
+                'job_registered': job is not None,
+                'job_next_run':   (job.next_run_time.isoformat()
+                                   if job and job.next_run_time else None),
+            })
+    except Exception as e:
+        sched_info['error'] = repr(e)
+
+    # 2. Cluster / leader state (global election + this worker's verdict).
+    cluster = get_cluster_status()
+
+    # 3. Active backend + the plan the real job would build right now.
+    configured_backend = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
+    db = get_db()
+    active_backend = getattr(db, 'db_type', None)
+    try:
+        plan = _plan_scheduled_emails(db, date.today())
+    finally:
+        db.close()
+
+    return jsonify({
+        'server_now':            now.isoformat(),
+        'server_hour':           now.hour,
+        'send_hour':             send_hour,
+        'hour_gate_passes_now':  now.hour >= send_hour,
+        'scheduler':             sched_info,
+        'this_worker_is_leader': cluster.get('is_leader'),
+        'cluster': {
+            'enabled':      cluster.get('enabled'),
+            'force_leader': cluster.get('force_leader'),
+            'leader_id':    cluster.get('leader_id'),
+            'leader_ip':    cluster.get('leader_ip'),
+            'self_id':      cluster.get('self_id'),
+            'peers':        cluster.get('peers'),
+        },
+        'db_backend': {
+            'configured':          configured_backend,
+            'active':              active_backend,
+            'fell_back_to_sqlite': (configured_backend == 'postgres'
+                                    and active_backend != 'postgres'),
+        },
+        'plan_count': len(plan),
+        'plan': [{
+            'show_id':      p['show_id'],
+            'show_name':    p['show_name'],
+            'pdf_type':     p['pdf_type'],
+            'days_until':   p['days_until'],
+            'trigger_days': p['trigger_days'],
+        } for p in plan],
+    })
+
+
 # ─── Cluster (multi-server heartbeat & leader election) ──────────────────────
 
 @app.route('/api/cluster/peers', methods=['GET'])
