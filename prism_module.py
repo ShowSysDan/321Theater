@@ -5,11 +5,13 @@ Prism FM integration module — SANDBOXED.
 the venue's primary scheduling system. This module is deliberately isolated
 from the rest of the app:
 
-  * It only WRITES to its own staging tables (`prism_events`, `prism_sync_log`)
-    and its own `prism_*` keys in `app_settings`.
-  * It only touches main-app data (`shows`, `show_performances`,
-    `advance_data`) when an admin explicitly imports selected staged events
-    from the /prism page.
+  * It only WRITES to its own staging tables (`prism_events`, `prism_sync_log`,
+    `prism_venues`) and its own `prism_*` keys in `app_settings`.
+  * It touches main-app data (`shows`, `show_performances`, `advance_data`)
+    only through import_staged_events() — manual import on /prism, or every
+    pending NEW event when the opt-in prism_auto_import_enabled setting is
+    on — plus ONE sanctioned sync write-through: shows.prism_status (the
+    Hold/Confirmed tag on the homepage) is kept current for linked shows.
   * app.py's only knowledge of this module is `register(app, deps)` plus one
     scheduler job — delete this file + the /prism nav link and the app runs
     unchanged.
@@ -79,6 +81,10 @@ SETTING_DEFAULTS = {
     'prism_enabled':            '0',
     'prism_token':              '',
     'prism_auto_sync_enabled':  '0',
+    # When '1', each sync also auto-imports future-dated NEW events (hidden
+    # venues excluded — they arrive pre-ignored) as 321T shows, exactly as if
+    # an admin had selected everything and clicked Import.
+    'prism_auto_import_enabled': '0',
     'prism_sync_hour':          '5',
     'prism_lookahead_days':     '365',
     'prism_event_statuses':     '2',     # CSV of EVENT_STATUSES keys
@@ -405,7 +411,8 @@ def run_prism_sync(trigger='manual', triggered_by=''):
         log_lines.append(f"{datetime.now().strftime('%H:%M:%S')} {msg}")
 
     summary = {'ok': False, 'log_id': None, 'fetched': 0, 'new': 0,
-               'updated': 0, 'unchanged': 0, 'auto_ignored': 0, 'error': ''}
+               'updated': 0, 'unchanged': 0, 'auto_ignored': 0,
+               'auto_imported': 0, 'status_synced': 0, 'error': ''}
 
     if not _sync_lock.acquire(blocking=False):
         summary['error'] = 'A sync is already running in this worker.'
@@ -520,6 +527,26 @@ def run_prism_sync(trigger='manual', triggered_by=''):
                     seen_ids.add(pid)
                     _upsert_event(db, ev, summary, dbg, hidden)
 
+                # Shows imported before the status tag existed (or whose tag
+                # was cleared) get it filled in from their staged event.
+                cur = db.execute("""
+                    UPDATE shows SET prism_status = (
+                        SELECT e.event_status FROM prism_events e
+                        WHERE e.imported_show_id = shows.id
+                          AND e.import_state = 'imported'
+                        ORDER BY e.last_synced_at DESC LIMIT 1)
+                    WHERE prism_status IS NULL
+                      AND id IN (SELECT imported_show_id FROM prism_events
+                                 WHERE import_state = 'imported'
+                                   AND imported_show_id IS NOT NULL)
+                """)
+                if cur.rowcount:
+                    dbg(f'backfilled Prism status tag on {cur.rowcount} '
+                        f'previously imported show(s)')
+
+                if settings.get('prism_auto_import_enabled') == '1':
+                    _auto_import(db, summary, dbg, win_start)
+
                 db.execute(
                     "UPDATE prism_sync_log SET status='ok', finished_at=CURRENT_TIMESTAMP, "
                     "events_fetched=?, events_new=?, events_updated=?, events_unchanged=?, "
@@ -583,7 +610,8 @@ def _upsert_event(db, ev, summary, dbg, hidden=frozenset()):
     h = _content_hash(ev)
 
     row = db.execute(
-        'SELECT id, content_hash, import_state FROM prism_events WHERE prism_event_id=?',
+        'SELECT id, content_hash, import_state, imported_show_id, event_status '
+        'FROM prism_events WHERE prism_event_id=?',
         (pid,)).fetchone()
 
     if row is None:
@@ -623,6 +651,16 @@ def _upsert_event(db, ev, summary, dbg, hidden=frozenset()):
               h, last_updated, row['id']))
         summary['updated'] += 1
         dbg(f'UPDATED #{pid} "{name}" (state={row["import_state"]})')
+        # Sanctioned write-through: keep the linked show's Prism status tag
+        # (Hold / Confirmed / ... on the homepage) current. The ONLY field
+        # the sync ever writes to a main-app table.
+        if row['import_state'] == 'imported' and row['imported_show_id'] \
+                and status_str and status_str != row['event_status']:
+            db.execute('UPDATE shows SET prism_status=? WHERE id=?',
+                       (status_str, row['imported_show_id']))
+            summary['status_synced'] += 1
+            dbg(f'  ↳ status {row["event_status"] or "?"} → {status_str} '
+                f'flowed to show {row["imported_show_id"]}')
     else:
         db.execute("""
             UPDATE prism_events SET raw_json=?, prism_last_updated=?,
@@ -678,6 +716,29 @@ def run_prism_auto_sync():
     run_prism_sync(trigger='scheduled', triggered_by='system')
 
 
+def _auto_import(db, summary, dbg, today):
+    """
+    Opt-in (prism_auto_import_enabled): import every future-dated NEW staged
+    event as a 321T show, exactly like a manual Import of everything pending.
+    Hidden-venue events never qualify (they arrive pre-ignored), and the
+    name+date duplicate guard auto-ignores instead of retrying forever.
+    Capped per run — anything beyond the cap is picked up by the next sync.
+    """
+    rows = db.execute(
+        "SELECT id FROM prism_events WHERE import_state='new' "
+        "AND first_date >= ? ORDER BY first_date LIMIT 200",
+        (today.isoformat(),)).fetchall()
+    if not rows:
+        return
+    dbg(f'auto-import: {len(rows)} candidate(s)')
+    results = import_staged_events(db, [r['id'] for r in rows],
+                                   user_id=None, username='auto-import',
+                                   auto=True)
+    for res in results:
+        dbg(('  ✓ ' if res['ok'] else '  ✗ ') + res['msg'])
+    summary['auto_imported'] = sum(1 for r in results if r['ok'])
+
+
 # ─── Import into 321Theater ───────────────────────────────────────────────────
 
 def _venue_for_event(db, ev_row):
@@ -708,10 +769,14 @@ def _venue_for_event(db, ev_row):
     return next((c for c in candidates if c), '')
 
 
-def import_staged_events(db, ids, user_id, username):
+def import_staged_events(db, ids, user_id, username, auto=False):
     """
-    Create 321T shows from staged Prism events. This is the ONE place the
-    sandbox writes into main-app tables. Returns a per-event result list.
+    Create 321T shows from staged Prism events — the import gateway between
+    the sandbox and main-app tables. Returns a per-event result list.
+
+    `auto=True` (auto-import during sync) differs in one way: events caught
+    by the name+date duplicate guard are moved to IGNORED instead of being
+    left NEW, so they don't retry on every sync (Restore to New re-arms one).
     """
     results = []
     for eid in ids:
@@ -745,16 +810,21 @@ def import_staged_events(db, ids, user_id, username):
                 "  WHERE perf_date=?))",
                 (row['name'], first_date, first_date)).fetchone()
             if dup:
-                results.append({'id': eid, 'ok': False,
-                                'msg': f'{label}: a show with this name and date already '
-                                       f'exists (show {dup["id"]}) — skipped'})
+                msg = (f'{label}: a show with this name and date already '
+                       f'exists (show {dup["id"]}) — skipped')
+                if auto:
+                    db.execute("UPDATE prism_events SET import_state='ignored' "
+                               "WHERE id=?", (eid,))
+                    msg += ' and auto-ignored (Restore to New to retry)'
+                results.append({'id': eid, 'ok': False, 'msg': msg})
                 continue
 
         venue = _venue_for_event(db, row)
         cur = db.execute(
-            "INSERT INTO shows (name, show_date, show_time, venue, created_by) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (row['name'], first_date, first_time, venue, user_id))
+            "INSERT INTO shows (name, show_date, show_time, venue, prism_status, "
+            "created_by) VALUES (?, ?, ?, ?, ?, ?)",
+            (row['name'], first_date, first_time, venue,
+             row['event_status'] or None, user_id))
         show_id = cur.lastrowid
 
         for key, val in [('show_name', row['name']), ('show_date', first_date or ''),
@@ -1024,6 +1094,8 @@ def _save_settings_view():
                       '1' if request.form.get('prism_enabled') else '0')
         _save_setting(db, 'prism_auto_sync_enabled',
                       '1' if request.form.get('prism_auto_sync_enabled') else '0')
+        _save_setting(db, 'prism_auto_import_enabled',
+                      '1' if request.form.get('prism_auto_import_enabled') else '0')
 
         # Blank token field = leave the stored token unchanged.
         token = request.form.get('prism_token', '')

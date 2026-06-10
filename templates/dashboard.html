@@ -59,6 +59,7 @@
         <span class="today-card-tag tag-{{ tag|replace(' ', '-')|lower }}">{{ tag }}</span>
         {% endfor %}
         {% if t.is_test %}<span class="today-card-tag tag-test">TEST</span>{% endif %}
+        {% if t.prism_status %}<span class="prism-tag prism-tag-{{ t.prism_status|lower|replace(' ', '') }}" style="margin-left:0" title="Prism event status — kept current by the Prism sync">{{ t.prism_status|upper }}</span>{% endif %}
       </div>
       <div class="today-card-name">{{ t.name }}</div>
       <div class="today-card-meta">
@@ -142,6 +143,7 @@
          data-is-test="{{ '1' if s.is_test else '0' }}">
         <div class="show-card-name">
           {{ s.name }}
+          {% if s.prism_status %}<span class="prism-tag prism-tag-{{ s.prism_status|lower|replace(' ', '') }}" title="Prism event status — kept current by the Prism sync">{{ s.prism_status|upper }}</span>{% endif %}
           {% if s.is_test %}<span class="test-badge" title="Test / demo — excluded from reports">TEST</span>{% endif %}
         </div>
         <div class="show-card-dates">

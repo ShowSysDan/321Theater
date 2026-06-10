@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `2.16.1`**
+**Current version: `2.17.0`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,7 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `2.17.0` — Prism status tags on shows + optional auto-import: (1) **Status tag** — new `shows.prism_status` column; importing a Prism event stamps the show with its event status, shown as a colored tag (HOLD amber, CONFIRMED green, settlement states dim) on homepage show cards and today cards, and the sync keeps it current — when a hold is confirmed in Prism, the next sync flips the tag and reports "updated the Prism status tag on N show(s)". A one-time backfill fills the tag on shows imported before this release. This is the single sanctioned field the sync writes to a real show (documented in CLAUDE.md). (2) **Auto-import** — new opt-in `prism_auto_import_enabled` setting: each sync imports every future-dated NEW staged event as a 321T show exactly like a manual Import (hidden venues excluded — they arrive pre-ignored; name+date duplicates are auto-ignored instead of retried forever; capped at 200/run), attributed to `auto-import`. (3) Help panel, README guide section, and sync result messages updated to match.
 - `2.16.1` — Prism fixes + documentation: (1) **Bug fix — venue Visible checkboxes did nothing**: the checkbox handler used `|tojson` (which emits double quotes) inside a double-quoted HTML attribute, so the browser truncated the handler and clicks were silently lost; attribute is now single-quoted per the Flask-documented pattern. (2) Renamed the events-toolbar *Restore* button to **Restore to New** with tooltips on all three actions (it moves selected IGNORED events back to NEW — the undo for Ignore; it never touches shows). (3) New collapsible **"How this page works"** panel on /prism documenting the sync model, the NEW/IMPORTED/IGNORED lifecycle, buttons, badges, venue-visibility semantics (including why panel counts don't drop when hiding), and the troubleshooting tools. (4) README gains a full **Prism FM Integration** section under the Admin & Settings Guide.
 - `2.16.0` — Prism venue catalog + per-venue visibility filter: every sync now also pulls Prism's venues API into a new `prism_venues` staging table (name, city/state, stages with capacities, active flag, raw payload) and the `/prism` page gains a collapsible **Venues & Stages** panel documenting everything found — catalogued stages, stage-less pseudo-venues (Prism reports things like "Holidays" as venues), and any venue names seen only on events — each with its staged-event count. Unchecking *Visible* on an entry filters its events from the staged list, sweeps its not-yet-imported NEW events to Ignored, and makes future syncs stage its events pre-ignored, so junk venues disappear in one click without ever losing data (imported rows are never touched; "Show hidden venues" + Restore reverses everything). The hidden set persists in `app_settings.prism_hidden_stages` (auto-saved, audited); sync results report an auto-ignored count.
 - `2.15.2` — Prism API troubleshooting tools: (1) **`prism_bridge/fix_sdk_remove_genres.js`** — one-command workaround for Prism's API rejecting SDK 1.1.2's events query (`Unknown argument "genres" on field "emsList"`); strips the two `genres` lines from the installed bundle with a `.orig` backup, idempotent, refuses on unexpected SDK contents. Prefer a newer vendor tarball when available (see prism_bridge/README.md → Troubleshooting). (2) **"Raw API Fetch" button on /prism** — live 7-day events fetch returning the exact request arguments, the bridge/SDK exchange trace (timing, sizes, stderr chatter), and the raw JSON response, without writing to staging. (3) Sync debug logs and Test Connection now record the full bridge exchange (request args, duration, response bytes, SDK stderr) instead of stderr-on-failure only.
@@ -722,6 +723,21 @@ mapped against the Settings venue list and one performance per Prism date;
 already-imported events and name+date matches against existing shows are
 skipped. *Ignore* dismisses; *Restore to New* un-dismisses (it only flips the
 staging state — it never touches shows).
+
+**Prism status tag.** Imported shows carry their Prism event status
+(`HOLD` / `CONFIRMED` / `IN SETTLEMENT` / `SETTLED`) as a colored tag on the
+homepage show cards (`shows.prism_status`). The sync keeps it current — when
+a hold is confirmed in Prism, the next sync updates the tag automatically.
+This is the only field the sync ever writes to a real show.
+
+**Auto-import (optional).** With *Auto-import new events* enabled in the
+page's Settings panel (`prism_auto_import_enabled`, off by default), each
+sync also imports every future-dated NEW event as a 321T show — identical to
+selecting everything and clicking Import, attributed to `auto-import`.
+Hidden-venue events never qualify (they arrive pre-ignored), and events
+caught by the name+date duplicate guard are auto-ignored rather than retried
+forever (Restore to New re-arms one). Capped at 200 imports per sync; the
+remainder is picked up by the next run.
 
 **Venues & Stages panel.** Documents everything Prism reports — stages with
 capacities, stage-less pseudo-venues (Prism lists things like "Holidays" as
