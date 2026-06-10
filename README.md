@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `2.16.0`**
+**Current version: `2.16.1`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,7 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `2.16.1` — Prism fixes + documentation: (1) **Bug fix — venue Visible checkboxes did nothing**: the checkbox handler used `|tojson` (which emits double quotes) inside a double-quoted HTML attribute, so the browser truncated the handler and clicks were silently lost; attribute is now single-quoted per the Flask-documented pattern. (2) Renamed the events-toolbar *Restore* button to **Restore to New** with tooltips on all three actions (it moves selected IGNORED events back to NEW — the undo for Ignore; it never touches shows). (3) New collapsible **"How this page works"** panel on /prism documenting the sync model, the NEW/IMPORTED/IGNORED lifecycle, buttons, badges, venue-visibility semantics (including why panel counts don't drop when hiding), and the troubleshooting tools. (4) README gains a full **Prism FM Integration** section under the Admin & Settings Guide.
 - `2.16.0` — Prism venue catalog + per-venue visibility filter: every sync now also pulls Prism's venues API into a new `prism_venues` staging table (name, city/state, stages with capacities, active flag, raw payload) and the `/prism` page gains a collapsible **Venues & Stages** panel documenting everything found — catalogued stages, stage-less pseudo-venues (Prism reports things like "Holidays" as venues), and any venue names seen only on events — each with its staged-event count. Unchecking *Visible* on an entry filters its events from the staged list, sweeps its not-yet-imported NEW events to Ignored, and makes future syncs stage its events pre-ignored, so junk venues disappear in one click without ever losing data (imported rows are never touched; "Show hidden venues" + Restore reverses everything). The hidden set persists in `app_settings.prism_hidden_stages` (auto-saved, audited); sync results report an auto-ignored count.
 - `2.15.2` — Prism API troubleshooting tools: (1) **`prism_bridge/fix_sdk_remove_genres.js`** — one-command workaround for Prism's API rejecting SDK 1.1.2's events query (`Unknown argument "genres" on field "emsList"`); strips the two `genres` lines from the installed bundle with a `.orig` backup, idempotent, refuses on unexpected SDK contents. Prefer a newer vendor tarball when available (see prism_bridge/README.md → Troubleshooting). (2) **"Raw API Fetch" button on /prism** — live 7-day events fetch returning the exact request arguments, the bridge/SDK exchange trace (timing, sizes, stderr chatter), and the raw JSON response, without writing to staging. (3) Sync debug logs and Test Connection now record the full bridge exchange (request args, duration, response bytes, SDK stderr) instead of stderr-on-failure only.
 - `2.15.1` — PostgreSQL fixes for the Prism module + two latent infrastructure bugs it exposed, all verified against a real PostgreSQL 16 instance: (1) `/prism` 500'd on PG because psycopg2 interprets a literal `%` (`LIKE 'prism_%'`) as a placeholder when a params tuple is passed — the pattern is now bound as a parameter, **and** `db_adapter.execute()` passes `None` to psycopg2 when there are no params, which also repairs `reload_syslog_handler()` (same literal-`%` query — syslog settings had been silently failing to load on PG deployments). (2) The Prism stale-row cleanup contained a literal `?` inside a SQL string ("worker died?") that db_adapter blindly rewrote to `%s` — message now bound as a parameter, and the sync's preflight phase is wrapped so any failure returns a clean JSON error instead of a 500. (3) `init_db.py`: fresh `--init-postgres` could never complete because `PG_SCHEMA` isn't FK-ordered and a single-transaction pass rolled back all prior creates on each failure — schema statements are now applied with per-statement commits and multi-pass retry (`_apply_pg_schema`), used by both init and `migrate_db_postgres()`; also removed a semicolon inside a schema comment that the naive `;`-split turned into a syntax error, which had silently prevented `prism_events` from being created. CLAUDE.md documents all three PG-only traps.
@@ -101,6 +102,7 @@ Version history:
    - [Database Backups](#database-backups)
    - [File Manager](#file-manager)
    - [God Mode](#god-mode)
+   - [Prism FM Integration](#prism-fm-integration)
 6. [Database Configuration](#database-configuration)
    - [SQLite (Default)](#sqlite-default)
    - [PostgreSQL (Dual-Schema)](#postgresql-dual-schema)
@@ -690,6 +692,51 @@ Settings → God Mode (admin only).
 
 - **Active Sessions** — users on a show page in the last 5 minutes (user, show, tab, last seen)
 - **User Last Login** — last login timestamp per user
+
+### Prism FM Integration
+
+Sidebar → Prism Sync (admin only). Pulls the building schedule from **Prism**
+(the venue's primary scheduling system) into a staging area, from which
+selected events can be imported as normal 321T shows. The module is
+**sandboxed**: syncing only writes to its own staging tables — nothing in
+321Theater changes until an admin explicitly imports.
+
+**One-time server setup** (Node.js + the official Prism SDK tarball + an API
+token) is documented in [`prism_bridge/README.md`](prism_bridge/README.md),
+including the troubleshooting workaround for the SDK 1.1.2 `genres` query
+error. The page's Environment panel verifies every prerequisite live.
+
+**Syncing.** *Sync Now*, or a daily leader-gated auto-sync at a configurable
+hour, fetches every event from today out to the configured lookahead (default
+365 days), filtered by event status (Hold / Confirmed / In Settlement /
+Settled). Events are deduplicated by Prism event ID — re-syncs update staged
+rows in place, never duplicate. Each sync also refreshes the venue/stage
+catalog and writes a debug log (request, timing, SDK output, per-event
+decisions) viewable under Sync History.
+
+**Event lifecycle.** Every staged event is NEW (awaiting review), IMPORTED
+(a 321T show was created from it — linked, and flagged CHANGED IN PRISM if
+Prism edits it afterwards), or IGNORED (dismissed, kept so it doesn't return
+as NEW). *Import selected → 321T* creates one show per event with the venue
+mapped against the Settings venue list and one performance per Prism date;
+already-imported events and name+date matches against existing shows are
+skipped. *Ignore* dismisses; *Restore to New* un-dismisses (it only flips the
+staging state — it never touches shows).
+
+**Venues & Stages panel.** Documents everything Prism reports — stages with
+capacities, stage-less pseudo-venues (Prism lists things like "Holidays" as
+venues), inactive venues, and names seen only on events — with staged-event
+counts. Unchecking *Visible* on an entry hides its events from the list,
+moves its current NEW events to IGNORED, and stages its future events
+pre-ignored, so junk venues disappear in one click. Fully reversible: tick
+*Show hidden venues*, select, *Restore to New*. The hidden set persists in
+settings and is audited.
+
+**Troubleshooting.** *Test Connection* exercises the full pipeline with a
+live venues fetch; *Raw API Fetch* shows the exact request and raw response
+for the next 7 days; the `{ }` button on any staged row shows its raw Prism
+payload; and an expandable *How this page works* panel on the page itself
+documents all of the above for operators.
 
 ---
 
