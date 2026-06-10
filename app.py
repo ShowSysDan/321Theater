@@ -53,6 +53,7 @@ import db_adapter
 from db_adapter import DBIntegrityError
 import s3_storage
 import pdf_layouts
+import prism_module  # sandboxed Prism FM integration — wired up near the bottom
 
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, session, jsonify, make_response, abort, send_file,
@@ -470,7 +471,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.14.1'
+APP_VERSION = '2.15.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -2263,6 +2264,15 @@ def start_scheduler():
         # quiet long enough.
         scheduler.add_job(run_field_change_alerts, 'interval', minutes=10,
                           id='field_change_alerts')
+        # Prism auto-sync (sandboxed module): leader-gated inside the job;
+        # fires hourly but only acts during the configured hour, only when
+        # both prism_enabled and prism_auto_sync_enabled are '1', and skips
+        # if a scheduled sync already succeeded today. minute=20 keeps it
+        # clear of the PDF-email job's top-of-hour slot. Same cron/misfire
+        # rationale as pdf_email_check above.
+        scheduler.add_job(prism_module.run_prism_auto_sync, 'cron', minute=20,
+                          id='prism_auto_sync', misfire_grace_time=3600,
+                          coalesce=True)
         scheduler.start()
         # Backfill contact↔user link once on boot.
         try:
@@ -16712,6 +16722,26 @@ def internal_error(e):
     return render_template('error.html', code=500,
                            message="An unexpected server error occurred.",
                            user=get_current_user()), 500
+
+
+# ─── Prism FM integration (sandboxed) ─────────────────────────────────────────
+# All Prism logic lives in prism_module.py + prism_bridge/ + templates/
+# prism.html, isolated behind this one registration call (plus the
+# prism_auto_sync scheduler job above). The module stages Prism events in its
+# own tables and only writes shows/show_performances/advance_data when an
+# admin explicitly imports from the /prism page.
+
+prism_module.register(
+    app,
+    get_db=get_db,
+    get_current_user=get_current_user,
+    am_i_leader=am_i_leader,
+    admin_required=admin_required,
+    log_audit=log_audit,
+    db_adapter=db_adapter,
+    DATABASE=DATABASE,
+    syslog_logger=syslog_logger,
+)
 
 
 # ─── Run ──────────────────────────────────────────────────────────────────────

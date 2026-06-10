@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `2.14.1`**
+**Current version: `2.15.0`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,7 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `2.15.0` — **Prism FM integration (sandboxed)**: new admin-only `/prism` page pulls the building schedule from Prism (the venue's primary scheduling system) into a staging area — a manual **Sync Now** button and an optional once-daily auto-sync each look `prism_lookahead_days` (default 365) ahead and upsert events into a new `prism_events` table keyed on Prism's event ID, so re-syncs update in place and never duplicate. Staged events are listed with search/state/past filters and NEW / IMPORTED / IGNORED states plus debug badges (CHANGED IN PRISM after import, NOT IN LAST SYNC for events that vanished from the feed); selected rows can be explicitly **imported** into 321T — creating a normal show with per-date performances (times included), advance-sheet seeds, venue mapped against the Settings venue list, and a SHOW_CREATE audit entry — with a duplicate guard that skips events matching an existing show's name + date. Nothing outside the staging tables is touched until an import is clicked. The module is isolated in `prism_module.py` + `prism_bridge/` (Node bridge scripts wrapping the official `@prismfm/prism-sdk`, architecture validated in the PrismSDKTest project; see `prism_bridge/README.md` for the one-time SDK install) and wired into `app.py` by a single `register()` call plus one leader-gated scheduler job that refuses to run on a stale SQLite fallback (same safety pattern as scheduled PDF emails). Every sync writes a `prism_sync_log` row with counts and a capped debug log, surfaced in the page's Sync History panel together with an Environment panel (Node.js / SDK / token / DB checks) and a live **Test Connection** button. Settings (enable, API token, schedule hour, lookahead, event-status filter, bridge dir/timeout) live in `app_settings` and are edited on the page itself. Requires Node.js ≥ 18 on the server only if the integration is enabled.
 - `1.x` — Initial release through security hardening and red team audit
 - `2.0.0` — Asset Manager (inventory tracking, rental pricing, show reservations, external rentals), Performance Company field, version numbering system
 - `2.1.0` — User registration with CAPTCHA, password recovery via email, pending registration approval workflow, in-app git update system with rollback, site-wide messaging (MOTD/maintenance/alerts with dismissal), AI session concurrency management, asset availability dashboards (public/private), asset usage reports by company/date range, Dashboards and Asset Reports in sidebar nav
@@ -119,6 +120,7 @@ Version history:
 | Disk | 1 GB (for database and backups) |
 | Network | LAN access for crew devices |
 | Database | SQLite (built-in) or PostgreSQL 13+ (optional) |
+| Node.js | 18+ (optional — only for the Prism FM integration, see `prism_bridge/README.md`) |
 
 Python packages installed automatically: Flask, Werkzeug, gunicorn, WeasyPrint (PDF generation), APScheduler (backups), flask-limiter (login rate limiting), qrcode[pil] + Pillow (WiFi QR codes), dnspython (direct MX email delivery), pdfplumber + python-docx + openpyxl + xlrd + striprtf (document import/AI extraction), psycopg2-binary (optional PostgreSQL support).
 

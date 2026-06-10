@@ -881,6 +881,58 @@ CREATE TABLE IF NOT EXISTS cluster_instances (
 );
 
 CREATE INDEX IF NOT EXISTS idx_cluster_instances_last_seen ON cluster_instances(last_seen);
+
+-- ── Prism FM integration (SANDBOXED — see prism_module.py) ────────────────────
+-- Staging area for events pulled from Prism, the building's scheduling system.
+-- The main app never reads these tables; prism_module only writes to
+-- shows/show_performances/advance_data on an explicit admin import.
+
+CREATE TABLE IF NOT EXISTS prism_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    prism_event_id INTEGER UNIQUE NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    event_status TEXT DEFAULT '',
+    event_status_code TEXT DEFAULT '',
+    first_date DATE DEFAULT NULL,
+    last_date DATE DEFAULT NULL,
+    venue_name TEXT DEFAULT '',
+    stage_names TEXT DEFAULT '',
+    tour_name TEXT DEFAULT '',
+    number_of_shows INTEGER DEFAULT 0,
+    is_rental INTEGER DEFAULT 0,
+    dates_json TEXT DEFAULT '[]',
+    raw_json TEXT DEFAULT '{}',
+    content_hash TEXT DEFAULT '',
+    prism_last_updated TEXT DEFAULT '',
+    import_state TEXT DEFAULT 'new',
+    imported_show_id INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+    imported_at TIMESTAMP DEFAULT NULL,
+    imported_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_prism_events_state ON prism_events(import_state, first_date);
+
+CREATE TABLE IF NOT EXISTS prism_sync_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    finished_at TIMESTAMP DEFAULT NULL,
+    trigger_type TEXT DEFAULT 'manual',
+    triggered_by TEXT DEFAULT '',
+    window_start DATE DEFAULT NULL,
+    window_end DATE DEFAULT NULL,
+    status TEXT DEFAULT 'running',
+    events_fetched INTEGER DEFAULT 0,
+    events_new INTEGER DEFAULT 0,
+    events_updated INTEGER DEFAULT 0,
+    events_unchanged INTEGER DEFAULT 0,
+    error_text TEXT DEFAULT '',
+    debug_log TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_prism_sync_log_started ON prism_sync_log(started_at);
 """
 
 SEED_CONTACTS = [
@@ -1506,6 +1558,56 @@ def migrate_db():
         );
         CREATE INDEX IF NOT EXISTS idx_pdf_submissions_show
             ON pdf_submissions(show_id);
+    """)
+
+    # Prism FM integration staging tables (sandboxed module — see prism_module.py)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS prism_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prism_event_id INTEGER UNIQUE NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            event_status TEXT DEFAULT '',
+            event_status_code TEXT DEFAULT '',
+            first_date DATE DEFAULT NULL,
+            last_date DATE DEFAULT NULL,
+            venue_name TEXT DEFAULT '',
+            stage_names TEXT DEFAULT '',
+            tour_name TEXT DEFAULT '',
+            number_of_shows INTEGER DEFAULT 0,
+            is_rental INTEGER DEFAULT 0,
+            dates_json TEXT DEFAULT '[]',
+            raw_json TEXT DEFAULT '{}',
+            content_hash TEXT DEFAULT '',
+            prism_last_updated TEXT DEFAULT '',
+            import_state TEXT DEFAULT 'new',
+            imported_show_id INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+            imported_at TIMESTAMP DEFAULT NULL,
+            imported_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_prism_events_state
+            ON prism_events(import_state, first_date);
+
+        CREATE TABLE IF NOT EXISTS prism_sync_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            finished_at TIMESTAMP DEFAULT NULL,
+            trigger_type TEXT DEFAULT 'manual',
+            triggered_by TEXT DEFAULT '',
+            window_start DATE DEFAULT NULL,
+            window_end DATE DEFAULT NULL,
+            status TEXT DEFAULT 'running',
+            events_fetched INTEGER DEFAULT 0,
+            events_new INTEGER DEFAULT 0,
+            events_updated INTEGER DEFAULT 0,
+            events_unchanged INTEGER DEFAULT 0,
+            error_text TEXT DEFAULT '',
+            debug_log TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_prism_sync_log_started
+            ON prism_sync_log(started_at);
     """)
 
     # ALTER TABLE for new columns (SQLite errors if column already exists)
@@ -3183,6 +3285,58 @@ CREATE TABLE IF NOT EXISTS cluster_instances (
 );
 
 CREATE INDEX IF NOT EXISTS idx_cluster_instances_last_seen ON cluster_instances(last_seen);
+
+-- ── Prism FM integration (SANDBOXED — see prism_module.py) ────────────────────
+-- Staging area for events pulled from Prism, the building's scheduling system.
+-- The main app never reads these tables; prism_module only writes to
+-- shows/show_performances/advance_data on an explicit admin import.
+
+CREATE TABLE IF NOT EXISTS prism_events (
+    id SERIAL PRIMARY KEY,
+    prism_event_id INTEGER UNIQUE NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    event_status TEXT DEFAULT '',
+    event_status_code TEXT DEFAULT '',
+    first_date DATE DEFAULT NULL,
+    last_date DATE DEFAULT NULL,
+    venue_name TEXT DEFAULT '',
+    stage_names TEXT DEFAULT '',
+    tour_name TEXT DEFAULT '',
+    number_of_shows INTEGER DEFAULT 0,
+    is_rental INTEGER DEFAULT 0,
+    dates_json TEXT DEFAULT '[]',
+    raw_json TEXT DEFAULT '{}',
+    content_hash TEXT DEFAULT '',
+    prism_last_updated TEXT DEFAULT '',
+    import_state TEXT DEFAULT 'new',
+    imported_show_id INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+    imported_at TIMESTAMP DEFAULT NULL,
+    imported_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_prism_events_state ON prism_events(import_state, first_date);
+
+CREATE TABLE IF NOT EXISTS prism_sync_log (
+    id SERIAL PRIMARY KEY,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    finished_at TIMESTAMP DEFAULT NULL,
+    trigger_type TEXT DEFAULT 'manual',
+    triggered_by TEXT DEFAULT '',
+    window_start DATE DEFAULT NULL,
+    window_end DATE DEFAULT NULL,
+    status TEXT DEFAULT 'running',
+    events_fetched INTEGER DEFAULT 0,
+    events_new INTEGER DEFAULT 0,
+    events_updated INTEGER DEFAULT 0,
+    events_unchanged INTEGER DEFAULT 0,
+    error_text TEXT DEFAULT '',
+    debug_log TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_prism_sync_log_started ON prism_sync_log(started_at);
 """
 
 

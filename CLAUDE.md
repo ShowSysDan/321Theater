@@ -62,6 +62,31 @@ their conflict columns added to `_CONFLICT_COLS`. PostgreSQL returns `date`/
 - Actual send: `_send_pdf_email()`. SMTP/recipient failures are recorded in the
   `email_send_errors` table and the Settings "Email Send Errors" panel.
 
+## Prism FM integration (SANDBOXED — keep it that way)
+Prism is the building's primary scheduling system. The integration lives in
+`prism_module.py` + `prism_bridge/` + `templates/prism.html`, wired into
+app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
+`prism_auto_sync` scheduler job. Rules:
+- The module only writes to its own tables (`prism_events`, `prism_sync_log`)
+  and `prism_*` keys in `app_settings`. It touches main-app tables
+  (`shows` / `show_performances` / `advance_data`) **only** inside
+  `import_staged_events()`, which runs when an admin explicitly imports
+  selected events on `/prism`. Don't add automatic write-through to shows
+  without being asked.
+- Prism's SDK is Node-only (GraphQL under the hood) — Python shells out to
+  `prism_bridge/*.js` subprocesses (pattern validated in the PrismSDKTest
+  repo). The SDK itself is installed from a vendor tarball and gitignored;
+  see `prism_bridge/README.md`. `prism_bridge_dir` in settings can point at
+  a stub directory for testing without credentials.
+- Dedup is by `prism_events.prism_event_id` (unique). Re-syncs upsert;
+  `content_hash` drives the "changed since import" badge.
+- The scheduled job follows the background-job rules above: leader-gated AND
+  refuses to act when configured-postgres ≠ active backend (stale SQLite
+  fallback). Manual sync, settings, and import are admin-only routes.
+- Debugging: every sync writes a `prism_sync_log` row with a capped debug
+  log; the `/prism` page shows env checks (node/SDK/token/DB), sync history,
+  and a raw-payload viewer per staged event.
+
 ## Git
 Develop on the branch you were assigned; commit with clear messages; push with
 `git push -u origin <branch>`. Do not open a PR unless explicitly asked.
