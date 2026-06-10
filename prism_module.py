@@ -51,6 +51,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 from datetime import date, datetime, timedelta
 
 from flask import jsonify, redirect, render_template, request, session, url_for
@@ -159,11 +160,20 @@ def _bridge_dir(settings):
     return settings.get('prism_bridge_dir') or DEFAULT_BRIDGE_DIR
 
 
-def _bridge_call(script_name, args=None, *, settings, timeout=None):
+def _bridge_call(script_name, args=None, *, settings, timeout=None, debug_sink=None):
     """
     Run a prism_bridge Node script and return parsed JSON from stdout.
     Mirrors the subprocess pattern validated in PrismSDKTest.
+
+    `debug_sink` (callable taking a string) receives a trace of the exchange —
+    request args, timing, response size, and the SDK's stderr chatter — so
+    sync logs and the Raw API Fetch tool can show exactly what went over the
+    wire. The token itself is never written to the sink.
     """
+    def note(msg):
+        if debug_sink is not None:
+            debug_sink(msg)
+
     bridge_dir = _bridge_dir(settings)
     script_path = os.path.join(bridge_dir, script_name)
     if not os.path.isfile(script_path):
@@ -176,37 +186,50 @@ def _bridge_call(script_name, args=None, *, settings, timeout=None):
 
     env = {**os.environ, 'PRISM_TOKEN': settings.get('prism_token', '')}
     cmd = ['node', script_name, json.dumps(args or {})]
+    note(f'→ {script_name} args={json.dumps(args or {})[:1500]}')
 
+    t0 = time.monotonic()
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True,
             timeout=node_timeout, env=env, cwd=bridge_dir,
         )
     except subprocess.TimeoutExpired:
+        note(f'✗ {script_name} timed out after {node_timeout}s')
         raise PrismBridgeError(
             f'{script_name} timed out after {node_timeout}s')
     except FileNotFoundError:
+        note('✗ node executable not found')
         raise PrismBridgeError(
             'node executable not found — install Node.js ≥ 18 on this server '
             '(see prism_bridge/README.md)')
 
+    elapsed = time.monotonic() - t0
+    stderr_txt = (result.stderr or '').strip()
+
     if result.returncode != 0:
-        stderr = (result.stderr or '').strip()
+        note(f'✗ {script_name} exit={result.returncode} after {elapsed:.1f}s')
+        if stderr_txt:
+            note(f'stderr: {stderr_txt[-2000:]}')
         try:
-            err = json.loads(stderr.splitlines()[-1])
-            raise PrismBridgeError(err.get('error') or stderr,
-                                   detail={'stderr': stderr[-4000:]})
+            err = json.loads(stderr_txt.splitlines()[-1])
+            raise PrismBridgeError(err.get('error') or stderr_txt,
+                                   detail={'stderr': stderr_txt[-4000:]})
         except (json.JSONDecodeError, IndexError):
             raise PrismBridgeError(
-                stderr[-1000:] or f'{script_name} exited with code {result.returncode}',
-                detail={'stderr': stderr[-4000:]})
+                stderr_txt[-1000:] or f'{script_name} exited with code {result.returncode}',
+                detail={'stderr': stderr_txt[-4000:]})
 
     stdout = (result.stdout or '').strip()
+    note(f'← {script_name} {len(stdout)} bytes in {elapsed:.1f}s')
+    if stderr_txt:
+        note(f'SDK chatter (stderr): {stderr_txt[-2000:]}')
     if not stdout:
         raise PrismBridgeError(f'{script_name} produced no output')
     try:
         return json.loads(stdout)
     except json.JSONDecodeError as exc:
+        note(f'✗ stdout is not JSON: {stdout[:300]}')
         raise PrismBridgeError(f'Could not parse {script_name} output as JSON: {exc}',
                                detail={'stdout': stdout[:2000]})
 
@@ -397,7 +420,8 @@ def run_prism_sync(trigger='manual', triggered_by=''):
                         'endDate': win_end.isoformat()}
                 if statuses:
                     args['eventStatus'] = statuses
-                events = _bridge_call('get_events.js', args, settings=settings)
+                events = _bridge_call('get_events.js', args, settings=settings,
+                                      debug_sink=dbg)
                 if not isinstance(events, list):
                     raise PrismBridgeError(
                         f'Expected a JSON array of events, got {type(events).__name__}')
@@ -778,10 +802,12 @@ def _test_view():
         env = environment_check(settings, db=db)
     finally:
         db.close()
-    out = {'env': env, 'api_ok': False, 'api_detail': ''}
+    log_lines = []
+    out = {'env': env, 'api_ok': False, 'api_detail': '', 'log': log_lines}
     if all(c['ok'] for c in env):
         try:
-            venues = _bridge_call('get_venues.js', settings=settings, timeout=60)
+            venues = _bridge_call('get_venues.js', settings=settings, timeout=60,
+                                  debug_sink=log_lines.append)
             names = [v.get('name', '?') for v in venues][:10] \
                 if isinstance(venues, list) else []
             out['api_ok'] = True
@@ -791,6 +817,55 @@ def _test_view():
             out['api_detail'] = str(e)
     else:
         out['api_detail'] = 'Environment checks failed — fix the items above first.'
+    return jsonify(out)
+
+
+def _debug_fetch_view():
+    """
+    Troubleshooting tool ("Raw API Fetch" on /prism): run a short live events
+    fetch and return the exact request arguments, the bridge/SDK exchange
+    trace, and the raw JSON response — WITHOUT writing anything to staging.
+    """
+    db = _d['get_db']()
+    try:
+        settings = get_prism_settings(db)
+    finally:
+        db.close()
+    if settings['prism_enabled'] != '1':
+        return jsonify({'ok': False, 'error': 'Prism module is disabled in settings.'})
+    if not settings['prism_token']:
+        return jsonify({'ok': False, 'error': 'No Prism API token configured.'})
+
+    body = request.get_json(silent=True) or {}
+    try:
+        days = max(1, min(31, int(body.get('days', 7))))
+    except (TypeError, ValueError):
+        days = 7
+
+    win_start = date.today()
+    win_end = win_start + timedelta(days=days)
+    statuses = [int(s) for s in
+                str(settings.get('prism_event_statuses') or '2').split(',')
+                if s.strip().isdigit()]
+    args = {'startDate': win_start.isoformat(), 'endDate': win_end.isoformat()}
+    if statuses:
+        args['eventStatus'] = statuses
+
+    log_lines = []
+    out = {'ok': False, 'request': {'script': 'get_events.js', 'args': args},
+           'log': log_lines}
+    try:
+        events = _bridge_call('get_events.js', args, settings=settings,
+                              debug_sink=log_lines.append)
+        out['ok'] = True
+        out['event_count'] = len(events) if isinstance(events, list) else None
+        raw = json.dumps(events, indent=2)
+        out['response_truncated'] = len(raw) > 80_000
+        out['response'] = raw[:80_000]
+    except PrismBridgeError as e:
+        out['error'] = str(e)
+        if e.detail:
+            out['detail'] = e.detail
     return jsonify(out)
 
 
@@ -911,6 +986,8 @@ def register(app, **deps):
                      methods=['POST'])
     app.add_url_rule('/prism/test', 'prism_test', admin(_test_view),
                      methods=['POST'])
+    app.add_url_rule('/prism/debug-fetch', 'prism_debug_fetch',
+                     admin(_debug_fetch_view), methods=['POST'])
     app.add_url_rule('/prism/settings', 'prism_save_settings',
                      admin(_save_settings_view), methods=['POST'])
     app.add_url_rule('/prism/events/state', 'prism_set_state',

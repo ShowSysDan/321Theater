@@ -54,6 +54,39 @@ prints JSON to stdout. This is the same architecture validated in the
 5. Open **321Theater → Prism** — the Environment panel re-checks all of the
    above and the **Test connection** button does a live venues fetch.
 
+## Troubleshooting
+
+### Sync fails with: `Unknown argument "genres" on field "emsList" of type "Query"`
+
+Prism's GraphQL API no longer accepts the `genres` filter that SDK 1.1.2
+bakes into its events query, so every `getEvents()` call is rejected
+server-side (venues still work — only the events query is affected).
+
+1. **First** check Prism → Settings → Developer for a **newer SDK tarball**.
+   If one exists, install it and retry — that's the proper fix:
+   ```bash
+   cd prism_bridge && npm install --no-save ./prismfm-prism-sdk-x.y.z.tar
+   ```
+2. If you're stuck on 1.1.2, run the bundled workaround, which strips the
+   two `genres` lines from the installed SDK's query (a `.orig` backup is
+   written next to the bundle; the script is a no-op once patched):
+   ```bash
+   cd prism_bridge && node fix_sdk_remove_genres.js
+   ```
+   Re-run it after any SDK reinstall. If it reports unexpected contents,
+   the SDK version differs from 1.1.2 — contact engineering@prism.fm.
+
+### Seeing what is actually sent and received
+
+- **/prism → "Raw API Fetch"** — live 7-day events fetch showing the exact
+  request arguments, the bridge/SDK exchange (timing, sizes, stderr
+  chatter), and the raw JSON response. Touches nothing in the database.
+- **Sync History debug logs** — every sync records its request args, timing,
+  response size, SDK stderr, and per-event NEW/UPDATED decisions.
+- **`{ }` button on a staged event** — the raw payload as last synced.
+- From a shell, the bridge scripts run standalone:
+  `PRISM_TOKEN=… node get_events.js '{"startDate":"2026-06-10","endDate":"2026-06-17"}'`
+
 ## Notes
 
 - The token is passed to these scripts via the `PRISM_TOKEN` environment
