@@ -178,6 +178,12 @@ class DBConnection:
     def execute(self, sql, params=()):
         adapted_sql, needs_lastval = self._adapt_sql(sql)
 
+        # psycopg2 only skips %-placeholder interpolation when vars is None —
+        # an empty tuple still triggers it, so a literal % in the SQL (e.g.
+        # "LIKE 'prefix_%'") raises IndexError. SQLite has no such pitfall;
+        # map "no params" to None so both backends treat literal % the same.
+        pg_params = params if params else None
+
         if self.db_type == 'postgres':
             import psycopg2
             import psycopg2.extras
@@ -185,7 +191,7 @@ class DBConnection:
 
             cur = self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
             try:
-                cur.execute(adapted_sql, params)
+                cur.execute(adapted_sql, pg_params)
                 adapted = AdaptedCursor(cur, 'postgres')
                 if needs_lastval:
                     lv_cur = self._conn.cursor()

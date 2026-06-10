@@ -39,6 +39,20 @@ their conflict columns added to `_CONFLICT_COLS`. PostgreSQL returns `date`/
 `datetime` objects where SQLite returns ISO strings — coerce with `_as_date()`
 (app.py) before doing date math.
 
+Traps that only bite on PostgreSQL (each has caused a real 500):
+- **Literal `%` in SQL** (e.g. `LIKE 'prefix_%'`): bind the pattern as a
+  parameter instead. db_adapter now passes `None` to psycopg2 when there are
+  no params (so param-less literals work), but a query that mixes a literal
+  `%` WITH bound params will still break — psycopg2 interprets `%` as a
+  placeholder marker.
+- **Literal `?` anywhere in SQL text** — including inside quoted string
+  literals and prose ("worker died?") — is rewritten to `%s` by db_adapter's
+  blind `replace('?', '%s')`. Bind any text containing `?` as a parameter.
+- **`PG_SCHEMA` in init_db.py is split on `;` with no real parser** — never
+  put a semicolon inside a schema comment, and keep every statement
+  self-contained. SQLite's `executescript` parses properly, so the mistake
+  passes SQLite testing and only fails on PG init/migrate.
+
 ## Runtime / deployment
 - Served by **Gunicorn, 4 workers × 4 threads** (`start.sh`); each worker imports
   the module independently, so `start_scheduler()` runs once per worker.

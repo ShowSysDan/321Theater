@@ -884,7 +884,7 @@ CREATE INDEX IF NOT EXISTS idx_cluster_instances_last_seen ON cluster_instances(
 
 -- ── Prism FM integration (SANDBOXED — see prism_module.py) ────────────────────
 -- Staging area for events pulled from Prism, the building's scheduling system.
--- The main app never reads these tables; prism_module only writes to
+-- The main app never reads these tables — prism_module only writes to
 -- shows/show_performances/advance_data on an explicit admin import.
 
 CREATE TABLE IF NOT EXISTS prism_events (
@@ -3288,7 +3288,7 @@ CREATE INDEX IF NOT EXISTS idx_cluster_instances_last_seen ON cluster_instances(
 
 -- ── Prism FM integration (SANDBOXED — see prism_module.py) ────────────────────
 -- Staging area for events pulled from Prism, the building's scheduling system.
--- The main app never reads these tables; prism_module only writes to
+-- The main app never reads these tables — prism_module only writes to
 -- shows/show_performances/advance_data on an explicit admin import.
 
 CREATE TABLE IF NOT EXISTS prism_events (
@@ -3374,6 +3374,46 @@ def _table_for_stmt(stmt):
     return None
 
 
+def _apply_pg_schema(conn, app_schema, shared_schema):
+    """
+    Execute every PG_SCHEMA statement, committing after each success and
+    retrying failures in later passes.
+
+    Why: the statements are not strictly FK-ordered (e.g. form_sections
+    references asset_categories, defined later), and a single-transaction
+    pass can never converge — each failed statement rolls back every
+    uncommitted CREATE before it, so on an EMPTY database a fresh init
+    always died and migrate_db_postgres only ever managed to create the
+    tail of the file. Per-statement commits make ordering irrelevant:
+    anything whose FK target is missing simply succeeds on a later pass.
+
+    Returns a list of (statement, error) still failing after all passes
+    (empty on success).
+    """
+    cur = conn.cursor()
+    pending = [s.strip() for s in PG_SCHEMA.split(';') if s.strip()]
+    failures = []
+    for _pass in range(8):
+        failures = []
+        for stmt in pending:
+            table = _table_for_stmt(stmt)
+            if table and table in SHARED_TABLES:
+                cur.execute(f'SET search_path TO "{shared_schema}"')
+            else:
+                cur.execute(f'SET search_path TO "{app_schema}", "{shared_schema}"')
+            try:
+                cur.execute(stmt)
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                failures.append((stmt, e))
+        if not failures:
+            break
+        pending = [s for s, _ in failures]
+    cur.close()
+    return failures
+
+
 def init_db_postgres(settings, seed=True):
     """
     Initialize a PostgreSQL database with the ShowAdvance schema.
@@ -3438,21 +3478,19 @@ def init_db_postgres(settings, seed=True):
 
         cur.close()
 
-        # Switch to transactional mode for table creation
+        # Switch to transactional mode for table creation. Statements are
+        # applied with per-statement commits + multi-pass retry so FK
+        # ordering inside PG_SCHEMA doesn't matter (see _apply_pg_schema).
         conn.autocommit = False
+        leftover = _apply_pg_schema(conn, app_schema, shared_schema)
+        if leftover:
+            for stmt, err in leftover:
+                first_line = stmt.splitlines()[0][:90]
+                print(f"  ✗ statement failed after retries: {first_line}… → {err}")
+            conn.close()
+            print("✗ PostgreSQL init failed: some schema statements could not be applied")
+            return False
         cur = conn.cursor()
-
-        # Create tables, routing each to the correct schema
-        for stmt in PG_SCHEMA.split(';'):
-            stmt = stmt.strip()
-            if not stmt:
-                continue
-            table = _table_for_stmt(stmt)
-            if table and table in SHARED_TABLES:
-                cur.execute(f'SET search_path TO "{shared_schema}"')
-            else:
-                cur.execute(f'SET search_path TO "{app_schema}", "{shared_schema}"')
-            cur.execute(stmt)
 
         if seed:
             # Admin user (in shared schema)
@@ -3518,26 +3556,17 @@ def migrate_db_postgres():
         return
 
     try:
-        cur = conn.cursor()
-
         # ── 1. Ensure all current tables exist (handles new tables added in ──
-        #        any release after initial PG setup)                          ──
-        cur.execute(f'SET search_path TO "{app_schema}", "{shared_schema}"')
-        for stmt in PG_SCHEMA.split(';'):
-            stmt = stmt.strip()
-            if not stmt:
-                continue
-            table = _table_for_stmt(stmt)
-            if table and table in SHARED_TABLES:
-                cur.execute(f'SET search_path TO "{shared_schema}"')
-            else:
-                cur.execute(f'SET search_path TO "{app_schema}", "{shared_schema}"')
-            try:
-                cur.execute(stmt)
-            except Exception:
-                conn.rollback()  # ignore errors on individual table statements
+        #        any release after initial PG setup). Per-statement commits +
+        #        multi-pass retry (see _apply_pg_schema) — the old single-pass
+        #        version rolled back all prior uncommitted creates on each
+        #        failure, so it could never bootstrap missing mid-file tables.
+        leftover = _apply_pg_schema(conn, app_schema, shared_schema)
+        for stmt, err in leftover:
+            first_line = stmt.splitlines()[0][:90]
+            print(f"[migrate_pg] statement still failing: {first_line}… → {err}")
 
-        conn.commit()
+        cur = conn.cursor()
 
         # ── 2. Add any columns that may be missing on older schemas ──────────
         #   PostgreSQL supports ADD COLUMN IF NOT EXISTS natively (9.6+)
