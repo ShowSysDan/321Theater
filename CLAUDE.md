@@ -82,11 +82,13 @@ Prism is the building's primary scheduling system. The integration lives in
 app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
 `prism_auto_sync` scheduler job. Rules:
 - The module only writes to its own tables (`prism_events`, `prism_sync_log`,
-  `prism_venues`) and `prism_*` keys in `app_settings`. It touches main-app tables
-  (`shows` / `show_performances` / `advance_data`) **only** inside
-  `import_staged_events()`, which runs when an admin explicitly imports
-  selected events on `/prism`. Don't add automatic write-through to shows
-  without being asked.
+  `prism_venues`) and `prism_*` keys in `app_settings`. It touches main-app
+  tables (`shows` / `show_performances` / `advance_data`) **only** inside
+  `import_staged_events()` — manual import on `/prism`, or every pending NEW
+  event when the opt-in `prism_auto_import_enabled` setting is on — plus ONE
+  sanctioned sync write-through: `shows.prism_status` (the Hold/Confirmed tag
+  on homepage cards) is kept current for linked shows. Don't widen that
+  write-through surface without being asked.
 - Prism's SDK is Node-only (GraphQL under the hood) — Python shells out to
   `prism_bridge/*.js` subprocesses (pattern validated in the PrismSDKTest
   repo). The SDK itself is installed from a vendor tarball and gitignored;

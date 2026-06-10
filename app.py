@@ -471,7 +471,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.16.1'
+APP_VERSION = '2.17.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -3326,6 +3326,7 @@ def dashboard():
                 'name': s['name'],
                 'venue': s.get('venue') or '',
                 'is_test': s.get('is_test') or 0,
+                'prism_status': s.get('prism_status'),
                 'pm': pm_by_show.get(s['id'], ''),
                 'crew_calls': sorted(calls_by_show.get(s['id'], set())),
                 'perf_times': [p.get('perf_time') for p in todays_perfs if p.get('perf_time')],

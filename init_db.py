@@ -74,6 +74,9 @@ CREATE TABLE IF NOT EXISTS shows (
     -- 1 = exclude from financial / activity reports. Use for trainings,
     -- demos, and dry runs so they don't pollute totals.
     is_test INTEGER DEFAULT 0,
+    -- Prism event status tag ('Hold', 'Confirmed', ...) for shows imported
+    -- from Prism. Kept current by the Prism sync. NULL = not a Prism import.
+    prism_status TEXT DEFAULT NULL,
     created_by INTEGER REFERENCES users(id),
     last_saved_by INTEGER REFERENCES users(id),
     last_saved_at TIMESTAMP,
@@ -1676,6 +1679,7 @@ def migrate_db():
         'ALTER TABLE form_fields ADD COLUMN pdf_template_id INTEGER DEFAULT NULL',
         'ALTER TABLE contacts ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL',
         'ALTER TABLE shows ADD COLUMN is_test INTEGER DEFAULT 0',
+        'ALTER TABLE shows ADD COLUMN prism_status TEXT DEFAULT NULL',
         'ALTER TABLE schedule_meta_fields ADD COLUMN show_in_contacts INTEGER DEFAULT 0',
         "ALTER TABLE labor_requests ADD COLUMN break_start TEXT DEFAULT ''",
         "ALTER TABLE labor_requests ADD COLUMN break_end TEXT DEFAULT ''",
@@ -2542,6 +2546,9 @@ CREATE TABLE IF NOT EXISTS shows (
     crew_count INTEGER DEFAULT NULL,
     performance_company TEXT DEFAULT '',
     is_test INTEGER DEFAULT 0,
+    -- Prism event status tag ('Hold', 'Confirmed', ...) for shows imported
+    -- from Prism. Kept current by the Prism sync. NULL = not a Prism import.
+    prism_status TEXT DEFAULT NULL,
     created_by INTEGER REFERENCES users(id),
     last_saved_by INTEGER REFERENCES users(id),
     last_saved_at TIMESTAMP,
@@ -3709,6 +3716,7 @@ def migrate_db_postgres():
             f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS pdf_template_id INTEGER DEFAULT NULL',
             f'ALTER TABLE "{app_schema}".contacts ADD COLUMN IF NOT EXISTS user_id INTEGER',
             f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS is_test INTEGER DEFAULT 0',
+            f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS prism_status TEXT DEFAULT NULL',
             f'ALTER TABLE "{app_schema}".schedule_meta_fields ADD COLUMN IF NOT EXISTS show_in_contacts INTEGER DEFAULT 0',
             f"ALTER TABLE \"{app_schema}\".labor_requests ADD COLUMN IF NOT EXISTS break_start TEXT DEFAULT ''",
             f"ALTER TABLE \"{app_schema}\".labor_requests ADD COLUMN IF NOT EXISTS break_end TEXT DEFAULT ''",

@@ -73,12 +73,25 @@
 
     <p style="margin:0 0 10px"><strong>The buttons.</strong>
       <em>Import selected → 321T</em> creates a real show per selected event — name, venue
-      (mapped to the Settings venue list when possible), and one performance per Prism date with
-      its start time. Already-imported events and events matching an existing show's name + date
-      are skipped, never doubled. ·
+      (mapped to the Settings venue list when possible), one performance per Prism date with
+      its start time, and the Prism status tag (see below). Already-imported events and events
+      matching an existing show's name + date are skipped, never doubled. ·
       <em>Ignore</em> moves selected events to IGNORED. ·
       <em>Restore to New</em> is the undo for Ignore: it moves selected IGNORED events back to
       NEW — that's all it does (it never touches shows).</p>
+
+    <p style="margin:0 0 10px"><strong>Prism status tag on shows.</strong>
+      Imported shows carry their Prism event status (<span class="prism-tag prism-tag-hold">HOLD</span>,
+      <span class="prism-tag prism-tag-confirmed">CONFIRMED</span>, …) as a tag on the homepage
+      show cards. Syncs keep it current: when Prism confirms a hold, the next sync updates the
+      tag automatically — the only thing the sync ever changes on a real show.</p>
+
+    <p style="margin:0 0 10px"><strong>Auto-import (optional).</strong>
+      With <em>Auto-import new events</em> enabled in Settings, every sync also imports each
+      future-dated NEW event as a show — the same as selecting everything and clicking Import.
+      Hidden venues never qualify (their events arrive pre-ignored), and events caught by the
+      name+date duplicate guard are auto-ignored instead of retrying forever. Leave it off to
+      keep imports a deliberate, manual step.</p>
 
     <p style="margin:0 0 10px"><strong>Venues &amp; Stages panel.</strong>
       Documents everything Prism reports (stages with capacities, pseudo-venues like
@@ -184,6 +197,10 @@
         <label class="checkbox-label">
           <input type="checkbox" name="prism_auto_sync_enabled" value="1" {% if settings.prism_auto_sync_enabled == '1' %}checked{% endif %}>
           Auto-sync daily
+        </label>
+        <label class="checkbox-label" title="Each sync also imports every future-dated NEW event as a 321T show — exactly like selecting everything and clicking Import. Hidden venues stay out (they arrive pre-ignored).">
+          <input type="checkbox" name="prism_auto_import_enabled" value="1" {% if settings.prism_auto_import_enabled == '1' %}checked{% endif %}>
+          Auto-import new events
         </label>
       </div>
 
@@ -569,7 +586,10 @@ async function syncNow(btn) {
   if (ok && data.ok) {
     showResult('Sync complete: ' + data.fetched + ' fetched, ' + data.new + ' new'
                + (data.auto_ignored ? ' (' + data.auto_ignored + ' auto-ignored from hidden venues)' : '')
-               + ', ' + data.updated + ' updated, ' + data.unchanged + ' unchanged. Reloading…');
+               + ', ' + data.updated + ' updated, ' + data.unchanged + ' unchanged'
+               + (data.auto_imported ? '. Auto-imported ' + data.auto_imported + ' show(s)' : '')
+               + (data.status_synced ? '. Updated the Prism status tag on ' + data.status_synced + ' show(s)' : '')
+               + '. Reloading…');
     setTimeout(() => location.reload(), 1200);
   } else {
     showResult('Sync failed: ' + (data.error || 'unknown error'), true);
