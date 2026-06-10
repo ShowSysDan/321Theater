@@ -411,11 +411,7 @@
     return tr;
   }
 
-  function renderShows(shows) {
-    if (!shows || !shows.length) return;
-    const container = document.getElementById('scheduler-results');
-
-    shows.forEach(show => {
+  function buildShowSection(show) {
       const section = document.createElement('div');
       section.className = 'form-section';
       section.style.marginBottom = '16px';
@@ -472,24 +468,12 @@
       table.appendChild(tbody);
       bodyWrap.appendChild(table);
       section.appendChild(bodyWrap);
-      container.appendChild(section);
-    });
+      return section;
   }
 
-  /* Render the Overhead & Project Crew portion. Each row PUT/DELETE goes to
+  /* Build one Overhead & Project Crew section. Each row PUT/DELETE goes to
      /api/overhead-crew/requests/<id> instead of /api/labor-scheduler/<id>. */
-  function renderOverheadGroups(groups) {
-    if (!groups || !groups.length) return;
-    const container = document.getElementById('scheduler-results');
-
-    // Section header banner so the scheduler can quickly scan past show
-    // requests and jump into overhead lines.
-    const banner = document.createElement('div');
-    banner.style.cssText = 'margin:18px 0 8px;font-size:11px;letter-spacing:.06em;font-weight:700;text-transform:uppercase;color:var(--text-dim)';
-    banner.textContent = '— Overhead & Project Crew —';
-    container.appendChild(banner);
-
-    groups.forEach(g => {
+  function buildOverheadSection(g) {
       const section = document.createElement('div');
       section.className = 'form-section';
       section.style.marginBottom = '16px';
@@ -498,9 +482,10 @@
       const header = document.createElement('div');
       header.className = 'form-section-header';
       header.innerHTML = `
-        <span class="section-icon">◈</span>
+        <span class="section-icon">▦</span>
         <div class="scheduler-show-header">
           <strong style="text-transform:none;letter-spacing:normal;font-size:14px">${escapeHtml(g.project_name || g.group_name || 'General')}</strong>
+          <span style="font-size:9px;font-weight:700;letter-spacing:.07em;background:rgba(168,85,247,.15);color:#C084FC;padding:2px 6px;border-radius:3px;white-space:nowrap" title="Overhead &amp; Project Crew labor — not tied to a show">OH / PROJECT</span>
           <span class="text-dim" style="font-size:11px">
             ${escapeHtml(g.project_client || '')}${g.work_date ? ' · ' + escapeHtml(g.work_date) : ''}
           </span>
@@ -545,8 +530,30 @@
       table.appendChild(tbody);
       bodyWrap.appendChild(table);
       section.appendChild(bodyWrap);
-      container.appendChild(section);
+      return section;
+  }
+
+  /* One unified top-to-bottom timeline: show sections and Overhead/Project
+     sections are interleaved by date instead of overhead being dumped at the
+     bottom. A show's sort date is its earliest labor date in the range (its
+     requests arrive date-sorted from the API); shows with no rows yet (the
+     forced-include "add labor to existing show…" picks) sort to the very top
+     so they're easy to find. Same-date ties put shows before overhead. */
+  function renderAllSections(shows, overheadGroups) {
+    const container = document.getElementById('scheduler-results');
+    const sections = [];
+    (shows || []).forEach(show => {
+      const date = show.requests.length
+        ? (show.requests[0].work_date || show.show_date || '')
+        : '';
+      sections.push({ date: date, kind: 0, build: () => buildShowSection(show) });
     });
+    (overheadGroups || []).forEach(g => {
+      sections.push({ date: g.work_date || '', kind: 1, build: () => buildOverheadSection(g) });
+    });
+    sections.sort((a, b) =>
+      a.date < b.date ? -1 : a.date > b.date ? 1 : (a.kind - b.kind));
+    sections.forEach(s => container.appendChild(s.build()));
   }
 
   async function loadScheduler() {
@@ -574,8 +581,7 @@
       const overheadGroups  = data.overhead_groups || [];
       const container = document.getElementById('scheduler-results');
       container.innerHTML = '';
-      renderShows(shows);
-      renderOverheadGroups(overheadGroups);
+      renderAllSections(shows, overheadGroups);
       if (!container.children.length) {
         container.innerHTML =
           '<div class="form-section"><div class="form-section-body">' +
