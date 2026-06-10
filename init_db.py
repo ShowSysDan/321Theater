@@ -317,25 +317,6 @@ CREATE TABLE IF NOT EXISTS form_history (
     snapshot_json TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS user_groups (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL,
-    group_type TEXT NOT NULL DEFAULT 'all_access',
-    description TEXT DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS user_group_members (
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    group_id INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
-    PRIMARY KEY (user_id, group_id)
-);
-
-CREATE TABLE IF NOT EXISTS show_group_access (
-    show_id INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
-    group_id INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
-    PRIMARY KEY (show_id, group_id)
-);
-
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT DEFAULT ''
@@ -1390,25 +1371,6 @@ def migrate_db():
             saved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
             saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             snapshot_json TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS user_groups (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            group_type TEXT NOT NULL DEFAULT 'all_access',
-            description TEXT DEFAULT ''
-        );
-
-        CREATE TABLE IF NOT EXISTS user_group_members (
-            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            group_id INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
-            PRIMARY KEY (user_id, group_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS show_group_access (
-            show_id INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
-            group_id INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
-            PRIMARY KEY (show_id, group_id)
         );
 
         CREATE TABLE IF NOT EXISTS app_settings (
@@ -2647,25 +2609,6 @@ CREATE TABLE IF NOT EXISTS form_history (
     snapshot_json TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS user_groups (
-    id SERIAL PRIMARY KEY,
-    name TEXT UNIQUE NOT NULL,
-    group_type TEXT NOT NULL DEFAULT 'all_access',
-    description TEXT DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS user_group_members (
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    group_id INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
-    PRIMARY KEY (user_id, group_id)
-);
-
-CREATE TABLE IF NOT EXISTS show_group_access (
-    show_id INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
-    group_id INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
-    PRIMARY KEY (show_id, group_id)
-);
-
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT DEFAULT ''
@@ -3248,7 +3191,7 @@ CREATE INDEX IF NOT EXISTS idx_cluster_instances_last_seen ON cluster_instances(
 # Tables like active_sessions and audit_log reference shows (app schema)
 # so they must live in the app schema.
 SHARED_TABLES = {
-    'users', 'user_groups', 'user_group_members', 'app_settings',
+    'users', 'app_settings',
     'password_reset_tokens', 'user_pending_registration',
     'site_messages', 'site_message_dismissals',
     # Server-side session store — shared so multiple apps can read the
@@ -3706,16 +3649,16 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
     # Table copy order respects foreign key dependencies (parents before children)
     TABLE_ORDER = [
         # ── No dependencies ───────────────────────────────────────────────────
-        'users', 'user_groups', 'contacts', 'form_sections', 'schedule_templates',
+        'users', 'contacts', 'form_sections', 'schedule_templates',
         'app_settings', 'position_categories', 'warehouse_locations',
         'asset_categories', 'site_messages', 'ai_sessions',
         # ── Depend on level above ─────────────────────────────────────────────
-        'shows', 'form_fields', 'schedule_meta_fields', 'user_group_members',
+        'shows', 'form_fields', 'schedule_meta_fields',
         'job_positions', 'asset_types', 'site_message_dismissals',
         'user_pending_registration', 'password_reset_tokens',
         # ── Depend on shows / asset_types ─────────────────────────────────────
         'advance_data', 'schedule_meta', 'post_show_notes', 'schedule_rows',
-        'show_performances', 'show_group_access', 'form_history',
+        'show_performances', 'form_history',
         'show_comments', 'show_attachments', 'advance_reads', 'export_log',
         'schedule_template_rows', 'active_sessions', 'labor_requests',
         'crew_members', 'asset_items', 'asset_dashboards',
@@ -3864,7 +3807,7 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
     serial_tables = [
         'users', 'shows', 'advance_data', 'schedule_rows', 'schedule_meta',
         'post_show_notes', 'show_performances', 'contacts', 'export_log',
-        'form_sections', 'form_fields', 'form_history', 'user_groups',
+        'form_sections', 'form_fields', 'form_history',
         'show_comments', 'show_attachments', 'advance_reads',
         'schedule_meta_fields', 'schedule_templates', 'schedule_template_rows',
         # Added in v2.0.0+

@@ -992,7 +992,7 @@ def admin_required(f):
 
 
 def content_admin_required(f):
-    """Allow system admins AND users in an 'admin_group' type group."""
+    """Allow system admins and content admins (staff role)."""
     @wraps(f)
     def decorated(*args, **kwargs):
         if 'user_id' not in session:
@@ -1032,7 +1032,7 @@ def _can_schedule_labor():
 
 
 def scheduler_required(f):
-    """Allow admins, staff, scheduler_group members, or users with is_scheduler flag."""
+    """Allow admins, staff, or users with the is_scheduler flag."""
     @wraps(f)
     def decorated(*args, **kwargs):
         if 'user_id' not in session:
@@ -1153,92 +1153,44 @@ def get_current_user():
     return None
 
 
-# ─── Access Control Helpers ───────────────────────────────────────────────────
-
-def _get_user_group_types(user_id):
-    """Returns a list of group_type strings for the user's groups."""
-    db = get_db()
-    rows = db.execute("""
-        SELECT ug.group_type FROM user_groups ug
-        JOIN user_group_members ugm ON ug.id = ugm.group_id
-        WHERE ugm.user_id = ?
-    """, (user_id,)).fetchall()
-    db.close()
-    return [r['group_type'] for r in rows]
-
+# ─── Access Control Helpers ─────────────────────────────────────────────────
+# The user-groups feature (group-based show ACLs / "restricted" users) was
+# removed — it was never used in production. Show visibility is role-based
+# only. get_accessible_shows / can_access_show / is_restricted_user keep their
+# signatures because dozens of routes call them; they are the seam for
+# reintroducing per-user show access control if it is ever needed.
 
 def is_content_admin(user_id):
-    """True if the user is a system admin, a staff user, or is in an 'admin_group' type group."""
+    """True if the user is a system admin or a staff user."""
     db = get_db()
     user = db.execute('SELECT role FROM users WHERE id=?', (user_id,)).fetchone()
     db.close()
-    if not user:
-        return False
-    if user['role'] in ('admin', 'staff'):
-        return True
-    return 'admin_group' in _get_user_group_types(user_id)
+    return bool(user) and user['role'] in ('admin', 'staff')
 
 
 def get_accessible_shows(user_id):
-    """Returns None (all shows) or a list of accessible show IDs."""
-    db = get_db()
-    user = db.execute('SELECT role FROM users WHERE id=?', (user_id,)).fetchone()
-    if not user or user['role'] == 'admin':
-        db.close()
-        return None
-
-    group_types = _get_user_group_types(user_id)
-
-    # admin_group and all_access both get unrestricted show access
-    if not group_types or any(t in ('all_access', 'admin_group') for t in group_types):
-        return None
-
-    rows = db.execute("""
-        SELECT DISTINCT sga.show_id
-        FROM show_group_access sga
-        JOIN user_group_members ugm ON sga.group_id = ugm.group_id
-        WHERE ugm.user_id = ?
-    """, (user_id,)).fetchall()
-    db.close()
-    return [r['show_id'] for r in rows]
+    """Returns None (= no restriction) or a list of accessible show IDs."""
+    return None
 
 
 def can_access_show(user_id, show_id):
     accessible = get_accessible_shows(user_id)
-    if accessible is None:
-        return True
-    return show_id in accessible
+    return accessible is None or show_id in accessible
 
 
 def is_restricted_user(user_id):
-    """True if the user is ONLY in restricted groups (read-only, assigned shows only)."""
-    db = get_db()
-    user = db.execute('SELECT role FROM users WHERE id=?', (user_id,)).fetchone()
-    if not user or user['role'] == 'admin':
-        db.close()
-        return False
-    group_types = _get_user_group_types(user_id)
-    if not group_types:
-        return False
-    # Restricted only if ALL groups are 'restricted' (no all_access or admin_group)
-    return all(t == 'restricted' for t in group_types)
+    """Always False since restricted user-groups were removed; the session
+    flag and its template checks stay wired to this."""
+    return False
 
 
 def is_labor_scheduler(user_id):
-    """True if the user can access the Labor Scheduler page.
-
-    System admins and staff always qualify; additionally any user in a group
-    with type 'scheduler_group' or 'admin_group' qualifies.
-    """
+    """True if the user can access the Labor Scheduler page. The per-user
+    is_scheduler flag is checked separately (see _can_schedule_labor)."""
     db = get_db()
     user = db.execute('SELECT role FROM users WHERE id=?', (user_id,)).fetchone()
     db.close()
-    if not user:
-        return False
-    if user['role'] in ('admin', 'staff'):
-        return True
-    group_types = _get_user_group_types(user_id)
-    return any(t in ('scheduler_group', 'admin_group') for t in group_types)
+    return bool(user) and user['role'] in ('admin', 'staff')
 
 
 # ─── Document Viewer ─────────────────────────────────────────────────────────
@@ -1307,40 +1259,22 @@ def viewer_can_see_venue(venue):
 
 
 def viewer_accessible_shows(user_id):
-    """Return list of show_ids the viewer can see (intersection of their
-    group-show-ACL and venue filter). None means no restriction (admins).
-    A viewer with no venue filter still respects the group ACL."""
-    base = get_accessible_shows(user_id)
+    """Return list of show_ids the viewer can see (their venue allow-list
+    applied to non-archived shows). None means no restriction."""
     is_viewer, venues, _ = get_document_viewer_settings(user_id)
     if not is_viewer:
-        return base
+        return get_accessible_shows(user_id)
     db = get_db()
-    if base is None:
-        # Viewer with all_access group — still apply venue filter if any
-        if not venues:
-            rows = db.execute(
-                "SELECT id FROM shows WHERE COALESCE(status, 'active') != 'archived'"
-            ).fetchall()
-        else:
-            ph = ','.join(['?'] * len(venues))
-            rows = db.execute(
-                f"SELECT id FROM shows WHERE COALESCE(status, 'active') != 'archived' "
-                f"AND venue IN ({ph})", venues
-            ).fetchall()
-        db.close()
-        return [r['id'] for r in rows]
-    if not base:
-        db.close()
-        return []
     if not venues:
-        db.close()
-        return list(base)
-    ph_ids = ','.join(['?'] * len(base))
-    ph_v   = ','.join(['?'] * len(venues))
-    rows = db.execute(
-        f"SELECT id FROM shows WHERE id IN ({ph_ids}) AND venue IN ({ph_v})",
-        list(base) + venues
-    ).fetchall()
+        rows = db.execute(
+            "SELECT id FROM shows WHERE COALESCE(status, 'active') != 'archived'"
+        ).fetchall()
+    else:
+        ph = ','.join(['?'] * len(venues))
+        rows = db.execute(
+            f"SELECT id FROM shows WHERE COALESCE(status, 'active') != 'archived' "
+            f"AND venue IN ({ph})", venues
+        ).fetchall()
     db.close()
     return [r['id'] for r in rows]
 
@@ -2958,7 +2892,6 @@ UNDO_TABLE_MAP = {
     'show_asset':             'show_assets',
     'show_external_rental':   'show_external_rentals',
     'site_message':           'site_messages',
-    'group':                  'user_groups',
     'schedule_meta_field':    'schedule_meta_fields',
     'overhead_project':       'overhead_projects',
     'overhead_labor_group':   'overhead_labor_groups',
@@ -5766,6 +5699,61 @@ def viewer_export(show_id, doc_type):
 
 # ─── Show Management ──────────────────────────────────────────────────────────
 
+def _redirect_after_show_action():
+    """Redirect back to the page the archive/restore form came from. Only
+    relative in-app paths are accepted (no '//' or scheme) so a tampered
+    `next` value can't turn this into an open redirect."""
+    nxt = request.form.get('next') or ''
+    if nxt.startswith('/') and not nxt.startswith('//') and '\\' not in nxt:
+        return redirect(nxt)
+    return redirect(url_for('dashboard'))
+
+
+@app.route('/settings/shows')
+@staff_or_admin_required
+def manage_shows():
+    """Settings → Shows: searchable list of every show with manual
+    archive/restore. Archiving only flips shows.status — nothing is deleted."""
+    auto_archive_past_shows()
+    db = get_db()
+    eff_date = """COALESCE(s.show_date,
+        (SELECT MIN(perf_date) FROM show_performances
+         WHERE show_id=s.id AND perf_date IS NOT NULL))"""
+    rows = db.execute(f"""
+        SELECT s.id, s.name, s.venue, s.is_test,
+               COALESCE(s.status, 'active') AS status,
+               u.display_name AS creator,
+               (SELECT COUNT(*) FROM show_performances WHERE show_id=s.id) AS perf_count,
+               {eff_date} AS first_date,
+               (SELECT MAX(perf_date) FROM show_performances
+                 WHERE show_id=s.id AND perf_date IS NOT NULL) AS last_perf
+        FROM shows s LEFT JOIN users u ON s.created_by = u.id
+        ORDER BY {eff_date} DESC NULLS LAST, s.name
+    """).fetchall()
+    db.close()
+
+    def _norm(v):
+        if v is None or isinstance(v, str):
+            return v
+        try:
+            return v.strftime('%Y-%m-%d')
+        except AttributeError:
+            return str(v)
+
+    shows = []
+    for r in rows:
+        d = dict(r)
+        d['first_date'] = _norm(d['first_date'])
+        d['last_perf'] = _norm(d['last_perf'])
+        shows.append(d)
+    archived_count = sum(1 for s in shows if s['status'] == 'archived')
+    return render_template('manage_shows.html',
+                           shows=shows,
+                           active_count=len(shows) - archived_count,
+                           archived_count=archived_count,
+                           user=get_current_user())
+
+
 @app.route('/shows/<int:show_id>/archive', methods=['POST'])
 @staff_or_admin_required
 def archive_show(show_id):
@@ -5777,7 +5765,7 @@ def archive_show(show_id):
     db.commit(); db.close()
     syslog_logger.info(f"SHOW_ARCHIVE show_id={show_id} by={session.get('username')}")
     flash('Show archived.', 'success')
-    return redirect(url_for('dashboard'))
+    return _redirect_after_show_action()
 
 
 @app.route('/shows/<int:show_id>/restore', methods=['POST'])
@@ -5791,7 +5779,7 @@ def restore_show(show_id):
     db.commit(); db.close()
     syslog_logger.info(f"SHOW_RESTORE show_id={show_id} by={session.get('username')}")
     flash('Show restored to active.', 'success')
-    return redirect(url_for('dashboard'))
+    return _redirect_after_show_action()
 
 
 @app.route('/shows/<int:show_id>/test-mode', methods=['POST'])
@@ -5893,7 +5881,7 @@ def bulk_delete_shows():
 #    (labor_requests, show_assets, …) are deliberately absent: a merge moves
 #    those first; a plain delete lets the FK cascade drop them.
 _SHOW_PURGE_TABLES = ['advance_data', 'schedule_rows', 'schedule_meta',
-    'post_show_notes', 'export_log', 'form_history', 'show_group_access',
+    'post_show_notes', 'export_log', 'form_history',
     'field_alert_state', 'notifications', 'pdf_submissions']
 
 # Child tables a merge REASSIGNS from the duplicate to the keeper so their data
@@ -6128,58 +6116,6 @@ def move_attachment(show_id, aid):
     syslog_logger.info(f"ATTACHMENT_MOVE aid={aid} from={show_id} to={target_id} "
                        f"by={session.get('username')}")
     return jsonify({'success': True, 'target_name': target['name']})
-
-
-# ─── Show Access (Groups ↔ Shows) ─────────────────────────────────────────────
-
-@app.route('/shows/<int:show_id>/access/add', methods=['POST'])
-@admin_required
-def add_show_access(show_id):
-    data = request.get_json(force=True) or {}
-    group_id = data.get('group_id')
-    if not group_id:
-        return jsonify({'success': False, 'error': 'group_id required'}), 400
-    db = get_db()
-    db.execute('INSERT OR IGNORE INTO show_group_access (show_id, group_id) VALUES (?,?)',
-               (show_id, group_id))
-    log_audit(db, 'SHOW_ACCESS_ADD', 'show', show_id, show_id=show_id,
-              detail=f'group_id={group_id}')
-    db.commit(); db.close()
-    syslog_logger.info(
-        f"SHOW_ACCESS_ADD show_id={show_id} group_id={group_id} by={session.get('username')}"
-    )
-    return jsonify({'success': True})
-
-
-@app.route('/shows/<int:show_id>/access/remove', methods=['POST'])
-@admin_required
-def remove_show_access(show_id):
-    data = request.get_json(force=True) or {}
-    group_id = data.get('group_id')
-    if not group_id:
-        return jsonify({'success': False, 'error': 'group_id required'}), 400
-    db = get_db()
-    db.execute('DELETE FROM show_group_access WHERE show_id=? AND group_id=?',
-               (show_id, group_id))
-    log_audit(db, 'SHOW_ACCESS_REMOVE', 'show', show_id, show_id=show_id,
-              detail=f'group_id={group_id}')
-    db.commit(); db.close()
-    syslog_logger.info(f"SHOW_ACCESS_REMOVE show_id={show_id} group_id={group_id} by={session.get('username')}")
-    return jsonify({'success': True})
-
-
-@app.route('/api/shows/<int:show_id>/access')
-@admin_required
-def get_show_access(show_id):
-    db = get_db()
-    rows = db.execute("""
-        SELECT ug.id, ug.name, ug.group_type
-        FROM show_group_access sga
-        JOIN user_groups ug ON sga.group_id = ug.id
-        WHERE sga.show_id = ?
-    """, (show_id,)).fetchall()
-    db.close()
-    return jsonify([dict(r) for r in rows])
 
 
 # ─── Audit Log ────────────────────────────────────────────────────────────────
@@ -6498,27 +6434,6 @@ def settings():
         ud['viewer_venues_list']    = _decode_json_list(ud.get('viewer_venues'))
         ud['viewer_doc_types_list'] = _decode_json_list(ud.get('viewer_doc_types'))
         users.append(ud)
-    groups   = db.execute('SELECT * FROM user_groups ORDER BY name').fetchall()
-
-    # Attach members and shows to each group
-    groups_data = []
-    for g in groups:
-        members = db.execute("""
-            SELECT u.id, u.display_name, u.username FROM user_group_members ugm
-            JOIN users u ON ugm.user_id = u.id
-            WHERE ugm.group_id = ?
-        """, (g['id'],)).fetchall()
-        shows = db.execute("""
-            SELECT s.id, s.name, s.show_date FROM show_group_access sga
-            JOIN shows s ON sga.show_id = s.id
-            WHERE sga.group_id = ?
-            ORDER BY s.show_date DESC
-        """, (g['id'],)).fetchall()
-        gd = dict(g)
-        gd['members'] = [dict(m) for m in members]
-        gd['shows'] = [dict(s) for s in shows]
-        groups_data.append(gd)
-
     all_settings = {r['key']: r['value'] for r in
                     db.execute("SELECT key, value FROM app_settings").fetchall()}
 
@@ -6632,7 +6547,6 @@ def settings():
     return render_template('settings.html',
                            contacts=contacts,
                            users=users,
-                           groups=groups_data,
                            form_sections=form_sections,
                            asset_categories=asset_categories,
                            arts_groups=arts_groups,
@@ -6966,172 +6880,16 @@ def change_own_password():
     return jsonify({'success': True})
 
 
-# ─── User Groups Management ───────────────────────────────────────────────────
-
-@app.route('/settings/groups/add', methods=['POST'])
-@admin_required
-def add_group():
-    data = request.get_json(force=True) or {}
-    name = data.get('name','').strip()
-    group_type = data.get('group_type','all_access')
-    desc = data.get('description','').strip()
-    if not name:
-        return jsonify({'success': False, 'error': 'Name required.'}), 400
-    db = get_db()
-    try:
-        cur = db.execute(
-            'INSERT INTO user_groups (name, group_type, description) VALUES (?,?,?)',
-            (name, group_type, desc)
-        )
-        gid = cur.lastrowid
-        log_audit(db, 'GROUP_CREATE', 'group', gid, detail=name)
-        db.commit()
-        syslog_logger.info(f"GROUP_CREATE name={name} by={session.get('username')}")
-        return jsonify({'success': True, 'id': gid})
-    except sqlite3.IntegrityError:
-        return jsonify({'success': False, 'error': 'Group name already exists.'}), 400
-    finally:
-        db.close()
-
-
-@app.route('/settings/groups/<int:gid>/edit', methods=['POST'])
-@admin_required
-def edit_group(gid):
-    data = request.get_json(force=True) or {}
-    db = get_db()
-    db.execute("""
-        UPDATE user_groups SET name=?, group_type=?, description=? WHERE id=?
-    """, (data.get('name',''), data.get('group_type','all_access'),
-          data.get('description',''), gid))
-    log_audit(db, 'GROUP_EDIT', 'group', gid, detail=data.get('name',''))
-    db.commit(); db.close()
-    syslog_logger.info(f"GROUP_EDIT id={gid} name={data.get('name','')!r} by={session.get('username')}")
-    return jsonify({'success': True})
-
-
-@app.route('/settings/groups/<int:gid>/delete', methods=['POST'])
-@admin_required
-def delete_group(gid):
-    db = get_db()
-    row = db.execute('SELECT name FROM user_groups WHERE id=?', (gid,)).fetchone()
-    log_audit(db, 'GROUP_DELETE', 'group', gid, detail=row['name'] if row else str(gid))
-    db.execute('DELETE FROM user_groups WHERE id=?', (gid,))
-    db.commit(); db.close()
-    syslog_logger.info(f"GROUP_DELETE id={gid} by={session.get('username')}")
-    return jsonify({'success': True})
-
-
-@app.route('/settings/groups/<int:gid>/members/add', methods=['POST'])
-@admin_required
-def add_group_member(gid):
-    data = request.get_json(force=True) or {}
-    uid = data.get('user_id')
-    if not uid:
-        return jsonify({'success': False, 'error': 'user_id required'}), 400
-    db = get_db()
-    db.execute('INSERT OR IGNORE INTO user_group_members (user_id, group_id) VALUES (?,?)',
-               (uid, gid))
-    log_audit(db, 'GROUP_MEMBER_ADD', 'group', gid, detail=f'user_id={uid}')
-
-    # Refresh the affected user's is_restricted in their session (best effort)
-    # Session is server-side cookie; we can't update other sessions directly.
-    # User will see updated access on next login.
-
-    db.commit()
-    db.close()
-    syslog_logger.info(
-        f"GROUP_ASSIGN user_id={uid} group_id={gid} by={session.get('username')}"
-    )
-    return jsonify({'success': True})
-
-
-@app.route('/settings/groups/<int:gid>/members/remove', methods=['POST'])
-@admin_required
-def remove_group_member(gid):
-    data = request.get_json(force=True) or {}
-    uid = data.get('user_id')
-    if not uid:
-        return jsonify({'success': False, 'error': 'user_id required'}), 400
-    db = get_db()
-    db.execute('DELETE FROM user_group_members WHERE user_id=? AND group_id=?', (uid, gid))
-    log_audit(db, 'GROUP_MEMBER_REMOVE', 'group', gid, detail=f'user_id={uid}')
-    db.commit(); db.close()
-    syslog_logger.info(
-        f"GROUP_REMOVE user_id={uid} group_id={gid} by={session.get('username')}"
-    )
-    return jsonify({'success': True})
-
-
-@app.route('/api/groups')
-@login_required
-def api_groups():
-    db = get_db()
-    groups = db.execute('SELECT * FROM user_groups ORDER BY name').fetchall()
-    db.close()
-    return jsonify([dict(g) for g in groups])
-
-
 # ─── Form Field Editor ────────────────────────────────────────────────────────
 
 @app.route('/settings/form-fields')
 @content_admin_required
 def form_fields_settings():
-    form_sections = get_form_fields_for_template()
-    db = get_db()
-    users = db.execute(
-        'SELECT id, username, display_name, role, created_at FROM users ORDER BY display_name'
-    ).fetchall()
-    contacts = db.execute('SELECT * FROM contacts ORDER BY department, name').fetchall()
-    groups = db.execute('SELECT * FROM user_groups ORDER BY name').fetchall()
-
-    groups_data = []
-    for g in groups:
-        members = db.execute("""
-            SELECT u.id, u.display_name, u.username FROM user_group_members ugm
-            JOIN users u ON ugm.user_id = u.id
-            WHERE ugm.group_id = ?
-        """, (g['id'],)).fetchall()
-        shows = db.execute("""
-            SELECT s.id, s.name, s.show_date FROM show_group_access sga
-            JOIN shows s ON sga.show_id = s.id
-            WHERE sga.group_id = ?
-            ORDER BY s.show_date DESC
-        """, (g['id'],)).fetchall()
-        gd = dict(g)
-        gd['members'] = [dict(m) for m in members]
-        gd['shows'] = [dict(s) for s in shows]
-        groups_data.append(gd)
-
-    all_settings = {r['key']: r['value'] for r in
-                    db.execute("SELECT key, value FROM app_settings").fetchall()}
-    db.close()
-
-    _is_ca = session.get('is_content_admin', False) or session.get('user_role') == 'admin'
-
-    db4 = get_db()
-    sched_templates2 = [dict(t) for t in db4.execute(
-        'SELECT id, name FROM schedule_templates ORDER BY sort_order, name'
-    ).fetchall()] if _is_ca else []
-    db4.close()
-
-    return render_template('settings.html',
-                           contacts=contacts,
-                           users=users,
-                           groups=groups_data,
-                           form_sections=form_sections,
-                           sched_meta_fields=get_schedule_meta_fields(),
-                           syslog_settings=all_settings,
-                           departments=DEPARTMENTS,
-                           active_tab='fields',
-                           is_content_admin=_is_ca,
-                           sched_templates=sched_templates2,
-                           wifi_network=all_settings.get('wifi_network', ''),
-                           wifi_password=all_settings.get('wifi_password', ''),
-                           upload_max_mb=all_settings.get('upload_max_mb', '20'),
-                           logo_data=all_settings.get('logo_data', ''),
-                           db_settings=all_settings,
-                           ai_settings=all_settings,
-                           user=get_current_user())
+    """Legacy URL. This used to re-render settings.html with a hand-picked
+    subset of its variables and 500'd whenever the settings page grew a new
+    required variable — the Form Fields tab lives on /settings, so redirect
+    there and let the hash-based tab switcher open it."""
+    return redirect(url_for('settings') + '#fields')
 
 
 @app.route('/settings/form-fields/add', methods=['POST'])
@@ -14416,22 +14174,16 @@ def _get_asset_notification_recipients(db, exclude_user_id=None):
     """Return [(display_name, email)] for users who can manage assets.
 
     Mirrors the access rules of asset_manager_required: admins, staff,
-    members of an 'admin_group' user group, and users with the
-    is_asset_manager flag. Skips users without an email and the optional
+    and users with the is_asset_manager flag. Skips users without an email
+    and the optional
     exclude_user_id (typically the actor that triggered the event, so they
     don't receive an email about their own action).
     """
     rows = db.execute("""
         SELECT DISTINCT u.id, u.username, u.display_name, u.email
         FROM users u
-        LEFT JOIN user_group_members ugm ON ugm.user_id = u.id
-        LEFT JOIN user_groups ug ON ug.id = ugm.group_id
         WHERE u.email IS NOT NULL AND u.email != ''
-          AND (
-            u.role IN ('admin', 'staff')
-            OR u.is_asset_manager = 1
-            OR ug.group_type = 'admin_group'
-          )
+          AND (u.role IN ('admin', 'staff') OR u.is_asset_manager = 1)
     """).fetchall()
     out = []
     seen = set()
