@@ -37,6 +37,74 @@
   </div>
 </div>
 
+{# ── How this page works (documentation) ──────────────────────────────────── #}
+<div class="form-section">
+  <div class="form-section-header" style="cursor:pointer" onclick="togglePanel('prism-help')">
+    <span class="section-icon">?</span> HOW THIS PAGE WORKS
+    <span class="ml-auto text-dim" style="font-size:11px">click to expand</span>
+  </div>
+  <div class="form-section-body" id="prism-help" style="display:none;font-size:12.5px;line-height:1.55">
+
+    <p style="margin:0 0 10px"><strong>Syncing.</strong>
+      <em>Sync Now</em> (or the optional daily auto-sync) asks Prism for every event from today
+      out to the configured lookahead and stages it below. Events are matched by their Prism
+      event ID, so re-syncing <em>updates</em> existing rows — it never creates duplicates.
+      Events that change in Prism are updated in place; events past their last date simply age
+      out of view ("Hide past").</p>
+
+    <p style="margin:0 0 6px"><strong>Every staged event is in exactly one state:</strong></p>
+    <table class="data-table" style="margin-bottom:10px">
+      <tr>
+        <td style="white-space:nowrap"><span style="font-size:10px;background:rgba(34,197,94,.12);color:var(--green);padding:2px 7px;border-radius:3px;letter-spacing:.06em">NEW</span></td>
+        <td class="text-dim">Found in Prism, not acted on yet. Your to-review queue.</td>
+      </tr>
+      <tr>
+        <td style="white-space:nowrap"><span style="font-size:10px;background:rgba(255,176,46,.12);color:var(--accent);padding:2px 7px;border-radius:3px;letter-spacing:.06em">IMPORTED</span></td>
+        <td class="text-dim">You created a 321T show from it (linked in the State column). Re-syncs keep
+            watching it: if Prism changes it afterwards, it gets the CHANGED IN PRISM badge so you can
+            update the show by hand.</td>
+      </tr>
+      <tr>
+        <td style="white-space:nowrap"><span style="font-size:10px;background:rgba(148,163,184,.12);color:var(--text-muted);padding:2px 7px;border-radius:3px;letter-spacing:.06em">IGNORED</span></td>
+        <td class="text-dim">Dismissed. Kept in staging (never deleted) so the same event doesn't bounce
+            back as NEW on the next sync.</td>
+      </tr>
+    </table>
+
+    <p style="margin:0 0 10px"><strong>The buttons.</strong>
+      <em>Import selected → 321T</em> creates a real show per selected event — name, venue
+      (mapped to the Settings venue list when possible), and one performance per Prism date with
+      its start time. Already-imported events and events matching an existing show's name + date
+      are skipped, never doubled. ·
+      <em>Ignore</em> moves selected events to IGNORED. ·
+      <em>Restore to New</em> is the undo for Ignore: it moves selected IGNORED events back to
+      NEW — that's all it does (it never touches shows).</p>
+
+    <p style="margin:0 0 10px"><strong>Venues &amp; Stages panel.</strong>
+      Documents everything Prism reports (stages with capacities, pseudo-venues like
+      "Holidays") plus any venue names seen only on events. Unchecking <em>Visible</em> hides
+      that venue's events from the list, moves its current NEW events to IGNORED, and makes
+      future syncs stage its events pre-ignored. The panel row itself stays (it's the switch
+      you'd use to undo), and its "Staged events" count is everything in staging for that venue
+      regardless of state — so the number doesn't drop when you hide it. Tick
+      <em>Show hidden venues</em> in the events toolbar to see hidden events again; select +
+      <em>Restore to New</em> brings them fully back.</p>
+
+    <p style="margin:0 0 10px"><strong>Badges.</strong>
+      <span style="font-size:9px;background:rgba(245,158,11,.15);color:#f59e0b;padding:1px 5px;border-radius:3px">CHANGED IN PRISM</span>
+      = Prism edited this event after you imported it — review the linked show. ·
+      <span style="font-size:9px;background:rgba(239,68,68,.15);color:var(--red);padding:1px 5px;border-radius:3px">NOT IN LAST SYNC</span>
+      = the most recent sync didn't return this event (possibly cancelled or moved in Prism).</p>
+
+    <p style="margin:0"><strong>Troubleshooting.</strong>
+      <em>Test Connection</em> checks the whole pipeline and does a live venues fetch.
+      <em>Raw API Fetch</em> shows the exact request and raw response for the next 7 days.
+      Each run in Sync History has an expandable debug log (request args, timing, SDK output,
+      per-event decisions), and the <em>{ }</em> button on any row shows its raw Prism payload.
+      Server-side setup lives in <code>prism_bridge/README.md</code>.</p>
+  </div>
+</div>
+
 {# ── Status cards ─────────────────────────────────────────────────────────── #}
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:16px">
 
@@ -213,9 +281,12 @@
           <td class="text-dim" style="font-size:12px">{{ v.parent or '—' }}</td>
           <td class="text-dim" style="text-align:right">{{ v.capacity if v.capacity is not none else '—' }}</td>
           <td class="text-dim" style="text-align:right">{{ v.count }}</td>
+          {# NOTE: single-quoted attribute is required — |tojson emits double
+             quotes, which would terminate a double-quoted attribute early and
+             silently break the click handler. #}
           <td style="text-align:center">
             <input type="checkbox" {% if not v.hidden %}checked{% endif %}
-                   onchange="toggleVenue({{ v.label|tojson }}, this.checked)">
+                   onchange='toggleVenue({{ v.label|tojson }}, this.checked)'>
           </td>
         </tr>
         {% endfor %}
@@ -254,9 +325,12 @@
       </label>
       <span style="flex:1"></span>
       <span id="sel-count" class="text-dim" style="font-size:12px"></span>
-      <button class="btn btn-sm btn-primary" onclick="importSelected(this)">Import selected → 321T</button>
-      <button class="btn btn-sm btn-ghost" onclick="setStateSelected('ignored', this)">Ignore</button>
-      <button class="btn btn-sm btn-ghost" onclick="setStateSelected('new', this)">Restore</button>
+      <button class="btn btn-sm btn-primary" title="Create a normal 321T show (with performances) from each selected event"
+              onclick="importSelected(this)">Import selected → 321T</button>
+      <button class="btn btn-sm btn-ghost" title="Dismiss selected events — kept in staging (state IGNORED) so they don't show as NEW again"
+              onclick="setStateSelected('ignored', this)">Ignore</button>
+      <button class="btn btn-sm btn-ghost" title="Move selected IGNORED events back to NEW (undo an Ignore — affects nothing else)"
+              onclick="setStateSelected('new', this)">Restore to New</button>
     </div>
 
     <div id="action-result" style="display:none;margin:10px 14px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;font-size:12px;white-space:pre-wrap"></div>
