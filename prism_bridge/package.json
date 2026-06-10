@@ -2,5 +2,5 @@
   "name": "prism-bridge",
   "version": "1.0.0",
   "private": true,
-  "description": "Node.js bridge scripts that let 321Theater call the official Prism FM SDK. The @prismfm/prism-sdk dependency is installed from the vendor tarball (npm adds it to this file) — see README.md."
+  "description": "Node.js bridge scripts that let 321Theater call the official Prism FM SDK. The @prismfm/prism-sdk dependency is installed from the vendor tarball with --no-save (never committed, never recorded here) — see README.md."
 }

@@ -29,11 +29,16 @@ prints JSON to stdout. This is the same architecture validated in the
 
    ```bash
    cd /path/to/321Theater/prism_bridge
-   npm install ./prismfm-prism-sdk-1.1.2.tar
+   npm install --no-save ./prismfm-prism-sdk-1.1.2.tar
    ```
 
-   npm records the dependency in `package.json` and unpacks it into
-   `node_modules/` (gitignored).
+   `--no-save` matters: it unpacks the SDK into `node_modules/` (gitignored)
+   WITHOUT recording the dependency in `package.json`, so the install never
+   modifies a tracked file and the app's git-based update flow stays clean.
+   The tarball itself is also gitignored — neither it nor the SDK is ever
+   committed to this repo. (Consequence: re-running a bare `npm install`
+   won't restore the SDK; re-run the command above if `node_modules/` is
+   ever wiped.)
 
    *Alternative:* if the SDK is already installed elsewhere (e.g. a
    PrismSDKTest checkout), skip the install and point the app at it by
