@@ -15,6 +15,8 @@
     </p>
   </div>
   <div style="display:flex;gap:8px">
+    <button class="btn btn-ghost" title="Live 7-day events fetch showing the exact request, SDK chatter, and raw response — touches nothing"
+            onclick="rawApiFetch(this)">Raw API Fetch</button>
     <button class="btn btn-ghost" onclick="testConnection(this)">Test Connection</button>
     <button class="btn btn-primary" id="sync-now-btn" onclick="syncNow(this)"
             {% if settings.prism_enabled != '1' or not has_token %}disabled
@@ -417,10 +419,37 @@ async function testConnection(btn) {
   const {data} = await postJSON('{{ url_for('prism_test') }}');
   const lines = (data.env || []).map(c => (c.ok ? '✓ ' : '✗ ') + c.name + ' — ' + c.detail);
   lines.push((data.api_ok ? '✓ API: ' : '✗ API: ') + (data.api_detail || ''));
+  if (data.log && data.log.length) lines.push('', 'Bridge exchange:', ...data.log);
   showResult(lines.join('\n'), !data.api_ok);
   const tr = document.getElementById('test-result');
   tr.textContent = data.api_ok ? '✓ ' + data.api_detail : '✗ ' + (data.api_detail || 'test failed');
   tr.style.color = data.api_ok ? 'var(--green)' : 'var(--red)';
+  btn.disabled = false;
+  btn.textContent = old;
+}
+
+async function rawApiFetch(btn) {
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = 'Fetching…';
+  const {data} = await postJSON('{{ url_for('prism_debug_fetch') }}', {days: 7});
+  const parts = [];
+  if (data.request) {
+    parts.push('REQUEST → ' + data.request.script);
+    parts.push(JSON.stringify(data.request.args, null, 2));
+  }
+  if (data.log && data.log.length) parts.push('', 'BRIDGE EXCHANGE', data.log.join('\n'));
+  if (data.ok) {
+    parts.push('', 'RESPONSE — ' + data.event_count + ' event(s)'
+               + (data.response_truncated ? ' (display truncated at 80 KB)' : ''));
+    parts.push(data.response);
+  } else {
+    parts.push('', 'ERROR', data.error || 'unknown');
+    if (data.detail) parts.push(JSON.stringify(data.detail, null, 2));
+  }
+  document.getElementById('raw-title').textContent = 'Raw API fetch — next 7 days (debug)';
+  document.getElementById('raw-body').textContent = parts.join('\n');
+  document.getElementById('raw-modal').style.display = '';
   btn.disabled = false;
   btn.textContent = old;
 }
