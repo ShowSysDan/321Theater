@@ -1204,14 +1204,6 @@ select option { background: var(--bg-surface); color: var(--text); }
   font-family: var(--font-mono);
 }
 
-/* ── Group Management ────────────────────────────────────────────── */
-.group-type-badge {
-  display: inline-block; padding: 2px 7px; border-radius: 3px;
-  font-family: var(--font-cond); font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
-}
-.group-all-access { background: rgba(34,197,94,.1); color: var(--green); }
-.group-restricted  { background: rgba(239,68,68,.1);  color: var(--red); }
-
 /* ── Syslog / Backup Tabs ────────────────────────────────────────── */
 .settings-info-row {
   display: flex; align-items: center; justify-content: space-between;

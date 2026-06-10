@@ -75,8 +75,6 @@ _CONFLICT_COLS = {
     'advance_data':      ['show_id', 'field_key'],
     'schedule_meta':     ['show_id', 'field_key'],
     'post_show_notes':   ['show_id', 'field_key'],
-    'show_group_access': ['show_id', 'group_id'],
-    'user_group_members':['user_id', 'group_id'],
     'advance_reads':     ['show_id', 'user_id'],
     'active_sessions':   ['user_id', 'show_id'],
     'app_sessions':      ['sid'],

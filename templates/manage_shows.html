@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Manage Shows — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Manage Shows</h1>
+    <p class="page-sub">{{ active_count }} active · {{ archived_count }} archived</p>
+  </div>
+  <a href="{{ url_for('settings') }}" class="btn btn-ghost">← Back to Settings</a>
+</div>
+
+<div class="form-section">
+  <div class="form-section-header">
+    <span class="section-icon">◈</span> ALL SHOWS
+    <span class="section-count ml-auto text-dim" id="shows-count"></span>
+  </div>
+  <div class="form-section-body" style="border-bottom:1px solid var(--border)">
+    <p class="text-dim" style="font-size:12px;margin:0">
+      Archiving hides a show from the active dashboard — nothing is ever deleted, and a show
+      can be restored at any time. Shows also archive themselves automatically once their last
+      performance date has passed.
+    </p>
+  </div>
+  <div class="form-section-body no-pad">
+    <div class="table-toolbar">
+      <input type="text" id="show-search" class="field-input field-input-sm"
+             placeholder="Search by name, venue, or year…" oninput="filterShows()"
+             autocomplete="off" style="max-width:280px">
+      <select id="status-filter" class="field-input field-input-sm" onchange="filterShows()" style="max-width:160px">
+        <option value="">All statuses</option>
+        <option value="active">Active</option>
+        <option value="archived">Archived</option>
+      </select>
+    </div>
+    <table class="data-table" id="shows-table">
+      <thead>
+        <tr>
+          <th>Show</th>
+          <th>Venue</th>
+          <th>Date(s)</th>
+          <th style="text-align:center" title="Number of performances">Perfs</th>
+          <th>Status</th>
+          <th>Created by</th>
+          <th style="width:100px;text-align:right">Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in shows %}
+        <tr data-search="{{ (s.name ~ ' ' ~ (s.venue or '') ~ ' ' ~ (s.first_date or ''))|lower }}"
+            data-status="{{ s.status }}">
+          <td>
+            <a href="{{ url_for('show_page', show_id=s.id) }}" style="font-weight:500">{{ s.name }}</a>
+            {% if s.is_test %}
+            <span style="font-size:9px;background:rgba(125,75,175,.25);color:#c9a6ec;padding:1px 5px;border-radius:3px;letter-spacing:.05em;margin-left:4px;vertical-align:middle"
+                  title="Test/demo show — excluded from reports">TEST</span>
+            {% endif %}
+          </td>
+          <td class="text-dim">{{ s.venue or '—' }}</td>
+          <td class="text-dim" style="white-space:nowrap">
+            {{ s.first_date or '—' }}{% if s.last_perf and s.last_perf != s.first_date %} → {{ s.last_perf }}{% endif %}
+          </td>
+          <td class="text-dim" style="text-align:center">{{ s.perf_count or '' }}</td>
+          <td>
+            {% if s.status == 'archived' %}
+            <span style="font-size:10px;background:rgba(239,68,68,.12);color:var(--red);padding:2px 7px;border-radius:3px;letter-spacing:.06em">ARCHIVED</span>
+            {% else %}
+            <span style="font-size:10px;background:rgba(34,197,94,.12);color:var(--green);padding:2px 7px;border-radius:3px;letter-spacing:.06em">ACTIVE</span>
+            {% endif %}
+          </td>
+          <td class="text-dim">{{ s.creator or '—' }}</td>
+          <td style="text-align:right">
+            {% if s.status == 'archived' %}
+            <form method="post" action="{{ url_for('restore_show', show_id=s.id) }}" style="display:inline">
+              <input type="hidden" name="next" value="{{ url_for('manage_shows') }}">
+              <button class="btn btn-xs btn-ghost">Restore</button>
+            </form>
+            {% else %}
+            <form method="post" action="{{ url_for('archive_show', show_id=s.id) }}" style="display:inline"
+                  data-name="{{ s.name }}" onsubmit="return confirmArchive(this)">
+              <input type="hidden" name="next" value="{{ url_for('manage_shows') }}">
+              <button class="btn btn-xs btn-danger-ghost">Archive</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if not shows %}
+    <p class="text-dim" style="padding:16px">No shows yet.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function confirmArchive(form) {
+  return confirm('Archive “' + form.dataset.name + '”?\n\n' +
+                 'It will be hidden from the dashboard but nothing is deleted — ' +
+                 'you can restore it here at any time.');
+}
+
+function filterShows() {
+  const q  = document.getElementById('show-search').value.trim().toLowerCase();
+  const st = document.getElementById('status-filter').value;
+  let visible = 0;
+  document.querySelectorAll('#shows-table tbody tr').forEach(tr => {
+    const match = (!q || tr.dataset.search.includes(q)) && (!st || tr.dataset.status === st);
+    tr.style.display = match ? '' : 'none';
+    if (match) visible++;
+  });
+  document.getElementById('shows-count').textContent = visible + ' shown';
+}
+filterShows();
+</script>
+{% endblock %}

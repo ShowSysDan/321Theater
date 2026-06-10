@@ -78,7 +78,7 @@ Version history:
    - [Users & Roles](#users--roles)
    - [View As (Role Preview)](#view-as-role-preview)
    - [Registration Approval](#registration-approval)
-   - [Groups & Show Access](#groups--show-access)
+   - [Show Archiving](#show-archiving)
    - [Form Field Customisation](#form-field-customisation)
    - [PDF Form Templates](#pdf-form-templates)
    - [Notification Bell](#notification-bell)
@@ -226,7 +226,7 @@ The **SCHED** checkbox and **SCHEDULED TECH** column inside each day are read-on
 
 ### Labor Scheduler
 
-Accessible from the sidebar (SYSTEM section) to admins, staff, and anyone in a group of type `scheduler_group`. Pick a **From** and **To** date and the page pulls every labor request whose `work_date` falls in that range, grouped by show.
+Accessible from the sidebar (SYSTEM section) to admins, staff, and users with the **Scheduler** flag (Settings → Users). Pick a **From** and **To** date and the page pulls every labor request whose `work_date` falls in that range, grouped by show.
 
 For each row the scheduler can:
 - Tick the **SCHED ✓** checkbox once the position is confirmed (TCO'd).
@@ -483,7 +483,7 @@ Admins can preview the site from another role's perspective without logging out.
 | Preview Mode | Simulates |
 |---|---|
 | **C.Admin** | Content Admin (can edit form fields, manage messages) |
-| **User** | Standard user (show access controlled by groups) |
+| **User** | Standard user |
 | **R/O** | Read-only user (view-only, no edits) |
 
 An amber banner appears at the top of every page while in preview mode. Click **Exit Preview** (or **RETURN TO ADMIN** in the sidebar) to restore full admin access. The real session is preserved — no actual role change occurs in the database.
@@ -499,17 +499,19 @@ New users can self-register at `/register`. The flow:
 
 **Forgot password:** Available at `/forgot-password`. Sends a 2-hour reset link via email. Also requires CAPTCHA.
 
-### Groups & Show Access
+### Show Archiving
 
-| Group Type | Behaviour |
-|------------|-----------|
-| `all_access` | Can see and edit all shows |
-| `restricted` | Can only view/export assigned shows |
-| `scheduler_group` | Can access the Labor Scheduler page to assign technicians and mark positions as scheduled |
+Archiving hides a show from the active dashboard without deleting anything; an
+archived show can be restored at any time.
 
-1. Create group: Settings → Groups → **+ New Group**
-2. Add members
-3. For restricted groups: assign shows via **Assign show...**
+- **Automatic** — a show is archived once its last performance date has passed
+  (or its legacy show date, if it has no performances).
+- **Manual** — Settings → **Shows** (admin/staff) lists every show with search
+  and status filters, plus per-show **Archive** / **Restore** buttons. The
+  dashboard also offers **Restore** on recently archived shows.
+
+There is no delete from this page — hard deletion exists only behind the
+admin-only bulk API and requires explicit confirmation.
 
 ### Form Field Customisation
 
@@ -702,7 +704,7 @@ PostgreSQL mode uses **two schemas** within one database:
 
 | Schema | Default Name | Contents | Purpose |
 |--------|-------------|----------|---------|
-| **Shared** | `shared` | `users`, `user_groups`, `user_group_members`, `app_settings`, `password_reset_tokens`, `user_pending_registration`, `site_messages`, `site_message_dismissals`, `app_sessions` | User/auth + session data — designed to be shared across multiple apps |
+| **Shared** | `shared` | `users`, `app_settings`, `password_reset_tokens`, `user_pending_registration`, `site_messages`, `site_message_dismissals`, `app_sessions` | User/auth + session data — designed to be shared across multiple apps |
 | **App** | `theater321` | Shows, schedules, contacts, forms, assets, labor, exports, comments, active_sessions, audit_log, and all other theater-specific tables | App-specific data |
 
 This separation means another app can connect to the same PostgreSQL database and share the user/auth system without touching theater data. With the shared `app_sessions` table, logging in to either app authenticates the user in both — see **[SHARED_SESSIONS.md](SHARED_SESSIONS.md)** for the porting guide for the companion app.

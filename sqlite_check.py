@@ -9,7 +9,7 @@ print(f"SQLite: {DATABASE}\n")
 tables = [
     'users', 'shows', 'contacts', 'asset_categories', 'asset_types',
     'asset_items', 'advance_data', 'form_fields', 'form_sections',
-    'schedule_rows', 'user_groups', 'user_group_members', 'app_settings',
+    'schedule_rows', 'app_settings',
     'job_positions', 'position_categories', 'labor_requests',
     'crew_members', 'crew_qualifications', 'show_comments',
     'export_log', 'audit_log', 'schedule_templates',

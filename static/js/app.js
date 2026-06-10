@@ -2240,60 +2240,6 @@ async function deleteSchedTemplate(tid) {
   else alert(d.error || 'Delete failed.');
 }
 
-/* ── Group Management ────────────────────────────────────────── */
-async function addGroupMember(gid, userId) {
-  if (!userId) return;
-  const resp = await fetch(`/settings/groups/${gid}/members/add`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({user_id: Number(userId)})
-  });
-  const d = await resp.json();
-  if (d.success) location.reload();
-  else alert(d.error || 'Failed to add member.');
-}
-
-async function removeGroupMember(gid, userId) {
-  const resp = await fetch(`/settings/groups/${gid}/members/remove`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({user_id: userId})
-  });
-  const d = await resp.json();
-  if (d.success) location.reload();
-  else alert(d.error || 'Failed to remove member.');
-}
-
-async function addGroupShowAccess(showId, groupId) {
-  const resp = await fetch(`/shows/${showId}/access/add`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({group_id: Number(groupId)})
-  });
-  const d = await resp.json();
-  if (d.success) location.reload();
-  else alert(d.error || 'Failed.');
-}
-
-async function removeGroupShowAccess(showId, groupId) {
-  const resp = await fetch(`/shows/${showId}/access/remove`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({group_id: groupId})
-  });
-  const d = await resp.json();
-  if (d.success) location.reload();
-  else alert(d.error || 'Failed.');
-}
-
-async function deleteGroup(gid) {
-  if (!confirm('Delete this group? Members will lose their restricted access assignments.')) return;
-  const resp = await fetch(`/settings/groups/${gid}/delete`, {method:'POST'});
-  const d = await resp.json();
-  if (d.success) location.reload();
-  else alert(d.error || 'Delete failed.');
-}
-
 /* ── Server Settings (port change + live restart) ────────────── */
 async function saveServerSettings(form) {
   const newPort = parseInt(form.querySelector('[name="app_port"]').value, 10);
