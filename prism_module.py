@@ -92,9 +92,11 @@ _DEBUG_LOG_MAX_CHARS = 60_000
 # ─── Settings helpers ─────────────────────────────────────────────────────────
 
 def get_prism_settings(db):
-    """Return all prism_* settings as a dict, with defaults filled in."""
+    """Return all prism_* settings as a dict, with defaults filled in.
+    The LIKE pattern is bound as a parameter — a literal % in SQL would be
+    eaten by psycopg2's placeholder interpolation on PostgreSQL."""
     rows = db.execute(
-        "SELECT key, value FROM app_settings WHERE key LIKE 'prism_%'"
+        'SELECT key, value FROM app_settings WHERE key LIKE ?', ('prism_%',)
     ).fetchall()
     found = {r['key']: r['value'] for r in rows}
     return {k: (found.get(k) if found.get(k) not in (None, '') else v)
@@ -316,61 +318,76 @@ def run_prism_sync(trigger='manual', triggered_by=''):
             _log(f'Prism sync aborted — {summary["error"]}', error=True)
             return summary
         try:
-            # Same stale-bootstrap guard as the scheduled-email job: if we're
-            # configured for PostgreSQL but silently fell back to SQLite, every
-            # setting we read here (token!) is stale — refuse to act.
-            configured = _d['db_adapter'].read_db_settings(_d['DATABASE']).get('db_type', 'sqlite')
-            if configured == 'postgres' and getattr(db, 'db_type', None) != 'postgres':
-                summary['error'] = ('Refusing to sync: configured for postgres but the '
-                                    'active connection is SQLite (stale bootstrap).')
-                _log(f"Prism sync REFUSED — {summary['error']}", error=True)
-                return summary
-
-            settings = get_prism_settings(db)
-            if settings['prism_enabled'] != '1':
-                summary['error'] = 'Prism module is disabled in settings.'
-                return summary
-            if not settings['prism_token']:
-                summary['error'] = 'No Prism API token configured.'
-                return summary
-
-            # Cross-worker guard: bail if another instance has a live run.
-            # First expire zombie rows (worker died mid-sync) so they can't
-            # block syncs forever.
+            # ── Preflight: guards + claim a 'running' log row. Wrapped so any
+            # failure here (DB hiccup etc.) comes back as a summary error and
+            # never escapes as an exception — this function's contract.
             try:
-                node_timeout = int(settings.get('prism_node_timeout') or 120)
-            except (TypeError, ValueError):
-                node_timeout = 120
-            stale_cutoff = (datetime.now() - timedelta(seconds=node_timeout * 3 + 60))
-            db.execute("UPDATE prism_sync_log SET status='error', "
-                       "error_text='Marked stale — sync never finished (worker died?)', "
-                       "finished_at=CURRENT_TIMESTAMP "
-                       "WHERE status='running' AND started_at < ?",
-                       (stale_cutoff.strftime('%Y-%m-%d %H:%M:%S'),))
-            running = db.execute(
-                "SELECT COUNT(*) AS n FROM prism_sync_log WHERE status='running'"
-            ).fetchone()
-            if running and running['n']:
+                # Same stale-bootstrap guard as the scheduled-email job: if
+                # we're configured for PostgreSQL but silently fell back to
+                # SQLite, every setting we read here (token!) is stale —
+                # refuse to act.
+                configured = _d['db_adapter'].read_db_settings(_d['DATABASE']).get('db_type', 'sqlite')
+                if configured == 'postgres' and getattr(db, 'db_type', None) != 'postgres':
+                    summary['error'] = ('Refusing to sync: configured for postgres but the '
+                                        'active connection is SQLite (stale bootstrap).')
+                    _log(f"Prism sync REFUSED — {summary['error']}", error=True)
+                    return summary
+
+                settings = get_prism_settings(db)
+                if settings['prism_enabled'] != '1':
+                    summary['error'] = 'Prism module is disabled in settings.'
+                    return summary
+                if not settings['prism_token']:
+                    summary['error'] = 'No Prism API token configured.'
+                    return summary
+
+                # Cross-worker guard: bail if another instance has a live run.
+                # First expire zombie rows (worker died mid-sync) so they
+                # can't block syncs forever. NOTE: the message is bound as a
+                # parameter — db_adapter rewrites every literal '?' in SQL
+                # text to %s for PostgreSQL, prose included.
+                try:
+                    node_timeout = int(settings.get('prism_node_timeout') or 120)
+                except (TypeError, ValueError):
+                    node_timeout = 120
+                stale_cutoff = (datetime.now() - timedelta(seconds=node_timeout * 3 + 60))
+                db.execute("UPDATE prism_sync_log SET status='error', "
+                           "error_text=?, finished_at=CURRENT_TIMESTAMP "
+                           "WHERE status='running' AND started_at < ?",
+                           ('Marked stale — sync never finished (worker died?)',
+                            stale_cutoff.strftime('%Y-%m-%d %H:%M:%S')))
+                running = db.execute(
+                    "SELECT COUNT(*) AS n FROM prism_sync_log WHERE status='running'"
+                ).fetchone()
+                if running and running['n']:
+                    db.commit()
+                    summary['error'] = 'A sync is already running on another instance.'
+                    return summary
+
+                try:
+                    lookahead = int(settings.get('prism_lookahead_days') or 365)
+                except (TypeError, ValueError):
+                    lookahead = 365
+                win_start = date.today()
+                win_end = win_start + timedelta(days=lookahead)
+                statuses = [int(s) for s in
+                            str(settings.get('prism_event_statuses') or '2').split(',')
+                            if s.strip().isdigit()]
+
+                cur = db.execute(
+                    "INSERT INTO prism_sync_log (trigger_type, triggered_by, "
+                    "window_start, window_end, status) VALUES (?, ?, ?, ?, 'running')",
+                    (trigger, triggered_by, win_start.isoformat(), win_end.isoformat()))
+                log_id = summary['log_id'] = cur.lastrowid
                 db.commit()
-                summary['error'] = 'A sync is already running on another instance.'
+            except Exception as e:
+                summary['error'] = f'Sync preflight failed: {e}'
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                _log(f'Prism sync preflight FAILED ({trigger}): {e}', error=True)
                 return summary
-
-            try:
-                lookahead = int(settings.get('prism_lookahead_days') or 365)
-            except (TypeError, ValueError):
-                lookahead = 365
-            win_start = date.today()
-            win_end = win_start + timedelta(days=lookahead)
-            statuses = [int(s) for s in
-                        str(settings.get('prism_event_statuses') or '2').split(',')
-                        if s.strip().isdigit()]
-
-            cur = db.execute(
-                "INSERT INTO prism_sync_log (trigger_type, triggered_by, "
-                "window_start, window_end, status) VALUES (?, ?, ?, ?, 'running')",
-                (trigger, triggered_by, win_start.isoformat(), win_end.isoformat()))
-            log_id = summary['log_id'] = cur.lastrowid
-            db.commit()
 
             dbg(f'sync start trigger={trigger} by={triggered_by or "?"} '
                 f'window={win_start}→{win_end} statuses={statuses or "all"}')
