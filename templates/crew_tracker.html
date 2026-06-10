@@ -414,7 +414,7 @@
   </thead>
   <tbody id="crew-tbody">
     {% for m in members %}
-    <tr data-mid="{{ m.id }}" data-name="{{ m.name|lower }}" data-quals="{{ m.qualifications|tojson }}" data-statuses='{{ m.qualification_status|tojson }}' data-notes="{{ m.training_notes|e }}">
+    <tr data-mid="{{ m.id }}" data-name="{{ m.name|lower }}" data-quals='{{ m.qualifications|tojson }}' data-statuses='{{ m.qualification_status|tojson }}' data-notes="{{ m.training_notes|e }}">
       <td class="name-col crew-name-cell">
         <div class="crew-actions">
           <span>{{ m.name }}</span>

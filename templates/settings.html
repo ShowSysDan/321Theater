@@ -231,8 +231,11 @@
                         data-scheduler="{{ 1 if u.is_scheduler else 0 }}"
                         data-asset-mgr="{{ 1 if u.is_asset_manager else 0 }}"
                         data-doc-viewer="{{ 1 if u.is_document_viewer else 0 }}"
-                        data-venues="{{ u.viewer_venues_list|tojson }}"
-                        data-doc-types="{{ u.viewer_doc_types_list|tojson }}">Edit</button>
+                        {# single-quoted on purpose: |tojson emits double quotes,
+                           which would truncate a double-quoted attribute and
+                           blank the edit dialog's saved selections #}
+                        data-venues='{{ u.viewer_venues_list|tojson }}'
+                        data-doc-types='{{ u.viewer_doc_types_list|tojson }}'>Edit</button>
                 <button class="btn btn-xs btn-ghost" onclick="resetPassword({{ u.id }})">Reset PW</button>
                 {% if u.id != user.id %}
                 <button class="btn btn-xs btn-danger-ghost" onclick="deleteUser({{ u.id }}, this)">Delete</button>
