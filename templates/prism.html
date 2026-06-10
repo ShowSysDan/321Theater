@@ -1,0 +1,468 @@
+{% extends "base.html" %}
+{% block title %}Prism Sync — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Prism Sync</h1>
+    <p class="page-sub">
+      Pulls the building schedule from Prism into a staging area.
+      {% if settings.prism_enabled == '1' %}
+        <span style="font-size:10px;background:rgba(34,197,94,.12);color:var(--green);padding:2px 7px;border-radius:3px;letter-spacing:.06em">ENABLED</span>
+      {% else %}
+        <span style="font-size:10px;background:rgba(239,68,68,.12);color:var(--red);padding:2px 7px;border-radius:3px;letter-spacing:.06em">DISABLED</span>
+      {% endif %}
+    </p>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button class="btn btn-ghost" onclick="testConnection(this)">Test Connection</button>
+    <button class="btn btn-primary" id="sync-now-btn" onclick="syncNow(this)"
+            {% if settings.prism_enabled != '1' or not has_token %}disabled
+            title="Enable the module and set an API token first"{% endif %}>
+      ⟳ Sync Now
+    </button>
+  </div>
+</div>
+
+<div class="form-section" style="border-left:3px solid var(--accent)">
+  <div class="form-section-body">
+    <p class="text-dim" style="font-size:12px;margin:0">
+      <strong>Sandboxed module.</strong> Syncing only reads from Prism and writes to its own
+      staging tables — nothing in 321Theater changes until you select staged events below and
+      click <em>Import selected</em>. Imports create normal shows (with performances) that you
+      can edit or archive like any other.
+    </p>
+  </div>
+</div>
+
+{# ── Status cards ─────────────────────────────────────────────────────────── #}
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:16px">
+
+  <div class="form-section" style="margin:0">
+    <div class="form-section-header"><span class="section-icon">⚙</span> ENVIRONMENT</div>
+    <div class="form-section-body" style="font-size:12px">
+      {% for c in env_checks %}
+      <div style="display:flex;gap:8px;align-items:baseline;margin-bottom:5px">
+        {% if c.ok %}<span style="color:var(--green)">✓</span>{% else %}<span style="color:var(--red)">✗</span>{% endif %}
+        <div><strong>{{ c.name }}</strong>
+          <div class="text-dim" style="font-size:11px;word-break:break-word">{{ c.detail }}</div>
+        </div>
+      </div>
+      {% endfor %}
+      <div id="test-result" class="text-dim" style="font-size:11px;margin-top:6px"></div>
+    </div>
+  </div>
+
+  <div class="form-section" style="margin:0">
+    <div class="form-section-header"><span class="section-icon">⟳</span> LAST SUCCESSFUL SYNC</div>
+    <div class="form-section-body" style="font-size:12px">
+      {% if last_ok %}
+        <div><strong>{{ last_ok.started_at }}</strong> <span class="text-dim">({{ last_ok.trigger_type }}{% if last_ok.triggered_by %} · {{ last_ok.triggered_by }}{% endif %})</span></div>
+        <div class="text-dim" style="margin-top:4px">
+          {{ last_ok.events_fetched }} fetched ·
+          {{ last_ok.events_new }} new ·
+          {{ last_ok.events_updated }} updated ·
+          {{ last_ok.events_unchanged }} unchanged
+        </div>
+        <div class="text-dim" style="margin-top:4px">Window: {{ last_ok.window_start }} → {{ last_ok.window_end }}</div>
+      {% else %}
+        <div class="text-dim">Never synced. Configure below, then click <em>Sync Now</em>.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="form-section" style="margin:0">
+    <div class="form-section-header"><span class="section-icon">⏰</span> AUTO-SYNC</div>
+    <div class="form-section-body" style="font-size:12px">
+      {% if settings.prism_auto_sync_enabled == '1' and settings.prism_enabled == '1' %}
+        <div>Daily at <strong>{{ '%02d:00'|format(settings.prism_sync_hour|int) }}</strong>,
+             looking <strong>{{ settings.prism_lookahead_days }}</strong> days out.</div>
+        <div class="text-dim" style="margin-top:4px">
+          Runs on the cluster leader{% if is_leader %} (this instance is currently leader){% endif %}.
+          Skips if a scheduled sync already succeeded today.
+        </div>
+      {% else %}
+        <div class="text-dim">Off — syncs only happen when you click <em>Sync Now</em>.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="form-section" style="margin:0">
+    <div class="form-section-header"><span class="section-icon">▤</span> STAGED EVENTS</div>
+    <div class="form-section-body" style="font-size:12px">
+      <div><span style="color:var(--green);font-weight:600">{{ counts.get('new', 0) }}</span> new ·
+           <span style="color:var(--accent);font-weight:600">{{ counts.get('imported', 0) }}</span> imported ·
+           <span class="text-dim">{{ counts.get('ignored', 0) }} ignored</span></div>
+      <div class="text-dim" style="margin-top:4px">Deduplicated by Prism event ID — re-syncs update in place, never duplicate.</div>
+    </div>
+  </div>
+</div>
+
+{# ── Settings ─────────────────────────────────────────────────────────────── #}
+<div class="form-section">
+  <div class="form-section-header" style="cursor:pointer" onclick="togglePanel('prism-settings')">
+    <span class="section-icon">⚙</span> SETTINGS
+    <span class="ml-auto text-dim" style="font-size:11px">click to {{ 'collapse' if settings.prism_enabled != '1' else 'expand' }}</span>
+  </div>
+  <div class="form-section-body" id="prism-settings" {% if settings.prism_enabled == '1' %}style="display:none"{% endif %}>
+    <form method="post" action="{{ url_for('prism_save_settings') }}">
+      <div style="display:flex;flex-wrap:wrap;gap:18px;margin-bottom:14px">
+        <label class="checkbox-label">
+          <input type="checkbox" name="prism_enabled" value="1" {% if settings.prism_enabled == '1' %}checked{% endif %}>
+          Enable Prism module
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" name="prism_auto_sync_enabled" value="1" {% if settings.prism_auto_sync_enabled == '1' %}checked{% endif %}>
+          Auto-sync daily
+        </label>
+      </div>
+
+      <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:14px">
+        <div class="field-group" style="flex:2;min-width:260px">
+          <label class="field-label">API token</label>
+          <input type="password" name="prism_token" class="field-input" autocomplete="new-password"
+                 placeholder="{% if has_token %}•••••••• saved — leave blank to keep{% else %}Paste token from Prism → Settings → Developer{% endif %}">
+          {% if has_token %}
+          <label class="checkbox-label" style="font-size:11px;margin-top:4px">
+            <input type="checkbox" name="prism_token_clear" value="1"> Clear stored token
+          </label>
+          {% endif %}
+        </div>
+        <div class="field-group" style="min-width:110px">
+          <label class="field-label">Sync hour</label>
+          <select name="prism_sync_hour" class="field-input">
+            {% for h in range(24) %}
+            <option value="{{ h }}" {% if settings.prism_sync_hour|int == h %}selected{% endif %}>{{ '%02d:00'|format(h) }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field-group" style="min-width:120px">
+          <label class="field-label">Lookahead (days)</label>
+          <input type="number" name="prism_lookahead_days" class="field-input" min="1" max="1095"
+                 value="{{ settings.prism_lookahead_days }}">
+        </div>
+        <div class="field-group" style="min-width:120px">
+          <label class="field-label">Bridge timeout (s)</label>
+          <input type="number" name="prism_node_timeout" class="field-input" min="30" max="600"
+                 value="{{ settings.prism_node_timeout }}">
+        </div>
+      </div>
+
+      <div class="field-group" style="margin-bottom:14px">
+        <label class="field-label">Pull events with status</label>
+        <div class="checkbox-row">
+          {% set chosen = settings.prism_event_statuses.split(',') %}
+          {% for code, label in event_statuses.items() %}
+          <label class="checkbox-label">
+            <input type="checkbox" name="prism_event_statuses" value="{{ code }}"
+                   {% if code in chosen %}checked{% endif %}> {{ label }}
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="field-group" style="margin-bottom:14px;max-width:560px">
+        <label class="field-label">Bridge directory (advanced — blank = app's prism_bridge/)</label>
+        <input type="text" name="prism_bridge_dir" class="field-input"
+               value="{{ settings.prism_bridge_dir }}" placeholder="/opt/321Theater/prism_bridge">
+      </div>
+
+      <button class="btn btn-primary" type="submit">Save Settings</button>
+    </form>
+  </div>
+</div>
+
+{# ── Staged events ────────────────────────────────────────────────────────── #}
+<div class="form-section">
+  <div class="form-section-header">
+    <span class="section-icon">▤</span> EVENTS FOUND IN PRISM
+    <span class="section-count ml-auto text-dim" id="events-count"></span>
+  </div>
+  <div class="form-section-body no-pad">
+    <div class="table-toolbar" style="flex-wrap:wrap;gap:10px">
+      <input type="text" id="event-search" class="field-input field-input-sm"
+             placeholder="Search name, venue, tour…" oninput="filterEvents()"
+             autocomplete="off" style="max-width:260px">
+      <select id="state-filter" class="field-input field-input-sm" onchange="filterEvents()" style="max-width:150px">
+        <option value="">All states</option>
+        <option value="new" selected>New</option>
+        <option value="imported">Imported</option>
+        <option value="ignored">Ignored</option>
+      </select>
+      <label class="checkbox-label" style="font-size:12px">
+        <input type="checkbox" id="hide-past" checked onchange="filterEvents()"> Hide past
+      </label>
+      <span style="flex:1"></span>
+      <span id="sel-count" class="text-dim" style="font-size:12px"></span>
+      <button class="btn btn-sm btn-primary" onclick="importSelected(this)">Import selected → 321T</button>
+      <button class="btn btn-sm btn-ghost" onclick="setStateSelected('ignored', this)">Ignore</button>
+      <button class="btn btn-sm btn-ghost" onclick="setStateSelected('new', this)">Restore</button>
+    </div>
+
+    <div id="action-result" style="display:none;margin:10px 14px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;font-size:12px;white-space:pre-wrap"></div>
+
+    <table class="data-table" id="events-table">
+      <thead>
+        <tr>
+          <th style="width:28px"><input type="checkbox" id="check-all" onchange="toggleAll(this)"></th>
+          <th>Event</th>
+          <th>Status</th>
+          <th>Date(s)</th>
+          <th style="text-align:center" title="Number of performances in Prism">Perfs</th>
+          <th>Venue / Stage</th>
+          <th>State</th>
+          <th style="width:60px;text-align:right">Debug</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in events %}
+        <tr data-id="{{ e.id }}"
+            data-state="{{ e.import_state }}"
+            data-past="{{ '1' if e.is_past else '0' }}"
+            data-search="{{ (e.name ~ ' ' ~ (e.venue_name or '') ~ ' ' ~ (e.stage_names or '') ~ ' ' ~ (e.tour_name or '') ~ ' ' ~ (e.first_date or ''))|lower }}">
+          <td><input type="checkbox" class="row-check" value="{{ e.id }}" onchange="updateSelCount()"
+                     {% if e.import_state == 'imported' %}disabled title="Already imported"{% endif %}></td>
+          <td>
+            <span style="font-weight:500">{{ e.name }}</span>
+            {% if e.tour_name %}<div class="text-dim" style="font-size:11px">{{ e.tour_name }}</div>{% endif %}
+            <span class="text-dim" style="font-size:10px">Prism #{{ e.prism_event_id }}</span>
+            {% if e.missing_in_prism and not e.is_past %}
+            <span style="font-size:9px;background:rgba(239,68,68,.15);color:var(--red);padding:1px 5px;border-radius:3px;margin-left:4px"
+                  title="Was not returned by the most recent sync — possibly cancelled or moved in Prism">NOT IN LAST SYNC</span>
+            {% endif %}
+            {% if e.changed_since_import %}
+            <span style="font-size:9px;background:rgba(245,158,11,.15);color:#f59e0b;padding:1px 5px;border-radius:3px;margin-left:4px"
+                  title="Prism changed this event after it was imported — review the 321T show">CHANGED IN PRISM</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="text-dim" style="font-size:12px">{{ e.event_status or '—' }}</span>
+            {% if e.is_rental %}<div class="text-dim" style="font-size:10px">rental</div>{% endif %}
+          </td>
+          <td class="text-dim" style="white-space:nowrap;font-size:12px">
+            {{ e.first_date or '—' }}{% if e.last_date and e.last_date != e.first_date %} → {{ e.last_date }}{% endif %}
+          </td>
+          <td class="text-dim" style="text-align:center">{{ e.number_of_shows or '' }}</td>
+          <td class="text-dim" style="font-size:12px">{{ e.stage_names or e.venue_name or '—' }}</td>
+          <td class="state-cell">
+            {% if e.import_state == 'imported' %}
+              <span style="font-size:10px;background:rgba(255,176,46,.12);color:var(--accent);padding:2px 7px;border-radius:3px;letter-spacing:.06em">IMPORTED</span>
+              {% if e.imported_show_id %}
+              <div style="font-size:11px;margin-top:2px"><a href="{{ url_for('show_page', show_id=e.imported_show_id) }}">show {{ e.imported_show_id }}{% if e.show_name_321 %} · {{ e.show_name_321 }}{% endif %}</a></div>
+              {% endif %}
+            {% elif e.import_state == 'ignored' %}
+              <span style="font-size:10px;background:rgba(148,163,184,.12);color:var(--text-muted);padding:2px 7px;border-radius:3px;letter-spacing:.06em">IGNORED</span>
+            {% else %}
+              <span style="font-size:10px;background:rgba(34,197,94,.12);color:var(--green);padding:2px 7px;border-radius:3px;letter-spacing:.06em">NEW</span>
+            {% endif %}
+          </td>
+          <td style="text-align:right">
+            <button class="btn btn-xs btn-ghost" title="View raw Prism payload (debug)"
+                    onclick="showRaw({{ e.id }})">{ }</button>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not events %}
+        <tr><td colspan="8" class="text-dim" style="text-align:center;padding:24px">
+          Nothing staged yet — run a sync to pull events from Prism.
+        </td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{# ── Sync history / debug ─────────────────────────────────────────────────── #}
+<div class="form-section">
+  <div class="form-section-header"><span class="section-icon">≡</span> SYNC HISTORY <span class="ml-auto text-dim" style="font-size:11px">last {{ history|length }} runs</span></div>
+  <div class="form-section-body no-pad">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Started</th><th>Trigger</th><th>Window</th><th>Status</th>
+          <th style="text-align:right">Fetched</th><th style="text-align:right">New</th>
+          <th style="text-align:right">Updated</th><th>Detail / debug log</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for h in history %}
+        <tr>
+          <td class="text-dim" style="white-space:nowrap;font-size:12px">{{ h.started_at }}</td>
+          <td class="text-dim" style="font-size:12px">{{ h.trigger_type }}{% if h.triggered_by %} · {{ h.triggered_by }}{% endif %}</td>
+          <td class="text-dim" style="white-space:nowrap;font-size:12px">{{ h.window_start }} → {{ h.window_end }}</td>
+          <td>
+            {% if h.status == 'ok' %}
+              <span style="font-size:10px;background:rgba(34,197,94,.12);color:var(--green);padding:2px 7px;border-radius:3px">OK</span>
+            {% elif h.status == 'running' %}
+              <span style="font-size:10px;background:rgba(255,176,46,.12);color:var(--accent);padding:2px 7px;border-radius:3px">RUNNING</span>
+            {% else %}
+              <span style="font-size:10px;background:rgba(239,68,68,.12);color:var(--red);padding:2px 7px;border-radius:3px">ERROR</span>
+            {% endif %}
+          </td>
+          <td class="text-dim" style="text-align:right">{{ h.events_fetched }}</td>
+          <td class="text-dim" style="text-align:right">{{ h.events_new }}</td>
+          <td class="text-dim" style="text-align:right">{{ h.events_updated }}</td>
+          <td style="font-size:12px;max-width:380px">
+            {% if h.error_text %}<div style="color:var(--red);word-break:break-word">{{ h.error_text }}</div>{% endif %}
+            {% if h.debug_log %}
+            <details>
+              <summary class="text-dim" style="cursor:pointer;font-size:11px">debug log</summary>
+              <pre style="font-size:10.5px;max-height:240px;overflow:auto;white-space:pre-wrap;background:rgba(0,0,0,.25);padding:8px;border-radius:4px;margin:6px 0 0">{{ h.debug_log }}</pre>
+            </details>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not history %}
+        <tr><td colspan="8" class="text-dim" style="text-align:center;padding:18px">No syncs yet.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{# ── Raw payload modal ────────────────────────────────────────────────────── #}
+<div id="raw-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000" onclick="if(event.target===this)hideRaw()">
+  <div style="max-width:760px;margin:5vh auto;background:var(--bg-card,#1a1d24);border:1px solid var(--border);border-radius:8px;max-height:85vh;display:flex;flex-direction:column">
+    <div style="display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border)">
+      <strong id="raw-title" style="font-size:13px">Raw Prism payload</strong>
+      <button class="btn btn-xs btn-ghost" style="margin-left:auto" onclick="hideRaw()">✕ Close</button>
+    </div>
+    <pre id="raw-body" style="font-size:11px;overflow:auto;padding:14px;margin:0;white-space:pre-wrap"></pre>
+  </div>
+</div>
+
+<script>
+function togglePanel(id) {
+  const el = document.getElementById(id);
+  el.style.display = (el.style.display === 'none') ? '' : 'none';
+}
+
+/* ── table filtering ── */
+function filterEvents() {
+  const q = document.getElementById('event-search').value.toLowerCase();
+  const state = document.getElementById('state-filter').value;
+  const hidePast = document.getElementById('hide-past').checked;
+  let shown = 0;
+  document.querySelectorAll('#events-table tbody tr[data-id]').forEach(tr => {
+    const ok = (!state || tr.dataset.state === state)
+            && (!hidePast || tr.dataset.past !== '1')
+            && (!q || tr.dataset.search.includes(q));
+    tr.style.display = ok ? '' : 'none';
+    if (ok) shown++;
+  });
+  document.getElementById('events-count').textContent = shown + ' shown';
+  updateSelCount();
+}
+
+function toggleAll(box) {
+  document.querySelectorAll('#events-table tbody tr[data-id]').forEach(tr => {
+    if (tr.style.display === 'none') return;
+    const c = tr.querySelector('.row-check');
+    if (c && !c.disabled) c.checked = box.checked;
+  });
+  updateSelCount();
+}
+
+function selectedIds() {
+  return Array.from(document.querySelectorAll('.row-check:checked'))
+    .filter(c => c.closest('tr').style.display !== 'none')
+    .map(c => parseInt(c.value, 10));
+}
+
+function updateSelCount() {
+  const n = selectedIds().length;
+  document.getElementById('sel-count').textContent = n ? n + ' selected' : '';
+}
+
+/* ── actions ── */
+function showResult(text, isError) {
+  const box = document.getElementById('action-result');
+  box.style.display = '';
+  box.style.borderColor = isError ? 'var(--red)' : 'var(--border)';
+  box.textContent = text;
+}
+
+async function postJSON(url, payload) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload || {}),
+  });
+  let data = {};
+  try { data = await r.json(); } catch (e) { data = {error: 'Bad response (' + r.status + ')'}; }
+  return {ok: r.ok, data};
+}
+
+async function syncNow(btn) {
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = 'Syncing… (this can take a minute)';
+  const {ok, data} = await postJSON('{{ url_for('prism_sync_now') }}');
+  if (ok && data.ok) {
+    showResult('Sync complete: ' + data.fetched + ' fetched, ' + data.new + ' new, '
+               + data.updated + ' updated, ' + data.unchanged + ' unchanged. Reloading…');
+    setTimeout(() => location.reload(), 1200);
+  } else {
+    showResult('Sync failed: ' + (data.error || 'unknown error'), true);
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+async function testConnection(btn) {
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = 'Testing…';
+  const {data} = await postJSON('{{ url_for('prism_test') }}');
+  const lines = (data.env || []).map(c => (c.ok ? '✓ ' : '✗ ') + c.name + ' — ' + c.detail);
+  lines.push((data.api_ok ? '✓ API: ' : '✗ API: ') + (data.api_detail || ''));
+  showResult(lines.join('\n'), !data.api_ok);
+  const tr = document.getElementById('test-result');
+  tr.textContent = data.api_ok ? '✓ ' + data.api_detail : '✗ ' + (data.api_detail || 'test failed');
+  tr.style.color = data.api_ok ? 'var(--green)' : 'var(--red)';
+  btn.disabled = false;
+  btn.textContent = old;
+}
+
+async function importSelected(btn) {
+  const ids = selectedIds();
+  if (!ids.length) { showResult('Select at least one event first.', true); return; }
+  if (!confirm('Create ' + ids.length + ' show(s) in 321Theater from the selected Prism events?')) return;
+  btn.disabled = true;
+  const {ok, data} = await postJSON('{{ url_for('prism_import') }}', {ids});
+  btn.disabled = false;
+  if (!ok) { showResult('Import failed: ' + (data.error || 'unknown error'), true); return; }
+  const msgs = (data.results || []).map(r => (r.ok ? '✓ ' : '✗ ') + r.msg);
+  showResult('Imported ' + data.created + ' of ' + ids.length + ':\n' + msgs.join('\n'),
+             data.created !== ids.length);
+  setTimeout(() => location.reload(), data.created === ids.length ? 1500 : 6000);
+}
+
+async function setStateSelected(state, btn) {
+  const ids = selectedIds();
+  if (!ids.length) { showResult('Select at least one event first.', true); return; }
+  btn.disabled = true;
+  const {ok, data} = await postJSON('{{ url_for('prism_set_state') }}', {ids, state});
+  btn.disabled = false;
+  if (!ok) { showResult('Failed: ' + (data.error || 'unknown error'), true); return; }
+  showResult('Marked ' + data.updated + ' event(s) as ' + state + '. Reloading…');
+  setTimeout(() => location.reload(), 900);
+}
+
+/* ── raw payload modal ── */
+async function showRaw(id) {
+  const r = await fetch('/prism/events/' + id + '/raw');
+  const data = await r.json();
+  document.getElementById('raw-title').textContent =
+    'Prism #' + (data.prism_event_id || '?') + ' — ' + (data.name || '');
+  document.getElementById('raw-body').textContent =
+    JSON.stringify(data.payload, null, 2);
+  document.getElementById('raw-modal').style.display = '';
+}
+function hideRaw() { document.getElementById('raw-modal').style.display = 'none'; }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') hideRaw(); });
+
+filterEvents();
+</script>
+{% endblock %}
