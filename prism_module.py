@@ -84,7 +84,32 @@ SETTING_DEFAULTS = {
     'prism_event_statuses':     '2',     # CSV of EVENT_STATUSES keys
     'prism_node_timeout':       '120',   # seconds per bridge call
     'prism_bridge_dir':         '',      # blank = <app>/prism_bridge
+    # JSON array of stage/venue names hidden from the events list. Prism
+    # reports non-venues like "Holidays" as venues — hiding one filters its
+    # events from view AND newly synced events from it arrive pre-ignored.
+    'prism_hidden_stages':      '[]',
 }
+
+NO_VENUE_TOKEN = '(no venue)'
+
+
+def _hidden_set(settings):
+    """Hidden stage/venue names as a lowercase set."""
+    try:
+        names = json.loads(settings.get('prism_hidden_stages') or '[]')
+        return {str(n).strip().lower() for n in names if str(n).strip()}
+    except (TypeError, json.JSONDecodeError):
+        return set()
+
+
+def _event_tokens(stage_names, venue_name):
+    """The venue-filter tokens an event row carries: its stage names, falling
+    back to the venue name (Prism pseudo-venues like "Holidays" have no
+    stages), falling back to a catch-all so blank rows stay filterable."""
+    toks = [s.strip() for s in (stage_names or '').split(',') if s.strip()]
+    if not toks and (venue_name or '').strip():
+        toks = [venue_name.strip()]
+    return toks or [NO_VENUE_TOKEN]
 
 # Cap stored debug logs so a chatty sync can't bloat the table.
 _DEBUG_LOG_MAX_CHARS = 60_000
@@ -285,6 +310,58 @@ def environment_check(settings, *, db=None):
 
 # ─── Sync engine ──────────────────────────────────────────────────────────────
 
+def _refresh_venues(db, settings, dbg):
+    """
+    Pull the venue/stage catalog from Prism into prism_venues (upsert by
+    Prism's venue id). Best-effort: a failure here is logged in the sync
+    debug log but never aborts the events sync.
+    """
+    try:
+        venues = _bridge_call('get_venues.js', {'includeInactive': True},
+                              settings=settings, timeout=60, debug_sink=dbg)
+        if not isinstance(venues, list):
+            dbg(f'venue refresh: unexpected response shape '
+                f'({type(venues).__name__}) — skipped')
+            return 0
+        n = 0
+        for v in venues:
+            vid = v.get('id')
+            if vid is None:
+                continue
+            name = _norm_str(v.get('name'))[:200]
+            city = _norm_str(v.get('city') or v.get('venueCity'))[:100]
+            state = _norm_str(v.get('state') or v.get('venueState'))[:50]
+            capacity = v.get('capacity') if isinstance(v.get('capacity'), int) else None
+            inactive = bool(v.get('isInactive')) or v.get('active') is False
+            stages = [{'name': _norm_str(s.get('name'))[:200],
+                       'capacity': s.get('capacity')}
+                      for s in (v.get('stages') or []) if s.get('name')]
+            row = db.execute('SELECT id FROM prism_venues WHERE prism_venue_id=?',
+                             (vid,)).fetchone()
+            if row is None:
+                db.execute("""
+                    INSERT INTO prism_venues
+                      (prism_venue_id, name, city, state, capacity, is_active,
+                       stages_json, raw_json, last_synced_at)
+                    VALUES (?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
+                """, (vid, name, city, state, capacity, 0 if inactive else 1,
+                      json.dumps(stages), json.dumps(v)))
+            else:
+                db.execute("""
+                    UPDATE prism_venues SET name=?, city=?, state=?, capacity=?,
+                       is_active=?, stages_json=?, raw_json=?,
+                       last_synced_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                """, (name, city, state, capacity, 0 if inactive else 1,
+                      json.dumps(stages), json.dumps(v), row['id']))
+            n += 1
+        dbg(f'venue refresh: {n} venue(s) catalogued')
+        return n
+    except PrismBridgeError as e:
+        dbg(f'venue refresh FAILED (events sync continues): {e}')
+        _log(f'Prism venue refresh failed: {e}', error=True)
+        return 0
+
 def _content_hash(ev):
     """Hash the fields we care about so re-syncs can tell changed from
     unchanged. Deliberately excludes Prism's last-updated stamp — we only
@@ -328,7 +405,7 @@ def run_prism_sync(trigger='manual', triggered_by=''):
         log_lines.append(f"{datetime.now().strftime('%H:%M:%S')} {msg}")
 
     summary = {'ok': False, 'log_id': None, 'fetched': 0, 'new': 0,
-               'updated': 0, 'unchanged': 0, 'error': ''}
+               'updated': 0, 'unchanged': 0, 'auto_ignored': 0, 'error': ''}
 
     if not _sync_lock.acquire(blocking=False):
         summary['error'] = 'A sync is already running in this worker.'
@@ -416,6 +493,8 @@ def run_prism_sync(trigger='manual', triggered_by=''):
                 f'window={win_start}→{win_end} statuses={statuses or "all"}')
 
             try:
+                _refresh_venues(db, settings, dbg)
+
                 args = {'startDate': win_start.isoformat(),
                         'endDate': win_end.isoformat()}
                 if statuses:
@@ -428,6 +507,7 @@ def run_prism_sync(trigger='manual', triggered_by=''):
                 summary['fetched'] = len(events)
                 dbg(f'bridge returned {len(events)} event(s)')
 
+                hidden = _hidden_set(settings)
                 seen_ids = set()
                 for ev in events:
                     pid = ev.get('id')
@@ -438,7 +518,7 @@ def run_prism_sync(trigger='manual', triggered_by=''):
                         dbg(f'SKIP duplicate id {pid} in API response')
                         continue
                     seen_ids.add(pid)
-                    _upsert_event(db, ev, summary, dbg)
+                    _upsert_event(db, ev, summary, dbg, hidden)
 
                 db.execute(
                     "UPDATE prism_sync_log SET status='ok', finished_at=CURRENT_TIMESTAMP, "
@@ -481,8 +561,10 @@ def run_prism_sync(trigger='manual', triggered_by=''):
     return summary
 
 
-def _upsert_event(db, ev, summary, dbg):
-    """Insert or update one staged event row, keyed on Prism's event id."""
+def _upsert_event(db, ev, summary, dbg, hidden=frozenset()):
+    """Insert or update one staged event row, keyed on Prism's event id.
+    Brand-new events whose every venue token is hidden arrive pre-ignored so
+    junk venues (e.g. Prism's "Holidays") never pile up as NEW."""
     pid = ev.get('id')
     name = _norm_str(ev.get('name'))[:300]
     status_code = _norm_str(ev.get('event_status'))
@@ -505,20 +587,28 @@ def _upsert_event(db, ev, summary, dbg):
         (pid,)).fetchone()
 
     if row is None:
+        tokens = _event_tokens(stage_names, venue_name)
+        auto_ignore = bool(hidden) and all(t.lower() in hidden for t in tokens)
+        initial_state = 'ignored' if auto_ignore else 'new'
         db.execute("""
             INSERT INTO prism_events
               (prism_event_id, name, event_status, event_status_code, first_date,
                last_date, venue_name, stage_names, tour_name, number_of_shows,
                is_rental, dates_json, raw_json, content_hash, prism_last_updated,
                import_state, first_seen_at, last_synced_at, last_changed_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'new',
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,
                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         """, (pid, name, status_str, status_code, first_date, last_date,
               venue_name, stage_names, tour_name, n_shows, is_rental,
-              dates_json, raw_json, h, last_updated))
+              dates_json, raw_json, h, last_updated, initial_state))
         summary['new'] += 1
-        dbg(f'NEW #{pid} "{name}" {first_date or "?"} [{status_str}] '
-            f'{stage_names or venue_name}')
+        if auto_ignore:
+            summary['auto_ignored'] = summary.get('auto_ignored', 0) + 1
+            dbg(f'NEW #{pid} "{name}" {first_date or "?"} [{status_str}] '
+                f'{stage_names or venue_name} → auto-ignored (hidden venue)')
+        else:
+            dbg(f'NEW #{pid} "{name}" {first_date or "?"} [{status_str}] '
+                f'{stage_names or venue_name}')
     elif row['content_hash'] != h:
         db.execute("""
             UPDATE prism_events SET
@@ -745,6 +835,10 @@ def _page_view():
             LIMIT 5000
         """).fetchall()
 
+        hidden = _hidden_set(settings)
+        token_counts = {}   # lowercase token → staged-event count
+        token_labels = {}   # lowercase token → original-case label
+
         today = date.today().isoformat()
         events = []
         for r in rows:
@@ -760,7 +854,59 @@ def _page_view():
             d['changed_since_import'] = bool(
                 d['import_state'] == 'imported' and d['imported_at']
                 and d['last_changed_at'] and d['last_changed_at'] > d['imported_at'])
+            d['venue_tokens'] = _event_tokens(d['stage_names'], d['venue_name'])
+            for t in d['venue_tokens']:
+                tl = t.lower()
+                token_counts[tl] = token_counts.get(tl, 0) + 1
+                token_labels.setdefault(tl, t)
             events.append(d)
+
+        # ── Venue/stage catalog panel + filter rows ──────────────────────────
+        # One row per filterable token: every stage of every catalogued venue,
+        # venue-level tokens (stage-less pseudo-venues like "Holidays"), and
+        # anything seen in events that the venues API didn't report.
+        venue_filter = []
+        covered = set()
+        for v in db.execute('SELECT * FROM prism_venues ORDER BY name').fetchall():
+            try:
+                stages = json.loads(v['stages_json'] or '[]')
+            except (TypeError, json.JSONDecodeError):
+                stages = []
+            for s in stages:
+                nm = (s.get('name') or '').strip()
+                if not nm or nm.lower() in covered:
+                    continue
+                covered.add(nm.lower())
+                venue_filter.append({
+                    'label': nm, 'parent': v['name'],
+                    'capacity': s.get('capacity'),
+                    'count': token_counts.get(nm.lower(), 0),
+                    'hidden': nm.lower() in hidden,
+                    'inactive': not v['is_active'],
+                })
+            nmv = (v['name'] or '').strip()
+            if nmv and nmv.lower() not in covered and \
+                    (not stages or nmv.lower() in token_counts):
+                covered.add(nmv.lower())
+                venue_filter.append({
+                    'label': nmv, 'parent': '',
+                    'capacity': v['capacity'],
+                    'count': token_counts.get(nmv.lower(), 0),
+                    'hidden': nmv.lower() in hidden,
+                    'inactive': not v['is_active'],
+                })
+        for tl in sorted(set(token_counts) - covered):
+            venue_filter.append({
+                'label': token_labels[tl], 'parent': '(seen in events only)',
+                'capacity': None, 'count': token_counts[tl],
+                'hidden': tl in hidden, 'inactive': False,
+            })
+
+        try:
+            hidden_list = [str(n) for n in
+                           json.loads(settings.get('prism_hidden_stages') or '[]')]
+        except (TypeError, json.JSONDecodeError):
+            hidden_list = []
 
         hist = []
         for r in history:
@@ -782,6 +928,8 @@ def _page_view():
             is_leader=_d['am_i_leader'](),
             event_statuses=EVENT_STATUSES,
             today=today,
+            venue_filter=venue_filter,
+            hidden_list=hidden_list,
         )
     finally:
         db.close()
@@ -909,6 +1057,52 @@ def _save_settings_view():
     return redirect(url_for('prism_page'))
 
 
+def _venue_visibility_view():
+    """Persist the set of hidden stage/venue names (prism_hidden_stages).
+
+    Hiding a venue filters its events from the list, makes newly synced
+    events from it arrive pre-ignored, AND moves its already-staged NEW
+    events to ignored in the same click (imported/ignored rows untouched) —
+    so junk like Prism's "Holidays" disappears in one action. Everything
+    stays staged and reversible (Show hidden venues → select → Restore)."""
+    data = request.get_json(silent=True) or {}
+    names = data.get('hidden')
+    if not isinstance(names, list) or len(names) > 300:
+        return jsonify({'error': 'hidden must be a list of names (max 300)'}), 400
+    clean, seen = [], set()
+    for n in names:
+        s = str(n).strip()[:200]
+        if s and s.lower() not in seen:
+            seen.add(s.lower())
+            clean.append(s)
+    db = _d['get_db']()
+    try:
+        prev = _hidden_set(get_prism_settings(db))
+        newly_hidden = seen - prev
+
+        ignored_now = 0
+        if newly_hidden:
+            rows = db.execute(
+                "SELECT id, stage_names, venue_name FROM prism_events "
+                "WHERE import_state='new'").fetchall()
+            for r in rows:
+                tokens = _event_tokens(r['stage_names'], r['venue_name'])
+                if all(t.lower() in seen for t in tokens) and \
+                        any(t.lower() in newly_hidden for t in tokens):
+                    db.execute("UPDATE prism_events SET import_state='ignored' "
+                               "WHERE id=?", (r['id'],))
+                    ignored_now += 1
+
+        _save_setting(db, 'prism_hidden_stages', json.dumps(clean))
+        _d['log_audit'](db, 'SETTINGS_UPDATE', 'setting', 'prism_hidden_stages',
+                        detail=f'Prism venue visibility updated — {len(clean)} hidden, '
+                               f'{ignored_now} staged event(s) auto-ignored')
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({'ok': True, 'hidden': clean, 'ignored_now': ignored_now})
+
+
 def _set_state_view():
     """Mark staged events ignored / back to new. Never touches main tables."""
     data = request.get_json(silent=True) or {}
@@ -992,6 +1186,8 @@ def register(app, **deps):
                      admin(_save_settings_view), methods=['POST'])
     app.add_url_rule('/prism/events/state', 'prism_set_state',
                      admin(_set_state_view), methods=['POST'])
+    app.add_url_rule('/prism/venues/visibility', 'prism_venue_visibility',
+                     admin(_venue_visibility_view), methods=['POST'])
     app.add_url_rule('/prism/import', 'prism_import', admin(_import_view),
                      methods=['POST'])
     app.add_url_rule('/prism/events/<int:eid>/raw', 'prism_event_raw',

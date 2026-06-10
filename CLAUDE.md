@@ -81,8 +81,8 @@ Prism is the building's primary scheduling system. The integration lives in
 `prism_module.py` + `prism_bridge/` + `templates/prism.html`, wired into
 app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
 `prism_auto_sync` scheduler job. Rules:
-- The module only writes to its own tables (`prism_events`, `prism_sync_log`)
-  and `prism_*` keys in `app_settings`. It touches main-app tables
+- The module only writes to its own tables (`prism_events`, `prism_sync_log`,
+  `prism_venues`) and `prism_*` keys in `app_settings`. It touches main-app tables
   (`shows` / `show_performances` / `advance_data`) **only** inside
   `import_staged_events()`, which runs when an admin explicitly imports
   selected events on `/prism`. Don't add automatic write-through to shows

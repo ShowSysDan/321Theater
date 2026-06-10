@@ -933,6 +933,24 @@ CREATE TABLE IF NOT EXISTS prism_sync_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_prism_sync_log_started ON prism_sync_log(started_at);
+
+-- Venue and stage catalog as reported by Prism's venues API — refreshed on
+-- every sync so the /prism page can document what exists and drive the
+-- per-venue visibility filter (prism_hidden_stages in app_settings).
+
+CREATE TABLE IF NOT EXISTS prism_venues (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    prism_venue_id INTEGER UNIQUE NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    city TEXT DEFAULT '',
+    state TEXT DEFAULT '',
+    capacity INTEGER DEFAULT NULL,
+    is_active INTEGER DEFAULT 1,
+    stages_json TEXT DEFAULT '[]',
+    raw_json TEXT DEFAULT '{}',
+    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 SEED_CONTACTS = [
@@ -1608,6 +1626,20 @@ def migrate_db():
         );
         CREATE INDEX IF NOT EXISTS idx_prism_sync_log_started
             ON prism_sync_log(started_at);
+
+        CREATE TABLE IF NOT EXISTS prism_venues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prism_venue_id INTEGER UNIQUE NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            city TEXT DEFAULT '',
+            state TEXT DEFAULT '',
+            capacity INTEGER DEFAULT NULL,
+            is_active INTEGER DEFAULT 1,
+            stages_json TEXT DEFAULT '[]',
+            raw_json TEXT DEFAULT '{}',
+            first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     """)
 
     # ALTER TABLE for new columns (SQLite errors if column already exists)
@@ -3337,6 +3369,24 @@ CREATE TABLE IF NOT EXISTS prism_sync_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_prism_sync_log_started ON prism_sync_log(started_at);
+
+-- Venue and stage catalog as reported by Prism's venues API — refreshed on
+-- every sync so the /prism page can document what exists and drive the
+-- per-venue visibility filter (prism_hidden_stages in app_settings).
+
+CREATE TABLE IF NOT EXISTS prism_venues (
+    id SERIAL PRIMARY KEY,
+    prism_venue_id INTEGER UNIQUE NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    city TEXT DEFAULT '',
+    state TEXT DEFAULT '',
+    capacity INTEGER DEFAULT NULL,
+    is_active INTEGER DEFAULT 1,
+    stages_json TEXT DEFAULT '[]',
+    raw_json TEXT DEFAULT '{}',
+    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
