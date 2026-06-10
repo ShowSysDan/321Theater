@@ -6885,41 +6885,11 @@ def change_own_password():
 @app.route('/settings/form-fields')
 @content_admin_required
 def form_fields_settings():
-    form_sections = get_form_fields_for_template()
-    db = get_db()
-    users = db.execute(
-        'SELECT id, username, display_name, role, created_at FROM users ORDER BY display_name'
-    ).fetchall()
-    contacts = db.execute('SELECT * FROM contacts ORDER BY department, name').fetchall()
-    all_settings = {r['key']: r['value'] for r in
-                    db.execute("SELECT key, value FROM app_settings").fetchall()}
-    db.close()
-
-    _is_ca = session.get('is_content_admin', False) or session.get('user_role') == 'admin'
-
-    db4 = get_db()
-    sched_templates2 = [dict(t) for t in db4.execute(
-        'SELECT id, name FROM schedule_templates ORDER BY sort_order, name'
-    ).fetchall()] if _is_ca else []
-    db4.close()
-
-    return render_template('settings.html',
-                           contacts=contacts,
-                           users=users,
-                           form_sections=form_sections,
-                           sched_meta_fields=get_schedule_meta_fields(),
-                           syslog_settings=all_settings,
-                           departments=DEPARTMENTS,
-                           active_tab='fields',
-                           is_content_admin=_is_ca,
-                           sched_templates=sched_templates2,
-                           wifi_network=all_settings.get('wifi_network', ''),
-                           wifi_password=all_settings.get('wifi_password', ''),
-                           upload_max_mb=all_settings.get('upload_max_mb', '20'),
-                           logo_data=all_settings.get('logo_data', ''),
-                           db_settings=all_settings,
-                           ai_settings=all_settings,
-                           user=get_current_user())
+    """Legacy URL. This used to re-render settings.html with a hand-picked
+    subset of its variables and 500'd whenever the settings page grew a new
+    required variable — the Form Fields tab lives on /settings, so redirect
+    there and let the hash-based tab switcher open it."""
+    return redirect(url_for('settings') + '#fields')
 
 
 @app.route('/settings/form-fields/add', methods=['POST'])
