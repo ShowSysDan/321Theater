@@ -1658,6 +1658,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       <span class="section-icon">◈</span> POST-SHOW NOTES
       <div class="ml-auto" style="display:flex;gap:6px">
         <a href="/shows/{{ show.id }}/post-show-invoice.pdf" target="_blank" class="btn btn-sm btn-ghost" title="Final invoice: internal & external assets + actual labor + costs">Final Invoice PDF</a>
+        <a href="{{ url_for('combined_invoice_page', preselect=show.id) }}" class="btn btn-sm btn-ghost" title="Bill this show together with others (multi-venue / multi-day events) on one combined invoice">Combined Invoice…</a>
         <a href="{{ url_for('export_postnotes', show_id=show.id) }}" class="btn btn-sm btn-ghost" target="_blank">Export PDF</a>
         <button class="btn btn-sm btn-ghost" type="button" title="Generate post-show report and email to recipients"
                 onclick="emailPdf({{ show.id }}, 'postnotes', this)">

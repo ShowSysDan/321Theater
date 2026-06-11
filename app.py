@@ -15479,6 +15479,203 @@ def show_post_invoice(show_id):
     return resp
 
 
+# ─── Combined Multi-Show Invoice ─────────────────────────────────────────────
+# One client, several events (e.g. a mainstage show plus an after-party in
+# another venue, spread over multiple days) → ONE invoice covering labor,
+# internal assets/gear, and external rentals, with every attached 3rd-party
+# rental PDF appended. Available to every logged-in user; document viewers
+# are bounced by _viewer_gate before they get here.
+
+MAX_COMBINED_INVOICE_SHOWS = 25
+
+
+def _parse_show_ids_param(raw):
+    """Parse a comma-separated id list ('12,34') into unique positive ints,
+    preserving order. Returns [] for empty input, None for garbage."""
+    ids, seen = [], set()
+    for part in (raw or '').split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            sid = int(part)
+        except ValueError:
+            return None
+        if sid <= 0:
+            return None
+        if sid not in seen:
+            seen.add(sid)
+            ids.append(sid)
+    return ids
+
+
+@app.route('/combined-invoice')
+@login_required
+def combined_invoice_page():
+    """Builder page: search every show (active and archived — invoicing
+    usually happens after the run) and pick the ones to bill together."""
+    auto_archive_past_shows()
+    db = get_db()
+    eff_date = """COALESCE(s.show_date,
+        (SELECT MIN(perf_date) FROM show_performances
+         WHERE show_id=s.id AND perf_date IS NOT NULL))"""
+    rows = db.execute(f"""
+        SELECT s.id, s.name, s.venue, s.is_test,
+               COALESCE(s.status, 'active') AS status,
+               {eff_date} AS first_date,
+               (SELECT MAX(perf_date) FROM show_performances
+                 WHERE show_id=s.id AND perf_date IS NOT NULL) AS last_perf,
+               (SELECT field_value FROM advance_data
+                 WHERE show_id=s.id AND field_key='performance_company') AS company
+        FROM shows s
+        ORDER BY {eff_date} DESC NULLS LAST, s.name
+    """).fetchall()
+    db.close()
+
+    shows = []
+    for r in rows:
+        d = dict(r)
+        for k in ('first_date', 'last_perf'):
+            dv = _as_date(d.get(k))
+            d[k] = dv.isoformat() if dv else ''
+        d['company'] = d.get('company') or ''
+        shows.append(d)
+
+    preselect = _parse_show_ids_param(request.args.get('preselect', '')) or []
+    return render_template('combined_invoice.html',
+                           shows=shows,
+                           preselect=preselect,
+                           max_shows=MAX_COMBINED_INVOICE_SHOWS,
+                           user=get_current_user())
+
+
+@app.route('/combined-invoice.pdf')
+@login_required
+def combined_invoice_pdf():
+    """ONE PDF for several shows: a per-show breakdown of internal assets
+    (gear), external rentals, and actual labor, with per-show totals plus a
+    combined grand total — then every attached 3rd-party rental PDF,
+    watermarked with the show it belongs to."""
+    ids = _parse_show_ids_param(request.args.get('shows', ''))
+    if ids is None:
+        return 'Invalid show list.', 400
+    if not ids:
+        return 'Pick at least one show.', 400
+    if len(ids) > MAX_COMBINED_INVOICE_SHOWS:
+        return f'Too many shows — the limit is {MAX_COMBINED_INVOICE_SHOWS}.', 400
+    for sid in ids:
+        if not can_access_show(session['user_id'], sid):
+            abort(403)
+
+    db = get_db()
+    placeholders = ','.join('?' * len(ids))
+    rows = db.execute(f'SELECT * FROM shows WHERE id IN ({placeholders})',
+                      tuple(ids)).fetchall()
+    by_id = {r['id']: dict(r) for r in rows}
+    missing = [str(sid) for sid in ids if sid not in by_id]
+    if missing:
+        db.close()
+        return 'Show(s) not found: ' + ', '.join(missing), 404
+
+    sections = []
+    for sid in ids:
+        show = by_id[sid]
+        assets_list, ext_list, assets_subtotal, external_subtotal = \
+            _fetch_show_assets_and_externals(db, sid)
+        # Same auto-snapshot the single-show Final Invoice does, so labor is
+        # billed from actuals even if the Post-Show tab was never opened.
+        _ensure_post_show_labor(db, sid)
+        labor_lines, labor_total = _calc_post_show_labor_cost(db, sid)
+
+        perf = db.execute(
+            'SELECT MIN(perf_date) AS first_perf, MAX(perf_date) AS last_perf '
+            'FROM show_performances WHERE show_id=? AND perf_date IS NOT NULL',
+            (sid,)).fetchone()
+        eff_first = _as_date(show.get('show_date')) or _as_date(perf['first_perf'])
+        eff_last = _as_date(perf['last_perf'])
+        date_label = eff_first.isoformat() if eff_first else ''
+        if eff_first and eff_last and eff_last > eff_first:
+            date_label += f' – {eff_last.isoformat()}'
+
+        sections.append({
+            'show': show,
+            'performance_company': _show_performance_company(db, sid),
+            'date_label': date_label,
+            'sort_date': eff_first,
+            'last_date': eff_last or eff_first,
+            'assets': assets_list,
+            'external_rentals': ext_list,
+            'labor_lines': labor_lines,
+            'assets_subtotal': assets_subtotal,
+            'external_subtotal': external_subtotal,
+            'labor_total': labor_total,
+            'show_total': round(assets_subtotal + external_subtotal + labor_total, 2),
+        })
+
+    # Chronological on the invoice no matter the selection order.
+    sections.sort(key=lambda sec: (sec['sort_date'] or date.max,
+                                   sec['show'].get('name') or ''))
+
+    # 3rd-party rental PDFs, appended in invoice order and grouped per show
+    # so each group's watermark says which show it belongs to.
+    attachment_groups = []
+    for sec in sections:
+        pdfs = _fetch_external_rental_pdfs(db, sec['show']['id'])
+        if pdfs:
+            attachment_groups.append((sec['show'].get('name') or '', pdfs))
+    db.close()
+
+    combined_assets = round(sum(sec['assets_subtotal'] for sec in sections), 2)
+    combined_external = round(sum(sec['external_subtotal'] for sec in sections), 2)
+    combined_labor = round(sum(sec['labor_total'] for sec in sections), 2)
+    grand_total = round(combined_assets + combined_external + combined_labor, 2)
+
+    companies = []
+    for sec in sections:
+        c = (sec['performance_company'] or '').strip()
+        if c and c not in companies:
+            companies.append(c)
+
+    firsts = [sec['sort_date'] for sec in sections if sec['sort_date']]
+    lasts = [sec['last_date'] for sec in sections if sec['last_date']]
+    date_span = ''
+    if firsts:
+        date_span = min(firsts).isoformat()
+        if lasts and max(lasts) > min(firsts):
+            date_span += f' – {max(lasts).isoformat()}'
+
+    html_str = render_template(
+        'pdf/combined_invoice_pdf.html',
+        sections=sections,
+        companies=companies,
+        date_span=date_span,
+        combined_assets=combined_assets,
+        combined_external=combined_external,
+        combined_labor=combined_labor,
+        grand_total=grand_total,
+        generated_date=date.today().isoformat(),
+    )
+
+    try:
+        from weasyprint import HTML as WP_HTML
+        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+    except Exception as e:
+        app.logger.error(f'WeasyPrint combined-invoice error: {e}')
+        return f'PDF generation failed: {e}', 500
+
+    for show_name, pdfs in attachment_groups:
+        pdf_bytes = _merge_pdfs(
+            pdf_bytes, pdfs,
+            extras_watermark=f'3rd-party rental attachment — {show_name}')
+
+    base = secure_filename(companies[0]) if len(companies) == 1 else ''
+    fname = f'{base or "combined"}_invoice_{date.today().isoformat()}.pdf'
+    resp = make_response(pdf_bytes)
+    resp.headers['Content-Type'] = 'application/pdf'
+    resp.headers['Content-Disposition'] = _safe_content_disposition(fname)
+    return resp
+
+
 # ─── In-App Updates ───────────────────────────────────────────────────────────
 
 _update_state = {'running': False, 'log': [], 'phase': 'idle', 'error': None}
