@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+{% block title %}Combined Invoice — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Combined Invoice</h1>
+    <p class="page-sub">Bill several shows/events on one invoice — labor, gear &amp; assets, plus attached 3rd-party rentals</p>
+  </div>
+  <button id="generate-btn" class="btn btn-primary" onclick="generatePdf()" disabled>
+    Generate Combined Invoice
+  </button>
+</div>
+
+<div class="form-section">
+  <div class="form-section-header">
+    <span class="section-icon">◈</span> SELECTED SHOWS
+    <span class="ml-auto text-dim" id="sel-count" style="font-size:11px;letter-spacing:.05em"></span>
+  </div>
+  <div class="form-section-body" style="gap:10px">
+    <p class="text-dim" style="font-size:12px;margin:0">
+      Pick every show/event that belongs on this invoice — e.g. a mainstage performance in one venue
+      plus an after-party in another. The PDF shows each show's actual labor, internal assets &amp; gear,
+      and external costs with per-show totals and one combined grand total; any 3rd-party rental PDFs
+      are attached at the end. Shows appear on the invoice in date order.
+    </p>
+    <div id="sel-chips" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center"></div>
+  </div>
+</div>
+
+<div class="form-section">
+  <div class="form-section-header">
+    <span class="section-icon">◈</span> ALL SHOWS
+    <span class="section-count ml-auto text-dim" id="shows-count"></span>
+  </div>
+  <div class="form-section-body no-pad">
+    <div class="table-toolbar">
+      <input type="text" id="show-search" class="field-input field-input-sm"
+             placeholder="Search by name, company, venue, or year…" oninput="filterShows()"
+             autocomplete="off" style="max-width:300px">
+      <select id="venue-filter" class="field-input field-input-sm" onchange="filterShows()" style="max-width:180px">
+        <option value="">All venues</option>
+        {% for v in shows|map(attribute='venue')|select|unique|sort %}
+        <option value="{{ v }}">{{ v }}</option>
+        {% endfor %}
+      </select>
+      <select id="status-filter" class="field-input field-input-sm" onchange="filterShows()" style="max-width:150px">
+        <option value="">All statuses</option>
+        <option value="active">Active</option>
+        <option value="archived">Archived</option>
+      </select>
+      <button class="btn btn-sm btn-ghost" type="button" id="clear-btn" onclick="clearSelection()"
+              style="margin-left:auto" disabled>Clear selection</button>
+    </div>
+    <table class="data-table" id="shows-table">
+      <thead>
+        <tr>
+          <th style="width:34px"></th>
+          <th>Show</th>
+          <th>Company / Client</th>
+          <th>Venue</th>
+          <th>Date(s)</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in shows %}
+        <tr data-id="{{ s.id }}"
+            data-search="{{ (s.name ~ ' ' ~ (s.company or '') ~ ' ' ~ (s.venue or '') ~ ' ' ~ (s.first_date or ''))|lower }}"
+            data-status="{{ s.status }}" data-venue="{{ s.venue or '' }}"
+            style="cursor:pointer" onclick="rowClick(this)">
+          <td style="text-align:center">
+            <input type="checkbox" class="show-check" value="{{ s.id }}"
+                   data-name="{{ s.name }}" data-venue="{{ s.venue or '' }}" data-date="{{ s.first_date or '' }}"
+                   onchange="onCheck(this)" onclick="event.stopPropagation()"
+                   style="accent-color:var(--accent);width:15px;height:15px;cursor:pointer">
+          </td>
+          <td>
+            <span style="font-weight:500">{{ s.name }}</span>
+            {% if s.is_test %}
+            <span style="font-size:9px;background:rgba(125,75,175,.25);color:#c9a6ec;padding:1px 5px;border-radius:3px;letter-spacing:.05em;margin-left:4px;vertical-align:middle"
+                  title="Test/demo show — excluded from reports">TEST</span>
+            {% endif %}
+          </td>
+          <td class="text-dim">{{ s.company or '—' }}</td>
+          <td class="text-dim">{{ s.venue or '—' }}</td>
+          <td class="text-dim" style="white-space:nowrap">
+            {{ s.first_date or '—' }}{% if s.last_perf and s.last_perf != s.first_date %} → {{ s.last_perf }}{% endif %}
+          </td>
+          <td>
+            {% if s.status == 'archived' %}
+            <span style="font-size:10px;background:rgba(239,68,68,.12);color:var(--red);padding:2px 7px;border-radius:3px;letter-spacing:.06em">ARCHIVED</span>
+            {% else %}
+            <span style="font-size:10px;background:rgba(34,197,94,.12);color:var(--green);padding:2px 7px;border-radius:3px;letter-spacing:.06em">ACTIVE</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if not shows %}
+    <p class="text-dim" style="padding:16px">No shows yet.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const MAX_SHOWS = {{ max_shows }};
+const PDF_URL = "{{ url_for('combined_invoice_pdf') }}";
+const selected = new Map();   // id -> {name, venue, date}
+
+function rowClick(tr) {
+  const cb = tr.querySelector('.show-check');
+  cb.checked = !cb.checked;
+  onCheck(cb);
+}
+
+function onCheck(cb) {
+  const id = parseInt(cb.value, 10);
+  if (cb.checked) {
+    if (selected.size >= MAX_SHOWS) {
+      cb.checked = false;
+      alert('A combined invoice can include at most ' + MAX_SHOWS + ' shows.');
+      return;
+    }
+    selected.set(id, {name: cb.dataset.name, venue: cb.dataset.venue, date: cb.dataset.date});
+  } else {
+    selected.delete(id);
+  }
+  renderSelection();
+}
+
+function removeShow(id) {
+  selected.delete(id);
+  const cb = document.querySelector('.show-check[value="' + id + '"]');
+  if (cb) cb.checked = false;
+  renderSelection();
+}
+
+function clearSelection() {
+  selected.clear();
+  document.querySelectorAll('.show-check:checked').forEach(cb => { cb.checked = false; });
+  renderSelection();
+}
+
+function renderSelection() {
+  const wrap = document.getElementById('sel-chips');
+  wrap.innerHTML = '';
+  if (!selected.size) {
+    const hint = document.createElement('span');
+    hint.className = 'text-dim';
+    hint.style.fontSize = '12px';
+    hint.textContent = 'Nothing selected yet — tick shows in the list below.';
+    wrap.appendChild(hint);
+  } else {
+    selected.forEach((s, id) => {
+      const chip = document.createElement('span');
+      chip.style.cssText = 'display:inline-flex;align-items:center;gap:7px;background:var(--bg-hover);border:1px solid var(--border-light);border-radius:14px;padding:4px 6px 4px 11px;font-size:12px';
+      const label = document.createElement('span');
+      label.textContent = s.name + (s.date ? ' · ' + s.date : '') + (s.venue ? ' · ' + s.venue : '');
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.textContent = '×';
+      x.title = 'Remove from invoice';
+      x.style.cssText = 'border:none;background:transparent;color:var(--text-dim);cursor:pointer;font-size:14px;line-height:1;padding:0 4px';
+      x.onclick = () => removeShow(id);
+      chip.appendChild(label);
+      chip.appendChild(x);
+      wrap.appendChild(chip);
+    });
+  }
+  document.getElementById('sel-count').textContent = selected.size ? (selected.size + ' selected') : '';
+  document.getElementById('generate-btn').disabled = !selected.size;
+  document.getElementById('clear-btn').disabled = !selected.size;
+  document.querySelectorAll('#shows-table tbody tr').forEach(tr => {
+    tr.style.background = selected.has(parseInt(tr.dataset.id, 10)) ? 'var(--accent-glow)' : '';
+  });
+}
+
+function generatePdf() {
+  if (!selected.size) return;
+  const ids = Array.from(selected.keys()).join(',');
+  window.open(PDF_URL + '?shows=' + ids, '_blank');
+}
+
+function filterShows() {
+  const q  = document.getElementById('show-search').value.trim().toLowerCase();
+  const st = document.getElementById('status-filter').value;
+  const vn = document.getElementById('venue-filter').value;
+  let visible = 0;
+  document.querySelectorAll('#shows-table tbody tr').forEach(tr => {
+    const match = (!q || tr.dataset.search.includes(q))
+               && (!st || tr.dataset.status === st)
+               && (!vn || tr.dataset.venue === vn);
+    tr.style.display = match ? '' : 'none';
+    if (match) visible++;
+  });
+  document.getElementById('shows-count').textContent = visible + ' shown';
+}
+
+// Pre-tick shows passed via ?preselect= (e.g. from a show's Post-Show tab).
+{{ preselect|tojson }}.forEach(id => {
+  const cb = document.querySelector('.show-check[value="' + id + '"]');
+  if (cb && !cb.checked) { cb.checked = true; onCheck(cb); }
+});
+renderSelection();
+filterShows();
+</script>
+{% endblock %}

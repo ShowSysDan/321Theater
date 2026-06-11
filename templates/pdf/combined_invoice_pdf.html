@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; border-bottom: 2px solid #F57F20; padding-bottom: 14px; }
+  .org-name { font-size: 18px; font-weight: 700; color: #194980; letter-spacing: 0.04em; }
+  .org-sub  { font-size: 9px; color: #888; letter-spacing: 0.08em; text-transform: uppercase; margin-top: 3px; }
+  .doc-title { text-align: right; }
+  .doc-title h1 { font-size: 22px; font-weight: 700; color: #F57F20; margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 0.06em; }
+  .doc-title .doc-date { font-size: 10px; color: #888; }
+  .show-block { background: #f8f8f8; border-left: 3px solid #F57F20; padding: 10px 14px; margin-bottom: 20px; }
+  .show-name { font-size: 15px; font-weight: 700; color: #194980; }
+  .show-meta { font-size: 10px; color: #666; margin-top: 4px; display: flex; gap: 20px; flex-wrap: wrap; }
+  .section-title { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #888; border-bottom: 1px solid #e0e0e0; padding-bottom: 4px; margin: 20px 0 8px 0; }
+  table { width: 100%; border-collapse: collapse; }
+  th { font-size: 9px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: #666; padding: 5px 8px; border-bottom: 1px solid #ddd; text-align: left; }
+  td { padding: 6px 8px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .text-dim { color: #888; font-size: 10px; }
+  .total-row td { font-weight: 700; border-top: 2px solid #ddd; border-bottom: none; padding-top: 8px; }
+  .grand-total { background: #194980; color: #fff; padding: 12px 16px; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
+  .grand-total-label { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+  .grand-total-amount { font-size: 20px; font-weight: 700; }
+  .show-total { background: #eef2f7; color: #194980; padding: 9px 14px; margin-top: 16px; display: flex; justify-content: space-between; align-items: center; border-left: 3px solid #194980; }
+  .show-total-label { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+  .show-total-amount { font-size: 15px; font-weight: 700; }
+  .footer { margin-top: 24px; border-top: 1px solid #e0e0e0; padding-top: 10px; font-size: 9px; color: #aaa; text-align: center; }
+  .badge { display: inline-block; background: #f0f0f0; color: #555; font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 600; letter-spacing: 0.05em; }
+  .empty-note { color: #999; font-size: 10px; font-style: italic; margin: 6px 0 0 0; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <div class="org-name">3·2·1→THEATER</div>
+    <div class="org-sub">Combined Invoice — {{ sections|length }} show{{ 's' if sections|length != 1 }}</div>
+  </div>
+  <div class="doc-title">
+    <h1>Combined Invoice</h1>
+    <div class="doc-date">Generated {{ generated_date }}</div>
+  </div>
+</div>
+
+<div class="show-block">
+  <div class="show-name">{{ companies|join(' · ') if companies else 'Combined Invoice' }}</div>
+  <div class="show-meta">
+    <span><strong>Shows / Events:</strong> {{ sections|length }}</span>
+    {% if date_span %}<span><strong>Dates:</strong> {{ date_span }}</span>{% endif %}
+    {% set venues = sections|map(attribute='show.venue')|select|unique|list %}
+    {% if venues %}<span><strong>Venues:</strong> {{ venues|join(', ') }}</span>{% endif %}
+  </div>
+</div>
+
+<div class="section-title">Summary by Show</div>
+<table>
+  <thead>
+    <tr>
+      <th>Show / Event</th>
+      <th>Date(s)</th>
+      <th>Venue</th>
+      <th class="num">Labor</th>
+      <th class="num">Assets</th>
+      <th class="num">External</th>
+      <th class="num">Total</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for sec in sections %}
+    <tr>
+      <td><strong>{{ sec.show.name }}</strong></td>
+      <td class="text-dim">{{ sec.date_label or '—' }}</td>
+      <td class="text-dim">{{ sec.show.venue or '—' }}</td>
+      <td class="num">${{ '%.2f' | format(sec.labor_total) }}</td>
+      <td class="num">${{ '%.2f' | format(sec.assets_subtotal) }}</td>
+      <td class="num">${{ '%.2f' | format(sec.external_subtotal) }}</td>
+      <td class="num"><strong>${{ '%.2f' | format(sec.show_total) }}</strong></td>
+    </tr>
+    {% endfor %}
+    <tr class="total-row">
+      <td colspan="3" class="num">Combined</td>
+      <td class="num">${{ '%.2f' | format(combined_labor) }}</td>
+      <td class="num">${{ '%.2f' | format(combined_assets) }}</td>
+      <td class="num">${{ '%.2f' | format(combined_external) }}</td>
+      <td class="num">${{ '%.2f' | format(grand_total) }}</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="grand-total">
+  <span class="grand-total-label">Combined Total</span>
+  <span class="grand-total-amount">${{ '%.2f' | format(grand_total) }}</span>
+</div>
+
+{% for sec in sections %}
+<div style="page-break-before: always"></div>
+
+<div class="show-block">
+  <div class="show-name">{{ sec.show.name }}</div>
+  <div class="show-meta">
+    <span><strong>Show {{ loop.index }} of {{ sections|length }}</strong></span>
+    {% if sec.date_label %}<span><strong>Date:</strong> {{ sec.date_label }}</span>{% endif %}
+    {% if sec.show.venue %}<span><strong>Venue:</strong> {{ sec.show.venue }}</span>{% endif %}
+    {% if sec.performance_company %}<span><strong>Company:</strong> {{ sec.performance_company }}</span>{% endif %}
+  </div>
+</div>
+
+{% if sec.assets %}
+<div class="section-title">Internal Assets</div>
+<table>
+  <thead>
+    <tr>
+      <th>Category</th>
+      <th>Item</th>
+      <th class="num">Qty</th>
+      <th>Rental Period</th>
+      <th class="num">Unit Price</th>
+      <th class="num">Line Total</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for a in sec.assets %}
+    <tr>
+      <td class="text-dim">{{ a.category_name }}</td>
+      <td>
+        <strong>{{ a.type_name }}</strong>
+        {% if a.model %}<br><span class="text-dim">{{ a.model }}</span>{% endif %}
+        {% if a.notes %}<br><span class="text-dim">{{ a.notes }}</span>{% endif %}
+      </td>
+      <td class="num">{{ a.quantity }}</td>
+      <td class="text-dim">
+        {% if a.rental_start %}{{ a.rental_start }}{% endif %}
+        {% if a.rental_start and a.rental_end and a.rental_start != a.rental_end %} – {{ a.rental_end }}{% endif %}
+      </td>
+      <td class="num">${{ '%.2f' | format(a.locked_price or 0) }}</td>
+      <td class="num">${{ '%.2f' | format((a.locked_price or 0) * a.quantity) }}</td>
+    </tr>
+    {% endfor %}
+    <tr class="total-row">
+      <td colspan="5" class="num">Asset Rental Subtotal</td>
+      <td class="num">${{ '%.2f' | format(sec.assets_subtotal) }}</td>
+    </tr>
+  </tbody>
+</table>
+{% endif %}
+
+{% if sec.external_rentals %}
+<div class="section-title">External Assets &amp; Costs</div>
+<table>
+  <thead>
+    <tr>
+      <th>Description</th>
+      <th class="num">Cost</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for er in sec.external_rentals %}
+    <tr>
+      <td>
+        {{ er.description }}
+        {% if er.pdf_filename %}<br><span class="text-dim badge">PDF attached: {{ er.pdf_filename }}</span>{% endif %}
+      </td>
+      <td class="num">${{ '%.2f' | format(er.cost or 0) }}</td>
+    </tr>
+    {% endfor %}
+    <tr class="total-row">
+      <td class="num">External Subtotal</td>
+      <td class="num">${{ '%.2f' | format(sec.external_subtotal) }}</td>
+    </tr>
+  </tbody>
+</table>
+{% endif %}
+
+{% if sec.labor_lines %}
+<div class="section-title">Actual Labor</div>
+<table>
+  <thead>
+    <tr>
+      <th>Date</th>
+      <th>Position</th>
+      <th class="num">In</th>
+      <th class="num">Out</th>
+      <th>Breaks</th>
+      <th class="num">Hours</th>
+      <th class="num">Rate</th>
+      <th class="num">Line Total</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for l in sec.labor_lines %}
+    {% if l.is_billable_extra %}
+    <tr>
+      <td class="text-dim">—</td>
+      <td>{{ l.position_name or '—' }} <span class="text-dim">(per crew)</span></td>
+      <td class="num text-dim">—</td>
+      <td class="num text-dim">—</td>
+      <td class="text-dim">{{ l.crew_count }} crew billed</td>
+      <td class="num">× {{ l.crew_count }}</td>
+      <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/crew</td>
+      <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
+    </tr>
+    {% else %}
+    <tr>
+      <td class="text-dim">{{ l.work_date or '—' }}</td>
+      <td>{{ l.position_name or '—' }}</td>
+      <td class="num text-dim">{{ l.in_time or '—' }}</td>
+      <td class="num text-dim">{{ l.out_time or '—' }}</td>
+      <td class="text-dim">{{ l.breaks or '—' }}</td>
+      <td class="num">{{ '%.2f' | format(l.hours) }}h</td>
+      <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/hr</td>
+      <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
+    </tr>
+    {% endif %}
+    {% endfor %}
+    <tr class="total-row">
+      <td colspan="7" class="num">Labor Subtotal</td>
+      <td class="num">${{ '%.2f' | format(sec.labor_total) }}</td>
+    </tr>
+  </tbody>
+</table>
+{% endif %}
+
+{% if not sec.assets and not sec.external_rentals and not sec.labor_lines %}
+<p class="empty-note">Nothing billed for this show yet — no assets, external costs, or labor recorded.</p>
+{% endif %}
+
+<div class="show-total">
+  <span class="show-total-label">{{ sec.show.name }} — Show Total</span>
+  <span class="show-total-amount">${{ '%.2f' | format(sec.show_total) }}</span>
+</div>
+{% endfor %}
+
+<div class="footer">
+  3·2·1→THEATER — Dr. Phillips Center for the Performing Arts &nbsp;·&nbsp; Combined invoice ({{ sections|length }} show{{ 's' if sections|length != 1 }}) &nbsp;·&nbsp; {{ generated_date }}
+</div>
+
+</body>
+</html>
