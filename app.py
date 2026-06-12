@@ -1187,8 +1187,9 @@ def is_restricted_user(user_id):
 
 
 def is_labor_scheduler(user_id):
-    """True if the user can access the Labor Scheduler page. The per-user
-    is_scheduler flag is checked separately (see _can_schedule_labor)."""
+    """True if the user's ROLE alone (admin/staff) grants the Labor Scheduler.
+    NOT the full access predicate: the per-user is_scheduler permission also
+    grants the page — use _can_schedule_labor for any access/visibility check."""
     db = get_db()
     user = db.execute('SELECT role FROM users WHERE id=?', (user_id,)).fetchone()
     db.close()
@@ -1330,7 +1331,11 @@ def _nav_audience_ok(audience):
         return (role == 'admin' or bool(session.get('is_content_admin'))
                 or bool(session.get('is_asset_manager')))
     if audience == 'labor_scheduler':
-        return bool(session.get('is_labor_scheduler'))
+        # Share the route guard's predicate (scheduler_required) so the nav
+        # link and page access can never disagree — is_labor_scheduler alone
+        # is role-derived (staff/admin) and misses the per-user is_scheduler
+        # permission, which left user-role schedulers with access but no link.
+        return _can_schedule_labor()
     return False
 
 
