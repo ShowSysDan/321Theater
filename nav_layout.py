@@ -33,7 +33,7 @@ AUDIENCE_LABELS = {
     'admin':           'Admins only',
     'content_admin':   'Admins & content admins',
     'asset_manager':   'Admins, content admins & asset managers',
-    'labor_scheduler': 'Labor schedulers (staff & admins)',
+    'labor_scheduler': 'Labor schedulers (staff, admins & users with the Scheduler permission)',
 }
 
 # `icon` is the inner markup of the nav <svg> (the wrapper with viewBox /
