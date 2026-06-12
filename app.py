@@ -472,7 +472,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.18.0'
+APP_VERSION = '2.18.1'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -8029,6 +8029,8 @@ def pdf_designer_preview(pdf_type):
 # Admin-only editor for the main left nav: reorder items, group them under
 # section labels, indent, rename, and cosmetically hide. Same catalog/layout
 # split as the PDF designer; stored in app_settings under 'nav_layout'.
+# Not a nav item itself — reached from the Settings tab bar (like Prism Sync
+# and the PDF Designer) to keep the sidebar short.
 
 @app.route('/admin/navigation')
 @admin_required

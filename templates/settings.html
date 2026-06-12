@@ -21,6 +21,7 @@
   {% if user.role == 'admin' or is_content_admin %}
   <button class="tab-btn" onclick="switchSettingsTab('fields')">Form Fields</button>
   <button class="tab-btn" onclick="switchSettingsTab('arts-groups')">Arts Groups</button>
+  <a href="{{ url_for('pdf_designer_page') }}" class="tab-btn">PDF Designer</a>
   {% endif %}
   {% if user.role == 'admin' or is_content_admin or user.is_scheduler %}
   <button class="tab-btn" onclick="switchSettingsTab('positions')">Job Positions</button>
@@ -34,6 +35,8 @@
   <button class="tab-btn" onclick="switchSettingsTab('email')">Email</button>
   <a href="{{ url_for('audit_log_view') }}" class="tab-btn">Audit Log</a>
   <button class="tab-btn" onclick="switchSettingsTab('dashboards')">Dashboards</button>
+  <a href="{{ url_for('prism_page') }}" class="tab-btn">Prism Sync</a>
+  <a href="{{ url_for('nav_editor_page') }}" class="tab-btn">Sidebar Editor</a>
   {% endif %}
   <button class="tab-btn" onclick="switchSettingsTab('account')">My Account</button>
 </div>
