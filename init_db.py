@@ -2648,11 +2648,27 @@ CREATE TABLE IF NOT EXISTS form_sections (
 );
 
 CREATE TABLE IF NOT EXISTS arts_groups (
-    id         SERIAL PRIMARY KEY,
-    name       TEXT UNIQUE NOT NULL,
-    sort_order INTEGER DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id                    SERIAL PRIMARY KEY,
+    name                  TEXT UNIQUE NOT NULL,
+    sort_order            INTEGER DEFAULT 0,
+    primary_contact_name  TEXT DEFAULT '',
+    primary_contact_email TEXT DEFAULT '',
+    primary_contact_phone TEXT DEFAULT '',
+    notes                 TEXT DEFAULT '',
+    created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS arts_group_contacts (
+    id             SERIAL PRIMARY KEY,
+    arts_group_id  INTEGER NOT NULL REFERENCES arts_groups(id) ON DELETE CASCADE,
+    name           TEXT DEFAULT '',
+    email          TEXT DEFAULT '',
+    phone          TEXT DEFAULT '',
+    sort_order     INTEGER DEFAULT 0,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_agc_group ON arts_group_contacts(arts_group_id);
 
 CREATE TABLE IF NOT EXISTS form_fields (
     id SERIAL PRIMARY KEY,
@@ -3698,6 +3714,22 @@ def migrate_db_postgres():
                 sort_order INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''',
+            # Arts group contact & notes fields (added to PG_SCHEMA later —
+            # pre-existing PG tables need the columns backfilled here).
+            f"ALTER TABLE \"{app_schema}\".arts_groups ADD COLUMN IF NOT EXISTS primary_contact_name TEXT DEFAULT ''",
+            f"ALTER TABLE \"{app_schema}\".arts_groups ADD COLUMN IF NOT EXISTS primary_contact_email TEXT DEFAULT ''",
+            f"ALTER TABLE \"{app_schema}\".arts_groups ADD COLUMN IF NOT EXISTS primary_contact_phone TEXT DEFAULT ''",
+            f"ALTER TABLE \"{app_schema}\".arts_groups ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT ''",
+            f'''CREATE TABLE IF NOT EXISTS "{app_schema}".arts_group_contacts (
+                id             SERIAL PRIMARY KEY,
+                arts_group_id  INTEGER NOT NULL REFERENCES "{app_schema}".arts_groups(id) ON DELETE CASCADE,
+                name           TEXT DEFAULT '',
+                email          TEXT DEFAULT '',
+                phone          TEXT DEFAULT '',
+                sort_order     INTEGER DEFAULT 0,
+                created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''',
+            f'CREATE INDEX IF NOT EXISTS idx_agc_group ON "{app_schema}".arts_group_contacts(arts_group_id)',
             f'ALTER TABLE "{app_schema}".schedule_rows ADD COLUMN IF NOT EXISTS perf_id INTEGER DEFAULT NULL',
             f'ALTER TABLE "{app_schema}".schedule_rows ADD COLUMN IF NOT EXISTS day_date TEXT DEFAULT NULL',
             f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approved INTEGER DEFAULT 0',
@@ -3892,11 +3924,12 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
         # ── No dependencies ───────────────────────────────────────────────────
         'users', 'contacts', 'form_sections', 'schedule_templates',
         'app_settings', 'position_categories', 'warehouse_locations',
-        'asset_categories', 'site_messages', 'ai_sessions',
+        'asset_categories', 'site_messages', 'ai_sessions', 'arts_groups',
         # ── Depend on level above ─────────────────────────────────────────────
         'shows', 'form_fields', 'schedule_meta_fields',
         'job_positions', 'asset_types', 'site_message_dismissals',
         'user_pending_registration', 'password_reset_tokens',
+        'arts_group_contacts',
         # ── Depend on shows / asset_types ─────────────────────────────────────
         'advance_data', 'schedule_meta', 'post_show_notes', 'schedule_rows',
         'show_performances', 'form_history',
