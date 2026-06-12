@@ -1903,6 +1903,23 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
         {% if _postnotes_v > 0 %}<span class="version-badge">Current: v{{ _postnotes_v }}</span>{% endif %}
       </div>
     </div>
+
+    <!-- Final Invoice PDF -->
+    <div class="export-card">
+      <div class="export-card-header">
+        <div class="export-card-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="24" height="24"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+        </div>
+        <h3 class="export-card-title">Final Invoice PDF</h3>
+      </div>
+      <p class="export-card-desc">Final billing invoice: internal &amp; external assets, actual labor, and costs.</p>
+      <div class="export-card-foot">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <a href="{{ url_for('show_post_invoice', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Export PDF</a>
+          <a href="{{ url_for('combined_invoice_page', preselect=show.id) }}" class="btn btn-ghost btn-sm" title="Bill this show together with others (multi-venue / multi-day events) on one combined invoice">Combined Invoice…</a>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Export History -->
