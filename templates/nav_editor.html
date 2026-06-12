@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+{% block title %}Sidebar Editor — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Sidebar Editor</h1>
+    <p class="page-sub">Reorder the main navigation, group items under section labels, rename, indent, or hide them</p>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button class="btn btn-ghost" type="button" onclick="addSection()">+ Add Section</button>
+    <button class="btn btn-ghost" type="button" onclick="resetLayout()">Reset to Default</button>
+    <button class="btn btn-primary" type="button" id="save-btn" onclick="saveLayout()">Save</button>
+  </div>
+</div>
+
+<div class="form-section">
+  <div class="form-section-header">
+    <span class="section-icon">◈</span> NAVIGATION LAYOUT
+    <span class="ml-auto text-dim" style="font-size:11px">drag rows or use ↑ ↓ to reorder</span>
+  </div>
+  <div class="form-section-body" style="border-bottom:1px solid var(--border)">
+    <p class="text-dim" style="font-size:12px;margin:0">
+      This controls the sidebar below <strong>Home</strong> for every user. Section labels are just
+      visual group headers — add as many as you like. <strong>Who can see each item is fixed by its
+      role</strong> (shown on the right) and cannot be widened here; hiding an item is cosmetic and
+      never changes page permissions. A section label is automatically skipped for users who can't
+      see any of the items under it. Changes apply to everyone after you save.
+    </p>
+  </div>
+  <div class="form-section-body no-pad">
+    <div id="nav-rows"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+  .ne-row { display:flex; align-items:center; gap:10px; padding:8px 14px; border-bottom:1px solid var(--border); cursor:grab; }
+  .ne-row:last-child { border-bottom:none; }
+  .ne-row.dragging { opacity:.4; }
+  .ne-row.drop-above { box-shadow: inset 0 2px 0 var(--accent); }
+  .ne-row.drop-below { box-shadow: inset 0 -2px 0 var(--accent); }
+  .ne-row .ne-icon { display:flex; align-items:center; color:var(--text-dim); flex-shrink:0; width:18px; }
+  .ne-row.ne-section { background:var(--bg-hover); }
+  .ne-row.ne-indent .ne-icon { margin-left:22px; }
+  .ne-label-input { flex:0 1 240px; }
+  .ne-section .ne-label-input { text-transform:uppercase; letter-spacing:.08em; font-weight:600; }
+  .ne-default-name { font-size:11px; color:var(--text-dim); flex:0 0 150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ne-audience { font-size:10px; color:var(--text-muted); letter-spacing:.04em; flex:1; min-width:120px; }
+  .ne-check { display:flex; align-items:center; gap:5px; font-size:11px; color:var(--text-dim); white-space:nowrap; }
+  .ne-check input { accent-color:var(--accent); }
+  .ne-move { display:flex; gap:2px; }
+</style>
+<script>
+let entries = [];          // saved layout entries (sections + items)
+let catalog = {};          // key -> {label, icon, required, audience_label}
+
+async function loadLayout() {
+  const r = await fetch('{{ url_for('nav_editor_layout_get') }}');
+  const d = await r.json();
+  entries = d.layout.entries;
+  catalog = {};
+  d.catalog.forEach(c => { catalog[c.key] = c; });
+  render();
+}
+
+function render() {
+  const wrap = document.getElementById('nav-rows');
+  wrap.innerHTML = '';
+  entries.forEach((e, i) => wrap.appendChild(e.type === 'section' ? sectionRow(e, i) : itemRow(e, i)));
+  if (!entries.length) {
+    wrap.innerHTML = '<p class="text-dim" style="padding:16px">Nothing here — Reset to Default to restore the standard layout.</p>';
+  }
+}
+
+function baseRow(i, extraClass) {
+  const row = document.createElement('div');
+  row.className = 'ne-row' + (extraClass ? ' ' + extraClass : '');
+  row.draggable = true;
+  row.dataset.index = i;
+  row.addEventListener('dragstart', ev => { dragFrom = i; row.classList.add('dragging'); ev.dataTransfer.effectAllowed = 'move'; });
+  row.addEventListener('dragend', () => { dragFrom = null; render(); });
+  row.addEventListener('dragover', ev => {
+    ev.preventDefault();
+    const below = ev.offsetY > row.offsetHeight / 2;
+    row.classList.toggle('drop-above', !below);
+    row.classList.toggle('drop-below', below);
+  });
+  row.addEventListener('dragleave', () => row.classList.remove('drop-above', 'drop-below'));
+  row.addEventListener('drop', ev => {
+    ev.preventDefault();
+    if (dragFrom === null || dragFrom === i) return;
+    const below = ev.offsetY > row.offsetHeight / 2;
+    let to = i + (below ? 1 : 0);
+    const [moved] = entries.splice(dragFrom, 1);
+    if (dragFrom < to) to--;
+    entries.splice(to, 0, moved);
+    dragFrom = null;
+    render();
+  });
+  return row;
+}
+let dragFrom = null;
+
+function moveButtons(i) {
+  const box = document.createElement('div');
+  box.className = 'ne-move';
+  const up = document.createElement('button');
+  up.className = 'btn btn-xs btn-ghost'; up.type = 'button'; up.textContent = '↑';
+  up.disabled = i === 0;
+  up.onclick = () => { [entries[i-1], entries[i]] = [entries[i], entries[i-1]]; render(); };
+  const dn = document.createElement('button');
+  dn.className = 'btn btn-xs btn-ghost'; dn.type = 'button'; dn.textContent = '↓';
+  dn.disabled = i === entries.length - 1;
+  dn.onclick = () => { [entries[i+1], entries[i]] = [entries[i], entries[i+1]]; render(); };
+  box.appendChild(up); box.appendChild(dn);
+  return box;
+}
+
+function sectionRow(e, i) {
+  const row = baseRow(i, 'ne-section');
+  const icon = document.createElement('span');
+  icon.className = 'ne-icon';
+  icon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="15" height="15"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="14" y2="15"/></svg>';
+  row.appendChild(icon);
+
+  const input = document.createElement('input');
+  input.className = 'field-input field-input-sm ne-label-input';
+  input.maxLength = 40;
+  input.value = e.label;
+  input.placeholder = 'SECTION LABEL';
+  input.oninput = () => { e.label = input.value; };
+  row.appendChild(input);
+
+  const tag = document.createElement('span');
+  tag.className = 'ne-audience';
+  tag.textContent = 'Section label — shown only when a visible item follows it';
+  row.appendChild(tag);
+
+  const del = document.createElement('button');
+  del.className = 'btn btn-xs btn-danger-ghost'; del.type = 'button'; del.textContent = '✕';
+  del.title = 'Remove this section label (items below it join the previous group)';
+  del.onclick = () => { entries.splice(i, 1); render(); };
+  row.appendChild(del);
+  row.appendChild(moveButtons(i));
+  return row;
+}
+
+function itemRow(e, i) {
+  const c = catalog[e.key] || {label: e.key, icon: '', required: false, audience_label: ''};
+  const row = baseRow(i, e.indent ? 'ne-indent' : '');
+
+  const icon = document.createElement('span');
+  icon.className = 'ne-icon';
+  icon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16">' + c.icon + '</svg>';
+  row.appendChild(icon);
+
+  const input = document.createElement('input');
+  input.className = 'field-input field-input-sm ne-label-input';
+  input.maxLength = 40;
+  input.value = e.label;
+  input.placeholder = c.label;
+  input.title = 'Custom label — leave blank to use the default';
+  input.oninput = () => { e.label = input.value; };
+  row.appendChild(input);
+
+  const def = document.createElement('span');
+  def.className = 'ne-default-name';
+  def.textContent = c.label + (c.required ? ' · required' : '');
+  row.appendChild(def);
+
+  const aud = document.createElement('span');
+  aud.className = 'ne-audience';
+  aud.textContent = 'Visible to: ' + c.audience_label;
+  row.appendChild(aud);
+
+  const indent = document.createElement('label');
+  indent.className = 'ne-check';
+  const icb = document.createElement('input');
+  icb.type = 'checkbox'; icb.checked = !!e.indent;
+  icb.onchange = () => { e.indent = icb.checked; render(); };
+  indent.appendChild(icb); indent.appendChild(document.createTextNode('Indent'));
+  row.appendChild(indent);
+
+  const hide = document.createElement('label');
+  hide.className = 'ne-check';
+  const hcb = document.createElement('input');
+  hcb.type = 'checkbox'; hcb.checked = !!e.hidden; hcb.disabled = !!c.required;
+  hide.title = c.required ? 'This item can never be hidden' : 'Hide from the sidebar (cosmetic only — page permissions are unchanged)';
+  hcb.onchange = () => { e.hidden = hcb.checked; };
+  hide.appendChild(hcb); hide.appendChild(document.createTextNode('Hide'));
+  row.appendChild(hide);
+
+  row.appendChild(moveButtons(i));
+  return row;
+}
+
+function addSection() {
+  entries.push({type: 'section', label: 'NEW SECTION'});
+  render();
+  const inputs = document.querySelectorAll('#nav-rows .ne-section .ne-label-input');
+  const last = inputs[inputs.length - 1];
+  if (last) { last.focus(); last.select(); }
+}
+
+async function saveLayout() {
+  const btn = document.getElementById('save-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const r = await fetch('{{ url_for('nav_editor_layout_save') }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({version: 1, entries: entries}),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.success) throw new Error(d.error || 'Save failed');
+    location.reload();   // sidebar re-renders with the new layout
+  } catch (err) {
+    alert('Could not save: ' + err.message);
+    btn.disabled = false; btn.textContent = 'Save';
+  }
+}
+
+async function resetLayout() {
+  if (!confirm('Reset the sidebar to the default layout for everyone?')) return;
+  const r = await fetch('{{ url_for('nav_editor_layout_reset') }}', {method: 'POST'});
+  const d = await r.json();
+  if (!r.ok || !d.success) { alert('Reset failed'); return; }
+  location.reload();
+}
+
+loadLayout();
+</script>
+{% endblock %}

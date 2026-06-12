@@ -53,6 +53,7 @@ import db_adapter
 from db_adapter import DBIntegrityError
 import s3_storage
 import pdf_layouts
+import nav_layout
 import prism_module  # sandboxed Prism FM integration — wired up near the bottom
 
 from flask import (Flask, render_template, request, redirect, url_for,
@@ -1305,6 +1306,57 @@ def _viewer_gate():
     if request.is_json or request.path.startswith('/api/'):
         return jsonify({'error': 'Document viewers are restricted to /viewer.'}), 403
     return redirect(url_for('viewer_home'))
+
+
+# ─── Sidebar Navigation (admin-customizable) ─────────────────────────────────
+# The main left-nav below Home is data-driven: nav_layout.py holds the catalog
+# (items, endpoints, icons, audiences) and the admin-saved layout JSON lives
+# in app_settings under 'nav_layout' (Settings → Sidebar Editor). Audience
+# checks stay in code — the editor can reorder/group/rename/hide but never
+# widen who sees an item, and nav visibility never substitutes for the
+# permission decorator on the route itself.
+
+def _nav_audience_ok(audience):
+    """Session-aware visibility predicate for nav_layout audiences. Mirrors
+    the role checks the hardcoded sidebar used before it was data-driven."""
+    role = session.get('user_role')
+    if audience == 'all':
+        return True
+    if audience == 'admin':
+        return role == 'admin'
+    if audience == 'content_admin':
+        return role == 'admin' or bool(session.get('is_content_admin'))
+    if audience == 'asset_manager':
+        return (role == 'admin' or bool(session.get('is_content_admin'))
+                or bool(session.get('is_asset_manager')))
+    if audience == 'labor_scheduler':
+        return bool(session.get('is_labor_scheduler'))
+    return False
+
+
+def get_nav_entries():
+    """Render-ready sidebar entries for the current request, or [] for
+    anonymous users / document viewers / non-request renders (background
+    jobs render PDF templates too — they get no sidebar)."""
+    if not has_request_context() or 'user_id' not in session \
+            or session.get('is_document_viewer'):
+        return []
+    endpoint = request.endpoint or ''
+    try:
+        layout = nav_layout.parse_or_default(get_app_setting(nav_layout.NAV_SETTING_KEY, ''))
+        return nav_layout.resolve(layout, _nav_audience_ok, endpoint)
+    except Exception as e:
+        app.logger.warning(f'nav layout resolve failed, using defaults: {e}')
+        try:
+            return nav_layout.resolve(nav_layout.default_layout(),
+                                      _nav_audience_ok, endpoint)
+        except Exception:
+            return []
+
+
+@app.context_processor
+def _inject_nav_entries():
+    return {'nav_entries': get_nav_entries()}
 
 
 # ─── Form Fields Helper ───────────────────────────────────────────────────────
@@ -7966,6 +8018,64 @@ def pdf_designer_preview(pdf_type):
     resp.headers['Content-Disposition'] = f'inline; filename="{pdf_type}_preview.pdf"'
     resp.headers['Cache-Control'] = 'no-store'
     return resp
+
+
+# ─── Sidebar (Navigation) Editor ──────────────────────────────────────────────
+# Admin-only editor for the main left nav: reorder items, group them under
+# section labels, indent, rename, and cosmetically hide. Same catalog/layout
+# split as the PDF designer; stored in app_settings under 'nav_layout'.
+
+@app.route('/admin/navigation')
+@admin_required
+def nav_editor_page():
+    return render_template('nav_editor.html', user=get_current_user())
+
+
+@app.route('/admin/navigation/layout.json', methods=['GET'])
+@admin_required
+def nav_editor_layout_get():
+    raw = get_app_setting(nav_layout.NAV_SETTING_KEY, '')
+    return jsonify({'layout': nav_layout.parse_or_default(raw),
+                    'catalog': nav_layout.catalog_for_editor()})
+
+
+@app.route('/admin/navigation/layout.json', methods=['POST'])
+@admin_required
+def nav_editor_layout_save():
+    payload = request.get_json(force=True, silent=True)
+    if payload is None:
+        return jsonify({'error': 'invalid JSON body'}), 400
+    cleaned, err = nav_layout.validate_payload(payload)
+    if err:
+        return jsonify({'error': err}), 400
+    db = get_db()
+    before_raw = get_app_setting(nav_layout.NAV_SETTING_KEY, '')
+    try:
+        before_obj = json.loads(before_raw) if before_raw else None
+    except Exception:
+        before_obj = None
+    db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)',
+               (nav_layout.NAV_SETTING_KEY, json.dumps(cleaned)))
+    log_audit_change(db, 'LAYOUT_EDIT', 'nav_layout', None,
+                     detail='sidebar', before=before_obj, after=cleaned)
+    db.commit(); db.close()
+    return jsonify({'success': True, 'layout': cleaned})
+
+
+@app.route('/admin/navigation/reset', methods=['POST'])
+@admin_required
+def nav_editor_layout_reset():
+    db = get_db()
+    before_raw = get_app_setting(nav_layout.NAV_SETTING_KEY, '')
+    try:
+        before_obj = json.loads(before_raw) if before_raw else None
+    except Exception:
+        before_obj = None
+    db.execute('DELETE FROM app_settings WHERE key=?', (nav_layout.NAV_SETTING_KEY,))
+    log_audit_change(db, 'LAYOUT_RESET', 'nav_layout', None,
+                     detail='sidebar', before=before_obj, after=None)
+    db.commit(); db.close()
+    return jsonify({'success': True, 'layout': nav_layout.default_layout()})
 
 
 @app.route('/api/form-fields')
