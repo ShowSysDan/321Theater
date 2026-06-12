@@ -37,7 +37,10 @@ placeholders → `%s`, `INSERT OR REPLACE/IGNORE` → `ON CONFLICT …`, and
 `datetime('now', …)` → `NOW() ± INTERVAL`. New `INSERT OR REPLACE` targets need
 their conflict columns added to `_CONFLICT_COLS`. PostgreSQL returns `date`/
 `datetime` objects where SQLite returns ISO strings — coerce with `_as_date()`
-(app.py) before doing date math.
+(app.py) before doing date math, and `json.dumps` row snapshots with
+`default=str` (a bare dumps raises on PG and, inside never-raise helpers like
+`log_audit`, the row silently vanishes — this dropped every snapshot-bearing
+EDIT/DELETE audit entry on PG until 2.18.0).
 
 Traps that only bite on PostgreSQL (each has caused a real 500):
 - **Literal `%` in SQL** (e.g. `LIKE 'prefix_%'`): bind the pattern as a
