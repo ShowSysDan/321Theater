@@ -7,7 +7,14 @@
     <h1 class="page-title">Sidebar Editor</h1>
     <p class="page-sub">Reorder the main navigation, group items under section labels, rename, indent, or hide them</p>
   </div>
-  <div style="display:flex;gap:8px">
+  <div style="display:flex;gap:8px;align-items:center">
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-dim)" title="How tightly the sidebar links pack together (applies to everyone)">
+      Spacing
+      <select id="density-select" class="field-input field-input-sm" style="width:auto" onchange="density = this.value">
+        <option value="compact">Compact</option>
+        <option value="comfortable">Comfortable</option>
+      </select>
+    </label>
     <button class="btn btn-ghost" type="button" onclick="addSection()">+ Add Section</button>
     <button class="btn btn-ghost" type="button" onclick="resetLayout()">Reset to Default</button>
     <button class="btn btn-primary" type="button" id="save-btn" onclick="saveLayout()">Save</button>
@@ -25,7 +32,8 @@
       visual group headers — add as many as you like. <strong>Who can see each item is fixed by its
       role</strong> (shown on the right) and cannot be widened here; hiding an item is cosmetic and
       never changes page permissions. A section label is automatically skipped for users who can't
-      see any of the items under it. Changes apply to everyone after you save.
+      see any of the items under it. <strong>Spacing</strong> (above) sets how tightly the
+      links pack together. Changes apply to everyone after you save.
     </p>
   </div>
   <div class="form-section-body no-pad">
@@ -55,11 +63,14 @@
 <script>
 let entries = [];          // saved layout entries (sections + items)
 let catalog = {};          // key -> {label, icon, required, audience_label}
+let density = 'compact';   // sidebar link spacing: compact | comfortable
 
 async function loadLayout() {
   const r = await fetch('{{ url_for('nav_editor_layout_get') }}');
   const d = await r.json();
   entries = d.layout.entries;
+  density = d.layout.density || 'compact';
+  document.getElementById('density-select').value = density;
   catalog = {};
   d.catalog.forEach(c => { catalog[c.key] = c; });
   render();
@@ -211,7 +222,7 @@ async function saveLayout() {
     const r = await fetch('{{ url_for('nav_editor_layout_save') }}', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({version: 1, entries: entries}),
+      body: JSON.stringify({version: 1, density: density, entries: entries}),
     });
     const d = await r.json();
     if (!r.ok || !d.success) throw new Error(d.error || 'Save failed');
