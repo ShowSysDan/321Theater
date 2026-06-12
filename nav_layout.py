@@ -35,7 +35,10 @@ AUDIENCE_LABELS = {
 # stroke attributes lives in base.html). `active` lists endpoints that light
 # the item up; `active_prefix` matches request.endpoint by prefix.
 # `required` items can be moved/renamed but never hidden (so nobody strands
-# themselves without Settings or the editor itself).
+# themselves without Settings).
+# NOTE: admin tools (Prism Sync, PDF Designer, Sidebar Editor) are deliberately
+# NOT nav items — they're reached from the Settings tab bar to keep the
+# sidebar short. Don't re-add them here without being asked.
 NAV_CATALOG = [
     {'key': 'dashboards', 'label': 'Dashboards', 'endpoint': 'dashboards_list',
      'active': ('dashboards_list', 'dashboard_view'), 'audience': 'all',
@@ -68,24 +71,15 @@ NAV_CATALOG = [
     {'key': 'assets_retired', 'label': 'Retired Archive', 'endpoint': 'assets_retired',
      'active': ('assets_retired',), 'audience': 'asset_manager',
      'icon': '<circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/>'},
-    {'key': 'prism', 'label': 'Prism Sync', 'endpoint': 'prism_page',
-     'active': ('prism_page',), 'audience': 'admin',
-     'icon': '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>'},
     {'key': 'settings', 'label': 'Settings', 'endpoint': 'settings',
      'active': ('settings',), 'audience': 'all', 'required': True,
      'icon': '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>'},
-    {'key': 'pdf_designer', 'label': 'PDF Designer', 'endpoint': 'pdf_designer_page',
-     'active': (), 'active_prefix': 'pdf_designer', 'audience': 'content_admin',
-     'icon': '<path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/>'},
-    {'key': 'nav_editor', 'label': 'Sidebar Editor', 'endpoint': 'nav_editor_page',
-     'active': ('nav_editor_page',), 'audience': 'admin', 'required': True,
-     'icon': '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="5" y1="8" x2="7" y2="8"/><line x1="5" y1="12" x2="7" y2="12"/><line x1="5" y1="16" x2="7" y2="16"/>'},
 ]
 
 _BY_KEY = {item['key']: item for item in NAV_CATALOG}
 
-# Default layout — reproduces the classic sidebar but grouped into sections,
-# with the invoice/designer/editor tools nested under Settings.
+# Default layout — the classic sidebar grouped into sections, with the
+# Combined Invoice tool nested under Settings.
 DEFAULT_ENTRIES = [
     {'type': 'section', 'label': 'SYSTEM'},
     {'type': 'item', 'key': 'dashboards', 'label': '', 'indent': False, 'hidden': False},
@@ -100,11 +94,8 @@ DEFAULT_ENTRIES = [
     {'type': 'item', 'key': 'asset_reports', 'label': '', 'indent': True, 'hidden': False},
     {'type': 'item', 'key': 'assets_retired', 'label': '', 'indent': True, 'hidden': False},
     {'type': 'section', 'label': 'SETTINGS'},
-    {'type': 'item', 'key': 'prism', 'label': '', 'indent': False, 'hidden': False},
     {'type': 'item', 'key': 'settings', 'label': '', 'indent': False, 'hidden': False},
     {'type': 'item', 'key': 'combined_invoice', 'label': '', 'indent': True, 'hidden': False},
-    {'type': 'item', 'key': 'pdf_designer', 'label': '', 'indent': True, 'hidden': False},
-    {'type': 'item', 'key': 'nav_editor', 'label': '', 'indent': True, 'hidden': False},
 ]
 
 
