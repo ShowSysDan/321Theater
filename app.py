@@ -471,7 +471,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.17.2'
+APP_VERSION = '2.18.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -2855,6 +2855,10 @@ def log_audit(db, action, entity_type, entity_id=None, show_id=None,
               before=None, after=None, detail=None):
     """Write one row to audit_log. Never raises — audit failure must not block normal flow."""
     try:
+        # default=str: on PostgreSQL, row snapshots contain datetime/date/
+        # Decimal objects (SQLite returns strings) — without it json.dumps
+        # raised and the silent except dropped every EDIT/DELETE audit row
+        # that carried a before/after snapshot.
         db.execute("""
             INSERT INTO audit_log
               (user_id, username, action, entity_type, entity_id,
@@ -2867,8 +2871,8 @@ def log_audit(db, action, entity_type, entity_id=None, show_id=None,
             entity_type,
             str(entity_id) if entity_id is not None else None,
             show_id,
-            json.dumps(before) if before is not None else None,
-            json.dumps(after)  if after  is not None else None,
+            json.dumps(before, default=str) if before is not None else None,
+            json.dumps(after, default=str)  if after  is not None else None,
             request.remote_addr,
             detail,
         ))
@@ -2897,6 +2901,7 @@ UNDO_TABLE_MAP = {
     'warehouse_location':     'warehouse_locations',
     'asset_category':         'asset_categories',
     'arts_group':             'arts_groups',
+    'arts_group_contact':     'arts_group_contacts',
     'asset_type':             'asset_types',
     'asset_item':             'asset_items',
     'show_asset':             'show_assets',
@@ -8713,13 +8718,17 @@ def venues_settings():
 @app.route('/settings/arts-groups', methods=['GET'])
 @login_required
 def arts_groups_list():
+    # try/finally on every arts-group route: get_db() opens a fresh
+    # connection per call, so an exception before close() leaks it.
     db = get_db()
-    rows = db.execute(
-        'SELECT id, name, sort_order, primary_contact_name, primary_contact_email, '
-        'primary_contact_phone, notes FROM arts_groups ORDER BY sort_order, name'
-    ).fetchall()
-    db.close()
-    return jsonify({'arts_groups': [dict(r) for r in rows]})
+    try:
+        rows = db.execute(
+            'SELECT id, name, sort_order, primary_contact_name, primary_contact_email, '
+            'primary_contact_phone, notes FROM arts_groups ORDER BY sort_order, name'
+        ).fetchall()
+        return jsonify({'arts_groups': [dict(r) for r in rows]})
+    finally:
+        db.close()
 
 
 @app.route('/settings/arts-groups/add', methods=['POST'])
@@ -8734,8 +8743,8 @@ def arts_groups_add():
     pc_phone = (data.get('primary_contact_phone') or '').strip()
     notes    = (data.get('notes') or '').strip()
     db = get_db()
-    max_order = db.execute('SELECT MAX(sort_order) FROM arts_groups').fetchone()[0] or 0
     try:
+        max_order = db.execute('SELECT MAX(sort_order) FROM arts_groups').fetchone()[0] or 0
         cur = db.execute(
             'INSERT INTO arts_groups (name, sort_order, primary_contact_name, '
             'primary_contact_email, primary_contact_phone, notes) VALUES (?,?,?,?,?,?)',
@@ -8758,20 +8767,21 @@ def arts_groups_add():
 @login_required
 def arts_groups_get(gid):
     db = get_db()
-    row = db.execute(
-        'SELECT id, name, sort_order, primary_contact_name, primary_contact_email, '
-        'primary_contact_phone, notes FROM arts_groups WHERE id=?', (gid,)
-    ).fetchone()
-    if not row:
+    try:
+        row = db.execute(
+            'SELECT id, name, sort_order, primary_contact_name, primary_contact_email, '
+            'primary_contact_phone, notes FROM arts_groups WHERE id=?', (gid,)
+        ).fetchone()
+        if not row:
+            return jsonify({'success': False, 'error': 'Not found.'}), 404
+        contacts = db.execute(
+            'SELECT id, name, email, phone, sort_order FROM arts_group_contacts '
+            'WHERE arts_group_id=? ORDER BY sort_order, id', (gid,)
+        ).fetchall()
+        return jsonify({'success': True, 'group': dict(row),
+                        'contacts': [dict(c) for c in contacts]})
+    finally:
         db.close()
-        return jsonify({'success': False, 'error': 'Not found.'}), 404
-    contacts = db.execute(
-        'SELECT id, name, email, phone, sort_order FROM arts_group_contacts '
-        'WHERE arts_group_id=? ORDER BY sort_order, id', (gid,)
-    ).fetchall()
-    db.close()
-    return jsonify({'success': True, 'group': dict(row),
-                    'contacts': [dict(c) for c in contacts]})
 
 
 @app.route('/settings/arts-groups/<int:gid>/edit', methods=['POST'])
@@ -8786,8 +8796,8 @@ def arts_groups_edit(gid):
     pc_phone = (data.get('primary_contact_phone') or '').strip()
     notes    = (data.get('notes') or '').strip()
     db = get_db()
-    before = _snapshot_row(db, 'arts_groups', gid)
     try:
+        before = _snapshot_row(db, 'arts_groups', gid)
         db.execute(
             'UPDATE arts_groups SET name=?, primary_contact_name=?, '
             'primary_contact_email=?, primary_contact_phone=?, notes=? WHERE id=?',
@@ -8809,61 +8819,84 @@ def arts_groups_edit(gid):
 @content_admin_required
 def arts_group_contact_add(gid):
     data = request.get_json(force=True) or {}
+    c_name = (data.get('name') or '').strip()
     db = get_db()
-    if not db.execute('SELECT id FROM arts_groups WHERE id=?', (gid,)).fetchone():
+    try:
+        if not db.execute('SELECT id FROM arts_groups WHERE id=?', (gid,)).fetchone():
+            return jsonify({'success': False, 'error': 'Group not found.'}), 404
+        max_order = db.execute(
+            'SELECT MAX(sort_order) FROM arts_group_contacts WHERE arts_group_id=?', (gid,)
+        ).fetchone()[0] or 0
+        cur = db.execute(
+            'INSERT INTO arts_group_contacts (arts_group_id, name, email, phone, sort_order) '
+            'VALUES (?,?,?,?,?)',
+            (gid, c_name,
+             (data.get('email') or '').strip(),
+             (data.get('phone') or '').strip(),
+             max_order + 10)
+        )
+        cid = cur.lastrowid
+        log_audit(db, 'ARTS_GROUP_CONTACT_ADD', 'arts_group_contact', cid, detail=c_name)
+        db.commit()
+        syslog_logger.info(f"ARTS_GROUP_CONTACT_ADD id={cid} group={gid} name={c_name!r} by={session.get('username')}")
+        return jsonify({'success': True, 'id': cid})
+    finally:
         db.close()
-        return jsonify({'success': False, 'error': 'Group not found.'}), 404
-    max_order = db.execute(
-        'SELECT MAX(sort_order) FROM arts_group_contacts WHERE arts_group_id=?', (gid,)
-    ).fetchone()[0] or 0
-    cur = db.execute(
-        'INSERT INTO arts_group_contacts (arts_group_id, name, email, phone, sort_order) '
-        'VALUES (?,?,?,?,?)',
-        (gid, (data.get('name') or '').strip(),
-         (data.get('email') or '').strip(),
-         (data.get('phone') or '').strip(),
-         max_order + 10)
-    )
-    cid = cur.lastrowid
-    db.commit(); db.close()
-    return jsonify({'success': True, 'id': cid})
 
 
 @app.route('/settings/arts-groups/<int:gid>/contacts/<int:cid>/edit', methods=['POST'])
 @content_admin_required
 def arts_group_contact_edit(gid, cid):
     data = request.get_json(force=True) or {}
+    c_name = (data.get('name') or '').strip()
     db = get_db()
-    db.execute(
-        'UPDATE arts_group_contacts SET name=?, email=?, phone=? WHERE id=? AND arts_group_id=?',
-        ((data.get('name') or '').strip(),
-         (data.get('email') or '').strip(),
-         (data.get('phone') or '').strip(),
-         cid, gid)
-    )
-    db.commit(); db.close()
-    return jsonify({'success': True})
+    try:
+        before = _snapshot_row(db, 'arts_group_contacts', cid)
+        db.execute(
+            'UPDATE arts_group_contacts SET name=?, email=?, phone=? WHERE id=? AND arts_group_id=?',
+            (c_name,
+             (data.get('email') or '').strip(),
+             (data.get('phone') or '').strip(),
+             cid, gid)
+        )
+        after = _snapshot_row(db, 'arts_group_contacts', cid)
+        log_audit(db, 'ARTS_GROUP_CONTACT_EDIT', 'arts_group_contact', cid, detail=c_name,
+                  before=before, after=after)
+        db.commit()
+        syslog_logger.info(f"ARTS_GROUP_CONTACT_EDIT id={cid} group={gid} name={c_name!r} by={session.get('username')}")
+        return jsonify({'success': True})
+    finally:
+        db.close()
 
 
 @app.route('/settings/arts-groups/<int:gid>/contacts/<int:cid>/delete', methods=['POST'])
 @content_admin_required
 def arts_group_contact_delete(gid, cid):
     db = get_db()
-    db.execute('DELETE FROM arts_group_contacts WHERE id=? AND arts_group_id=?', (cid, gid))
-    db.commit(); db.close()
-    return jsonify({'success': True})
+    try:
+        before = _snapshot_row(db, 'arts_group_contacts', cid)
+        log_audit(db, 'ARTS_GROUP_CONTACT_DELETE', 'arts_group_contact', cid, before=before)
+        db.execute('DELETE FROM arts_group_contacts WHERE id=? AND arts_group_id=?', (cid, gid))
+        db.commit()
+        syslog_logger.info(f"ARTS_GROUP_CONTACT_DELETE id={cid} group={gid} by={session.get('username')}")
+        return jsonify({'success': True})
+    finally:
+        db.close()
 
 
 @app.route('/settings/arts-groups/<int:gid>/delete', methods=['POST'])
 @content_admin_required
 def arts_groups_delete(gid):
     db = get_db()
-    before = _snapshot_row(db, 'arts_groups', gid)
-    log_audit(db, 'ARTS_GROUP_DELETE', 'arts_group', gid, before=before)
-    db.execute('DELETE FROM arts_groups WHERE id=?', (gid,))
-    db.commit(); db.close()
-    syslog_logger.info(f"ARTS_GROUP_DELETE id={gid} by={session.get('username')}")
-    return jsonify({'success': True})
+    try:
+        before = _snapshot_row(db, 'arts_groups', gid)
+        log_audit(db, 'ARTS_GROUP_DELETE', 'arts_group', gid, before=before)
+        db.execute('DELETE FROM arts_groups WHERE id=?', (gid,))
+        db.commit()
+        syslog_logger.info(f"ARTS_GROUP_DELETE id={gid} by={session.get('username')}")
+        return jsonify({'success': True})
+    finally:
+        db.close()
 
 
 @app.route('/settings/logo', methods=['POST'])
@@ -15427,23 +15460,24 @@ def show_post_invoice(show_id):
     if not can_access_show(session['user_id'], show_id):
         abort(403)
     db = get_db()
-    show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
-    if not show:
+    try:
+        show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
+        if not show:
+            abort(404)
+
+        assets_list, ext_list, assets_subtotal, external_subtotal = \
+            _fetch_show_assets_and_externals(db, show_id)
+        performance_company = _show_performance_company(db, show_id)
+
+        # Final Invoice bills ACTUAL labor recorded on the Post-Show tab
+        # (post_show_labor), not the schedule. Tech names are never exposed.
+        # Ensure scheduled labor has been auto-snapshotted (first-access pull) so
+        # the invoice is correct even if the Post-Show tab was never opened.
+        _ensure_post_show_labor(db, show_id)
+        labor_lines, labor_total = _calc_post_show_labor_cost(db, show_id)
+        er_pdfs = _fetch_external_rental_pdfs(db, show_id)
+    finally:
         db.close()
-        abort(404)
-
-    assets_list, ext_list, assets_subtotal, external_subtotal = \
-        _fetch_show_assets_and_externals(db, show_id)
-    performance_company = _show_performance_company(db, show_id)
-
-    # Final Invoice bills ACTUAL labor recorded on the Post-Show tab
-    # (post_show_labor), not the schedule. Tech names are never exposed.
-    # Ensure scheduled labor has been auto-snapshotted (first-access pull) so
-    # the invoice is correct even if the Post-Show tab was never opened.
-    _ensure_post_show_labor(db, show_id)
-    labor_lines, labor_total = _calc_post_show_labor_cost(db, show_id)
-    er_pdfs = _fetch_external_rental_pdfs(db, show_id)
-    db.close()
 
     grand_total = assets_subtotal + external_subtotal + labor_total
 

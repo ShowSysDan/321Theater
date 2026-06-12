@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `2.17.2`**
+**Current version: `2.18.0`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,7 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `2.18.0` — Final Invoice on Export & Files + arts-group PostgreSQL fixes: (1) **Final Invoice export card** — the show's Export & Files tab gains a Final Invoice PDF card (Export + Combined Invoice… link) so the post-show billing invoice is reachable from the same place as the other PDFs; the Post Show tab buttons are unchanged. (2) **Bug fix — Arts Groups settings 500'd on PostgreSQL**: adding a group returned "Internal server error" and opening the edit dialog showed "Failed to load group" because the contact/notes columns (`primary_contact_*`, `notes`) and the `arts_group_contacts` table had only ever been added to the SQLite schema/migrations — never to `PG_SCHEMA` or `migrate_db_postgres()` (syslog showed `UndefinedColumn: primary_contact_name`). Existing PG databases heal automatically on the next startup via idempotent `ADD COLUMN IF NOT EXISTS` backfills + table create; both arts tables are also now included in the SQLite→PostgreSQL data-copy order so a fresh migration no longer silently drops them. Verified against a real PostgreSQL 16 instance (reproduced the error, ran the migration twice, exercised every endpoint's SQL through db_adapter). (3) **Stability — connection-leak hardening**: every arts-group route and the Final Invoice generator now close their DB connection in `try/finally`; previously any exception (like the UndefinedColumn above) leaked a PostgreSQL connection per failed request until garbage collection. (4) **Syslog/audit coverage** — arts-group *contact* add/edit/delete now write `ARTS_GROUP_CONTACT_ADD/EDIT/DELETE` audit entries (with before/after snapshots, undo-capable) and syslog lines, matching the existing `ARTS_GROUP_*` actions. (5) **Latent bug fix — EDIT/DELETE audit rows silently dropped on PostgreSQL**: end-to-end testing revealed that any audit entry carrying a before/after row snapshot was never written on PG — snapshots contain `datetime` objects there (SQLite returns strings), `json.dumps` raised, and `log_audit`'s never-raise guard swallowed it, so every snapshot-bearing EDIT/DELETE audit entry (and its undo capability) was lost while plain ADD entries and syslog lines still appeared. `log_audit` now serialises with `default=str`, restoring audit/undo coverage for all entity types on PG. Both fixes verified end-to-end through the real Flask app against PostgreSQL 16 (startup self-heal, all endpoints, audit rows with snapshots, no connection growth across 150 requests including error paths) and smoke-tested on SQLite.
 - `2.17.2` — Labor Scheduler: Overhead & Project Crew sections are now interleaved with show sections in one top-to-bottom chronological list (previously all shows rendered first with overhead dumped at the bottom behind a banner). Each section sorts by its earliest labor date in the range (shows added via "add labor to existing show…" with no lines yet still surface at the top); same-date ties render shows before overhead. Overhead sections keep their identity inline via a purple **OH / PROJECT** badge and a distinct section icon in place of the old banner.
 - `2.17.1` — Bug fix: Document Viewer edit dialog opened with all saved venue/doc-type selections blank once a user had venues saved. `|tojson` emits double quotes, and the Edit button carried its `data-venues` / `data-doc-types` payloads inside double-quoted attributes — the browser truncated them at the first quote (`data-venues="["`) and the dialog's `JSON.parse` silently fell back to empty, so reopening showed nothing checked (and re-saving from that state would wipe the selections). Attributes are now single-quoted (same class of bug as the 2.16.1 Prism checkbox fix); also fixed the identical latent pattern on the Skill Tracker's `data-quals` attribute. Verified by HTML-parsing the rendered page: full JSON arrays now reach the browser intact.
 - `2.17.0` — Prism status tags on shows + optional auto-import: (1) **Status tag** — new `shows.prism_status` column; importing a Prism event stamps the show with its event status, shown as a colored tag (HOLD amber, CONFIRMED green, settlement states dim) on homepage show cards and today cards, and the sync keeps it current — when a hold is confirmed in Prism, the next sync flips the tag and reports "updated the Prism status tag on N show(s)". A one-time backfill fills the tag on shows imported before this release. This is the single sanctioned field the sync writes to a real show (documented in CLAUDE.md). (2) **Auto-import** — new opt-in `prism_auto_import_enabled` setting: each sync imports every future-dated NEW staged event as a 321T show exactly like a manual Import (hidden venues excluded — they arrive pre-ignored; name+date duplicates are auto-ignored instead of retried forever; capped at 200/run), attributed to `auto-import`. (3) Help panel, README guide section, and sync result messages updated to match.
@@ -83,6 +84,7 @@ Version history:
    - [Retired Assets](#retired-assets)
    - [Asset Reports](#asset-reports)
    - [Contacts](#contacts)
+   - [Arts Groups](#arts-groups)
    - [Users & Roles](#users--roles)
    - [View As (Role Preview)](#view-as-role-preview)
    - [Registration Approval](#registration-approval)
@@ -283,6 +285,7 @@ Show-specific comment thread with `@mention` autocomplete. Visible to all author
 | Export Advance → vN | Generates Advance Sheet PDF |
 | Export Schedule → vN | Generates Production Schedule PDF with timeline, contacts, WiFi QR code, and logo |
 | Export PDF (postnotes tab) | Generates Post-Show Notes PDF |
+| Final Invoice PDF | Generates the post-show billing invoice (internal & external assets + actual labor + costs); the Combined Invoice… link bills this show together with others on one invoice. Also available on the Post Show tab |
 | ↓ (history) | Re-downloads a previously generated PDF |
 
 PDFs are stored in the database — use the **↓** button in Export History to re-download without generating a new version.
@@ -453,6 +456,12 @@ Access via **Asset Reports** in the sidebar (admin only). Filter asset usage by 
 ### Contacts
 
 Add, edit, delete dpc contacts. Fields: name, title, department, phone, email. Contacts appear in dropdowns on advance and schedule forms.
+
+### Arts Groups
+
+Settings → Arts Groups. Manage the touring companies / resident artists list used by `arts_group_dropdown` form fields (new values typed into those fields are auto-added here on save).
+
+Each group stores a primary contact (name, email, phone), free-text notes, and optional **additional contacts** (name/email/phone rows managed inside the same Add/Edit dialog). Group and contact changes are captured in the Audit Log (undo-capable) and syslog as `ARTS_GROUP_*` / `ARTS_GROUP_CONTACT_*` actions. Deleting a group removes its additional contacts with it. Content-admin access required for changes.
 
 ### Users & Roles
 
