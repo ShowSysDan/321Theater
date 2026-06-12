@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `2.19.4`**
+**Current version: `2.19.5`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,7 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `2.19.5` — Merge Duplicates moved off the homepage: the admin-only Merge Duplicate Shows tool now lives in the Settings tab bar (next to Prism Sync / Sidebar Editor, same admin-only route), the homepage header keeps just New Show, and the merge page's back link points to Settings.
 - `2.19.4` — Combined Invoice… button removed from the Post Show tab as well — the sidebar entry (under Settings) is now the single way in. The page's `?preselect=` parameter still works for direct links/bookmarks.
 - `2.19.3` — Export & Files polish: the four export cards (Advance, Schedule, Post-Show Report, Final Invoice) now sit in one row of four instead of 3 + 1 (two-up below 1200px, single column below 900px as before), and the Combined Invoice… link is removed from the Final Invoice card — it remains on the Post Show tab and in the sidebar under Settings.
 - `2.19.2` — **Bug fix: sidebar global search dead on PostgreSQL.** Every query to `/api/search` 500'd with `operator does not exist: date ~~ unknown` because the shows query ran `show_date LIKE ?` against a `DATE` column — fine on SQLite (dates are stored as text), invalid on PG — so the search box silently did nothing after the PostgreSQL migration (the frontend swallowed non-OK responses). Fixed with `CAST(show_date AS TEXT) LIKE ?` (portable, date-fragment searches like "2026-07" work again); also fixed the latent crash right behind it (PG returns `date` objects, so the result sub-label `join` would have raised `TypeError`), the endpoint now closes its DB connection in `try/finally` (same leak-hardening as 2.18.0), and a failed search now shows "Search isn't responding" in the results panel instead of failing silently. Verified end-to-end on PostgreSQL 16 (reproduced the 500, then name/venue/date/contact/barcode-path searches green, both access-control branches) and on SQLite.

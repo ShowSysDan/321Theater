@@ -9,12 +9,6 @@
   </div>
   {% if not restricted %}
   <div style="display:flex;gap:8px;align-items:center">
-    {% if user and user.role == 'admin' %}
-    <a href="{{ url_for('merge_shows_page') }}" class="btn btn-ghost" title="Merge two duplicate show entries into one">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M7 3v6a5 5 0 0 0 5 5 5 5 0 0 0 5 5v2"/><path d="M17 3v6a5 5 0 0 1-5 5"/></svg>
-      Merge Duplicates
-    </a>
-    {% endif %}
     <a href="{{ url_for('new_show') }}" class="btn btn-primary">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       New Show
