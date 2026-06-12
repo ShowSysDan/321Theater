@@ -984,7 +984,9 @@ html[data-theme="light"] select.field-input {
 .schedule-row.row-drag-over { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 /* ── Export Tab ──────────────────────────────────────────────────── */
-.export-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 24px; }
+.export-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 24px; }
+/* Narrow windows: 4-up gets cramped before the 900px single-column collapse */
+@media (max-width: 1200px) { .export-grid { grid-template-columns: repeat(2, 1fr); } }
 .export-card {
   background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg);
   padding: 14px 16px; display: flex; flex-direction: column; gap: 8px;
