@@ -472,7 +472,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.19.0'
+APP_VERSION = '2.19.1'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -16489,8 +16489,9 @@ def _parse_show_ids_param(raw):
 @app.route('/combined-invoice')
 @login_required
 def combined_invoice_page():
-    """Builder page: search every show (active and archived — invoicing
-    usually happens after the run) and pick the ones to bill together."""
+    """Builder page: search every show and pick the ones to bill together.
+    The list defaults to active shows; the status filter reveals archived
+    ones (invoicing often happens after the run)."""
     auto_archive_past_shows()
     db = get_db()
     eff_date = """COALESCE(s.show_date,
