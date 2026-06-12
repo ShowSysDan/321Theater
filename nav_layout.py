@@ -22,6 +22,11 @@ NAV_SETTING_KEY = 'nav_layout'
 MAX_ENTRIES = 100
 MAX_LABEL_LEN = 40
 
+# Link spacing for the whole sidebar (Sidebar Editor → Spacing). 'compact'
+# tightens the padding between links; 'comfortable' is the roomier classic look.
+DENSITIES = ('compact', 'comfortable')
+DEFAULT_DENSITY = 'compact'
+
 # Audience keys are resolved against the session by app._nav_audience_ok().
 AUDIENCE_LABELS = {
     'all':             'Everyone',
@@ -100,7 +105,8 @@ DEFAULT_ENTRIES = [
 
 
 def default_layout():
-    return {'version': 1, 'entries': copy.deepcopy(DEFAULT_ENTRIES)}
+    return {'version': 1, 'density': DEFAULT_DENSITY,
+            'entries': copy.deepcopy(DEFAULT_ENTRIES)}
 
 
 def _default_entry_for(key):
@@ -112,6 +118,11 @@ def _default_entry_for(key):
 
 def _clean_label(v):
     return str(v or '').strip()[:MAX_LABEL_LEN]
+
+
+def _clean_density(v):
+    v = str(v or '').strip().lower()
+    return v if v in DENSITIES else DEFAULT_DENSITY
 
 
 def _normalize_entries(raw_entries):
@@ -157,7 +168,8 @@ def parse_or_default(raw):
     except Exception as e:
         logger.warning('nav_layout: parse failed (%s) — using defaults', e)
         return default_layout()
-    return {'version': 1, 'entries': _normalize_entries(data['entries'])}
+    return {'version': 1, 'density': _clean_density(data.get('density')),
+            'entries': _normalize_entries(data['entries'])}
 
 
 def validate_payload(payload):
@@ -173,7 +185,8 @@ def validate_payload(payload):
         item = _BY_KEY.get(e.get('key')) if e.get('type') == 'item' else None
         if item and item.get('required') and e.get('hidden'):
             return None, f"'{item['label']}' is required and cannot be hidden."
-    return {'version': 1, 'entries': _normalize_entries(payload['entries'])}, None
+    return {'version': 1, 'density': _clean_density(payload.get('density')),
+            'entries': _normalize_entries(payload['entries'])}, None
 
 
 def catalog_for_editor():

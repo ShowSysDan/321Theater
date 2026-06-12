@@ -472,7 +472,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.18.1'
+APP_VERSION = '2.18.2'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -1334,29 +1334,33 @@ def _nav_audience_ok(audience):
     return False
 
 
-def get_nav_entries():
-    """Render-ready sidebar entries for the current request, or [] for
-    anonymous users / document viewers / non-request renders (background
-    jobs render PDF templates too — they get no sidebar)."""
+def get_nav_context():
+    """Sidebar template context — render-ready entries plus the link-spacing
+    density — for the current request; empty defaults for anonymous users /
+    document viewers / non-request renders (background jobs render PDF
+    templates too — they get no sidebar)."""
+    empty = {'nav_entries': [], 'nav_density': nav_layout.DEFAULT_DENSITY}
     if not has_request_context() or 'user_id' not in session \
             or session.get('is_document_viewer'):
-        return []
+        return empty
     endpoint = request.endpoint or ''
     try:
         layout = nav_layout.parse_or_default(get_app_setting(nav_layout.NAV_SETTING_KEY, ''))
-        return nav_layout.resolve(layout, _nav_audience_ok, endpoint)
+        return {'nav_entries': nav_layout.resolve(layout, _nav_audience_ok, endpoint),
+                'nav_density': layout['density']}
     except Exception as e:
         app.logger.warning(f'nav layout resolve failed, using defaults: {e}')
         try:
-            return nav_layout.resolve(nav_layout.default_layout(),
-                                      _nav_audience_ok, endpoint)
+            return {'nav_entries': nav_layout.resolve(nav_layout.default_layout(),
+                                                      _nav_audience_ok, endpoint),
+                    'nav_density': nav_layout.DEFAULT_DENSITY}
         except Exception:
-            return []
+            return empty
 
 
 @app.context_processor
 def _inject_nav_entries():
-    return {'nav_entries': get_nav_entries()}
+    return get_nav_context()
 
 
 # ─── Form Fields Helper ───────────────────────────────────────────────────────

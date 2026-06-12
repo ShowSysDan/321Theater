@@ -59,7 +59,7 @@
       <div id="gs-results"></div>
     </div>
 
-    <nav class="sidebar-nav">
+    <nav class="sidebar-nav{% if nav_density == 'compact' %} compact{% endif %}">
       {% if session.get('is_document_viewer') %}
       {# Document viewers only get the documents page — everything else is
          off-limits, and the @before_request gate would redirect anyway. #}
@@ -112,7 +112,7 @@
       {# Everything below Home is data-driven: catalog in nav_layout.py,
          admin-saved order/sections in app_settings ('nav_layout' — see
          Settings → Sidebar Editor). Audience filtering happens server-side
-         in get_nav_entries(); icons come from the code catalog (safe). #}
+         in get_nav_context(); icons come from the code catalog (safe). #}
       {% for entry in nav_entries %}
       {% if entry.type == 'section' %}
       <div class="nav-section-label">{{ entry.label }}</div>
