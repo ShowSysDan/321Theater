@@ -415,10 +415,21 @@ function _gsPositionPanel() {
 async function _gsFetch(q) {
   try {
     const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-    if (!r.ok) return;
+    if (!r.ok) { _gsShowError(); return; }
     const data = await r.json();
     if (Array.isArray(data)) { _gsPositionPanel(); _gsRender(data, q); }
-  } catch (_) { /* network error — fail silently */ }
+  } catch (_) { _gsShowError(); }
+}
+
+// A server/network failure used to fail silently — the panel just never
+// opened, which made a broken /api/search look like a dead search box.
+function _gsShowError() {
+  _gsActiveIdx = -1;
+  _gsItems = [];
+  _gsPositionPanel();
+  document.getElementById('gs-results').innerHTML =
+    '<div class="gs-empty">Search isn’t responding (server error). Try again — if it persists, check the server logs.</div>';
+  document.getElementById('gs-panel').style.display = '';
 }
 
 function _gsRender(results, q) {
