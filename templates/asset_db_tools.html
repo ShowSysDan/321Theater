@@ -1,0 +1,648 @@
+{% extends "base.html" %}
+{% block title %}Asset DB Tools — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Asset DB Tools</h1>
+    <p class="page-sub">Raw, audited access to the asset tables — for fixing rows the normal interface can't reach</p>
+  </div>
+  <div class="header-actions" style="align-items:center">
+    <a href="/assets" class="btn btn-ghost btn-sm">← Asset Manager</a>
+    <a href="/admin/audit" class="btn btn-ghost btn-sm" title="Every change made here is logged with before/after snapshots and can be undone from the audit log (admins)">Audit Log</a>
+  </div>
+</div>
+
+<div style="background:rgba(245,127,32,.08);border:1px solid rgba(245,127,32,.35);border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:12px;line-height:1.5">
+  <strong style="color:var(--accent)">How the tree works:</strong>
+  Categories → Groups → Types. A “group” is just an <code>asset_types</code> row with no parent; anything
+  with <code>parent_type_id</code> set appears under it. A parentless row that gains children silently becomes a
+  group (and disappears from the finder search); a parentless row with no children shows as an empty group.
+  Edits and deletes here are <strong>audited with before/after snapshots</strong> — admins can undo them from the Audit Log.
+</div>
+
+{# ── Integrity scan ── #}
+<div class="form-section" style="margin-bottom:20px">
+  <div class="form-section-header" style="display:flex;align-items:center;gap:10px">
+    <span class="section-icon">⚕</span> INTEGRITY SCAN
+    <span id="integrity-summary" style="font-size:11px;font-weight:400;color:var(--text-dim)"></span>
+    <button class="btn btn-xs btn-ghost" style="margin-left:auto" onclick="runIntegrity()">↻ Re-run</button>
+  </div>
+  <div id="integrity-body" style="padding:4px 0">
+    <p style="color:var(--text-dim);font-size:12px;padding:8px 12px">Scanning…</p>
+  </div>
+</div>
+
+{# ── Table browser ── #}
+<div class="form-section">
+  <div class="form-section-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <span class="section-icon">▦</span> BROWSE &amp; EDIT
+    <select id="dbt-table" class="field-input" style="width:230px;padding:5px 8px;font-size:12px" onchange="switchTable(this.value)"></select>
+    <input type="text" id="dbt-search" class="field-input" placeholder="Search name / barcode… or exact id"
+           style="flex:1;min-width:180px;padding:5px 8px;font-size:12px" oninput="onSearchInput()">
+    <span id="dbt-counter" style="font-size:11px;color:var(--text-dim);white-space:nowrap"></span>
+    <button class="btn btn-xs btn-ghost" onclick="pageMove(-1)" id="dbt-prev" disabled>‹ Prev</button>
+    <button class="btn btn-xs btn-ghost" onclick="pageMove(1)" id="dbt-next" disabled>Next ›</button>
+  </div>
+  <div id="dbt-table-wrap" style="overflow-x:auto;padding-bottom:4px">
+    <p style="color:var(--text-dim);font-size:12px;padding:8px 12px">Loading…</p>
+  </div>
+</div>
+
+{# ── Edit modal ── #}
+<div id="dbt-edit-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeEditModal()">
+  <div class="modal" style="max-width:640px;width:92%">
+    <div class="modal-hdr">
+      <h2 id="dbt-edit-title" style="margin:0;font-size:15px">Edit row</h2>
+      <button class="btn btn-ghost btn-sm" onclick="closeEditModal()">✕</button>
+    </div>
+    <div class="modal-body" style="max-height:70vh;overflow:auto">
+      <div id="dbt-edit-fields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px 14px"></div>
+      <div id="dbt-edit-error" style="display:none;color:#e53e3e;font-size:12px;border:1px solid rgba(229,62,62,.4);background:rgba(229,62,62,.08);border-radius:4px;padding:8px 10px"></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span id="dbt-edit-extra" style="display:flex;gap:8px"></span>
+        <span style="flex:1"></span>
+        <button class="btn btn-ghost btn-sm" onclick="closeEditModal()">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="saveEdit()">Save Changes</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Delete modal ── #}
+<div id="dbt-del-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeDelModal()">
+  <div class="modal" style="max-width:520px;width:92%">
+    <div class="modal-hdr">
+      <h2 style="margin:0;font-size:15px;color:#e53e3e">Hard-delete row</h2>
+      <button class="btn btn-ghost btn-sm" onclick="closeDelModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="dbt-del-summary" style="font-size:13px"></div>
+      <div id="dbt-del-info" style="font-size:12px;color:var(--text-dim)"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn btn-ghost btn-sm" onclick="closeDelModal()">Cancel</button>
+        <button id="dbt-del-btn" class="btn btn-sm" style="background:#e53e3e;color:#fff" onclick="confirmDelete(false)">Delete</button>
+        <button id="dbt-del-force-btn" class="btn btn-sm" style="display:none;background:#9b2c2c;color:#fff" onclick="confirmDelete(true)">Force Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Merge modal ── #}
+<div id="dbt-merge-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeMergeModal()">
+  <div class="modal" style="max-width:560px;width:92%">
+    <div class="modal-hdr">
+      <h2 style="margin:0;font-size:15px">Merge type into another</h2>
+      <button class="btn btn-ghost btn-sm" onclick="closeMergeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="dbt-merge-src" style="font-size:13px"></div>
+      <p style="font-size:12px;color:var(--text-dim);margin:0">
+        Units, show lines (locked prices kept), system links and memberships are repointed at the
+        target, then the source row is deleted. Use this to fold an accidental duplicate into the real type.
+      </p>
+      <label style="font-size:12px">Merge into
+        <select id="dbt-merge-target" class="field-input" style="width:100%;margin-top:4px"></select>
+      </label>
+      <div id="dbt-merge-error" style="display:none;color:#e53e3e;font-size:12px"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn btn-ghost btn-sm" onclick="closeMergeModal()">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="confirmMerge()">Merge</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Move-children modal ── #}
+<div id="dbt-children-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeChildrenModal()">
+  <div class="modal" style="max-width:560px;width:92%">
+    <div class="modal-hdr">
+      <h2 style="margin:0;font-size:15px">Move children to another group</h2>
+      <button class="btn btn-ghost btn-sm" onclick="closeChildrenModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="dbt-children-src" style="font-size:13px"></div>
+      <label style="font-size:12px">New group
+        <select id="dbt-children-target" class="field-input" style="width:100%;margin-top:4px"></select>
+      </label>
+      <div id="dbt-children-error" style="display:none;color:#e53e3e;font-size:12px"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn btn-ghost btn-sm" onclick="closeChildrenModal()">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="confirmChildrenMove()">Move Children</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="dbt-toast" style="display:none;position:fixed;bottom:24px;right:24px;background:var(--accent);color:#fff;padding:10px 16px;border-radius:6px;font-size:13px;z-index:2000;box-shadow:0 4px 16px rgba(0,0,0,.4)"></div>
+
+<script>
+// ── Asset DB Tools ────────────────────────────────────────────────────────────
+const HDRS = {'X-Requested-With': 'XMLHttpRequest'};
+const JSON_HDRS = Object.assign({'Content-Type': 'application/json'}, HDRS);
+
+let _meta = null;
+let _table = 'asset_types';
+let _q = '', _offset = 0, _limit = 100, _total = 0;
+let _rows = [];
+let _cats = [], _types = [];
+let _editRow = null, _delRow = null, _mergeSrc = null, _childrenSrc = null;
+let _searchTimer = null;
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function toast(msg) {
+  const t = document.getElementById('dbt-toast');
+  t.textContent = msg; t.style.display = '';
+  clearTimeout(t._tm); t._tm = setTimeout(() => t.style.display = 'none', 3500);
+}
+function money(v) { return '$' + Number(v || 0).toFixed(2); }
+function yesno(v) { return v ? '<span style="color:var(--accent)">✓</span>' : '<span style="color:var(--text-dim)">—</span>'; }
+function dt(v) { return v ? '<span style="white-space:nowrap">' + esc(String(v).slice(0, 16)) + '</span>' : '—'; }
+function trunc(v, n) { const s = String(v == null ? '' : v); return esc(s.length > n ? s.slice(0, n) + '…' : s); }
+function badge(text, color) {
+  return '<span style="font-size:9px;font-weight:700;letter-spacing:.04em;border-radius:3px;padding:1px 5px;background:' +
+         color + '22;color:' + color + '">' + esc(text) + '</span>';
+}
+function typeRole(r) {
+  if (r.is_system) return badge('SYSTEM', '#8b5cf6');
+  if (r.is_package) return badge('PACKAGE', '#0ea5e9');
+  if (!r.parent_type_id && r.ref_children > 0) return badge('GROUP', '#f59e0b');
+  if (!r.parent_type_id) return badge('STANDALONE', '#64748b');
+  return badge('LEAF', '#10b981');
+}
+function retiredBadge(r) { return r.is_retired ? ' ' + badge('RETIRED', '#e53e3e') : ''; }
+function refPill(label, n, color) {
+  if (!n) return '';
+  return '<span title="' + esc(label) + '" style="font-size:10px;border-radius:3px;padding:1px 5px;margin-right:3px;background:' +
+         (color || 'var(--border)') + ';white-space:nowrap">' + esc(label) + ': ' + n + '</span>';
+}
+
+// ── Display column definitions per table ──────────────────────────────────────
+const COLS = {
+  asset_types: [
+    {l: 'ID', f: r => r.id},
+    {l: 'Role', f: r => typeRole(r) + retiredBadge(r)},
+    {l: 'Name', f: r => '<strong>' + esc(r.name) + '</strong>'},
+    {l: 'Mfr / Model', f: r => esc([r.manufacturer, r.model].filter(Boolean).join(' · ')) || '—'},
+    {l: 'Category', f: r => r.category_name ? esc(r.category_name) + ' <span style="color:var(--text-dim)">#' + r.category_id + '</span>'
+                                            : badge('MISSING #' + r.category_id, '#e53e3e')},
+    {l: 'Group (parent)', f: r => r.parent_type_id
+        ? (r.parent_name ? esc(r.parent_name) : badge('MISSING', '#e53e3e')) + ' <span style="color:var(--text-dim)">#' + r.parent_type_id + '</span>'
+        : '—'},
+    {l: '$/day', f: r => money(r.rental_cost)},
+    {l: '$/wk', f: r => money(r.weekly_rate)},
+    {l: 'Hidden', f: r => yesno(r.hide_from_pm)},
+    {l: 'References', f: r => refPill('children', r.ref_children) + refPill('units', r.ref_items) +
+                              refPill('show lines', r.ref_show_lines, 'rgba(245,127,32,.25)') + refPill('memberships', r.ref_members) || '—'},
+    {l: 'Created', f: r => dt(r.created_at)},
+  ],
+  asset_items: [
+    {l: 'ID', f: r => r.id},
+    {l: 'Type', f: r => (r.type_name ? esc(r.type_name) : badge('MISSING', '#e53e3e')) +
+                        ' <span style="color:var(--text-dim)">#' + r.asset_type_id + '</span>' +
+                        (r.type_is_retired ? ' ' + badge('TYPE RETIRED', '#e53e3e') : '')},
+    {l: 'Barcode', f: r => esc(r.barcode) || '—'},
+    {l: 'Status', f: r => esc(r.status)},
+    {l: 'Condition', f: r => esc(r.condition)},
+    {l: 'Container', f: r => (r.is_container ? badge('CONTAINER', '#0ea5e9') + ' ' : '') +
+                             (r.container_item_id ? 'in #' + r.container_item_id : '—')},
+    {l: 'System unit', f: r => r.system_type_id ? '#' + r.system_type_id : '—'},
+    {l: 'References', f: r => refPill('show pins', r.ref_show_pins, 'rgba(245,127,32,.25)') +
+                              refPill('logs', r.ref_logs) + refPill('maint', r.ref_maint) +
+                              refPill('contained', r.ref_contained) || '—'},
+    {l: 'Created', f: r => dt(r.created_at)},
+  ],
+  show_assets: [
+    {l: 'ID', f: r => r.id},
+    {l: 'Show', f: r => (r.show_name ? esc(r.show_name) : badge('MISSING SHOW', '#e53e3e')) +
+                        ' <span style="color:var(--text-dim)">#' + r.show_id + (r.show_date ? ' · ' + esc(String(r.show_date).slice(0,10)) : '') + '</span>'},
+    {l: 'Type', f: r => (r.type_name ? esc(r.type_name) : badge('MISSING TYPE', '#e53e3e')) +
+                        ' <span style="color:var(--text-dim)">#' + r.asset_type_id + '</span>'},
+    {l: 'Unit pin', f: r => r.asset_item_id ? '#' + r.asset_item_id : '—'},
+    {l: 'Qty', f: r => r.quantity},
+    {l: 'Rental window', f: r => esc(r.rental_start || '—') + ' → ' + esc(r.rental_end || '—')},
+    {l: 'Locked $', f: r => money(r.locked_price)},
+    {l: 'Hidden', f: r => yesno(r.is_hidden)},
+    {l: 'Notes', f: r => trunc(r.notes, 40) || '—'},
+    {l: 'Created', f: r => dt(r.created_at)},
+  ],
+  asset_categories: [
+    {l: 'ID', f: r => r.id},
+    {l: 'Name', f: r => '<strong>' + esc(r.name) + '</strong>'},
+    {l: 'Sort', f: r => r.sort_order},
+    {l: 'Types', f: r => refPill('types', r.ref_types) || '0'},
+  ],
+  warehouse_locations: [
+    {l: 'ID', f: r => r.id},
+    {l: 'Name', f: r => '<strong>' + esc(r.name) + '</strong>'},
+    {l: 'Sort', f: r => r.sort_order},
+    {l: 'Types stored here', f: r => refPill('types', r.ref_types) || '0'},
+  ],
+  asset_logs: [
+    {l: 'ID', f: r => r.id},
+    {l: 'Unit', f: r => esc(r.type_name || '') + ' #' + r.asset_item_id + (r.barcode ? ' · ' + esc(r.barcode) : '')},
+    {l: 'Date', f: r => esc(String(r.log_date || '').slice(0,10))},
+    {l: 'Kind', f: r => esc(r.log_type)},
+    {l: 'Body', f: r => trunc(r.body, 60)},
+    {l: 'Created', f: r => dt(r.created_at)},
+  ],
+  asset_maintenance: [
+    {l: 'ID', f: r => r.id},
+    {l: 'Unit', f: r => esc(r.type_name || '') + ' #' + r.asset_item_id + (r.barcode ? ' · ' + esc(r.barcode) : '')},
+    {l: 'Status', f: r => r.status === 'in_progress' ? badge('IN PROGRESS', '#f59e0b') : esc(r.status)},
+    {l: 'Reason', f: r => trunc(r.reason, 40) || '—'},
+    {l: 'Notes', f: r => trunc(r.notes, 40) || '—'},
+    {l: 'Created', f: r => dt(r.created_at)},
+    {l: 'Resolved', f: r => dt(r.resolved_at)},
+  ],
+  asset_type_system_members: [
+    {l: 'System', f: r => (r.system_name ? esc(r.system_name) : badge('MISSING', '#e53e3e')) +
+                          ' <span style="color:var(--text-dim)">#' + r.system_type_id + '</span>' +
+                          (r.system_retired ? ' ' + badge('RETIRED', '#e53e3e') : '')},
+    {l: 'Component', f: r => (r.component_name ? esc(r.component_name) : badge('MISSING', '#e53e3e')) +
+                             ' <span style="color:var(--text-dim)">#' + r.component_type_id + '</span>' +
+                             (r.component_retired ? ' ' + badge('RETIRED', '#e53e3e') : '')},
+    {l: 'Sort', f: r => r.sort_order},
+  ],
+};
+
+// Field labels/help for the edit modal (fallback: column name)
+const FIELD_HELP = {
+  parent_type_id: 'Group this type files under. Empty = top level (acts as a group itself once it has children).',
+  category_id: 'Top-level category (left column of the finder).',
+  hide_from_pm: 'Hide from the show-page advance picker (approvals portal still sees it).',
+  is_retired: 'Soft delete — keeps history, removes from pickers. retired_at is managed automatically.',
+  asset_item_id: 'Pin this show line to a specific unit (forces quantity 1).',
+  container_item_id: 'ID of the case/container item this unit lives in.',
+  system_type_id: 'System this unit is allocated to (system types only).',
+  track_quantity: 'Count individual units for availability math.',
+  reserve_count: 'Units held back as spares when computing availability.',
+};
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  const r = await fetch('/assets/db-tools/api/meta', {headers: HDRS});
+  _meta = (await r.json()).tables;
+  const sel = document.getElementById('dbt-table');
+  sel.innerHTML = Object.keys(COLS).map(t =>
+    '<option value="' + t + '">' + esc(_meta[t] ? _meta[t].label : t) +
+    (_meta[t] && _meta[t].count != null ? ' (' + _meta[t].count + ')' : '') + '</option>').join('');
+  sel.value = _table;
+  await loadCaches();
+  await Promise.all([loadRows(), runIntegrity()]);
+}
+
+async function loadCaches() {
+  try {
+    const [rc, rt] = await Promise.all([
+      fetch('/settings/asset-categories', {headers: HDRS}),
+      fetch('/settings/asset-types?show_retired=1', {headers: HDRS}),
+    ]);
+    _cats = await rc.json();
+    _types = await rt.json();
+  } catch (e) { _cats = []; _types = []; }
+}
+
+window.switchTable = function(t, q) {
+  _table = t; _offset = 0;
+  document.getElementById('dbt-table').value = t;
+  if (q !== undefined) {
+    _q = q; document.getElementById('dbt-search').value = q;
+  }
+  loadRows();
+};
+
+window.onSearchInput = function() {
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(() => {
+    _q = document.getElementById('dbt-search').value.trim();
+    _offset = 0;
+    loadRows();
+  }, 250);
+};
+
+window.pageMove = function(dir) {
+  _offset = Math.max(0, _offset + dir * _limit);
+  loadRows();
+};
+
+// ── Rows ──────────────────────────────────────────────────────────────────────
+async function loadRows() {
+  const wrap = document.getElementById('dbt-table-wrap');
+  wrap.innerHTML = '<p style="color:var(--text-dim);font-size:12px;padding:8px 12px">Loading…</p>';
+  const params = new URLSearchParams({limit: _limit, offset: _offset});
+  if (_q) params.set('q', _q);
+  const r = await fetch('/assets/db-tools/api/rows/' + _table + '?' + params, {headers: HDRS});
+  if (!r.ok) { wrap.innerHTML = '<p style="color:#e53e3e;font-size:12px;padding:8px 12px">Failed to load rows.</p>'; return; }
+  const data = await r.json();
+  _rows = data.rows; _total = data.total;
+  renderRows();
+}
+
+function renderRows() {
+  const wrap = document.getElementById('dbt-table-wrap');
+  const cols = COLS[_table] || [];
+  const composite = _table === 'asset_type_system_members';
+  const editable = _meta && _meta[_table] && Object.keys(_meta[_table].editable || {}).length > 0;
+
+  const from = _total ? _offset + 1 : 0;
+  const to = Math.min(_offset + _rows.length, _total);
+  document.getElementById('dbt-counter').textContent = from + '–' + to + ' of ' + _total;
+  document.getElementById('dbt-prev').disabled = _offset <= 0;
+  document.getElementById('dbt-next').disabled = _offset + _limit >= _total;
+
+  if (!_rows.length) {
+    wrap.innerHTML = '<p style="color:var(--text-dim);font-size:12px;padding:8px 12px">No rows.</p>';
+    return;
+  }
+  let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;min-width:900px"><thead><tr>' +
+    cols.map(c => '<th style="text-align:left;padding:6px 8px;font-size:10px;letter-spacing:.05em;color:var(--text-dim);border-bottom:1px solid var(--border);white-space:nowrap">' + esc(c.l).toUpperCase() + '</th>').join('') +
+    '<th style="border-bottom:1px solid var(--border)"></th></tr></thead><tbody>';
+  _rows.forEach((row, i) => {
+    html += '<tr style="border-bottom:1px solid var(--border)">' +
+      cols.map(c => '<td style="padding:6px 8px;vertical-align:top">' + c.f(row) + '</td>').join('');
+    let actions = '';
+    if (composite) {
+      actions = '<button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="unlinkMember(' +
+                row.system_type_id + ',' + row.component_type_id + ')">Unlink</button>';
+    } else {
+      if (editable) actions += '<button class="btn btn-xs btn-ghost" onclick="openEdit(' + i + ')">✎ Edit</button> ';
+      if (_table === 'asset_types') {
+        actions += '<button class="btn btn-xs btn-ghost" onclick="openMerge(' + i + ')" title="Fold this duplicate into another type">⇄ Merge</button> ';
+        if (row.ref_children > 0) {
+          actions += '<button class="btn btn-xs btn-ghost" onclick="openChildrenMove(' + i + ')" title="Move its child types to a different group">⤵ Move children</button> ';
+        }
+      }
+      actions += '<button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="openDelete(' + i + ')">✕</button>';
+    }
+    html += '<td style="padding:6px 8px;white-space:nowrap;text-align:right">' + actions + '</td></tr>';
+  });
+  wrap.innerHTML = html + '</tbody></table>';
+}
+
+// ── Edit modal ────────────────────────────────────────────────────────────────
+function _typeOption(t, selectedId) {
+  const label = '#' + t.id + ' · ' + (t.category_name || '') + ' › ' + t.name +
+    (t.model ? ' (' + t.model + ')' : '') + (t.is_retired ? ' [retired]' : '');
+  return '<option value="' + t.id + '"' + (t.id === selectedId ? ' selected' : '') + '>' + esc(label) + '</option>';
+}
+
+function fieldControl(col, kind, val) {
+  const help = FIELD_HELP[col] ? '<div style="font-size:10px;color:var(--text-dim);margin-top:2px">' + esc(FIELD_HELP[col]) + '</div>' : '';
+  const lbl = '<label style="font-size:11px;font-weight:600;letter-spacing:.03em">' + esc(col) + '</label>';
+  let input = '';
+  const v = val == null ? '' : val;
+  if (kind === 'bool') {
+    input = '<label class="checkbox-label" style="font-size:12px;margin-top:4px"><input type="checkbox" data-col="' + col + '"' + (val ? ' checked' : '') + '> yes</label>';
+  } else if (kind === 'int' || kind === 'int_null') {
+    input = '<input type="number" step="1" class="field-input" data-col="' + col + '" value="' + esc(v) + '" style="width:100%">';
+  } else if (kind === 'float' || kind === 'float_null') {
+    input = '<input type="number" step="0.01" class="field-input" data-col="' + col + '" value="' + esc(v) + '" style="width:100%">';
+  } else if (kind === 'date_null' || kind === 'date_req') {
+    input = '<input type="date" class="field-input" data-col="' + col + '" value="' + esc(String(v).slice(0,10)) + '" style="width:100%">';
+  } else if (kind === 'item_status' || kind === 'item_condition' || kind === 'maint_status') {
+    const opts = {item_status: ['available','maintenance','retired'],
+                  item_condition: ['excellent','good','fair','poor','retired'],
+                  maint_status: ['in_progress','resolved']}[kind];
+    input = '<select class="field-input" data-col="' + col + '" style="width:100%">' +
+      opts.map(o => '<option value="' + o + '"' + (o === val ? ' selected' : '') + '>' + o + '</option>').join('') + '</select>';
+  } else if (kind === 'fk_category') {
+    input = '<select class="field-input" data-col="' + col + '" style="width:100%">' +
+      _cats.map(c => '<option value="' + c.id + '"' + (c.id === val ? ' selected' : '') + '>#' + c.id + ' · ' + esc(c.name) + '</option>').join('') + '</select>';
+  } else if (kind === 'fk_parent_null') {
+    const tops = _types.filter(t => !t.parent_type_id && !t.is_system && !t.is_package && t.id !== (_editRow ? _editRow.id : null));
+    input = '<select class="field-input" data-col="' + col + '" style="width:100%"><option value="">— none (top level) —</option>' +
+      tops.map(t => _typeOption(t, val)).join('') + '</select>';
+  } else if (kind === 'fk_type' || kind === 'fk_type_null') {
+    input = '<select class="field-input" data-col="' + col + '" style="width:100%">' +
+      (kind === 'fk_type_null' ? '<option value="">— none —</option>' : '') +
+      _types.map(t => _typeOption(t, val)).join('') + '</select>';
+  } else {
+    input = '<input type="text" class="field-input" data-col="' + col + '" value="' + esc(v) + '" style="width:100%">';
+  }
+  return '<div>' + lbl + input + help + '</div>';
+}
+
+window.openEdit = function(i) {
+  _editRow = _rows[i];
+  const editable = _meta[_table].editable;
+  document.getElementById('dbt-edit-title').textContent =
+    'Edit ' + _table + ' #' + _editRow.id + (_editRow.name ? ' — ' + _editRow.name : '');
+  document.getElementById('dbt-edit-fields').innerHTML =
+    Object.entries(editable).map(([col, kind]) => fieldControl(col, kind, _editRow[col])).join('');
+  document.getElementById('dbt-edit-error').style.display = 'none';
+  document.getElementById('dbt-edit-modal').style.display = '';
+};
+
+window.closeEditModal = function() { document.getElementById('dbt-edit-modal').style.display = 'none'; _editRow = null; };
+
+window.saveEdit = async function() {
+  if (!_editRow) return;
+  const editable = _meta[_table].editable;
+  const updates = {};
+  document.querySelectorAll('#dbt-edit-fields [data-col]').forEach(el => {
+    const col = el.dataset.col, kind = editable[col];
+    let val;
+    if (kind === 'bool') val = el.checked;
+    else val = el.value;
+    const orig = _editRow[col];
+    const origNorm = kind === 'bool' ? !!orig : (orig == null ? '' : String(orig));
+    const valNorm = kind === 'bool' ? !!val : String(val);
+    if ((kind === 'date_null' || kind === 'date_req') && origNorm) {
+      if (String(origNorm).slice(0,10) === valNorm) return;
+    } else if (valNorm === origNorm) return;
+    updates[col] = val;
+  });
+  if (!Object.keys(updates).length) { closeEditModal(); return; }
+  const r = await fetch('/assets/db-tools/api/rows/' + _table + '/' + _editRow.id, {
+    method: 'PUT', headers: JSON_HDRS, body: JSON.stringify({updates}),
+  });
+  const data = await r.json();
+  if (!r.ok) {
+    const err = document.getElementById('dbt-edit-error');
+    err.textContent = data.error || 'Save failed';
+    err.style.display = '';
+    return;
+  }
+  closeEditModal();
+  toast('Row updated — change is in the audit log');
+  await Promise.all([loadRows(), loadCaches()]);
+  runIntegrity();
+};
+
+// ── Delete ────────────────────────────────────────────────────────────────────
+window.openDelete = function(i) {
+  _delRow = _rows[i];
+  const label = _delRow.name || _delRow.barcode || ('row #' + _delRow.id);
+  document.getElementById('dbt-del-summary').innerHTML =
+    'Permanently delete <strong>' + esc(label) + '</strong> (#' + _delRow.id + ') from <code>' + _table + '</code>.' +
+    '<div style="font-size:11px;color:var(--text-dim);margin-top:4px">A snapshot goes to the audit log, so an admin can restore the row itself — but prefer Retire / Edit when history matters.</div>';
+  document.getElementById('dbt-del-info').innerHTML = '';
+  document.getElementById('dbt-del-btn').style.display = '';
+  document.getElementById('dbt-del-force-btn').style.display = 'none';
+  document.getElementById('dbt-del-modal').style.display = '';
+};
+
+window.closeDelModal = function() { document.getElementById('dbt-del-modal').style.display = 'none'; _delRow = null; };
+
+window.confirmDelete = async function(force) {
+  if (!_delRow) return;
+  const r = await fetch('/assets/db-tools/api/rows/' + _table + '/' + _delRow.id + (force ? '?force=1' : ''), {
+    method: 'DELETE', headers: HDRS,
+  });
+  const data = await r.json();
+  if (r.status === 409) {
+    const info = document.getElementById('dbt-del-info');
+    if (data.blockers) {
+      info.innerHTML = '<div style="color:#e53e3e;font-weight:600;margin-bottom:4px">Blocked:</div>' +
+        data.blockers.map(b => '· ' + esc(b)).join('<br>');
+      document.getElementById('dbt-del-btn').style.display = 'none';
+      document.getElementById('dbt-del-force-btn').style.display = 'none';
+    } else if (data.forceable) {
+      info.innerHTML = '<div style="color:var(--accent);font-weight:600;margin-bottom:4px">This will also:</div>' +
+        data.forceable.map(b => '· ' + esc(b)).join('<br>');
+      document.getElementById('dbt-del-btn').style.display = 'none';
+      document.getElementById('dbt-del-force-btn').style.display = '';
+    }
+    return;
+  }
+  if (!r.ok) { document.getElementById('dbt-del-info').textContent = data.error || 'Delete failed'; return; }
+  closeDelModal();
+  toast('Row deleted');
+  await Promise.all([loadRows(), loadCaches()]);
+  runIntegrity();
+};
+
+window.unlinkMember = async function(systemId, componentId) {
+  if (!confirm('Unlink component #' + componentId + ' from system #' + systemId + '?')) return;
+  const r = await fetch('/settings/asset-types/' + systemId + '/members/' + componentId, {
+    method: 'DELETE', headers: HDRS,
+  });
+  if (!r.ok) { toast('Unlink failed'); return; }
+  toast('Member link removed');
+  loadRows(); runIntegrity();
+};
+
+// ── Merge ─────────────────────────────────────────────────────────────────────
+window.openMerge = function(i) {
+  _mergeSrc = _rows[i];
+  document.getElementById('dbt-merge-src').innerHTML =
+    'Source: <strong>#' + _mergeSrc.id + ' ' + esc(_mergeSrc.name) + '</strong>' +
+    (_mergeSrc.ref_children > 0 ? ' ' + badge(_mergeSrc.ref_children + ' CHILDREN — move them first', '#e53e3e') : '') +
+    '<div style="font-size:11px;color:var(--text-dim);margin-top:2px">' +
+    refPill('units', _mergeSrc.ref_items) + refPill('show lines', _mergeSrc.ref_show_lines, 'rgba(245,127,32,.25)') +
+    refPill('memberships', _mergeSrc.ref_members) + '</div>';
+  document.getElementById('dbt-merge-target').innerHTML =
+    _types.filter(t => t.id !== _mergeSrc.id).map(t => _typeOption(t, null)).join('');
+  document.getElementById('dbt-merge-error').style.display = 'none';
+  document.getElementById('dbt-merge-modal').style.display = '';
+};
+window.closeMergeModal = function() { document.getElementById('dbt-merge-modal').style.display = 'none'; _mergeSrc = null; };
+
+window.confirmMerge = async function() {
+  if (!_mergeSrc) return;
+  const targetId = parseInt(document.getElementById('dbt-merge-target').value, 10);
+  const r = await fetch('/assets/db-tools/api/asset-types/' + _mergeSrc.id + '/merge', {
+    method: 'POST', headers: JSON_HDRS, body: JSON.stringify({target_id: targetId}),
+  });
+  const data = await r.json();
+  if (!r.ok) {
+    const err = document.getElementById('dbt-merge-error');
+    err.textContent = data.error || 'Merge failed'; err.style.display = '';
+    return;
+  }
+  closeMergeModal();
+  toast('Merged — ' + data.moved_items + ' unit(s), ' + data.moved_lines + ' show line(s) repointed');
+  await Promise.all([loadRows(), loadCaches()]);
+  runIntegrity();
+};
+
+// ── Move children ─────────────────────────────────────────────────────────────
+window.openChildrenMove = function(i) {
+  _childrenSrc = _rows[i];
+  document.getElementById('dbt-children-src').innerHTML =
+    'Move the <strong>' + _childrenSrc.ref_children + '</strong> child type(s) of <strong>#' +
+    _childrenSrc.id + ' ' + esc(_childrenSrc.name) + '</strong> to:';
+  const tops = _types.filter(t => !t.parent_type_id && !t.is_system && !t.is_package && !t.is_retired && t.id !== _childrenSrc.id);
+  document.getElementById('dbt-children-target').innerHTML =
+    '<option value="">— no group (top level) —</option>' + tops.map(t => _typeOption(t, null)).join('');
+  document.getElementById('dbt-children-error').style.display = 'none';
+  document.getElementById('dbt-children-modal').style.display = '';
+};
+window.closeChildrenModal = function() { document.getElementById('dbt-children-modal').style.display = 'none'; _childrenSrc = null; };
+
+window.confirmChildrenMove = async function() {
+  if (!_childrenSrc) return;
+  const v = document.getElementById('dbt-children-target').value;
+  const r = await fetch('/assets/db-tools/api/asset-types/' + _childrenSrc.id + '/reassign-children', {
+    method: 'POST', headers: JSON_HDRS,
+    body: JSON.stringify({new_parent_id: v === '' ? null : parseInt(v, 10)}),
+  });
+  const data = await r.json();
+  if (!r.ok) {
+    const err = document.getElementById('dbt-children-error');
+    err.textContent = data.error || 'Move failed'; err.style.display = '';
+    return;
+  }
+  closeChildrenModal();
+  toast(data.moved + ' child type(s) moved');
+  await Promise.all([loadRows(), loadCaches()]);
+  runIntegrity();
+};
+
+// ── Integrity scan ────────────────────────────────────────────────────────────
+const SEV = {error: ['#e53e3e', 'ERROR'], warn: ['#f59e0b', 'WARN'], info: ['#64748b', 'INFO']};
+
+function integrityRowLabel(check, row) {
+  if (check.table === 'asset_type_system_members') {
+    return 'system #' + row.system_type_id + ' ' + esc(row.system_name || '[missing]') +
+           ' ⊃ #' + row.component_type_id + ' ' + esc(row.component_name || '[missing]');
+  }
+  const bits = ['#' + row.id];
+  if (row.name) bits.push(esc(row.name));
+  if (row.show_name) bits.push('show: ' + esc(row.show_name));
+  if (row.type_name) bits.push(esc(row.type_name));
+  if (row.barcode) bits.push(esc(row.barcode));
+  if (row.category_name) bits.push('<span style="color:var(--text-dim)">' + esc(row.category_name) + '</span>');
+  if (row.manufacturer || row.model) bits.push('<span style="color:var(--text-dim)">' + esc([row.manufacturer, row.model].filter(Boolean).join(' ')) + '</span>');
+  const refs = refPill('children', row.ref_children) + refPill('units', row.ref_items) +
+               refPill('show lines', row.ref_show_lines, 'rgba(245,127,32,.25)');
+  return bits.join(' · ') + (refs ? ' ' + refs : '');
+}
+
+window.runIntegrity = async function() {
+  const body = document.getElementById('integrity-body');
+  body.innerHTML = '<p style="color:var(--text-dim);font-size:12px;padding:8px 12px">Scanning…</p>';
+  const r = await fetch('/assets/db-tools/api/integrity', {headers: HDRS});
+  if (!r.ok) { body.innerHTML = '<p style="color:#e53e3e;font-size:12px;padding:8px 12px">Scan failed.</p>'; return; }
+  const data = await r.json();
+  document.getElementById('integrity-summary').textContent =
+    data.problems ? data.problems + ' row(s) flagged' : 'no problems found';
+  body.innerHTML = data.checks.map((c, idx) => {
+    const [color, tag] = SEV[c.severity] || SEV.info;
+    const open = c.count > 0 && c.severity !== 'info';
+    const rowsHtml = c.rows.map(row => {
+      const goId = c.table === 'asset_type_system_members' ? row.system_type_id : row.id;
+      return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px dotted var(--border)">' +
+        '<div style="flex:1;min-width:0;font-size:12px">' + integrityRowLabel(c, row) + '</div>' +
+        '<button class="btn btn-xs btn-ghost" onclick="switchTable(\'' + c.table + '\', \'' + goId + '\')">Open ›</button></div>';
+    }).join('');
+    return '<div style="border-bottom:1px solid var(--border)">' +
+      '<div style="display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer" onclick="const b=document.getElementById(\'icheck-' + idx + '\');b.style.display=b.style.display===\'none\'?\'\':\'none\'">' +
+      badge(tag, color) +
+      '<strong style="font-size:12.5px">' + esc(c.title) + '</strong>' +
+      '<span style="font-size:11px;color:' + (c.count ? color : 'var(--text-dim)') + ';font-weight:' + (c.count ? '700' : '400') + '">' + c.count + '</span>' +
+      '<span style="flex:1"></span><span style="color:var(--text-dim);font-size:11px">details</span></div>' +
+      '<div id="icheck-' + idx + '" style="display:' + (open ? '' : 'none') + ';padding:2px 12px 10px 12px">' +
+      '<p style="font-size:11px;color:var(--text-dim);margin:0 0 6px">' + esc(c.description) + '</p>' +
+      (c.count ? rowsHtml : '<p style="font-size:11px;color:var(--text-dim);margin:0">Nothing found — all good.</p>') +
+      '</div></div>';
+  }).join('');
+};
+
+init();
+</script>
+{% endblock %}

@@ -472,7 +472,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.18.2'
+APP_VERSION = '2.19.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -2965,6 +2965,8 @@ UNDO_TABLE_MAP = {
     'arts_group_contact':     'arts_group_contacts',
     'asset_type':             'asset_types',
     'asset_item':             'asset_items',
+    'asset_log':              'asset_logs',
+    'asset_maintenance':      'asset_maintenance',
     'show_asset':             'show_assets',
     'show_external_rental':   'show_external_rentals',
     'site_message':           'site_messages',
@@ -13383,6 +13385,13 @@ def asset_types_api():
     `?include_hidden=1` to bypass the filter — that's how the approval
     portal's own picker fetches the full catalog so the tech team can still
     add the restricted items themselves.
+
+    Group rows are never returned: a parentless type that has children is
+    tree structure (the middle "Groups" column of /assets), not a rentable
+    asset. Without this filter every group surfaced in the pickers as a
+    bogus $0.00/day duplicate of its own children — exactly what happened
+    when a type created without a group later had real types parented
+    under it. The asset-manager finder applies the same rule client-side.
     """
     include_hidden = request.args.get('include_hidden') == '1'
     is_manager = (
@@ -13392,6 +13401,12 @@ def asset_types_api():
     )
     db = get_db()
     where = ['at.is_retired = 0']
+    where.append("""NOT (
+            at.parent_type_id IS NULL
+            AND COALESCE(at.is_system, 0) = 0
+            AND COALESCE(at.is_package, 0) = 0
+            AND EXISTS (SELECT 1 FROM asset_types ch WHERE ch.parent_type_id = at.id)
+        )""")
     if not (include_hidden and is_manager):
         where.append('COALESCE(at.hide_from_pm, 0) = 0')
     rows = db.execute(f"""
@@ -15389,6 +15404,813 @@ def assets_retired():
                            retired_types=[dict(t) for t in types],
                            standalone_items=[dict(s) for s in standalone],
                            user=get_current_user())
+
+
+# ─── Asset Manager — DB Tools (raw row inspection & repair) ──────────────────
+#
+# The /assets finder only shows rows that fit the Category → Group → Type tree,
+# so malformed rows can be unreachable from any normal interface: a type
+# created without a group silently becomes a de-facto "folder" once another
+# type is parented under it, duplicates hide behind identical names, children
+# of retired parents vanish from the tree, etc. These routes give asset
+# managers direct — but column-whitelisted and audited — access to the
+# underlying asset tables so those data problems can be diagnosed and fixed
+# without opening psql.
+#
+# Every mutation snapshots before/after into audit_log under the standard
+# entity types, so edits and deletes made here can be undone from
+# /admin/audit like any other tracked change.
+
+_ASSET_DBT_TABLES = {
+    'asset_categories': {
+        'label': 'Categories',
+        'entity': 'asset_category',
+        'id_col': 'c.id',
+        'select': """
+            SELECT c.*,
+                   (SELECT COUNT(*) FROM asset_types t WHERE t.category_id = c.id) AS ref_types
+            FROM asset_categories c
+        """,
+        'search': ['c.name'],
+        'order': 'c.sort_order, c.name',
+        'editable': {'name': 'str_req', 'sort_order': 'int'},
+    },
+    'asset_types': {
+        'label': 'Asset Types',
+        'entity': 'asset_type',
+        'id_col': 't.id',
+        'select': """
+            SELECT t.id, t.category_id, t.parent_type_id, t.name, t.manufacturer, t.model,
+                   t.storage_location, t.rental_cost, t.weekly_rate, t.reserve_count,
+                   t.is_consumable, t.is_system, t.is_package, t.track_quantity,
+                   t.supplier_name, t.supplier_contact, t.is_retired, t.retired_at,
+                   t.hide_from_pm, t.allow_unit_selection, t.sort_order, t.created_at,
+                   ac.name AS category_name,
+                   pt.name AS parent_name,
+                   (SELECT COUNT(*) FROM asset_types ch WHERE ch.parent_type_id = t.id) AS ref_children,
+                   (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = t.id) AS ref_items,
+                   (SELECT COUNT(*) FROM show_assets sa WHERE sa.asset_type_id = t.id) AS ref_show_lines,
+                   (SELECT COUNT(*) FROM asset_type_system_members m
+                     WHERE m.system_type_id = t.id OR m.component_type_id = t.id) AS ref_members
+            FROM asset_types t
+            LEFT JOIN asset_categories ac ON ac.id = t.category_id
+            LEFT JOIN asset_types pt ON pt.id = t.parent_type_id
+        """,
+        'search': ['t.name', 't.manufacturer', 't.model', 'ac.name', 'pt.name'],
+        'order': 't.id DESC',
+        'editable': {
+            'name': 'str_req', 'manufacturer': 'str', 'model': 'str',
+            'storage_location': 'str', 'supplier_name': 'str', 'supplier_contact': 'str',
+            'category_id': 'fk_category', 'parent_type_id': 'fk_parent_null',
+            'rental_cost': 'float', 'weekly_rate': 'float', 'reserve_count': 'int',
+            'sort_order': 'int', 'is_consumable': 'bool', 'is_system': 'bool',
+            'is_package': 'bool', 'track_quantity': 'bool', 'hide_from_pm': 'bool',
+            'allow_unit_selection': 'bool', 'is_retired': 'bool',
+        },
+    },
+    'asset_items': {
+        'label': 'Units (asset_items)',
+        'entity': 'asset_item',
+        'id_col': 'i.id',
+        'select': """
+            SELECT i.*, t.name AS type_name, t.is_retired AS type_is_retired,
+                   (SELECT COUNT(*) FROM show_assets sa WHERE sa.asset_item_id = i.id) AS ref_show_pins,
+                   (SELECT COUNT(*) FROM asset_logs al WHERE al.asset_item_id = i.id) AS ref_logs,
+                   (SELECT COUNT(*) FROM asset_maintenance am WHERE am.asset_item_id = i.id) AS ref_maint,
+                   (SELECT COUNT(*) FROM asset_items ci WHERE ci.container_item_id = i.id) AS ref_contained
+            FROM asset_items i
+            LEFT JOIN asset_types t ON t.id = i.asset_type_id
+        """,
+        'search': ['i.barcode', 't.name', 'i.status'],
+        'order': 'i.id DESC',
+        'editable': {
+            'asset_type_id': 'fk_type', 'barcode': 'str', 'status': 'item_status',
+            'condition': 'item_condition', 'year_purchased': 'int_null',
+            'purchase_value': 'float_null', 'depreciation_years': 'int_null',
+            'warranty_expires': 'date_null', 'depreciation_start_date': 'date_null',
+            'replacement_cost': 'float_null', 'is_container': 'bool',
+            'container_item_id': 'fk_item_null', 'system_type_id': 'fk_type_null',
+            'sort_order': 'int',
+        },
+    },
+    'show_assets': {
+        'label': 'Show Lines (show_assets)',
+        'entity': 'show_asset',
+        'id_col': 'sa.id',
+        'select': """
+            SELECT sa.*, s.name AS show_name, s.show_date,
+                   t.name AS type_name, t.is_retired AS type_is_retired
+            FROM show_assets sa
+            LEFT JOIN shows s ON s.id = sa.show_id
+            LEFT JOIN asset_types t ON t.id = sa.asset_type_id
+        """,
+        'search': ['s.name', 't.name', 'sa.notes'],
+        'order': 'sa.id DESC',
+        'editable': {
+            'asset_type_id': 'fk_type', 'asset_item_id': 'fk_item_null',
+            'quantity': 'int', 'rental_start': 'date_null', 'rental_end': 'date_null',
+            'locked_price': 'float', 'original_locked_price': 'float_null',
+            'is_hidden': 'bool', 'notes': 'str',
+        },
+    },
+    'asset_type_system_members': {
+        'label': 'System Members',
+        'entity': 'asset_type',
+        'composite': True,
+        'id_col': None,
+        'select': """
+            SELECT m.system_type_id, m.component_type_id, m.sort_order,
+                   st.name AS system_name, st.is_retired AS system_retired,
+                   ct.name AS component_name, ct.is_retired AS component_retired
+            FROM asset_type_system_members m
+            LEFT JOIN asset_types st ON st.id = m.system_type_id
+            LEFT JOIN asset_types ct ON ct.id = m.component_type_id
+        """,
+        'search': ['st.name', 'ct.name'],
+        'order': 'm.system_type_id, m.sort_order',
+        'editable': {},
+    },
+    'warehouse_locations': {
+        'label': 'Warehouse Locations',
+        'entity': 'warehouse_location',
+        'id_col': 'w.id',
+        'select': """
+            SELECT w.*,
+                   (SELECT COUNT(*) FROM asset_types t WHERE t.storage_location = w.name) AS ref_types
+            FROM warehouse_locations w
+        """,
+        'search': ['w.name'],
+        'order': 'w.sort_order, w.name',
+        'editable': {'name': 'str_req', 'sort_order': 'int'},
+    },
+    'asset_logs': {
+        'label': 'Unit Logs',
+        'entity': 'asset_log',
+        'id_col': 'al.id',
+        'select': """
+            SELECT al.*, i.barcode, t.name AS type_name
+            FROM asset_logs al
+            LEFT JOIN asset_items i ON i.id = al.asset_item_id
+            LEFT JOIN asset_types t ON t.id = i.asset_type_id
+        """,
+        'search': ['al.body', 'al.log_type', 't.name', 'i.barcode'],
+        'order': 'al.id DESC',
+        'editable': {'log_date': 'date_req', 'log_type': 'str_req', 'body': 'str'},
+    },
+    'asset_maintenance': {
+        'label': 'Maintenance Records',
+        'entity': 'asset_maintenance',
+        'id_col': 'am.id',
+        'select': """
+            SELECT am.*, i.barcode, t.name AS type_name
+            FROM asset_maintenance am
+            LEFT JOIN asset_items i ON i.id = am.asset_item_id
+            LEFT JOIN asset_types t ON t.id = i.asset_type_id
+        """,
+        'search': ['am.reason', 'am.notes', 't.name', 'i.barcode'],
+        'order': 'am.id DESC',
+        'editable': {'reason': 'str', 'notes': 'str', 'status': 'maint_status'},
+    },
+}
+
+
+def _dbt_snapshot(db, table, row_id):
+    """Row snapshot for audit/undo, minus the legacy photo BLOB (it can be
+    multiple MB and json.dumps(default=str) would garble it anyway)."""
+    snap = _snapshot_row(db, table, row_id)
+    if snap:
+        snap.pop('photo', None)
+    return snap
+
+
+def _dbt_jsonable(row_dict):
+    """PostgreSQL hands back date/datetime objects (SQLite returns ISO text)
+    and memoryview for blobs — normalize so the JSON the UI sees is identical
+    on both backends."""
+    out = {}
+    for k, v in row_dict.items():
+        if isinstance(v, datetime):
+            out[k] = v.isoformat(sep=' ')[:19]
+        elif isinstance(v, date):
+            out[k] = v.isoformat()
+        elif isinstance(v, memoryview):
+            out[k] = None
+        else:
+            out[k] = v
+    return out
+
+
+def _dbt_parent_cycle(db, type_id, new_parent_id):
+    """True if making new_parent_id the parent of type_id would create a
+    parent_type_id cycle (walks up from the proposed parent)."""
+    seen, cur = set(), new_parent_id
+    while cur is not None and cur not in seen:
+        if cur == type_id:
+            return True
+        seen.add(cur)
+        r = db.execute('SELECT parent_type_id FROM asset_types WHERE id=?', (cur,)).fetchone()
+        cur = r['parent_type_id'] if r else None
+    return False
+
+
+def _dbt_coerce(db, col, kind, val, row_id=None):
+    """Validate/coerce one incoming column value per its whitelist kind.
+    Raises ValueError with a user-facing message when the value is unusable."""
+    def _as_int(v, msg):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            raise ValueError(msg)
+
+    if kind in ('str', 'str_req'):
+        v = ('' if val is None else str(val)).strip()
+        if kind == 'str_req' and not v:
+            raise ValueError(f'{col} cannot be empty')
+        return v
+    if kind == 'int':
+        return _as_int(0 if val in (None, '') else val, f'{col} must be a whole number')
+    if kind == 'int_null':
+        if val in (None, '', 'null'):
+            return None
+        return _as_int(val, f'{col} must be a whole number')
+    if kind in ('float', 'float_null'):
+        if val in (None, '', 'null'):
+            if kind == 'float_null':
+                return None
+            return 0.0
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            raise ValueError(f'{col} must be a number')
+    if kind == 'bool':
+        return 1 if val in (True, 1, '1', 'true', 'True', 'on') else 0
+    if kind in ('date_null', 'date_req'):
+        v = ('' if val is None else str(val)).strip()
+        if not v:
+            if kind == 'date_req':
+                raise ValueError(f'{col} is required')
+            return None
+        try:
+            datetime.strptime(v[:10], '%Y-%m-%d')
+        except ValueError:
+            raise ValueError(f'{col} must be a YYYY-MM-DD date')
+        return v[:10]
+    if kind == 'item_status':
+        v = ('' if val is None else str(val)).strip().lower()
+        if v not in ('available', 'maintenance', 'retired'):
+            raise ValueError('status must be one of: available, maintenance, retired')
+        return v
+    if kind == 'item_condition':
+        v = ('' if val is None else str(val)).strip().lower()
+        if v not in ('excellent', 'good', 'fair', 'poor', 'retired'):
+            raise ValueError('condition must be one of: excellent, good, fair, poor, retired')
+        return v
+    if kind == 'maint_status':
+        v = ('' if val is None else str(val)).strip().lower()
+        if v not in ('in_progress', 'resolved'):
+            raise ValueError('status must be in_progress or resolved')
+        return v
+    if kind == 'fk_category':
+        cid = _as_int(val, f'{col} must be an asset_categories id')
+        if not db.execute('SELECT 1 FROM asset_categories WHERE id=?', (cid,)).fetchone():
+            raise ValueError(f'asset_categories id {cid} does not exist')
+        return cid
+    if kind in ('fk_type', 'fk_type_null', 'fk_parent_null'):
+        if val in (None, '', 'null'):
+            if kind == 'fk_type':
+                raise ValueError(f'{col} is required')
+            return None
+        tid = _as_int(val, f'{col} must be an asset_types id')
+        if not db.execute('SELECT 1 FROM asset_types WHERE id=?', (tid,)).fetchone():
+            raise ValueError(f'asset_types id {tid} does not exist')
+        if kind == 'fk_parent_null':
+            if tid == row_id:
+                raise ValueError('a type cannot be its own parent')
+            if row_id is not None and _dbt_parent_cycle(db, row_id, tid):
+                raise ValueError(f'type {tid} is a descendant of this type — that parent would create a cycle')
+        return tid
+    if kind == 'fk_item_null':
+        if val in (None, '', 'null'):
+            return None
+        iid = _as_int(val, f'{col} must be an asset_items id')
+        if not db.execute('SELECT 1 FROM asset_items WHERE id=?', (iid,)).fetchone():
+            raise ValueError(f'asset_items id {iid} does not exist')
+        return iid
+    raise ValueError(f'unsupported edit kind for {col}')
+
+
+def _dbt_cross_check(db, table, row_id, before, clean):
+    """Field-combination guards that single-column coercion can't express."""
+    merged = dict(before)
+    merged.update(clean)
+    if table == 'show_assets':
+        if int(merged.get('quantity') or 0) < 1:
+            raise ValueError('quantity must be at least 1')
+        item_id = merged.get('asset_item_id')
+        if item_id:
+            item = db.execute('SELECT asset_type_id FROM asset_items WHERE id=?',
+                              (item_id,)).fetchone()
+            if item and item['asset_type_id'] != merged.get('asset_type_id'):
+                raise ValueError(
+                    f"unit {item_id} belongs to asset_type_id {item['asset_type_id']}, "
+                    f"not {merged.get('asset_type_id')} — clear the pin or pick a matching unit")
+            if int(merged.get('quantity') or 1) != 1:
+                raise ValueError('unit-pinned lines must keep quantity 1')
+    elif table == 'asset_items':
+        if merged.get('container_item_id') == row_id:
+            raise ValueError('an item cannot contain itself')
+
+
+@app.route('/assets/db-tools')
+@asset_manager_required
+def asset_db_tools_page():
+    return render_template('asset_db_tools.html', user=get_current_user())
+
+
+@app.route('/assets/db-tools/api/meta')
+@asset_manager_required
+def asset_dbt_meta():
+    db = get_db()
+    tables = {}
+    for name, cfg in _ASSET_DBT_TABLES.items():
+        try:
+            count = db.execute(f'SELECT COUNT(*) FROM {name}').fetchone()[0]
+        except Exception:
+            count = None
+        tables[name] = {
+            'label': cfg['label'],
+            'entity': cfg['entity'],
+            'editable': cfg['editable'],
+            'composite': bool(cfg.get('composite')),
+            'count': count,
+        }
+    db.close()
+    return jsonify({'tables': tables})
+
+
+@app.route('/assets/db-tools/api/rows/<table>')
+@asset_manager_required
+def asset_dbt_rows(table):
+    cfg = _ASSET_DBT_TABLES.get(table)
+    if not cfg:
+        return jsonify({'error': 'Unknown table'}), 404
+    q = (request.args.get('q') or '').strip()
+    try:
+        limit = max(1, min(int(request.args.get('limit', 100)), 500))
+    except (TypeError, ValueError):
+        limit = 100
+    try:
+        offset = max(0, int(request.args.get('offset', 0)))
+    except (TypeError, ValueError):
+        offset = 0
+
+    where, params = '', []
+    if q:
+        clauses = [f'LOWER({c}) LIKE ?' for c in cfg['search']]
+        params.extend([f'%{q.lower()}%'] * len(clauses))
+        if q.isdigit() and cfg.get('id_col'):
+            clauses.append(f"{cfg['id_col']} = ?")
+            params.append(int(q))
+        where = 'WHERE (' + ' OR '.join(clauses) + ')'
+
+    db = get_db()
+    count_sql = f"SELECT COUNT(*) FROM ({cfg['select']} {where}) AS _sub"
+    total = (db.execute(count_sql, tuple(params)) if params else db.execute(count_sql)).fetchone()[0]
+    rows_sql = f"{cfg['select']} {where} ORDER BY {cfg['order']} LIMIT {limit} OFFSET {offset}"
+    rows = (db.execute(rows_sql, tuple(params)) if params else db.execute(rows_sql)).fetchall()
+    db.close()
+    return jsonify({'rows': [_dbt_jsonable(dict(r)) for r in rows], 'total': total,
+                    'limit': limit, 'offset': offset})
+
+
+@app.route('/assets/db-tools/api/rows/<table>/<int:row_id>', methods=['PUT'])
+@asset_manager_required
+def asset_dbt_update(table, row_id):
+    cfg = _ASSET_DBT_TABLES.get(table)
+    if not cfg:
+        return jsonify({'error': 'Unknown table'}), 404
+    if not cfg['editable'] or cfg.get('composite'):
+        return jsonify({'error': 'This table is not editable here'}), 400
+    data = request.get_json() or {}
+    updates = data.get('updates') or {}
+    if not isinstance(updates, dict) or not updates:
+        return jsonify({'error': 'No updates supplied'}), 400
+    unknown = sorted(k for k in updates if k not in cfg['editable'])
+    if unknown:
+        return jsonify({'error': f"Column(s) not editable: {', '.join(unknown)}"}), 400
+
+    db = get_db()
+    before = _dbt_snapshot(db, table, row_id)
+    if not before:
+        db.close()
+        return jsonify({'error': 'Row not found'}), 404
+    try:
+        clean = {col: _dbt_coerce(db, col, cfg['editable'][col], val, row_id=row_id)
+                 for col, val in updates.items()}
+        _dbt_cross_check(db, table, row_id, before, clean)
+    except ValueError as e:
+        db.close()
+        return jsonify({'error': str(e)}), 400
+
+    # Flipping is_retired manages retired_at alongside, like the normal routes
+    if table == 'asset_types' and 'is_retired' in clean:
+        if clean['is_retired'] and not before.get('is_retired'):
+            clean['retired_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        elif not clean['is_retired'] and before.get('is_retired'):
+            clean['retired_at'] = None
+
+    cols = list(clean.keys())
+    set_clause = ', '.join(f'{c}=?' for c in cols)
+    db.execute(f'UPDATE {table} SET {set_clause} WHERE id=?',
+               tuple(clean[c] for c in cols) + (row_id,))
+    db.commit()
+    after = _dbt_snapshot(db, table, row_id)
+    show_id = before.get('show_id') if table == 'show_assets' else None
+    log_audit(db, f"{cfg['entity'].upper()}_EDIT", cfg['entity'], row_id,
+              show_id=show_id, before=before, after=after,
+              detail=f"DB tools: {', '.join(cols)}")
+    db.commit()
+    if table == 'show_assets' and show_id:
+        _reset_asset_approval(db, show_id, 'Asset line edited via DB tools')
+        db.commit()
+    syslog_logger.info(
+        f"ASSET_DBT_EDIT table={table} id={row_id} cols={','.join(cols)} "
+        f"by={session.get('username')}")
+    db.close()
+    return jsonify({'success': True, 'row': _dbt_jsonable(after) if after else None})
+
+
+@app.route('/assets/db-tools/api/rows/<table>/<int:row_id>', methods=['DELETE'])
+@asset_manager_required
+def asset_dbt_delete(table, row_id):
+    cfg = _ASSET_DBT_TABLES.get(table)
+    if not cfg:
+        return jsonify({'error': 'Unknown table'}), 404
+    if cfg.get('composite'):
+        return jsonify({'error': 'Use the unlink action for system members'}), 400
+    force = request.args.get('force') == '1'
+
+    db = get_db()
+    before = _dbt_snapshot(db, table, row_id)
+    if not before:
+        db.close()
+        return jsonify({'error': 'Row not found'}), 404
+
+    def _count(sql, args):
+        return db.execute(sql, args).fetchone()[0]
+
+    blockers, forceable = [], []
+    if table == 'asset_categories':
+        n = _count('SELECT COUNT(*) FROM asset_types WHERE category_id=?', (row_id,))
+        if n:
+            blockers.append(f'{n} asset type(s) still in this category — move or delete them first')
+    elif table == 'asset_types':
+        n_shows = _count('SELECT COUNT(*) FROM show_assets WHERE asset_type_id=?', (row_id,))
+        n_children = _count('SELECT COUNT(*) FROM asset_types WHERE parent_type_id=?', (row_id,))
+        n_items = _count('SELECT COUNT(*) FROM asset_items WHERE asset_type_id=?', (row_id,))
+        if n_shows:
+            blockers.append(f'{n_shows} show line(s) reference this type — merge it into another '
+                            'type or retire it instead; deleting would erase show rental history')
+        if n_children:
+            blockers.append(f'{n_children} child type(s) use this row as their group — '
+                            'use "Move children" first')
+        if n_items:
+            forceable.append(f'{n_items} unit(s) and their logs / maintenance records will be deleted')
+    elif table == 'asset_items':
+        n_pins = _count('SELECT COUNT(*) FROM show_assets WHERE asset_item_id=?', (row_id,))
+        n_logs = _count('SELECT COUNT(*) FROM asset_logs WHERE asset_item_id=?', (row_id,))
+        n_maint = _count('SELECT COUNT(*) FROM asset_maintenance WHERE asset_item_id=?', (row_id,))
+        n_contained = _count('SELECT COUNT(*) FROM asset_items WHERE container_item_id=?', (row_id,))
+        if n_pins:
+            forceable.append(f'{n_pins} show line(s) are pinned to this unit — the pin will be '
+                             'cleared (the line itself stays)')
+        if n_logs or n_maint:
+            forceable.append(f'{n_logs} log(s) and {n_maint} maintenance record(s) will be deleted')
+        if n_contained:
+            forceable.append(f'{n_contained} contained item(s) will be released from this container')
+
+    if blockers:
+        db.close()
+        return jsonify({'error': 'Delete blocked', 'blockers': blockers}), 409
+    if forceable and not force:
+        db.close()
+        return jsonify({'error': 'Confirmation required', 'forceable': forceable}), 409
+
+    show_id = before.get('show_id') if table == 'show_assets' else None
+    if table == 'asset_categories':
+        db.execute('UPDATE form_sections SET asset_category_id=NULL WHERE asset_category_id=?', (row_id,))
+    elif table == 'asset_types':
+        db.execute('UPDATE show_assets SET asset_item_id=NULL WHERE asset_item_id IN '
+                   '(SELECT id FROM asset_items WHERE asset_type_id=?)', (row_id,))
+        db.execute('DELETE FROM asset_logs WHERE asset_item_id IN '
+                   '(SELECT id FROM asset_items WHERE asset_type_id=?)', (row_id,))
+        db.execute('DELETE FROM asset_maintenance WHERE asset_item_id IN '
+                   '(SELECT id FROM asset_items WHERE asset_type_id=?)', (row_id,))
+        db.execute('UPDATE asset_items SET container_item_id=NULL WHERE container_item_id IN '
+                   '(SELECT id FROM asset_items WHERE asset_type_id=?)', (row_id,))
+        db.execute('DELETE FROM asset_items WHERE asset_type_id=?', (row_id,))
+        db.execute('UPDATE asset_items SET system_type_id=NULL WHERE system_type_id=?', (row_id,))
+        db.execute('DELETE FROM asset_type_system_members WHERE system_type_id=? OR component_type_id=?',
+                   (row_id, row_id))
+    elif table == 'asset_items':
+        db.execute('UPDATE show_assets SET asset_item_id=NULL WHERE asset_item_id=?', (row_id,))
+        db.execute('UPDATE asset_items SET container_item_id=NULL WHERE container_item_id=?', (row_id,))
+        db.execute('DELETE FROM asset_logs WHERE asset_item_id=?', (row_id,))
+        db.execute('DELETE FROM asset_maintenance WHERE asset_item_id=?', (row_id,))
+
+    db.execute(f'DELETE FROM {table} WHERE id=?', (row_id,))
+    db.commit()
+    label = before.get('name') or before.get('barcode') or str(row_id)
+    log_audit(db, f"{cfg['entity'].upper()}_DELETE", cfg['entity'], row_id,
+              show_id=show_id, before=before,
+              detail=f'DB tools hard delete: {label}')
+    db.commit()
+    if table == 'show_assets' and show_id:
+        _reset_asset_approval(db, show_id, 'Asset line deleted via DB tools')
+        db.commit()
+    syslog_logger.info(
+        f"ASSET_DBT_DELETE table={table} id={row_id} force={force} "
+        f"by={session.get('username')}")
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/assets/db-tools/api/asset-types/<int:type_id>/reassign-children', methods=['POST'])
+@asset_manager_required
+def asset_dbt_reassign_children(type_id):
+    """Move every child of a type to a different (top-level) group, or to no
+    group at all. This is the unblock step before deleting or merging a row
+    that accidentally became a folder."""
+    data = request.get_json() or {}
+    raw = data.get('new_parent_id')
+    new_parent_id = None
+    if raw not in (None, '', 'null'):
+        try:
+            new_parent_id = int(raw)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'new_parent_id must be an asset_types id or null'}), 400
+
+    db = get_db()
+    src = db.execute('SELECT id, name FROM asset_types WHERE id=?', (type_id,)).fetchone()
+    if not src:
+        db.close()
+        return jsonify({'error': 'Type not found'}), 404
+    if new_parent_id is not None:
+        if new_parent_id == type_id:
+            db.close()
+            return jsonify({'error': 'New parent cannot be the same type'}), 400
+        parent = db.execute('SELECT id, name, parent_type_id, is_retired FROM asset_types WHERE id=?',
+                            (new_parent_id,)).fetchone()
+        if not parent:
+            db.close()
+            return jsonify({'error': f'asset_types id {new_parent_id} does not exist'}), 400
+        if parent['parent_type_id']:
+            db.close()
+            return jsonify({'error': 'New parent is itself a child — pick a top-level group'}), 400
+        if parent['is_retired']:
+            db.close()
+            return jsonify({'error': 'New parent is retired — children would stay unreachable'}), 400
+
+    cur = db.execute('UPDATE asset_types SET parent_type_id=? WHERE parent_type_id=?',
+                     (new_parent_id, type_id))
+    moved = cur.rowcount
+    db.commit()
+    log_audit(db, 'ASSET_TYPE_CHILDREN_MOVE', 'asset_type', type_id,
+              detail=f'DB tools: moved {moved} child type(s) from {src["name"]} '
+                     f'to {new_parent_id if new_parent_id is not None else "no group"}')
+    db.commit()
+    syslog_logger.info(
+        f"ASSET_DBT_CHILDREN_MOVE type_id={type_id} new_parent={new_parent_id} "
+        f"moved={moved} by={session.get('username')}")
+    db.close()
+    return jsonify({'success': True, 'moved': moved})
+
+
+@app.route('/assets/db-tools/api/asset-types/<int:src_id>/merge', methods=['POST'])
+@asset_manager_required
+def asset_dbt_merge_type(src_id):
+    """Fold a duplicate type into another: units, show lines, system links
+    and member rows are repointed at the target, then the source row is
+    deleted. Show history survives with its locked prices intact."""
+    data = request.get_json() or {}
+    try:
+        target_id = int(data.get('target_id'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'target_id required'}), 400
+    if target_id == src_id:
+        return jsonify({'error': 'Cannot merge a type into itself'}), 400
+
+    db = get_db()
+    src = _dbt_snapshot(db, 'asset_types', src_id)
+    tgt = _dbt_snapshot(db, 'asset_types', target_id)
+    if not src or not tgt:
+        db.close()
+        return jsonify({'error': 'Source or target type not found'}), 404
+    n_children = db.execute('SELECT COUNT(*) FROM asset_types WHERE parent_type_id=?',
+                            (src_id,)).fetchone()[0]
+    if n_children:
+        db.close()
+        return jsonify({'error': f'Source still has {n_children} child type(s) — '
+                                 'use "Move children" first'}), 409
+
+    show_ids = [r['show_id'] for r in db.execute(
+        'SELECT DISTINCT show_id FROM show_assets WHERE asset_type_id=?', (src_id,)).fetchall()]
+    moved_items = db.execute('UPDATE asset_items SET asset_type_id=? WHERE asset_type_id=?',
+                             (target_id, src_id)).rowcount
+    moved_lines = db.execute('UPDATE show_assets SET asset_type_id=? WHERE asset_type_id=?',
+                             (target_id, src_id)).rowcount
+    db.execute('UPDATE asset_items SET system_type_id=? WHERE system_type_id=?',
+               (target_id, src_id))
+    # Fold membership pairs, dropping rows that would duplicate an existing
+    # pair or link the target to itself
+    for side, other in (('system_type_id', 'component_type_id'),
+                        ('component_type_id', 'system_type_id')):
+        rows = db.execute(
+            f'SELECT system_type_id, component_type_id, sort_order '
+            f'FROM asset_type_system_members WHERE {side}=?', (src_id,)).fetchall()
+        for m in rows:
+            other_id = m[other]
+            dup = (other_id == target_id) or db.execute(
+                f'SELECT 1 FROM asset_type_system_members WHERE {side}=? AND {other}=?',
+                (target_id, other_id)).fetchone()
+            db.execute(f'DELETE FROM asset_type_system_members WHERE {side}=? AND {other}=?',
+                       (src_id, other_id))
+            if not dup:
+                db.execute(f'INSERT INTO asset_type_system_members ({side}, {other}, sort_order) '
+                           f'VALUES (?,?,?)', (target_id, other_id, m['sort_order']))
+    db.execute('DELETE FROM asset_types WHERE id=?', (src_id,))
+    db.commit()
+    log_audit(db, 'ASSET_TYPE_MERGE', 'asset_type', src_id, before=src,
+              detail=f'DB tools: merged "{src.get("name")}" into '
+                     f'{target_id} "{tgt.get("name")}" — {moved_items} unit(s), '
+                     f'{moved_lines} show line(s) repointed')
+    db.commit()
+    for sid in show_ids:
+        _reset_asset_approval(db, sid, 'Asset type merged via DB tools')
+    db.commit()
+    syslog_logger.info(
+        f"ASSET_DBT_MERGE src={src_id} target={target_id} items={moved_items} "
+        f"lines={moved_lines} by={session.get('username')}")
+    db.close()
+    return jsonify({'success': True, 'moved_items': moved_items, 'moved_lines': moved_lines})
+
+
+@app.route('/assets/db-tools/api/integrity')
+@asset_manager_required
+def asset_dbt_integrity():
+    """Canned anomaly scan over the asset tables. Read-only; each finding
+    carries enough ids for the UI to jump to the offending rows."""
+    db = get_db()
+    checks = []
+
+    def add(key, title, severity, description, table, sql):
+        try:
+            rows = [_dbt_jsonable(dict(r)) for r in db.execute(sql).fetchall()]
+            checks.append({'key': key, 'title': title, 'severity': severity,
+                           'description': description, 'table': table,
+                           'count': len(rows), 'rows': rows[:200]})
+        except Exception as e:
+            checks.append({'key': key, 'title': title, 'severity': 'error',
+                           'description': f'check failed: {e}', 'table': table,
+                           'count': 0, 'rows': []})
+
+    add('group_and_asset', 'Group rows that also look like assets', 'warn',
+        'Parentless types with children act as the tree\'s "group" folders, but these also carry '
+        'asset data (manufacturer, model, pricing, units or show lines) — usually a type created '
+        'without a group that other types were later parented under. Clean the asset fields off '
+        'the row to make it a pure group, or move its children and merge/delete it.',
+        'asset_types', """
+        SELECT t.id, t.name, t.manufacturer, t.model, t.rental_cost,
+               ac.name AS category_name,
+               (SELECT COUNT(*) FROM asset_types c WHERE c.parent_type_id = t.id) AS ref_children,
+               (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = t.id) AS ref_items,
+               (SELECT COUNT(*) FROM show_assets sa WHERE sa.asset_type_id = t.id) AS ref_show_lines
+        FROM asset_types t
+        LEFT JOIN asset_categories ac ON ac.id = t.category_id
+        WHERE t.is_retired = 0 AND t.parent_type_id IS NULL
+          AND COALESCE(t.is_system, 0) = 0 AND COALESCE(t.is_package, 0) = 0
+          AND EXISTS (SELECT 1 FROM asset_types c WHERE c.parent_type_id = t.id)
+          AND (COALESCE(t.manufacturer, '') <> '' OR COALESCE(t.model, '') <> ''
+               OR COALESCE(t.rental_cost, 0) > 0 OR COALESCE(t.weekly_rate, 0) > 0
+               OR EXISTS (SELECT 1 FROM asset_items ai WHERE ai.asset_type_id = t.id)
+               OR EXISTS (SELECT 1 FROM show_assets sa WHERE sa.asset_type_id = t.id))
+        ORDER BY t.id LIMIT 200""")
+
+    add('dup_names', 'Duplicate type names within a category', 'warn',
+        'Active types sharing a name inside the same category. Often one is real and the other is '
+        'a stray created by mistake — merge the stray into the real one to keep history.',
+        'asset_types', """
+        SELECT t.id, t.name, t.manufacturer, t.model, t.parent_type_id,
+               ac.name AS category_name,
+               (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = t.id) AS ref_items,
+               (SELECT COUNT(*) FROM show_assets sa WHERE sa.asset_type_id = t.id) AS ref_show_lines
+        FROM asset_types t
+        LEFT JOIN asset_categories ac ON ac.id = t.category_id
+        WHERE t.is_retired = 0 AND EXISTS (
+            SELECT 1 FROM asset_types d
+            WHERE d.id <> t.id AND d.is_retired = 0
+              AND d.category_id = t.category_id
+              AND LOWER(d.name) = LOWER(t.name))
+        ORDER BY LOWER(t.name), t.id LIMIT 200""")
+
+    add('standalone_types', 'Types not in any group', 'info',
+        'Active types with no group and no children. They render as empty groups in the finder '
+        'and are directly pickable on shows — fine if intentional, limbo if not. Assign a '
+        'parent_type_id to file them under a group.',
+        'asset_types', """
+        SELECT t.id, t.name, t.manufacturer, t.model, t.rental_cost,
+               ac.name AS category_name,
+               (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = t.id) AS ref_items,
+               (SELECT COUNT(*) FROM show_assets sa WHERE sa.asset_type_id = t.id) AS ref_show_lines
+        FROM asset_types t
+        LEFT JOIN asset_categories ac ON ac.id = t.category_id
+        WHERE t.is_retired = 0 AND t.parent_type_id IS NULL
+          AND COALESCE(t.is_system, 0) = 0 AND COALESCE(t.is_package, 0) = 0
+          AND NOT EXISTS (SELECT 1 FROM asset_types c WHERE c.parent_type_id = t.id)
+        ORDER BY t.id LIMIT 200""")
+
+    add('child_of_retired', 'Active types under a retired group', 'warn',
+        'These types are active but their group is retired, so they are unreachable in the '
+        'finder tree. Move them to a live group or retire them too.',
+        'asset_types', """
+        SELECT t.id, t.name, t.manufacturer, t.model, t.parent_type_id,
+               pt.name AS parent_name, ac.name AS category_name
+        FROM asset_types t
+        JOIN asset_types pt ON pt.id = t.parent_type_id
+        LEFT JOIN asset_categories ac ON ac.id = t.category_id
+        WHERE t.is_retired = 0 AND pt.is_retired = 1
+        ORDER BY t.id LIMIT 200""")
+
+    add('dangling_parent', 'Types pointing at a missing parent', 'error',
+        'parent_type_id references a row that no longer exists (legacy SQLite data could get '
+        'here; PostgreSQL enforces the FK). Clear or fix the parent.',
+        'asset_types', """
+        SELECT t.id, t.name, t.parent_type_id, ac.name AS category_name
+        FROM asset_types t
+        LEFT JOIN asset_types pt ON pt.id = t.parent_type_id
+        LEFT JOIN asset_categories ac ON ac.id = t.category_id
+        WHERE t.parent_type_id IS NOT NULL AND pt.id IS NULL
+        ORDER BY t.id LIMIT 200""")
+
+    add('missing_category', 'Types with a missing category', 'error',
+        'category_id is null or references a deleted category — these rows are invisible in '
+        'most asset screens (they inner-join categories). Point them at a real category.',
+        'asset_types', """
+        SELECT t.id, t.name, t.category_id, t.parent_type_id, t.is_retired
+        FROM asset_types t
+        LEFT JOIN asset_categories ac ON ac.id = t.category_id
+        WHERE ac.id IS NULL
+        ORDER BY t.id LIMIT 200""")
+
+    add('avail_on_retired_type', 'Available units under retired types', 'warn',
+        'Units still marked available although their whole type is retired — normally retiring '
+        'a type retires its units too. Retire the units or un-retire the type.',
+        'asset_items', """
+        SELECT i.id, i.barcode, i.status, i.asset_type_id, t.name AS type_name
+        FROM asset_items i
+        JOIN asset_types t ON t.id = i.asset_type_id
+        WHERE t.is_retired = 1 AND i.status = 'available'
+        ORDER BY i.id LIMIT 200""")
+
+    add('orphan_items', 'Units pointing at a missing type', 'error',
+        'asset_type_id references a type row that no longer exists. Repoint or delete the unit.',
+        'asset_items', """
+        SELECT i.id, i.barcode, i.status, i.asset_type_id
+        FROM asset_items i
+        LEFT JOIN asset_types t ON t.id = i.asset_type_id
+        WHERE t.id IS NULL
+        ORDER BY i.id LIMIT 200""")
+
+    add('orphan_show_assets', 'Show lines with broken references', 'error',
+        'show_assets rows whose show or asset type no longer exists.',
+        'show_assets', """
+        SELECT sa.id, sa.show_id, sa.asset_type_id, sa.quantity, sa.locked_price,
+               s.name AS show_name, t.name AS type_name
+        FROM show_assets sa
+        LEFT JOIN shows s ON s.id = sa.show_id
+        LEFT JOIN asset_types t ON t.id = sa.asset_type_id
+        WHERE s.id IS NULL OR t.id IS NULL
+        ORDER BY sa.id LIMIT 200""")
+
+    add('dangling_members', 'System member links with problems', 'warn',
+        'Membership rows where either side is missing or retired. Unlink them from the row '
+        'actions in the System Members table.',
+        'asset_type_system_members', """
+        SELECT m.system_type_id, m.component_type_id,
+               st.name AS system_name, st.is_retired AS system_retired,
+               ct.name AS component_name, ct.is_retired AS component_retired
+        FROM asset_type_system_members m
+        LEFT JOIN asset_types st ON st.id = m.system_type_id
+        LEFT JOIN asset_types ct ON ct.id = m.component_type_id
+        WHERE st.id IS NULL OR ct.id IS NULL
+           OR st.is_retired = 1 OR ct.is_retired = 1
+        ORDER BY m.system_type_id LIMIT 200""")
+
+    db.close()
+    order = {'error': 0, 'warn': 1, 'info': 2}
+    checks.sort(key=lambda c: (order.get(c['severity'], 3), c['key']))
+    return jsonify({'checks': checks,
+                    'problems': sum(c['count'] for c in checks if c['severity'] != 'info')})
 
 
 def _make_watermark_pdf(text):
