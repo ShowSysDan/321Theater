@@ -46,7 +46,7 @@
       </select>
       <select id="status-filter" class="field-input field-input-sm" onchange="filterShows()" style="max-width:150px">
         <option value="">All statuses</option>
-        <option value="active">Active</option>
+        <option value="active" selected>Active</option>
         <option value="archived">Archived</option>
       </select>
       <button class="btn btn-sm btn-ghost" type="button" id="clear-btn" onclick="clearSelection()"
@@ -205,6 +205,13 @@ function filterShows() {
   const cb = document.querySelector('.show-check[value="' + id + '"]');
   if (cb && !cb.checked) { cb.checked = true; onCheck(cb); }
 });
+// The status filter defaults to Active; if a preselected show is archived
+// (invoicing usually happens after the run), widen to all statuses so the
+// preselection isn't hidden by the filter.
+if (Array.from(selected.keys()).some(id => {
+  const tr = document.querySelector('#shows-table tbody tr[data-id="' + id + '"]');
+  return tr && tr.dataset.status === 'archived';
+})) document.getElementById('status-filter').value = '';
 renderSelection();
 filterShows();
 </script>
