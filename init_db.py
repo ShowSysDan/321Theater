@@ -775,10 +775,14 @@ CREATE TABLE IF NOT EXISTS show_external_rentals (
 );
 
 -- System/package component membership (many-to-many: a type can belong to multiple systems)
+-- quantity = how many of the component the system holds (e.g. a rig with 2 mics).
+-- This count is deducted from the component type's global inventory when the system
+-- is placed on a show (see _component_demand / _system_component_shortages in app.py).
 CREATE TABLE IF NOT EXISTS asset_type_system_members (
     system_type_id    INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
     component_type_id INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
     sort_order        INTEGER DEFAULT 0,
+    quantity          INTEGER DEFAULT 1,
     PRIMARY KEY (system_type_id, component_type_id)
 );
 
@@ -2222,6 +2226,9 @@ def migrate_db():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_sys_members_sys  ON asset_type_system_members(system_type_id)",
         "CREATE INDEX IF NOT EXISTS idx_sys_members_comp ON asset_type_system_members(component_type_id)",
+        # Per-component quantity inside a system/package (e.g. a rig holding 2 mics).
+        # Existing rows backfill to 1 via DEFAULT.
+        "ALTER TABLE asset_type_system_members ADD COLUMN quantity INTEGER DEFAULT 1",
         # Per-item system membership — links each physical unit to its system type
         "ALTER TABLE asset_items ADD COLUMN system_type_id INTEGER REFERENCES asset_types(id) ON DELETE SET NULL",
         "CREATE INDEX IF NOT EXISTS idx_asset_items_sys ON asset_items(system_type_id)",
@@ -3237,6 +3244,7 @@ CREATE TABLE IF NOT EXISTS asset_type_system_members (
     system_type_id    INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
     component_type_id INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
     sort_order        INTEGER DEFAULT 0,
+    quantity          INTEGER DEFAULT 1,
     PRIMARY KEY (system_type_id, component_type_id)
 );
 
@@ -3672,6 +3680,7 @@ def migrate_db_postgres():
             f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS photo_s3_key TEXT DEFAULT NULL',
             f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS hide_from_pm INTEGER DEFAULT 0',
             f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS allow_unit_selection INTEGER DEFAULT 0',
+            f'ALTER TABLE "{app_schema}".asset_type_system_members ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1',
             f'ALTER TABLE "{app_schema}".show_assets ADD COLUMN IF NOT EXISTS asset_item_id INTEGER REFERENCES "{app_schema}".asset_items(id) ON DELETE SET NULL',
             f'CREATE INDEX IF NOT EXISTS idx_show_assets_item ON "{app_schema}".show_assets(asset_item_id)',
             f'ALTER TABLE "{app_schema}".contacts ADD COLUMN IF NOT EXISTS advance_recipient INTEGER DEFAULT 0',
