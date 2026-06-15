@@ -490,6 +490,25 @@ Each group stores a primary contact (name, email, phone), free-text notes, and o
 
 Add users via Settings → Users. Admins can reset passwords.
 
+#### Cross-application account flags (`is_app_user` / `is_app_admin`)
+
+The `users` table is a **shared user directory** — on PostgreSQL it lives in the
+`shared` schema (separate from this app's `theater321` schema), so several apps
+that point at the same database authenticate against the same accounts. Two
+columns exist purely for those *other* apps to read:
+
+| Column | Meaning |
+|--------|---------|
+| `is_app_user`  | Account is a user of the shared application |
+| `is_app_admin` | Account is an administrator of the shared application |
+
+- Toggled per-user in the Edit User modal under **OTHER APPLICATIONS**.
+- **321Theater never reads these columns.** They are not loaded into the session,
+  never gate a route, and have no effect on this app — they are storage only,
+  surfaced here because this is the shared user manager.
+- Both default to `0`. A consuming app reads them straight off the shared `users`
+  row, e.g. `SELECT is_app_user, is_app_admin FROM users WHERE username = %s`.
+
 #### Document Viewer
 
 A stricter variant of read-only for external stakeholders (touring crew, vendors, FOH supervisors) who only need to see a subset of documents.
