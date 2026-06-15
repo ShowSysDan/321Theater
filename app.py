@@ -16480,6 +16480,51 @@ def asset_dbt_integrity():
            OR st.is_retired = 1 OR ct.is_retired = 1
         ORDER BY m.system_type_id LIMIT 200""")
 
+    add('system_with_children', 'Systems/packages that are also groups', 'warn',
+        'These types are flagged as a system/package but ALSO have child types parented under '
+        'them, so they double as a group folder and can surface in the regular Assets browser '
+        'instead of staying on the Systems & Packages tab. Open the asset_types row and either '
+        'clear the system/package flag or re-parent its children.',
+        'asset_types', """
+        SELECT t.id, t.name, t.is_system, t.is_package,
+               ac.name AS category_name,
+               (SELECT COUNT(*) FROM asset_types c WHERE c.parent_type_id = t.id) AS ref_children
+        FROM asset_types t
+        LEFT JOIN asset_categories ac ON ac.id = t.category_id
+        WHERE t.is_retired = 0
+          AND (COALESCE(t.is_system, 0) = 1 OR COALESCE(t.is_package, 0) = 1)
+          AND EXISTS (SELECT 1 FROM asset_types c WHERE c.parent_type_id = t.id)
+        ORDER BY t.id LIMIT 200""")
+
+    add('nested_system_members', 'Components that are themselves systems', 'warn',
+        'Membership rows whose component is itself a system/package. Nested systems are not '
+        'expanded, so they deduct NOTHING from inventory when the parent system is placed on a '
+        'show. Unlink them from the System Members table and add the underlying component types '
+        'directly (the picker now blocks this, but older data may still have it).',
+        'asset_type_system_members', """
+        SELECT m.system_type_id, m.component_type_id,
+               st.name AS system_name, ct.name AS component_name,
+               ct.is_system AS component_is_system, ct.is_package AS component_is_package
+        FROM asset_type_system_members m
+        JOIN asset_types st ON st.id = m.system_type_id
+        JOIN asset_types ct ON ct.id = m.component_type_id
+        WHERE COALESCE(ct.is_system, 0) = 1 OR COALESCE(ct.is_package, 0) = 1
+        ORDER BY m.system_type_id LIMIT 200""")
+
+    add('empty_system', 'Systems/packages with no components', 'info',
+        'Active systems/packages with no component types assigned. They carry their own price '
+        'but deduct nothing from inventory — fine if intentional, otherwise add the components '
+        'they should pull (with quantities) on the Systems & Packages tab.',
+        'asset_types', """
+        SELECT t.id, t.name, t.is_system, t.is_package, t.rental_cost,
+               ac.name AS category_name
+        FROM asset_types t
+        LEFT JOIN asset_categories ac ON ac.id = t.category_id
+        WHERE t.is_retired = 0
+          AND (COALESCE(t.is_system, 0) = 1 OR COALESCE(t.is_package, 0) = 1)
+          AND NOT EXISTS (SELECT 1 FROM asset_type_system_members m WHERE m.system_type_id = t.id)
+        ORDER BY t.id LIMIT 200""")
+
     db.close()
     order = {'error': 0, 'warn': 1, 'info': 2}
     checks.sort(key=lambda c: (order.get(c['severity'], 3), c['key']))

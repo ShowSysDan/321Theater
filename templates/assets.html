@@ -456,13 +456,73 @@ let _currentItems = [];
 let _selectedItemId = null;
 let _showRetired = false;
 let _viewingComponentOf = null; // system type ID when navigated into a component from a system view
+
+// ── Finder state persistence (survive page reloads) ───────────────────────────
+// The finder tree (tab + selected category/group/type/unit/system) is stored in
+// localStorage so a page refresh returns you to where you were instead of the
+// top of the tree. State is snapshotted on unload/hide so we don't have to touch
+// every selection handler.
+const _FINDER_LS_KEY = 'am.finderState.v1';
+function _saveFinderState() {
+  try {
+    localStorage.setItem(_FINDER_LS_KEY, JSON.stringify({
+      tab: _activeTab,
+      catId: _selectedCatId,
+      parentTypeId: _selectedParentTypeId,
+      typeId: _selectedTypeId,
+      itemId: _selectedItemId,
+      systemId: _selectedSystemId,
+      showRetired: _showRetired,
+    }));
+  } catch (e) { /* storage unavailable — ignore */ }
+}
+function _loadFinderState() {
+  try { return JSON.parse(localStorage.getItem(_FINDER_LS_KEY) || 'null'); }
+  catch (e) { return null; }
+}
+async function _restoreFinderState(s) {
+  if (!s) return;
+  if (s.tab === 'systems') {
+    switchAssetsTab('systems');
+    if (s.systemId && _allTypes.some(t => t.id === s.systemId && (t.is_system || t.is_package))) {
+      await showSystemDetail(s.systemId);
+    }
+    return;
+  }
+  // Assets tab: walk category → group → type → unit, stopping at the first
+  // level whose saved id no longer exists (deleted/retired since last visit).
+  if (!(s.catId && _categories.some(c => c.id === s.catId))) return;
+  selectCat(s.catId);
+  if (!(s.parentTypeId && _allTypes.some(t => t.id === s.parentTypeId))) return;
+  selectGroup(s.parentTypeId);
+  if (!(s.typeId && _allTypes.some(t => t.id === s.typeId))) return;
+  await selectType(s.typeId);
+  if (s.itemId && _currentItems.some(i => i.id === s.itemId)) await selectItem(s.itemId);
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 (async function init() {
+  const saved = _loadFinderState();
+  if (saved && saved.showRetired) {
+    _showRetired = true;
+    const cb = document.getElementById('show-retired-toggle');
+    if (cb) cb.checked = true;
+  }
   await loadTypes();
   renderFinderCats();
   const typeId = parseInt(new URLSearchParams(window.location.search).get('type_id'));
-  if (typeId) await selectType(typeId);
+  if (typeId) {
+    await selectType(typeId);          // explicit ?type_id= deep-link wins
+  } else {
+    await _restoreFinderState(saved);  // otherwise return to last place
+  }
   refreshOverbookedBadge();
+  // Snapshot on the events that fire before a reload/navigation.
+  window.addEventListener('beforeunload', _saveFinderState);
+  window.addEventListener('pagehide', _saveFinderState);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') _saveFinderState();
+  });
 })();
 
 async function loadTypes() {
@@ -774,7 +834,9 @@ function renderFinderCats() {
     return;
   }
   c.innerHTML = _categories.map(cat => {
-    const cnt = _allTypes.filter(t => t.category_id === cat.id).length;
+    // Count only browsable types — systems/packages live on their own tab.
+    const cnt = _allTypes.filter(t => t.category_id === cat.id
+                                      && !t.is_system && !t.is_package).length;
     const active = cat.id === _selectedCatId ? ' active' : '';
     const bulkCb = _bulkCheckboxHtml('cat', cat.id, _categoryHideState(cat.id));
     return `<div class="finder-cat-row${active}" onclick="selectCat(${cat.id})">
@@ -822,8 +884,10 @@ function renderFinderGroups() {
     return;
   }
 
-  // Parent types are those with parent_type_id = null in this category
-  const parents = _allTypes.filter(t => t.category_id === _selectedCatId && !t.parent_type_id);
+  // Parent types are those with parent_type_id = null in this category.
+  // Systems/packages live on their own tab, so keep them out of this browser.
+  const parents = _allTypes.filter(t => t.category_id === _selectedCatId && !t.parent_type_id
+                                        && !t.is_system && !t.is_package);
   const cat = _categories.find(x => x.id === _selectedCatId);
   if (lbl) lbl.textContent = cat ? cat.name.toUpperCase() : 'GROUPS';
   if (addBtn) addBtn.style.display = '';
@@ -1161,12 +1225,15 @@ function renderMembersHTML(members, systemTypeId) {
           ${c.unit_count||0} units${c.manufacturer?' · '+esc(c.manufacturer):''}
         </div>
       </div>
-      <label style="display:flex;align-items:center;gap:3px;flex-shrink:0;font-size:11px;color:var(--text-dim)"
-             onclick="event.stopPropagation()" title="How many of this component the system holds (deducted from inventory)">
-        ×<input type="number" min="1" step="1" value="${qty}"
-               style="width:46px;padding:2px 4px;font-size:12px;text-align:center"
+      <label style="display:flex;align-items:center;gap:5px;flex-shrink:0;margin-right:6px"
+             onclick="event.stopPropagation()"
+             title="How many of this component the system holds — deducted from inventory when the system is added to a show">
+        <span style="font-size:9.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim)">QTY</span>
+        <input type="number" min="1" step="1" value="${qty}"
+               class="field-input field-input-sm" style="width:56px;text-align:center"
                onclick="event.stopPropagation()"
-               onchange="updateComponentQuantity(${c.id},${systemTypeId},this.value,this)"></label>
+               onchange="updateComponentQuantity(${c.id},${systemTypeId},this.value,this)">
+      </label>
       <button class="btn btn-xs btn-ghost" style="color:#FC814A;flex-shrink:0;padding:2px 6px"
               onclick="event.stopPropagation();removeComponentFromSystem(${c.id},${systemTypeId})"
               title="Remove from system">✕</button>
