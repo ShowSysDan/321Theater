@@ -456,13 +456,73 @@ let _currentItems = [];
 let _selectedItemId = null;
 let _showRetired = false;
 let _viewingComponentOf = null; // system type ID when navigated into a component from a system view
+
+// ── Finder state persistence (survive page reloads) ───────────────────────────
+// The finder tree (tab + selected category/group/type/unit/system) is stored in
+// localStorage so a page refresh returns you to where you were instead of the
+// top of the tree. State is snapshotted on unload/hide so we don't have to touch
+// every selection handler.
+const _FINDER_LS_KEY = 'am.finderState.v1';
+function _saveFinderState() {
+  try {
+    localStorage.setItem(_FINDER_LS_KEY, JSON.stringify({
+      tab: _activeTab,
+      catId: _selectedCatId,
+      parentTypeId: _selectedParentTypeId,
+      typeId: _selectedTypeId,
+      itemId: _selectedItemId,
+      systemId: _selectedSystemId,
+      showRetired: _showRetired,
+    }));
+  } catch (e) { /* storage unavailable — ignore */ }
+}
+function _loadFinderState() {
+  try { return JSON.parse(localStorage.getItem(_FINDER_LS_KEY) || 'null'); }
+  catch (e) { return null; }
+}
+async function _restoreFinderState(s) {
+  if (!s) return;
+  if (s.tab === 'systems') {
+    switchAssetsTab('systems');
+    if (s.systemId && _allTypes.some(t => t.id === s.systemId && (t.is_system || t.is_package))) {
+      await showSystemDetail(s.systemId);
+    }
+    return;
+  }
+  // Assets tab: walk category → group → type → unit, stopping at the first
+  // level whose saved id no longer exists (deleted/retired since last visit).
+  if (!(s.catId && _categories.some(c => c.id === s.catId))) return;
+  selectCat(s.catId);
+  if (!(s.parentTypeId && _allTypes.some(t => t.id === s.parentTypeId))) return;
+  selectGroup(s.parentTypeId);
+  if (!(s.typeId && _allTypes.some(t => t.id === s.typeId))) return;
+  await selectType(s.typeId);
+  if (s.itemId && _currentItems.some(i => i.id === s.itemId)) await selectItem(s.itemId);
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 (async function init() {
+  const saved = _loadFinderState();
+  if (saved && saved.showRetired) {
+    _showRetired = true;
+    const cb = document.getElementById('show-retired-toggle');
+    if (cb) cb.checked = true;
+  }
   await loadTypes();
   renderFinderCats();
   const typeId = parseInt(new URLSearchParams(window.location.search).get('type_id'));
-  if (typeId) await selectType(typeId);
+  if (typeId) {
+    await selectType(typeId);          // explicit ?type_id= deep-link wins
+  } else {
+    await _restoreFinderState(saved);  // otherwise return to last place
+  }
   refreshOverbookedBadge();
+  // Snapshot on the events that fire before a reload/navigation.
+  window.addEventListener('beforeunload', _saveFinderState);
+  window.addEventListener('pagehide', _saveFinderState);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') _saveFinderState();
+  });
 })();
 
 async function loadTypes() {
