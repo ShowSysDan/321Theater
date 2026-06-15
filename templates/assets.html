@@ -774,7 +774,9 @@ function renderFinderCats() {
     return;
   }
   c.innerHTML = _categories.map(cat => {
-    const cnt = _allTypes.filter(t => t.category_id === cat.id).length;
+    // Count only browsable types — systems/packages live on their own tab.
+    const cnt = _allTypes.filter(t => t.category_id === cat.id
+                                      && !t.is_system && !t.is_package).length;
     const active = cat.id === _selectedCatId ? ' active' : '';
     const bulkCb = _bulkCheckboxHtml('cat', cat.id, _categoryHideState(cat.id));
     return `<div class="finder-cat-row${active}" onclick="selectCat(${cat.id})">
@@ -822,8 +824,10 @@ function renderFinderGroups() {
     return;
   }
 
-  // Parent types are those with parent_type_id = null in this category
-  const parents = _allTypes.filter(t => t.category_id === _selectedCatId && !t.parent_type_id);
+  // Parent types are those with parent_type_id = null in this category.
+  // Systems/packages live on their own tab, so keep them out of this browser.
+  const parents = _allTypes.filter(t => t.category_id === _selectedCatId && !t.parent_type_id
+                                        && !t.is_system && !t.is_package);
   const cat = _categories.find(x => x.id === _selectedCatId);
   if (lbl) lbl.textContent = cat ? cat.name.toUpperCase() : 'GROUPS';
   if (addBtn) addBtn.style.display = '';
@@ -1161,12 +1165,15 @@ function renderMembersHTML(members, systemTypeId) {
           ${c.unit_count||0} units${c.manufacturer?' · '+esc(c.manufacturer):''}
         </div>
       </div>
-      <label style="display:flex;align-items:center;gap:3px;flex-shrink:0;font-size:11px;color:var(--text-dim)"
-             onclick="event.stopPropagation()" title="How many of this component the system holds (deducted from inventory)">
-        ×<input type="number" min="1" step="1" value="${qty}"
-               style="width:46px;padding:2px 4px;font-size:12px;text-align:center"
+      <label style="display:flex;align-items:center;gap:5px;flex-shrink:0;margin-right:6px"
+             onclick="event.stopPropagation()"
+             title="How many of this component the system holds — deducted from inventory when the system is added to a show">
+        <span style="font-size:9.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim)">QTY</span>
+        <input type="number" min="1" step="1" value="${qty}"
+               class="field-input field-input-sm" style="width:56px;text-align:center"
                onclick="event.stopPropagation()"
-               onchange="updateComponentQuantity(${c.id},${systemTypeId},this.value,this)"></label>
+               onchange="updateComponentQuantity(${c.id},${systemTypeId},this.value,this)">
+      </label>
       <button class="btn btn-xs btn-ghost" style="color:#FC814A;flex-shrink:0;padding:2px 6px"
               onclick="event.stopPropagation();removeComponentFromSystem(${c.id},${systemTypeId})"
               title="Remove from system">✕</button>
