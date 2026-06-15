@@ -6503,7 +6503,8 @@ def settings():
     users_raw = db.execute(
         'SELECT id, username, display_name, email, role, created_at, '
         '       is_readonly, is_scheduler, is_asset_manager, '
-        '       is_document_viewer, viewer_venues, viewer_doc_types '
+        '       is_document_viewer, viewer_venues, viewer_doc_types, '
+        '       is_app_user, is_app_admin '
         'FROM users ORDER BY display_name'
     ).fetchall()
     # Decode the viewer JSON columns so the template can use |tojson cleanly
@@ -6822,6 +6823,17 @@ def edit_user(uid):
     is_scheduler = 1 if data.get('is_scheduler') else 0
     is_asset_manager = 1 if data.get('is_asset_manager') else 0
     is_document_viewer = 1 if data.get('is_document_viewer') else 0
+    # Cross-app account flags. Stored on the shared user row purely so OTHER
+    # apps that share this user directory can read them; 321Theater applies
+    # NO behavior to them. NEVER gate any 321Theater logic (auth, routes,
+    # sessions, @*_required decorators, background jobs, feature visibility)
+    # on is_app_user / is_app_admin — the only place this app reads them is to
+    # render their badges + modal checkboxes in the user manager. Use this
+    # app's own flags (role / is_readonly / is_scheduler / is_asset_manager /
+    # is_document_viewer) for any 321Theater permission. Persist as plain 0/1
+    # and otherwise leave them alone.
+    is_app_user = 1 if data.get('is_app_user') else 0
+    is_app_admin = 1 if data.get('is_app_admin') else 0
     # Doc viewer implies read-only — they only see read views/PDFs.
     if is_document_viewer:
         is_readonly = 1
@@ -6859,11 +6871,13 @@ def edit_user(uid):
     db.execute(
         'UPDATE users SET display_name=?, email=?, role=?, is_readonly=?, '
         '                 is_scheduler=?, is_asset_manager=?, '
-        '                 is_document_viewer=?, viewer_venues=?, viewer_doc_types=? '
+        '                 is_document_viewer=?, viewer_venues=?, viewer_doc_types=?, '
+        '                 is_app_user=?, is_app_admin=? '
         'WHERE id=?',
         (display_name or row['username'], email, role, is_readonly,
          is_scheduler, is_asset_manager,
-         is_document_viewer, viewer_venues_json, viewer_doc_types_json, uid)
+         is_document_viewer, viewer_venues_json, viewer_doc_types_json,
+         is_app_user, is_app_admin, uid)
     )
     # If the doc-viewer flag flipped (either direction), invalidate any active
     # sessions for this user so the new permission set takes effect immediately
@@ -6876,6 +6890,7 @@ def edit_user(uid):
     log_audit(db, 'USER_EDIT', 'user', uid,
               detail=(f'role={role} readonly={is_readonly} scheduler={is_scheduler} '
                       f'asset_mgr={is_asset_manager} doc_viewer={is_document_viewer} '
+                      f'app_user={is_app_user} app_admin={is_app_admin} '
                       f'by={session.get("username")}'))
     # Keep the linked contact row's name + email in sync with this user.
     _sync_contact_for_user(db, uid, display_name=display_name or row['username'],
@@ -6885,7 +6900,8 @@ def edit_user(uid):
     syslog_logger.info(
         f"USER_EDIT user_id={uid} role={role} readonly={is_readonly} "
         f"scheduler={is_scheduler} asset_mgr={is_asset_manager} "
-        f"doc_viewer={is_document_viewer} by={session.get('username')}"
+        f"doc_viewer={is_document_viewer} app_user={is_app_user} "
+        f"app_admin={is_app_admin} by={session.get('username')}"
     )
     return jsonify({'success': True})
 

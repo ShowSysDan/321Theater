@@ -221,6 +221,8 @@
               {% if u.is_scheduler %}<span style="font-size:10px;background:rgba(74,158,255,.15);color:#4A9EFF;padding:2px 6px;border-radius:99px;border:1px solid rgba(74,158,255,.3);margin-left:4px">Scheduler</span>{% endif %}
               {% if u.is_asset_manager %}<span style="font-size:10px;background:rgba(72,187,120,.15);color:#68D391;padding:2px 6px;border-radius:99px;border:1px solid rgba(72,187,120,.3);margin-left:4px">Asset Mgr</span>{% endif %}
               {% if u.is_document_viewer %}<span style="font-size:10px;background:rgba(168,85,247,.15);color:#C084FC;padding:2px 6px;border-radius:99px;border:1px solid rgba(168,85,247,.3);margin-left:4px">Doc Viewer</span>{% endif %}
+              {% if u.is_app_user %}<span title="Flag for other apps that share this user directory — no effect in 321Theater" style="font-size:10px;background:rgba(45,212,191,.15);color:#2DD4BF;padding:2px 6px;border-radius:99px;border:1px solid rgba(45,212,191,.3);margin-left:4px">App User</span>{% endif %}
+              {% if u.is_app_admin %}<span title="Flag for other apps that share this user directory — no effect in 321Theater" style="font-size:10px;background:rgba(251,146,60,.15);color:#FB923C;padding:2px 6px;border-radius:99px;border:1px solid rgba(251,146,60,.3);margin-left:4px">App Admin</span>{% endif %}
             </td>
             <td class="text-dim text-sm">{{ (u.created_at|string)[:10] if u.created_at else '—' }}</td>
             <td>
@@ -235,6 +237,8 @@
                         data-scheduler="{{ 1 if u.is_scheduler else 0 }}"
                         data-asset-mgr="{{ 1 if u.is_asset_manager else 0 }}"
                         data-doc-viewer="{{ 1 if u.is_document_viewer else 0 }}"
+                        data-app-user="{{ 1 if u.is_app_user else 0 }}"
+                        data-app-admin="{{ 1 if u.is_app_admin else 0 }}"
                         {# single-quoted on purpose: |tojson emits double quotes,
                            which would truncate a double-quoted attribute and
                            blank the edit dialog's saved selections #}
@@ -2218,6 +2222,23 @@
         </div>
         <div style="font-size:11px;color:var(--text-dim);margin-top:6px">Admins always have full access. These only apply to User/Staff accounts.</div>
       </div>
+      <div id="edit-user-app-flags" style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
+        <div style="font-size:11px;font-weight:600;color:var(--text-dim);letter-spacing:.05em;margin-bottom:4px">OTHER APPLICATIONS</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
+          Shared account flags read by other apps that use this same user directory.
+          They have <strong>no effect inside 3&middot;2&middot;1&rarr;Theater</strong>.
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);cursor:pointer">
+            <input type="checkbox" id="edit-user-app-user" style="width:auto;margin:0">
+            Is App User — account is a user of the shared application
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);cursor:pointer">
+            <input type="checkbox" id="edit-user-app-admin" style="width:auto;margin:0">
+            Is App Admin — account is an administrator of the shared application
+          </label>
+        </div>
+      </div>
       <div id="edit-user-msg" style="color:#FC8181;font-size:12px;display:none"></div>
     </div>
     <div class="modal-footer">
@@ -2398,11 +2419,13 @@ document.addEventListener('click', e => {
     Number(btn.dataset.docViewer) ? 1 : 0,
     venues,
     docTypes,
+    Number(btn.dataset.appUser) ? 1 : 0,
+    Number(btn.dataset.appAdmin) ? 1 : 0,
   );
 });
 
 function openEditUser(id, name, email, role, isReadonly, isScheduler, isAssetManager,
-                      isDocViewer, viewerVenues, viewerDocTypes) {
+                      isDocViewer, viewerVenues, viewerDocTypes, isAppUser, isAppAdmin) {
   document.getElementById('edit-user-id').value = id;
   document.getElementById('edit-user-name').value = name;
   document.getElementById('edit-user-email').value = email;
@@ -2424,6 +2447,9 @@ function openEditUser(id, name, email, role, isReadonly, isScheduler, isAssetMan
   document.querySelectorAll('.viewer-doctype-cb').forEach(cb => {
     cb.checked = wantTypes.has(cb.value);
   });
+  // Cross-app flags — stored only for other apps; inert in 321Theater.
+  document.getElementById('edit-user-app-user').checked = !!isAppUser;
+  document.getElementById('edit-user-app-admin').checked = !!isAppAdmin;
   document.getElementById('edit-user-msg').style.display = 'none';
   document.getElementById('edit-user-modal').style.display = 'flex';
 }
@@ -2457,6 +2483,8 @@ async function saveEditUser() {
     is_document_viewer: isDocViewer,
     viewer_venues,
     viewer_doc_types,
+    is_app_user: document.getElementById('edit-user-app-user').checked,
+    is_app_admin: document.getElementById('edit-user-app-admin').checked,
   };
   const resp = await fetch(`/settings/users/${id}/edit`, {
     method:'POST', headers:{'Content-Type':'application/json'},

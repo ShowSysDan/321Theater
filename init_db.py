@@ -38,6 +38,12 @@ CREATE TABLE IF NOT EXISTS users (
     -- Per-user home dashboard layout preference.
     home_layout TEXT DEFAULT 'columns',    -- 'columns' | 'stacked'
     home_density TEXT DEFAULT 'normal',    -- 'normal'  | 'slim'
+    -- Cross-application account flags. These live in the shared user
+    -- directory so OTHER apps that point at the same database can read
+    -- them. 321Theater itself never consults these columns, so they have
+    -- no effect on anything in this app.
+    is_app_user INTEGER DEFAULT 0,
+    is_app_admin INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -2192,6 +2198,10 @@ def migrate_db():
         "ALTER TABLE users ADD COLUMN is_document_viewer INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN viewer_venues TEXT DEFAULT NULL",
         "ALTER TABLE users ADD COLUMN viewer_doc_types TEXT DEFAULT NULL",
+        # Cross-app account flags — read by OTHER apps sharing this user
+        # directory; never consulted inside 321Theater.
+        "ALTER TABLE users ADD COLUMN is_app_user INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN is_app_admin INTEGER DEFAULT 0",
         # Asset manager enhancements
         "ALTER TABLE asset_types ADD COLUMN supplier_name TEXT DEFAULT ''",
         "ALTER TABLE asset_types ADD COLUMN supplier_contact TEXT DEFAULT ''",
@@ -2521,6 +2531,12 @@ CREATE TABLE IF NOT EXISTS users (
     -- Per-user home dashboard layout preference.
     home_layout TEXT DEFAULT 'columns',    -- 'columns' | 'stacked'
     home_density TEXT DEFAULT 'normal',    -- 'normal'  | 'slim'
+    -- Cross-application account flags. These live in the shared user
+    -- directory so OTHER apps that point at the same database can read
+    -- them. 321Theater itself never consults these columns, so they have
+    -- no effect on anything in this app.
+    is_app_user INTEGER DEFAULT 0,
+    is_app_admin INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -3831,6 +3847,10 @@ def migrate_db_postgres():
             f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS viewer_doc_types TEXT DEFAULT NULL',
             f"ALTER TABLE \"{shared_schema}\".users ADD COLUMN IF NOT EXISTS home_layout TEXT DEFAULT 'columns'",
             f"ALTER TABLE \"{shared_schema}\".users ADD COLUMN IF NOT EXISTS home_density TEXT DEFAULT 'normal'",
+            # Cross-app account flags — read by OTHER apps that share this
+            # user directory; 321Theater never reads them itself.
+            f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS is_app_user INTEGER DEFAULT 0',
+            f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS is_app_admin INTEGER DEFAULT 0',
         ]
 
         n = 0
