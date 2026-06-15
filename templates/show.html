@@ -1315,7 +1315,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     _updateAddAssetBlockState();
     const availDiv = document.getElementById('asset-avail-info');
     if (isSystem) {
-      availDiv.innerHTML = '<span style="color:var(--accent)">System — assembled from individual components, no unit limit.</span>';
+      availDiv.innerHTML = '<span style="color:var(--accent)">System — deducts its component quantities from inventory; the add is blocked if a component is short for these dates.</span>';
     } else {
       availDiv.textContent = 'Checking availability…';
       try {
@@ -1472,7 +1472,13 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         loadAssetsTab();
       } else {
         const e = await r.json().catch(() => ({}));
-        alert(e.error || 'Failed to add asset');
+        let msg = e.error || 'Failed to add asset';
+        // System/package shortage responses include a per-component breakdown.
+        if (Array.isArray(e.shortages) && e.shortages.length) {
+          msg += '\n\n' + e.shortages.map(s =>
+            `• ${s.component_name}: need ${s.needed}, ${s.available} available`).join('\n');
+        }
+        alert(msg);
         if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = prevLabel || 'Add to Show'; }
       }
     } catch (err) {

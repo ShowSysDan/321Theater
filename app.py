@@ -13718,7 +13718,7 @@ def asset_type_members_list(type_id):
         # Per-system count (requires system_type_id column — added in migration)
         rows = db.execute("""
             SELECT at.id, at.name, at.manufacturer, at.model, at.is_system, at.is_package,
-                   ac.name as category_name,
+                   ac.name as category_name, m.quantity,
                    (SELECT COUNT(*) FROM asset_items ai
                     WHERE ai.asset_type_id = at.id
                       AND ai.system_type_id = m.system_type_id
@@ -13733,7 +13733,7 @@ def asset_type_members_list(type_id):
         # Fallback: column not yet migrated — show total unit count
         rows = db.execute("""
             SELECT at.id, at.name, at.manufacturer, at.model, at.is_system, at.is_package,
-                   ac.name as category_name,
+                   ac.name as category_name, m.quantity,
                    (SELECT COUNT(*) FROM asset_items ai
                     WHERE ai.asset_type_id = at.id AND ai.status != 'retired') as unit_count
             FROM asset_type_system_members m
@@ -13753,17 +13753,36 @@ def asset_type_member_add(type_id):
     component_id = data.get('component_type_id')
     if not component_id:
         return jsonify({'error': 'component_type_id required'}), 400
+    try:
+        quantity = max(1, int(data.get('quantity') or 1))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid quantity'}), 400
+    if int(component_id) == type_id:
+        return jsonify({'error': 'A system cannot contain itself.'}), 400
     db = get_db()
+    # Components must be plain trackable types. Blocking systems/packages keeps
+    # inventory deduction to a SINGLE level of expansion (no nesting), which is
+    # what _component_demand / _system_component_shortages assume.
+    comp = db.execute(
+        'SELECT is_system, is_package FROM asset_types WHERE id=?', (component_id,)
+    ).fetchone()
+    if not comp:
+        db.close()
+        return jsonify({'error': 'Component type not found.'}), 404
+    if comp['is_system'] or comp['is_package']:
+        db.close()
+        return jsonify({'error': 'A system/package cannot be added as a component of another system.'}), 400
     try:
         db.execute("""
-            INSERT OR IGNORE INTO asset_type_system_members (system_type_id, component_type_id)
-            VALUES (?, ?)
-        """, (type_id, component_id))
+            INSERT OR IGNORE INTO asset_type_system_members (system_type_id, component_type_id, quantity)
+            VALUES (?, ?, ?)
+        """, (type_id, component_id, quantity))
         db.commit()
     except Exception as e:
         db.close()
         return jsonify({'error': str(e)}), 400
-    log_audit(db, 'ASSET_MEMBER_ADD', 'asset_type', type_id, detail=f'component={component_id}')
+    log_audit(db, 'ASSET_MEMBER_ADD', 'asset_type', type_id,
+              detail=f'component={component_id} qty={quantity}')
     db.commit()
     db.close()
     return jsonify({'success': True}), 201
@@ -13782,6 +13801,33 @@ def asset_type_member_remove(type_id, component_id):
     db.commit()
     db.close()
     return jsonify({'success': True})
+
+
+@app.route('/settings/asset-types/<int:type_id>/members/<int:component_id>', methods=['PATCH'])
+@asset_manager_required
+def asset_type_member_set_quantity(type_id, component_id):
+    """Set how many of a component a system/package holds (e.g. 2 microphones).
+    This quantity is what gets deducted from the component's global inventory
+    when the system is placed on a show."""
+    data = request.get_json() or {}
+    try:
+        quantity = max(1, int(data.get('quantity')))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid quantity'}), 400
+    db = get_db()
+    cur = db.execute("""
+        UPDATE asset_type_system_members SET quantity=?
+        WHERE system_type_id=? AND component_type_id=?
+    """, (quantity, type_id, component_id))
+    if not cur.rowcount:
+        db.close()
+        return jsonify({'error': 'Component is not a member of this system.'}), 404
+    db.commit()
+    log_audit(db, 'ASSET_MEMBER_QTY', 'asset_type', type_id,
+              detail=f'component={component_id} qty={quantity}')
+    db.commit()
+    db.close()
+    return jsonify({'success': True, 'quantity': quantity})
 
 
 # ─── Asset Manager — Items ────────────────────────────────────────────────────
@@ -14025,6 +14071,79 @@ def asset_item_maintenance_resolve(item_id):
 
 # ─── Asset Manager — Availability ─────────────────────────────────────────────
 
+def _component_demand(db, type_id, start_date=None, end_date=None):
+    """Return every booking that draws on an asset *type*, combining two sources:
+
+      • DIRECT  — show_assets rows that book this type itself.
+      • INDIRECT — show_assets rows that book a System/Package which lists this
+        type as a component; each contributes (system line qty × per-component
+        qty) units of demand.
+
+    Rows are shaped identically so callers can simply ``sum(r['quantity'])``
+    over the combined list and treat both kinds the same. Direct rows carry
+    their real ``asset_item_id`` (for unit pinning) and ``via_system_name=None``;
+    indirect rows carry ``asset_item_id=None`` (the draw is generic, not a
+    specific unit) plus the System's name/id in ``via_system_name``/
+    ``via_system_id`` so the UI can explain "2 reserved by <System>".
+
+    This is the single source of truth shared by ``_get_asset_availability``,
+    ``_find_overbooked_types`` and the asset-calendar endpoint, so all three
+    agree on how much of a component a System consumes. An optional
+    ``[start_date, end_date]`` window filters to bookings whose rental range
+    overlaps it.
+
+    NOTE (PostgreSQL): every placeholder is ``?`` (rewritten to ``%s`` by
+    db_adapter) and there is no literal ``%`` in the SQL — see CLAUDE.md.
+    ``COALESCE(m.quantity, 1)`` keeps legacy rows (pre-migration) at 1.
+    """
+    date_filter = ''
+    date_params = []
+    if start_date and end_date:
+        date_filter = ' AND (sa.rental_end >= ? AND sa.rental_start <= ?)'
+        date_params = [start_date, end_date]
+
+    # DIRECT demand — lines that book this type directly.
+    direct = db.execute(f"""
+        SELECT sa.id, sa.show_id, sa.quantity, sa.rental_start, sa.rental_end,
+               sa.is_hidden, sa.locked_price, sa.original_locked_price,
+               sa.asset_item_id,
+               s.name AS show_name
+        FROM show_assets sa
+        JOIN shows s ON s.id = sa.show_id
+        WHERE sa.asset_type_id = ?{date_filter}
+        ORDER BY sa.rental_start
+    """, [type_id] + date_params).fetchall()
+
+    rows = []
+    for r in direct:
+        d = dict(r)
+        d['via_system_id'] = None
+        d['via_system_name'] = None
+        rows.append(d)
+
+    # INDIRECT demand — lines that book a System/Package containing this type.
+    indirect = db.execute(f"""
+        SELECT sa.id, sa.show_id,
+               sa.quantity * COALESCE(m.quantity, 1) AS quantity,
+               sa.rental_start, sa.rental_end,
+               sa.is_hidden, sa.locked_price, sa.original_locked_price,
+               s.name AS show_name,
+               sys.id AS via_system_id, sys.name AS via_system_name
+        FROM asset_type_system_members m
+        JOIN show_assets sa  ON sa.asset_type_id = m.system_type_id
+        JOIN asset_types sys ON sys.id = m.system_type_id
+        JOIN shows s         ON s.id = sa.show_id
+        WHERE m.component_type_id = ?{date_filter}
+        ORDER BY sa.rental_start
+    """, [type_id] + date_params).fetchall()
+    for r in indirect:
+        d = dict(r)
+        d['asset_item_id'] = None  # indirect demand is generic, never unit-pinned
+        rows.append(d)
+
+    return rows
+
+
 def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
     """
     Return dict with:
@@ -14068,27 +14187,13 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
             'unlimited': True,
         }
 
-    # Shows requesting this asset (optionally filtered by date range overlap).
-    # Specific-unit bookings (sa.asset_item_id IS NOT NULL) still occupy a row
-    # in show_assets with quantity=1 — so they're already counted in
-    # total_reserved below. We surface them separately so the UI can render
-    # per-unit state.
-    params = [asset_type_id]
-    date_filter = ''
-    if start_date and end_date:
-        date_filter = ' AND (sa.rental_end >= ? AND sa.rental_start <= ?)'
-        params.extend([start_date, end_date])
-
-    shows = db.execute(f"""
-        SELECT sa.id, sa.show_id, sa.quantity, sa.rental_start, sa.rental_end,
-               sa.is_hidden, sa.locked_price, sa.original_locked_price,
-               sa.asset_item_id,
-               s.name as show_name
-        FROM show_assets sa
-        JOIN shows s ON s.id = sa.show_id
-        WHERE sa.asset_type_id = ?{date_filter}
-        ORDER BY sa.rental_start
-    """, params).fetchall()
+    # Demand on this type = direct show lines for the type PLUS indirect demand
+    # from any System/Package line that includes this type as a component (see
+    # _component_demand). Specific-unit bookings still occupy a direct row with
+    # quantity=1, so they're already counted in total_reserved; indirect rows
+    # are generic (asset_item_id is None) and only move the aggregate count, so
+    # the per-unit logic below ignores them.
+    shows = _component_demand(db, asset_type_id, start_date, end_date)
 
     total_reserved = sum(r['quantity'] for r in shows)
     available = total_items - in_maintenance - reserve_count - total_reserved
@@ -14140,6 +14245,64 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
         'units': units,
         'booked_item_ids': list(booked_item_ids),
     }
+
+
+def _system_component_shortages(db, system_type_id, system_qty, start_date, end_date,
+                                back_out_system_qty=0):
+    """Check whether a System/Package being placed on (or resized within) a show
+    has enough GLOBAL inventory for every one of its components over the rental
+    window. Returns a list of shortage dicts ``[{component_name, available,
+    needed}]`` — one per component that would go negative; an empty list means
+    OK.
+
+    ``system_qty`` is how many of the system are booked (each multiplies its
+    per-component quantity). ``back_out_system_qty`` credits back demand that an
+    EXISTING line already contributes so it isn't counted against itself; the
+    three call patterns are:
+
+      • ADD pre-check   — line not yet inserted: back_out=0.
+      • EDIT pre-check  — old line present, new qty proposed: back_out=old_qty
+        (when the old window overlaps), needed uses the new qty.
+      • POST-commit     — line present at its final qty: pass back_out=system_qty
+        so the test reduces to "did this component's pool go negative?" (the
+        ``effective - needed`` term collapses to the type's raw ``available``),
+        mirroring the direct-asset post-commit guard in show_asset_add/edit.
+
+    Components that are themselves unlimited (consumables, or a nested
+    system/package) can never run short and are skipped.
+    """
+    members = db.execute("""
+        SELECT m.component_type_id, COALESCE(m.quantity, 1) AS member_qty,
+               at.name AS component_name
+        FROM asset_type_system_members m
+        JOIN asset_types at ON at.id = m.component_type_id
+        WHERE m.system_type_id = ?
+    """, (system_type_id,)).fetchall()
+
+    shortages = []
+    for m in members:
+        needed = m['member_qty'] * system_qty
+        av = _get_asset_availability(db, m['component_type_id'], start_date, end_date)
+        if not av or av.get('unlimited') or av.get('available') is None:
+            continue
+        effective = av['available'] + m['member_qty'] * back_out_system_qty
+        if effective - needed < 0:
+            shortages.append({
+                'component_name': m['component_name'],
+                'available': max(0, effective),
+                'needed': needed,
+            })
+    return shortages
+
+
+def _format_shortage_error(system_name, shortages):
+    """Build a human-readable 409 message listing the short components."""
+    parts = ', '.join(
+        f"{s['component_name']} (need {s['needed']}, {s['available']} available)"
+        for s in shortages
+    )
+    return (f'Not enough inventory to place "{system_name}" for these dates — '
+            f'short on: {parts}.')
 
 
 def _compute_locked_price(daily_rate, weekly_rate, rental_start, rental_end):
@@ -14194,24 +14357,24 @@ def _find_overbooked_types(db):
         reserve = t['reserve_count'] or 0
         usable = max(0, total - in_maint - reserve)
 
-        bookings = db.execute("""
-            SELECT sa.id, sa.show_id, sa.quantity, sa.rental_start, sa.rental_end,
-                   s.name AS show_name
-            FROM show_assets sa
-            JOIN shows s ON s.id = sa.show_id
-            WHERE sa.asset_type_id = ?
-              AND sa.rental_start IS NOT NULL AND sa.rental_end IS NOT NULL
-              AND sa.rental_start != '' AND sa.rental_end != ''
-        """, (t['id'],)).fetchall()
+        # Direct lines for this type PLUS indirect demand from any System that
+        # includes it as a component (see _component_demand). Keep only bookings
+        # with a real date range.
+        bookings = [
+            b for b in _component_demand(db, t['id'])
+            if b['rental_start'] and b['rental_end']
+        ]
         if not bookings:
             continue
 
-        # Sweep-line: at each event, track concurrent quantity.
+        # Sweep-line: at each event, track concurrent quantity. Use the booking's
+        # LIST INDEX as the event identity — indirect (via-system) rows reuse the
+        # System's show_assets.id, so ids are not unique across the combined list.
         events = []
-        for b in bookings:
-            events.append((b['rental_start'], +b['quantity'], b['id']))
+        for idx, b in enumerate(bookings):
+            events.append((b['rental_start'], +b['quantity'], idx))
             # rental_end is inclusive; the booking ends AFTER that day.
-            events.append((b['rental_end'],   'end_marker',   b['id']))
+            events.append((b['rental_end'],   'end_marker',   idx))
         events.sort(key=lambda e: (e[0], 0 if e[1] != 'end_marker' else 1))
 
         peak = 0
@@ -14235,18 +14398,15 @@ def _find_overbooked_types(db):
                 peak_ids = set(concurrent_ids)
             # Then apply removals scheduled to end on this date
             while j < len(events) and events[j][0] == d and events[j][1] == 'end_marker':
-                # Find the matching booking to subtract its qty
-                ev_id = events[j][2]
-                for b in bookings:
-                    if b['id'] == ev_id:
-                        current -= b['quantity']
-                        concurrent_ids.discard(ev_id)
-                        break
+                # Subtract the matching booking's qty by its list index.
+                ev_idx = events[j][2]
+                current -= bookings[ev_idx]['quantity']
+                concurrent_ids.discard(ev_idx)
                 j += 1
             i = j
 
         if peak > usable:
-            offending = [dict(b) for b in bookings if b['id'] in peak_ids]
+            offending = [dict(bookings[i]) for i in peak_ids]
             overbooked.append({
                 'type_id': t['id'],
                 'type_name': t['name'],
@@ -14630,7 +14790,7 @@ def show_asset_add(show_id):
     rental_start = data.get('rental_start') or default_start
     rental_end   = data.get('rental_end')   or default_end
 
-    type_row = db.execute('SELECT rental_cost, weekly_rate, hide_from_pm, allow_unit_selection FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
+    type_row = db.execute('SELECT rental_cost, weekly_rate, hide_from_pm, allow_unit_selection, is_system, is_package, name FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
 
     # If a specific unit was requested, validate it belongs to this type, is
     # bookable, and isn't already pinned to an overlapping show. Specific-unit
@@ -14713,6 +14873,25 @@ def show_asset_add(show_id):
                 'requested': quantity,
             }), 409
 
+    # System/Package lines stay a single line but deduct each component's
+    # quantity from that component type's GLOBAL inventory. Reject the add if any
+    # component is short for the requested window. (The direct check above is
+    # skipped for systems because their own availability is unlimited.)
+    if type_row and (type_row['is_system'] or type_row['is_package']):
+        shortages = _system_component_shortages(db, asset_type_id, quantity, rental_start, rental_end)
+        if shortages:
+            sys_name = type_row['name'] or f'System #{asset_type_id}'
+            syslog_logger.info(
+                f"ASSET_SYSTEM_ADD_BLOCKED show_id={show_id} type_id={asset_type_id} "
+                f"qty={quantity} short={[s['component_name'] for s in shortages]} "
+                f"by={session.get('username')}"
+            )
+            db.close()
+            return jsonify({
+                'error': _format_shortage_error(sys_name, shortages),
+                'shortages': shortages,
+            }), 409
+
     db.execute("""
         INSERT INTO show_assets
           (show_id, asset_type_id, asset_item_id, quantity, rental_start, rental_end,
@@ -14747,6 +14926,32 @@ def show_asset_add(show_id):
             'available': available_after_rollback,
             'requested': quantity,
         }), 409
+
+    # Post-commit re-check for System/Package component demand. The inserted line
+    # is now visible to _component_demand's indirect query, so two concurrent
+    # adders each see the other's draw and at least one rolls back. Passing
+    # back_out_system_qty=quantity reduces the test to "did a component go
+    # negative?" (mirrors the direct-asset guard above).
+    if type_row and (type_row['is_system'] or type_row['is_package']):
+        post_shortages = _system_component_shortages(
+            db, asset_type_id, quantity, rental_start, rental_end,
+            back_out_system_qty=quantity
+        )
+        if post_shortages:
+            db.execute('DELETE FROM show_assets WHERE id=?', (row['id'],))
+            db.commit()
+            sys_name = type_row['name'] or f'System #{asset_type_id}'
+            syslog_logger.warning(
+                f"ASSET_SYSTEM_ADD_ROLLBACK show_id={show_id} type_id={asset_type_id} "
+                f"qty={quantity} short={[s['component_name'] for s in post_shortages]} "
+                f"by={session.get('username')}"
+            )
+            db.close()
+            return jsonify({
+                'error': _format_shortage_error(sys_name, post_shortages) +
+                         ' (Another user may have just booked one of these.)',
+                'shortages': post_shortages,
+            }), 409
 
     audit_detail = f'type_id={asset_type_id} qty={quantity}'
     if asset_item_id is not None:
@@ -14840,6 +15045,38 @@ def show_asset_edit(show_id, sa_id):
                     'requested': quantity,
                 }), 409
 
+    # System/Package edits re-check each component's GLOBAL inventory. Credit
+    # back this line's CURRENT contribution (old qty) when its old window
+    # overlapped, so resizing isn't counted against itself — mirrors the
+    # direct-asset self-backout above.
+    edit_type = db.execute(
+        'SELECT is_system, is_package, name FROM asset_types WHERE id=?',
+        (existing['asset_type_id'],)
+    ).fetchone()
+    if edit_type and (edit_type['is_system'] or edit_type['is_package']):
+        own_overlaps = (
+            existing['rental_start'] and existing['rental_end']
+            and rental_start and rental_end
+            and existing['rental_end'] >= rental_start
+            and existing['rental_start'] <= rental_end
+        )
+        shortages = _system_component_shortages(
+            db, existing['asset_type_id'], quantity, rental_start, rental_end,
+            back_out_system_qty=(existing['quantity'] if own_overlaps else 0)
+        )
+        if shortages:
+            sys_name = edit_type['name'] or f"System #{existing['asset_type_id']}"
+            syslog_logger.info(
+                f"ASSET_SYSTEM_EDIT_BLOCKED show_id={show_id} sa_id={sa_id} "
+                f"type_id={existing['asset_type_id']} qty={quantity} "
+                f"short={[s['component_name'] for s in shortages]} by={session.get('username')}"
+            )
+            db.close()
+            return jsonify({
+                'error': _format_shortage_error(sys_name, shortages),
+                'shortages': shortages,
+            }), 409
+
     db.execute("""
         UPDATE show_assets SET quantity=?, rental_start=?, rental_end=?,
                is_hidden=?, notes=?
@@ -14876,6 +15113,35 @@ def show_asset_edit(show_id, sa_id):
             'available': headroom,
             'requested': quantity,
         }), 409
+
+    # Post-commit re-check for System/Package edits (see show_asset_add). The
+    # updated line is now visible to _component_demand; back_out_system_qty=new
+    # qty reduces the test to "did a component go negative?".
+    if edit_type and (edit_type['is_system'] or edit_type['is_package']):
+        post_shortages = _system_component_shortages(
+            db, existing['asset_type_id'], quantity, rental_start, rental_end,
+            back_out_system_qty=quantity
+        )
+        if post_shortages:
+            db.execute("""
+                UPDATE show_assets SET quantity=?, rental_start=?, rental_end=?,
+                       is_hidden=?, notes=?
+                WHERE id=? AND show_id=?
+            """, (existing['quantity'], existing['rental_start'], existing['rental_end'],
+                  existing['is_hidden'], existing['notes'], sa_id, show_id))
+            db.commit()
+            sys_name = edit_type['name'] or f"System #{existing['asset_type_id']}"
+            syslog_logger.warning(
+                f"ASSET_SYSTEM_EDIT_ROLLBACK show_id={show_id} sa_id={sa_id} "
+                f"type_id={existing['asset_type_id']} qty={quantity} "
+                f"short={[s['component_name'] for s in post_shortages]} by={session.get('username')}"
+            )
+            db.close()
+            return jsonify({
+                'error': _format_shortage_error(sys_name, post_shortages) +
+                         ' (Another user may have just booked one of these.)',
+                'shortages': post_shortages,
+            }), 409
 
     log_audit(db, 'ASSET_SHOW_EDIT', 'show_asset', sa_id, show_id=show_id)
     _reset_asset_approval(db, show_id, 'asset_edited')
@@ -15527,7 +15793,7 @@ _ASSET_DBT_TABLES = {
         'composite': True,
         'id_col': None,
         'select': """
-            SELECT m.system_type_id, m.component_type_id, m.sort_order,
+            SELECT m.system_type_id, m.component_type_id, m.sort_order, m.quantity,
                    st.name AS system_name, st.is_retired AS system_retired,
                    ct.name AS component_name, ct.is_retired AS component_retired
             FROM asset_type_system_members m
@@ -16034,7 +16300,7 @@ def asset_dbt_merge_type(src_id):
     for side, other in (('system_type_id', 'component_type_id'),
                         ('component_type_id', 'system_type_id')):
         rows = db.execute(
-            f'SELECT system_type_id, component_type_id, sort_order '
+            f'SELECT system_type_id, component_type_id, sort_order, quantity '
             f'FROM asset_type_system_members WHERE {side}=?', (src_id,)).fetchall()
         for m in rows:
             other_id = m[other]
@@ -16044,8 +16310,8 @@ def asset_dbt_merge_type(src_id):
             db.execute(f'DELETE FROM asset_type_system_members WHERE {side}=? AND {other}=?',
                        (src_id, other_id))
             if not dup:
-                db.execute(f'INSERT INTO asset_type_system_members ({side}, {other}, sort_order) '
-                           f'VALUES (?,?,?)', (target_id, other_id, m['sort_order']))
+                db.execute(f'INSERT INTO asset_type_system_members ({side}, {other}, sort_order, quantity) '
+                           f'VALUES (?,?,?,?)', (target_id, other_id, m['sort_order'], m['quantity']))
     db.execute('DELETE FROM asset_types WHERE id=?', (src_id,))
     db.commit()
     log_audit(db, 'ASSET_TYPE_MERGE', 'asset_type', src_id, before=src,
@@ -17545,12 +17811,10 @@ def api_dashboard_asset_calendar():
         ).fetchone()[0]
         reserve = row['reserve_count'] or 0
 
-    reservations = [] if unlimited else db.execute(
-        'SELECT sa.quantity, sa.rental_start, sa.rental_end, sa.show_id, s.name AS show_name '
-        'FROM show_assets sa JOIN shows s ON s.id = sa.show_id '
-        'WHERE sa.asset_type_id=? AND sa.rental_end>=? AND sa.rental_start<=?',
-        (type_id, date_from, date_to)
-    ).fetchall()
+    # Direct lines for this type PLUS indirect demand from systems that include
+    # it as a component (see _component_demand), so the calendar agrees with
+    # _get_asset_availability and the overbooked scan.
+    reservations = [] if unlimited else _component_demand(db, type_id, date_from, date_to)
     db.close()
 
     try:
