@@ -6825,7 +6825,13 @@ def edit_user(uid):
     is_document_viewer = 1 if data.get('is_document_viewer') else 0
     # Cross-app account flags. Stored on the shared user row purely so OTHER
     # apps that share this user directory can read them; 321Theater applies
-    # no behavior to them. Persist as plain 0/1 and otherwise leave them alone.
+    # NO behavior to them. NEVER gate any 321Theater logic (auth, routes,
+    # sessions, @*_required decorators, background jobs, feature visibility)
+    # on is_app_user / is_app_admin — the only place this app reads them is to
+    # render their badges + modal checkboxes in the user manager. Use this
+    # app's own flags (role / is_readonly / is_scheduler / is_asset_manager /
+    # is_document_viewer) for any 321Theater permission. Persist as plain 0/1
+    # and otherwise leave them alone.
     is_app_user = 1 if data.get('is_app_user') else 0
     is_app_admin = 1 if data.get('is_app_admin') else 0
     # Doc viewer implies read-only — they only see read views/PDFs.

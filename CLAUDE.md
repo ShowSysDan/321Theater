@@ -56,6 +56,19 @@ Traps that only bite on PostgreSQL (each has caused a real 500):
   self-contained. SQLite's `executescript` parses properly, so the mistake
   passes SQLite testing and only fails on PG init/migrate.
 
+## Cross-app user flags (`is_app_user` / `is_app_admin`) — NEVER used in this app
+Two columns on the (shared-schema) `users` table — `is_app_user` and
+`is_app_admin` — exist **only** for OTHER applications that share this user
+directory. 321Theater lets an admin set them (Settings → user list → Edit User
+modal, persisted in `edit_user()`) and reads them back **only** to render their
+badges + modal checkboxes. They carry **no** behavior in this app.
+**Never gate any 321Theater logic on these flags** — not auth, routes, sessions,
+`@*_required` decorators, background jobs, or feature visibility. They are not a
+permission system for this app; treat them as opaque values owned by the sister
+apps. For a 321Theater access change, use this app's own flags instead
+(`role` / `is_readonly` / `is_scheduler` / `is_asset_manager` /
+`is_document_viewer`), never `is_app_*`.
+
 ## Runtime / deployment
 - Served by **Gunicorn, 4 workers × 4 threads** (`start.sh`); each worker imports
   the module independently, so `start_scheduler()` runs once per worker.
