@@ -6379,7 +6379,7 @@ def audit_log_view():
         page=page,
         per_page=per_page,
         total_pages=max(1, (total + per_page - 1) // per_page),
-        filters=request.args,
+        filters={k: v for k, v in request.args.items() if k != 'page'},
         user=get_current_user(),
     )
 
