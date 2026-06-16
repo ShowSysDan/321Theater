@@ -6914,6 +6914,16 @@ def delete_user(uid):
     db = get_db()
     row = db.execute('SELECT username FROM users WHERE id=?', (uid,)).fetchone()
     log_audit(db, 'USER_DELETE', 'user', uid, detail=row['username'] if row else str(uid))
+    # Most tables that reference users(id) are declared ON DELETE SET NULL /
+    # CASCADE, so they clear themselves. A few audit/history columns
+    # (shows.created_by, shows.last_saved_by, export_log.exported_by) were
+    # created with a bare REFERENCES (no ON DELETE action → RESTRICT), so the
+    # raw DELETE raises a ForeignKeyViolation on PostgreSQL and 500s. Unlink
+    # those rows first — keeping the historical record, dropping only the
+    # author reference — to mirror the ON DELETE SET NULL behavior elsewhere.
+    db.execute('UPDATE shows SET created_by=NULL WHERE created_by=?', (uid,))
+    db.execute('UPDATE shows SET last_saved_by=NULL WHERE last_saved_by=?', (uid,))
+    db.execute('UPDATE export_log SET exported_by=NULL WHERE exported_by=?', (uid,))
     db.execute('DELETE FROM users WHERE id=?', (uid,))
     db.commit(); db.close()
     syslog_logger.info(f"USER_DELETE user_id={uid} by={session.get('username')}")

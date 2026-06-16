@@ -83,8 +83,8 @@ CREATE TABLE IF NOT EXISTS shows (
     -- Prism event status tag ('Hold', 'Confirmed', ...) for shows imported
     -- from Prism. Kept current by the Prism sync. NULL = not a Prism import.
     prism_status TEXT DEFAULT NULL,
-    created_by INTEGER REFERENCES users(id),
-    last_saved_by INTEGER REFERENCES users(id),
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    last_saved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     last_saved_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -210,7 +210,7 @@ CREATE TABLE IF NOT EXISTS export_log (
     show_id INTEGER REFERENCES shows(id) ON DELETE SET NULL,
     export_type TEXT,
     version INTEGER,
-    exported_by INTEGER REFERENCES users(id),
+    exported_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     exported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     filename TEXT DEFAULT '',
     pdf_data BLOB,
@@ -2572,8 +2572,8 @@ CREATE TABLE IF NOT EXISTS shows (
     -- Prism event status tag ('Hold', 'Confirmed', ...) for shows imported
     -- from Prism. Kept current by the Prism sync. NULL = not a Prism import.
     prism_status TEXT DEFAULT NULL,
-    created_by INTEGER REFERENCES users(id),
-    last_saved_by INTEGER REFERENCES users(id),
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    last_saved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     last_saved_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -2652,7 +2652,7 @@ CREATE TABLE IF NOT EXISTS export_log (
     show_id INTEGER REFERENCES shows(id) ON DELETE SET NULL,
     export_type TEXT,
     version INTEGER,
-    exported_by INTEGER REFERENCES users(id),
+    exported_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     exported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     filename TEXT DEFAULT '',
     pdf_data BYTEA,
