@@ -5715,7 +5715,6 @@ def viewer_home():
         doc_types=doc_types,
         venues_allow=venues_allow,
         doc_types_allow=doc_types_allow,
-        can_labor_overview=bool(session.get('viewer_labor_overview')),
     )
 
 
