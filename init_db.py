@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS users (
     is_document_viewer INTEGER DEFAULT 0,
     viewer_venues TEXT DEFAULT NULL,
     viewer_doc_types TEXT DEFAULT NULL,
+    -- Extra read-only grant for document viewers: when set, the viewer is also
+    -- allowed to reach the (read-only) Labor Overview page in addition to /viewer.
+    viewer_labor_overview INTEGER DEFAULT 0,
     -- Per-user home dashboard layout preference.
     home_layout TEXT DEFAULT 'columns',    -- 'columns' | 'stacked'
     home_density TEXT DEFAULT 'normal',    -- 'normal'  | 'slim'
@@ -2198,6 +2201,7 @@ def migrate_db():
         "ALTER TABLE users ADD COLUMN is_document_viewer INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN viewer_venues TEXT DEFAULT NULL",
         "ALTER TABLE users ADD COLUMN viewer_doc_types TEXT DEFAULT NULL",
+        "ALTER TABLE users ADD COLUMN viewer_labor_overview INTEGER DEFAULT 0",
         # Cross-app account flags — read by OTHER apps sharing this user
         # directory; never consulted inside 321Theater.
         "ALTER TABLE users ADD COLUMN is_app_user INTEGER DEFAULT 0",
@@ -2528,6 +2532,9 @@ CREATE TABLE IF NOT EXISTS users (
     is_document_viewer INTEGER DEFAULT 0,
     viewer_venues TEXT DEFAULT NULL,
     viewer_doc_types TEXT DEFAULT NULL,
+    -- Extra read-only grant for document viewers: when set, the viewer is also
+    -- allowed to reach the (read-only) Labor Overview page in addition to /viewer.
+    viewer_labor_overview INTEGER DEFAULT 0,
     -- Per-user home dashboard layout preference.
     home_layout TEXT DEFAULT 'columns',    -- 'columns' | 'stacked'
     home_density TEXT DEFAULT 'normal',    -- 'normal'  | 'slim'
@@ -3845,6 +3852,7 @@ def migrate_db_postgres():
             f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS is_document_viewer INTEGER DEFAULT 0',
             f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS viewer_venues TEXT DEFAULT NULL',
             f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS viewer_doc_types TEXT DEFAULT NULL',
+            f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS viewer_labor_overview INTEGER DEFAULT 0',
             f"ALTER TABLE \"{shared_schema}\".users ADD COLUMN IF NOT EXISTS home_layout TEXT DEFAULT 'columns'",
             f"ALTER TABLE \"{shared_schema}\".users ADD COLUMN IF NOT EXISTS home_density TEXT DEFAULT 'normal'",
             # Cross-app account flags — read by OTHER apps that share this
