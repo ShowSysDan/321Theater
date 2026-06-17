@@ -1109,6 +1109,7 @@ def _populate_session_from_user(user, ts=None):
     session['is_document_viewer'] = bool(user.get('is_document_viewer', 0))
     session['viewer_venues']      = _decode_json_list(user.get('viewer_venues'))
     session['viewer_doc_types']   = _decode_json_list(user.get('viewer_doc_types'))
+    session['viewer_labor_overview'] = bool(user.get('viewer_labor_overview', 0))
     session['_role_checked_at']   = ts if ts is not None else datetime.utcnow().timestamp()
 
 
@@ -1125,7 +1126,8 @@ def _refresh_session_roles():
         db = get_db()
         user = db.execute(
             'SELECT id, role, display_name, is_readonly, is_scheduler, is_asset_manager, '
-            '       is_document_viewer, viewer_venues, viewer_doc_types '
+            '       is_document_viewer, viewer_venues, viewer_doc_types, '
+            '       viewer_labor_overview '
             'FROM users WHERE id=?',
             (session['user_id'],)
         ).fetchone()
@@ -1300,6 +1302,10 @@ def _viewer_gate():
         return None
     ep = request.endpoint or ''
     if ep in _VIEWER_ALLOWED_ENDPOINTS:
+        return None
+    # Optional per-user grant: document viewers may also reach the read-only
+    # Labor Overview page when their account has it enabled.
+    if ep == 'labor_overview' and session.get('viewer_labor_overview'):
         return None
     if ep.startswith('static'):
         return None
@@ -5709,6 +5715,7 @@ def viewer_home():
         doc_types=doc_types,
         venues_allow=venues_allow,
         doc_types_allow=doc_types_allow,
+        can_labor_overview=bool(session.get('viewer_labor_overview')),
     )
 
 
@@ -6504,6 +6511,7 @@ def settings():
         'SELECT id, username, display_name, email, role, created_at, '
         '       is_readonly, is_scheduler, is_asset_manager, '
         '       is_document_viewer, viewer_venues, viewer_doc_types, '
+        '       viewer_labor_overview, '
         '       is_app_user, is_app_admin '
         'FROM users ORDER BY display_name'
     ).fetchall()
@@ -6823,6 +6831,9 @@ def edit_user(uid):
     is_scheduler = 1 if data.get('is_scheduler') else 0
     is_asset_manager = 1 if data.get('is_asset_manager') else 0
     is_document_viewer = 1 if data.get('is_document_viewer') else 0
+    # Extra read-only grant: doc viewers can also reach the Labor Overview page.
+    # Only meaningful alongside is_document_viewer, so clear it otherwise.
+    viewer_labor_overview = 1 if (is_document_viewer and data.get('viewer_labor_overview')) else 0
     # Cross-app account flags. Stored on the shared user row purely so OTHER
     # apps that share this user directory can read them; 321Theater applies
     # NO behavior to them. NEVER gate any 321Theater logic (auth, routes,
@@ -6872,11 +6883,13 @@ def edit_user(uid):
         'UPDATE users SET display_name=?, email=?, role=?, is_readonly=?, '
         '                 is_scheduler=?, is_asset_manager=?, '
         '                 is_document_viewer=?, viewer_venues=?, viewer_doc_types=?, '
+        '                 viewer_labor_overview=?, '
         '                 is_app_user=?, is_app_admin=? '
         'WHERE id=?',
         (display_name or row['username'], email, role, is_readonly,
          is_scheduler, is_asset_manager,
          is_document_viewer, viewer_venues_json, viewer_doc_types_json,
+         viewer_labor_overview,
          is_app_user, is_app_admin, uid)
     )
     # If the doc-viewer flag flipped (either direction), invalidate any active
@@ -6890,6 +6903,7 @@ def edit_user(uid):
     log_audit(db, 'USER_EDIT', 'user', uid,
               detail=(f'role={role} readonly={is_readonly} scheduler={is_scheduler} '
                       f'asset_mgr={is_asset_manager} doc_viewer={is_document_viewer} '
+                      f'viewer_labor_overview={viewer_labor_overview} '
                       f'app_user={is_app_user} app_admin={is_app_admin} '
                       f'by={session.get("username")}'))
     # Keep the linked contact row's name + email in sync with this user.
@@ -11276,7 +11290,8 @@ def labor_overview():
                            week_end=week_end,
                            prev_week=prev_week,
                            next_week=next_week,
-                           today_iso=today_iso)
+                           today_iso=today_iso,
+                           is_viewer=bool(session.get('is_document_viewer')))
 
 
 @app.route('/api/labor-scheduler', methods=['GET'])

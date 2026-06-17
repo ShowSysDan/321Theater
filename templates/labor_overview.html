@@ -177,7 +177,9 @@
       <tr class="lo-row-{{ r.kind }}{% if r.is_training_shift %} lo-training-row{% endif %}">
         <td class="lo-name">
           {% if r.color %}<span class="lo-color-dot" style="background: {{ r.color }}"></span>{% endif %}
-          {% if r.kind == 'show' %}
+          {% if is_viewer %}
+            {{ r.name }}{% if r.kind != 'show' %}<span class="lo-kind-badge">OH</span>{% endif %}
+          {% elif r.kind == 'show' %}
             <a href="{{ url_for('show_page', show_id=r.show_id, tab='staffing') }}">{{ r.name }}</a>
           {% else %}
             <a href="{{ url_for('overhead_crew_page') }}">{{ r.name }}</a>
