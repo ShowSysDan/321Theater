@@ -1588,6 +1588,11 @@
           <span><code>{app_name}</code> — 3·2·1→Theater</span>
         </div>
       </div>
+
+      <div style="margin-top:12px">
+        <button class="btn btn-primary" onclick="savePdfEmailSettings()">Save Message Content</button>
+        <p id="pdf-email-content-msg" class="text-dim text-sm mt-sm" style="display:none;margin-top:6px"></p>
+      </div>
     </div>
   </div>
 
@@ -3839,12 +3844,17 @@ async function savePdfEmailSettings() {
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)
   });
   const d = await resp.json();
-  const msg = document.getElementById('pdf-email-msg');
-  msg.style.display = 'block';
-  msg.textContent = d.success ? '✓ Email schedule saved.' : '✗ ' + (d.error || 'Error');
+  // Both the schedule and message-content sections share this save handler;
+  // light up whichever inline indicators are present.
+  const msgs = ['pdf-email-msg', 'pdf-email-content-msg']
+    .map(id => document.getElementById(id)).filter(Boolean);
+  msgs.forEach(m => {
+    m.style.display = 'block';
+    m.textContent = d.success ? '✓ Saved.' : '✗ ' + (d.error || 'Error');
+  });
   if (d.success) {
-    showSaveToast('✓ Email schedule saved');
-    setTimeout(() => { msg.style.display='none'; }, 3000);
+    showSaveToast('✓ Email settings saved');
+    setTimeout(() => { msgs.forEach(m => { m.style.display = 'none'; }); }, 3000);
     loadPdfEmailPreview();
   }
 }
