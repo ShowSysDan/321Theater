@@ -1920,6 +1920,36 @@ def _pdf_email_recipients(db, show_id, pdf_type):
     return recipients
 
 
+# Variables admins may use in the custom PDF-email subject / body templates.
+# Keep this list in sync with the help text rendered in settings.html so the
+# UI never advertises a token the renderer doesn't know about.
+PDF_EMAIL_TEMPLATE_VARS = (
+    'show_name', 'show_date', 'venue', 'pm_name',
+    'type_label', 'pdf_filename', 'sender', 'sent_datetime',
+    'sent_date', 'sent_time', 'app_name',
+)
+
+
+def _render_email_template(template, context):
+    """Substitute {token} placeholders in a user-supplied email template.
+
+    Only tokens present in `context` are replaced; any unknown `{...}` text is
+    left untouched so a typo shows up literally instead of raising (unlike
+    str.format, which also chokes on stray/literal braces). Matching is
+    case-insensitive on the token name.
+    """
+    if not template:
+        return template
+
+    def _sub(m):
+        key = m.group(1).strip().lower()
+        if key in context:
+            return str(context[key] if context[key] is not None else '')
+        return m.group(0)
+
+    return re.sub(r'\{([a-zA-Z_][a-zA-Z0-9_]*)\}', _sub, template)
+
+
 def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_before=None):
     """
     Build a PDF (advance or schedule) and email it to all report recipients.
@@ -2012,25 +2042,51 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
         if v is None: return ''
         if isinstance(v, (datetime, date)): return v.isoformat()[:10]
         return str(v)
-    subject_parts = ['3·2·1→Theater', type_label, _s(show_name)]
-    if show_date:
-        subject_parts.append(_s(show_date))
-    if venue:
-        subject_parts.append(_s(venue))
-    if pm_name:
-        subject_parts.append(f'PM: {_s(pm_name)}')
-    subject = ' | '.join(subject_parts)
+    safe_show = show_name.replace(' ', '_').replace('/', '-')
+    filename   = f"{type_label.replace(' ','_')}_{safe_show}_{_s(show_date)}.pdf"
 
-    # Email body
-    if triggered_by == 'system':
+    # Variables available to admin-customized subject / body templates.
+    _now = datetime.now()
+    sender_display = '3·2·1→Theater' if triggered_by == 'system' else str(triggered_by)
+    tmpl_ctx = {
+        'show_name':     _s(show_name),
+        'show_date':     _s(show_date),
+        'venue':         _s(venue),
+        'pm_name':       _s(pm_name),
+        'type_label':    type_label,
+        'pdf_filename':  filename,
+        'sender':        sender_display,
+        'sent_datetime': _now.strftime('%B %d, %Y at %I:%M %p'),
+        'sent_date':     _now.strftime('%B %d, %Y'),
+        'sent_time':     _now.strftime('%I:%M %p'),
+        'app_name':      '3·2·1→Theater',
+    }
+
+    # Build email subject — honor a custom template if the admin set one,
+    # otherwise fall back to the default that omits empty parts.
+    subject_tmpl = (get_app_setting('pdf_email_subject_template', '') or '').strip()
+    if subject_tmpl:
+        subject = _render_email_template(subject_tmpl, tmpl_ctx)
+    else:
+        subject_parts = ['3·2·1→Theater', type_label, _s(show_name)]
+        if show_date:
+            subject_parts.append(_s(show_date))
+        if venue:
+            subject_parts.append(_s(venue))
+        if pm_name:
+            subject_parts.append(f'PM: {_s(pm_name)}')
+        subject = ' | '.join(subject_parts)
+
+    # Email body — custom template wins, else the default sentence.
+    body_tmpl = get_app_setting('pdf_email_body_template', '') or ''
+    if body_tmpl.strip():
+        body_line = _render_email_template(body_tmpl, tmpl_ctx)
+    elif triggered_by == 'system':
         body_line = (f'This {type_label} was automatically generated and sent by 3·2·1→Theater '
-                     f'on {datetime.now().strftime("%B %d, %Y at %I:%M %p")}.')
+                     f'on {tmpl_ctx["sent_datetime"]}.')
     else:
         body_line = (f'This {type_label} was generated and sent by {triggered_by} '
-                     f'on {datetime.now().strftime("%B %d, %Y at %I:%M %p")}.')
-
-    safe_show = show_name.replace(' ', '_').replace('/', '-')
-    filename   = f"{type_label.replace(' ','_')}_{safe_show}_{show_date}.pdf"
+                     f'on {tmpl_ctx["sent_datetime"]}.')
 
     # Send email via configured provider (SMTP relay or direct MX)
     attachments = [{'filename': filename, 'data': pdf_bytes, 'mimetype': 'application/pdf'}]
@@ -6611,6 +6667,8 @@ def settings():
         'schedule_email_days_1':     all_settings.get('schedule_email_days_1', '10'),
         'schedule_email_enabled_2':  all_settings.get('schedule_email_enabled_2', '0'),
         'schedule_email_days_2':     all_settings.get('schedule_email_days_2', '1'),
+        'pdf_email_subject_template': all_settings.get('pdf_email_subject_template', ''),
+        'pdf_email_body_template':    all_settings.get('pdf_email_body_template', ''),
     }
 
     # Strip sensitive keys from syslog_settings for non-admin users
@@ -9779,7 +9837,8 @@ def save_pdf_email_settings():
     keys = ('pdf_email_send_hour',
             'advance_email_enabled',   'advance_email_days_before',
             'schedule_email_enabled_1','schedule_email_days_1',
-            'schedule_email_enabled_2','schedule_email_days_2')
+            'schedule_email_enabled_2','schedule_email_days_2',
+            'pdf_email_subject_template', 'pdf_email_body_template')
     for key in keys:
         if key in data:
             db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',

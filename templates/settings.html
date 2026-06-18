@@ -1546,6 +1546,51 @@
     </div>
   </div>
 
+  {# Customizable subject line + body text for all PDF emails #}
+  <div class="form-section mt-lg">
+    <div class="form-section-header"><span class="section-icon">◈</span> MESSAGE CONTENT</div>
+    <div class="form-section-body">
+      <p class="text-dim text-sm" style="margin-bottom:12px">
+        Customize the subject line and body for every PDF email — both the automated
+        sends above and manual “Email PDF” sends. Leave a field blank to use the
+        built-in default. Use the variables below (e.g. <code>{show_name}</code>) and
+        they’ll be filled in per show when the email goes out.
+      </p>
+
+      <div class="field-group">
+        <label class="field-label">SUBJECT LINE TEMPLATE</label>
+        <input type="text" id="pdf_email_subject_template" class="field-input"
+               placeholder="3·2·1→Theater | {type_label} | {show_name} | {show_date}"
+               value="{{ pdf_email_settings.pdf_email_subject_template }}">
+        <span class="field-hint">Blank = default subject (skips empty fields automatically).</span>
+      </div>
+
+      <div class="field-group" style="margin-top:12px">
+        <label class="field-label">BODY TEXT TEMPLATE</label>
+        <textarea id="pdf_email_body_template" class="field-input" rows="4"
+                  placeholder="Attached is the {type_label} for {show_name} on {show_date} at {venue}.&#10;Sent by {sender} on {sent_datetime}.">{{ pdf_email_settings.pdf_email_body_template }}</textarea>
+        <span class="field-hint">Blank = default body text.</span>
+      </div>
+
+      <div style="margin-top:12px;padding:10px 12px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:6px">
+        <div class="text-dim text-sm" style="margin-bottom:6px;font-weight:600">Available variables</div>
+        <div class="text-dim text-sm" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:4px 14px">
+          <span><code>{show_name}</code> — show name</span>
+          <span><code>{show_date}</code> — show date</span>
+          <span><code>{venue}</code> — venue</span>
+          <span><code>{pm_name}</code> — production manager</span>
+          <span><code>{type_label}</code> — “Advance Sheet” / “Production Schedule” / “Post-Show Report”</span>
+          <span><code>{pdf_filename}</code> — attached PDF file name</span>
+          <span><code>{sender}</code> — who sent it (or app name for scheduled)</span>
+          <span><code>{sent_datetime}</code> — date &amp; time sent</span>
+          <span><code>{sent_date}</code> — date sent</span>
+          <span><code>{sent_time}</code> — time sent</span>
+          <span><code>{app_name}</code> — 3·2·1→Theater</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
   {# Shared send time #}
   <div class="form-section mt-lg">
     <div class="form-section-header"><span class="section-icon">◈</span> SCHEDULED SEND TIME</div>
@@ -3787,6 +3832,8 @@ async function savePdfEmailSettings() {
     schedule_email_days_1:     document.getElementById('schedule_email_days_1').value,
     schedule_email_enabled_2:  document.getElementById('schedule_email_enabled_2').value,
     schedule_email_days_2:     document.getElementById('schedule_email_days_2').value,
+    pdf_email_subject_template: document.getElementById('pdf_email_subject_template').value,
+    pdf_email_body_template:    document.getElementById('pdf_email_body_template').value,
   };
   const resp = await fetch('/settings/pdf-emails', {
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)
