@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `2.20.0`**
+**Current version: `2.21.0`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,7 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `2.21.0` — **Labor Scheduler now groups each show by date.** A show that spans multiple days now renders one day-block per work date inside its section (mirroring the show staffing view) instead of cramming every date into a single table — each block has a date header, its own "+ Add Line" (new lines inherit that day's date), and an editable date input that re-dates every line in the block at once (the way to correct mis-dated lines). A "+ Add Day" button on the show header adds a new empty day-block, and the redundant per-row DATE column is dropped from show blocks (the block header carries the date; overhead sections keep their inline date column). Backend: the labor-request PUT now accepts `work_date` so a line/day can be re-dated. Shows with no lines still get one empty day-block so the first line can be added.
 - `2.20.0` — **Labor Scheduler week navigation + responsive layout, plus two fixes.** (1) New ← Prev Week / This Week / Next Week → controls on the Labor Scheduler snap the From/To range to a whole Monday–Sunday work week (mirrors Labor Overview's week jump); the From/To inputs stay editable for custom multi-week ranges. (2) **Bug fix:** "+ Add Line" now dates a new labor line to the *show's own date* instead of the loaded range's start date, which previously mis-dated lines for any show that wasn't on the first day of the window (the row's date is still editable, and an undated show still falls back to the range start). (3) **Layout fix:** wide tables (scheduler / overview) now scroll horizontally inside their card instead of being clipped off the right edge on smaller windows, so the far-right columns — including the per-row delete × (which already existed but was getting cut off) — stay reachable; the sidebar is now collapsible to an icon rail (chevron at the top, preference saved in localStorage) and on narrow viewports (≤900px) it shrinks to that rail instead of disappearing entirely, handing the freed width to page content.
 - `2.19.5` — Merge Duplicates moved off the homepage: the admin-only Merge Duplicate Shows tool now lives in the Settings tab bar (next to Prism Sync / Sidebar Editor, same admin-only route), the homepage header keeps just New Show, and the merge page's back link points to Settings.
 - `2.19.4` — Combined Invoice… button removed from the Post Show tab as well — the sidebar entry (under Settings) is now the single way in. The page's `?preselect=` parameter still works for direct links/bookmarks.
