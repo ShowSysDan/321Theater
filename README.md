@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `2.19.5`**
+**Current version: `2.20.0`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,7 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `2.20.0` — **Labor Scheduler week navigation + responsive layout, plus two fixes.** (1) New ← Prev Week / This Week / Next Week → controls on the Labor Scheduler snap the From/To range to a whole Monday–Sunday work week (mirrors Labor Overview's week jump); the From/To inputs stay editable for custom multi-week ranges. (2) **Bug fix:** "+ Add Line" now dates a new labor line to the *show's own date* instead of the loaded range's start date, which previously mis-dated lines for any show that wasn't on the first day of the window (the row's date is still editable, and an undated show still falls back to the range start). (3) **Layout fix:** wide tables (scheduler / overview) now scroll horizontally inside their card instead of being clipped off the right edge on smaller windows, so the far-right columns — including the per-row delete × (which already existed but was getting cut off) — stay reachable; the sidebar is now collapsible to an icon rail (chevron at the top, preference saved in localStorage) and on narrow viewports (≤900px) it shrinks to that rail instead of disappearing entirely, handing the freed width to page content.
 - `2.19.5` — Merge Duplicates moved off the homepage: the admin-only Merge Duplicate Shows tool now lives in the Settings tab bar (next to Prism Sync / Sidebar Editor, same admin-only route), the homepage header keeps just New Show, and the merge page's back link points to Settings.
 - `2.19.4` — Combined Invoice… button removed from the Post Show tab as well — the sidebar entry (under Settings) is now the single way in. The page's `?preselect=` parameter still works for direct links/bookmarks.
 - `2.19.3` — Export & Files polish: the four export cards (Advance, Schedule, Post-Show Report, Final Invoice) now sit in one row of four instead of 3 + 1 (two-up below 1200px, single column below 900px as before), and the Combined Invoice… link is removed from the Final Invoice card — it remains on the Post Show tab and in the sidebar under Settings.

@@ -135,6 +135,47 @@ a:hover { text-decoration: underline; }
 .logout-btn:hover { color: var(--brand-red); background: rgba(240,78,35,0.15); }
 .logout-btn svg { width: 16px; height: 16px; }
 
+/* ── Collapsible sidebar (icon rail) ──────────────────────────────────
+   Toggled via the chevron at the top of the sidebar (state persisted in
+   localStorage as `sidebar_collapsed`) and also forced on narrow viewports
+   (≤900px, via the `force-rail` class set in app.js) so the sidebar shrinks to
+   an icon-only rail instead of vanishing entirely. The freed width flows to
+   the page content, and wide tables get a horizontal scrollbar (see
+   .form-section-body.no-pad below), so nothing is clipped off the right edge. */
+.sidebar-collapse-btn {
+  display: flex; align-items: center; justify-content: center;
+  margin: 0 10px 6px auto; width: 28px; height: 24px;
+  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 5px; color: rgba(255,255,255,0.6); cursor: pointer;
+  transition: all 0.15s; flex-shrink: 0;
+}
+.sidebar-collapse-btn:hover { background: rgba(255,255,255,0.14); color: #fff; }
+html.sidebar-collapsed, html.force-rail { --sidebar-w: 66px; }
+html.sidebar-collapsed .sidebar-brand,
+html.force-rail .sidebar-brand { justify-content: center; padding: 18px 4px 14px; gap: 0; }
+html.sidebar-collapsed .sidebar-brand > div,
+html.force-rail .sidebar-brand > div,
+html.sidebar-collapsed .gs-wrap,
+html.force-rail .gs-wrap,
+html.sidebar-collapsed .nav-section-label,
+html.force-rail .nav-section-label,
+html.sidebar-collapsed .sidebar-user .user-info,
+html.force-rail .sidebar-user .user-info,
+html.sidebar-collapsed .sidebar-footer > div:not(.sidebar-footer-row),
+html.force-rail .sidebar-footer > div:not(.sidebar-footer-row) { display: none; }
+html.sidebar-collapsed .nav-item,
+html.force-rail .nav-item { justify-content: center; gap: 0; padding-left: 0; padding-right: 0; font-size: 0; }
+html.sidebar-collapsed .nav-item.sub,
+html.force-rail .nav-item.sub { padding-left: 0; }
+html.sidebar-collapsed .sidebar-footer,
+html.force-rail .sidebar-footer { padding: 12px 6px; }
+html.sidebar-collapsed .sidebar-footer-row,
+html.force-rail .sidebar-footer-row { flex-wrap: wrap; justify-content: center; gap: 6px; }
+html.sidebar-collapsed .sidebar-collapse-btn,
+html.force-rail .sidebar-collapse-btn { margin: 0 auto 6px; }
+html.sidebar-collapsed .sidebar-collapse-btn svg,
+html.force-rail .sidebar-collapse-btn svg { transform: rotate(180deg); }
+
 /* ── Page Header ───────────────────────────────────────────────── */
 .page-header {
   display: flex; justify-content: space-between; align-items: flex-start;
@@ -1001,6 +1042,10 @@ html[data-theme="light"] select.field-input {
 
 /* ── Data Tables ─────────────────────────────────────────────────── */
 .data-table { width: 100%; border-collapse: collapse; }
+/* Wide data tables (labor scheduler / overview) scroll horizontally within
+   their own card instead of being clipped off the right edge on small windows
+   — this keeps the far-right columns (TECH, the per-row delete ×) reachable. */
+.form-section-body.no-pad { overflow-x: auto; }
 .data-table th { font-family: var(--font-cond); font-size: 10.5px; font-weight: 700; letter-spacing: 0.1em; color: var(--text-muted); text-transform: uppercase; padding: 11px 16px; text-align: left; border-bottom: 2px solid var(--border); }
 .data-table td { padding: 11px 16px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
 .data-table tr:last-child td { border-bottom: none; }
@@ -1103,7 +1148,9 @@ input[type=checkbox].oh-check:disabled {
 select option { background: var(--bg-surface); color: var(--text); }
 
 @media (max-width: 900px) {
-  .sidebar { display: none; }
+  /* Sidebar no longer fully disappears here — app.js adds `force-rail` to
+     <html> at ≤900px, collapsing it to the icon rail (see the collapsible
+     sidebar rules above) so it stays reachable without hogging width. */
   .main-content { padding: 16px; }
   .show-grid { grid-template-columns: 1fr; }
   .two-col { grid-template-columns: 1fr; }
