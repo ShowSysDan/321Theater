@@ -106,6 +106,20 @@
     padding-left: 6px; padding-right: 6px;
   }
   .sched-stack-cell .sched-time-input { width: 70px; }
+
+  /* Per-day blocks inside a show section — one block per work_date. */
+  .sched-day-block + .sched-day-block { border-top: 1px solid var(--border); }
+  .sched-day-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .sched-day-label {
+    font-size: 11px; font-weight: 700; letter-spacing: .07em;
+    color: var(--accent); white-space: nowrap;
+  }
+  .sched-day-date { width: 150px; }
 </style>
 {% endblock %}
 
@@ -364,12 +378,18 @@
   /* Build a row for a labor request. `endpointBase` is the URL prefix used
      for PUT/DELETE — '/api/labor-scheduler' for show requests, or
      '/api/overhead-crew/requests' for overhead crew lines. */
-  function buildRow(lr, endpointBase) {
+  function buildRow(lr, endpointBase, opts) {
+    opts = opts || {};
     const tr = document.createElement('tr');
     tr.dataset.rid = lr.id;
     tr.dataset.endpointBase = endpointBase || '/api/labor-scheduler';
     if (lr.is_scheduled) tr.classList.add('scheduled-row');
     if (lr.is_training_shift) tr.classList.add('training-shift-row');
+    // Show rows live inside per-day blocks whose header carries the date, so
+    // the redundant per-row DATE cell is omitted there (opts.hideDate). Overhead
+    // rows keep their inline date column.
+    const dateCell = opts.hideDate ? ''
+      : `<td style="font-size:12px;color:var(--text-dim)">${escapeHtml(lr.work_date || '—')}</td>`;
     tr.innerHTML = `
       <td class="sched-check-cell">
         <input type="checkbox" class="sched-check" ${lr.is_scheduled ? 'checked' : ''}
@@ -382,7 +402,7 @@
                 aria-pressed="${lr.is_training_shift ? 'true' : 'false'}"
                 onclick="window.__scheduler.onTrainingShiftToggle(this)"></button>
       </td>
-      <td style="font-size:12px;color:var(--text-dim)">${escapeHtml(lr.work_date || '—')}</td>
+      ${dateCell}
       <td>
         <select class="field-input field-input-sm sched-pos" style="min-width:150px"
                 onchange="window.__scheduler.onPositionChange(this)">
@@ -448,6 +468,59 @@
     return tr;
   }
 
+  /* "2026-07-01" → "WED, JUL 1" (matches the show staffing view's day labels). */
+  function schedDayLabel(iso) {
+    const d = parseISODate(iso);
+    if (!d) return iso || 'NO DATE';
+    return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }).toUpperCase();
+  }
+
+  /* Build one day-block (header + table) inside a show section. The block's
+     date lives on the header (dataset.workDate); changing it re-dates every
+     line in the block, and "+ Add Line" adds a row pre-dated to this day. */
+  function buildDayBlock(show, date, requests) {
+    const block = document.createElement('div');
+    block.className = 'sched-day-block';
+    block.dataset.workDate = date || '';
+
+    const header = document.createElement('div');
+    header.className = 'sched-day-header';
+    header.innerHTML = `
+      <span class="sched-day-label">${escapeHtml(schedDayLabel(date))}</span>
+      <input type="date" class="field-input field-input-sm sched-day-date" value="${date || ''}"
+             title="Work date for this day — changing it moves every line in this block"
+             onchange="window.__scheduler.onDayDateChange(this)">
+      <button class="btn btn-ghost btn-sm ml-auto" onclick="window.__scheduler.addRow(this, ${show.show_id})">+ Add Line</button>
+    `;
+    block.appendChild(header);
+
+    const bodyWrap = document.createElement('div');
+    bodyWrap.className = 'form-section-body no-pad';
+    const table = document.createElement('table');
+    table.className = 'data-table';
+    table.innerHTML = `
+      <thead>
+        <tr>
+          <th style="width:52px;text-align:center" title="Scheduled — counts toward staffing">SCHED ✓</th>
+          <th style="width:58px;text-align:center;line-height:1.05" title="Training shift — extra body on this position for learning, doesn't replace the staffed tech">IN<br>TRAINING</th>
+          <th style="min-width:160px">POSITION</th>
+          <th style="width:72px">IN</th>
+          <th style="width:78px;white-space:nowrap">LUNCH START</th>
+          <th style="width:78px;white-space:nowrap">LUNCH END</th>
+          <th style="width:72px">OUT</th>
+          <th style="min-width:200px">TECH</th>
+          <th style="width:40px"></th>
+        </tr>
+      </thead>
+    `;
+    const tbody = document.createElement('tbody');
+    (requests || []).forEach(lr => tbody.appendChild(buildRow(lr, '/api/labor-scheduler', { hideDate: true })));
+    table.appendChild(tbody);
+    bodyWrap.appendChild(table);
+    block.appendChild(bodyWrap);
+    return block;
+  }
+
   function buildShowSection(show) {
       const section = document.createElement('div');
       section.className = 'form-section';
@@ -465,7 +538,7 @@
           </span>
           <a href="/shows/${show.show_id}?tab=staffing" class="show-link" target="_blank" rel="noopener">Open show →</a>
         </div>
-        <button class="btn btn-ghost btn-sm ml-auto" onclick="window.__scheduler.addRow(this, ${show.show_id}, '${show.show_date || ''}')">+ Add Line</button>
+        <button class="btn btn-ghost btn-sm ml-auto" onclick="window.__scheduler.addDay(this, ${show.show_id}, '${show.show_date || ''}')">+ Add Day</button>
       `;
       section.appendChild(header);
 
@@ -479,32 +552,21 @@
       `;
       section.appendChild(notesBox);
 
-      const bodyWrap = document.createElement('div');
-      bodyWrap.className = 'form-section-body no-pad';
+      // Group the show's lines by date so a multi-day show shows one block per
+      // day (mirrors the show staffing view). NULL/empty dates fall back to the
+      // show's own date. A show with no lines still gets one (empty) day block
+      // for its show date so the first line can be added.
+      const groups = new Map();
+      (show.requests || []).forEach(lr => {
+        const d = lr.work_date || show.show_date || '';
+        if (!groups.has(d)) groups.set(d, []);
+        groups.get(d).push(lr);
+      });
+      if (groups.size === 0) groups.set(show.show_date || '', []);
+      const dates = [...groups.keys()].sort((a, b) =>
+        (!a && b) ? -1 : (a && !b) ? 1 : (a < b ? -1 : a > b ? 1 : 0));
+      dates.forEach(d => section.appendChild(buildDayBlock(show, d, groups.get(d))));
 
-      const table = document.createElement('table');
-      table.className = 'data-table';
-      table.innerHTML = `
-        <thead>
-          <tr>
-            <th style="width:52px;text-align:center" title="Scheduled — counts toward staffing">SCHED ✓</th>
-            <th style="width:58px;text-align:center;line-height:1.05" title="Training shift — extra body on this position for learning, doesn't replace the staffed tech">IN<br>TRAINING</th>
-            <th style="width:110px">DATE</th>
-            <th style="min-width:160px">POSITION</th>
-            <th style="width:72px">IN</th>
-            <th style="width:78px;white-space:nowrap">LUNCH START</th>
-            <th style="width:78px;white-space:nowrap">LUNCH END</th>
-            <th style="width:72px">OUT</th>
-            <th style="min-width:200px">TECH</th>
-            <th style="width:40px"></th>
-          </tr>
-        </thead>
-      `;
-      const tbody = document.createElement('tbody');
-      show.requests.forEach(lr => tbody.appendChild(buildRow(lr, '/api/labor-scheduler')));
-      table.appendChild(tbody);
-      bodyWrap.appendChild(table);
-      section.appendChild(bodyWrap);
       return section;
   }
 
@@ -719,11 +781,12 @@
     await putSchedulerUpdate(tr, payload);
   }
 
-  async function addRow(btn, showId, showDate) {
-    // A new line defaults to the show's own date — NOT the range start, which
-    // would mis-date the line for any show that isn't on the first day of the
-    // loaded window. Fall back to the range start only if the show has no date.
-    const workDate = showDate || document.getElementById('sched-from').value || null;
+  async function addRow(btn, showId) {
+    // The "+ Add Line" button lives in a day-block header, so the new line
+    // inherits that block's date — never the loaded range's start (which would
+    // mis-date it). Fall back to the range start only if the block has no date.
+    const block = btn.closest('.sched-day-block');
+    const workDate = (block && block.dataset.workDate) || document.getElementById('sched-from').value || null;
     const r = await fetch('/api/labor-scheduler/add', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -732,11 +795,64 @@
     if (!r.ok) { showSaveToast('✗ Add failed', 'error'); return; }
     const data = await r.json();
     if (!data.success) { showSaveToast('✗ ' + (data.error || 'Add failed'), 'error'); return; }
-    const section = btn.closest('.form-section');
-    const tbody = section.querySelector('tbody');
-    const newRow = buildRow(data.row);
+    const tbody = block ? block.querySelector('tbody')
+                        : btn.closest('.form-section').querySelector('tbody');
+    const newRow = buildRow(data.row, '/api/labor-scheduler', { hideDate: true });
     tbody.appendChild(newRow);
     showSaveToast('✓ Row added');
+  }
+
+  /* Append a fresh, empty day-block to a show section so labor can be added on
+     a date the show doesn't have lines on yet. It defaults to the show's date;
+     change the block's date first (no save until it has rows) to target another
+     day, then use its "+ Add Line". */
+  function addDay(btn, showId, defaultDate) {
+    const section = btn.closest('.form-section');
+    const block = buildDayBlock({ show_id: showId, show_date: defaultDate }, defaultDate || '', []);
+    section.appendChild(block);
+    block.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    const di = block.querySelector('.sched-day-date');
+    if (di) di.focus();
+  }
+
+  /* Quiet row PUT (no per-row toast) — used when re-dating a whole day-block. */
+  async function _putRowQuiet(tr, payload) {
+    const r = await fetch(`${_endpointFor(tr)}/${tr.dataset.rid}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) return null;
+    try { return await r.json(); } catch (e) { return { success: true }; }
+  }
+
+  /* Change a day-block's date. With no rows yet (a freshly added day) it just
+     retargets the block. With rows, it re-dates every line then reloads so the
+     scheduler re-groups (merging into an existing same-date block if any). */
+  async function onDayDateChange(input) {
+    const block = input.closest('.sched-day-block');
+    const newDate = input.value || '';
+    const oldDate = block.dataset.workDate || '';
+    if (newDate === oldDate) return;
+    if (!newDate) { input.value = oldDate; return; }   // don't allow clearing
+    const rows = Array.from(block.querySelectorAll('tbody tr[data-rid]'));
+    if (!rows.length) {
+      block.dataset.workDate = newDate;
+      const lbl = block.querySelector('.sched-day-label');
+      if (lbl) lbl.textContent = schedDayLabel(newDate);
+      return;
+    }
+    if (!confirm(`Move ${rows.length} labor line${rows.length === 1 ? '' : 's'} to ${newDate}?`)) {
+      input.value = oldDate;
+      return;
+    }
+    let ok = true;
+    for (const tr of rows) {
+      const res = await _putRowQuiet(tr, { work_date: newDate });
+      if (!res || !res.success) ok = false;
+    }
+    if (ok) { showSaveToast('✓ Dates updated'); await loadScheduler(); }
+    else showSaveToast('✗ Some lines failed to move', 'error');
   }
 
   async function addOverheadRow(btn, groupId) {
@@ -984,7 +1100,7 @@
     if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
-  window.__scheduler = { onScheduledToggle, onTrainingShiftToggle, onCrewChange, onPositionChange, onTimeChange, addRow, addOverheadRow, removeRow, saveAll, saveShowNotes, saveGroupNotes,
+  window.__scheduler = { onScheduledToggle, onTrainingShiftToggle, onCrewChange, onPositionChange, onTimeChange, addRow, addDay, onDayDateChange, addOverheadRow, removeRow, saveAll, saveShowNotes, saveGroupNotes,
                          openAddShow, closeAddShow, submitAddShow, onPickShow, thisWeek, shiftWeek };
   window.loadScheduler = loadScheduler;
 

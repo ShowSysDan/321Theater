@@ -472,7 +472,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.20.0'
+APP_VERSION = '2.21.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -11566,6 +11566,14 @@ def api_labor_scheduler_update(rid):
         updates.append('notes=?')
         params.append((data['notes'] or '').strip())
         detail_parts.append('notes=updated')
+    if 'work_date' in data:
+        # Re-dating a line (e.g. correcting a mis-dated row, or moving a whole
+        # day-block in the scheduler). Empty string clears it back to NULL, in
+        # which case it falls back to the show's date in list queries.
+        wd = (data.get('work_date') or '').strip() or None
+        updates.append('work_date=?')
+        params.append(wd)
+        detail_parts.append(f"work_date={wd}")
 
     if not updates:
         db.close()
