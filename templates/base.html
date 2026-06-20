@@ -9,6 +9,17 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <script>
+    /* Apply the sidebar rail state before first paint to avoid a flash:
+       honor the saved collapse preference, and force the rail on narrow
+       viewports (≤900px). app.js keeps `force-rail` in sync on resize. */
+    try {
+      if (localStorage.getItem('sidebar_collapsed') === '1')
+        document.documentElement.classList.add('sidebar-collapsed');
+      if (window.matchMedia('(max-width: 900px)').matches)
+        document.documentElement.classList.add('force-rail');
+    } catch (e) {}
+  </script>
   {% block head %}{% endblock %}
 </head>
 <body>
@@ -43,6 +54,12 @@
         <div class="brand-sub">Advance to stage in 3-2-1</div>
       </div>
     </div>
+
+    <!-- Collapse / expand toggle (icon rail) -->
+    <button type="button" class="sidebar-collapse-btn" id="sidebar-collapse-btn"
+            onclick="toggleSidebar()" title="Collapse / expand sidebar" aria-label="Collapse or expand sidebar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="15 18 9 12 15 6"/></svg>
+    </button>
 
     <!-- Global Search -->
     <div class="gs-wrap" id="gs-wrap">

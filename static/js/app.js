@@ -2364,6 +2364,25 @@ async function loadBackupStatus() {
 const _SUN_SVG  = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`;
 const _MOON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/></svg>`;
 
+/* ── Collapsible sidebar (icon rail) ─────────────────────────────────
+   Manual toggle persists the preference; a matchMedia listener also forces
+   the rail on narrow viewports without touching the saved preference, so
+   resizing back to a wide window restores whatever the user last chose. */
+function toggleSidebar() {
+  const collapsed = document.documentElement.classList.toggle('sidebar-collapsed');
+  try { localStorage.setItem('sidebar_collapsed', collapsed ? '1' : '0'); } catch (e) {}
+}
+(function _initSidebarRail() {
+  if (!window.matchMedia) return;
+  const mq = window.matchMedia('(max-width: 900px)');
+  const apply = (e) => document.documentElement.classList.toggle('force-rail', e.matches);
+  apply(mq);
+  // addEventListener('change', …) is the modern API; addListener is the
+  // pre-Safari-14 fallback. Either way we register exactly one listener.
+  if (mq.addEventListener) mq.addEventListener('change', apply);
+  else if (mq.addListener) mq.addListener(apply);
+})();
+
 function toggleTheme() {
   const html    = document.documentElement;
   const current = html.getAttribute('data-theme') || 'dark';
