@@ -15,23 +15,26 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: Arial, Helvetica, sans-serif; font-size: 8.5pt; color: #1a1a1a; line-height: 1.35; }
 
-  /* ── Page break between days ── */
-  .day-section { page-break-after: always; }
-  .day-section:last-child { page-break-after: avoid; }
+  /* ── Days flow on one sheet; banners break them up ── */
+  .day-section { margin-bottom: 14px; }
+  .day-section:last-child { margin-bottom: 0; }
 
   /* ── Header ── */
-  .doc-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 2.5px solid #000; }
-  .doc-title { font-size: 18pt; font-weight: 900; letter-spacing: 0.05em; text-transform: uppercase; }
-  .doc-title span { color: #B8840A; }
+  .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; padding-bottom: 7px; border-bottom: 2.5px solid #000; }
+  .doc-type { font-size: 7.5pt; font-weight: bold; color: #B8840A; letter-spacing: 0.12em; text-transform: uppercase; }
+  .show-name { font-size: 25pt; font-weight: 900; line-height: 1.04; color: #1a1a1a; letter-spacing: 0.01em; margin: 1px 0 2px; }
+  .show-sub { font-size: 8.5pt; color: #444; }
+  .show-sub strong { color: #111; }
   .doc-org { font-size: 7pt; color: #555; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
-  .doc-meta { text-align: right; font-size: 7.5pt; color: #444; }
+  .doc-meta { text-align: right; font-size: 7.5pt; color: #444; white-space: nowrap; padding-left: 12px; }
   .doc-meta .version { font-size: 10pt; font-weight: bold; color: #B8840A; }
 
-  /* ── Day label banner ── */
-  .day-banner { background: #1a1a1a; color: #fff; font-size: 10pt; font-weight: bold;
-                letter-spacing: 0.08em; text-transform: uppercase; padding: 5px 10px;
-                margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
-  .day-banner .day-date { font-size: 8pt; color: #ccc; font-weight: normal; }
+  /* ── Day label banner (the breaker between days) ── */
+  .day-banner { background: #1a1a1a; color: #fff; font-size: 11pt; font-weight: bold;
+                letter-spacing: 0.06em; text-transform: uppercase; padding: 6px 10px;
+                margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;
+                page-break-after: avoid; page-break-inside: avoid; }
+  .day-banner .day-date { font-size: 9pt; color: #f0c44a; font-weight: bold; text-transform: none; letter-spacing: 0; }
 
   /* ── Info bar ── */
   .info-bar { display: grid; gap: 6px; margin-bottom: 10px; background: #f5f5f5; border: 1px solid #ddd; padding: 7px 10px; align-items: center; }
@@ -70,7 +73,7 @@
 <body>
 
 <!-- Running footer elements must be declared early for WeasyPrint to pick them up -->
-<div class="footer-left">{{ show.name }}  ·  {{ show.show_date or '—' }}  ·  Dr. Phillips Center for the Performing Arts</div>
+<div class="footer-left">{{ show.name }}  ·  {{ show.show_date | dowdate or show.show_date or '—' }}  ·  Dr. Phillips Center for the Performing Arts</div>
 <div class="footer-right">PRODUCTION SCHEDULE v{{ version }}  ·  Exported {{ export_date }}</div>
 
 {% set d = schedule_meta %}
@@ -85,45 +88,85 @@
 {% set _full_fields = _smf_tech | selectattr('width_hint', 'eq', 'full') | list %}
 
 {% set _section_keys = ['header','day_banner','info_bar','wifi_box','crew_call','sched_table','contacts_grid'] %}
+{# day_banner + sched_table are the only per-day sections; everything else is
+   show-level and renders once. The per-day loop (banner + table) is emitted
+   in-place at whichever of those two keys comes first in the saved order, so
+   multiple days stack on one sheet — broken up by the day banner — instead of
+   forcing a page per day. #}
+{% set _day_keys = ['day_banner','sched_table'] %}
+{% set _ns = namespace(day_loop_done=false) %}
 
-{% for day in schedule_days %}
-{% set _is_last_day = loop.last %}
-{% set _is_first_day = loop.first %}
-<div class="day-section">
+{% for skey in layout.iter_sections(_section_keys) if layout.visible(skey) %}
 
-  {% for skey in layout.iter_sections(_section_keys) if layout.visible(skey) %}
-    {% if layout.page_break_before(skey) and not (_is_first_day and loop.first) %}<div style="page-break-before: always"></div>{% endif %}
+  {% if skey in _day_keys %}
+    {% if not _ns.day_loop_done %}
+    {% set _ns.day_loop_done = true %}
+    {% if layout.page_break_before(skey) and not loop.first %}<div style="page-break-before: always"></div>{% endif %}
+    {% for day in schedule_days %}
+    <div class="day-section">
+      {% if layout.visible('day_banner') and schedule_days | length > 1 %}
+      <div class="day-banner" style="font-size: {{ layout.font_size('day_banner', '11pt') }}">
+        <span>{{ layout.label('day_banner', 'Day') }} {{ day.day_num }}</span>
+        <span class="day-date">{{ day.perf.perf_date | dowdate or day.perf.perf_date or '' }}{% if day.perf.perf_time %} · {{ day.perf.perf_time | hhmm }}{% endif %}</span>
+      </div>
+      {% endif %}
+      {% if layout.visible('sched_table') %}
+      <table class="sched-table" style="font-size: {{ layout.font_size('sched_table', '8.5pt') }}">
+        <thead>
+          <tr>
+            <th style="width:90px">Start</th>
+            <th style="width:90px">End</th>
+            <th>Description</th>
+            <th style="width:200px">Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in day.rows %}
+          {% if row.description or row.start_time %}
+          <tr>
+            <td class="time-col">{{ row.start_time or '' }}</td>
+            <td class="time-col">{{ row.end_time or '' }}</td>
+            <td class="desc-col">{{ row.description or '' }}</td>
+            <td class="notes-col">{{ row.notes or '' }}</td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+          {% if not day.rows %}
+          <tr><td colspan="4" style="text-align:center;color:#aaa;padding:12px;">No schedule rows entered.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>{# end .day-section #}
+    {% endfor %}
+    {% endif %}
+
+  {% else %}
+    {% if layout.page_break_before(skey) and not loop.first %}<div style="page-break-before: always"></div>{% endif %}
 
     {% if skey == 'header' %}
     <div class="doc-header">
-      <div style="display:flex;align-items:center;gap:12px">
+      <div style="display:flex;align-items:flex-start;gap:12px">
         {% if logo_data %}
         <img src="{{ logo_data }}" alt="Logo" style="max-height:90px;max-width:240px;object-fit:contain">
         {% endif %}
         <div>
-          <div class="doc-title"><span style="text-transform:none">dpc</span> <span>{{ layout.label('header', 'PRODUCTION') }}</span> SCHEDULE</div>
+          <div class="doc-type"><span style="text-transform:none">dpc</span> {{ layout.label('header', 'PRODUCTION') }} SCHEDULE</div>
+          <div class="show-name">{{ show.name }}</div>
+          <div class="show-sub">
+            {% if show.venue %}{{ show.venue }}{% endif %}
+            {% set _hdr_date = show.show_date or (schedule_days[0].perf.perf_date if schedule_days else None) %}
+            {% if _hdr_date %}{% if show.venue %} &nbsp;·&nbsp; {% endif %}<strong>{{ _hdr_date | dowdate or _hdr_date }}</strong>{% endif %}
+            {% if schedule_days | length > 1 %} &nbsp;·&nbsp; {{ schedule_days | length }} days{% endif %}
+          </div>
           <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
         </div>
       </div>
       <div class="doc-meta">
         <div class="version">v{{ version }}</div>
         <div>{{ export_date }}</div>
-        <div style="margin-top:3px; font-size:8pt; color:#222">
-          <strong>{{ show.name }}</strong>
-          {% if schedule_days | length > 1 %} &nbsp;·&nbsp; <strong>Day {{ day.day_num }}</strong>{% endif %}
-          &nbsp;·&nbsp; {{ day.perf.perf_date or show.show_date or '—' }}
-          {% if day.perf.perf_time %} &nbsp;·&nbsp; {{ day.perf.perf_time | hhmm }}{% endif %}
-        </div>
       </div>
     </div>
-
-    {% elif skey == 'day_banner' %}
-    {% if schedule_days | length > 1 %}
-    <div class="day-banner" style="font-size: {{ layout.font_size('day_banner', '10pt') }}">
-      <span>{{ layout.label('day_banner', 'Day') }} {{ day.day_num }}</span>
-      <span class="day-date">{{ day.perf.perf_date or '' }}{% if day.perf.perf_time %} · {{ day.perf.perf_time | hhmm }}{% endif %}</span>
-    </div>
-    {% endif %}
 
     {% elif skey == 'info_bar' %}
     {% set _has_load = show.load_in_date or show.load_in_time or show.load_out_date or show.load_out_time %}
@@ -144,11 +187,11 @@
       {% if _has_load %}
       <div class="info-item">
         <div class="lbl">Load-In</div>
-        <div class="val">{{ show.load_in_date or '' }}{% if show.load_in_date and show.load_in_time %} · {% endif %}{{ show.load_in_time or '' }}{{ '—' if not show.load_in_date and not show.load_in_time }}</div>
+        <div class="val">{{ show.load_in_date | dowdate or show.load_in_date or '' }}{% if show.load_in_date and show.load_in_time %} · {% endif %}{{ show.load_in_time or '' }}{{ '—' if not show.load_in_date and not show.load_in_time }}</div>
       </div>
       <div class="info-item">
         <div class="lbl">Load-Out</div>
-        <div class="val">{{ show.load_out_date or '' }}{% if show.load_out_date and show.load_out_time %} · {% endif %}{{ show.load_out_time or '' }}{{ '—' if not show.load_out_date and not show.load_out_time }}</div>
+        <div class="val">{{ show.load_out_date | dowdate or show.load_out_date or '' }}{% if show.load_out_date and show.load_out_time %} · {% endif %}{{ show.load_out_time or '' }}{{ '—' if not show.load_out_date and not show.load_out_time }}</div>
       </div>
       {% endif %}
     </div>
@@ -186,33 +229,6 @@
       </div>
     </div>
     {% endif %}
-
-    {% elif skey == 'sched_table' %}
-    <table class="sched-table" style="font-size: {{ layout.font_size('sched_table', '8.5pt') }}">
-      <thead>
-        <tr>
-          <th style="width:90px">Start</th>
-          <th style="width:90px">End</th>
-          <th>Description</th>
-          <th style="width:200px">Notes</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for row in day.rows %}
-        {% if row.description or row.start_time %}
-        <tr>
-          <td class="time-col">{{ row.start_time or '' }}</td>
-          <td class="time-col">{{ row.end_time or '' }}</td>
-          <td class="desc-col">{{ row.description or '' }}</td>
-          <td class="notes-col">{{ row.notes or '' }}</td>
-        </tr>
-        {% endif %}
-        {% endfor %}
-        {% if not day.rows %}
-        <tr><td colspan="4" style="text-align:center;color:#aaa;padding:12px;">No schedule rows entered.</td></tr>
-        {% endif %}
-      </tbody>
-    </table>
 
     {% elif skey == 'contacts_grid' %}
     <div class="contacts-grid" style="font-size: {{ layout.font_size('contacts_grid', '8pt') }}">
@@ -260,10 +276,8 @@
       </div>
     </div>
     {% endif %}
+  {% endif %}{# end day-keys / show-level #}
 
-  {% endfor %}
-
-</div>{# end .day-section #}
 {% endfor %}
 
 </body>

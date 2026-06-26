@@ -53,7 +53,7 @@
   <div class="show-block" style="font-size: {{ layout.font_size('show_block', '11px') }}">
     <div class="show-name">{{ show.name }}</div>
     <div class="show-meta">
-      {% if show.show_date %}<span><strong>Date:</strong> {{ show.show_date }}</span>{% endif %}
+      {% if show.show_date %}<span><strong>Date:</strong> {{ show.show_date | dowdate or show.show_date }}</span>{% endif %}
       {% if show.venue %}<span><strong>Venue:</strong> {{ show.venue }}</span>{% endif %}
       {% if performance_company %}<span><strong>Company:</strong> {{ performance_company }}</span>{% endif %}
     </div>
