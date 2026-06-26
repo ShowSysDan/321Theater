@@ -15,12 +15,13 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: Arial, Helvetica, sans-serif; font-size: 8.5pt; color: #1a1a1a; line-height: 1.35; }
 
-  /* ── Days flow on one sheet; banners break them up ── */
-  .day-section { margin-bottom: 14px; }
-  .day-section:last-child { margin-bottom: 0; }
+  /* ── Two-column page: schedule left ~2/3, info sidebar right ~1/3 ── */
+  .layout-cols { display: table; width: 100%; table-layout: fixed; }
+  .sched-main  { display: table-cell; width: 66%; vertical-align: top; padding-right: 14px; }
+  .sidebar     { display: table-cell; width: 34%; vertical-align: top; }
 
   /* ── Header ── */
-  .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; padding-bottom: 7px; border-bottom: 2.5px solid #1a4a7a; }
+  .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; padding-bottom: 7px; border-bottom: 2.5px solid #1a4a7a; }
   .doc-type { font-size: 7.5pt; font-weight: bold; color: #B8840A; letter-spacing: 0.12em; text-transform: uppercase; }
   .show-name { font-size: 25pt; font-weight: 900; line-height: 1.04; color: #1a1a1a; letter-spacing: 0.01em; margin: 1px 0 2px; }
   .show-sub { font-size: 8.5pt; color: #444; }
@@ -29,43 +30,44 @@
   .doc-meta { text-align: right; font-size: 7.5pt; color: #444; white-space: nowrap; padding-left: 12px; }
   .doc-meta .version { font-size: 10pt; font-weight: bold; color: #B8840A; }
 
-  /* ── Day label banner (the breaker between days) ── brand blue ── */
-  .day-banner { background: #1a4a7a; color: #fff; font-size: 11pt; font-weight: bold;
-                letter-spacing: 0.06em; text-transform: uppercase; padding: 6px 10px;
-                margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;
-                page-break-after: avoid; page-break-inside: avoid; }
-  .day-banner .day-date { font-size: 9pt; color: #f0c44a; font-weight: bold; text-transform: none; letter-spacing: 0; }
+  /* ── Schedule Table — day # and column legends share ONE blue header ── */
+  .sched-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+  .sched-table thead { display: table-header-group; }
+  .day-row th { background: #1a4a7a; color: #fff; font-size: 10.5pt; font-weight: bold;
+                letter-spacing: 0.05em; text-transform: uppercase; text-align: left; padding: 5px 8px; }
+  .day-row .day-date { float: right; font-size: 8.5pt; color: #f0c44a; font-weight: bold; text-transform: none; letter-spacing: 0; }
+  .cols-row th { background: #1a4a7a; color: #cfe0f2; font-size: 7pt; letter-spacing: 0.08em; text-align: left;
+                 padding: 3px 8px; text-transform: uppercase; border-top: 1px solid #3a6ea5; }
+  .sched-table td { padding: 5px 8px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
+  .sched-table tbody tr:nth-child(even) td { background: #fafafa; }
+  .sched-table tbody tr:last-child td { border-bottom: 2px solid #bbb; }
+  .sched-table .time-col { font-weight: bold; white-space: nowrap; font-size: 8.5pt; color: #333; }
+  .sched-table .desc-col { font-size: 8.5pt; }
+  .sched-table .notes-col { font-size: 7.5pt; color: #555; }
 
-  /* ── Info bar ── */
-  .info-bar { display: grid; gap: 6px; margin-bottom: 10px; background: #f5f5f5; border: 1px solid #ddd; padding: 7px 10px; align-items: center; }
+  /* ── Sidebar: venue/config info as a vertical column ── */
+  .info-bar { display: block; margin-bottom: 10px; background: #f5f5f5; border: 1px solid #ddd; padding: 6px 9px; }
+  .info-item { padding: 3px 0; border-bottom: 1px solid #e6e6e6; }
+  .info-item:last-child { border-bottom: none; }
   .info-item .lbl { font-size: 6.5pt; font-weight: bold; color: #888; text-transform: uppercase; letter-spacing: 0.06em; }
   .info-item .val { font-size: 8.5pt; color: #111; margin-top: 1px; font-weight: 600; }
 
-  /* ── WiFi box ── */
-  .wifi-box { display: flex; align-items: center; gap: 10px; background: #f0f8ff; border: 1.5px solid #4a90d9; padding: 6px 10px; border-radius: 4px; margin-bottom: 10px; }
-  .wifi-qr img { width: 90px; height: 90px; }
+  /* ── WiFi box (stacks within the sidebar column) ── */
+  .wifi-box { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; background: #f0f8ff; border: 1.5px solid #4a90d9; padding: 7px 9px; border-radius: 4px; margin-bottom: 10px; }
+  .wifi-qr img { width: 84px; height: 84px; }
   .wifi-info .wifi-label { font-size: 9pt; font-weight: 900; letter-spacing: 0.1em; color: #1a4a7a; text-transform: uppercase; margin-bottom: 3px; }
   .wifi-info .wifi-ssid  { font-size: 10pt; font-weight: bold; color: #1a1a1a; }
   .wifi-info .wifi-pass  { font-size: 8.5pt; color: #444; margin-top: 2px; }
   .wifi-info .wifi-pass span { font-family: monospace; font-weight: bold; color: #1a1a1a; }
 
-  /* ── Schedule Table ── */
-  .sched-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
-  .sched-table th { background: #B8840A; color: #fff; font-size: 7pt; letter-spacing: 0.08em; text-align: left; padding: 5px 8px; text-transform: uppercase; }
-  .sched-table td { padding: 5px 8px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
-  .sched-table tr:nth-child(even) td { background: #fafafa; }
-  .sched-table tr:last-child td { border-bottom: 2px solid #bbb; }
-  .sched-table .time-col { font-weight: bold; white-space: nowrap; font-size: 8.5pt; color: #333; }
-  .sched-table .desc-col { font-size: 8.5pt; }
-  .sched-table .notes-col { font-size: 7.5pt; color: #555; }
-
-  /* ── Contacts grid ── */
-  .contacts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .contacts-box { border: 1px solid #bcd0e4; }
+  /* ── Contacts (single column in sidebar) ── */
+  .contacts-grid { display: block; }
+  .contacts-box { border: 1px solid #bcd0e4; margin-bottom: 8px; }
+  .contacts-box:last-child { margin-bottom: 0; }
   .contacts-box-head { background: #1a4a7a; color: #fff; font-size: 7pt; font-weight: bold; letter-spacing: 0.1em; padding: 4px 7px; text-transform: uppercase; }
   .contacts-table { width: 100%; border-collapse: collapse; }
   .contacts-table td { padding: 3px 7px; border-bottom: 1px solid #eee; font-size: 8pt; }
-  .contacts-table td.lbl { font-size: 7pt; font-weight: bold; color: #666; text-transform: uppercase; width: 38%; }
+  .contacts-table td.lbl { font-size: 7pt; font-weight: bold; color: #666; text-transform: uppercase; width: 40%; }
   .contacts-table tr:last-child td { border-bottom: none; }
 
 </style>
@@ -87,86 +89,83 @@
 {% set _bar_fields  = _smf_tech | selectattr('width_hint', 'ne', 'full') | list %}
 {% set _full_fields = _smf_tech | selectattr('width_hint', 'eq', 'full') | list %}
 
-{% set _section_keys = ['header','day_banner','info_bar','wifi_box','crew_call','sched_table','contacts_grid'] %}
-{# Only the schedule tables repeat per day; every other section (header, info
-   bar, WiFi, crew call, contacts) is show-level and renders ONCE. The per-day
-   loop is emitted at the sched_table position so the top-of-sheet sections —
-   venue/config info bar and WiFi — always stay above the day-by-day schedule.
-   day_banner remains an orderable visibility toggle but is drawn per-day inside
-   the loop; it never renders as a standalone block. #}
+{# Fixed two-column layout: the schedule fills the left ~2/3 and the show-level
+   info (venue/config bar, WiFi, crew call, contacts) sits in the right ~1/3 as
+   a sidebar column. The layout editor's per-section visibility, labels and font
+   sizes are still honored; its section ordering / page-breaks do not apply to
+   this fixed arrangement. #}
 
-{% for skey in layout.iter_sections(_section_keys) if layout.visible(skey) %}
-
-  {% if skey == 'day_banner' %}
-    {# Drawn per-day inside the schedule loop below — nothing standalone here. #}
-
-  {% else %}
-    {% if layout.page_break_before(skey) and not loop.first %}<div style="page-break-before: always"></div>{% endif %}
-
-    {% if skey == 'sched_table' %}
-    {% for day in schedule_days %}
-    <div class="day-section">
-      {% if layout.visible('day_banner') and schedule_days | length > 1 %}
-      <div class="day-banner" style="font-size: {{ layout.font_size('day_banner', '11pt') }}">
-        <span>{{ layout.label('day_banner', 'Day') }} {{ day.day_num }}</span>
-        <span class="day-date">{{ day.perf.perf_date | dowdate or day.perf.perf_date or '' }}{% if day.perf.perf_time %} · {{ day.perf.perf_time | hhmm }}{% endif %}</span>
+{% if layout.visible('header') %}
+<div class="doc-header">
+  <div style="display:flex;align-items:flex-start;gap:12px">
+    {% if logo_data %}
+    <img src="{{ logo_data }}" alt="Logo" style="max-height:90px;max-width:240px;object-fit:contain">
+    {% endif %}
+    <div>
+      <div class="doc-type"><span style="text-transform:none">dpc</span> {{ layout.label('header', 'PRODUCTION') }} SCHEDULE</div>
+      <div class="show-name">{{ show.name }}</div>
+      <div class="show-sub">
+        {% if show.venue %}{{ show.venue }}{% endif %}
+        {% set _hdr_date = show.show_date or (schedule_days[0].perf.perf_date if schedule_days else None) %}
+        {% if _hdr_date %}{% if show.venue %} &nbsp;·&nbsp; {% endif %}<strong>{{ _hdr_date | dowdate or _hdr_date }}</strong>{% endif %}
+        {% if schedule_days | length > 1 %} &nbsp;·&nbsp; {{ schedule_days | length }} days{% endif %}
       </div>
-      {% endif %}
-      <table class="sched-table" style="font-size: {{ layout.font_size('sched_table', '8.5pt') }}">
-        <thead>
-          <tr>
-            <th style="width:90px">Start</th>
-            <th style="width:90px">End</th>
-            <th>Description</th>
-            <th style="width:200px">Notes</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for row in day.rows %}
-          {% if row.description or row.start_time %}
-          <tr>
-            <td class="time-col">{{ row.start_time or '' }}</td>
-            <td class="time-col">{{ row.end_time or '' }}</td>
-            <td class="desc-col">{{ row.description or '' }}</td>
-            <td class="notes-col">{{ row.notes or '' }}</td>
-          </tr>
-          {% endif %}
-          {% endfor %}
-          {% if not day.rows %}
-          <tr><td colspan="4" style="text-align:center;color:#aaa;padding:12px;">No schedule rows entered.</td></tr>
-          {% endif %}
-        </tbody>
-      </table>
-    </div>{# end .day-section #}
-    {% endfor %}
-
-    {% elif skey == 'header' %}
-    <div class="doc-header">
-      <div style="display:flex;align-items:flex-start;gap:12px">
-        {% if logo_data %}
-        <img src="{{ logo_data }}" alt="Logo" style="max-height:90px;max-width:240px;object-fit:contain">
-        {% endif %}
-        <div>
-          <div class="doc-type"><span style="text-transform:none">dpc</span> {{ layout.label('header', 'PRODUCTION') }} SCHEDULE</div>
-          <div class="show-name">{{ show.name }}</div>
-          <div class="show-sub">
-            {% if show.venue %}{{ show.venue }}{% endif %}
-            {% set _hdr_date = show.show_date or (schedule_days[0].perf.perf_date if schedule_days else None) %}
-            {% if _hdr_date %}{% if show.venue %} &nbsp;·&nbsp; {% endif %}<strong>{{ _hdr_date | dowdate or _hdr_date }}</strong>{% endif %}
-            {% if schedule_days | length > 1 %} &nbsp;·&nbsp; {{ schedule_days | length }} days{% endif %}
-          </div>
-          <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
-        </div>
-      </div>
-      <div class="doc-meta">
-        <div class="version">v{{ version }}</div>
-        <div>{{ export_date }}</div>
-      </div>
+      <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
     </div>
+  </div>
+  <div class="doc-meta">
+    <div class="version">v{{ version }}</div>
+    <div>{{ export_date }}</div>
+  </div>
+</div>
+{% endif %}
 
-    {% elif skey == 'info_bar' %}
+<div class="layout-cols">
+
+  {# ── Left 2/3: the day-by-day schedule ── #}
+  <div class="sched-main">
+    {% if layout.visible('sched_table') %}
+    {% for day in schedule_days %}
+    <table class="sched-table" style="font-size: {{ layout.font_size('sched_table', '8.5pt') }}">
+      <thead>
+        {% if layout.visible('day_banner') and schedule_days | length > 1 %}
+        <tr class="day-row">
+          <th colspan="4" style="font-size: {{ layout.font_size('day_banner', '10.5pt') }}">{{ layout.label('day_banner', 'Day') }} {{ day.day_num }}<span class="day-date">{{ day.perf.perf_date | dowdate or day.perf.perf_date or '' }}{% if day.perf.perf_time %} · {{ day.perf.perf_time | hhmm }}{% endif %}</span></th>
+        </tr>
+        {% endif %}
+        <tr class="cols-row">
+          <th style="width:62px">Start</th>
+          <th style="width:62px">End</th>
+          <th>Description</th>
+          <th style="width:110px">Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in day.rows %}
+        {% if row.description or row.start_time %}
+        <tr>
+          <td class="time-col">{{ row.start_time or '' }}</td>
+          <td class="time-col">{{ row.end_time or '' }}</td>
+          <td class="desc-col">{{ row.description or '' }}</td>
+          <td class="notes-col">{{ row.notes or '' }}</td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+        {% if not day.rows %}
+        <tr><td colspan="4" style="text-align:center;color:#aaa;padding:12px;">No schedule rows entered.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+    {% endfor %}
+    {% endif %}
+  </div>
+
+  {# ── Right 1/3: venue/config info, WiFi, crew call, contacts ── #}
+  <div class="sidebar">
+
+    {% if layout.visible('info_bar') %}
     {% set _has_load = show.load_in_date or show.load_in_time or show.load_out_date or show.load_out_time %}
-    <div class="info-bar" style="grid-template-columns: 1fr {% for _ in _bar_fields %}1fr {% endfor %}{% if _has_load %} 1fr 1fr{% endif %}; font-size: {{ layout.font_size('info_bar', '8.5pt') }}">
+    <div class="info-bar" style="font-size: {{ layout.font_size('info_bar', '8.5pt') }}">
       <div class="info-item">
         <div class="lbl">Venue</div>
         <div class="val">{{ show.venue or '—' }}</div>
@@ -174,10 +173,7 @@
       {% for f in _bar_fields %}
       <div class="info-item">
         <div class="lbl">{{ f.label }}</div>
-        <div class="val">
-          {% if f.advance_field_key %}{{ adv(f.advance_field_key) or m(f.field_key) or '—' }}
-          {% else %}{{ m(f.field_key) or '—' }}{% endif %}
-        </div>
+        <div class="val">{% if f.advance_field_key %}{{ adv(f.advance_field_key) or m(f.field_key) or '—' }}{% else %}{{ m(f.field_key) or '—' }}{% endif %}</div>
       </div>
       {% endfor %}
       {% if _has_load %}
@@ -200,17 +196,16 @@
     </div>
     {% endif %}
     {% endfor %}
+    {% endif %}
 
-    {% elif skey == 'crew_call' %}
-    {% if crew_call_times %}
-    <div style="background:#fff8e8; border:1px solid #e8c870; padding:5px 10px; margin-bottom:8px; font-size: {{ layout.font_size('crew_call', '8.5pt') }}; border-radius:3px;">
-      <strong>{{ layout.label('crew_call', 'CREW CALL') }}:</strong>
-      {% for t in crew_call_times %}Crew {{ loop.index }} Start: <strong>{{ t }}</strong>{% if not loop.last %} &nbsp;/&nbsp; {% endif %}{% endfor %}
+    {% if layout.visible('crew_call') and crew_call_times %}
+    <div style="background:#fff8e8; border:1px solid #e8c870; padding:5px 9px; margin-bottom:10px; font-size: {{ layout.font_size('crew_call', '8.5pt') }}; border-radius:3px;">
+      <strong>{{ layout.label('crew_call', 'CREW CALL') }}:</strong><br>
+      {% for t in crew_call_times %}Crew {{ loop.index }}: <strong>{{ t }}</strong>{% if not loop.last %}<br>{% endif %}{% endfor %}
     </div>
     {% endif %}
 
-    {% elif skey == 'wifi_box' %}
-    {% if wifi_ssid %}
+    {% if layout.visible('wifi_box') and wifi_ssid %}
     <div class="wifi-box">
       {% if wifi_qr_b64 %}
       <div class="wifi-qr">
@@ -221,12 +216,12 @@
         <div class="wifi-label">{{ layout.label('wifi_box', 'WiFi Access') }}</div>
         <div class="wifi-ssid">{{ wifi_ssid }}</div>
         {% if wifi_pass %}<div class="wifi-pass">Password: <span>{{ wifi_pass }}</span></div>{% endif %}
-        {% if wifi_qr_b64 %}<div style="font-size:7pt;color:#666;margin-top:3px">Scan QR code to connect automatically</div>{% endif %}
+        {% if wifi_qr_b64 %}<div style="font-size:7pt;color:#666;margin-top:3px">Scan to connect</div>{% endif %}
       </div>
     </div>
     {% endif %}
 
-    {% elif skey == 'contacts_grid' %}
+    {% if layout.visible('contacts_grid') %}
     <div class="contacts-grid" style="font-size: {{ layout.font_size('contacts_grid', '8pt') }}">
       <div class="contacts-box">
         <div class="contacts-box-head">{{ layout.label('contacts_grid', 'Artist / Tour Contacts') }}</div>
@@ -272,9 +267,10 @@
       </div>
     </div>
     {% endif %}
-  {% endif %}{# end day-keys / show-level #}
 
-{% endfor %}
+  </div>{# end .sidebar #}
+
+</div>{# end .layout-cols #}
 
 </body>
 </html>
