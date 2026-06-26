@@ -14,11 +14,13 @@
   body { font-family: Arial, Helvetica, sans-serif; font-size: 8.5pt; color: #1a1a1a; line-height: 1.35; }
 
   /* ── Header ── */
-  .doc-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 2.5px solid #000; }
-  .doc-title { font-size: 18pt; font-weight: 900; letter-spacing: 0.05em; text-transform: uppercase; }
-  .doc-title span { color: #B8840A; }
+  .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; padding-bottom: 7px; border-bottom: 2.5px solid #000; }
+  .doc-type { font-size: 7.5pt; font-weight: bold; color: #B8840A; letter-spacing: 0.12em; text-transform: uppercase; }
+  .show-name { font-size: 25pt; font-weight: 900; line-height: 1.04; color: #1a1a1a; letter-spacing: 0.01em; margin: 1px 0 2px; }
+  .show-sub { font-size: 8.5pt; color: #444; }
+  .show-sub strong { color: #111; }
   .doc-org { font-size: 7pt; color: #555; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
-  .doc-meta { text-align: right; font-size: 7.5pt; color: #444; }
+  .doc-meta { text-align: right; font-size: 7.5pt; color: #444; white-space: nowrap; padding-left: 12px; }
   .doc-meta .version { font-size: 10pt; font-weight: bold; color: #B8840A; }
 
   /* ── Section ── */
@@ -92,21 +94,22 @@
     {% if skey == 'header' %}
       {# ── Document Header ────────────────────────────────────── #}
       <div class="doc-header">
-        <div style="display:flex;align-items:center;gap:12px">
+        <div style="display:flex;align-items:flex-start;gap:12px">
           {% if logo_data %}
           <img src="{{ logo_data }}" alt="Logo" style="max-height:90px;max-width:240px;object-fit:contain">
           {% endif %}
           <div>
-            <div class="doc-title"><span style="text-transform:none">dpc</span> <span>{{ layout.label('header', 'ADVANCE') }}</span> SHEET</div>
+            <div class="doc-type"><span style="text-transform:none">dpc</span> {{ layout.label('header', 'ADVANCE') }} SHEET</div>
+            <div class="show-name">{{ show.name }}</div>
+            <div class="show-sub">
+              {% if show.venue %}{{ show.venue }} &nbsp;·&nbsp; {% endif %}<strong>{{ show.show_date | dowdate or show.show_date or '—' }}</strong>{% if show.show_time %} &nbsp;·&nbsp; {{ show.show_time | hhmm }}{% endif %}
+            </div>
             <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
           </div>
         </div>
         <div class="doc-meta">
           <div class="version">v{{ version }}</div>
           <div>{{ export_date }}</div>
-          <div style="margin-top:3px; font-size:8pt; color:#222">
-            <strong>{{ show.name }}</strong> &nbsp;·&nbsp; {{ show.show_date or '—' }}
-          </div>
         </div>
       </div>
 
@@ -203,21 +206,22 @@
 {% else %}
   {# Fallback header (form_sections missing — render minimal header so document is identifiable) #}
   <div class="doc-header">
-    <div style="display:flex;align-items:center;gap:12px">
+    <div style="display:flex;align-items:flex-start;gap:12px">
       {% if logo_data %}
       <img src="{{ logo_data }}" alt="Logo" style="max-height:90px;max-width:240px;object-fit:contain">
       {% endif %}
       <div>
-        <div class="doc-title"><span style="text-transform:none">dpc</span> <span>ADVANCE</span> SHEET</div>
+        <div class="doc-type"><span style="text-transform:none">dpc</span> ADVANCE SHEET</div>
+        <div class="show-name">{{ show.name }}</div>
+        <div class="show-sub">
+          {% if show.venue %}{{ show.venue }} &nbsp;·&nbsp; {% endif %}<strong>{{ show.show_date | dowdate or show.show_date or '—' }}</strong>{% if show.show_time %} &nbsp;·&nbsp; {{ show.show_time | hhmm }}{% endif %}
+        </div>
         <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
       </div>
     </div>
     <div class="doc-meta">
       <div class="version">v{{ version }}</div>
       <div>{{ export_date }}</div>
-      <div style="margin-top:3px; font-size:8pt; color:#222">
-        <strong>{{ show.name }}</strong> &nbsp;·&nbsp; {{ show.show_date or '—' }}
-      </div>
     </div>
   </div>
 
@@ -229,7 +233,7 @@
       <div class="section-head">Show Information</div>
       <table class="two-col-table">
         {{ row('Show Name',  v('show_name', show.name)) }}
-        {{ row('Date',       v('show_date', show.show_date or '')) }}
+        {{ row('Date',       v('show_date', show.show_date or '') | dowdate) }}
         {{ row('Time',       v('show_time', show.show_time)) }}
         {{ row('Venue',      v('venue',     show.venue)) }}
         {{ row('Prod. Manager', v('production_manager')) }}
@@ -257,7 +261,7 @@
 {% endif %}
 
 <!-- Running footer elements (positioned by @page margin boxes) -->
-<div class="footer-left">{{ show.name }}  ·  {{ show.show_date or '—' }}  ·  Dr. Phillips Center for the Performing Arts</div>
+<div class="footer-left">{{ show.name }}  ·  {{ show.show_date | dowdate or show.show_date or '—' }}  ·  Dr. Phillips Center for the Performing Arts</div>
 <div class="footer-right">ADVANCE SHEET v{{ version }}  ·  Exported {{ export_date }}</div>
 
 </body>

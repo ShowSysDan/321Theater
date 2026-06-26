@@ -464,6 +464,22 @@ def hhmm_filter(value):
     return s
 
 
+@app.template_filter('dowdate')
+def dowdate_filter(value):
+    """Format a date value for printed paperwork WITH its weekday name, e.g. a
+    date of 2024-04-04 -> 'Tuesday, 4/4/24'. Printed paperwork should always
+    show the day of week alongside the numeric date. If the value can't be
+    parsed as a date it's returned unchanged (as a string) so partial or
+    free-text dates still print. Empty/None collapses to '' so callers can
+    keep using `... | dowdate or '—'`."""
+    d = _as_date(value)
+    if d is None:
+        if value is None:
+            return ''
+        return value if isinstance(value, str) else str(value)
+    return f"{d.strftime('%A')}, {d.month}/{d.day}/{d.strftime('%y')}"
+
+
 DATABASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'advance.db')
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 
