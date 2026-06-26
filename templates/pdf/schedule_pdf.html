@@ -20,7 +20,7 @@
   .day-section:last-child { margin-bottom: 0; }
 
   /* ── Header ── */
-  .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; padding-bottom: 7px; border-bottom: 2.5px solid #000; }
+  .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; padding-bottom: 7px; border-bottom: 2.5px solid #1a4a7a; }
   .doc-type { font-size: 7.5pt; font-weight: bold; color: #B8840A; letter-spacing: 0.12em; text-transform: uppercase; }
   .show-name { font-size: 25pt; font-weight: 900; line-height: 1.04; color: #1a1a1a; letter-spacing: 0.01em; margin: 1px 0 2px; }
   .show-sub { font-size: 8.5pt; color: #444; }
@@ -29,8 +29,8 @@
   .doc-meta { text-align: right; font-size: 7.5pt; color: #444; white-space: nowrap; padding-left: 12px; }
   .doc-meta .version { font-size: 10pt; font-weight: bold; color: #B8840A; }
 
-  /* ── Day label banner (the breaker between days) ── */
-  .day-banner { background: #1a1a1a; color: #fff; font-size: 11pt; font-weight: bold;
+  /* ── Day label banner (the breaker between days) ── brand blue ── */
+  .day-banner { background: #1a4a7a; color: #fff; font-size: 11pt; font-weight: bold;
                 letter-spacing: 0.06em; text-transform: uppercase; padding: 6px 10px;
                 margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;
                 page-break-after: avoid; page-break-inside: avoid; }
@@ -51,7 +51,7 @@
 
   /* ── Schedule Table ── */
   .sched-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
-  .sched-table th { background: #1a1a1a; color: #fff; font-size: 7pt; letter-spacing: 0.08em; text-align: left; padding: 5px 8px; text-transform: uppercase; }
+  .sched-table th { background: #B8840A; color: #fff; font-size: 7pt; letter-spacing: 0.08em; text-align: left; padding: 5px 8px; text-transform: uppercase; }
   .sched-table td { padding: 5px 8px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
   .sched-table tr:nth-child(even) td { background: #fafafa; }
   .sched-table tr:last-child td { border-bottom: 2px solid #bbb; }
@@ -61,8 +61,8 @@
 
   /* ── Contacts grid ── */
   .contacts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .contacts-box { border: 1px solid #ccc; }
-  .contacts-box-head { background: #333; color: #fff; font-size: 7pt; font-weight: bold; letter-spacing: 0.1em; padding: 4px 7px; text-transform: uppercase; }
+  .contacts-box { border: 1px solid #bcd0e4; }
+  .contacts-box-head { background: #1a4a7a; color: #fff; font-size: 7pt; font-weight: bold; letter-spacing: 0.1em; padding: 4px 7px; text-transform: uppercase; }
   .contacts-table { width: 100%; border-collapse: collapse; }
   .contacts-table td { padding: 3px 7px; border-bottom: 1px solid #eee; font-size: 8pt; }
   .contacts-table td.lbl { font-size: 7pt; font-weight: bold; color: #666; text-transform: uppercase; width: 38%; }
@@ -88,20 +88,22 @@
 {% set _full_fields = _smf_tech | selectattr('width_hint', 'eq', 'full') | list %}
 
 {% set _section_keys = ['header','day_banner','info_bar','wifi_box','crew_call','sched_table','contacts_grid'] %}
-{# day_banner + sched_table are the only per-day sections; everything else is
-   show-level and renders once. The per-day loop (banner + table) is emitted
-   in-place at whichever of those two keys comes first in the saved order, so
-   multiple days stack on one sheet — broken up by the day banner — instead of
-   forcing a page per day. #}
-{% set _day_keys = ['day_banner','sched_table'] %}
-{% set _ns = namespace(day_loop_done=false) %}
+{# Only the schedule tables repeat per day; every other section (header, info
+   bar, WiFi, crew call, contacts) is show-level and renders ONCE. The per-day
+   loop is emitted at the sched_table position so the top-of-sheet sections —
+   venue/config info bar and WiFi — always stay above the day-by-day schedule.
+   day_banner remains an orderable visibility toggle but is drawn per-day inside
+   the loop; it never renders as a standalone block. #}
 
 {% for skey in layout.iter_sections(_section_keys) if layout.visible(skey) %}
 
-  {% if skey in _day_keys %}
-    {% if not _ns.day_loop_done %}
-    {% set _ns.day_loop_done = true %}
+  {% if skey == 'day_banner' %}
+    {# Drawn per-day inside the schedule loop below — nothing standalone here. #}
+
+  {% else %}
     {% if layout.page_break_before(skey) and not loop.first %}<div style="page-break-before: always"></div>{% endif %}
+
+    {% if skey == 'sched_table' %}
     {% for day in schedule_days %}
     <div class="day-section">
       {% if layout.visible('day_banner') and schedule_days | length > 1 %}
@@ -110,7 +112,6 @@
         <span class="day-date">{{ day.perf.perf_date | dowdate or day.perf.perf_date or '' }}{% if day.perf.perf_time %} · {{ day.perf.perf_time | hhmm }}{% endif %}</span>
       </div>
       {% endif %}
-      {% if layout.visible('sched_table') %}
       <table class="sched-table" style="font-size: {{ layout.font_size('sched_table', '8.5pt') }}">
         <thead>
           <tr>
@@ -136,15 +137,10 @@
           {% endif %}
         </tbody>
       </table>
-      {% endif %}
     </div>{# end .day-section #}
     {% endfor %}
-    {% endif %}
 
-  {% else %}
-    {% if layout.page_break_before(skey) and not loop.first %}<div style="page-break-before: always"></div>{% endif %}
-
-    {% if skey == 'header' %}
+    {% elif skey == 'header' %}
     <div class="doc-header">
       <div style="display:flex;align-items:flex-start;gap:12px">
         {% if logo_data %}
