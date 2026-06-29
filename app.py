@@ -2394,7 +2394,7 @@ def _plan_no_labor_alerts(db, target_date):
         return []
 
     shows = db.execute(
-        "SELECT id, name, show_date FROM shows WHERE status='active'"
+        "SELECT id, name, venue, show_date FROM shows WHERE status='active'"
     ).fetchall()
     if not shows:
         return []
@@ -2436,6 +2436,8 @@ def _plan_no_labor_alerts(db, target_date):
         plan.append({
             'show_id': sid,
             'show_name': s['name'],
+            'show_date': perf_date.isoformat(),
+            'venue': s['venue'],
             'trigger_days': send_trigger,
             'days_until': days_until,
             'also_satisfies': sorted(td for td in due if td != send_trigger),
@@ -2464,7 +2466,9 @@ def run_no_labor_alerts():
     can follow up. Mirrors run_scheduled_pdf_emails() exactly: acts only DURING
     the configured send hour, refuses to act on a stale SQLite fallback, dedups
     all-time per (show, trigger) via email_send_log, and catches up on missed
-    days. Delivers BOTH a scheduler email and an in-app notification.
+    days. Delivery is twofold: ONE digest email to all schedulers listing every
+    due show (the breakdown), plus a per-show in-app notification that links
+    straight to that show's Labor Requests.
 
     Like the PDF-email job, every early return is logged on purpose — silent
     no-ops here are exactly how a background alert quietly stops working."""
@@ -2505,43 +2509,31 @@ def run_no_labor_alerts():
 
         emails, user_ids = _scheduler_alert_recipients(db)
         if not emails and not user_ids:
+            # No delivery channel at all — do NOT burn the dedup, or the alert
+            # would be lost forever. Skip this run so it re-fires (and actually
+            # reaches someone) once a scheduler user is configured.
             app.logger.warning(
                 'No-labor alert: %d show(s) due but no schedulers (is_scheduler) to '
                 'notify — configure scheduler users to receive these alerts.', len(plan))
+            return
         base_url = (get_app_setting('public_base_url', '') or '').rstrip('/')
 
+        def _when(d):
+            return 'today' if d == 0 else 'tomorrow' if d == 1 else f'in {d} days'
+
+        # Per-show in-app notifications (each links to its own show) + the
+        # all-time dedup log, and collect one breakdown line per show for the
+        # single digest email below.
+        digest_lines = []
         for item in plan:
             sid = item['show_id']
             show_name = item['show_name'] or f"Show #{sid}"
-            days_until = item['days_until']
-            when = ('today' if days_until == 0 else
-                    'tomorrow' if days_until == 1 else f'in {days_until} days')
+            when = _when(item['days_until'])
             # Build the link by hand rather than url_for(): this runs in an
             # APScheduler thread with no request context, and SERVER_NAME isn't
             # configured, so url_for() would raise. The route is /shows/<id>.
             link_path = f"/shows/{sid}?tab=staffing"
             link_url = (base_url + link_path) if base_url else link_path
-
-            subj = f"[{show_name}] No labor requested — show is {when}"
-            body_text = (
-                f"{show_name} is {when} and has no labor requested yet.\n\n"
-                f"Please review staffing for this show and add labor requests if "
-                f"crew is needed.\n\n"
-                f"Open the show's Labor Requests: {link_url}\n"
-            )
-
-            recipient_count = 0
-            if emails:
-                try:
-                    ok, _msg = _send_email(
-                        subj, emails, body_text=body_text,
-                        error_context={'pdf_type': 'no_labor_alert', 'show_id': sid,
-                                       'triggered_by': 'no_labor_alert_job',
-                                       'purpose': 'no_labor_alert'})
-                    if ok:
-                        recipient_count = len(emails)
-                except Exception as e:
-                    app.logger.warning(f'no-labor alert email failed show={sid}: {e}')
 
             for uid in user_ids:
                 create_notification(
@@ -2550,19 +2542,53 @@ def run_no_labor_alerts():
                     body=f"Show is {when}. Add labor requests if crew is needed.",
                     link_url=link_path, kind='no_labor_alert', show_id=sid)
 
+            venue = f" · {item['venue']}" if item['venue'] else ''
+            digest_lines.append(
+                f"• {show_name} — {item['show_date']} ({when}){venue}\n    {link_url}")
+
             # Dedup log: the fired trigger plus any it supersedes, so neither
-            # re-fires. recipient_count is recorded on the fired trigger only.
-            for td in [item['trigger_days']] + item['also_satisfies']:
+            # re-fires. recipient_count (filled in after the email) marks the
+            # fired trigger only.
+            item['_dedup_days'] = [item['trigger_days']] + item['also_satisfies']
+
+        # ONE digest email — the breakdown of every upcoming show missing labor
+        # — to all schedulers, rather than a separate email per show.
+        recipient_count = 0
+        if emails and digest_lines:
+            n = len(plan)
+            subj = f"[3·2·1→Theater] {n} upcoming show{'s' if n != 1 else ''} with no labor requested"
+            body_text = (
+                f"{n} active show{'s are' if n != 1 else ' is'} approaching with no "
+                f"labor requested yet:\n\n"
+                + "\n".join(digest_lines)
+                + "\n\nPlease review staffing and add labor requests where crew is needed.\n"
+            )
+            try:
+                ok, _msg = _send_email(
+                    subj, emails, body_text=body_text,
+                    error_context={'pdf_type': 'no_labor_alert', 'show_id': None,
+                                   'triggered_by': 'no_labor_alert_job',
+                                   'purpose': 'no_labor_alert'})
+                if ok:
+                    recipient_count = len(emails)
+            except Exception as e:
+                app.logger.warning(f'no-labor alert digest email failed: {e}')
+
+        # Record dedup + commit once. In-app notifications were delivered above
+        # regardless of email outcome (email failures land in the Email Send
+        # Errors panel via _send_email's error_context).
+        for item in plan:
+            sid = item['show_id']
+            for td in item['_dedup_days']:
                 db.execute(
                     "INSERT INTO email_send_log "
                     "(show_id, pdf_type, trigger_type, days_before, sent_by, recipient_count) "
                     "VALUES (?, 'no_labor_alert', 'no_labor', ?, 'system', ?)",
                     (sid, td, recipient_count if td == item['trigger_days'] else 0))
-            db.commit()
-            syslog_logger.info(
-                f"NO_LABOR_ALERT_SENT show_id={sid} days_until={days_until} "
-                f"trigger={item['trigger_days']} emails={len(emails)} "
-                f"notified_users={len(user_ids)}")
+        db.commit()
+        syslog_logger.info(
+            f"NO_LABOR_ALERT_SENT shows={len(plan)} email_recipients={len(emails)} "
+            f"notified_users={len(user_ids)}")
     finally:
         db.close()
 
