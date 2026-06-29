@@ -10990,10 +10990,21 @@ def _pull_scheduled_into_post_show(db, show_id):
     not already pulled (matched by source_request_id). The scheduled in/out/lunch
     times are copied into BOTH the read-only sched_* reference columns AND the
     editable billable columns, so each line arrives PRE-FILLED for the PM to
-    tweak rather than starting blank. Never touches labor_requests. Returns the
-    number of lines added (the caller is responsible for committing)."""
-    existing = {r['source_request_id'] for r in db.execute(
-        'SELECT source_request_id FROM post_show_labor '
+    tweak rather than starting blank. Never touches labor_requests.
+
+    A line can be flagged scheduled (and given times) before a specific crew
+    member is assigned. If the initial pull happened in that window, the row was
+    frozen with a blank crew name and an unresolved rate; when the crew member
+    is later assigned, a re-sync should backfill that reference data on the
+    already-pulled row. So existing rows that have since gained a crew
+    assignment get their sched_crew_name (and, only when the PM hasn't already
+    entered a rate, pay_rate_snapshot) refreshed — never clobbering PM edits.
+
+    Returns (added, refreshed): newly inserted lines and existing lines whose
+    reference data was backfilled. The caller is responsible for committing."""
+    existing = {r['source_request_id']: r for r in db.execute(
+        'SELECT source_request_id, sched_crew_name, pay_rate_snapshot '
+        'FROM post_show_labor '
         'WHERE show_id=? AND source_request_id IS NOT NULL', (show_id,)
     ).fetchall()}
     sched = db.execute("""
@@ -11006,8 +11017,29 @@ def _pull_scheduled_into_post_show(db, show_id):
     """, (show_id,)).fetchall()
     order = _max_sort_order(db, 'post_show_labor', 'show_id=?', (show_id,))
     added = 0
+    refreshed = 0
     for s in sched:
-        if s['id'] in existing:
+        prev = existing.get(s['id'])
+        if prev is not None:
+            crew_name = s['scheduled_crew_name'] or ''
+            # Only act when the line gained a crew member after the initial
+            # pull: the snapshot's name is blank but the schedule now has one.
+            if crew_name and not (prev['sched_crew_name'] or '').strip():
+                sets = ['sched_crew_name=?']
+                vals = [crew_name]
+                # Backfill the rate too, but only if the PM hasn't already set
+                # a real (non-zero) one — manual rate edits must survive.
+                if not float(prev['pay_rate_snapshot'] or 0):
+                    rate = _resolve_labor_rate(
+                        db, s['position_id'], s['scheduled_crew_member_id'])
+                    if rate:
+                        sets.append('pay_rate_snapshot=?')
+                        vals.append(rate)
+                vals.extend([show_id, s['id']])
+                db.execute(
+                    f"UPDATE post_show_labor SET {', '.join(sets)} "
+                    "WHERE show_id=? AND source_request_id=?", vals)
+                refreshed += 1
             continue
         rate = _resolve_labor_rate(db, s['position_id'], s['scheduled_crew_member_id'])
         db.execute("""
@@ -11027,7 +11059,7 @@ def _pull_scheduled_into_post_show(db, show_id):
               rate, order))
         order += 10
         added += 1
-    return added
+    return added, refreshed
 
 
 def _ensure_post_show_labor(db, show_id):
@@ -11043,7 +11075,7 @@ def _ensure_post_show_labor(db, show_id):
         ).fetchone()
         if marker:
             return 0
-        added = _pull_scheduled_into_post_show(db, show_id)
+        added, _ = _pull_scheduled_into_post_show(db, show_id)
         if added:
             db.execute(
                 'INSERT OR REPLACE INTO post_show_notes (show_id, field_key, field_value) '
@@ -11069,19 +11101,19 @@ def pull_post_show_labor(show_id):
     if session.get('is_restricted') or session.get('is_readonly'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
-    added = _pull_scheduled_into_post_show(db, show_id)
+    added, refreshed = _pull_scheduled_into_post_show(db, show_id)
     db.execute(
         'INSERT OR REPLACE INTO post_show_notes (show_id, field_key, field_value) '
         'VALUES (?, ?, ?)',
         (show_id, _PSL_INIT_KEY, '1')
     )
     log_audit(db, 'POST_SHOW_LABOR_PULL', 'show', show_id, show_id=show_id,
-              detail=f'added={added}')
+              detail=f'added={added}; refreshed={refreshed}')
     db.commit()
     rows = _post_show_labor_rows(db, show_id)
     db.close()
-    syslog_logger.info(f"POST_SHOW_LABOR_PULL show_id={show_id} added={added} by={session.get('username')}")
-    return jsonify({'success': True, 'added': added, 'rows': rows})
+    syslog_logger.info(f"POST_SHOW_LABOR_PULL show_id={show_id} added={added} refreshed={refreshed} by={session.get('username')}")
+    return jsonify({'success': True, 'added': added, 'refreshed': refreshed, 'rows': rows})
 
 
 @app.route('/shows/<int:show_id>/post-show-labor', methods=['POST'])

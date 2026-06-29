@@ -3330,9 +3330,12 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
       window._postShowLaborData = data.rows || [];
       await _loadLaborPositions();
       _renderPostShowLabor();
-      alert(data.added
-        ? `Re-synced — pulled ${data.added} newly-scheduled line(s).`
-        : 'Already in sync with the schedule — no new scheduled lines to pull.');
+      const parts = [];
+      if (data.added) parts.push(`pulled ${data.added} newly-scheduled line(s)`);
+      if (data.refreshed) parts.push(`updated ${data.refreshed} line(s) from the schedule`);
+      alert(parts.length
+        ? `Re-synced — ${parts.join(' and ')}.`
+        : 'Already in sync with the schedule — nothing to pull.');
     } finally {
       if (btn) btn.disabled = false;
     }
