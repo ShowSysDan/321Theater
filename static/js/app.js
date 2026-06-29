@@ -612,6 +612,20 @@ function bindAdvanceForm() {
     });
   });
 
+  // On first fillout, default the load-out date to the load-in date. Only
+  // fires when load-out is still blank, so it never overrides a date the
+  // user (or a saved show) already set — most shows load out the same day.
+  const loadInDateEl  = form.querySelector('[data-key="load_in_date"]');
+  const loadOutDateEl = form.querySelector('[data-key="load_out_date"]');
+  if (loadInDateEl && loadOutDateEl) {
+    loadInDateEl.addEventListener('change', () => {
+      if (loadInDateEl.value && !loadOutDateEl.value) {
+        loadOutDateEl.value = loadInDateEl.value;
+        scheduleSave();
+      }
+    });
+  }
+
   // Yes/No slider toggles
   form.querySelectorAll('.yn-slider').forEach(wrap => {
     if (wrap.dataset.ynBound) return;

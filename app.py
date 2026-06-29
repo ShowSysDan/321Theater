@@ -488,7 +488,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.21.0'
+APP_VERSION = '2.22.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -2357,6 +2357,216 @@ def run_scheduled_pdf_emails():
                     app.logger.warning(f'superseded trigger log failed: {e}')
 
 
+def _no_labor_alert_triggers():
+    """Enabled day-before triggers for the no-labor alert, e.g. [14, 7].
+    Read-only; [] when the feature is off or no positive day value is set.
+    Two independent triggers (a heads-up and a closer nudge) mirror the
+    scheduled-email design; each fires once per show."""
+    if get_app_setting('no_labor_alert_enabled', '0') not in ('1', 'true'):
+        return []
+    triggers = []
+    for days_key in ('no_labor_alert_days_1', 'no_labor_alert_days_2'):
+        try:
+            d = int(get_app_setting(days_key, '0'))
+        except (TypeError, ValueError):
+            continue
+        if d > 0:
+            triggers.append(d)
+    return sorted(set(triggers))
+
+
+def _plan_no_labor_alerts(db, target_date):
+    """Read-only: which active shows are inside an alert window, have NO labor
+    requested, and haven't had that window's alert sent yet. Shares its logic
+    with the Settings preview so the two never disagree.
+
+    A trigger is "due" when 0 <= days_until <= trigger_days (due-not-exact, so a
+    missed run or a late-entered show still alerts), and dedup is all-time per
+    (show, trigger_days) via email_send_log (trigger_type='no_labor'). If both
+    triggers are simultaneously overdue, one alert covers them: the most imminent
+    fires and the rest are listed under 'also_satisfies'.
+
+    Returns a list of dicts sorted by urgency:
+      {show_id, show_name, trigger_days, days_until, also_satisfies}
+    """
+    triggers = _no_labor_alert_triggers()
+    if not triggers:
+        return []
+
+    shows = db.execute(
+        "SELECT id, name, show_date FROM shows WHERE status='active'"
+    ).fetchall()
+    if not shows:
+        return []
+
+    first_perf = {r['show_id']: r['first_perf'] for r in db.execute(
+        "SELECT show_id, MIN(perf_date) AS first_perf "
+        "FROM show_performances GROUP BY show_id"
+    ).fetchall()}
+
+    show_ids = [s['id'] for s in shows]
+    placeholders = ','.join(['?'] * len(show_ids))
+    # Shows that already have at least one labor line — excluded entirely.
+    has_labor = {r['show_id'] for r in db.execute(
+        f"SELECT DISTINCT show_id FROM labor_requests WHERE show_id IN ({placeholders})",
+        tuple(show_ids)
+    ).fetchall()}
+    already_sent = set()
+    for r in db.execute(
+        f"SELECT show_id, days_before FROM email_send_log "
+        f"WHERE trigger_type='no_labor' AND show_id IN ({placeholders})",
+        tuple(show_ids)
+    ).fetchall():
+        already_sent.add((r['show_id'], r['days_before']))
+
+    plan = []
+    for s in shows:
+        sid = s['id']
+        if sid in has_labor:
+            continue
+        perf_date = _as_date(first_perf.get(sid)) or _as_date(s['show_date'])
+        if not perf_date:
+            continue
+        days_until = (perf_date - target_date).days
+        due = [td for td in triggers
+               if 0 <= days_until <= td and (sid, td) not in already_sent]
+        if not due:
+            continue
+        send_trigger = min(due)  # most imminent reminder
+        plan.append({
+            'show_id': sid,
+            'show_name': s['name'],
+            'trigger_days': send_trigger,
+            'days_until': days_until,
+            'also_satisfies': sorted(td for td in due if td != send_trigger),
+        })
+    plan.sort(key=lambda p: (p['days_until'], (p['show_name'] or '').lower()))
+    return plan
+
+
+def _scheduler_alert_recipients(db):
+    """(emails, user_ids) for the schedulers a no-labor alert targets. Every
+    active user flagged is_scheduler gets the in-app notification; those with a
+    usable email also get the email. Admins are intentionally not included —
+    the alert is the schedulers' to action."""
+    rows = db.execute(
+        "SELECT id, email FROM users "
+        "WHERE COALESCE(is_scheduler, 0) = 1 AND COALESCE(is_active, 1) = 1"
+    ).fetchall()
+    emails = sorted({(r['email'] or '').strip() for r in rows if (r['email'] or '').strip()})
+    user_ids = {r['id'] for r in rows}
+    return emails, user_ids
+
+
+def run_no_labor_alerts():
+    """APScheduler job (cron, top of every hour; leader-gated): warns schedulers
+    about active shows approaching their date with NO labor requested, so they
+    can follow up. Mirrors run_scheduled_pdf_emails() exactly: acts only DURING
+    the configured send hour, refuses to act on a stale SQLite fallback, dedups
+    all-time per (show, trigger) via email_send_log, and catches up on missed
+    days. Delivers BOTH a scheduler email and an in-app notification.
+
+    Like the PDF-email job, every early return is logged on purpose — silent
+    no-ops here are exactly how a background alert quietly stops working."""
+    if not am_i_leader():
+        app.logger.info('No-labor alert: skipped — not cluster leader')
+        return
+    if get_app_setting('no_labor_alert_enabled', '0') not in ('1', 'true'):
+        return
+    try:
+        send_hour = int(get_app_setting('pdf_email_send_hour', '6'))
+    except (TypeError, ValueError):
+        send_hour = 6
+    if datetime.now().hour != send_hour:
+        return
+
+    today = date.today()
+    db = get_db()
+    try:
+        # Same stale-SQLite-fallback guard as run_scheduled_pdf_emails: if PG is
+        # the configured backend but get_db() silently fell back to the SQLite
+        # bootstrap, app_settings are stale and we must NOT act — log and retry
+        # next hour.
+        configured_backend = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
+        active_backend = getattr(db, 'db_type', None)
+        if configured_backend == 'postgres' and active_backend != 'postgres':
+            app.logger.error(
+                'No-labor alert: configured for postgres but active connection is %r — '
+                'app_settings are STALE; skipping this run (retry next hour).',
+                active_backend)
+            return
+
+        plan = _plan_no_labor_alerts(db, today)
+        if not plan:
+            app.logger.info(
+                'No-labor alert: leader, hour=%s == send_hour, postgres OK, but no '
+                'shows are due+unsent for %s.', send_hour, today.isoformat())
+            return
+
+        emails, user_ids = _scheduler_alert_recipients(db)
+        if not emails and not user_ids:
+            app.logger.warning(
+                'No-labor alert: %d show(s) due but no schedulers (is_scheduler) to '
+                'notify — configure scheduler users to receive these alerts.', len(plan))
+        base_url = (get_app_setting('public_base_url', '') or '').rstrip('/')
+
+        for item in plan:
+            sid = item['show_id']
+            show_name = item['show_name'] or f"Show #{sid}"
+            days_until = item['days_until']
+            when = ('today' if days_until == 0 else
+                    'tomorrow' if days_until == 1 else f'in {days_until} days')
+            # Build the link by hand rather than url_for(): this runs in an
+            # APScheduler thread with no request context, and SERVER_NAME isn't
+            # configured, so url_for() would raise. The route is /shows/<id>.
+            link_path = f"/shows/{sid}?tab=staffing"
+            link_url = (base_url + link_path) if base_url else link_path
+
+            subj = f"[{show_name}] No labor requested — show is {when}"
+            body_text = (
+                f"{show_name} is {when} and has no labor requested yet.\n\n"
+                f"Please review staffing for this show and add labor requests if "
+                f"crew is needed.\n\n"
+                f"Open the show's Labor Requests: {link_url}\n"
+            )
+
+            recipient_count = 0
+            if emails:
+                try:
+                    ok, _msg = _send_email(
+                        subj, emails, body_text=body_text,
+                        error_context={'pdf_type': 'no_labor_alert', 'show_id': sid,
+                                       'triggered_by': 'no_labor_alert_job',
+                                       'purpose': 'no_labor_alert'})
+                    if ok:
+                        recipient_count = len(emails)
+                except Exception as e:
+                    app.logger.warning(f'no-labor alert email failed show={sid}: {e}')
+
+            for uid in user_ids:
+                create_notification(
+                    db, uid,
+                    title=f"No labor requested — {show_name}",
+                    body=f"Show is {when}. Add labor requests if crew is needed.",
+                    link_url=link_path, kind='no_labor_alert', show_id=sid)
+
+            # Dedup log: the fired trigger plus any it supersedes, so neither
+            # re-fires. recipient_count is recorded on the fired trigger only.
+            for td in [item['trigger_days']] + item['also_satisfies']:
+                db.execute(
+                    "INSERT INTO email_send_log "
+                    "(show_id, pdf_type, trigger_type, days_before, sent_by, recipient_count) "
+                    "VALUES (?, 'no_labor_alert', 'no_labor', ?, 'system', ?)",
+                    (sid, td, recipient_count if td == item['trigger_days'] else 0))
+            db.commit()
+            syslog_logger.info(
+                f"NO_LABOR_ALERT_SENT show_id={sid} days_until={days_until} "
+                f"trigger={item['trigger_days']} emails={len(emails)} "
+                f"notified_users={len(user_ids)}")
+    finally:
+        db.close()
+
+
 def start_scheduler():
     """Register all background jobs.
 
@@ -2411,6 +2621,13 @@ def start_scheduler():
         # rationale as pdf_email_check above.
         scheduler.add_job(prism_module.run_prism_auto_sync, 'cron', minute=20,
                           id='prism_auto_sync', misfire_grace_time=3600,
+                          coalesce=True)
+        # No-labor alerts: leader-gated inside the job; fires hourly but only
+        # acts during the configured send hour (same hour as the PDF emails).
+        # All-time dedup makes a late/duplicate fire harmless. minute=30 keeps
+        # it clear of the other top-of-hour jobs.
+        scheduler.add_job(run_no_labor_alerts, 'cron', minute=30,
+                          id='no_labor_alert_check', misfire_grace_time=3600,
                           coalesce=True)
         scheduler.start()
         # Backfill contact↔user link once on boot.
@@ -6685,6 +6902,9 @@ def settings():
         'schedule_email_days_2':     all_settings.get('schedule_email_days_2', '1'),
         'pdf_email_subject_template': all_settings.get('pdf_email_subject_template', ''),
         'pdf_email_body_template':    all_settings.get('pdf_email_body_template', ''),
+        'no_labor_alert_enabled':    all_settings.get('no_labor_alert_enabled', '0'),
+        'no_labor_alert_days_1':     all_settings.get('no_labor_alert_days_1', '14'),
+        'no_labor_alert_days_2':     all_settings.get('no_labor_alert_days_2', '7'),
     }
 
     # Strip sensitive keys from syslog_settings for non-admin users
@@ -9854,7 +10074,9 @@ def save_pdf_email_settings():
             'advance_email_enabled',   'advance_email_days_before',
             'schedule_email_enabled_1','schedule_email_days_1',
             'schedule_email_enabled_2','schedule_email_days_2',
-            'pdf_email_subject_template', 'pdf_email_body_template')
+            'pdf_email_subject_template', 'pdf_email_body_template',
+            'no_labor_alert_enabled', 'no_labor_alert_days_1',
+            'no_labor_alert_days_2')
     for key in keys:
         if key in data:
             db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
@@ -16884,6 +17106,7 @@ def show_post_invoice(show_id):
         _ensure_post_show_labor(db, show_id)
         labor_lines, labor_total = _calc_post_show_labor_cost(db, show_id)
         er_pdfs = _fetch_external_rental_pdfs(db, show_id)
+        logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
     finally:
         db.close()
 
@@ -16902,6 +17125,7 @@ def show_post_invoice(show_id):
         performance_company=performance_company,
         layout=pdf_layouts.PdfLayout('post_show_invoice', get_app_setting),
         generated_date=date.today().isoformat(),
+        logo_data=logo_data,
     )
 
     try:
