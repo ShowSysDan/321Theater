@@ -1022,7 +1022,7 @@ async function loadTimelineWidget(idx, section, loadEl, contentEl) {
   section._tlDayWidth = tlFitDayWidth(section, section._tlData);
   drawTimeline(idx);
   const wrap = contentEl.querySelector('.tl-wrap');
-  if (wrap) wrap.scrollLeft = 0;   // start at the picked "from"
+  if (wrap) { wrap.scrollLeft = 0; section._tlProgAt = Date.now(); }   // start at the picked "from"
 }
 
 /* Scroll handler: keep the date inputs in step with the visible viewport, and
@@ -1052,7 +1052,11 @@ function tlOnScroll(idx) {
     if (f) f.value = visFrom;
     if (t) t.value = visTo;
 
-    if (!section._tlBusy && total < TL_MAX_SPAN) {
+    // Skip edge auto-extend for scrolls we triggered programmatically (Today /
+    // Fit / initial load / extend restore) so positioning to an edge doesn't
+    // immediately pull in more dates.
+    const recentProg = section._tlProgAt && (Date.now() - section._tlProgAt < 250);
+    if (!section._tlBusy && !recentProg && total < TL_MAX_SPAN) {
       if (wrap.scrollLeft + wrap.clientWidth >= wrap.scrollWidth - dw * 2) tlExtend(idx, 'right');
       else if (wrap.scrollLeft <= dw * 2) tlExtend(idx, 'left');
     }
@@ -1084,6 +1088,7 @@ async function tlExtend(idx, side) {
       // Preserve the on-screen position: a left-extension shifts everything
       // right by chunk*dayWidth, so add that to scrollLeft.
       wrap.scrollLeft = side === 'left' ? prevScroll + chunk * dw : prevScroll;
+      section._tlProgAt = Date.now();
     }
   } finally {
     section._tlBusy = false;
@@ -1111,41 +1116,41 @@ function tlFit(idx) {
   section._tlDayWidth = tlFitDayWidth(section, section._tlData);
   drawTimeline(idx);
   const wrap = section._contentEl.querySelector('.tl-wrap');
-  if (wrap) wrap.scrollLeft = 0;
+  if (wrap) { wrap.scrollLeft = 0; section._tlProgAt = Date.now(); }
 }
 
-/* Scroll the loaded window so a given date sits centred in the viewport. */
-function tlCenterOn(section, dateStr) {
+/* Scroll the loaded window so a given date sits at the left edge of the view. */
+function tlScrollDateLeft(section, dateStr) {
   const wrap = section._contentEl.querySelector('.tl-wrap');
   if (!wrap) return;
   const dw    = section._tlDayWidth || 12;
   const fromD = new Date(section._tlData.from + 'T00:00:00');
   const dayI  = Math.round((new Date(dateStr + 'T00:00:00') - fromD) / _TL_DAY);
-  const viewDays = wrap.clientWidth - TL_LABEL_W;
-  wrap.scrollLeft = Math.max(0, dayI * dw + dw / 2 - viewDays / 2);
+  wrap.scrollLeft = Math.max(0, dayI * dw);
+  section._tlProgAt = Date.now();
 }
 
-/* "Today" button — centre on today, reloading a window around it if today is
-   outside the currently-loaded range. */
+/* "Today" button — put today at the left edge, reloading a window that starts
+   at today (preserving the current span + zoom) if today is outside the
+   currently-loaded range. */
 function tlToday(idx) {
   const section = tlSection(idx);
   if (!section || !section._tlData || section._tlBusy) return;
   const todayStr = new Date().toISOString().slice(0,10);
   if (todayStr >= section._tlData.from && todayStr <= section._tlData.to) {
-    tlCenterOn(section, todayStr);
+    tlScrollDateLeft(section, todayStr);
     return;
   }
-  // Reload a window centred on today, preserving the current span + zoom.
+  // Reload a window starting at today, preserving the current span + zoom.
   const span = tlTotalDays(section._tlData);
-  const half = Math.floor(span / 2);
   const t = new Date(todayStr + 'T00:00:00');
-  section._tlFrom = new Date(t.getTime() - half * _TL_DAY).toISOString().slice(0,10);
-  section._tlTo   = new Date(t.getTime() + (span - half) * _TL_DAY).toISOString().slice(0,10);
+  section._tlFrom = todayStr;
+  section._tlTo   = new Date(t.getTime() + (span - 1) * _TL_DAY).toISOString().slice(0,10);
   section._tlBusy = true;
   tlFetch(section).then(() => {
     drawTimeline(idx);
     section._tlBusy = false;
-    tlCenterOn(section, todayStr);
+    tlScrollDateLeft(section, todayStr);
   }).catch(() => { section._tlBusy = false; });
 }
 
