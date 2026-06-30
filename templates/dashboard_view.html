@@ -991,6 +991,14 @@ function tlFitDayWidth(section, data) {
   return Math.max(TL_MIN_DAYW, Math.min(TL_MAX_DAYW, dw || 12));
 }
 
+const TL_MAX_SPAN = 900;   // soft cap on loaded days, so endless scrolling can't balloon
+
+async function tlFetch(section) {
+  const data = await safeFetch(
+    `/api/dashboard/reservation-timeline?from=${section._tlFrom}&to=${section._tlTo}`);
+  section._tlData = data;
+}
+
 async function loadTimelineWidget(idx, section, loadEl, contentEl) {
   const { from, to } = getWidgetDates(section);
   if (!from || !to) {
@@ -998,15 +1006,84 @@ async function loadTimelineWidget(idx, section, loadEl, contentEl) {
     contentEl.innerHTML = '<div class="tl-empty">Pick a date range to view the reservation timeline.</div>';
     return;
   }
-  const data = await safeFetch(`/api/dashboard/reservation-timeline?from=${from}&to=${to}`);
-  section._tlData = data;
   section._tlIdx  = idx;
+  // The loaded window starts as the picked range; scrolling extends it.
+  section._tlFrom = from;
+  section._tlTo   = to;
+  await tlFetch(section);
   // Reveal content first so clientWidth is real, then fit the range to width.
   loadEl.style.display = 'none';
   contentEl.style.display = 'block';
   // Re-fit on (re)load so a freshly-changed date range starts sensibly zoomed.
-  section._tlDayWidth = tlFitDayWidth(section, data);
+  section._tlDayWidth = tlFitDayWidth(section, section._tlData);
   drawTimeline(idx);
+  const wrap = contentEl.querySelector('.tl-wrap');
+  if (wrap) wrap.scrollLeft = 0;   // start at the picked "from"
+}
+
+/* Scroll handler: keep the date inputs in step with the visible viewport, and
+   lazily extend the loaded window when the user reaches either edge. */
+function tlOnScroll(idx) {
+  const section = tlSection(idx);
+  if (!section || !section._tlData) return;
+  if (section._tlRaf) return;
+  section._tlRaf = requestAnimationFrame(() => {
+    section._tlRaf = 0;
+    const wrap = section._contentEl.querySelector('.tl-wrap');
+    if (!wrap) return;
+    const dw    = section._tlDayWidth || 12;
+    const total = tlTotalDays(section._tlData);
+    const fromD = new Date(section._tlData.from + 'T00:00:00');
+    const viewDays = Math.max(0, wrap.clientWidth - TL_LABEL_W);
+    let li = Math.round(wrap.scrollLeft / dw);
+    let ri = Math.round((wrap.scrollLeft + viewDays) / dw) - 1;
+    li = Math.max(0, Math.min(total - 1, li));
+    ri = Math.max(li, Math.min(total - 1, ri));
+    const visFrom = new Date(fromD.getTime() + li * _TL_DAY).toISOString().slice(0,10);
+    const visTo   = new Date(fromD.getTime() + ri * _TL_DAY).toISOString().slice(0,10);
+    // Reflect the visible window in the date inputs (programmatic .value does
+    // not fire 'change', so this never triggers a reload).
+    const f = section.querySelector('.w-date-from');
+    const t = section.querySelector('.w-date-to');
+    if (f) f.value = visFrom;
+    if (t) t.value = visTo;
+
+    if (!section._tlBusy && total < TL_MAX_SPAN) {
+      if (wrap.scrollLeft + wrap.clientWidth >= wrap.scrollWidth - dw * 2) tlExtend(idx, 'right');
+      else if (wrap.scrollLeft <= dw * 2) tlExtend(idx, 'left');
+    }
+  });
+}
+
+async function tlExtend(idx, side) {
+  const section = tlSection(idx);
+  if (!section || section._tlBusy || !section._tlData) return;
+  section._tlBusy = true;
+  try {
+    const dw    = section._tlDayWidth || 12;
+    const span  = tlTotalDays(section._tlData);
+    const chunk = Math.max(21, Math.round(span * 0.5));   // grow by ~half a span
+    const fromD = new Date(section._tlData.from + 'T00:00:00');
+    const toD   = new Date(section._tlData.to   + 'T00:00:00');
+    const wrap0 = section._contentEl.querySelector('.tl-wrap');
+    const prevScroll = wrap0 ? wrap0.scrollLeft : 0;
+
+    if (side === 'right') {
+      section._tlTo = new Date(toD.getTime() + chunk * _TL_DAY).toISOString().slice(0,10);
+    } else {
+      section._tlFrom = new Date(fromD.getTime() - chunk * _TL_DAY).toISOString().slice(0,10);
+    }
+    await tlFetch(section);
+    drawTimeline(idx);                 // keeps current zoom (px/day)
+    const wrap = section._contentEl.querySelector('.tl-wrap');
+    if (wrap) {
+      // Preserve the on-screen position: a left-extension shifts everything
+      // right by chunk*dayWidth, so add that to scrollLeft.
+      wrap.scrollLeft = side === 'left' ? prevScroll + chunk * dw : prevScroll;
+    }
+  } finally {
+    section._tlBusy = false;
+  }
 }
 
 /* Zoom handlers — adjust px/day and redraw from cached data (no refetch). */
@@ -1014,10 +1091,15 @@ function tlSection(idx) { return document.querySelector(`.widget-section[data-id
 function tlZoom(idx, dir) {
   const section = tlSection(idx);
   if (!section || !section._tlData) return;
-  let dw = section._tlDayWidth || 12;
+  const wrap0 = section._contentEl.querySelector('.tl-wrap');
+  const oldDw = section._tlDayWidth || 12;
+  const anchorDay = wrap0 ? wrap0.scrollLeft / oldDw : 0;   // keep left-visible day fixed
+  let dw = oldDw;
   dw = dir === 'in' ? dw * 1.4 : dw / 1.4;
   section._tlDayWidth = Math.max(TL_MIN_DAYW, Math.min(TL_MAX_DAYW, Math.round(dw)));
   drawTimeline(idx);
+  const wrap = section._contentEl.querySelector('.tl-wrap');
+  if (wrap) wrap.scrollLeft = anchorDay * section._tlDayWidth;
 }
 function tlFit(idx) {
   const section = tlSection(idx);
@@ -1165,11 +1247,16 @@ function drawTimeline(idx) {
   html += '</div></div></div>';  // tl-body, tl-inner, tl-wrap
   html += '<div style="margin-top:8px;font-size:11px;color:var(--text-dim)">'
         + 'Each bar is one reservation (show × quantity) spanning its rental window. '
-        + 'Bars stack when reservations overlap. Zoom or scroll horizontally to explore. '
-        + 'Click a bar to open the show.'
+        + 'Bars stack when reservations overlap. Scroll horizontally to move through time — '
+        + 'the date range above follows the view and loads more dates at each edge. '
+        + 'Zoom with the controls; click a bar to open the show.'
         + (todayX !== null ? ' The accent line marks today.' : '')
         + '</div>';
   contentEl.innerHTML = html;
+
+  // Re-bind the scroll handler — innerHTML replaced the previous .tl-wrap.
+  const wrapEl = contentEl.querySelector('.tl-wrap');
+  if (wrapEl) wrapEl.addEventListener('scroll', () => tlOnScroll(idx), { passive: true });
 }
 
 /* ── Add / Remove widgets ────────────────────────────────────────── */
