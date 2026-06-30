@@ -2235,6 +2235,35 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     // no saved state → server-rendered default_open class is used as-is
   });
 
+  /* ── Default load-in / load-out from the show dates ──────────────
+     When a show has performance dates but its load-in/out window was
+     never filled in, assume the earliest show day is load-in and the
+     latest is load-out (events typically load in the first day and out
+     the last). Fires only when BOTH load dates are blank, so it never
+     overrides a window someone set, and saves once so it sticks. A
+     single show date makes load-in and load-out the same day. */
+  (function defaultLoadDatesFromShowDates() {
+    if (RESTRICTED) return;
+    const inEl  = document.querySelector('.adv-field[data-key="load_in_date"]');
+    const outEl = document.querySelector('.adv-field[data-key="load_out_date"]');
+    if (!inEl || !outEl) return;
+    if (inEl.value || outEl.value) return;            // window already set
+    const dates = (window.SCHED_PERFORMANCES || [])
+      .map(p => (p.perf_date || '').toString().slice(0, 10))
+      .filter(Boolean)
+      .sort();
+    if (!dates.length) return;
+    inEl.value  = dates[0];
+    outEl.value = dates[dates.length - 1];
+    // Persist the ADVANCE form specifically — not scheduleSave()/saveActive(),
+    // which only saves whichever tab is active. The show can open on another
+    // tab (e.g. a ?tab=staffing deep link), and load-in/out live on the
+    // advance form, so saving the active tab there would never persist them
+    // and we'd re-derive on every load.
+    if (typeof saveAdvance === 'function') saveAdvance();
+    else if (typeof scheduleSave === 'function') scheduleSave();
+  })();
+
   /* ── Auto-expand sections/notes that have data in them ───────── */
   function syncAdvanceSectionVisibility() {
     // Top-level collapsible form sections (advance + schedule forms)
@@ -3330,9 +3359,12 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
       window._postShowLaborData = data.rows || [];
       await _loadLaborPositions();
       _renderPostShowLabor();
-      alert(data.added
-        ? `Re-synced — pulled ${data.added} newly-scheduled line(s).`
-        : 'Already in sync with the schedule — no new scheduled lines to pull.');
+      const parts = [];
+      if (data.added) parts.push(`pulled ${data.added} newly-scheduled line(s)`);
+      if (data.refreshed) parts.push(`updated ${data.refreshed} line(s) from the schedule`);
+      alert(parts.length
+        ? `Re-synced — ${parts.join(' and ')}.`
+        : 'Already in sync with the schedule — nothing to pull.');
     } finally {
       if (btn) btn.disabled = false;
     }

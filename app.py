@@ -488,7 +488,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.21.0'
+APP_VERSION = '2.22.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -2357,6 +2357,242 @@ def run_scheduled_pdf_emails():
                     app.logger.warning(f'superseded trigger log failed: {e}')
 
 
+def _no_labor_alert_triggers():
+    """Enabled day-before triggers for the no-labor alert, e.g. [14, 7].
+    Read-only; [] when the feature is off or no positive day value is set.
+    Two independent triggers (a heads-up and a closer nudge) mirror the
+    scheduled-email design; each fires once per show."""
+    if get_app_setting('no_labor_alert_enabled', '0') not in ('1', 'true'):
+        return []
+    triggers = []
+    for days_key in ('no_labor_alert_days_1', 'no_labor_alert_days_2'):
+        try:
+            d = int(get_app_setting(days_key, '0'))
+        except (TypeError, ValueError):
+            continue
+        if d > 0:
+            triggers.append(d)
+    return sorted(set(triggers))
+
+
+def _plan_no_labor_alerts(db, target_date):
+    """Read-only: which active shows are inside an alert window, have NO labor
+    requested, and haven't had that window's alert sent yet. Shares its logic
+    with the Settings preview so the two never disagree.
+
+    A trigger is "due" when 0 <= days_until <= trigger_days (due-not-exact, so a
+    missed run or a late-entered show still alerts), and dedup is all-time per
+    (show, trigger_days) via email_send_log (trigger_type='no_labor'). If both
+    triggers are simultaneously overdue, one alert covers them: the most imminent
+    fires and the rest are listed under 'also_satisfies'.
+
+    Returns a list of dicts sorted by urgency:
+      {show_id, show_name, trigger_days, days_until, also_satisfies}
+    """
+    triggers = _no_labor_alert_triggers()
+    if not triggers:
+        return []
+
+    shows = db.execute(
+        "SELECT id, name, venue, show_date FROM shows WHERE status='active'"
+    ).fetchall()
+    if not shows:
+        return []
+
+    first_perf = {r['show_id']: r['first_perf'] for r in db.execute(
+        "SELECT show_id, MIN(perf_date) AS first_perf "
+        "FROM show_performances GROUP BY show_id"
+    ).fetchall()}
+
+    show_ids = [s['id'] for s in shows]
+    placeholders = ','.join(['?'] * len(show_ids))
+    # Shows that already have at least one labor line — excluded entirely.
+    has_labor = {r['show_id'] for r in db.execute(
+        f"SELECT DISTINCT show_id FROM labor_requests WHERE show_id IN ({placeholders})",
+        tuple(show_ids)
+    ).fetchall()}
+    already_sent = set()
+    for r in db.execute(
+        f"SELECT show_id, days_before FROM email_send_log "
+        f"WHERE trigger_type='no_labor' AND show_id IN ({placeholders})",
+        tuple(show_ids)
+    ).fetchall():
+        already_sent.add((r['show_id'], r['days_before']))
+
+    plan = []
+    for s in shows:
+        sid = s['id']
+        if sid in has_labor:
+            continue
+        perf_date = _as_date(first_perf.get(sid)) or _as_date(s['show_date'])
+        if not perf_date:
+            continue
+        days_until = (perf_date - target_date).days
+        due = [td for td in triggers
+               if 0 <= days_until <= td and (sid, td) not in already_sent]
+        if not due:
+            continue
+        send_trigger = min(due)  # most imminent reminder
+        plan.append({
+            'show_id': sid,
+            'show_name': s['name'],
+            'show_date': perf_date.isoformat(),
+            'venue': s['venue'],
+            'trigger_days': send_trigger,
+            'days_until': days_until,
+            'also_satisfies': sorted(td for td in due if td != send_trigger),
+        })
+    plan.sort(key=lambda p: (p['days_until'], (p['show_name'] or '').lower()))
+    return plan
+
+
+def _scheduler_alert_recipients(db):
+    """(emails, user_ids) for the schedulers a no-labor alert targets. Every
+    active user flagged is_scheduler gets the in-app notification; those with a
+    usable email also get the email. Admins are intentionally not included —
+    the alert is the schedulers' to action."""
+    rows = db.execute(
+        "SELECT id, email FROM users "
+        "WHERE COALESCE(is_scheduler, 0) = 1 AND COALESCE(is_active, 1) = 1"
+    ).fetchall()
+    emails = sorted({(r['email'] or '').strip() for r in rows if (r['email'] or '').strip()})
+    user_ids = {r['id'] for r in rows}
+    return emails, user_ids
+
+
+def run_no_labor_alerts():
+    """APScheduler job (cron, top of every hour; leader-gated): warns schedulers
+    about active shows approaching their date with NO labor requested, so they
+    can follow up. Mirrors run_scheduled_pdf_emails() exactly: acts only DURING
+    the configured send hour, refuses to act on a stale SQLite fallback, dedups
+    all-time per (show, trigger) via email_send_log, and catches up on missed
+    days. Delivery is twofold: ONE digest email to all schedulers listing every
+    due show (the breakdown), plus a per-show in-app notification that links
+    straight to that show's Labor Requests.
+
+    Like the PDF-email job, every early return is logged on purpose — silent
+    no-ops here are exactly how a background alert quietly stops working."""
+    if not am_i_leader():
+        app.logger.info('No-labor alert: skipped — not cluster leader')
+        return
+    if get_app_setting('no_labor_alert_enabled', '0') not in ('1', 'true'):
+        return
+    try:
+        send_hour = int(get_app_setting('pdf_email_send_hour', '6'))
+    except (TypeError, ValueError):
+        send_hour = 6
+    if datetime.now().hour != send_hour:
+        return
+
+    today = date.today()
+    db = get_db()
+    try:
+        # Same stale-SQLite-fallback guard as run_scheduled_pdf_emails: if PG is
+        # the configured backend but get_db() silently fell back to the SQLite
+        # bootstrap, app_settings are stale and we must NOT act — log and retry
+        # next hour.
+        configured_backend = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
+        active_backend = getattr(db, 'db_type', None)
+        if configured_backend == 'postgres' and active_backend != 'postgres':
+            app.logger.error(
+                'No-labor alert: configured for postgres but active connection is %r — '
+                'app_settings are STALE; skipping this run (retry next hour).',
+                active_backend)
+            return
+
+        plan = _plan_no_labor_alerts(db, today)
+        if not plan:
+            app.logger.info(
+                'No-labor alert: leader, hour=%s == send_hour, postgres OK, but no '
+                'shows are due+unsent for %s.', send_hour, today.isoformat())
+            return
+
+        emails, user_ids = _scheduler_alert_recipients(db)
+        if not emails and not user_ids:
+            # No delivery channel at all — do NOT burn the dedup, or the alert
+            # would be lost forever. Skip this run so it re-fires (and actually
+            # reaches someone) once a scheduler user is configured.
+            app.logger.warning(
+                'No-labor alert: %d show(s) due but no schedulers (is_scheduler) to '
+                'notify — configure scheduler users to receive these alerts.', len(plan))
+            return
+        base_url = (get_app_setting('public_base_url', '') or '').rstrip('/')
+
+        def _when(d):
+            return 'today' if d == 0 else 'tomorrow' if d == 1 else f'in {d} days'
+
+        # Per-show in-app notifications (each links to its own show) + the
+        # all-time dedup log, and collect one breakdown line per show for the
+        # single digest email below.
+        digest_lines = []
+        for item in plan:
+            sid = item['show_id']
+            show_name = item['show_name'] or f"Show #{sid}"
+            when = _when(item['days_until'])
+            # Build the link by hand rather than url_for(): this runs in an
+            # APScheduler thread with no request context, and SERVER_NAME isn't
+            # configured, so url_for() would raise. The route is /shows/<id>.
+            link_path = f"/shows/{sid}?tab=staffing"
+            link_url = (base_url + link_path) if base_url else link_path
+
+            for uid in user_ids:
+                create_notification(
+                    db, uid,
+                    title=f"No labor requested — {show_name}",
+                    body=f"Show is {when}. Add labor requests if crew is needed.",
+                    link_url=link_path, kind='no_labor_alert', show_id=sid)
+
+            venue = f" · {item['venue']}" if item['venue'] else ''
+            digest_lines.append(
+                f"• {show_name} — {item['show_date']} ({when}){venue}\n    {link_url}")
+
+            # Dedup log: the fired trigger plus any it supersedes, so neither
+            # re-fires. recipient_count (filled in after the email) marks the
+            # fired trigger only.
+            item['_dedup_days'] = [item['trigger_days']] + item['also_satisfies']
+
+        # ONE digest email — the breakdown of every upcoming show missing labor
+        # — to all schedulers, rather than a separate email per show.
+        recipient_count = 0
+        if emails and digest_lines:
+            n = len(plan)
+            subj = f"[3·2·1→Theater] {n} upcoming show{'s' if n != 1 else ''} with no labor requested"
+            body_text = (
+                f"{n} active show{'s are' if n != 1 else ' is'} approaching with no "
+                f"labor requested yet:\n\n"
+                + "\n".join(digest_lines)
+                + "\n\nPlease review staffing and add labor requests where crew is needed.\n"
+            )
+            try:
+                ok, _msg = _send_email(
+                    subj, emails, body_text=body_text,
+                    error_context={'pdf_type': 'no_labor_alert', 'show_id': None,
+                                   'triggered_by': 'no_labor_alert_job',
+                                   'purpose': 'no_labor_alert'})
+                if ok:
+                    recipient_count = len(emails)
+            except Exception as e:
+                app.logger.warning(f'no-labor alert digest email failed: {e}')
+
+        # Record dedup + commit once. In-app notifications were delivered above
+        # regardless of email outcome (email failures land in the Email Send
+        # Errors panel via _send_email's error_context).
+        for item in plan:
+            sid = item['show_id']
+            for td in item['_dedup_days']:
+                db.execute(
+                    "INSERT INTO email_send_log "
+                    "(show_id, pdf_type, trigger_type, days_before, sent_by, recipient_count) "
+                    "VALUES (?, 'no_labor_alert', 'no_labor', ?, 'system', ?)",
+                    (sid, td, recipient_count if td == item['trigger_days'] else 0))
+        db.commit()
+        syslog_logger.info(
+            f"NO_LABOR_ALERT_SENT shows={len(plan)} email_recipients={len(emails)} "
+            f"notified_users={len(user_ids)}")
+    finally:
+        db.close()
+
+
 def start_scheduler():
     """Register all background jobs.
 
@@ -2411,6 +2647,13 @@ def start_scheduler():
         # rationale as pdf_email_check above.
         scheduler.add_job(prism_module.run_prism_auto_sync, 'cron', minute=20,
                           id='prism_auto_sync', misfire_grace_time=3600,
+                          coalesce=True)
+        # No-labor alerts: leader-gated inside the job; fires hourly but only
+        # acts during the configured send hour (same hour as the PDF emails).
+        # All-time dedup makes a late/duplicate fire harmless. minute=30 keeps
+        # it clear of the other top-of-hour jobs.
+        scheduler.add_job(run_no_labor_alerts, 'cron', minute=30,
+                          id='no_labor_alert_check', misfire_grace_time=3600,
                           coalesce=True)
         scheduler.start()
         # Backfill contact↔user link once on boot.
@@ -6685,6 +6928,9 @@ def settings():
         'schedule_email_days_2':     all_settings.get('schedule_email_days_2', '1'),
         'pdf_email_subject_template': all_settings.get('pdf_email_subject_template', ''),
         'pdf_email_body_template':    all_settings.get('pdf_email_body_template', ''),
+        'no_labor_alert_enabled':    all_settings.get('no_labor_alert_enabled', '0'),
+        'no_labor_alert_days_1':     all_settings.get('no_labor_alert_days_1', '14'),
+        'no_labor_alert_days_2':     all_settings.get('no_labor_alert_days_2', '7'),
     }
 
     # Strip sensitive keys from syslog_settings for non-admin users
@@ -9854,7 +10100,9 @@ def save_pdf_email_settings():
             'advance_email_enabled',   'advance_email_days_before',
             'schedule_email_enabled_1','schedule_email_days_1',
             'schedule_email_enabled_2','schedule_email_days_2',
-            'pdf_email_subject_template', 'pdf_email_body_template')
+            'pdf_email_subject_template', 'pdf_email_body_template',
+            'no_labor_alert_enabled', 'no_labor_alert_days_1',
+            'no_labor_alert_days_2')
     for key in keys:
         if key in data:
             db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
@@ -10990,10 +11238,21 @@ def _pull_scheduled_into_post_show(db, show_id):
     not already pulled (matched by source_request_id). The scheduled in/out/lunch
     times are copied into BOTH the read-only sched_* reference columns AND the
     editable billable columns, so each line arrives PRE-FILLED for the PM to
-    tweak rather than starting blank. Never touches labor_requests. Returns the
-    number of lines added (the caller is responsible for committing)."""
-    existing = {r['source_request_id'] for r in db.execute(
-        'SELECT source_request_id FROM post_show_labor '
+    tweak rather than starting blank. Never touches labor_requests.
+
+    A line can be flagged scheduled (and given times) before a specific crew
+    member is assigned. If the initial pull happened in that window, the row was
+    frozen with a blank crew name and an unresolved rate; when the crew member
+    is later assigned, a re-sync should backfill that reference data on the
+    already-pulled row. So existing rows that have since gained a crew
+    assignment get their sched_crew_name (and, only when the PM hasn't already
+    entered a rate, pay_rate_snapshot) refreshed — never clobbering PM edits.
+
+    Returns (added, refreshed): newly inserted lines and existing lines whose
+    reference data was backfilled. The caller is responsible for committing."""
+    existing = {r['source_request_id']: r for r in db.execute(
+        'SELECT source_request_id, sched_crew_name, pay_rate_snapshot '
+        'FROM post_show_labor '
         'WHERE show_id=? AND source_request_id IS NOT NULL', (show_id,)
     ).fetchall()}
     sched = db.execute("""
@@ -11006,8 +11265,29 @@ def _pull_scheduled_into_post_show(db, show_id):
     """, (show_id,)).fetchall()
     order = _max_sort_order(db, 'post_show_labor', 'show_id=?', (show_id,))
     added = 0
+    refreshed = 0
     for s in sched:
-        if s['id'] in existing:
+        prev = existing.get(s['id'])
+        if prev is not None:
+            crew_name = s['scheduled_crew_name'] or ''
+            # Only act when the line gained a crew member after the initial
+            # pull: the snapshot's name is blank but the schedule now has one.
+            if crew_name and not (prev['sched_crew_name'] or '').strip():
+                sets = ['sched_crew_name=?']
+                vals = [crew_name]
+                # Backfill the rate too, but only if the PM hasn't already set
+                # a real (non-zero) one — manual rate edits must survive.
+                if not float(prev['pay_rate_snapshot'] or 0):
+                    rate = _resolve_labor_rate(
+                        db, s['position_id'], s['scheduled_crew_member_id'])
+                    if rate:
+                        sets.append('pay_rate_snapshot=?')
+                        vals.append(rate)
+                vals.extend([show_id, s['id']])
+                db.execute(
+                    f"UPDATE post_show_labor SET {', '.join(sets)} "
+                    "WHERE show_id=? AND source_request_id=?", vals)
+                refreshed += 1
             continue
         rate = _resolve_labor_rate(db, s['position_id'], s['scheduled_crew_member_id'])
         db.execute("""
@@ -11027,7 +11307,7 @@ def _pull_scheduled_into_post_show(db, show_id):
               rate, order))
         order += 10
         added += 1
-    return added
+    return added, refreshed
 
 
 def _ensure_post_show_labor(db, show_id):
@@ -11043,7 +11323,7 @@ def _ensure_post_show_labor(db, show_id):
         ).fetchone()
         if marker:
             return 0
-        added = _pull_scheduled_into_post_show(db, show_id)
+        added, _ = _pull_scheduled_into_post_show(db, show_id)
         if added:
             db.execute(
                 'INSERT OR REPLACE INTO post_show_notes (show_id, field_key, field_value) '
@@ -11069,19 +11349,19 @@ def pull_post_show_labor(show_id):
     if session.get('is_restricted') or session.get('is_readonly'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
-    added = _pull_scheduled_into_post_show(db, show_id)
+    added, refreshed = _pull_scheduled_into_post_show(db, show_id)
     db.execute(
         'INSERT OR REPLACE INTO post_show_notes (show_id, field_key, field_value) '
         'VALUES (?, ?, ?)',
         (show_id, _PSL_INIT_KEY, '1')
     )
     log_audit(db, 'POST_SHOW_LABOR_PULL', 'show', show_id, show_id=show_id,
-              detail=f'added={added}')
+              detail=f'added={added}; refreshed={refreshed}')
     db.commit()
     rows = _post_show_labor_rows(db, show_id)
     db.close()
-    syslog_logger.info(f"POST_SHOW_LABOR_PULL show_id={show_id} added={added} by={session.get('username')}")
-    return jsonify({'success': True, 'added': added, 'rows': rows})
+    syslog_logger.info(f"POST_SHOW_LABOR_PULL show_id={show_id} added={added} refreshed={refreshed} by={session.get('username')}")
+    return jsonify({'success': True, 'added': added, 'refreshed': refreshed, 'rows': rows})
 
 
 @app.route('/shows/<int:show_id>/post-show-labor', methods=['POST'])
@@ -16852,6 +17132,7 @@ def show_post_invoice(show_id):
         _ensure_post_show_labor(db, show_id)
         labor_lines, labor_total = _calc_post_show_labor_cost(db, show_id)
         er_pdfs = _fetch_external_rental_pdfs(db, show_id)
+        logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
     finally:
         db.close()
 
@@ -16870,6 +17151,7 @@ def show_post_invoice(show_id):
         performance_company=performance_company,
         layout=pdf_layouts.PdfLayout('post_show_invoice', get_app_setting),
         generated_date=date.today().isoformat(),
+        logo_data=logo_data,
     )
 
     try:

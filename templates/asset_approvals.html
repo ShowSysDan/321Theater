@@ -12,6 +12,21 @@
 }
 .approvals-toolbar .field-group { margin: 0; }
 .approvals-presets, .approvals-pager { display: inline-flex; gap: 4px; padding-left: 8px; border-left: 1px solid var(--border); align-self: stretch; align-items: center; }
+.approvals-hide-empty {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+  align-self: stretch;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.approvals-hide-empty input { cursor: pointer; }
+/* When the filter is on, collapse the "No requests" empties out of the list. */
+.appr-list.hide-empty .appr-show[data-has-any="0"] { display: none; }
 .approvals-legend {
   margin-left: auto;
   font-size: 11px;
@@ -170,6 +185,9 @@
     <button class="btn btn-ghost btn-sm" onclick="shiftRange(-1)" title="Previous window">« Prev</button>
     <button class="btn btn-ghost btn-sm" onclick="shiftRange(+1)" title="Next window">Next »</button>
   </div>
+  <label class="approvals-hide-empty" title="Hide shows that have no assets or external rentals requested yet">
+    <input type="checkbox" id="hide-empty" onchange="toggleHideEmpty()"> Hide shows with no requests
+  </label>
   <div class="approvals-legend">
     <span><span class="dot ok"></span>Approved</span>
     <span><span class="dot pending"></span>Pending</span>
@@ -185,10 +203,12 @@
 </div>
 {% else %}
 
+<div class="appr-list" id="appr-list">
 {% for s in shows %}
 <div class="appr-show {% if s.assets_approved %}is-approved{% elif s.has_any %}is-pending{% endif %} collapsed"
      data-show-id="{{ s.id }}"
-     data-approved="{{ 1 if s.assets_approved else 0 }}">
+     data-approved="{{ 1 if s.assets_approved else 0 }}"
+     data-has-any="{{ 1 if s.has_any else 0 }}">
   <div class="appr-show-head" onclick="toggleShow(this)">
     <span class="appr-show-name">{{ s.name }}</span>
     <span class="appr-show-meta">
@@ -303,6 +323,11 @@
   </div>
 </div>
 {% endfor %}
+</div>
+
+<div id="appr-hide-empty-note" class="appr-empty-note" style="display:none;margin-top:12px">
+  All shows in this window have no requests yet — clear the “Hide shows with no requests” filter to see them.
+</div>
 
 {% endif %}
 
@@ -450,6 +475,27 @@ function toggleShow(head) {
   _persistExpandedState(card);
 }
 
+// ── "Hide shows with no requests" filter ─────────────────────────
+// Purely client-side declutter of the "No requests" empties. Persisted
+// in sessionStorage so it survives the full-page reloads that approve /
+// add / remove actions trigger.
+const _APPR_HIDE_EMPTY_KEY = 'apprHideEmpty';
+function _applyHideEmpty(on) {
+  const list = document.getElementById('appr-list');
+  if (list) list.classList.toggle('hide-empty', on);
+  // If the filter hid every card, show a gentle note instead of a blank page.
+  const note = document.getElementById('appr-hide-empty-note');
+  if (note && list) {
+    const anyVisible = !!list.querySelector('.appr-show[data-has-any="1"]');
+    note.style.display = (on && !anyVisible) ? '' : 'none';
+  }
+}
+function toggleHideEmpty() {
+  const on = document.getElementById('hide-empty').checked;
+  try { sessionStorage.setItem(_APPR_HIDE_EMPTY_KEY, on ? '1' : '0'); } catch (_) {}
+  _applyHideEmpty(on);
+}
+
 // ── Expanded-section persistence ─────────────────────────────────
 // Actions in this view (approve, remove, add, save price…) trigger a
 // page reload to refresh totals and approval badges. Without this,
@@ -470,6 +516,13 @@ function _persistExpandedState(card) {
   try { sessionStorage.setItem(_APPR_EXPANDED_KEY, JSON.stringify([...set])); } catch (_) {}
 }
 document.addEventListener('DOMContentLoaded', () => {
+  // Rehydrate the "hide empty" filter.
+  let hideEmpty = false;
+  try { hideEmpty = sessionStorage.getItem(_APPR_HIDE_EMPTY_KEY) === '1'; } catch (_) {}
+  const cb = document.getElementById('hide-empty');
+  if (cb) cb.checked = hideEmpty;
+  _applyHideEmpty(hideEmpty);
+
   const set = _getExpandedSet();
   if (!set.size) return;
   document.querySelectorAll('.appr-show').forEach(card => {
