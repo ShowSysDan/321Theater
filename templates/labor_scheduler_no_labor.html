@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Shows Without Labor — 3·2·1→Theater{% endblock %}
+
+{% block head %}
+<style>
+  .nl-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .nl-toolbar .nl-count {
+    font-size: 12px; font-weight: 700; letter-spacing: 0.04em;
+    padding: 3px 10px; border-radius: 999px;
+    background: rgba(245,158,11,.14); color: #f59e0b; border: 1px solid rgba(245,158,11,.35);
+  }
+  .nl-toolbar .nl-count.ok { background: rgba(34,197,94,.12); color: #22c55e; border-color: rgba(34,197,94,.35); }
+  .nl-toolbar .spacer { flex: 1; }
+  .nl-table { width: 100%; }
+  .nl-table td { vertical-align: middle; }
+  .nl-show-name { font-weight: 600; }
+  .nl-days {
+    display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: 0.03em;
+    padding: 2px 8px; border-radius: 10px; white-space: nowrap;
+  }
+  .nl-days.soon   { background: rgba(239,68,68,.14);  color: #f87171; border: 1px solid rgba(239,68,68,.3); }
+  .nl-days.near   { background: rgba(245,158,11,.14); color: #f59e0b; border: 1px solid rgba(245,158,11,.3); }
+  .nl-days.far    { background: var(--bg-hover); color: var(--text-muted); border: 1px solid var(--border); }
+  .nl-days.none   { background: var(--bg-hover); color: var(--text-muted); border: 1px dashed var(--border); }
+  .nl-days.past   { background: var(--bg-hover); color: var(--text-dim); border: 1px solid var(--border); }
+  .nl-empty { text-align: center; padding: 36px 20px; color: var(--text-muted); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Shows Without Labor</h1>
+    <p class="page-sub">Active shows that have no labor requested yet — the same signal the scheduler alert watches.</p>
+  </div>
+  <div class="header-actions">
+    <a href="{{ url_for('labor_scheduler') }}" class="btn btn-ghost">← Labor Scheduler</a>
+  </div>
+</div>
+
+<div class="nl-toolbar">
+  {% if shows %}
+    <span class="nl-count">{{ shows | length }} show{{ '' if shows | length == 1 else 's' }} need{{ 's' if shows | length == 1 else '' }} labor</span>
+  {% else %}
+    <span class="nl-count ok">All caught up</span>
+  {% endif %}
+  <div class="spacer"></div>
+  {% if include_past %}
+    <a href="{{ url_for('labor_scheduler_no_labor') }}" class="btn btn-ghost btn-sm">Hide past shows</a>
+  {% else %}
+    <a href="{{ url_for('labor_scheduler_no_labor', all=1) }}" class="btn btn-ghost btn-sm">Include past shows</a>
+  {% endif %}
+</div>
+
+{% if not shows %}
+<div class="form-section">
+  <div class="form-section-body nl-empty">
+    Every active{% if not include_past %} upcoming{% endif %} show has at least one labor request. 🎉
+  </div>
+</div>
+{% else %}
+<div class="form-section">
+  <div class="form-section-body no-pad">
+    <table class="data-table nl-table">
+      <thead>
+        <tr>
+          <th>SHOW</th>
+          <th style="width:120px">DATE</th>
+          <th style="width:110px">WHEN</th>
+          <th style="width:200px">VENUE</th>
+          <th style="width:160px">PM</th>
+          <th style="width:120px"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in shows %}
+        <tr>
+          <td class="nl-show-name">{{ s.name or '—' }}</td>
+          <td>{{ s.eff_date or '—' }}</td>
+          <td>
+            {% set d = s.days_until %}
+            {% if d is none %}
+              <span class="nl-days none">No date</span>
+            {% elif d < 0 %}
+              <span class="nl-days past">{{ -d }}d ago</span>
+            {% elif d == 0 %}
+              <span class="nl-days soon">Today</span>
+            {% elif d == 1 %}
+              <span class="nl-days soon">Tomorrow</span>
+            {% elif d <= 7 %}
+              <span class="nl-days soon">in {{ d }} days</span>
+            {% elif d <= 21 %}
+              <span class="nl-days near">in {{ d }} days</span>
+            {% else %}
+              <span class="nl-days far">in {{ d }} days</span>
+            {% endif %}
+          </td>
+          <td class="text-dim">{{ s.venue or '—' }}</td>
+          <td class="text-dim">{{ s.pm_name or '—' }}</td>
+          <td style="text-align:right">
+            <a href="{{ url_for('show_page', show_id=s.id, tab='staffing') }}"
+               class="btn btn-xs btn-primary" target="_blank">Add labor ↗</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
