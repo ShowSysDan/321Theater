@@ -170,50 +170,78 @@
 .ac-type-search-opt:hover { background: var(--bg-hover); }
 
 /* ── Reservation timeline (Gantt) ────────────────────────────────── */
-.tl-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); }
-.tl-grid { display: grid; grid-template-columns: 190px minmax(560px, 1fr); min-width: 750px; }
-.tl-labelcol-head, .tl-row-label {
-  position: sticky; left: 0; z-index: 3;
-  background: var(--bg-card); border-right: 1px solid var(--border);
+.tl-toolbar {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 10px; flex-wrap: wrap;
 }
+.tl-toolbar .tl-tb-label { font-size: 11px; color: var(--text-dim); }
+.tl-zoom { display: inline-flex; align-items: center; gap: 4px; }
+.tl-zoom-btn {
+  width: 26px; height: 26px; line-height: 1; padding: 0;
+  font-size: 16px; display: inline-flex; align-items: center; justify-content: center;
+}
+.tl-zoom-readout { font-size: 11px; color: var(--text-dim); min-width: 58px; text-align: center; }
+
+/* Always-visible horizontal scrollbar so the timeline reads as scrollable. */
+.tl-wrap {
+  overflow-x: scroll; overflow-y: hidden;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-card);
+}
+.tl-wrap::-webkit-scrollbar { height: 12px; }
+.tl-wrap::-webkit-scrollbar-track { background: var(--bg-hover); border-radius: 0 0 var(--radius) var(--radius); }
+.tl-wrap::-webkit-scrollbar-thumb {
+  background: var(--text-dim); border-radius: 6px;
+  border: 3px solid var(--bg-hover);
+}
+.tl-wrap::-webkit-scrollbar-thumb:hover { background: var(--text); }
+.tl-wrap { scrollbar-color: var(--text-dim) var(--bg-hover); scrollbar-width: auto; }
+
+.tl-inner { position: relative; }   /* width set inline = LABEL_W + timelineW */
+
+/* Axis (header) */
+.tl-axis-row { display: flex; background: var(--bg-hover); border-bottom: 1px solid var(--border); }
 .tl-corner {
-  position: sticky; left: 0; z-index: 4;
+  flex: 0 0 auto; position: sticky; left: 0; z-index: 6; height: 40px; box-sizing: border-box;
   background: var(--bg-hover); border-right: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
   padding: 6px 10px; font-size: 10px; font-weight: 700;
   letter-spacing: .06em; color: var(--text-dim); text-transform: uppercase;
   display: flex; align-items: flex-end;
 }
-.tl-axis {
-  position: relative; height: 38px;
-  border-bottom: 1px solid var(--border); background: var(--bg-hover);
-  overflow: hidden;
-}
+.tl-axis { position: relative; height: 40px; flex: 0 0 auto; }
 .tl-month {
-  position: absolute; top: 0; height: 18px; line-height: 18px;
+  position: absolute; top: 0; height: 19px; line-height: 19px;
   font-size: 10px; font-weight: 700; letter-spacing: .05em;
-  color: var(--text-dim); text-transform: uppercase;
-  padding-left: 6px; border-left: 1px solid var(--border);
+  color: var(--text); text-transform: uppercase;
+  padding-left: 5px; border-left: 1px solid var(--border);
   white-space: nowrap; overflow: hidden;
 }
-.tl-tick {
-  position: absolute; top: 18px; bottom: 0;
-  border-left: 1px solid var(--border-faint, rgba(255,255,255,.06));
-  font-size: 9px; color: var(--text-dim); padding: 1px 0 0 3px;
-  white-space: nowrap;
+.tl-ticklabel {
+  position: absolute; top: 21px; font-size: 9px; color: var(--text-dim);
+  padding-left: 3px; white-space: nowrap;
 }
-.tl-tick.tl-week  { border-left-color: var(--border); }
-.tl-tick.tl-today { border-left: 1px solid var(--accent); }
+
+/* Body */
+.tl-body { position: relative; }
+.tl-gridlines { position: absolute; top: 0; bottom: 0; z-index: 0; pointer-events: none; }
+.tl-gl { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--border-faint, rgba(255,255,255,.05)); }
+.tl-gl.tl-gl-week  { border-left-color: var(--border); }
+.tl-gl.tl-gl-month { border-left-color: var(--text-dim); }
+.tl-gl.tl-gl-today { border-left: 1px solid var(--accent); opacity: .7; z-index: 1; }
+
 .tl-cat-head {
-  grid-column: 1 / -1; position: sticky; left: 0;
+  position: sticky; left: 0; z-index: 2; box-sizing: border-box;
   font-size: 10px; font-weight: 700; letter-spacing: .08em;
   text-transform: uppercase; color: var(--accent);
   background: var(--bg-hover); padding: 5px 10px;
   border-bottom: 1px solid var(--border); border-top: 1px solid var(--border);
 }
+.tl-row { display: flex; position: relative; z-index: 1; }
 .tl-row-label {
-  padding: 6px 10px; font-size: 12px; color: var(--text);
+  flex: 0 0 auto; position: sticky; left: 0; z-index: 3; box-sizing: border-box;
+  background: var(--bg-card); border-right: 1px solid var(--border);
   border-bottom: 1px solid var(--border-faint, rgba(255,255,255,.06));
+  padding: 6px 10px; font-size: 12px; color: var(--text);
   display: flex; align-items: center; gap: 6px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
@@ -224,20 +252,16 @@
 }
 .tl-row-label .tl-kind.tl-pkg { background: rgba(168,85,247,.15); color: #A855F7; }
 .tl-lane {
-  position: relative;
+  position: relative; flex: 0 0 auto; background: transparent;
   border-bottom: 1px solid var(--border-faint, rgba(255,255,255,.06));
-  background-image: linear-gradient(to right, var(--border-faint, rgba(255,255,255,.05)) 1px, transparent 1px);
-}
-.tl-today-line {
-  position: absolute; top: 0; bottom: 0; width: 0;
-  border-left: 1px solid var(--accent); z-index: 1; opacity: .5;
 }
 .tl-bar {
-  position: absolute; height: 18px; border-radius: 4px; min-width: 6px;
+  position: absolute; height: 18px; border-radius: 4px; min-width: 5px;
   font-size: 10px; font-weight: 600; line-height: 18px;
   padding: 0 6px; color: #0b0e14; cursor: pointer; z-index: 2;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   box-shadow: 0 1px 2px rgba(0,0,0,.3); text-decoration: none;
+  box-sizing: border-box;
 }
 .tl-bar:hover { filter: brightness(1.12); z-index: 5; }
 .tl-bar .tl-qty { font-weight: 800; opacity: .85; }
@@ -948,6 +972,25 @@ function tlColor(showId) {
   return _TL_PALETTE[h % _TL_PALETTE.length];
 }
 
+const TL_LABEL_W = 190;    // px width of the sticky asset-type label column
+const TL_MIN_DAYW = 3;     // px per day at max zoom-out
+const TL_MAX_DAYW = 80;    // px per day at max zoom-in
+const _TL_DAY = 86400000;
+
+function tlTotalDays(data) {
+  const fromD = new Date(data.from + 'T00:00:00');
+  const toD   = new Date(data.to   + 'T00:00:00');
+  return Math.round((toD - fromD) / _TL_DAY) + 1;
+}
+
+/* Default px-per-day: fit the range into the widget's current width. */
+function tlFitDayWidth(section, data) {
+  const total = tlTotalDays(data);
+  const avail = ((section._contentEl && section._contentEl.clientWidth) || 900) - TL_LABEL_W - 4;
+  const dw = Math.floor(avail / Math.max(1, total));
+  return Math.max(TL_MIN_DAYW, Math.min(TL_MAX_DAYW, dw || 12));
+}
+
 async function loadTimelineWidget(idx, section, loadEl, contentEl) {
   const { from, to } = getWidgetDates(section);
   if (!from || !to) {
@@ -956,68 +999,127 @@ async function loadTimelineWidget(idx, section, loadEl, contentEl) {
     return;
   }
   const data = await safeFetch(`/api/dashboard/reservation-timeline?from=${from}&to=${to}`);
+  section._tlData = data;
+  section._tlIdx  = idx;
+  // Reveal content first so clientWidth is real, then fit the range to width.
   loadEl.style.display = 'none';
   contentEl.style.display = 'block';
-  contentEl.innerHTML = renderTimeline(data);
+  // Re-fit on (re)load so a freshly-changed date range starts sensibly zoomed.
+  section._tlDayWidth = tlFitDayWidth(section, data);
+  drawTimeline(idx);
 }
 
-function renderTimeline(data) {
-  const cats = data.categories || [];
+/* Zoom handlers — adjust px/day and redraw from cached data (no refetch). */
+function tlSection(idx) { return document.querySelector(`.widget-section[data-idx="${idx}"]`); }
+function tlZoom(idx, dir) {
+  const section = tlSection(idx);
+  if (!section || !section._tlData) return;
+  let dw = section._tlDayWidth || 12;
+  dw = dir === 'in' ? dw * 1.4 : dw / 1.4;
+  section._tlDayWidth = Math.max(TL_MIN_DAYW, Math.min(TL_MAX_DAYW, Math.round(dw)));
+  drawTimeline(idx);
+}
+function tlFit(idx) {
+  const section = tlSection(idx);
+  if (!section || !section._tlData) return;
+  section._tlDayWidth = tlFitDayWidth(section, section._tlData);
+  drawTimeline(idx);
+}
+
+function drawTimeline(idx) {
+  const section = tlSection(idx);
+  if (!section || !section._tlData) return;
+  const contentEl = section._contentEl;
+  const data    = section._tlData;
+  const dayWidth = section._tlDayWidth || 12;
+
+  const cats  = data.categories || [];
   const fromD = new Date(data.from + 'T00:00:00');
-  const toD   = new Date(data.to   + 'T00:00:00');
-  const DAY   = 86400000;
-  const totalDays = Math.round((toD - fromD) / DAY) + 1;
-  if (totalDays <= 0) return '<div class="tl-empty">Invalid date range.</div>';
+  const total = tlTotalDays(data);
+  if (total <= 0) { contentEl.innerHTML = '<div class="tl-empty">Invalid date range.</div>'; return; }
 
   const hasAny = cats.some(c => (c.types || []).some(t => (t.reservations || []).length));
-  if (!hasAny) {
-    return '<div class="tl-empty">No asset reservations overlap this date range.<br>' +
-           '<span style="font-size:11px">Try widening the range above.</span></div>';
-  }
+
+  const timelineW = total * dayWidth;
+  const innerW    = TL_LABEL_W + timelineW;
 
   // Day index (0-based) for an ISO date string, clamped to the window.
   const dayIndex = ds => {
     const d = new Date(ds + 'T00:00:00');
-    return Math.max(0, Math.min(totalDays - 1, Math.round((d - fromD) / DAY)));
+    return Math.max(0, Math.min(total - 1, Math.round((d - fromD) / _TL_DAY)));
   };
-  const pctLeft  = i => (i / totalDays) * 100;
-  const pctWidth = n => (n / totalDays) * 100;
+  const xFor = i => i * dayWidth;
 
   const todayStr = new Date().toISOString().slice(0,10);
   const todayInRange = todayStr >= data.from && todayStr <= data.to;
-  const todayPct = todayInRange ? pctLeft(dayIndex(todayStr) + 0.5) : null;
+  const todayX = todayInRange ? xFor(dayIndex(todayStr)) + dayWidth / 2 : null;
 
   const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-  // ── Axis: month bands (top) + day/week ticks (bottom) ──
+  // Toolbar (zoom controls) — always shown so the view is interactive.
+  let html = `<div class="tl-toolbar">
+    <span class="tl-tb-label">Zoom</span>
+    <span class="tl-zoom">
+      <button class="btn btn-ghost btn-sm tl-zoom-btn" title="Zoom out" onclick="tlZoom(${idx},'out')">−</button>
+      <span class="tl-zoom-readout">${dayWidth} px/day</span>
+      <button class="btn btn-ghost btn-sm tl-zoom-btn" title="Zoom in" onclick="tlZoom(${idx},'in')">+</button>
+    </span>
+    <button class="btn btn-ghost btn-sm" title="Fit to width" onclick="tlFit(${idx})">Fit</button>
+  </div>`;
+
+  if (!hasAny) {
+    html += '<div class="tl-empty">No asset reservations overlap this date range.<br>' +
+            '<span style="font-size:11px">Try widening the range above.</span></div>';
+    contentEl.innerHTML = html;
+    return;
+  }
+
+  // ── Axis: month bands (top) + day/week tick labels (bottom) ──
   let axis = '';
-  // Month bands
   let cur = new Date(fromD);
+  const toD = new Date(data.to + 'T00:00:00');
   while (cur <= toD) {
     const mStart = new Date(cur.getFullYear(), cur.getMonth(), 1);
     const mEnd   = new Date(cur.getFullYear(), cur.getMonth() + 1, 0);
     const segStart = mStart < fromD ? fromD : mStart;
     const segEnd   = mEnd   > toD   ? toD   : mEnd;
-    const li = Math.round((segStart - fromD) / DAY);
-    const wd = Math.round((segEnd - segStart) / DAY) + 1;
-    axis += `<div class="tl-month" style="left:${pctLeft(li)}%;width:${pctWidth(wd)}%">${MONTHS[mStart.getMonth()]} ${mStart.getFullYear()}</div>`;
+    const li = Math.round((segStart - fromD) / _TL_DAY);
+    const wd = Math.round((segEnd - segStart) / _TL_DAY) + 1;
+    const bandW = wd * dayWidth;
+    // Hide the label on a sliver of a partial month at the range edge so it
+    // doesn't collide with the next month; keep the divider line.
+    const mlabel = bandW >= 34 ? `${MONTHS[mStart.getMonth()]} ${mStart.getFullYear()}` : '';
+    axis += `<div class="tl-month" style="left:${xFor(li)}px;width:${bandW}px">${mlabel}</div>`;
     cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
   }
-  // Ticks
-  const step = totalDays <= 21 ? 1 : (totalDays <= 120 ? 7 : 14);
-  for (let i = 0; i < totalDays; i += step) {
-    const d = new Date(fromD.getTime() + i * DAY);
-    const ds = d.toISOString().slice(0,10);
-    const isWeek = d.getDay() === 1; // Monday
-    const label = step === 1 ? d.getDate() : `${d.getMonth()+1}/${d.getDate()}`;
-    axis += `<div class="tl-tick${isWeek ? ' tl-week' : ''}" style="left:${pctLeft(i)}%">${label}</div>`;
-  }
-  if (todayPct !== null) {
-    axis += `<div class="tl-tick tl-today" style="left:${todayPct}%" title="Today">●</div>`;
+  // Tick labels — denser when zoomed in.
+  const labelStep = dayWidth >= 22 ? 1 : (dayWidth >= 8 ? 7 : 14);
+  for (let i = 0; i < total; i += labelStep) {
+    const d = new Date(fromD.getTime() + i * _TL_DAY);
+    const label = labelStep === 1 ? d.getDate() : `${d.getMonth()+1}/${d.getDate()}`;
+    axis += `<div class="tl-ticklabel" style="left:${xFor(i)}px">${label}</div>`;
   }
 
-  let html = '<div class="tl-wrap"><div class="tl-grid">';
-  html += `<div class="tl-corner">Asset Type</div><div class="tl-axis">${axis}</div>`;
+  // ── Vertical gridlines spanning the full body height ──
+  let grid = '';
+  for (let i = 0; i <= total; i++) {
+    const d = new Date(fromD.getTime() + i * _TL_DAY);
+    const isMonth = d.getDate() === 1;
+    const isWeek  = d.getDay() === 1;  // Monday
+    let cls;
+    if (isMonth)      cls = 'tl-gl tl-gl-month';
+    else if (isWeek)  cls = 'tl-gl tl-gl-week';
+    else if (dayWidth >= 12) cls = 'tl-gl tl-gl-day';
+    else continue;
+    grid += `<div class="${cls}" style="left:${xFor(i)}px"></div>`;
+  }
+  if (todayX !== null) grid += `<div class="tl-gl tl-gl-today" style="left:${todayX}px"></div>`;
+
+  html += `<div class="tl-wrap"><div class="tl-inner" style="width:${innerW}px">`;
+  html += `<div class="tl-axis-row"><div class="tl-corner" style="width:${TL_LABEL_W}px">Asset Type</div>`
+        + `<div class="tl-axis" style="width:${timelineW}px">${axis}</div></div>`;
+  html += '<div class="tl-body">';
+  html += `<div class="tl-gridlines" style="left:${TL_LABEL_W}px;width:${timelineW}px">${grid}</div>`;
 
   const LANE_H = 22;   // px per stacked bar
   const PAD    = 5;    // top/bottom padding inside a row
@@ -1025,7 +1127,7 @@ function renderTimeline(data) {
   for (const cat of cats) {
     const types = (cat.types || []).filter(t => (t.reservations || []).length);
     if (!types.length) continue;
-    html += `<div class="tl-cat-head">${escHtml(cat.name)}</div>`;
+    html += `<div class="tl-cat-head" style="width:${innerW}px">${escHtml(cat.name)}</div>`;
     for (const t of types) {
       // Greedy lane assignment so overlapping bars stack instead of colliding.
       const lanes = [];          // lanes[k] = end day index occupied
@@ -1043,32 +1145,31 @@ function renderTimeline(data) {
       const kindBadge = t.kind === 'system'
         ? '<span class="tl-kind">SYS</span>'
         : (t.kind === 'package' ? '<span class="tl-kind tl-pkg">PKG</span>' : '');
-      html += `<div class="tl-row-label" style="min-height:${rowH}px">${kindBadge}<span title="${escHtml(t.name)}">${escHtml(t.name)}</span></div>`;
-
-      let lane = `<div class="tl-lane" style="height:${rowH}px">`;
-      if (todayPct !== null) lane += `<div class="tl-today-line" style="left:${todayPct}%"></div>`;
+      html += `<div class="tl-row" style="height:${rowH}px">`;
+      html += `<div class="tl-row-label" style="width:${TL_LABEL_W}px">${kindBadge}<span title="${escHtml(t.name)}">${escHtml(t.name)}</span></div>`;
+      html += `<div class="tl-lane" style="width:${timelineW}px">`;
       for (const p of placed) {
-        const left  = pctLeft(p.si);
-        const width = pctWidth(p.ei - p.si + 1);
+        const left  = xFor(p.si);
+        const width = (p.ei - p.si + 1) * dayWidth;
         const top   = PAD + p.lane * LANE_H;
         const color = tlColor(p.r.show_id);
         const tip = `${p.r.show_name} — qty ${p.r.quantity} · ${p.r.start} → ${p.r.end}`;
-        lane += `<a class="tl-bar" href="/shows/${p.r.show_id}" title="${escHtml(tip)}"
-          style="left:${left}%;width:${width}%;top:${top}px;background:${color}">`
+        html += `<a class="tl-bar" href="/shows/${p.r.show_id}" title="${escHtml(tip)}"
+          style="left:${left}px;width:${width}px;top:${top}px;background:${color}">`
           + `${escHtml(p.r.show_name)} <span class="tl-qty">×${p.r.quantity}</span></a>`;
       }
-      lane += '</div>';
-      html += lane;
+      html += '</div></div>';
     }
   }
 
-  html += '</div></div>';
+  html += '</div></div></div>';  // tl-body, tl-inner, tl-wrap
   html += '<div style="margin-top:8px;font-size:11px;color:var(--text-dim)">'
         + 'Each bar is one reservation (show × quantity) spanning its rental window. '
-        + 'Bars stack when reservations overlap. Click a bar to open the show.'
-        + (todayPct !== null ? ' The accent line marks today.' : '')
+        + 'Bars stack when reservations overlap. Zoom or scroll horizontally to explore. '
+        + 'Click a bar to open the show.'
+        + (todayX !== null ? ' The accent line marks today.' : '')
         + '</div>';
-  return html;
+  contentEl.innerHTML = html;
 }
 
 /* ── Add / Remove widgets ────────────────────────────────────────── */
