@@ -169,6 +169,80 @@
 }
 .ac-type-search-opt:hover { background: var(--bg-hover); }
 
+/* ── Reservation timeline (Gantt) ────────────────────────────────── */
+.tl-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); }
+.tl-grid { display: grid; grid-template-columns: 190px minmax(560px, 1fr); min-width: 750px; }
+.tl-labelcol-head, .tl-row-label {
+  position: sticky; left: 0; z-index: 3;
+  background: var(--bg-card); border-right: 1px solid var(--border);
+}
+.tl-corner {
+  position: sticky; left: 0; z-index: 4;
+  background: var(--bg-hover); border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 6px 10px; font-size: 10px; font-weight: 700;
+  letter-spacing: .06em; color: var(--text-dim); text-transform: uppercase;
+  display: flex; align-items: flex-end;
+}
+.tl-axis {
+  position: relative; height: 38px;
+  border-bottom: 1px solid var(--border); background: var(--bg-hover);
+  overflow: hidden;
+}
+.tl-month {
+  position: absolute; top: 0; height: 18px; line-height: 18px;
+  font-size: 10px; font-weight: 700; letter-spacing: .05em;
+  color: var(--text-dim); text-transform: uppercase;
+  padding-left: 6px; border-left: 1px solid var(--border);
+  white-space: nowrap; overflow: hidden;
+}
+.tl-tick {
+  position: absolute; top: 18px; bottom: 0;
+  border-left: 1px solid var(--border-faint, rgba(255,255,255,.06));
+  font-size: 9px; color: var(--text-dim); padding: 1px 0 0 3px;
+  white-space: nowrap;
+}
+.tl-tick.tl-week  { border-left-color: var(--border); }
+.tl-tick.tl-today { border-left: 1px solid var(--accent); }
+.tl-cat-head {
+  grid-column: 1 / -1; position: sticky; left: 0;
+  font-size: 10px; font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--accent);
+  background: var(--bg-hover); padding: 5px 10px;
+  border-bottom: 1px solid var(--border); border-top: 1px solid var(--border);
+}
+.tl-row-label {
+  padding: 6px 10px; font-size: 12px; color: var(--text);
+  border-bottom: 1px solid var(--border-faint, rgba(255,255,255,.06));
+  display: flex; align-items: center; gap: 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tl-row-label .tl-kind {
+  font-size: 8px; font-weight: 700; letter-spacing: .04em;
+  padding: 1px 4px; border-radius: 3px; flex-shrink: 0;
+  background: rgba(74,158,255,.15); color: #4A9EFF;
+}
+.tl-row-label .tl-kind.tl-pkg { background: rgba(168,85,247,.15); color: #A855F7; }
+.tl-lane {
+  position: relative;
+  border-bottom: 1px solid var(--border-faint, rgba(255,255,255,.06));
+  background-image: linear-gradient(to right, var(--border-faint, rgba(255,255,255,.05)) 1px, transparent 1px);
+}
+.tl-today-line {
+  position: absolute; top: 0; bottom: 0; width: 0;
+  border-left: 1px solid var(--accent); z-index: 1; opacity: .5;
+}
+.tl-bar {
+  position: absolute; height: 18px; border-radius: 4px; min-width: 6px;
+  font-size: 10px; font-weight: 600; line-height: 18px;
+  padding: 0 6px; color: #0b0e14; cursor: pointer; z-index: 2;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  box-shadow: 0 1px 2px rgba(0,0,0,.3); text-decoration: none;
+}
+.tl-bar:hover { filter: brightness(1.12); z-index: 5; }
+.tl-bar .tl-qty { font-weight: 800; opacity: .85; }
+.tl-empty { padding: 40px; text-align: center; color: var(--text-dim); }
+
 /* ── Widget section ──────────────────────────────────────────────── */
 .widget-section {
   margin-bottom: 24px;
@@ -253,6 +327,7 @@ const WIDGET_LABELS = {
   calendar:       'Shows Calendar',
   skills:         'Skill Coverage',
   asset_calendar: 'Asset Availability Calendar',
+  reservation_timeline: 'Reservation Timeline',
 };
 
 /* ── Safe fetch: throws if not JSON ─────────────────────────────── */
@@ -455,6 +530,7 @@ async function loadWidget(idx) {
     if (wtype === 'calendar')           await loadCalendarWidget(idx, section, loadEl, contentEl);
     else if (wtype === 'skills')        await loadSkillsWidget(idx, section, loadEl, contentEl);
     else if (wtype === 'asset_calendar') await loadAssetCalendarWidget(idx, section, loadEl, contentEl);
+    else if (wtype === 'reservation_timeline') await loadTimelineWidget(idx, section, loadEl, contentEl);
     else                                await loadAvailWidget(idx, section, loadEl, contentEl);
   } catch(e) {
     loadEl.innerHTML = `<span style="color:var(--red)">Error: ${escHtml(e.message)}</span>`;
@@ -860,6 +936,141 @@ function openDayPopup(idx, dateStr) {
   document.body.appendChild(overlay);
 }
 
+/* ── Reservation timeline (Gantt) widget ─────────────────────────── */
+const _TL_PALETTE = [
+  '#4A9EFF', '#22C55E', '#F59E0B', '#A855F7', '#EC4899',
+  '#14B8A6', '#EAB308', '#F97316', '#38BDF8', '#84CC16',
+];
+function tlColor(showId) {
+  let h = 0;
+  const s = String(showId);
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return _TL_PALETTE[h % _TL_PALETTE.length];
+}
+
+async function loadTimelineWidget(idx, section, loadEl, contentEl) {
+  const { from, to } = getWidgetDates(section);
+  if (!from || !to) {
+    loadEl.style.display = 'none'; contentEl.style.display = 'block';
+    contentEl.innerHTML = '<div class="tl-empty">Pick a date range to view the reservation timeline.</div>';
+    return;
+  }
+  const data = await safeFetch(`/api/dashboard/reservation-timeline?from=${from}&to=${to}`);
+  loadEl.style.display = 'none';
+  contentEl.style.display = 'block';
+  contentEl.innerHTML = renderTimeline(data);
+}
+
+function renderTimeline(data) {
+  const cats = data.categories || [];
+  const fromD = new Date(data.from + 'T00:00:00');
+  const toD   = new Date(data.to   + 'T00:00:00');
+  const DAY   = 86400000;
+  const totalDays = Math.round((toD - fromD) / DAY) + 1;
+  if (totalDays <= 0) return '<div class="tl-empty">Invalid date range.</div>';
+
+  const hasAny = cats.some(c => (c.types || []).some(t => (t.reservations || []).length));
+  if (!hasAny) {
+    return '<div class="tl-empty">No asset reservations overlap this date range.<br>' +
+           '<span style="font-size:11px">Try widening the range above.</span></div>';
+  }
+
+  // Day index (0-based) for an ISO date string, clamped to the window.
+  const dayIndex = ds => {
+    const d = new Date(ds + 'T00:00:00');
+    return Math.max(0, Math.min(totalDays - 1, Math.round((d - fromD) / DAY)));
+  };
+  const pctLeft  = i => (i / totalDays) * 100;
+  const pctWidth = n => (n / totalDays) * 100;
+
+  const todayStr = new Date().toISOString().slice(0,10);
+  const todayInRange = todayStr >= data.from && todayStr <= data.to;
+  const todayPct = todayInRange ? pctLeft(dayIndex(todayStr) + 0.5) : null;
+
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  // ── Axis: month bands (top) + day/week ticks (bottom) ──
+  let axis = '';
+  // Month bands
+  let cur = new Date(fromD);
+  while (cur <= toD) {
+    const mStart = new Date(cur.getFullYear(), cur.getMonth(), 1);
+    const mEnd   = new Date(cur.getFullYear(), cur.getMonth() + 1, 0);
+    const segStart = mStart < fromD ? fromD : mStart;
+    const segEnd   = mEnd   > toD   ? toD   : mEnd;
+    const li = Math.round((segStart - fromD) / DAY);
+    const wd = Math.round((segEnd - segStart) / DAY) + 1;
+    axis += `<div class="tl-month" style="left:${pctLeft(li)}%;width:${pctWidth(wd)}%">${MONTHS[mStart.getMonth()]} ${mStart.getFullYear()}</div>`;
+    cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
+  }
+  // Ticks
+  const step = totalDays <= 21 ? 1 : (totalDays <= 120 ? 7 : 14);
+  for (let i = 0; i < totalDays; i += step) {
+    const d = new Date(fromD.getTime() + i * DAY);
+    const ds = d.toISOString().slice(0,10);
+    const isWeek = d.getDay() === 1; // Monday
+    const label = step === 1 ? d.getDate() : `${d.getMonth()+1}/${d.getDate()}`;
+    axis += `<div class="tl-tick${isWeek ? ' tl-week' : ''}" style="left:${pctLeft(i)}%">${label}</div>`;
+  }
+  if (todayPct !== null) {
+    axis += `<div class="tl-tick tl-today" style="left:${todayPct}%" title="Today">●</div>`;
+  }
+
+  let html = '<div class="tl-wrap"><div class="tl-grid">';
+  html += `<div class="tl-corner">Asset Type</div><div class="tl-axis">${axis}</div>`;
+
+  const LANE_H = 22;   // px per stacked bar
+  const PAD    = 5;    // top/bottom padding inside a row
+
+  for (const cat of cats) {
+    const types = (cat.types || []).filter(t => (t.reservations || []).length);
+    if (!types.length) continue;
+    html += `<div class="tl-cat-head">${escHtml(cat.name)}</div>`;
+    for (const t of types) {
+      // Greedy lane assignment so overlapping bars stack instead of colliding.
+      const lanes = [];          // lanes[k] = end day index occupied
+      const placed = [];
+      for (const r of t.reservations) {
+        const si = dayIndex(r.start);
+        const ei = dayIndex(r.end);
+        let lane = lanes.findIndex(endIdx => endIdx < si);
+        if (lane === -1) { lane = lanes.length; lanes.push(ei); }
+        else { lanes[lane] = ei; }
+        placed.push({ r, si, ei, lane });
+      }
+      const rowH = lanes.length * LANE_H + PAD * 2;
+
+      const kindBadge = t.kind === 'system'
+        ? '<span class="tl-kind">SYS</span>'
+        : (t.kind === 'package' ? '<span class="tl-kind tl-pkg">PKG</span>' : '');
+      html += `<div class="tl-row-label" style="min-height:${rowH}px">${kindBadge}<span title="${escHtml(t.name)}">${escHtml(t.name)}</span></div>`;
+
+      let lane = `<div class="tl-lane" style="height:${rowH}px">`;
+      if (todayPct !== null) lane += `<div class="tl-today-line" style="left:${todayPct}%"></div>`;
+      for (const p of placed) {
+        const left  = pctLeft(p.si);
+        const width = pctWidth(p.ei - p.si + 1);
+        const top   = PAD + p.lane * LANE_H;
+        const color = tlColor(p.r.show_id);
+        const tip = `${p.r.show_name} — qty ${p.r.quantity} · ${p.r.start} → ${p.r.end}`;
+        lane += `<a class="tl-bar" href="/shows/${p.r.show_id}" title="${escHtml(tip)}"
+          style="left:${left}%;width:${width}%;top:${top}px;background:${color}">`
+          + `${escHtml(p.r.show_name)} <span class="tl-qty">×${p.r.quantity}</span></a>`;
+      }
+      lane += '</div>';
+      html += lane;
+    }
+  }
+
+  html += '</div></div>';
+  html += '<div style="margin-top:8px;font-size:11px;color:var(--text-dim)">'
+        + 'Each bar is one reservation (show × quantity) spanning its rental window. '
+        + 'Bars stack when reservations overlap. Click a bar to open the show.'
+        + (todayPct !== null ? ' The accent line marks today.' : '')
+        + '</div>';
+  return html;
+}
+
 /* ── Add / Remove widgets ────────────────────────────────────────── */
 let _currentWidgets = WIDGETS.slice();
 const _dayDataStore = {}; /* key: "{idx}_{date}" → day object from API */
@@ -941,6 +1152,7 @@ window.addEventListener('DOMContentLoaded', () => {
       <div class="field-group">
         <label class="field-label">WIDGET TYPE</label>
         <select id="add-widget-type" class="field-input">
+          <option value="reservation_timeline">Reservation Timeline — Gantt of all reserved assets</option>
           <option value="asset_calendar">Asset Type Calendar — per-day availability</option>
           <option value="combined">All Assets — combined availability</option>
           <option value="by_category">Assets by Category</option>
