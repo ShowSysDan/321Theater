@@ -11477,6 +11477,60 @@ def labor_scheduler():
     return render_template('labor_scheduler.html', user=get_current_user())
 
 
+@app.route('/labor-scheduler/no-labor')
+@scheduler_required
+def labor_scheduler_no_labor():
+    """Labor Scheduler subpage: active shows with NO labor requested yet, so
+    schedulers see the whole backlog at a glance and jump straight in. This is
+    the same "no labor requested" signal the scheduled no-labor alert acts on,
+    presented as a live list. Upcoming + undated shows show by default;
+    ?all=1 also includes past-dated shows."""
+    include_past = request.args.get('all') == '1'
+    today = date.today()
+    db = get_db()
+    try:
+        accessible = get_accessible_shows(session['user_id'])
+        shows = []
+        if accessible is None or accessible:
+            sql = """
+                SELECT s.id, s.name, s.venue, s.show_date,
+                       pf.first_perf AS first_perf,
+                       ad.field_value AS pm_name
+                FROM shows s
+                LEFT JOIN labor_requests lr ON lr.show_id = s.id
+                LEFT JOIN (SELECT show_id, MIN(perf_date) AS first_perf
+                             FROM show_performances GROUP BY show_id) pf
+                       ON pf.show_id = s.id
+                LEFT JOIN advance_data ad
+                       ON ad.show_id = s.id AND ad.field_key = 'production_manager'
+                WHERE COALESCE(s.status, 'active') != 'archived'
+                  AND lr.id IS NULL
+            """
+            params = []
+            if accessible is not None:
+                ph = ','.join(['?'] * len(accessible))
+                sql += f' AND s.id IN ({ph})'
+                params.extend(accessible)
+            for r in db.execute(sql, params).fetchall():
+                d = dict(r)
+                eff = _as_date(d.get('first_perf')) or _as_date(d.get('show_date'))
+                d['eff_date'] = eff.isoformat() if eff else None
+                d['days_until'] = (eff - today).days if eff else None
+                shows.append(d)
+            if not include_past:
+                shows = [s for s in shows
+                         if s['days_until'] is None or s['days_until'] >= 0]
+            # Dated shows first (soonest at top), undated last, name as tiebreak.
+            shows.sort(key=lambda s: (s['eff_date'] is None,
+                                      s['eff_date'] or '9999-99-99',
+                                      (s['name'] or '').lower()))
+    finally:
+        db.close()
+    return render_template('labor_scheduler_no_labor.html',
+                           user=get_current_user(), shows=shows,
+                           include_past=include_past)
+
+
 @app.route('/labor-overview')
 @login_required
 def labor_overview():

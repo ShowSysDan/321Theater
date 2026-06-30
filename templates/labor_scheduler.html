@@ -129,6 +129,8 @@
     <h1 class="page-title">Labor Scheduler</h1>
   </div>
   <div class="header-actions">
+    <a href="{{ url_for('labor_scheduler_no_labor') }}" class="btn btn-ghost"
+       title="Active shows that have no labor requested yet">Shows without labor</a>
     <button class="btn btn-primary" onclick="window.__scheduler.saveAll()">Save All</button>
   </div>
 </div>
