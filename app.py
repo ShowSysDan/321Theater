@@ -18345,6 +18345,99 @@ def api_dashboard_asset_calendar():
         'days':          days,
     })
 
+
+@app.route('/api/dashboard/reservation-timeline')
+def api_dashboard_reservation_timeline():
+    """Every asset reservation overlapping a date window, grouped by category →
+    asset type, for the Gantt-style "Reservation Timeline" widget.
+
+    Each booking line in ``show_assets`` (that is not hidden, on a non-archived
+    show) becomes one bar: it carries the show name, quantity, and an effective
+    rental window. The window falls back to the show's own dates when a line
+    has no explicit rental range, so undated lines still appear:
+        start = rental_start  or load_in_date or show_date
+        end   = rental_end    or load_out_date or show_date or load_in_date
+
+    A line is included when [start, end] overlaps the requested [from, to].
+    Window filtering and date coercion happen in Python via ``_as_date`` so we
+    never compare a bound text param against a PG ``date`` column (see
+    CLAUDE.md). Public-safe: mirrors the asset-calendar widget, which already
+    surfaces show names per reserved day without a login.
+    """
+    date_from = _as_date(request.args.get('from'))
+    date_to   = _as_date(request.args.get('to'))
+    if not date_from or not date_to:
+        return jsonify({'error': 'from, to required'}), 400
+    if date_to < date_from:
+        date_from, date_to = date_to, date_from
+
+    db = get_db()
+    rows = db.execute("""
+        SELECT sa.show_id, sa.quantity,
+               sa.rental_start, sa.rental_end,
+               s.name AS show_name, s.status AS show_status,
+               s.load_in_date, s.show_date, s.load_out_date,
+               at.id AS type_id, at.name AS type_name,
+               at.is_system, at.is_package,
+               ac.id AS category_id, ac.name AS category_name,
+               ac.sort_order AS cat_sort, at.sort_order AS type_sort
+        FROM show_assets sa
+        JOIN shows s            ON s.id = sa.show_id
+        JOIN asset_types at     ON at.id = sa.asset_type_id
+        JOIN asset_categories ac ON ac.id = at.category_id
+        WHERE sa.is_hidden = 0 AND s.status != 'archived'
+        ORDER BY ac.sort_order, ac.name, at.sort_order, at.name
+    """).fetchall()
+    db.close()
+
+    # category_id → {category fields, types: {type_id → {type fields, reservations: []}}}
+    cats = {}
+    for r in rows:
+        start = _as_date(r['rental_start']) or _as_date(r['load_in_date']) or _as_date(r['show_date'])
+        end   = (_as_date(r['rental_end']) or _as_date(r['load_out_date'])
+                 or _as_date(r['show_date']) or _as_date(r['load_in_date']))
+        if not start or not end:
+            continue
+        if end < start:
+            start, end = end, start
+        # Overlap test against the requested window
+        if end < date_from or start > date_to:
+            continue
+
+        cat = cats.get(r['category_id'])
+        if cat is None:
+            cat = {'id': r['category_id'], 'name': r['category_name'],
+                   'sort': r['cat_sort'] or 0, 'types': {}}
+            cats[r['category_id']] = cat
+        typ = cat['types'].get(r['type_id'])
+        if typ is None:
+            kind = ('system' if r['is_system'] else
+                    'package' if r['is_package'] else 'item')
+            typ = {'id': r['type_id'], 'name': r['type_name'],
+                   'sort': r['type_sort'] or 0, 'kind': kind, 'reservations': []}
+            cat['types'][r['type_id']] = typ
+        typ['reservations'].append({
+            'show_id':   r['show_id'],
+            'show_name': r['show_name'],
+            'quantity':  r['quantity'] or 1,
+            'start':     start.isoformat(),
+            'end':       end.isoformat(),
+        })
+
+    categories = []
+    for cat in sorted(cats.values(), key=lambda c: (c['sort'], c['name'] or '')):
+        types = sorted(cat['types'].values(), key=lambda t: (t['sort'], t['name'] or ''))
+        for t in types:
+            t['reservations'].sort(key=lambda x: (x['start'], x['end']))
+        categories.append({'id': cat['id'], 'name': cat['name'], 'types': types})
+
+    return jsonify({
+        'from':       date_from.isoformat(),
+        'to':         date_to.isoformat(),
+        'categories': categories,
+    })
+
+
 @app.route('/dashboards')
 @login_required
 def dashboards_list():
