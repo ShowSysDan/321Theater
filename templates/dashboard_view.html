@@ -983,12 +983,16 @@ function tlTotalDays(data) {
   return Math.round((toD - fromD) / _TL_DAY) + 1;
 }
 
-/* Default px-per-day: fit the range into the widget's current width. */
+/* Default px-per-day: fit the range into the widget's current width, but leave
+   a little horizontal overflow so the scrollbar is always present and the user
+   can always scroll (which is what loads more dates at the edges). */
 function tlFitDayWidth(section, data) {
   const total = tlTotalDays(data);
   const avail = ((section._contentEl && section._contentEl.clientWidth) || 900) - TL_LABEL_W - 4;
-  const dw = Math.floor(avail / Math.max(1, total));
-  return Math.max(TL_MIN_DAYW, Math.min(TL_MAX_DAYW, dw || 12));
+  let dw = Math.floor(avail / Math.max(1, total));
+  dw = Math.max(TL_MIN_DAYW, Math.min(TL_MAX_DAYW, dw || 12));
+  if (total * dw <= avail && dw < TL_MAX_DAYW) dw += 1;   // force a small overflow
+  return dw;
 }
 
 const TL_MAX_SPAN = 900;   // soft cap on loaded days, so endless scrolling can't balloon
@@ -1106,6 +1110,43 @@ function tlFit(idx) {
   if (!section || !section._tlData) return;
   section._tlDayWidth = tlFitDayWidth(section, section._tlData);
   drawTimeline(idx);
+  const wrap = section._contentEl.querySelector('.tl-wrap');
+  if (wrap) wrap.scrollLeft = 0;
+}
+
+/* Scroll the loaded window so a given date sits centred in the viewport. */
+function tlCenterOn(section, dateStr) {
+  const wrap = section._contentEl.querySelector('.tl-wrap');
+  if (!wrap) return;
+  const dw    = section._tlDayWidth || 12;
+  const fromD = new Date(section._tlData.from + 'T00:00:00');
+  const dayI  = Math.round((new Date(dateStr + 'T00:00:00') - fromD) / _TL_DAY);
+  const viewDays = wrap.clientWidth - TL_LABEL_W;
+  wrap.scrollLeft = Math.max(0, dayI * dw + dw / 2 - viewDays / 2);
+}
+
+/* "Today" button — centre on today, reloading a window around it if today is
+   outside the currently-loaded range. */
+function tlToday(idx) {
+  const section = tlSection(idx);
+  if (!section || !section._tlData || section._tlBusy) return;
+  const todayStr = new Date().toISOString().slice(0,10);
+  if (todayStr >= section._tlData.from && todayStr <= section._tlData.to) {
+    tlCenterOn(section, todayStr);
+    return;
+  }
+  // Reload a window centred on today, preserving the current span + zoom.
+  const span = tlTotalDays(section._tlData);
+  const half = Math.floor(span / 2);
+  const t = new Date(todayStr + 'T00:00:00');
+  section._tlFrom = new Date(t.getTime() - half * _TL_DAY).toISOString().slice(0,10);
+  section._tlTo   = new Date(t.getTime() + (span - half) * _TL_DAY).toISOString().slice(0,10);
+  section._tlBusy = true;
+  tlFetch(section).then(() => {
+    drawTimeline(idx);
+    section._tlBusy = false;
+    tlCenterOn(section, todayStr);
+  }).catch(() => { section._tlBusy = false; });
 }
 
 function drawTimeline(idx) {
@@ -1147,6 +1188,7 @@ function drawTimeline(idx) {
       <button class="btn btn-ghost btn-sm tl-zoom-btn" title="Zoom in" onclick="tlZoom(${idx},'in')">+</button>
     </span>
     <button class="btn btn-ghost btn-sm" title="Fit to width" onclick="tlFit(${idx})">Fit</button>
+    <button class="btn btn-ghost btn-sm" title="Jump to today" onclick="tlToday(${idx})">Today</button>
   </div>`;
 
   if (!hasAny) {
