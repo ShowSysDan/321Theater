@@ -257,13 +257,16 @@
     <span id="presence-indicator" class="presence-indicator" hidden></span>
     <span class="save-status" id="save-status"></span>
     <button type="button" class="btn btn-ghost btn-sm" onclick="openHistory()" title="Version history">History</button>
-    {% if session.get('user_role') in ('admin','staff') or session.get('is_content_admin') %}
-    <button type="button" class="btn btn-ghost btn-sm" id="show-mode-btn"
+    {% if not restricted %}
+    <button type="button" class="btn btn-sm show-mode-toggle" id="show-mode-btn"
             data-show-mode="{{ show.show_mode or 'show' }}"
-            title="Toggle between Show mode and Event mode (changes the home-screen accent and email routing)"
+            title="Toggle between Show mode and Event mode — changes the home-screen accent and email routing"
             onclick="toggleShowMode(this, {{ show.id }})">
-      {{ 'Mode: Event' if (show.show_mode == 'event') else 'Mode: Show' }}
+      <span class="show-mode-dot"></span>
+      <span class="show-mode-label">{{ 'Event Mode' if (show.show_mode == 'event') else 'Show Mode' }}</span>
     </button>
+    {% endif %}
+    {% if session.get('user_role') in ('admin','staff') or session.get('is_content_admin') %}
     <button type="button" class="btn btn-ghost btn-sm" id="test-mode-btn"
             data-is-test="{{ '1' if show.is_test else '0' }}"
             title="Flag as test / demo so reports can exclude this show"

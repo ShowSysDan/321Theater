@@ -6229,15 +6229,15 @@ def toggle_show_test_mode(show_id):
 
 
 @app.route('/shows/<int:show_id>/mode', methods=['POST'])
-@staff_or_admin_required
+@show_advance_editor_required
 def toggle_show_mode(show_id):
     """Set a show's classification to 'show' or 'event'. Idempotent.
 
     Drives the home-screen accent color and the per-recipient show/event
     email filter. Any value other than 'event' is normalized to 'show'.
+    Available to any user with edit access to the show (not just admins);
+    read-only / restricted users are blocked by the decorator.
     """
-    if session.get('user_role') != 'admin' and not can_access_show(session['user_id'], show_id):
-        return jsonify({'success': False, 'error': 'Access denied.'}), 403
     data = request.get_json(force=True) or {}
     mode = 'event' if data.get('show_mode') == 'event' else 'show'
     db = get_db()

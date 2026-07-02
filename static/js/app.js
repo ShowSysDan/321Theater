@@ -2822,7 +2822,8 @@ async function toggleShowMode(btn, showId) {
     const j = await r.json();
     if (j.success) {
       btn.dataset.showMode = j.show_mode;
-      btn.textContent = j.show_mode === 'event' ? 'Mode: Event' : 'Mode: Show';
+      const label = btn.querySelector('.show-mode-label');
+      if (label) label.textContent = j.show_mode === 'event' ? 'Event Mode' : 'Show Mode';
     } else {
       alert(j.error || 'Failed to update show mode.');
     }
