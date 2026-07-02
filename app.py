@@ -1127,6 +1127,12 @@ def _populate_session_from_user(user, ts=None):
     session['viewer_doc_types']   = _decode_json_list(user.get('viewer_doc_types'))
     session['viewer_labor_overview'] = bool(user.get('viewer_labor_overview', 0))
     session['_role_checked_at']   = ts if ts is not None else datetime.utcnow().timestamp()
+    # If an admin is previewing via "view site as", this refresh just reloaded
+    # their REAL flags from the DB — re-apply the preview override so it doesn't
+    # silently expire on the periodic role refresh. Guarded on the saved real
+    # admin role so it never affects a genuine (non-preview) session.
+    if session.get('_view_as') and session.get('_real_role') == 'admin':
+        _apply_view_as_override(session['_view_as'])
 
 
 @app.before_request
@@ -3463,6 +3469,39 @@ def logout():
     return redirect(url_for('login'))
 
 
+# Supported "view site as" preview modes and the session flag profile each
+# emulates. Keep this the single source of truth so the /admin/view-as route,
+# the allow-list, and the role-refresh re-apply below can never drift apart.
+# Every mode drops to a non-admin role with all elevated flags off, then turns
+# on only the one flag that defines it (scheduler / asset_manager). 'staff'
+# previews the base staff role; note staff normally carries content-admin /
+# labor-scheduler powers, but the preview intentionally shows the plain role.
+_VIEW_AS_PROFILES = {
+    'readonly':      {'user_role': 'user',  'is_readonly': True},
+    'user':          {'user_role': 'user'},
+    'staff':         {'user_role': 'staff'},
+    'scheduler':     {'user_role': 'user',  'is_scheduler': True},
+    'asset_manager': {'user_role': 'user',  'is_asset_manager': True},
+}
+
+
+def _apply_view_as_override(view_as):
+    """Overwrite the live permission session keys to emulate `view_as`.
+
+    Shared by the view-as route and the periodic role refresh so a preview
+    survives the 5-minute re-read from the DB instead of silently expiring.
+    Unknown modes are ignored (leave the session untouched)."""
+    profile = _VIEW_AS_PROFILES.get(view_as)
+    if profile is None:
+        return
+    session['user_role']          = profile.get('user_role', 'user')
+    session['is_readonly']        = profile.get('is_readonly', False)
+    session['is_content_admin']   = profile.get('is_content_admin', False)
+    session['is_labor_scheduler'] = profile.get('is_labor_scheduler', False)
+    session['is_scheduler']       = profile.get('is_scheduler', False)
+    session['is_asset_manager']   = profile.get('is_asset_manager', False)
+
+
 @app.route('/admin/view-as', methods=['POST'])
 @login_required
 def admin_view_as():
@@ -3475,7 +3514,7 @@ def admin_view_as():
         return jsonify({'error': 'Forbidden'}), 403
     data = request.get_json() or {}
     view_as = data.get('role', '')
-    if view_as not in ('staff', 'user', 'readonly'):
+    if view_as not in _VIEW_AS_PROFILES:
         return jsonify({'error': 'Invalid role'}), 400
     # Save real values if not already saved
     if '_real_role' not in session:
@@ -3487,27 +3526,7 @@ def admin_view_as():
         session['_real_is_asset_manager'] = session.get('is_asset_manager', False)
     session['_view_as'] = view_as
     syslog_logger.info(f"ADMIN_VIEW_AS view_as={view_as} by={session.get('username')}")
-    if view_as == 'readonly':
-        session['user_role'] = 'user'
-        session['is_readonly'] = True
-        session['is_content_admin'] = False
-        session['is_labor_scheduler'] = False
-        session['is_scheduler'] = False
-        session['is_asset_manager'] = False
-    elif view_as == 'user':
-        session['user_role'] = 'user'
-        session['is_readonly'] = False
-        session['is_content_admin'] = False
-        session['is_labor_scheduler'] = False
-        session['is_scheduler'] = False
-        session['is_asset_manager'] = False
-    elif view_as == 'staff':
-        session['user_role'] = 'staff'
-        session['is_readonly'] = False
-        session['is_content_admin'] = False
-        session['is_labor_scheduler'] = False
-        session['is_scheduler'] = False
-        session['is_asset_manager'] = False
+    _apply_view_as_override(view_as)
     return jsonify({'success': True, 'view_as': view_as})
 
 
