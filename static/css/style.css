@@ -810,6 +810,31 @@ html[data-theme="light"] select.field-input {
 .today-card-tag.tag-event {
   background: rgba(20,184,166,.2); color: var(--event);
 }
+/* Show/Event mode toggle on the show-page header — color-coded to the same
+   accent the home cards use, so the current mode reads at a glance. Orange
+   (accent) = Show, teal (event) = Event. */
+.show-mode-toggle {
+  display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid var(--accent-dim);
+  background: var(--accent-glow);
+  color: var(--accent);
+  font-weight: 600;
+}
+.show-mode-toggle:hover { background: rgba(245,127,32,.22); }
+.show-mode-toggle .show-mode-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 0 3px rgba(245,127,32,.18);
+  flex-shrink: 0;
+}
+.show-mode-toggle[data-show-mode="event"] {
+  border-color: var(--event-dim);
+  background: rgba(20,184,166,.16);
+  color: var(--event);
+}
+.show-mode-toggle[data-show-mode="event"]:hover { background: rgba(20,184,166,.26); }
+.show-mode-toggle[data-show-mode="event"] .show-mode-dot {
+  background: var(--event); box-shadow: 0 0 0 3px rgba(20,184,166,.22);
+}
 
 /* ── PDF-Form Field Type (advance form) ──────────────────────────── */
 .adv-pdf-form-block {
