@@ -118,8 +118,12 @@
           {% set _vf_list = c.venue_filter | from_json %}
           <tr data-id="{{ c.id }}" data-dept="{{ c.department }}" data-recipient="{{ '1' if c.report_recipient else '0' }}" data-venue-filter="{{ c.venue_filter or '' }}" data-mode-filter="{{ c.mode_filter or '' }}">
             <td class="contact-name">
-              <div style="font-weight:500" data-field="name">
-                {{ c.name }}
+              <div style="font-weight:500">
+                <span data-field="name">{{ c.name }}</span>
+                {% if c.user_id %}
+                <span style="font-size:9px;background:rgba(0,170,255,.15);color:#5db8ff;padding:1px 5px;border-radius:3px;letter-spacing:.05em;margin-left:4px;vertical-align:middle"
+                      title="Auto-synced from system user — name and email are kept in sync with the user account">USER</span>
+                {% endif %}
               </div>
               {% if c.title %}<div class="text-dim" style="font-size:11px" data-field="title">{{ c.title }}</div>{% endif %}
               {% if c.email %}<div style="font-size:11px;color:var(--accent)" data-field="email"><a href="mailto:{{ c.email }}" style="color:var(--accent)">{{ c.email }}</a></div>{% endif %}
