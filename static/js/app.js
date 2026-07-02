@@ -2808,6 +2808,31 @@ async function savePdfFormFiller(isAuto) {
   }
 }
 
+async function toggleShowMode(btn, showId) {
+  const cur = btn.dataset.showMode === 'event' ? 'event' : 'show';
+  const next = cur === 'event' ? 'show' : 'event';
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/shows/${showId}/mode`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify({show_mode: next})
+    });
+    const j = await r.json();
+    if (j.success) {
+      btn.dataset.showMode = j.show_mode;
+      btn.textContent = j.show_mode === 'event' ? 'Mode: Event' : 'Mode: Show';
+    } else {
+      alert(j.error || 'Failed to update show mode.');
+    }
+  } catch (e) {
+    alert('Network error.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function toggleShowTestMode(btn, showId) {
   const cur = btn.dataset.isTest === '1';
   const next = !cur;

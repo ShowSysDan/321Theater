@@ -86,6 +86,9 @@ CREATE TABLE IF NOT EXISTS shows (
     -- Prism event status tag ('Hold', 'Confirmed', ...) for shows imported
     -- from Prism. Kept current by the Prism sync. NULL = not a Prism import.
     prism_status TEXT DEFAULT NULL,
+    -- Per-show classification: 'show' (default) or 'event'. Drives the home
+    -- screen accent color and the per-recipient show/event email filter.
+    show_mode TEXT DEFAULT 'show',
     created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     last_saved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     last_saved_at TIMESTAMP,
@@ -155,6 +158,9 @@ CREATE TABLE IF NOT EXISTS contacts (
     -- JSON list of venue names this contact should receive emails for.
     -- NULL or empty list = no restriction (all venues, current default).
     venue_filter        TEXT DEFAULT NULL,
+    -- Show/event email filter: NULL or 'both' = every show (current default),
+    -- 'show' = only shows tagged show mode, 'event' = only event-mode shows.
+    mode_filter         TEXT DEFAULT NULL,
     -- If non-NULL, this contact is auto-synced from a system user account.
     -- Editing the linked user updates name + email here. Deleting the user
     -- clears the link but leaves the contact row in place.
@@ -1693,6 +1699,8 @@ def migrate_db():
         'ALTER TABLE contacts ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL',
         'ALTER TABLE shows ADD COLUMN is_test INTEGER DEFAULT 0',
         'ALTER TABLE shows ADD COLUMN prism_status TEXT DEFAULT NULL',
+        "ALTER TABLE shows ADD COLUMN show_mode TEXT DEFAULT 'show'",
+        'ALTER TABLE contacts ADD COLUMN mode_filter TEXT DEFAULT NULL',
         'ALTER TABLE schedule_meta_fields ADD COLUMN show_in_contacts INTEGER DEFAULT 0',
         "ALTER TABLE labor_requests ADD COLUMN break_start TEXT DEFAULT ''",
         "ALTER TABLE labor_requests ADD COLUMN break_end TEXT DEFAULT ''",
@@ -2579,6 +2587,9 @@ CREATE TABLE IF NOT EXISTS shows (
     -- Prism event status tag ('Hold', 'Confirmed', ...) for shows imported
     -- from Prism. Kept current by the Prism sync. NULL = not a Prism import.
     prism_status TEXT DEFAULT NULL,
+    -- Per-show classification: 'show' (default) or 'event'. Drives the home
+    -- screen accent color and the per-recipient show/event email filter.
+    show_mode TEXT DEFAULT 'show',
     created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     last_saved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     last_saved_at TIMESTAMP,
@@ -2646,6 +2657,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     postnotes_recipient  INTEGER DEFAULT 0,
     system_recipient     INTEGER DEFAULT 0,
     venue_filter         TEXT DEFAULT NULL,
+    mode_filter          TEXT DEFAULT NULL,
     user_id              INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -3781,6 +3793,8 @@ def migrate_db_postgres():
             f'ALTER TABLE "{app_schema}".contacts ADD COLUMN IF NOT EXISTS user_id INTEGER',
             f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS is_test INTEGER DEFAULT 0',
             f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS prism_status TEXT DEFAULT NULL',
+            f"ALTER TABLE \"{app_schema}\".shows ADD COLUMN IF NOT EXISTS show_mode TEXT DEFAULT 'show'",
+            f'ALTER TABLE "{app_schema}".contacts ADD COLUMN IF NOT EXISTS mode_filter TEXT DEFAULT NULL',
             f'ALTER TABLE "{app_schema}".schedule_meta_fields ADD COLUMN IF NOT EXISTS show_in_contacts INTEGER DEFAULT 0',
             f"ALTER TABLE \"{app_schema}\".labor_requests ADD COLUMN IF NOT EXISTS break_start TEXT DEFAULT ''",
             f"ALTER TABLE \"{app_schema}\".labor_requests ADD COLUMN IF NOT EXISTS break_end TEXT DEFAULT ''",

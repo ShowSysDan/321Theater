@@ -116,7 +116,7 @@
         <tbody>
           {% for c in contacts %}
           {% set _vf_list = c.venue_filter | from_json %}
-          <tr data-id="{{ c.id }}" data-dept="{{ c.department }}" data-recipient="{{ '1' if c.report_recipient else '0' }}" data-venue-filter="{{ c.venue_filter or '' }}">
+          <tr data-id="{{ c.id }}" data-dept="{{ c.department }}" data-recipient="{{ '1' if c.report_recipient else '0' }}" data-venue-filter="{{ c.venue_filter or '' }}" data-mode-filter="{{ c.mode_filter or '' }}">
             <td class="contact-name">
               <div style="font-weight:500" data-field="name">
                 {{ c.name }}
@@ -130,6 +130,11 @@
               {% if _vf_list %}
               <div style="font-size:10px;color:var(--text-dim);margin-top:3px" title="Only receives emails for: {{ _vf_list | join(', ') }}">
                 <span style="background:rgba(245,127,32,.12);color:var(--accent);padding:1px 5px;border-radius:3px;font-weight:600">VENUES: {{ _vf_list | length }}</span>
+              </div>
+              {% endif %}
+              {% if c.mode_filter in ('show', 'event') %}
+              <div style="font-size:10px;margin-top:3px" title="Only receives advance / production-schedule emails for {{ c.mode_filter }}-mode shows">
+                <span style="background:rgba(20,184,166,.14);color:var(--event);padding:1px 5px;border-radius:3px;font-weight:600">{{ c.mode_filter|upper }}S ONLY</span>
               </div>
               {% endif %}
             </td>
@@ -1886,6 +1891,17 @@
           {% endif %}
         </div>
       </div>
+      <div class="field-group" style="margin-top:4px">
+        <div class="field-label" style="margin-bottom:6px;display:flex;align-items:center;gap:8px">
+          SHOW / EVENT FILTER
+          <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-dim);font-size:11px">— limits advance &amp; production-schedule emails</span>
+        </div>
+        <select id="edit-mode-filter" class="field-input">
+          <option value="">Both shows &amp; events (default)</option>
+          <option value="show">Shows only</option>
+          <option value="event">Events only</option>
+        </select>
+      </div>
       {% endif %}
     </div>
     <div class="modal-footer">
@@ -2435,6 +2451,12 @@ function editContact(btn, id) {
     cb.checked = allowed.includes(cb.value);
   });
 
+  const modeSel = document.getElementById('edit-mode-filter');
+  if (modeSel) {
+    const mf = row.dataset.modeFilter || '';
+    modeSel.value = (mf === 'show' || mf === 'event') ? mf : '';
+  }
+
   document.getElementById('edit-modal').classList.remove('hidden');
 }
 
@@ -2459,6 +2481,8 @@ async function saveContact() {
     // Empty list intentionally means "no restriction" — backend normalises
     // it to NULL so every venue is allowed.
     venue_filter: venueFilter,
+    // '' = both shows & events (backend normalises to NULL).
+    mode_filter: document.getElementById('edit-mode-filter')?.value || '',
   };
   const resp = await fetch(`/settings/contacts/${id}/edit`, {
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)

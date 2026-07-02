@@ -17,6 +17,8 @@
   --brand-navy:  #194980;
   --brand-red:   #F04E23;
   --blue:        #4A9EFF;
+  --event:       #14B8A6;   /* teal – Event-mode accent (distinct from blue/training + purple/test) */
+  --event-dim:   #0F8A7E;
   --green:       #22C55E;
   --red:         #EF4444;
   --yellow:      #EAB308;
@@ -778,6 +780,37 @@ html[data-theme="light"] select.field-input {
 }
 .show-card.show-card-test { border-style: dashed; }
 
+/* ── Event-Mode Accent ───────────────────────────────────────────────
+   Event-mode shows swap the orange home accent for teal. Overriding the
+   local --accent/--accent-dim means the card's left border + hover state
+   (which already resolve through those vars) pick up the event color with
+   no per-property rules. Teal is used because blue = training indicator
+   and purple = the TEST badge. */
+.event-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: .06em;
+  background: rgba(20,184,166,.18);
+  color: var(--event);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.show-card.show-card-event {
+  --accent: var(--event);
+  --accent-dim: var(--event-dim);
+}
+.today-card.today-card-event {
+  --accent: var(--event);
+  --accent-dim: var(--event-dim);
+  border-left: 3px solid var(--event-dim);
+}
+.today-card-tag.tag-event {
+  background: rgba(20,184,166,.2); color: var(--event);
+}
+
 /* ── PDF-Form Field Type (advance form) ──────────────────────────── */
 .adv-pdf-form-block {
   background: rgba(0,170,255,0.05);
@@ -1392,6 +1425,8 @@ html[data-theme="light"] {
   --brand-navy:  #194980;
   --brand-red:   #D03818;
   --blue:        #1d6ed8;
+  --event:       #0d9488;   /* teal – Event-mode accent (light theme) */
+  --event-dim:   #0a7268;
   --green:       #16a34a;
   --red:         #dc2626;
   --yellow:      #ca8a04;

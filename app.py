@@ -1127,6 +1127,12 @@ def _populate_session_from_user(user, ts=None):
     session['viewer_doc_types']   = _decode_json_list(user.get('viewer_doc_types'))
     session['viewer_labor_overview'] = bool(user.get('viewer_labor_overview', 0))
     session['_role_checked_at']   = ts if ts is not None else datetime.utcnow().timestamp()
+    # If an admin is previewing via "view site as", this refresh just reloaded
+    # their REAL flags from the DB — re-apply the preview override so it doesn't
+    # silently expire on the periodic role refresh. Guarded on the saved real
+    # admin role so it never affects a genuine (non-preview) session.
+    if session.get('_view_as') and session.get('_real_role') == 'admin':
+        _apply_view_as_override(session['_view_as'])
 
 
 @app.before_request
@@ -1905,17 +1911,24 @@ def _pdf_email_recipients(db, show_id, pdf_type):
         'schedule':  'production_recipient',
         'postnotes': 'postnotes_recipient',
     }.get(pdf_type, 'report_recipient')
-    show_venue_row = db.execute(
-        'SELECT venue FROM shows WHERE id=?', (show_id,)
+    show_row = db.execute(
+        'SELECT venue, show_mode FROM shows WHERE id=?', (show_id,)
     ).fetchone()
-    show_venue = (show_venue_row['venue'] if show_venue_row else '') or ''
+    show_venue = (show_row['venue'] if show_row else '') or ''
+    show_mode = (show_row['show_mode'] if show_row else '') or 'show'
     rows = db.execute(
-        f"SELECT email, venue_filter FROM contacts "
+        f"SELECT email, venue_filter, mode_filter FROM contacts "
         f"WHERE ({recip_col}=1 OR report_recipient=1) AND email != '' "
         f"ORDER BY name"
     ).fetchall()
     recipients = []
     for r in rows:
+        # Show/event filter: NULL/'both' = every show; otherwise the contact
+        # only receives emails for shows whose mode matches. A blank/unknown
+        # filter fails open (contact kept) so a bad value never drops a send.
+        mf = (r['mode_filter'] or '').strip().lower()
+        if mf in ('show', 'event') and mf != show_mode:
+            continue
         raw = r['venue_filter']
         # Empty / missing → no venue filter, contact gets every show.
         if not raw or str(raw).strip() in ('', '[]', 'null'):
@@ -3456,6 +3469,39 @@ def logout():
     return redirect(url_for('login'))
 
 
+# Supported "view site as" preview modes and the session flag profile each
+# emulates. Keep this the single source of truth so the /admin/view-as route,
+# the allow-list, and the role-refresh re-apply below can never drift apart.
+# Every mode drops to a non-admin role with all elevated flags off, then turns
+# on only the one flag that defines it (scheduler / asset_manager). 'staff'
+# previews the base staff role; note staff normally carries content-admin /
+# labor-scheduler powers, but the preview intentionally shows the plain role.
+_VIEW_AS_PROFILES = {
+    'readonly':      {'user_role': 'user',  'is_readonly': True},
+    'user':          {'user_role': 'user'},
+    'staff':         {'user_role': 'staff'},
+    'scheduler':     {'user_role': 'user',  'is_scheduler': True},
+    'asset_manager': {'user_role': 'user',  'is_asset_manager': True},
+}
+
+
+def _apply_view_as_override(view_as):
+    """Overwrite the live permission session keys to emulate `view_as`.
+
+    Shared by the view-as route and the periodic role refresh so a preview
+    survives the 5-minute re-read from the DB instead of silently expiring.
+    Unknown modes are ignored (leave the session untouched)."""
+    profile = _VIEW_AS_PROFILES.get(view_as)
+    if profile is None:
+        return
+    session['user_role']          = profile.get('user_role', 'user')
+    session['is_readonly']        = profile.get('is_readonly', False)
+    session['is_content_admin']   = profile.get('is_content_admin', False)
+    session['is_labor_scheduler'] = profile.get('is_labor_scheduler', False)
+    session['is_scheduler']       = profile.get('is_scheduler', False)
+    session['is_asset_manager']   = profile.get('is_asset_manager', False)
+
+
 @app.route('/admin/view-as', methods=['POST'])
 @login_required
 def admin_view_as():
@@ -3468,7 +3514,7 @@ def admin_view_as():
         return jsonify({'error': 'Forbidden'}), 403
     data = request.get_json() or {}
     view_as = data.get('role', '')
-    if view_as not in ('staff', 'user', 'readonly'):
+    if view_as not in _VIEW_AS_PROFILES:
         return jsonify({'error': 'Invalid role'}), 400
     # Save real values if not already saved
     if '_real_role' not in session:
@@ -3480,27 +3526,7 @@ def admin_view_as():
         session['_real_is_asset_manager'] = session.get('is_asset_manager', False)
     session['_view_as'] = view_as
     syslog_logger.info(f"ADMIN_VIEW_AS view_as={view_as} by={session.get('username')}")
-    if view_as == 'readonly':
-        session['user_role'] = 'user'
-        session['is_readonly'] = True
-        session['is_content_admin'] = False
-        session['is_labor_scheduler'] = False
-        session['is_scheduler'] = False
-        session['is_asset_manager'] = False
-    elif view_as == 'user':
-        session['user_role'] = 'user'
-        session['is_readonly'] = False
-        session['is_content_admin'] = False
-        session['is_labor_scheduler'] = False
-        session['is_scheduler'] = False
-        session['is_asset_manager'] = False
-    elif view_as == 'staff':
-        session['user_role'] = 'staff'
-        session['is_readonly'] = False
-        session['is_content_admin'] = False
-        session['is_labor_scheduler'] = False
-        session['is_scheduler'] = False
-        session['is_asset_manager'] = False
+    _apply_view_as_override(view_as)
     return jsonify({'success': True, 'view_as': view_as})
 
 
@@ -3715,6 +3741,7 @@ def dashboard():
                 'name': s['name'],
                 'venue': s.get('venue') or '',
                 'is_test': s.get('is_test') or 0,
+                'show_mode': s.get('show_mode') or 'show',
                 'prism_status': s.get('prism_status'),
                 'pm': pm_by_show.get(s['id'], ''),
                 'crew_calls': sorted(calls_by_show.get(s['id'], set())),
@@ -6201,6 +6228,29 @@ def toggle_show_test_mode(show_id):
     return jsonify({'success': True, 'is_test': bool(is_test)})
 
 
+@app.route('/shows/<int:show_id>/mode', methods=['POST'])
+@staff_or_admin_required
+def toggle_show_mode(show_id):
+    """Set a show's classification to 'show' or 'event'. Idempotent.
+
+    Drives the home-screen accent color and the per-recipient show/event
+    email filter. Any value other than 'event' is normalized to 'show'.
+    """
+    if session.get('user_role') != 'admin' and not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    data = request.get_json(force=True) or {}
+    mode = 'event' if data.get('show_mode') == 'event' else 'show'
+    db = get_db()
+    db.execute('UPDATE shows SET show_mode=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+               (mode, show_id))
+    log_audit(db, 'SHOW_MODE', 'show', show_id, show_id=show_id,
+              detail=f'show_mode={mode}')
+    db.commit(); db.close()
+    syslog_logger.info(f"SHOW_MODE show_id={show_id} show_mode={mode} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'show_mode': mode})
+
+
 @app.route('/settings/shows/bulk-archive', methods=['POST'])
 @admin_required
 def bulk_archive_shows():
@@ -6983,6 +7033,16 @@ def settings():
                            user=get_current_user())
 
 
+def _normalize_mode_filter(raw):
+    """Normalize a contact's show/event email filter for storage.
+
+    Returns 'show' or 'event' for a real restriction, or None for "both"
+    (no restriction, the default). Anything unrecognized → None so a stray
+    value never silently narrows who gets a send."""
+    v = (raw or '').strip().lower()
+    return v if v in ('show', 'event') else None
+
+
 def _normalize_venue_filter(raw):
     """Accept a list/JSON-string/empty value and return a JSON string suitable
     for storage in contacts.venue_filter, or None when there's no restriction.
@@ -7023,8 +7083,8 @@ def add_contact():
     cur = db.execute("""
         INSERT INTO contacts (name, title, department, phone, email,
                               report_recipient, advance_recipient, production_recipient,
-                              postnotes_recipient, venue_filter)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              postnotes_recipient, venue_filter, mode_filter)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (name,
           request.form.get('title','').strip(),
           request.form.get('department','').strip(),
@@ -7034,7 +7094,7 @@ def add_contact():
           1 if request.form.get('advance_recipient') else 0,
           1 if request.form.get('production_recipient') else 0,
           1 if request.form.get('postnotes_recipient') else 0,
-          None))
+          None, None))
     cid_new = cur.lastrowid
     log_audit_change(db, 'CONTACT_ADD', 'contact', cid_new, detail=name,
                      table='contacts')
@@ -7064,6 +7124,9 @@ def edit_contact(cid):
     if 'venue_filter' in data:
         sets.append('venue_filter=?')
         params.append(_normalize_venue_filter(data.get('venue_filter')))
+    if 'mode_filter' in data:
+        sets.append('mode_filter=?')
+        params.append(_normalize_mode_filter(data.get('mode_filter')))
     params.append(cid)
     db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=?", params)
     after = _snapshot_row(db, 'contacts', cid)

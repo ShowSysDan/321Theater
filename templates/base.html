@@ -159,10 +159,12 @@
         </button>
         {% else %}
         <div style="font-size:9px;color:var(--text-dim);margin-bottom:4px;letter-spacing:.06em;text-align:center">VIEW SITE AS</div>
-        <div style="display:flex;gap:4px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
           <button onclick="setViewAs('staff')" class="view-as-btn" title="Staff">Staff</button>
           <button onclick="setViewAs('user')" class="view-as-btn" title="Regular User">User</button>
           <button onclick="setViewAs('readonly')" class="view-as-btn" title="Read-only">R/O</button>
+          <button onclick="setViewAs('scheduler')" class="view-as-btn" title="Labor Scheduler (is_scheduler)">Scheduler</button>
+          <button onclick="setViewAs('asset_manager')" class="view-as-btn" title="Asset Manager (is_asset_manager)">Assets</button>
         </div>
         {% endif %}
       </div>
@@ -174,7 +176,7 @@
             <div class="user-name">{{ user.display_name }}</div>
             <div class="user-role">
               {% if session.get('_view_as') %}
-              <span style="color:#F6AD55">viewing as {{ session['_view_as'] }}</span>
+              <span style="color:#F6AD55">viewing as {{ session['_view_as'].replace('_',' ') }}</span>
               {% else %}
               {{ user.role }}
               {% endif %}
