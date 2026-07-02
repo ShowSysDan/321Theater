@@ -47,11 +47,12 @@
   </div>
   <div class="today-box-grid">
     {% for t in today_shows %}
-    <a class="today-card{% if t.is_test %} today-card-test{% endif %}" href="{{ url_for('show_page', show_id=t.id, tab='advance') }}">
+    <a class="today-card{% if t.is_test %} today-card-test{% endif %}{% if t.show_mode == 'event' %} today-card-event{% endif %}" href="{{ url_for('show_page', show_id=t.id, tab='advance') }}">
       <div class="today-card-tags">
         {% for tag in t.tags %}
         <span class="today-card-tag tag-{{ tag|replace(' ', '-')|lower }}">{{ tag }}</span>
         {% endfor %}
+        {% if t.show_mode == 'event' %}<span class="today-card-tag tag-event">EVENT</span>{% endif %}
         {% if t.is_test %}<span class="today-card-tag tag-test">TEST</span>{% endif %}
         {% if t.prism_status %}<span class="prism-tag prism-tag-{{ t.prism_status|lower|replace(' ', '') }}" style="margin-left:0" title="Prism event status — kept current by the Prism sync">{{ t.prism_status|upper }}</span>{% endif %}
       </div>
@@ -132,12 +133,13 @@
     </div>
     <div class="venue-col-body">
       {% for s in shows %}
-      <a class="show-card{% if s.is_test %} show-card-test{% endif %}" href="{{ url_for('show_page', show_id=s.id, tab='advance') }}"
+      <a class="show-card{% if s.is_test %} show-card-test{% endif %}{% if s.show_mode == 'event' %} show-card-event{% endif %}" href="{{ url_for('show_page', show_id=s.id, tab='advance') }}"
          data-search="{{ (s.name ~ ' ' ~ (s.venue or ''))|lower }}" data-date="{{ s.show_date or '' }}"
          data-is-test="{{ '1' if s.is_test else '0' }}">
         <div class="show-card-name">
           {{ s.name }}
           {% if s.prism_status %}<span class="prism-tag prism-tag-{{ s.prism_status|lower|replace(' ', '') }}" title="Prism event status — kept current by the Prism sync">{{ s.prism_status|upper }}</span>{% endif %}
+          {% if s.show_mode == 'event' %}<span class="event-badge" title="Event mode">EVENT</span>{% endif %}
           {% if s.is_test %}<span class="test-badge" title="Test / demo — excluded from reports">TEST</span>{% endif %}
         </div>
         <div class="show-card-dates">
