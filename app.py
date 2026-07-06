@@ -14827,9 +14827,19 @@ def _compute_locked_price(daily_rate, weekly_rate, rental_start, rental_end,
 
     Consumables are billed at a FLAT rate per item — `rental_cost` as-is, with
     no per-day or per-week multiplication — since they're bought/used, not
-    rented for a window. Everything else: weekly when applicable, else
-    daily × days."""
-    daily = float(daily_rate or 0)
+    rented for a window.
+
+    Otherwise "smart-cap" rental pricing (per unit, over the rental window):
+      • BOTH a daily and weekly rate — each whole week bills at the weekly
+        rate, and the leftover days bill daily but are capped at one more
+        week, so the client never pays more than the weekly rate for any
+        7-day block. e.g. $100/day + $400/wk → 6 days = $400, 10 days = $700.
+      • ONLY a weekly rate (daily rate is 0) — bill per started week, i.e.
+        weekly × ceil(days / 7). A 3-day rental of a weekly-only item costs
+        one week rather than $0.
+      • ONLY a daily rate — daily × days."""
+    daily  = float(daily_rate or 0)
+    weekly = float(weekly_rate or 0)
     if is_consumable:
         return daily
     try:
@@ -14838,9 +14848,14 @@ def _compute_locked_price(daily_rate, weekly_rate, rental_start, rental_end,
         days = max(1, (d_end - d_start).days + 1) if d_start and d_end else 1
     except (ValueError, TypeError):
         days = 1
-    weekly = float(weekly_rate or 0)
-    if weekly > 0 and days >= 7:
-        return weekly * math.ceil(days / 7)
+    if weekly > 0:
+        if daily > 0:
+            # Whole weeks at the weekly rate; leftover days billed daily but
+            # capped at one more week — no 7-day block ever exceeds weekly.
+            full_weeks, rem_days = divmod(days, 7)
+            return full_weeks * weekly + min(rem_days * daily, weekly)
+        # Weekly-only rate: charge per started week (never free under 7 days).
+        return math.ceil(days / 7) * weekly
     return daily * days
 
 
