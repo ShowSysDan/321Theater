@@ -14816,16 +14816,24 @@ def _format_shortage_error(system_name, shortages):
             f'short on: {parts}.')
 
 
-def _compute_locked_price(daily_rate, weekly_rate, rental_start, rental_end):
-    """Apply the rate-card formula used at add-time: weekly when applicable,
-    else daily × days. Returns a float."""
+def _compute_locked_price(daily_rate, weekly_rate, rental_start, rental_end,
+                          is_consumable=False):
+    """Apply the rate-card formula used at add-time. Returns a per-unit float
+    (the line total is this × quantity elsewhere).
+
+    Consumables are billed at a FLAT rate per item — `rental_cost` as-is, with
+    no per-day or per-week multiplication — since they're bought/used, not
+    rented for a window. Everything else: weekly when applicable, else
+    daily × days."""
+    daily = float(daily_rate or 0)
+    if is_consumable:
+        return daily
     try:
         d_start = date.fromisoformat(str(rental_start)) if rental_start else None
         d_end   = date.fromisoformat(str(rental_end))   if rental_end   else None
         days = max(1, (d_end - d_start).days + 1) if d_start and d_end else 1
     except (ValueError, TypeError):
         days = 1
-    daily = float(daily_rate or 0)
     weekly = float(weekly_rate or 0)
     if weekly > 0 and days >= 7:
         return weekly * math.ceil(days / 7)
@@ -15301,7 +15309,7 @@ def show_asset_add(show_id):
     rental_start = data.get('rental_start') or default_start
     rental_end   = data.get('rental_end')   or default_end
 
-    type_row = db.execute('SELECT rental_cost, weekly_rate, hide_from_pm, allow_unit_selection, is_system, is_package, name FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
+    type_row = db.execute('SELECT rental_cost, weekly_rate, hide_from_pm, allow_unit_selection, is_system, is_package, is_consumable, name FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
 
     # If a specific unit was requested, validate it belongs to this type, is
     # bookable, and isn't already pinned to an overlapping show. Specific-unit
@@ -15350,7 +15358,8 @@ def show_asset_add(show_id):
         locked_price = float(data['locked_price'])
     elif type_row:
         locked_price = _compute_locked_price(
-            type_row['rental_cost'], type_row['weekly_rate'], rental_start, rental_end
+            type_row['rental_cost'], type_row['weekly_rate'], rental_start, rental_end,
+            is_consumable=type_row['is_consumable']
         )
     else:
         locked_price = 0.0
