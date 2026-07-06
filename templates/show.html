@@ -1002,6 +1002,12 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           <input type="text" id="asset-add-price" class="field-input" placeholder="0.00" readonly style="background:var(--bg);cursor:not-allowed;opacity:.7">
           <div style="font-size:10px;color:var(--text-dim);margin-top:2px">Auto-filled from rate card · price overrides happen in the approval portal</div>
         </div>
+        <div id="asset-add-breakdown" class="field-group" style="grid-column:span 2;display:none;margin:-4px 0 0">
+          <div style="font-size:11px;color:var(--text-dim);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:7px 10px;line-height:1.5">
+            <span id="asset-add-breakdown-detail"></span>
+            <span id="asset-add-breakdown-total" style="font-weight:600;color:var(--text)"></span>
+          </div>
+        </div>
         <div class="field-group">
           <label class="field-label">RENTAL START</label>
           <input type="date" id="asset-add-start" class="field-input">
@@ -1068,6 +1074,72 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
   let _allAssetTypes = null;
   let _currentAssetTypeId = null;
   let _currentAvailData = null;
+  let _currentAssetRate = {daily: 0, weekly: 0, isConsumable: false};
+
+  // Smart-cap rate-card math — mirrors _compute_locked_price() in app.py so the
+  // add-asset preview matches what the server will lock in. Returns the per-unit
+  // price plus a human-readable breakdown of how it was reached.
+  function _assetPriceBreakdown(daily, weekly, start, end, isConsumable, qty) {
+    daily  = Number(daily)  || 0;
+    weekly = Number(weekly) || 0;
+    qty    = Math.max(1, parseInt(qty, 10) || 1);
+    const money = v => `$${Number(v).toFixed(2)}`;
+    if (isConsumable) {
+      return {unit: daily, total: daily * qty,
+              detail: `${money(daily)}/item`};
+    }
+    let days = 1;
+    if (start && end) {
+      const d1 = new Date(start), d2 = new Date(end);
+      if (!isNaN(d1) && !isNaN(d2)) days = Math.max(1, Math.round((d2 - d1) / 86400000) + 1);
+    }
+    const dayLbl = `${days} day${days === 1 ? '' : 's'}`;
+    let unit, detail;
+    if (weekly > 0 && daily > 0) {
+      const fullWeeks = Math.floor(days / 7);
+      const rem = days % 7;
+      const remRaw = rem * daily;
+      const remCharge = Math.min(remRaw, weekly);
+      unit = fullWeeks * weekly + remCharge;
+      const parts = [];
+      if (fullWeeks) parts.push(`${fullWeeks} wk × ${money(weekly)}`);
+      if (rem) {
+        parts.push(remRaw >= weekly
+          ? `${rem} day${rem === 1 ? '' : 's'} capped at ${money(weekly)}`
+          : `${rem} day${rem === 1 ? '' : 's'} × ${money(daily)}`);
+      }
+      detail = `${dayLbl}: ${parts.join(' + ')}`;
+    } else if (weekly > 0) {
+      const weeks = Math.ceil(days / 7);
+      unit = weeks * weekly;
+      detail = `${dayLbl}: ${weeks} wk × ${money(weekly)} (weekly rate)`;
+    } else {
+      unit = daily * days;
+      detail = `${dayLbl} × ${money(daily)}`;
+    }
+    return {unit, total: unit * qty, detail};
+  }
+
+  // Recompute the locked-price field + breakdown from the current rate card,
+  // dates and quantity. Wired to change on the date/qty inputs.
+  window._recalcAssetPrice = function() {
+    const r = _currentAssetRate || {daily: 0, weekly: 0, isConsumable: false};
+    const start = document.getElementById('asset-add-start')?.value || '';
+    const end   = document.getElementById('asset-add-end')?.value   || '';
+    const qty   = parseInt(document.getElementById('asset-add-qty')?.value, 10) || 1;
+    const b = _assetPriceBreakdown(r.daily, r.weekly, start, end, r.isConsumable, qty);
+    const priceEl = document.getElementById('asset-add-price');
+    if (priceEl) priceEl.value = b.unit.toFixed(2);
+    const wrap = document.getElementById('asset-add-breakdown');
+    const detailEl = document.getElementById('asset-add-breakdown-detail');
+    const totalEl = document.getElementById('asset-add-breakdown-total');
+    if (wrap && detailEl && totalEl) {
+      detailEl.textContent = b.detail + (qty > 1 ? ` × ${qty} units` : '');
+      totalEl.textContent = qty > 1 || b.total !== b.unit
+        ? `  =  $${b.total.toFixed(2)}` : '';
+      wrap.style.display = (b.unit > 0 || b.total > 0) ? '' : 'none';
+    }
+  };
 
   // Load asset types lazily
   async function _loadAssetTypes() {
@@ -1301,23 +1373,14 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     document.getElementById('asset-add-start').value = defaultStart;
     document.getElementById('asset-add-end').value   = defaultEnd;
 
-    // Smart price. Consumables are a flat rate per item (no day/week math);
-    // everything else uses the weekly rate if ≥7 days, else daily × days.
-    const dailyRate  = Number(price)      || 0;
-    const wkRate     = Number(weeklyRate) || 0;
-    let calcPrice = dailyRate;
-    if (!isConsumable && defaultStart && defaultEnd) {
-      try {
-        const d1 = new Date(defaultStart), d2 = new Date(defaultEnd);
-        const days = Math.max(1, Math.round((d2 - d1) / 86400000) + 1);
-        if (wkRate > 0 && days >= 7) {
-          calcPrice = wkRate * Math.ceil(days / 7);
-        } else {
-          calcPrice = dailyRate * days;
-        }
-      } catch(e) { calcPrice = dailyRate; }
-    }
-    document.getElementById('asset-add-price').value = calcPrice.toFixed(2);
+    // Remember this type's rate card so the price + breakdown can recompute
+    // live as the dates / quantity change (see _recalcAssetPrice).
+    _currentAssetRate = {
+      daily:       Number(price)      || 0,
+      weekly:      Number(weeklyRate) || 0,
+      isConsumable: !!isConsumable,
+    };
+    _recalcAssetPrice();
 
     closeAssetSearch();
     document.getElementById('asset-add-modal').style.display = 'flex';
@@ -1395,6 +1458,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       qtyInput.style.opacity = '';
     }
     _updateAddAssetBlockState();
+    _recalcAssetPrice();
   };
 
   window.closeAssetAddModal = function() {
@@ -1443,6 +1507,10 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
   // Re-check block state when qty changes
   document.getElementById('asset-add-qty')?.addEventListener('input', _updateAddAssetBlockState);
+  // Recompute the locked price + breakdown as the dates or quantity change.
+  document.getElementById('asset-add-qty')?.addEventListener('input', _recalcAssetPrice);
+  document.getElementById('asset-add-start')?.addEventListener('change', _recalcAssetPrice);
+  document.getElementById('asset-add-end')?.addEventListener('change', _recalcAssetPrice);
 
   let _addAssetInFlight = false;
   window.submitAddAsset = async function() {
