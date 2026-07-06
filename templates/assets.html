@@ -212,10 +212,10 @@
           <select id="type-location" class="field-input"><option value="">— None —</option></select>
         </div>
         <div class="field-group">
-          <label class="field-label">DAILY RATE ($/day)</label>
+          <label class="field-label" id="type-cost-label">DAILY RATE ($/day)</label>
           <input type="number" id="type-cost" class="field-input" value="0" min="0" step="0.01">
         </div>
-        <div class="field-group">
+        <div class="field-group" id="type-weekly-group">
           <label class="field-label">WEEKLY RATE ($/week)</label>
           <input type="number" id="type-weekly-cost" class="field-input" value="0" min="0" step="0.01">
         </div>
@@ -232,7 +232,7 @@
           <input type="text" id="type-supplier-contact" class="field-input" placeholder="Phone, email, rep name…">
         </div>
         <div class="field-group" style="grid-column:span 2;display:flex;gap:20px;align-items:center">
-          <label class="checkbox-label"><input type="checkbox" id="type-consumable"> Consumable item</label>
+          <label class="checkbox-label"><input type="checkbox" id="type-consumable" onchange="onConsumableChange()"> Consumable item</label>
           <label class="checkbox-label"><input type="checkbox" id="type-track-qty" checked> Track by quantity</label>
           <label class="checkbox-label"><input type="checkbox" id="type-allow-unit-selection"> Allow unit selection <span style="font-size:10px;color:var(--text-dim)">(PM can pin a specific unit, e.g. by model number)</span></label>
         </div>
@@ -756,9 +756,11 @@ window.showSystemDetail = async function(typeId) {
     : `<span style="font-size:9px;background:rgba(72,187,120,.18);color:#48BB78;border-radius:3px;padding:2px 5px;font-weight:700;margin-left:6px">PACKAGE</span>`;
   const retiredBadge = t.is_retired ? `<span style="font-size:9px;color:#FC814A;font-weight:700;margin-left:6px">RETIRED</span>` : '';
   const brandModel = [t.manufacturer, t.model].filter(Boolean).join(' · ');
-  const rateLabel = t.weekly_rate
-    ? `$${Number(t.rental_cost||0).toFixed(2)}/day · $${Number(t.weekly_rate).toFixed(2)}/wk`
-    : `$${Number(t.rental_cost||0).toFixed(2)}/day`;
+  const rateLabel = t.is_consumable
+    ? `$${Number(t.rental_cost||0).toFixed(2)}/item`
+    : (t.weekly_rate
+        ? `$${Number(t.rental_cost||0).toFixed(2)}/day · $${Number(t.weekly_rate).toFixed(2)}/wk`
+        : `$${Number(t.rental_cost||0).toFixed(2)}/day`);
   const detail = document.getElementById('systems-detail');
   detail.style.display = 'flex';
   detail.style.flexDirection = 'column';
@@ -1061,9 +1063,11 @@ window.selectType = async function(typeId, opts) {
   if (!t) return;
 
   const isSystem = !!t.is_system;
-  const rateLabel = t.weekly_rate
-    ? `$${Number(t.rental_cost||0).toFixed(2)}/day · $${Number(t.weekly_rate).toFixed(2)}/wk`
-    : `$${Number(t.rental_cost||0).toFixed(2)}/day`;
+  const rateLabel = t.is_consumable
+    ? `$${Number(t.rental_cost||0).toFixed(2)}/item`
+    : (t.weekly_rate
+        ? `$${Number(t.rental_cost||0).toFixed(2)}/day · $${Number(t.weekly_rate).toFixed(2)}/wk`
+        : `$${Number(t.rental_cost||0).toFixed(2)}/day`);
 
   const hdrName = t.name.length > 24 ? t.name.slice(0,24)+'…' : t.name;
   document.getElementById('detail-col-hdr').textContent = hdrName;
@@ -2010,6 +2014,7 @@ window.openTypeModal = async function(id, defaultCatId) {
     document.getElementById('type-photo-preview').innerHTML = '';
     document.getElementById('type-photo').value = '';
   }
+  onConsumableChange();  // sync the cost-field label / weekly visibility
   document.getElementById('type-modal').style.display = 'flex';
   setTimeout(() => document.getElementById('type-name').focus(), 80);
 };
@@ -2023,6 +2028,17 @@ window.onTypeClassChange = function() {
     if (event.target === sys) pkg.checked = false;
     else sys.checked = false;
   }
+};
+
+// Consumables are billed at a flat per-unit cost (see _compute_locked_price in
+// app.py), so the daily/weekly rate-card doesn't apply. Relabel the cost field
+// as a per-unit price and hide the weekly rate when "Consumable" is checked.
+window.onConsumableChange = function() {
+  const isConsumable = document.getElementById('type-consumable').checked;
+  document.getElementById('type-cost-label').textContent =
+    isConsumable ? 'PER-UNIT COST ($/item)' : 'DAILY RATE ($/day)';
+  document.getElementById('type-weekly-group').style.display =
+    isConsumable ? 'none' : '';
 };
 
 window.saveType = async function() {
