@@ -11639,7 +11639,9 @@ def labor_overview():
         LEFT JOIN crew_members cm ON cm.id = lr.scheduled_crew_member_id
         LEFT JOIN advance_data ad
                ON ad.show_id = s.id AND ad.field_key = 'production_manager'
-        WHERE COALESCE(s.status, 'active') != 'archived'
+        -- Archived shows normally drop off this view, but scheduled labor on a
+        -- past show must stay visible so hours worked can still be referenced.
+        WHERE (COALESCE(s.status, 'active') != 'archived' OR lr.is_scheduled = 1)
           AND COALESCE(lr.work_date, s.show_date) BETWEEN ? AND ?
         ORDER BY work_date, s.name, lr.sort_order, lr.id
     """, (week_start.isoformat(), week_end.isoformat())).fetchall()
@@ -11800,7 +11802,9 @@ def api_labor_scheduler_list():
         LEFT JOIN job_positions jp ON lr.position_id = jp.id
         LEFT JOIN position_categories pc ON jp.category_id = pc.id
         LEFT JOIN crew_members cm ON lr.scheduled_crew_member_id = cm.id
-        WHERE s.status != 'archived'
+        -- Archived shows normally drop off the scheduler, but scheduled labor on
+        -- a past show must stay visible so hours worked can still be referenced.
+        WHERE (s.status != 'archived' OR lr.is_scheduled = 1)
           AND COALESCE(lr.work_date, s.show_date) BETWEEN ? AND ?
     """
     params = [date_from, date_to]
