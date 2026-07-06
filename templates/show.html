@@ -1230,11 +1230,13 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     const renderCard = (t) => {
       const label = t.name;  // Description is always the primary title
       const sub = [t.manufacturer, t.model].filter(Boolean).join(' ');
-      const rateLabel = t.weekly_rate > 0
-        ? `$${Number(t.rental_cost||0).toFixed(2)}/day · $${Number(t.weekly_rate||0).toFixed(2)}/wk`
-        : `$${Number(t.rental_cost||0).toFixed(2)}/day`;
+      const rateLabel = t.is_consumable
+        ? `$${Number(t.rental_cost||0).toFixed(2)}/item`
+        : (t.weekly_rate > 0
+            ? `$${Number(t.rental_cost||0).toFixed(2)}/day · $${Number(t.weekly_rate||0).toFixed(2)}/wk`
+            : `$${Number(t.rental_cost||0).toFixed(2)}/day`);
       const systemBadge = t.is_system ? '<span style="font-size:9px;font-weight:700;background:rgba(245,127,32,0.2);color:#F57F20;border-radius:3px;padding:1px 5px;margin-left:4px;letter-spacing:.04em">SYSTEM</span>' : '';
-      return `<button class="btn btn-ghost btn-sm" style="text-align:left;white-space:normal;align-items:flex-start;flex-direction:column;gap:2px;width:100%;min-width:0" onclick="selectAssetType(${t.id}, '${esc(label).replace(/'/g,"\\'")}', ${t.rental_cost || 0}, ${t.weekly_rate || 0}, ${t.is_system ? 1 : 0})">
+      return `<button class="btn btn-ghost btn-sm" style="text-align:left;white-space:normal;align-items:flex-start;flex-direction:column;gap:2px;width:100%;min-width:0" onclick="selectAssetType(${t.id}, '${esc(label).replace(/'/g,"\\'")}', ${t.rental_cost || 0}, ${t.weekly_rate || 0}, ${t.is_system ? 1 : 0}, ${t.is_consumable ? 1 : 0})">
         <div style="font-weight:500">${esc(label)}${systemBadge}</div>
         ${sub ? `<div style="font-size:10px;color:var(--text-dim)">${esc(sub)}</div>` : ''}
         <div style="font-size:10px;color:var(--text-dim)">${rateLabel}${t.is_consumable ? ' · consumable' : ''}${t.is_system ? ' · system' : ''}</div>
@@ -1274,7 +1276,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
   }
 
   // ── Asset Add Detail ──────────────────────────────────────────────────────
-  window.selectAssetType = async function(typeId, label, price, weeklyRate, isSystem) {
+  window.selectAssetType = async function(typeId, label, price, weeklyRate, isSystem, isConsumable) {
     _currentAssetTypeId = typeId;
     document.getElementById('asset-add-type-id').value = typeId;
     document.getElementById('asset-add-title').textContent = label;
@@ -1299,11 +1301,12 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     document.getElementById('asset-add-start').value = defaultStart;
     document.getElementById('asset-add-end').value   = defaultEnd;
 
-    // Smart price: weekly rate if ≥7 days, else daily × days
+    // Smart price. Consumables are a flat rate per item (no day/week math);
+    // everything else uses the weekly rate if ≥7 days, else daily × days.
     const dailyRate  = Number(price)      || 0;
     const wkRate     = Number(weeklyRate) || 0;
     let calcPrice = dailyRate;
-    if (defaultStart && defaultEnd) {
+    if (!isConsumable && defaultStart && defaultEnd) {
       try {
         const d1 = new Date(defaultStart), d2 = new Date(defaultEnd);
         const days = Math.max(1, Math.round((d2 - d1) / 86400000) + 1);

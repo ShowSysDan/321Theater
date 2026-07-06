@@ -682,9 +682,11 @@ function renderApprAssetResults(q, cat) {
   }
 
   const renderCard = (t) => {
-    const rate = `$${Number(t.rental_cost||0).toFixed(2)}/day`;
+    const rate = t.is_consumable
+      ? `$${Number(t.rental_cost||0).toFixed(2)}/item`
+      : `$${Number(t.rental_cost||0).toFixed(2)}/day`;
     return `<button class="btn btn-ghost btn-sm" style="text-align:left;white-space:normal"
-             onclick="selectApprAssetType(${t.id},'${_esc(t.name).replace(/'/g,"\\'")}',${t.rental_cost||0},${t.weekly_rate||0},${t.is_system?1:0})">
+             onclick="selectApprAssetType(${t.id},'${_esc(t.name).replace(/'/g,"\\'")}',${t.rental_cost||0},${t.weekly_rate||0},${t.is_system?1:0},${t.is_consumable?1:0})">
       <div style="font-weight:500">${_esc(t.name)}</div>
       ${t.manufacturer ? `<div style="font-size:10px;color:var(--text-dim)">${_esc(t.manufacturer)} ${_esc(t.model||'')}</div>` : ''}
       <div style="font-size:10px;color:var(--text-dim)">${rate}${t.is_consumable?' · consumable':''}</div>
@@ -716,7 +718,7 @@ function renderApprAssetResults(q, cat) {
   container.innerHTML = html;
 }
 
-async function selectApprAssetType(typeId, label, price, weeklyRate, isSystem) {
+async function selectApprAssetType(typeId, label, price, weeklyRate, isSystem, isConsumable) {
   _apprCurrentTypeId = typeId;
   _apprAvailData = null;
   document.getElementById('appr-add-type-id').value = typeId;
@@ -727,11 +729,11 @@ async function selectApprAssetType(typeId, label, price, weeklyRate, isSystem) {
   document.getElementById('appr-add-start').value = _apprDefaultStart;
   document.getElementById('appr-add-end').value   = _apprDefaultEnd;
 
-  // Smart price
+  // Smart price. Consumables are a flat rate per item (no day/week math).
   const dailyRate = Number(price) || 0;
   const wkRate    = Number(weeklyRate) || 0;
   let calcPrice = dailyRate;
-  if (_apprDefaultStart && _apprDefaultEnd) {
+  if (!isConsumable && _apprDefaultStart && _apprDefaultEnd) {
     try {
       const d1 = new Date(_apprDefaultStart), d2 = new Date(_apprDefaultEnd);
       const days = Math.max(1, Math.round((d2 - d1) / 86400000) + 1);
