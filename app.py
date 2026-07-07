@@ -2406,8 +2406,11 @@ def _plan_no_labor_alerts(db, target_date):
     if not triggers:
         return []
 
+    # Test/demo shows never trigger a real "no labor scheduled" email — they
+    # should behave as if they don't exist for staffing alerts (shows.is_test).
     shows = db.execute(
-        "SELECT id, name, venue, show_date FROM shows WHERE status='active'"
+        "SELECT id, name, venue, show_date FROM shows "
+        "WHERE status='active' AND COALESCE(is_test, 0) = 0"
     ).fetchall()
     if not shows:
         return []
@@ -14630,6 +14633,14 @@ def _component_demand(db, type_id, start_date=None, end_date=None):
     NOTE (PostgreSQL): every placeholder is ``?`` (rewritten to ``%s`` by
     db_adapter) and there is no literal ``%`` in the SQL — see CLAUDE.md.
     ``COALESCE(m.quantity, 1)`` keeps legacy rows (pre-migration) at 1.
+
+    Test/demo shows (``shows.is_test``) are EXCLUDED from every demand row so
+    they never consume real inventory — a test show's bookings must not reduce
+    availability, trip overbooking, or appear on the asset calendar. Because
+    this is the single source of truth, filtering here keeps
+    ``_get_asset_availability``, ``_find_overbooked_types`` and the calendar all
+    in agreement. ``COALESCE(s.is_test, 0)`` guards legacy rows where the column
+    could be NULL.
     """
     date_filter = ''
     date_params = []
@@ -14645,7 +14656,7 @@ def _component_demand(db, type_id, start_date=None, end_date=None):
                s.name AS show_name
         FROM show_assets sa
         JOIN shows s ON s.id = sa.show_id
-        WHERE sa.asset_type_id = ?{date_filter}
+        WHERE sa.asset_type_id = ? AND COALESCE(s.is_test, 0) = 0{date_filter}
         ORDER BY sa.rental_start
     """, [type_id] + date_params).fetchall()
 
@@ -14668,7 +14679,7 @@ def _component_demand(db, type_id, start_date=None, end_date=None):
         JOIN show_assets sa  ON sa.asset_type_id = m.system_type_id
         JOIN asset_types sys ON sys.id = m.system_type_id
         JOIN shows s         ON s.id = sa.show_id
-        WHERE m.component_type_id = ?{date_filter}
+        WHERE m.component_type_id = ? AND COALESCE(s.is_test, 0) = 0{date_filter}
         ORDER BY sa.rental_start
     """, [type_id] + date_params).fetchall()
     for r in indirect:
@@ -15034,7 +15045,9 @@ def assets_availability_bulk():
 
     accessible_ids = get_accessible_shows(session['user_id'])  # None = all, [] = none, list = specific
     params = []
-    where  = []
+    # Exclude test/demo shows from the by-show demand summary (mirrors the
+    # by_type numbers above, which already skip test shows via _component_demand).
+    where  = ["COALESCE(s.is_test, 0) = 0"]
     if accessible_ids is not None and len(accessible_ids) > 0:
         placeholders = ','.join('?' * len(accessible_ids))
         where.append(f's.id IN ({placeholders})')
@@ -18497,6 +18510,7 @@ def api_dashboard_reservation_timeline():
         JOIN asset_types at     ON at.id = sa.asset_type_id
         JOIN asset_categories ac ON ac.id = at.category_id
         WHERE sa.is_hidden = 0 AND s.status != 'archived'
+          AND COALESCE(s.is_test, 0) = 0
         ORDER BY ac.sort_order, ac.name, at.sort_order, at.name
     """).fetchall()
     db.close()
@@ -18767,7 +18781,9 @@ def asset_reports_data():
     db = get_db()
 
     params = []
-    where = []
+    # Test/demo shows are excluded from reporting so a test show's assets never
+    # show up as real revenue/inventory usage — see shows.is_test.
+    where = ["COALESCE(s.is_test, 0) = 0"]
 
     if company:
         where.append("""
