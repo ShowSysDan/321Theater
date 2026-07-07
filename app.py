@@ -2712,6 +2712,43 @@ def auto_archive_past_shows():
     db.close()
 
 
+def _schedule_span_dates(load_in, load_out, perf_dates):
+    """Return the sorted list of ISO calendar dates the production schedule
+    should cover: one entry for every day from load-in to load-out, unioned
+    with any performance dates.
+
+    Load-in / load-out anchor the contiguous span. When only one endpoint is
+    filled in (common — load-out is often confirmed later than load-in), the
+    other falls back to the performance-date envelope, so a show with just a
+    load-in date still gets a day for every date through its last performance
+    (and vice versa). With neither endpoint set, only the performance dates are
+    returned — we don't gap-fill between disjoint performances when there's no
+    load-in/out context to define a run.
+    """
+    from datetime import date as _date, timedelta as _td
+    def _norm(v):
+        s = str(v)[:10] if v else ''
+        return s or None
+    li = _norm(load_in)
+    lo = _norm(load_out)
+    perfs = sorted({d for d in (_norm(p) for p in perf_dates) if d})
+    dates = set(perfs)
+    if li or lo:
+        start = li or (perfs[0] if perfs else lo)
+        end   = lo or (perfs[-1] if perfs else li)
+        try:
+            _d1 = _date.fromisoformat(start)
+            _d2 = _date.fromisoformat(end)
+            if _d2 >= _d1:
+                _cur = _d1
+                while _cur <= _d2:
+                    dates.add(_cur.isoformat())
+                    _cur += _td(days=1)
+        except (ValueError, TypeError):
+            pass
+    return sorted(dates)
+
+
 def _build_schedule_days(db, show_id, show_row=None):
     """
     Build the canonical list of schedule "days" for a show: one entry per
@@ -2750,31 +2787,20 @@ def _build_schedule_days(db, show_id, show_row=None):
         schedule_days[idx]['perfs'].append(_p)
         schedule_days[idx]['perf_ids'].append(_p['id'])
 
-    def _iso(v):
-        s = str(v) if v is not None else ''
-        return s[:10] if s else ''
-    _li = _iso(show_row['load_in_date']) if show_row else ''
-    _lo = _iso(show_row['load_out_date']) if show_row else ''
-    if _li and _lo:
-        try:
-            from datetime import date as _date, timedelta as _td
-            _d1 = _date.fromisoformat(_li)
-            _d2 = _date.fromisoformat(_lo)
-            if _d2 >= _d1:
-                _cur = _d1
-                while _cur <= _d2:
-                    _k = _cur.isoformat()
-                    if _k not in _date_to_idx:
-                        _date_to_idx[_k] = len(schedule_days)
-                        schedule_days.append({
-                            'perf_date': _k,
-                            'date_key': _k,
-                            'perfs': [],
-                            'perf_ids': [],
-                        })
-                    _cur = _cur + _td(days=1)
-        except (ValueError, TypeError):
-            pass
+    _span = _schedule_span_dates(
+        show_row['load_in_date'] if show_row else None,
+        show_row['load_out_date'] if show_row else None,
+        [_p.get('perf_date') for _p in performances],
+    )
+    for _k in _span:
+        if _k not in _date_to_idx:
+            _date_to_idx[_k] = len(schedule_days)
+            schedule_days.append({
+                'perf_date': _k,
+                'date_key': _k,
+                'perfs': [],
+                'perf_ids': [],
+            })
 
     def _sort_key(d):
         pd = d.get('perf_date')
@@ -5633,22 +5659,7 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
         if pd:
             perf_by_date.setdefault(pd, []).append(p)
 
-    ordered_dates = []
-    if li and lo:
-        try:
-            from datetime import date as _d, timedelta as _td
-            d1, d2 = _d.fromisoformat(li), _d.fromisoformat(lo)
-            if d2 >= d1:
-                cur = d1
-                while cur <= d2:
-                    ordered_dates.append(cur.isoformat())
-                    cur += _td(days=1)
-        except (ValueError, TypeError):
-            pass
-    for pd in sorted(perf_by_date.keys()):
-        if pd not in ordered_dates:
-            ordered_dates.append(pd)
-    ordered_dates.sort()
+    ordered_dates = _schedule_span_dates(li, lo, perf_by_date.keys())
 
     for pd in ordered_dates:
         perfs_here = perf_by_date.get(pd, [])
