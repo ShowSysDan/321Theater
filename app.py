@@ -11558,8 +11558,9 @@ def labor_scheduler_no_labor():
     schedulers see the whole backlog at a glance and jump straight in. This is
     the same "no labor requested" signal the scheduled no-labor alert acts on,
     presented as a live list. Upcoming + undated shows show by default;
-    ?all=1 also includes past-dated shows."""
+    ?all=1 also includes past-dated shows. ?venue=<name> narrows to one venue."""
     include_past = request.args.get('all') == '1'
+    selected_venue = (request.args.get('venue') or '').strip()
     today = date.today()
     db = get_db()
     try:
@@ -11600,9 +11601,17 @@ def labor_scheduler_no_labor():
                                       (s['name'] or '').lower()))
     finally:
         db.close()
+    # Venue options reflect the shows currently in the backlog (respecting the
+    # past-shows toggle), so the dropdown never lists a venue with no rows.
+    venues = sorted({(s.get('venue') or '').strip() for s in shows
+                     if (s.get('venue') or '').strip()},
+                    key=str.lower)
+    if selected_venue:
+        shows = [s for s in shows if (s.get('venue') or '').strip() == selected_venue]
     return render_template('labor_scheduler_no_labor.html',
                            user=get_current_user(), shows=shows,
-                           include_past=include_past)
+                           include_past=include_past,
+                           venues=venues, selected_venue=selected_venue)
 
 
 @app.route('/labor-overview')
