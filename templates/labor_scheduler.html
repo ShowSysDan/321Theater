@@ -15,6 +15,17 @@
     text-decoration: none;
   }
   .scheduler-show-header .show-link:hover { color: var(--accent); text-decoration: underline; }
+  .scheduler-show-header .scheduler-pm-tag {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    background: rgba(237, 137, 54, 0.15);
+    color: var(--accent, #ed8936);
+    padding: 2px 6px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
   .scheduler-empty {
     text-align: center;
     padding: 40px 20px;
@@ -538,6 +549,7 @@
           <span class="text-dim" style="font-size:11px">
             ${escapeHtml(show.show_venue || '')}${show.show_date ? ' · ' + escapeHtml(show.show_date) : ''}
           </span>
+          ${show.show_pm ? `<span class="scheduler-pm-tag" title="Production Manager">PM: ${escapeHtml(show.show_pm)}</span>` : ''}
           <a href="/shows/${show.show_id}?tab=staffing" class="show-link" target="_blank" rel="noopener">Open show →</a>
         </div>
         <button class="btn btn-ghost btn-sm ml-auto" onclick="window.__scheduler.addDay(this, ${show.show_id}, '${show.show_date || ''}')">+ Add Day</button>
