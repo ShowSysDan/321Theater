@@ -2146,6 +2146,17 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
 
 {% block scripts %}
 <style>
+/* ── Actual Labor day headers ────────────────────── */
+#ps-labor-table tr.ps-day-header td {
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding: 7px 10px;
+  border-top: 2px solid var(--border);
+}
 /* ── Labor quick-fill toolbar ────────────────────── */
 .labor-quickfill {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
@@ -3282,8 +3293,25 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     const rows = window._postShowLaborData || [];
     tbody.innerHTML = '';
     const empty = document.getElementById('ps-labor-empty');
-    if (!rows.length) { if (empty) empty.style.display = ''; }
-    else { if (empty) empty.style.display = 'none'; rows.forEach(r => _renderPostShowLaborRow(tbody, r)); }
+    if (!rows.length) { if (empty) empty.style.display = ''; _updatePostShowLaborTotal(); return; }
+    if (empty) empty.style.display = 'none';
+    // Rows arrive already sorted by day (see _post_show_labor_rows), so group
+    // consecutive rows under a date header — one section per day, in order.
+    let lastDate;
+    rows.forEach(r => {
+      const d = r.work_date || '';
+      if (d !== lastDate) {
+        lastDate = d;
+        const hr = document.createElement('tr');
+        hr.className = 'ps-day-header';
+        const td = document.createElement('td');
+        td.colSpan = 11;
+        td.textContent = _dayLabel(d);
+        hr.appendChild(td);
+        tbody.appendChild(hr);
+      }
+      _renderPostShowLaborRow(tbody, r);
+    });
     _updatePostShowLaborTotal();
   }
 
@@ -3429,8 +3457,11 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     };
     (window._postShowLaborData = window._postShowLaborData || []).push(row);
     const empty = document.getElementById('ps-labor-empty'); if (empty) empty.style.display = 'none';
-    const tr = _renderPostShowLaborRow(document.getElementById('ps-labor-tbody'), row);
-    tr.querySelector('select[data-field="position_id"]')?.focus();
+    // Re-render so the new (Unscheduled) line lands under its day header.
+    _renderPostShowLabor();
+    const tbody = document.getElementById('ps-labor-tbody');
+    const tr = tbody.querySelector(`tr[data-id="${row.id}"]`);
+    tr?.querySelector('select[data-field="position_id"]')?.focus();
   }
 
   async function pullScheduledLabor() {
