@@ -11296,6 +11296,49 @@ def _calc_post_show_labor_cost(db, show_id):
     return lines, round(total, 2)
 
 
+def _summarize_labor_lines(lines):
+    """Collapse per-shift labor lines into one summary row per position/rate.
+
+    The Final Invoice normally lists every shift with its In/Out/Breaks time
+    ranges. When the "summarize labor" option is on, the client only wants to
+    see how many techs worked a position and the total hours — not the exact
+    windows. Group the ordinary shift lines by (position_name, hourly_rate),
+    counting techs (lines with hours > 0) and summing hours + line totals.
+    Per-crew billable extras pass through untouched, since they are already an
+    aggregate (crew_count × cost_per_crew)."""
+    groups = {}
+    order = []
+    passthrough = []
+    for l in lines:
+        if l.get('is_billable_extra'):
+            passthrough.append(l)
+            continue
+        key = (l.get('position_name') or '', round(float(l.get('hourly_rate') or 0), 2))
+        g = groups.get(key)
+        if g is None:
+            g = {
+                'position_name': l.get('position_name') or '',
+                'hourly_rate': float(l.get('hourly_rate') or 0),
+                'hours': 0.0,
+                'line_total': 0.0,
+                'tech_count': 0,
+                'is_summary': True,
+            }
+            groups[key] = g
+            order.append(key)
+        g['hours'] += float(l.get('hours') or 0)
+        g['line_total'] += float(l.get('line_total') or 0)
+        if float(l.get('hours') or 0) > 0:
+            g['tech_count'] += 1
+    summary = []
+    for key in order:
+        g = groups[key]
+        g['hours'] = round(g['hours'], 2)
+        g['line_total'] = round(g['line_total'], 2)
+        summary.append(g)
+    return summary + passthrough
+
+
 @app.route('/shows/<int:show_id>/post-show-labor', methods=['GET'])
 @login_required
 def get_post_show_labor(show_id):
@@ -17322,6 +17365,13 @@ def show_post_invoice(show_id):
     finally:
         db.close()
 
+    # Optional summary mode: show tech count + total hours per position instead
+    # of each shift's In/Out/Breaks time ranges (toggled by the checkbox next to
+    # the Final Invoice PDF button on the Post-Show tab).
+    summarize_labor = request.args.get('summarize_labor') in ('1', 'true', 'on', 'yes')
+    if summarize_labor:
+        labor_lines = _summarize_labor_lines(labor_lines)
+
     grand_total = assets_subtotal + external_subtotal + labor_total
 
     html_str = render_template(
@@ -17333,6 +17383,7 @@ def show_post_invoice(show_id):
         external_subtotal=external_subtotal,
         labor_lines=labor_lines,
         labor_total=labor_total,
+        summarize_labor=summarize_labor,
         grand_total=grand_total,
         performance_company=performance_company,
         layout=pdf_layouts.PdfLayout('post_show_invoice', get_app_setting),

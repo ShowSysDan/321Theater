@@ -1743,7 +1743,20 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     <div class="form-section-header">
       <span class="section-icon">◈</span> POST-SHOW NOTES
       <div class="ml-auto" style="display:flex;gap:6px">
-        <a href="/shows/{{ show.id }}/post-show-invoice.pdf" target="_blank" class="btn btn-sm btn-ghost" title="Final invoice: internal & external assets + actual labor + costs">Final Invoice PDF</a>
+        <label class="checkbox-inline" style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap"
+               title="Print only tech count + total hours per position instead of each shift's time ranges">
+          <input type="checkbox" id="summarizeLaborChk" onchange="updateFinalInvoiceLink()"> Summarize labor
+        </label>
+        <a href="/shows/{{ show.id }}/post-show-invoice.pdf" target="_blank" id="finalInvoiceLink" class="btn btn-sm btn-ghost" title="Final invoice: internal & external assets + actual labor + costs">Final Invoice PDF</a>
+        <script>
+          function updateFinalInvoiceLink() {
+            var link = document.getElementById('finalInvoiceLink');
+            var chk = document.getElementById('summarizeLaborChk');
+            if (!link || !chk) return;
+            var base = '/shows/{{ show.id }}/post-show-invoice.pdf';
+            link.href = chk.checked ? base + '?summarize_labor=1' : base;
+          }
+        </script>
         <a href="{{ url_for('export_postnotes', show_id=show.id) }}" class="btn btn-sm btn-ghost" target="_blank">Export PDF</a>
         <button class="btn btn-sm btn-ghost" type="button" title="Generate post-show report and email to recipients"
                 onclick="emailPdf({{ show.id }}, 'postnotes', this)">

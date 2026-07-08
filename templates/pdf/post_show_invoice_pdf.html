@@ -140,6 +140,45 @@
   {% elif skey == 'labor' %}
   {% if labor_lines %}
   <div class="section-title">{{ layout.label('labor', 'Actual Labor') }}</div>
+  {% if summarize_labor %}
+  {# Summary mode: tech count + total hours per position, no time ranges. #}
+  <table style="font-size: {{ layout.font_size('labor', '11px') }}">
+    <thead>
+      <tr>
+        <th>Position</th>
+        <th class="num">Techs</th>
+        <th class="num">Total Hours</th>
+        <th class="num">Rate</th>
+        <th class="num">Line Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for l in labor_lines %}
+      {% if l.is_billable_extra %}
+      <tr>
+        <td>{{ l.position_name or '—' }} <span class="text-dim">(per crew)</span></td>
+        <td class="num">{{ l.crew_count }}</td>
+        <td class="num text-dim">—</td>
+        <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/crew</td>
+        <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
+      </tr>
+      {% else %}
+      <tr>
+        <td>{{ l.position_name or '—' }}</td>
+        <td class="num">{{ l.tech_count }}</td>
+        <td class="num">{{ '%.2f' | format(l.hours) }}h</td>
+        <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/hr</td>
+        <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
+      </tr>
+      {% endif %}
+      {% endfor %}
+      <tr class="total-row">
+        <td colspan="4" class="num">Labor Subtotal</td>
+        <td class="num">${{ '%.2f' | format(labor_total) }}</td>
+      </tr>
+    </tbody>
+  </table>
+  {% else %}
   <table style="font-size: {{ layout.font_size('labor', '11px') }}">
     <thead>
       <tr>
@@ -185,6 +224,7 @@
       </tr>
     </tbody>
   </table>
+  {% endif %}
   {% endif %}
 
   {% elif skey == 'total_bar' %}
