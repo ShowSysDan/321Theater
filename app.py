@@ -11226,10 +11226,12 @@ def _post_show_labor_rows(db, show_id):
         SELECT psl.*, jp.name AS position_name
         FROM post_show_labor psl
         LEFT JOIN job_positions jp ON jp.id = psl.position_id
+        LEFT JOIN position_categories pc ON pc.id = jp.category_id
         LEFT JOIN labor_requests lr ON lr.id = psl.source_request_id
         WHERE psl.show_id = ?
           AND COALESCE(lr.is_training_shift, 0) = 0
-        ORDER BY psl.sort_order, psl.id
+        ORDER BY (psl.work_date IS NULL), psl.work_date,
+                 pc.sort_order, jp.sort_order, psl.sort_order, psl.id
     """, (show_id,)).fetchall()
     out = []
     for r in rows:
