@@ -11827,12 +11827,14 @@ def api_labor_scheduler_list():
                s.venue as show_venue,
                s.show_date as show_date,
                s.status as show_status,
-               s.labor_notes as show_labor_notes
+               s.labor_notes as show_labor_notes,
+               ad_pm.field_value as show_pm
         FROM labor_requests lr
         JOIN shows s ON lr.show_id = s.id
         LEFT JOIN job_positions jp ON lr.position_id = jp.id
         LEFT JOIN position_categories pc ON jp.category_id = pc.id
         LEFT JOIN crew_members cm ON lr.scheduled_crew_member_id = cm.id
+        LEFT JOIN advance_data ad_pm ON ad_pm.show_id = s.id AND ad_pm.field_key = 'production_manager'
         -- Archived shows normally drop off the scheduler, but scheduled labor on
         -- a past show must stay visible so hours worked can still be referenced.
         WHERE (s.status != 'archived' OR lr.is_scheduled = 1)
@@ -11875,6 +11877,7 @@ def api_labor_scheduler_list():
                 'show_date': rd['show_date'],
                 'show_status': rd['show_status'],
                 'show_labor_notes': rd.get('show_labor_notes') or '',
+                'show_pm': rd.get('show_pm') or '',
                 'requests': [],
             }
             order.append(sid)
@@ -11891,8 +11894,12 @@ def api_labor_scheduler_list():
             if missing:
                 ph = ','.join(['?'] * len(missing))
                 extra_rows = db.execute(
-                    f"SELECT id, name, venue, show_date, status, labor_notes "
-                    f"FROM shows WHERE id IN ({ph}) AND status != 'archived'",
+                    f"SELECT s.id, s.name, s.venue, s.show_date, s.status, s.labor_notes, "
+                    f"       ad_pm.field_value AS show_pm "
+                    f"FROM shows s "
+                    f"LEFT JOIN advance_data ad_pm ON ad_pm.show_id = s.id "
+                    f"       AND ad_pm.field_key = 'production_manager' "
+                    f"WHERE s.id IN ({ph}) AND s.status != 'archived'",
                     missing
                 ).fetchall()
                 for er in extra_rows:
@@ -11905,6 +11912,7 @@ def api_labor_scheduler_list():
                         'show_date':        erd['show_date'],
                         'show_status':      erd['status'],
                         'show_labor_notes': erd.get('labor_notes') or '',
+                        'show_pm':          erd.get('show_pm') or '',
                         'requests':         [],
                     }
                     order.insert(0, sid)  # surface at top so they're easy to find
