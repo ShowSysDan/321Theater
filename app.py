@@ -3897,7 +3897,6 @@ def new_show():
                 VALUES (?, ?, ?, 0)
             """, (show_id, show_date, show_time))
 
-        _seed_show_billable_items(db, show_id)
         log_audit(db, 'SHOW_CREATE', 'show', show_id, show_id=show_id,
                   after={'name': name, 'show_date': show_date, 'venue': venue})
         db.commit()
@@ -10945,28 +10944,6 @@ def reorder_labor_requests(show_id):
 
 # ─── Labor Scheduler ─────────────────────────────────────────────────────────
 
-def _seed_show_billable_items(db, show_id):
-    """Attach every currently-configured billable item to a freshly-created
-    show, preserving the legacy "applies to every show" default. The PM can
-    deselect from the show's staffing tab."""
-    db.execute(
-        'INSERT OR IGNORE INTO show_labor_billable_items (show_id, billable_item_id) '
-        'SELECT ?, id FROM labor_billable_items',
-        (show_id,)
-    )
-
-
-def _attach_billable_item_to_active_shows(db, billable_item_id):
-    """When a new billable item is added in Settings, attach it to every
-    non-archived show so the existing per-show charge behaviour continues
-    without requiring PMs to opt-in for every show."""
-    db.execute(
-        'INSERT OR IGNORE INTO show_labor_billable_items (show_id, billable_item_id) '
-        "SELECT id, ? FROM shows WHERE COALESCE(status, 'active') != 'archived'",
-        (billable_item_id,)
-    )
-
-
 def _calc_labor_cost_for_show(db, show_id):
     """Return labor line items and total cost for a show.
 
@@ -11246,18 +11223,66 @@ def _post_show_labor_rows(db, show_id):
     return out
 
 
+def _get_show_billable_items(db, show_id):
+    """Per-crew billable items the PM has selected for this show
+    (id, name, cost_per_crew), in display order."""
+    return db.execute(
+        'SELECT b.id, b.name, b.cost_per_crew '
+        'FROM labor_billable_items b '
+        'JOIN show_labor_billable_items sb '
+        '  ON sb.billable_item_id = b.id AND sb.show_id = ? '
+        'ORDER BY b.sort_order, b.name',
+        (show_id,)
+    ).fetchall()
+
+
+def _post_show_hide_billable(db, show_id):
+    """Whether this show folds its per-crew billable charges INTO the hourly
+    rate on the Final Invoice (hidden math) instead of listing them as
+    separate "Additional Charges" lines. Per-show toggle on the Post-Show tab,
+    stored in post_show_notes; defaults off."""
+    row = db.execute(
+        'SELECT field_value FROM post_show_notes WHERE show_id=? AND field_key=?',
+        (show_id, 'hide_billable_in_rate')
+    ).fetchone()
+    return bool(row and str(row['field_value']).strip() == '1')
+
+
 def _calc_post_show_labor_cost(db, show_id):
     """Final-invoice labor: bill ACTUAL hours × frozen rate from post_show_labor.
-    Never exposes the technician name. Per-crew billable extras (e.g. parking)
-    are multiplied by the number of lines that have actual hours entered."""
+    Never exposes the technician name.
+
+    Per-crew billable extras (e.g. parking) behave one of two ways depending on
+    the show's "fold into hourly rate" toggle:
+      • OFF (default): each extra is listed as its own line, multiplied by the
+        number of lines that have actual hours entered.
+      • ON: no extra lines appear. Instead the full per-crew charge is spread
+        across each billed line's worked hours and added to that line's hourly
+        rate, so the cost is still recovered but stays invisible on the invoice.
+        (e.g. $9/crew parking over a 10h line inflates a $10/hr rate to $10.90.)
+    """
     rows = _post_show_labor_rows(db, show_id)
+    hide = _post_show_hide_billable(db, show_id)
+    billable_items = _get_show_billable_items(db, show_id)
+    per_crew_total = round(
+        sum(float(it['cost_per_crew'] or 0) for it in billable_items), 2)
+
     lines = []
     total = 0.0
     billed_count = 0
     for d in rows:
-        cost = d['line_cost']
+        hours = d['hours']
+        base_rate = float(d.get('pay_rate_snapshot') or 0)
+        rate = base_rate
+        # Fold the per-crew charge into the rate: spread the whole charge over
+        # the hours actually worked. Rounding the inflated rate to cents keeps
+        # rate × hours == line total on the invoice (cost recovery may differ by
+        # a penny or two, which never surfaces to the client).
+        if hide and per_crew_total and hours > 0:
+            rate = round(base_rate + per_crew_total / hours, 2)
+        cost = round(hours * rate, 2)
         total += cost
-        if d['hours'] > 0:
+        if hours > 0:
             billed_count += 1
         lines.append({
             'id': d['id'],
@@ -11266,20 +11291,12 @@ def _calc_post_show_labor_cost(db, show_id):
             'in_time': d.get('in_time') or '',
             'out_time': d.get('out_time') or '',
             'breaks': _format_break_windows(d),
-            'hours': d['hours'],
-            'hourly_rate': float(d.get('pay_rate_snapshot') or 0),
+            'hours': hours,
+            'hourly_rate': rate,
             'line_total': cost,
         })
 
-    if billed_count > 0:
-        billable_items = db.execute(
-            'SELECT b.id, b.name, b.cost_per_crew '
-            'FROM labor_billable_items b '
-            'JOIN show_labor_billable_items sb '
-            '  ON sb.billable_item_id = b.id AND sb.show_id = ? '
-            'ORDER BY b.sort_order, b.name',
-            (show_id,)
-        ).fetchall()
+    if not hide and billed_count > 0:
         for item in billable_items:
             cost_each = float(item['cost_per_crew'] or 0)
             line_total = round(cost_each * billed_count, 2)
@@ -11441,6 +11458,33 @@ def pull_post_show_labor(show_id):
     db.close()
     syslog_logger.info(f"POST_SHOW_LABOR_PULL show_id={show_id} added={added} refreshed={refreshed} by={session.get('username')}")
     return jsonify({'success': True, 'added': added, 'refreshed': refreshed, 'rows': rows})
+
+
+@app.route('/shows/<int:show_id>/post-show-labor/hide-billable', methods=['POST'])
+@login_required
+def set_post_show_hide_billable(show_id):
+    """Toggle whether per-crew billable charges are folded into the hourly rate
+    (hidden math) instead of shown as separate lines on the Final Invoice.
+    Per-show, stored in post_show_notes; defaults off."""
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_restricted') or session.get('is_readonly'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    data = request.get_json(force=True) or {}
+    val = '1' if data.get('hide') else '0'
+    db = get_db()
+    db.execute(
+        'INSERT OR REPLACE INTO post_show_notes (show_id, field_key, field_value) '
+        'VALUES (?, ?, ?)',
+        (show_id, 'hide_billable_in_rate', val)
+    )
+    log_audit(db, 'POST_SHOW_HIDE_BILLABLE', 'show', show_id, show_id=show_id,
+              detail=f'hide={val}')
+    db.commit()
+    db.close()
+    syslog_logger.info(
+        f"POST_SHOW_HIDE_BILLABLE show_id={show_id} hide={val} by={session.get('username')}")
+    return jsonify({'success': True, 'hide': val == '1'})
 
 
 @app.route('/shows/<int:show_id>/post-show-labor', methods=['POST'])
@@ -12177,7 +12221,6 @@ def api_labor_scheduler_create_show():
             (show_id, show_date, show_time)
         )
 
-    _seed_show_billable_items(db, show_id)
     log_audit(db, 'SHOW_CREATE', 'show', show_id, show_id=show_id,
               after={'name': name, 'show_date': show_date, 'venue': venue,
                      'via': 'labor_scheduler'})
@@ -13730,7 +13773,7 @@ def save_crew_training_notes(mid):
     return jsonify({'success': True})
 
 
-# ─── Per-Crew Billable Items (auto-added to every show's labor cost) ──────────
+# ─── Per-Crew Billable Items (opt-in per show on the Post-Show tab) ───────────
 
 @app.route('/settings/labor-billable-items/add', methods=['POST'])
 @scheduler_required
@@ -13747,7 +13790,6 @@ def add_labor_billable_item():
         (name, cost, max_order + 10)
     )
     bid = cur.lastrowid
-    _attach_billable_item_to_active_shows(db, bid)
     log_audit_change(db, 'LABOR_BILLABLE_ADD', 'labor_billable_item', bid,
                      detail=f'{name} ${cost}/crew', table='labor_billable_items')
     db.commit(); db.close()
