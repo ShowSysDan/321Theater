@@ -838,19 +838,6 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
     </div>
   </div>
 
-  {# Per-show billable extras picker — only renders when at least one extra
-     is configured in Settings → Per-Crew Billable Items. #}
-  <div id="labor-billables-section" style="display:none">
-    <div class="form-section">
-      <div class="form-section-header">
-        <span class="section-icon">◈</span> PER-CREW EXTRAS
-        <span class="text-dim" style="font-size:11px;font-weight:400;text-transform:none;letter-spacing:normal;margin-left:8px">Pick which extras get charged to this show</span>
-      </div>
-      <div class="form-section-body" id="labor-billables-body" style="display:flex;flex-wrap:wrap;gap:8px">
-      </div>
-    </div>
-  </div>
-
   {# Labor cost summary — loaded when tab opens #}
   <div id="labor-cost-section" style="display:none">
     <div class="form-section">
@@ -1804,6 +1791,34 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
                   rows="4" placeholder="{{ placeholder }}" {% if restricted %}disabled{% endif %}>{{ note(key) }}</textarea>
       </div>
       {% endfor %}
+    </div>
+  </div>
+
+  {# ── Per-Crew Billable Extras ─────────────────────────────────────────────
+     Pick which per-crew charges (parking, etc.) apply to this show, and choose
+     whether they show as separate invoice lines or get folded into the hourly
+     rate. Only renders when at least one extra is configured in
+     Settings → Per-Crew Billable Items. Sits just above the labor editor so
+     the PM sets it while entering actuals. #}
+  <div class="form-section" id="labor-billables-section" style="display:none">
+    <div class="form-section-header">
+      <span class="section-icon">◈</span> PER-CREW BILLABLE EXTRAS
+      <span class="text-dim" style="font-size:11px;font-weight:400;text-transform:none;letter-spacing:normal;margin-left:8px">Charges applied to this show</span>
+    </div>
+    <div class="form-section-body">
+      <div id="labor-billables-body" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+      <label id="ps-hide-billable-wrap"
+             style="display:none;align-items:center;gap:8px;margin-top:12px;font-size:12px;cursor:pointer;user-select:none">
+        <input type="checkbox" id="ps-hide-billable" style="accent-color:var(--accent)"
+               {% if restricted %}disabled{% endif %}
+               {% if notes_data.get('hide_billable_in_rate') == '1' %}checked{% endif %}>
+        <span>
+          <strong>Fold extras into the hourly rate</strong>
+          <span class="text-dim" style="display:block;font-size:11px;margin-top:2px">
+            Hides the additional-charge lines and spreads each charge across the crew member's worked hours instead — on this page and the Final Invoice PDF.
+          </span>
+        </span>
+      </label>
     </div>
   </div>
 
@@ -3075,6 +3090,12 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     if (added) _sortDayBlocks();
   }
 
+  // Per-crew billable extras picker + "fold into rate" toggle. Lives on the
+  // Post-Show tab, just above the Actual Labor editor. Selection and toggle
+  // both feed the Actual Labor billing math (and the Final Invoice PDF).
+  window._psBillableItems = window._psBillableItems || [];
+  window._psHideBillable = {{ 'true' if notes_data.get('hide_billable_in_rate') == '1' else 'false' }};
+
   async function loadBillableItemsPicker() {
     const section = document.getElementById('labor-billables-section');
     const body = document.getElementById('labor-billables-body');
@@ -3084,8 +3105,16 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
       if (!r.ok) { section.style.display = 'none'; return; }
       const d = await r.json();
       const items = d.items || [];
-      if (!items.length) { section.style.display = 'none'; return; }
+      window._psBillableItems = items;
+      const hideWrap = document.getElementById('ps-hide-billable-wrap');
+      if (!items.length) {
+        section.style.display = 'none';
+        if (hideWrap) hideWrap.style.display = 'none';
+        _renderPostShowLabor();
+        return;
+      }
       section.style.display = '';
+      if (hideWrap) hideWrap.style.display = 'flex';
       body.innerHTML = '';
       const restricted = {{ 'true' if session.get('is_restricted') or session.get('is_readonly') else 'false' }};
       items.forEach(it => {
@@ -3106,6 +3135,8 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
         lbl.appendChild(txt);
         body.appendChild(lbl);
       });
+      // Reflect the current selection/toggle in the labor billing math.
+      _renderPostShowLabor();
     } catch(e) { /* silently ignore */ }
   }
 
@@ -3134,10 +3165,36 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
         return;
       }
       lbl.style.borderColor = changedCb.checked ? 'var(--accent)' : 'var(--border)';
+      // Keep the cached selection in sync and re-cost the labor lines.
+      const bid = parseInt(lbl.dataset.bid, 10);
+      const it = (window._psBillableItems || []).find(x => x.id === bid);
+      if (it) it.selected = changedCb.checked ? 1 : 0;
       showSaveToast('✓ Saved');
-      loadLaborCost();
+      _renderPostShowLabor();
     } catch(e) {
       changedCb.checked = !changedCb.checked;
+      showSaveToast('✗ Network error', 'error');
+    }
+  }
+
+  async function savePostShowHideBillable(cb) {
+    try {
+      const r = await fetch(`/shows/{{ show.id }}/post-show-labor/hide-billable`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({hide: cb.checked}),
+      });
+      const d = await r.json();
+      if (!d.success) {
+        cb.checked = !cb.checked;
+        showSaveToast('✗ ' + (d.error || 'Save failed'), 'error');
+        return;
+      }
+      window._psHideBillable = !!d.hide;
+      showSaveToast('✓ Saved');
+      _renderPostShowLabor();
+    } catch(e) {
+      cb.checked = !cb.checked;
       showSaveToast('✗ Network error', 'error');
     }
   }
@@ -3192,7 +3249,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
   }
 
   document.addEventListener('DOMContentLoaded', () => {
-    if (INITIAL_TAB === 'staffing') { initLaborTab(); loadBillableItemsPicker(); loadLaborCost(); }
+    if (INITIAL_TAB === 'staffing') { initLaborTab(); loadLaborCost(); }
     // When the user changes load-in / load-out in the Advance tab, extend the
     // Labor tab with a day block for each newly-covered date and re-check
     // the show-within-range validation warning.
@@ -3268,11 +3325,47 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
 
   async function initPostShowLaborTab() {
     await _loadLaborPositions();
+    // Wire the "fold into rate" toggle once.
+    const hideCb = document.getElementById('ps-hide-billable');
+    if (hideCb && !hideCb._wired) {
+      hideCb._wired = true;
+      hideCb.addEventListener('change', () => savePostShowHideBillable(hideCb));
+    }
+    // loadBillableItemsPicker() calls _renderPostShowLabor() once items load.
+    loadBillableItemsPicker();
     _renderPostShowLabor();
   }
 
   function _psNum(v) { return Number(v || 0); }
   function _psRate(v) { return (v === null || v === undefined || v === '') ? '' : _psNum(v).toFixed(2); }
+
+  /* Per-crew billable helpers — mirror _calc_post_show_labor_cost() in app.py
+     so this page and the Final Invoice PDF always agree. */
+  function _psSelectedBillables() {
+    return (window._psBillableItems || []).filter(it => it.selected);
+  }
+  function _psPerCrewTotal() {
+    return Math.round(_psSelectedBillables()
+      .reduce((s, it) => s + (parseFloat(it.cost_per_crew) || 0), 0) * 100) / 100;
+  }
+  function _psBilledCount() {
+    return (window._postShowLaborData || []).filter(r => _psNum(r.hours) > 0).length;
+  }
+  // Effective (billed) hourly rate for a line: base rate, plus — when the
+  // "fold into rate" toggle is on — the whole per-crew charge spread across the
+  // hours worked. Rounded to cents so rate × hours == the shown line cost.
+  function _psEffectiveRate(r) {
+    const base = _psNum(r.pay_rate_snapshot);
+    const hours = _psNum(r.hours);
+    const per = _psPerCrewTotal();
+    if (window._psHideBillable && per > 0 && hours > 0) {
+      return Math.round((base + per / hours) * 100) / 100;
+    }
+    return base;
+  }
+  function _psLineCost(r) {
+    return Math.round(_psNum(r.hours) * _psEffectiveRate(r) * 100) / 100;
+  }
 
   function _psSchedRef(r) {
     const seg = [];
@@ -3312,7 +3405,38 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
       }
       _renderPostShowLaborRow(tbody, r);
     });
+    _renderPostShowBillableExtras(tbody);
     _updatePostShowLaborTotal();
+  }
+
+  // When the "fold into rate" toggle is OFF, per-crew charges show as their own
+  // read-only "Additional Charges" rows — mirroring the Final Invoice PDF. When
+  // ON, nothing is appended here; the charge rides inside each line's rate.
+  function _renderPostShowBillableExtras(tbody) {
+    if (window._psHideBillable) return;
+    const items = _psSelectedBillables();
+    const billed = _psBilledCount();
+    if (!items.length || billed <= 0) return;
+    const hr = document.createElement('tr');
+    hr.className = 'ps-day-header';
+    const htd = document.createElement('td');
+    htd.colSpan = 11; htd.textContent = 'Additional Charges';
+    hr.appendChild(htd);
+    tbody.appendChild(hr);
+    items.forEach(it => {
+      const each = parseFloat(it.cost_per_crew) || 0;
+      const lineTotal = Math.round(each * billed * 100) / 100;
+      const tr = document.createElement('tr');
+      tr.className = 'ps-billable-extra';
+      tr.innerHTML =
+        `<td>${_esc(it.name)} <span class="text-dim" style="font-size:10px">(per crew)</span></td>` +
+        `<td colspan="6" class="text-dim" style="font-size:11px">${billed} crew billed</td>` +
+        `<td class="num" style="text-align:right">× ${billed}</td>` +
+        `<td class="num" style="text-align:right">$${each.toFixed(2)}/crew</td>` +
+        `<td class="num ps-cost" style="text-align:right">$${lineTotal.toFixed(2)}</td>` +
+        `<td></td>`;
+      tbody.appendChild(tr);
+    });
   }
 
   function _renderPostShowLaborRow(tbody, r) {
@@ -3373,12 +3497,22 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     if (RESTRICTED) rateInp.disabled = true;
     rateInp.addEventListener('change', () => _savePostShowLabor(r.id, { pay_rate_snapshot: rateInp.value }, tr));
     rateTd.appendChild(rateInp);
+    // When charges are folded into the rate, show the effective (billed) rate
+    // under the editable base rate so the inflation is visible on the page.
+    const effRate = _psEffectiveRate(r);
+    if (window._psHideBillable && effRate !== _psNum(r.pay_rate_snapshot)) {
+      const hint = document.createElement('div');
+      hint.className = 'text-dim ps-eff-rate';
+      hint.style.cssText = 'font-size:10px;margin-top:3px;white-space:nowrap';
+      hint.textContent = 'billed @ $' + effRate.toFixed(2) + '/hr';
+      rateTd.appendChild(hint);
+    }
     tr.appendChild(rateTd);
 
     const costTd = document.createElement('td');
     costTd.className = 'num ps-cost';
     costTd.style.textAlign = 'right';
-    costTd.textContent = '$' + _psNum(r.line_cost).toFixed(2);
+    costTd.textContent = '$' + _psLineCost(r).toFixed(2);
     tr.appendChild(costTd);
 
     const delTd = document.createElement('td');
@@ -3399,21 +3533,29 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     const arr = window._postShowLaborData || [];
     const i = arr.findIndex(x => x.id === id);
     if (i >= 0) arr[i] = row;
-    if (tr) {
-      const h = tr.querySelector('.ps-hours'); if (h) h.textContent = _psNum(row.hours).toFixed(2);
-      const c = tr.querySelector('.ps-cost'); if (c) c.textContent = '$' + _psNum(row.line_cost).toFixed(2);
-      const rate = tr.querySelector('input[data-field="pay_rate_snapshot"]');
-      if (rate && document.activeElement !== rate) rate.value = _psRate(row.pay_rate_snapshot);
-    }
-    _updatePostShowLaborTotal();
+    // A single edit can change hours (→ per-line inflation) and the billed-crew
+    // count (→ the Additional Charges block), so re-render the whole grid to
+    // keep the page consistent with the invoice math. Edits fire on blur, so
+    // no field loses focus.
+    _renderPostShowLabor();
   }
 
   function _updatePostShowLaborTotal() {
     const arr = window._postShowLaborData || [];
+    // Sum billed labor (base or rate-folded) exactly the way
+    // _calc_post_show_labor_cost() does server-side.
     let total = 0;
-    arr.forEach(r => { total += _psNum(r.line_cost); });
+    arr.forEach(r => { total += _psLineCost(r); });
+    if (!window._psHideBillable) {
+      const billed = _psBilledCount();
+      if (billed > 0) {
+        _psSelectedBillables().forEach(it => {
+          total += Math.round((parseFloat(it.cost_per_crew) || 0) * billed * 100) / 100;
+        });
+      }
+    }
     const el = document.getElementById('ps-labor-total');
-    if (el) el.textContent = '$' + total.toFixed(2);
+    if (el) el.textContent = '$' + (Math.round(total * 100) / 100).toFixed(2);
   }
 
   async function _savePostShowLabor(id, patch, tr) {
@@ -3493,7 +3635,6 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
       if (oc.includes('staffing') && !window._laborTabInited) {
         window._laborTabInited = true;
         initLaborTab();
-        loadBillableItemsPicker();
         loadLaborCost();
       }
       if (oc.includes('postnotes') && !window._postShowLaborInited) {
