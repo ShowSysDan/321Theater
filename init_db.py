@@ -859,6 +859,14 @@ CREATE TABLE IF NOT EXISTS site_message_dismissals (
     PRIMARY KEY (message_id, user_id)
 );
 
+-- Records who has SEEN each message (banner rendered), independent of dismissal.
+CREATE TABLE IF NOT EXISTS site_message_views (
+    message_id INTEGER NOT NULL REFERENCES site_messages(id) ON DELETE CASCADE,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    seen_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (message_id, user_id)
+);
+
 -- ── Asset Dashboard ───────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS asset_dashboards (
@@ -2380,6 +2388,13 @@ def migrate_db():
             PRIMARY KEY (message_id, user_id)
         );
 
+        CREATE TABLE IF NOT EXISTS site_message_views (
+            message_id INTEGER NOT NULL REFERENCES site_messages(id) ON DELETE CASCADE,
+            user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            seen_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (message_id, user_id)
+        );
+
         CREATE TABLE IF NOT EXISTS asset_dashboards (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -3347,6 +3362,13 @@ CREATE TABLE IF NOT EXISTS site_message_dismissals (
     PRIMARY KEY (message_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS site_message_views (
+    message_id   INTEGER NOT NULL REFERENCES site_messages(id) ON DELETE CASCADE,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    seen_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (message_id, user_id)
+);
+
 -- ── Asset Dashboard ───────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS asset_dashboards (
@@ -3470,7 +3492,7 @@ CREATE TABLE IF NOT EXISTS prism_venues (
 SHARED_TABLES = {
     'users', 'app_settings',
     'password_reset_tokens', 'user_pending_registration',
-    'site_messages', 'site_message_dismissals',
+    'site_messages', 'site_message_dismissals', 'site_message_views',
     # Server-side session store — shared so multiple apps can read the
     # same login state when pointed at the same PostgreSQL DB.
     'app_sessions',
@@ -3988,6 +4010,7 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
         # ── Depend on level above ─────────────────────────────────────────────
         'shows', 'form_fields', 'schedule_meta_fields',
         'job_positions', 'asset_types', 'site_message_dismissals',
+        'site_message_views',
         'user_pending_registration', 'password_reset_tokens',
         'arts_group_contacts',
         # ── Depend on shows / asset_types ─────────────────────────────────────

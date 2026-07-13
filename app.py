@@ -488,7 +488,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.23.0'
+APP_VERSION = '2.24.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -3821,7 +3821,6 @@ def dashboard():
                            restricted=restricted,
                            home_layout=home_layout,
                            home_density=home_density,
-                           motd_messages=get_active_messages(session.get('user_id'), 'motd'),
                            user=get_current_user())
 
 
@@ -18315,6 +18314,20 @@ def get_messages_api():
     msgs = get_active_messages(session['user_id'], msg_type)
     # Filter out already dismissed for users
     result = [m for m in msgs if not m['dismissed']]
+    # Record that this user has now seen each delivered message (first-seen wins;
+    # INSERT OR IGNORE keeps the original seen_at). These are the messages the
+    # browser actually renders as banners, so this is our "seen" signal.
+    if result:
+        db = get_db()
+        try:
+            for m in result:
+                db.execute(
+                    'INSERT OR IGNORE INTO site_message_views (message_id, user_id) VALUES (?,?)',
+                    (m['id'], session['user_id']))
+            db.commit()
+        except Exception:
+            pass
+        db.close()
     return jsonify(result)
 
 
@@ -18344,13 +18357,48 @@ def dismiss_message(msg_id):
 def messages_list():
     db = get_db()
     rows = db.execute("""
-        SELECT m.*, u.display_name as author
+        SELECT m.*, u.display_name as author,
+               (SELECT COUNT(*) FROM site_message_views v
+                  WHERE v.message_id = m.id)      AS seen_count,
+               (SELECT COUNT(*) FROM site_message_dismissals d
+                  WHERE d.message_id = m.id)      AS dismissed_count
         FROM site_messages m
         LEFT JOIN users u ON u.id = m.created_by
         ORDER BY m.created_at DESC
     """).fetchall()
     db.close()
-    return jsonify([dict(r) for r in rows])
+    return jsonify([_normalize_row_dates(dict(r)) for r in rows])
+
+
+@app.route('/settings/messages/<int:msg_id>/receipts', methods=['GET'])
+@admin_required
+def message_receipts(msg_id):
+    """Who has seen / dismissed a given message (admin read-receipt report)."""
+    db = get_db()
+    msg = db.execute('SELECT id, title FROM site_messages WHERE id=?', (msg_id,)).fetchone()
+    if not msg:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+    seen = db.execute("""
+        SELECT v.user_id, u.display_name, u.username, v.seen_at
+        FROM site_message_views v
+        LEFT JOIN users u ON u.id = v.user_id
+        WHERE v.message_id = ?
+        ORDER BY v.seen_at DESC
+    """, (msg_id,)).fetchall()
+    dismissed = db.execute("""
+        SELECT d.user_id, u.display_name, u.username, d.dismissed_at
+        FROM site_message_dismissals d
+        LEFT JOIN users u ON u.id = d.user_id
+        WHERE d.message_id = ?
+        ORDER BY d.dismissed_at DESC
+    """, (msg_id,)).fetchall()
+    db.close()
+    return jsonify({
+        'title': msg['title'],
+        'seen': [_normalize_row_dates(dict(r)) for r in seen],
+        'dismissed': [_normalize_row_dates(dict(r)) for r in dismissed],
+    })
 
 
 @app.route('/settings/messages', methods=['POST'])
