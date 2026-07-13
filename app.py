@@ -488,7 +488,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.22.0'
+APP_VERSION = '2.23.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -10944,12 +10944,39 @@ def reorder_labor_requests(show_id):
 
 # ─── Labor Scheduler ─────────────────────────────────────────────────────────
 
-def _calc_labor_cost_for_show(db, show_id):
-    """Return labor line items and total cost for a show.
+def _estimate_hourly_rate(db):
+    """Highest tech billable rate used to estimate a labor line before a tech is
+    assigned. Only pay-rate levels flagged ``include_in_estimate`` count, so
+    test / placeholder levels (e.g. an $834/hr "Super Technician") can stay in
+    the system for testing without inflating client estimates. Returns 0.0 when
+    no level qualifies."""
+    row = db.execute(
+        'SELECT MAX(hourly_rate) AS r FROM pay_rate_levels '
+        'WHERE COALESCE(include_in_estimate, 1) = 1'
+    ).fetchone()
+    return float(row['r']) if row and row['r'] is not None else 0.0
 
-    Includes both hourly labor lines and per-crew billable extras
-    (configured in Settings → Per-Crew Billable Items). Each extra is
-    multiplied by the number of scheduled labor lines on the show.
+
+def _calc_labor_cost_for_show(db, show_id):
+    """Return labor line items and total for a show — a live cost ESTIMATE that
+    is useful *before* anything is scheduled (for client quoting).
+
+    Per-line rate resolution:
+      • the position's special rate (``job_positions.override_rate``) if set;
+        else
+      • the scheduled technician's pay-level rate once a tech is assigned; else
+      • the highest *included* pay-rate level (:func:`_estimate_hourly_rate`) as
+        the pre-schedule estimate.
+    Lines that fall back to the estimate rate (i.e. are not yet scheduled) are
+    flagged ``is_estimate=True`` so the UI/PDF can mark them "(est.)".
+
+    Per-crew billable extras (Settings → Per-Crew Billable Items) are folded in
+    exactly like the Final Invoice, honouring the show's "fold into hourly rate"
+    toggle:
+      • OFF (default): each selected extra is a separate line × crew count.
+      • ON: the whole per-crew charge is spread across each line's worked hours
+        and folded into that line's rate (no separate extra lines).
+    Training / shadow shifts never bill and never count toward crew.
     """
     rows = db.execute("""
         SELECT lr.id, lr.work_date, lr.in_time, lr.out_time,
@@ -10967,15 +10994,31 @@ def _calc_labor_cost_for_show(db, show_id):
         ORDER BY lr.work_date, lr.sort_order
     """, (show_id,)).fetchall()
 
+    estimate_rate = _estimate_hourly_rate(db)
+    hide = _post_show_hide_billable(db, show_id)
+    billable_items = _get_show_billable_items(db, show_id)
+    per_crew_total = round(
+        sum(float(it['cost_per_crew'] or 0) for it in billable_items), 2)
+
     lines = []
     total = 0.0
-    scheduled_count = 0
+    crew_count = 0
     for r in rows:
         hours = _calc_hours(r['in_time'], r['out_time'],
                             r['break_start'], r['break_end'],
                             r['break2_start'], r['break2_end'])
-        rate = r['override_rate'] if r['override_rate'] is not None else (r['level_rate'] or 0)
+        # Rate source: position special rate → scheduled tech's level → estimate.
+        if r['override_rate'] is not None:
+            base_rate = float(r['override_rate'])
+            is_estimate = not bool(r['is_scheduled'])
+        elif r['level_rate'] is not None:
+            base_rate = float(r['level_rate'])
+            is_estimate = False
+        else:
+            base_rate = estimate_rate
+            is_estimate = True
         is_training = bool(r['is_training_shift'])
+        rate = base_rate
         if is_training:
             # Training / shadow shifts never bill the show: a trainee parked
             # alongside the primary tech carries no cost and is excluded from
@@ -10984,10 +11027,15 @@ def _calc_labor_cost_for_show(db, show_id):
             # training shift.
             cost = 0.0
         else:
+            crew_count += 1
+            # Fold the per-crew charge into the rate when the show opts in:
+            # spread the whole charge over the hours actually worked so the
+            # extra stays invisible but is still recovered (mirrors
+            # _calc_post_show_labor_cost).
+            if hide and per_crew_total and hours > 0:
+                rate = round(base_rate + per_crew_total / hours, 2)
             cost = round(hours * rate, 2)
             total += cost
-            if r['is_scheduled']:
-                scheduled_count += 1
         lines.append({
             'id': r['id'],
             'work_date': r['work_date'],
@@ -10997,27 +11045,22 @@ def _calc_labor_cost_for_show(db, show_id):
             'out_time': r['out_time'],
             'hours': round(hours, 2),
             'hourly_rate': rate,
+            'base_rate': base_rate,
             'line_total': cost,
             'level_name': r['level_name'] or '',
             'is_scheduled': bool(r['is_scheduled']),
             'is_training': is_training,
+            'is_estimate': is_estimate,
         })
 
-    if scheduled_count > 0:
-        # Only items the PM has selected for this show. Defaults are seeded
+    if not hide and crew_count > 0:
+        # Per-crew extras the PM has selected for this show. Defaults are seeded
         # at show-creation time so legacy "applies to every show" behaviour
-        # stays intact until the PM deselects something.
-        billable_items = db.execute(
-            'SELECT b.id, b.name, b.cost_per_crew '
-            'FROM labor_billable_items b '
-            'JOIN show_labor_billable_items sb '
-            '  ON sb.billable_item_id = b.id AND sb.show_id = ? '
-            'ORDER BY b.sort_order, b.name',
-            (show_id,)
-        ).fetchall()
+        # stays intact until the PM deselects something. Quantity is the number
+        # of chargeable (non-training) labor lines — i.e. estimated crew.
         for item in billable_items:
             cost_each = float(item['cost_per_crew'] or 0)
-            line_total = round(cost_each * scheduled_count, 2)
+            line_total = round(cost_each * crew_count, 2)
             total += line_total
             lines.append({
                 'id': f"billable-{item['id']}",
@@ -11026,13 +11069,13 @@ def _calc_labor_cost_for_show(db, show_id):
                 'tech_name': '',
                 'in_time': '',
                 'out_time': '',
-                'hours': scheduled_count,
+                'hours': crew_count,
                 'hourly_rate': cost_each,
                 'line_total': line_total,
                 'level_name': '',
                 'is_scheduled': True,
                 'is_billable_extra': True,
-                'crew_count': scheduled_count,
+                'crew_count': crew_count,
             })
 
     return lines, round(total, 2)
@@ -13540,16 +13583,20 @@ def add_pay_rate_level():
     rate = float(data.get('hourly_rate') or 0)
     if not name:
         return jsonify({'success': False, 'error': 'Name is required.'}), 400
+    include_est = 0 if data.get('include_in_estimate') is False else 1
     db = get_db()
     max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM pay_rate_levels').fetchone()[0]
-    cur = db.execute('INSERT INTO pay_rate_levels (name, hourly_rate, sort_order) VALUES (?,?,?)',
-                     (name, rate, max_order + 10))
+    cur = db.execute(
+        'INSERT INTO pay_rate_levels (name, hourly_rate, include_in_estimate, sort_order) '
+        'VALUES (?,?,?,?)',
+        (name, rate, include_est, max_order + 10))
     lid = cur.lastrowid
     log_audit_change(db, 'PAY_LEVEL_ADD', 'pay_rate_level', lid,
                      detail=f'{name} ${rate}/hr', table='pay_rate_levels')
     db.commit(); db.close()
-    syslog_logger.info(f"PAY_LEVEL_ADD id={lid} name={name!r} rate={rate} by={session.get('username')}")
-    return jsonify({'success': True, 'id': lid, 'name': name, 'hourly_rate': rate})
+    syslog_logger.info(f"PAY_LEVEL_ADD id={lid} name={name!r} rate={rate} include_in_estimate={include_est} by={session.get('username')}")
+    return jsonify({'success': True, 'id': lid, 'name': name,
+                    'hourly_rate': rate, 'include_in_estimate': include_est})
 
 
 @app.route('/settings/pay-rate-levels/<int:lid>/edit', methods=['POST'])
@@ -13581,6 +13628,25 @@ def delete_pay_rate_level(lid):
     db.commit(); db.close()
     syslog_logger.info(f"PAY_LEVEL_DELETE id={lid} by={session.get('username')}")
     return jsonify({'success': True})
+
+
+@app.route('/settings/pay-rate-levels/<int:lid>/toggle-estimate', methods=['POST'])
+@admin_required
+def toggle_pay_rate_level_estimate(lid):
+    """Include/exclude a pay-rate level from the pre-show labor estimate. Test /
+    placeholder levels can be excluded so they never become the "highest tech
+    rate" the estimate reaches for."""
+    data = request.get_json(force=True) or {}
+    include_est = 1 if data.get('include_in_estimate') else 0
+    db = get_db()
+    before = _snapshot_row(db, 'pay_rate_levels', lid)
+    db.execute('UPDATE pay_rate_levels SET include_in_estimate=? WHERE id=?', (include_est, lid))
+    after = _snapshot_row(db, 'pay_rate_levels', lid)
+    log_audit(db, 'PAY_LEVEL_EDIT', 'pay_rate_level', lid,
+              detail=f"include_in_estimate={include_est}", before=before, after=after)
+    db.commit(); db.close()
+    syslog_logger.info(f"PAY_LEVEL_ESTIMATE_TOGGLE id={lid} include_in_estimate={include_est} by={session.get('username')}")
+    return jsonify({'success': True, 'include_in_estimate': include_est})
 
 
 @app.route('/api/crew-members')
@@ -17341,7 +17407,108 @@ def show_asset_invoice(show_id):
     safe_name = secure_filename(show['name'] or f'show_{show_id}')
     resp = make_response(pdf_bytes)
     resp.headers['Content-Type'] = 'application/pdf'
-    resp.headers['Content-Disposition'] = _safe_content_disposition(f'{safe_name}_invoice.pdf')
+    resp.headers['Content-Disposition'] = _safe_content_disposition(f'{safe_name}_asset_estimate.pdf')
+    return resp
+
+
+@app.route('/shows/<int:show_id>/labor-estimate.pdf')
+@login_required
+def show_labor_estimate(show_id):
+    """Pre-schedule labor cost ESTIMATE PDF (client quote). Uses
+    _calc_labor_cost_for_show — position special rates, else the highest
+    included tech rate — so it produces a number before any tech is assigned."""
+    if not can_access_show(session['user_id'], show_id):
+        abort(403)
+    db = get_db()
+    try:
+        show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
+        if not show:
+            abort(404)
+        labor_lines, labor_total = _calc_labor_cost_for_show(db, show_id)
+        performance_company = _show_performance_company(db, show_id)
+        logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+    finally:
+        db.close()
+
+    html_str = render_template(
+        'pdf/labor_estimate_pdf.html',
+        show=dict(show),
+        labor_lines=labor_lines,
+        labor_total=labor_total,
+        performance_company=performance_company,
+        generated_date=date.today().isoformat(),
+        logo_data=logo_data,
+    )
+    try:
+        from weasyprint import HTML as WP_HTML
+        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+    except Exception as e:
+        app.logger.error(f'WeasyPrint labor-estimate error: {e}')
+        return f'PDF generation failed: {e}', 500
+
+    safe_name = secure_filename(show['name'] or f'show_{show_id}')
+    syslog_logger.info(f"LABOR_ESTIMATE_EXPORT show_id={show_id} total={labor_total} by={session.get('username')}")
+    resp = make_response(pdf_bytes)
+    resp.headers['Content-Type'] = 'application/pdf'
+    resp.headers['Content-Disposition'] = _safe_content_disposition(f'{safe_name}_labor_estimate.pdf')
+    return resp
+
+
+@app.route('/shows/<int:show_id>/pre-show-estimate.pdf')
+@login_required
+def show_pre_show_estimate(show_id):
+    """Combined pre-show ESTIMATE / quote PDF: labor estimate + asset & external
+    rental estimate in one document. Labor comes from _calc_labor_cost_for_show
+    (works before scheduling); assets reuse the asset-estimate figures."""
+    if not can_access_show(session['user_id'], show_id):
+        abort(403)
+    db = get_db()
+    try:
+        show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
+        if not show:
+            abort(404)
+        assets_list, ext_list, assets_subtotal, external_subtotal = \
+            _fetch_show_assets_and_externals(db, show_id)
+        labor_lines, labor_total = _calc_labor_cost_for_show(db, show_id)
+        performance_company = _show_performance_company(db, show_id)
+        er_pdfs = _fetch_external_rental_pdfs(db, show_id)
+        logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+    finally:
+        db.close()
+
+    assets_total = assets_subtotal + external_subtotal
+    grand_total = assets_total + labor_total
+
+    html_str = render_template(
+        'pdf/pre_show_estimate_pdf.html',
+        show=dict(show),
+        assets=assets_list,
+        external_rentals=ext_list,
+        assets_subtotal=assets_subtotal,
+        external_subtotal=external_subtotal,
+        assets_total=assets_total,
+        labor_lines=labor_lines,
+        labor_total=labor_total,
+        grand_total=grand_total,
+        performance_company=performance_company,
+        generated_date=date.today().isoformat(),
+        logo_data=logo_data,
+    )
+    try:
+        from weasyprint import HTML as WP_HTML
+        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+    except Exception as e:
+        app.logger.error(f'WeasyPrint pre-show-estimate error: {e}')
+        return f'PDF generation failed: {e}', 500
+
+    if er_pdfs:
+        pdf_bytes = _merge_pdfs(pdf_bytes, er_pdfs)
+
+    safe_name = secure_filename(show['name'] or f'show_{show_id}')
+    syslog_logger.info(f"PRE_SHOW_ESTIMATE_EXPORT show_id={show_id} labor={labor_total} assets={assets_total} total={grand_total} by={session.get('username')}")
+    resp = make_response(pdf_bytes)
+    resp.headers['Content-Type'] = 'application/pdf'
+    resp.headers['Content-Disposition'] = _safe_content_disposition(f'{safe_name}_pre_show_estimate.pdf')
     return resp
 
 

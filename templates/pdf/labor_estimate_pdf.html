@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
+  * { box-sizing: border-box; }
+  /* Branding matches the Final Invoice / Production Schedule paperwork:
+     navy #1a4a7a structural, gold #B8840A accent, Arial, under the
+     Dr. Phillips Center identity. */
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; border-bottom: 2.5px solid #1a4a7a; padding-bottom: 14px; }
+  .doc-type { font-size: 9px; font-weight: bold; color: #B8840A; letter-spacing: 0.12em; text-transform: uppercase; }
+  .org-name { font-size: 18px; font-weight: 900; color: #1a4a7a; letter-spacing: 0.01em; margin-top: 2px; }
+  .org-sub  { font-size: 7.5px; color: #555; letter-spacing: 0.08em; text-transform: uppercase; margin-top: 3px; }
+  .doc-title { text-align: right; padding-left: 12px; }
+  .doc-title h1 { font-size: 22px; font-weight: 900; color: #1a4a7a; margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 0.05em; }
+  .doc-title .doc-date { font-size: 10px; color: #555; }
+  .show-block { background: #f5f5f5; border-left: 3px solid #B8840A; padding: 10px 14px; margin-bottom: 16px; }
+  .show-name { font-size: 15px; font-weight: 700; color: #1a4a7a; }
+  .show-meta { font-size: 10px; color: #666; margin-top: 4px; display: flex; gap: 20px; }
+  .estimate-note { font-size: 9.5px; color: #7a5a00; background: #fdf6e3; border: 1px solid #ecd9a0; border-radius: 4px; padding: 8px 12px; margin-bottom: 20px; }
+  .section-title { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #1a4a7a; border-bottom: 1px solid #1a4a7a; padding-bottom: 4px; margin: 20px 0 8px 0; }
+  table { width: 100%; border-collapse: collapse; }
+  th { font-size: 9px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: #666; padding: 5px 8px; border-bottom: 1px solid #ddd; text-align: left; }
+  td { padding: 6px 8px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .text-dim { color: #888; font-size: 10px; }
+  .est-tag { display: inline-block; font-size: 8px; font-weight: 700; color: #B8840A; letter-spacing: 0.05em; text-transform: uppercase; margin-left: 4px; }
+  .total-row td { font-weight: 700; border-top: 2px solid #ddd; border-bottom: none; padding-top: 8px; }
+  .labor-day-row td { font-weight: 700; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: #1a4a7a; background: #f4f7fa; border-bottom: 1px solid #ddd; padding: 5px 8px; }
+  .grand-total { background: #1a4a7a; color: #fff; padding: 12px 16px; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
+  .grand-total-label { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+  .grand-total-amount { font-size: 20px; font-weight: 700; color: #f0c44a; }
+  .footer { margin-top: 24px; border-top: 1px solid #e0e0e0; padding-top: 10px; font-size: 9px; color: #aaa; text-align: center; }
+  .empty { color: #888; font-size: 11px; padding: 24px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+  <div class="header">
+    <div style="display:flex;align-items:flex-start;gap:12px">
+      {% if logo_data %}
+      <img src="{{ logo_data }}" alt="Logo" style="max-height:72px;max-width:200px;object-fit:contain">
+      {% endif %}
+      <div>
+        <div class="doc-type"><span style="text-transform:none">dpc</span> Labor Estimate</div>
+        <div class="org-name">Dr. Phillips Center for the Performing Arts</div>
+        <div class="org-sub">3·2·1→Theater Production Services</div>
+      </div>
+    </div>
+    <div class="doc-title">
+      <h1>Labor Estimate</h1>
+      <div class="doc-date">Generated {{ generated_date }}</div>
+    </div>
+  </div>
+
+  <div class="show-block">
+    <div class="show-name">{{ show.name }}</div>
+    <div class="show-meta">
+      {% if show.show_date %}<span><strong>Date:</strong> {{ show.show_date | dowdate or show.show_date }}</span>{% endif %}
+      {% if show.venue %}<span><strong>Venue:</strong> {{ show.venue }}</span>{% endif %}
+      {% if performance_company %}<span><strong>Company:</strong> {{ performance_company }}</span>{% endif %}
+    </div>
+  </div>
+
+  <div class="estimate-note">
+    <strong>Estimate only.</strong> Labor costs are estimated from the requested positions using each
+    position's special rate where set, otherwise the highest standard technician rate. Lines marked
+    <span class="est-tag">est.</span> are not yet scheduled. Final billing reflects actual hours worked.
+  </div>
+
+  <div class="section-title">Labor</div>
+  {% if labor_lines %}
+  <table>
+    <thead>
+      <tr>
+        <th>Position</th>
+        <th class="num">In</th>
+        <th class="num">Out</th>
+        <th class="num">Hours</th>
+        <th class="num">Rate</th>
+        <th class="num">Line Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% set ns = namespace(last='__init__', extras=false) %}
+      {% for l in labor_lines %}
+      {% if l.is_billable_extra %}
+      {% if not ns.extras %}{% set ns.extras = true %}
+      <tr class="labor-day-row"><td colspan="6">Additional Charges</td></tr>
+      {% endif %}
+      <tr>
+        <td>{{ l.position_name or '—' }} <span class="text-dim">(per crew)</span></td>
+        <td class="num text-dim">—</td>
+        <td class="num text-dim">—</td>
+        <td class="num">× {{ l.crew_count }}</td>
+        <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/crew</td>
+        <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
+      </tr>
+      {% else %}
+      {% if (l.work_date or '') != ns.last %}{% set ns.last = l.work_date or '' %}
+      <tr class="labor-day-row"><td colspan="6">{{ l.work_date or 'Undated' }}</td></tr>
+      {% endif %}
+      <tr>
+        <td>
+          {{ l.position_name or '—' }}
+          {% if l.is_estimate %}<span class="est-tag">est.</span>{% endif %}
+          {% if l.is_training %}<span class="text-dim">(training — no charge)</span>{% endif %}
+        </td>
+        <td class="num text-dim">{{ l.in_time or '—' }}</td>
+        <td class="num text-dim">{{ l.out_time or '—' }}</td>
+        <td class="num">{{ '%.2f' | format(l.hours) }}h</td>
+        <td class="num">{% if l.is_training %}<span class="text-dim">—</span>{% else %}${{ '%.2f' | format(l.hourly_rate) }}/hr{% endif %}</td>
+        <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
+      </tr>
+      {% endif %}
+      {% endfor %}
+      <tr class="total-row">
+        <td colspan="5" class="num">Labor Subtotal</td>
+        <td class="num">${{ '%.2f' | format(labor_total) }}</td>
+      </tr>
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">No labor has been requested for this show yet.</div>
+  {% endif %}
+
+  <div class="grand-total">
+    <span class="grand-total-label">Estimated Labor Total</span>
+    <span class="grand-total-amount">${{ '%.2f' | format(labor_total) }}</span>
+  </div>
+
+  <div class="footer">
+    3·2·1→THEATER — Dr. Phillips Center for the Performing Arts &nbsp;·&nbsp; Estimate generated {{ generated_date }}
+  </div>
+
+</body>
+</html>

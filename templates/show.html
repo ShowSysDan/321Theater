@@ -838,12 +838,40 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
     </div>
   </div>
 
+  {# Per-crew billable extras + fold-into-rate toggle for the estimate. Shares
+     the same per-show settings as the Post-Show tab — edit in either place. #}
+  <div class="form-section" id="le-billables-section" style="display:none">
+    <div class="form-section-header">
+      <span class="section-icon">◈</span> PER-CREW BILLABLE EXTRAS
+      <span class="text-dim" style="font-size:11px;font-weight:400;text-transform:none;letter-spacing:normal;margin-left:8px">Included in the estimate below</span>
+    </div>
+    <div class="form-section-body">
+      <div id="le-billables-body" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+      <label id="le-hide-billable-wrap"
+             style="display:none;align-items:center;gap:8px;margin-top:12px;font-size:12px;cursor:pointer;user-select:none">
+        <input type="checkbox" id="le-hide-billable" style="accent-color:var(--accent)"
+               {% if restricted %}disabled{% endif %}
+               {% if notes_data.get('hide_billable_in_rate') == '1' %}checked{% endif %}>
+        <span>
+          <strong>Fold extras into the hourly rate</strong>
+          <span class="text-dim" style="display:block;font-size:11px;margin-top:2px">
+            Hides the additional-charge lines and spreads each charge across worked hours instead — on the estimate here and the Final Invoice PDF.
+          </span>
+        </span>
+      </label>
+    </div>
+  </div>
+
   {# Labor cost summary — loaded when tab opens #}
   <div id="labor-cost-section" style="display:none">
     <div class="form-section">
       <div class="form-section-header">
         <span class="section-icon">◈</span> ESTIMATED LABOR COST
-        <button class="btn btn-sm btn-ghost ml-auto" onclick="loadLaborCost()">Refresh</button>
+        <div class="ml-auto" style="display:flex;gap:6px;align-items:center">
+          <a href="{{ url_for('show_labor_estimate', show_id=show.id) }}" target="_blank"
+             class="btn btn-sm btn-primary" title="Download the labor estimate as a PDF">Labor Estimate PDF</a>
+          <button class="btn btn-sm btn-ghost" onclick="loadLaborCost()">Refresh</button>
+        </div>
       </div>
       <div class="form-section-body no-pad">
         <table class="data-table" id="labor-cost-table">
@@ -889,7 +917,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     <span id="assets-approval-badge" class="asset-approval-badge" style="display:none"></span>
     <div class="ml-auto" style="display:flex;gap:6px;align-items:center">
       <span id="assets-total-cost" style="font-size:12px;color:var(--text-dim);margin-right:8px"></span>
-      <a href="/shows/{{ show.id }}/assets/invoice.pdf" target="_blank" class="btn btn-sm btn-ghost" title="Download PDF invoice">Invoice PDF</a>
+      <a href="/shows/{{ show.id }}/assets/invoice.pdf" target="_blank" class="btn btn-sm btn-ghost" title="Download the asset &amp; rental estimate PDF">Asset Estimate PDF</a>
       {% if can_edit_advance %}
       <button class="btn btn-sm btn-primary" onclick="openAssetSearch()">+ Add Asset</button>
       <button class="btn btn-sm btn-ghost" onclick="openExternalRentalModal()">+ External Rental</button>
@@ -2018,6 +2046,22 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
         </div>
       </div>
     </div>
+
+    <!-- Pre-Show Estimate PDF -->
+    <div class="export-card">
+      <div class="export-card-header">
+        <div class="export-card-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="24" height="24"><path d="M9 11H15M9 15H15M9 7H15"/><path d="M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z"/></svg>
+        </div>
+        <h3 class="export-card-title">Pre-Show Estimate PDF</h3>
+      </div>
+      <p class="export-card-desc">Combined labor &amp; asset estimate/quote for the client — before anything is scheduled. Uses position special rates or the highest standard tech rate.</p>
+      <div class="export-card-foot">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <a href="{{ url_for('show_pre_show_estimate', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Generate Pre-Show Estimate</a>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Export History -->
@@ -2037,7 +2081,9 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
             <td>
               {% if e.pdf_data or e.s3_key %}
               <a href="{{ url_for('download_export_history', show_id=show.id, log_id=e.id) }}"
-                 class="btn btn-xs btn-ghost" title="Re-download PDF">↓</a>
+                 class="btn btn-sm btn-primary export-redownload" title="Re-download this PDF version">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:middle;margin-right:4px"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Download
+              </a>
               {% else %}
               <span class="text-dim" style="font-size:10px">—</span>
               {% endif %}
@@ -2237,6 +2283,28 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
   vertical-align: middle; white-space: nowrap;
 }
 .labor-day-table tr.labor-training-row td { background: rgba(43, 95, 179, 0.05); }
+/* "est." tag on estimate lines in the Estimated Labor Cost table */
+.labor-est-badge {
+  display: inline-block;
+  font-size: 9px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase;
+  padding: 1px 6px; border-radius: 999px;
+  background: rgba(245, 127, 32, 0.14); color: var(--accent);
+  border: 1px solid rgba(245, 127, 32, 0.4);
+  vertical-align: middle; white-space: nowrap; margin-left: 4px;
+}
+/* Post-Show Actual Labor: the effective (folded) billed rate, made prominent
+   so the inflation from folded per-crew charges is obvious. */
+.ps-eff-rate {
+  margin-top: 5px; white-space: nowrap;
+  font-size: 15px; font-weight: 800;
+  color: var(--accent); line-height: 1.1;
+}
+.ps-eff-rate .ps-eff-rate-label {
+  display: block; font-size: 9px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--text-muted); margin-bottom: 1px;
+}
+.ps-eff-rate .ps-eff-rate-unit { font-size: 11px; font-weight: 600; }
 /* Show-level labor notes box (top of staffing tab) */
 .show-labor-notes-wrap {
   padding: 10px 14px 8px;
@@ -3037,6 +3105,13 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     });
     _sortDayBlocks();
     _initQuickFillDefaults();
+    // Estimate billable-extras picker + fold toggle (shares Post-Show settings).
+    const leHide = document.getElementById('le-hide-billable');
+    if (leHide && !leHide._wired) {
+      leHide._wired = true;
+      leHide.addEventListener('change', () => saveEstHideBillable(leHide));
+    }
+    loadEstBillablePicker();
   }
 
   function _initQuickFillDefaults() {
@@ -3199,6 +3274,103 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     }
   }
 
+  /* ── Estimate-tab copy of the billable picker + fold toggle ──────────────
+     Lives on the Labor Requests (Staffing) tab, next to the Estimated Labor
+     Cost box. Reads/writes the SAME per-show settings as the Post-Show tab
+     (billable-item selection + hide_billable_in_rate), then re-costs the
+     estimate. Distinct element IDs (le-*) avoid colliding with the Post-Show
+     controls that share this page. */
+  async function loadEstBillablePicker() {
+    const section = document.getElementById('le-billables-section');
+    const body = document.getElementById('le-billables-body');
+    if (!section || !body) return;
+    try {
+      const r = await fetch(`/shows/{{ show.id }}/billable-items`);
+      if (!r.ok) { section.style.display = 'none'; return; }
+      const d = await r.json();
+      const items = d.items || [];
+      const hideWrap = document.getElementById('le-hide-billable-wrap');
+      if (!items.length) {
+        section.style.display = 'none';
+        if (hideWrap) hideWrap.style.display = 'none';
+        return;
+      }
+      section.style.display = '';
+      if (hideWrap) hideWrap.style.display = 'flex';
+      body.innerHTML = '';
+      const restricted = {{ 'true' if session.get('is_restricted') or session.get('is_readonly') else 'false' }};
+      items.forEach(it => {
+        const lbl = document.createElement('label');
+        lbl.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;cursor:pointer;user-select:none' + (restricted ? ';opacity:.7;cursor:default' : '');
+        lbl.dataset.bid = it.id;
+        if (it.selected) lbl.style.borderColor = 'var(--accent)';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = !!it.selected;
+        cb.style.accentColor = 'var(--accent)';
+        if (restricted) cb.disabled = true;
+        cb.addEventListener('change', () => saveEstBillableSelection(lbl, cb));
+        const txt = document.createElement('span');
+        const cost = parseFloat(it.cost_per_crew || 0).toFixed(2);
+        txt.innerHTML = `${_esc(it.name)} <span class="text-dim" style="font-size:11px">$${cost}/crew</span>`;
+        lbl.appendChild(cb);
+        lbl.appendChild(txt);
+        body.appendChild(lbl);
+      });
+    } catch(e) { /* silently ignore */ }
+  }
+
+  async function saveEstBillableSelection(lbl, changedCb) {
+    const body = document.getElementById('le-billables-body');
+    const ids = Array.from(body.querySelectorAll('label[data-bid]'))
+      .filter(l => l.querySelector('input[type=checkbox]').checked)
+      .map(l => parseInt(l.dataset.bid, 10));
+    try {
+      const r = await fetch(`/shows/{{ show.id }}/billable-items`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({billable_item_ids: ids}),
+      });
+      const d = await r.json();
+      if (!d.success) {
+        changedCb.checked = !changedCb.checked;
+        showSaveToast('✗ ' + (d.error || 'Save failed'), 'error');
+        return;
+      }
+      lbl.style.borderColor = changedCb.checked ? 'var(--accent)' : 'var(--border)';
+      showSaveToast('✓ Saved');
+      loadLaborCost();
+    } catch(e) {
+      changedCb.checked = !changedCb.checked;
+      showSaveToast('✗ Network error', 'error');
+    }
+  }
+
+  async function saveEstHideBillable(cb) {
+    try {
+      const r = await fetch(`/shows/{{ show.id }}/post-show-labor/hide-billable`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({hide: cb.checked}),
+      });
+      const d = await r.json();
+      if (!d.success) {
+        cb.checked = !cb.checked;
+        showSaveToast('✗ ' + (d.error || 'Save failed'), 'error');
+        return;
+      }
+      window._psHideBillable = !!d.hide;
+      // Keep the Post-Show tab's toggle visually in sync if it's on the page.
+      const psCb = document.getElementById('ps-hide-billable');
+      if (psCb) psCb.checked = cb.checked;
+      showSaveToast('✓ Saved');
+      loadLaborCost();
+    } catch(e) {
+      cb.checked = !cb.checked;
+      showSaveToast('✗ Network error', 'error');
+    }
+  }
+
   async function loadLaborCost() {
     const section = document.getElementById('labor-cost-section');
     const tbody = document.getElementById('labor-cost-tbody');
@@ -3210,6 +3382,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
       const d = await r.json();
       if (!d.lines || !d.lines.length) { section.style.display = 'none'; return; }
       section.style.display = '';
+      const estTag = '<span class="labor-est-badge" title="Estimated at the highest standard tech rate — not yet scheduled">est.</span>';
       tbody.innerHTML = d.lines.map(l => {
         if (l.is_billable_extra) {
           const qty = parseInt(l.crew_count || l.hours || 0, 10);
@@ -3217,7 +3390,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
             <tr style="background:var(--bg-subtle, transparent)">
               <td class="text-dim text-sm">—</td>
               <td>${l.position_name || '—'} <span class="text-dim" style="font-size:10px">(per crew)</span></td>
-              <td class="text-dim text-sm">${qty} scheduled crew</td>
+              <td class="text-dim text-sm">${qty} crew</td>
               <td style="text-align:right" class="mono">× ${qty}</td>
               <td style="text-align:right" class="mono">$${parseFloat(l.hourly_rate).toFixed(2)}/crew</td>
               <td style="text-align:right" class="mono">$${parseFloat(l.line_total).toFixed(2)}</td>
@@ -3235,9 +3408,9 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
             </tr>`;
         }
         return `
-          <tr style="${l.hourly_rate === 0 && l.is_scheduled ? 'color:var(--text-dim)' : ''}">
+          <tr>
             <td class="text-dim text-sm">${l.work_date || '—'}</td>
-            <td>${l.position_name || '—'}</td>
+            <td>${l.position_name || '—'}${l.is_estimate ? ' ' + estTag : ''}</td>
             <td>${l.is_scheduled ? (l.tech_name + (l.level_name ? `<br><span class="text-dim" style="font-size:10px">${l.level_name}</span>` : '')) : '<span class="text-dim">Unscheduled</span>'}</td>
             <td style="text-align:right">${parseFloat(l.hours).toFixed(2)}h</td>
             <td style="text-align:right" class="mono">$${parseFloat(l.hourly_rate).toFixed(2)}/hr</td>
@@ -3502,9 +3675,8 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     const effRate = _psEffectiveRate(r);
     if (window._psHideBillable && effRate !== _psNum(r.pay_rate_snapshot)) {
       const hint = document.createElement('div');
-      hint.className = 'text-dim ps-eff-rate';
-      hint.style.cssText = 'font-size:10px;margin-top:3px;white-space:nowrap';
-      hint.textContent = 'billed @ $' + effRate.toFixed(2) + '/hr';
+      hint.className = 'ps-eff-rate';
+      hint.innerHTML = '<span class="ps-eff-rate-label">billed @</span> $' + effRate.toFixed(2) + '<span class="ps-eff-rate-unit">/hr</span>';
       rateTd.appendChild(hint);
     }
     tr.appendChild(rateTd);
