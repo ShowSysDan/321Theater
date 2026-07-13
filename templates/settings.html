@@ -1252,12 +1252,24 @@
     </div>
     <div class="form-section-body no-pad">
       <table class="data-table">
-        <thead><tr><th>LEVEL NAME</th><th style="text-align:right">HOURLY RATE</th><th style="width:80px">ACTIONS</th></tr></thead>
+        <thead><tr>
+          <th>LEVEL NAME</th>
+          <th style="text-align:right">HOURLY RATE</th>
+          <th style="text-align:center;width:120px" title="Include this level when estimating labor before a tech is assigned. Turn off for test / placeholder levels.">IN ESTIMATE</th>
+          <th style="width:80px">ACTIONS</th>
+        </tr></thead>
         <tbody id="rate-levels-tbody">
           {% for lvl in pay_rate_levels %}
           <tr data-lid="{{ lvl.id }}">
             <td id="rate-level-name-{{ lvl.id }}">{{ lvl.name }}</td>
             <td id="rate-level-rate-{{ lvl.id }}" style="text-align:right" class="mono">${{ '%.2f' | format(lvl.hourly_rate) }}/hr</td>
+            <td style="text-align:center">
+              <label class="rate-est-toggle" title="Use this level's rate in the pre-show labor estimate">
+                <input type="checkbox" style="accent-color:var(--accent)"
+                       onchange="toggleRateLevelEstimate({{ lvl.id }}, this)"
+                       {% if (lvl.include_in_estimate if lvl.include_in_estimate is not none else 1) %}checked{% endif %}>
+              </label>
+            </td>
             <td>
               <div class="action-btns">
                 <button class="btn btn-xs btn-ghost" onclick="editPayRateLevel(this)">✎</button>
@@ -1266,10 +1278,15 @@
             </td>
           </tr>
           {% else %}
-          <tr id="rate-level-empty"><td colspan="3" class="text-dim" style="text-align:center;padding:16px">No rate levels configured.</td></tr>
+          <tr id="rate-level-empty"><td colspan="4" class="text-dim" style="text-align:center;padding:16px">No rate levels configured.</td></tr>
           {% endfor %}
         </tbody>
       </table>
+      <p class="text-dim" style="font-size:11px;margin:10px 14px 0">
+        <strong>In Estimate:</strong> the pre-show labor estimate bills each unscheduled position at the
+        <em>highest</em> rate among the levels checked here (unless the position has its own special rate).
+        Uncheck test or placeholder levels so they never inflate an estimate.
+      </p>
     </div>
   </div>
 
@@ -3514,8 +3531,14 @@ async function addPayRateLevel() {
     document.getElementById('new-rate-amount').value = '';
     document.getElementById('rate-level-empty')?.remove();
     const tr = document.createElement('tr'); tr.dataset.lid = d.id;
+    const estChecked = (d.include_in_estimate === undefined || d.include_in_estimate) ? 'checked' : '';
     tr.innerHTML = `<td id="rate-level-name-${d.id}">${_esc(d.name)}</td>
       <td id="rate-level-rate-${d.id}" style="text-align:right" class="mono">$${parseFloat(d.hourly_rate).toFixed(2)}/hr</td>
+      <td style="text-align:center">
+        <label class="rate-est-toggle" title="Use this level's rate in the pre-show labor estimate">
+          <input type="checkbox" style="accent-color:var(--accent)" onchange="toggleRateLevelEstimate(${d.id}, this)" ${estChecked}>
+        </label>
+      </td>
       <td><div class="action-btns">
         <button class="btn btn-xs btn-ghost" onclick="editPayRateLevel(this)">✎</button>
         <button class="btn btn-xs btn-danger-ghost" onclick="deletePayRateLevel(${d.id})">×</button>
@@ -3590,6 +3613,23 @@ function editPayRateLevel(btn) {
   rateInp.addEventListener('keydown', handleKey);
   nameInp.focus();
   nameInp.select();
+}
+
+async function toggleRateLevelEstimate(lid, cb) {
+  const include = cb.checked;
+  cb.disabled = true;
+  try {
+    const r = await fetch(`/settings/pay-rate-levels/${lid}/toggle-estimate`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({include_in_estimate: include})
+    });
+    const d = await r.json();
+    if (!d.success) { cb.checked = !include; alert(d.error || 'Error updating estimate setting.'); }
+  } catch (e) {
+    cb.checked = !include; alert('Network error updating estimate setting.');
+  } finally {
+    cb.disabled = false;
+  }
 }
 
 async function deletePayRateLevel(lid) {

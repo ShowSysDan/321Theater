@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `2.22.0`**
+**Current version: `2.23.0`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,7 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `2.23.0` — **Pre-show labor & asset estimating (client quoting before anything is scheduled).** Previously a show's labor carried no dollar value until a technician was scheduled, so there was no way to quote a client up front. This release adds a full estimate path. (1) **Estimate rate resolution:** the Staffing tab's "Estimated Labor Cost" box now produces real numbers before scheduling. Each labor line is priced by its position's **special rate** (`job_positions.override_rate`) when set, otherwise the **highest standard technician rate** — `_estimate_hourly_rate()` = `MAX(hourly_rate)` across pay-rate levels flagged for estimating. Once a tech is actually scheduled, that line switches to the assigned tech's real rate; still-unscheduled lines are tagged **"est."** in the table and PDFs. (2) **Include/exclude rate levels from estimates:** a new `pay_rate_levels.include_in_estimate` column (default on) with an **"In Estimate"** toggle column in Settings → Pay Rate Levels, so test/placeholder levels (e.g. an $834/hr "Super Technician") can stay in the system for testing without ever becoming the rate an estimate reaches for. Toggling writes a `PAY_LEVEL_ESTIMATE_TOGGLE` syslog line (and a `PAY_LEVEL_EDIT` audit entry). (3) **Per-crew billable extras + "fold into hourly rate" on the estimate:** the picker and fold toggle (previously only on the Post-Show tab) are surfaced next to the estimate box, sharing the same per-show settings — the estimate now honours both, using `_calc_labor_cost_for_show()` which was extended with the fold branch and now counts every chargeable (non-training) requested line as crew rather than only scheduled ones. (4) **Labor Estimate PDF:** an export button in the estimate box generates a branded labor estimate quote (`/shows/<id>/labor-estimate.pdf`, `LABOR_ESTIMATE_EXPORT` syslog). (5) **Pre-Show Estimate PDF:** a 5th card under Export & Files generates a **combined labor + asset estimate/quote** (`/shows/<id>/pre-show-estimate.pdf`, `PRE_SHOW_ESTIMATE_EXPORT` syslog). (6) **Assets "Invoice PDF" → "Asset Estimate PDF":** the Assets-tab button, the PDF's title/subtitle, and its download filename are relabelled as an estimate (route path and internal `asset_invoice` layout key unchanged). (7) **UI polish:** the Export History re-download control is now a labelled "↓ Download" primary button instead of a bare glyph; and the Post-Show Actual Labor "billed @ rate" (the folded effective rate) is rendered large, bold and in the accent color instead of tiny grey text.
 - `2.22.0` — **Four scheduler/billing improvements plus a post-show labor fix.** (1) **Asset Approvals — "Hide shows with no requests" filter:** a toolbar checkbox on `/assets/approvals` collapses the "No requests" empty shows out of the list so the approver sees only shows that actually have assets/external rentals to review. Purely client-side, persisted in `sessionStorage` so it survives the full-page reloads that approve/add/remove trigger. (2) **No-labor alerts for schedulers:** a new leader-gated APScheduler job (`run_no_labor_alerts`, top of every hour, acts during the shared `pdf_email_send_hour`) warns schedulers about active shows approaching their date with **no labor requested yet**. Two independent, configurable windows (default 14 days and 7 days out), each firing once per show via all-time dedup in `email_send_log` (`trigger_type='no_labor'`); delivery is **both** a single digest email to all schedulers that lists every due show (the breakdown) and a per-show in-app notification linking to that show's Labor Requests. Settings live in Settings → Email → "Labor — No-Request Alerts" (enable + two day thresholds). Mirrors the scheduled-PDF-email architecture exactly, including the stale-SQLite-fallback guard. Adds the `NO_LABOR_ALERT_SENT` syslog action. A **"Shows without labor" subpage** (`/labor-scheduler/no-labor`, linked from the Labor Scheduler header) shows the same backlog as a live list any time — every active show with no labor requested, with its date, days-out, venue and PM, and an "Add labor" link straight to each show (upcoming + undated by default; a toggle includes past-dated shows). (3) **Load-in/out auto-fill:** on a show's advance, when the load-in/out window is blank but the show has performance dates, the earliest show date is assumed as load-in and the latest as load-out (a single show date makes them the same day); and typing a load-in date auto-fills a still-blank load-out to match. Both only fire when the field is blank, so they never overwrite a window someone set. (4) **Paperwork branding:** the Advance Sheet and Post-Show Final Invoice PDFs now match the Production Schedule's branding — navy `#1a4a7a` structural color, gold `#B8840A` accent, Arial, the Dr. Phillips Center identity and logo treatment (the invoice previously used an off-brand orange `#F57F20` / `3·2·1→THEATER` look). (5) **Bug fix — post-show labor re-sync now backfills a missing crew name/rate:** a labor line flagged scheduled before a tech was assigned snapshotted into the Post-Show "Actual Labor" table with a blank tech name and unresolved rate; "Re-sync from Schedule" previously only inserted new lines, so the gap was unrecoverable. Re-sync now also refreshes already-pulled lines that have since gained a crew assignment (backfilling the name, and the rate only when the PM hasn't already entered one), and reports how many lines it updated.
 - `2.21.0` — **Labor Scheduler now groups each show by date.** A show that spans multiple days now renders one day-block per work date inside its section (mirroring the show staffing view) instead of cramming every date into a single table — each block has a date header, its own "+ Add Line" (new lines inherit that day's date), and an editable date input that re-dates every line in the block at once (the way to correct mis-dated lines). A "+ Add Day" button on the show header adds a new empty day-block, and the redundant per-row DATE column is dropped from show blocks (the block header carries the date; overhead sections keep their inline date column). Backend: the labor-request PUT now accepts `work_date` so a line/day can be re-dated. Shows with no lines still get one empty day-block so the first line can be added.
 - `2.20.0` — **Labor Scheduler week navigation + responsive layout, plus two fixes.** (1) New ← Prev Week / This Week / Next Week → controls on the Labor Scheduler snap the From/To range to a whole Monday–Sunday work week (mirrors Labor Overview's week jump); the From/To inputs stay editable for custom multi-week ranges. (2) **Bug fix:** "+ Add Line" now dates a new labor line to the *show's own date* instead of the loaded range's start date, which previously mis-dated lines for any show that wasn't on the first day of the window (the row's date is still editable, and an undated show still falls back to the range start). (3) **Layout fix:** wide tables (scheduler / overview) now scroll horizontally inside their card instead of being clipped off the right edge on smaller windows, so the far-right columns — including the per-row delete × (which already existed but was getting cut off) — stay reachable; the sidebar is now collapsible to an icon rail (chevron at the top, preference saved in localStorage) and on narrow viewports (≤900px) it shrinks to that rail instead of disappearing entirely, handing the freed width to page content.
@@ -94,6 +95,7 @@ Version history:
    - [Asset Maintenance Log](#asset-maintenance-log)
    - [Retired Assets](#retired-assets)
    - [Asset Reports](#asset-reports)
+   - [Pay Rate Levels & Labor Estimating](#pay-rate-levels--labor-estimating)
    - [Contacts](#contacts)
    - [Arts Groups](#arts-groups)
    - [Users & Roles](#users--roles)
@@ -249,6 +251,8 @@ For multi-day runs, fill out day 1 completely, then click **Clone to…** on the
 
 The **SCHED** checkbox and **SCHEDULED TECH** column inside each day are read-only — they are set by the scheduler via the [Labor Scheduler](#labor-scheduler) page. PMs can see who has been confirmed for each position but cannot edit the scheduler's entries. Restricted (read-only) users can view but not modify labor requests.
 
+**Estimated Labor Cost (client quoting before scheduling):** below the day blocks, the **Estimated Labor Cost** box prices the requested labor even before any technician is scheduled — useful for quoting a client. Each line is billed at its position's **special rate** if the position has one, otherwise at the **highest standard technician rate** (see [Pay Rate Levels & Labor Estimating](#pay-rate-levels--labor-estimating) for which rates count). Lines that are not yet scheduled are tagged **"est."**; once a tech is assigned, that line automatically shows the assigned tech's real rate. The **Per-Crew Billable Extras** picker and the **Fold extras into the hourly rate** toggle sit right above the box (the same settings shown on the Post-Show tab) so extras like parking are included in the estimate. Use **Labor Estimate PDF** in the box header to export the estimate as a branded quote.
+
 ### Labor Scheduler
 
 Accessible from the sidebar (SYSTEM section) to admins, staff, and users with the **Scheduler** flag (Settings → Users). Pick a **From** and **To** date and the page pulls every labor request whose `work_date` falls in that range, grouped by show.
@@ -277,6 +281,7 @@ The **Assets** tab on every show allows content admins to:
 - Set **quantity**, **rental period** (defaults to show production dates), and **unit price** (locked at time of reservation — subsequent database price changes do not affect existing reservations)
 - Add **external rental line items** with optional PDF attachment (vendor quote, contract, etc.)
 - View the combined **total cost** for internal + external rentals
+- Export an **Asset Estimate PDF** (the header button) — a branded estimate/quote of internal assets + external rentals for the client (formerly labelled "Invoice PDF")
 - **Hide** specific items from production managers (admin only) — useful when e.g. an admin needs to confirm a lens before adding it
 
 Availability is checked in real time when adding items. Items that are over-allocated or in maintenance show their status clearly.
@@ -301,9 +306,10 @@ Show-specific comment thread with `@mention` autocomplete. Visible to all author
 | Export Schedule → vN | Generates Production Schedule PDF with timeline, contacts, WiFi QR code, and logo |
 | Export PDF (postnotes tab) | Generates Post-Show Notes PDF |
 | Final Invoice PDF | Generates the post-show billing invoice (internal & external assets + actual labor + costs). Also available on the Post Show tab. To bill several shows on one invoice, use Combined Invoice in the sidebar (under Settings) |
-| ↓ (history) | Re-downloads a previously generated PDF |
+| Generate Pre-Show Estimate | Generates a combined **labor + asset estimate/quote** PDF — the client-facing counterpart to the Final Invoice, produced before anything is scheduled. Labor uses position special rates or the highest standard tech rate; assets use reserved quantities and locked prices |
+| ↓ Download (history) | Re-downloads a previously generated PDF |
 
-PDFs are stored in the database — use the **↓** button in Export History to re-download without generating a new version.
+PDFs are stored in the database — use the **↓ Download** button in Export History to re-download without generating a new version.
 
 **Attachments:** Drag-and-drop or click **+ Attach File**. Upload progress bar shown. Files stored in database.
 
@@ -467,6 +473,16 @@ Access via **Asset Reports** in the sidebar (admin only). Filter asset usage by 
 
 - Summary cards show total revenue, line item count, show count, and categories used
 - The **Performance Company** field on each show's advance sheet drives company-level filtering
+
+### Pay Rate Levels & Labor Estimating
+
+Settings → Staffing manages the labor cost inputs:
+
+- **Pay Rate Levels** — named hourly rates (e.g. L1, L2, External) assigned to technicians. Each level has an **In Estimate** checkbox: when on (the default), the level's rate is a candidate for the pre-show labor estimate. The estimate bills each unscheduled position at the **highest** rate among the checked levels (unless the position carries its own special rate). Uncheck a level to keep it in the system for testing without letting it inflate estimates — e.g. a deliberately high "Super Technician" test level. Toggling is admin-only and is recorded in the Audit Log and syslog (`PAY_LEVEL_ESTIMATE_TOGGLE`).
+- **Job Positions** — a position's optional **Rate ($/hr)** override is its *special rate*; when set it always wins over the pay-level/estimate rate for that position, both in estimates and in actual billing.
+- **Per-Crew Billable Items** — flat per-crew charges (e.g. parking) selectable per show and shown on both the Labor Requests estimate and the Post-Show invoice, with an optional "fold into the hourly rate" mode.
+
+See [Labor Requests](#labor-requests) for how these feed a show's estimate, and the Export tab's **Pre-Show Estimate PDF** for the combined labor + asset quote.
 
 ### Contacts
 

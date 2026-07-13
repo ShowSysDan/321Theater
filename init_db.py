@@ -444,11 +444,12 @@ CREATE TABLE IF NOT EXISTS labor_requests (
 );
 
 CREATE TABLE IF NOT EXISTS pay_rate_levels (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL,
-    hourly_rate REAL DEFAULT 0.0,
-    sort_order  INTEGER DEFAULT 0,
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    name               TEXT NOT NULL,
+    hourly_rate        REAL DEFAULT 0.0,
+    include_in_estimate INTEGER DEFAULT 1,
+    sort_order         INTEGER DEFAULT 0,
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS crew_members (
@@ -1733,6 +1734,7 @@ def migrate_db():
         'ALTER TABLE shows ADD COLUMN crew_count INTEGER DEFAULT NULL',
         "ALTER TABLE users ADD COLUMN home_layout TEXT DEFAULT 'columns'",
         "ALTER TABLE users ADD COLUMN home_density TEXT DEFAULT 'normal'",
+        "ALTER TABLE pay_rate_levels ADD COLUMN include_in_estimate INTEGER DEFAULT 1",
     ]:
         try:
             conn.execute(alter_sql)
@@ -1817,11 +1819,12 @@ def migrate_db():
         );
 
         CREATE TABLE IF NOT EXISTS pay_rate_levels (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            name        TEXT NOT NULL,
-            hourly_rate REAL DEFAULT 0.0,
-            sort_order  INTEGER DEFAULT 0,
-            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            name               TEXT NOT NULL,
+            hourly_rate        REAL DEFAULT 0.0,
+            include_in_estimate INTEGER DEFAULT 1,
+            sort_order         INTEGER DEFAULT 0,
+            created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS job_positions (
@@ -2275,11 +2278,14 @@ def migrate_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             hourly_rate REAL DEFAULT 0.0,
+            include_in_estimate INTEGER DEFAULT 1,
             sort_order INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )""",
         # Crew member rate level
         "ALTER TABLE crew_members ADD COLUMN rate_level_id INTEGER REFERENCES pay_rate_levels(id) ON DELETE SET NULL",
+        # Pay-rate levels: opt out of the pre-show labor estimate (e.g. test levels)
+        "ALTER TABLE pay_rate_levels ADD COLUMN include_in_estimate INTEGER DEFAULT 1",
         # Job position override rate
         "ALTER TABLE job_positions ADD COLUMN override_rate REAL DEFAULT NULL",
         # Venue field on job positions (replaces is_venue category approach)
@@ -2893,11 +2899,12 @@ CREATE TABLE IF NOT EXISTS position_categories (
 );
 
 CREATE TABLE IF NOT EXISTS pay_rate_levels (
-    id          SERIAL PRIMARY KEY,
-    name        TEXT NOT NULL,
-    hourly_rate REAL DEFAULT 0.0,
-    sort_order  INTEGER DEFAULT 0,
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id                 SERIAL PRIMARY KEY,
+    name               TEXT NOT NULL,
+    hourly_rate        REAL DEFAULT 0.0,
+    include_in_estimate INTEGER DEFAULT 1,
+    sort_order         INTEGER DEFAULT 0,
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS job_positions (
@@ -3729,9 +3736,11 @@ def migrate_db_postgres():
                 id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
                 hourly_rate REAL DEFAULT 0.0,
+                include_in_estimate INTEGER DEFAULT 1,
                 sort_order INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''',
+            f'ALTER TABLE "{app_schema}".pay_rate_levels ADD COLUMN IF NOT EXISTS include_in_estimate INTEGER DEFAULT 1',
             f'ALTER TABLE "{app_schema}".crew_members ADD COLUMN IF NOT EXISTS rate_level_id INTEGER',
             f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS override_rate REAL DEFAULT NULL',
             f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS venue TEXT DEFAULT NULL',
