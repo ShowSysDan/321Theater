@@ -1049,7 +1049,7 @@
     </div>
     <div class="form-section-body no-pad">
       <table class="data-table" id="msg-table">
-        <thead><tr><th>TYPE</th><th>TITLE</th><th>STATUS</th><th>EXPIRES</th><th>CREATED</th><th style="width:120px">ACTIONS</th></tr></thead>
+        <thead><tr><th>TYPE</th><th>TITLE</th><th>STATUS</th><th>SEEN / DISMISSED</th><th>EXPIRES</th><th>CREATED</th><th style="width:120px">ACTIONS</th></tr></thead>
         <tbody id="msg-tbody">
           <tr id="msg-loading"><td colspan="6" style="text-align:center;padding:20px;color:var(--text-dim)">Loading…</td></tr>
         </tbody>
@@ -4264,7 +4264,7 @@ async function loadMessages() {
   const tbody = document.getElementById('msg-tbody');
   if (!tbody) return;
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-dim)">No messages yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:24px;color:var(--text-dim)">No messages yet.</td></tr>';
     return;
   }
   const typeMap = { motd:'MOTD', maintenance:'Maintenance', alert:'Alert' };
@@ -4285,6 +4285,12 @@ async function loadMessages() {
       <td><span class="role-badge">${typeMap[m.msg_type]||m.msg_type}</span></td>
       <td><strong>${m.title}</strong></td>
       <td>${statusHtml}</td>
+      <td>
+        <button class="btn btn-xs btn-ghost" onclick="showReceipts(${m.id})"
+                title="See who has viewed / dismissed this message">
+          👁 ${m.seen_count||0} · ✓ ${m.dismissed_count||0}
+        </button>
+      </td>
       <td class="text-dim text-sm">${m.expires_at ? m.expires_at.slice(0,16) : '—'}</td>
       <td class="text-dim text-sm">${(m.created_at||'').slice(0,10)}</td>
       <td>
@@ -4352,6 +4358,50 @@ async function deleteMsg(id) {
   await fetch(`/settings/messages/${id}`, { method:'DELETE' });
   document.getElementById('msg-row-'+id)?.remove();
   showSaveToast('Message deleted');
+}
+
+function _fmtReceiptRow(r, tsKey) {
+  const name = r.display_name || r.username || ('User #' + r.user_id);
+  const ts = r[tsKey] ? String(r[tsKey]).replace('T',' ').slice(0,16) : '';
+  return `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)">
+            <span>${_escHtml(name)}</span>
+            <span class="text-dim">${ts}</span>
+          </div>`;
+}
+
+function _escHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function showReceipts(id) {
+  const modal = document.getElementById('msg-receipts-modal');
+  document.getElementById('receipts-seen-list').innerHTML = '<div class="text-dim">Loading…</div>';
+  document.getElementById('receipts-dismissed-list').innerHTML = '<div class="text-dim">Loading…</div>';
+  document.getElementById('receipts-seen-count').textContent = '…';
+  document.getElementById('receipts-dismissed-count').textContent = '…';
+  modal.style.display = 'flex';
+  try {
+    const resp = await fetch(`/settings/messages/${id}/receipts`);
+    if (!resp.ok) throw new Error('load failed');
+    const d = await resp.json();
+    document.getElementById('msg-receipts-title').textContent = 'Read Receipts — ' + (d.title || '');
+    document.getElementById('receipts-seen-count').textContent = d.seen.length;
+    document.getElementById('receipts-dismissed-count').textContent = d.dismissed.length;
+    document.getElementById('receipts-seen-list').innerHTML =
+      d.seen.length ? d.seen.map(r => _fmtReceiptRow(r, 'seen_at')).join('')
+                    : '<div class="text-dim">No views yet.</div>';
+    document.getElementById('receipts-dismissed-list').innerHTML =
+      d.dismissed.length ? d.dismissed.map(r => _fmtReceiptRow(r, 'dismissed_at')).join('')
+                         : '<div class="text-dim">None dismissed yet.</div>';
+  } catch (e) {
+    document.getElementById('receipts-seen-list').innerHTML = '<div class="text-dim">Error loading receipts.</div>';
+    document.getElementById('receipts-dismissed-list').innerHTML = '';
+  }
+}
+
+function closeReceiptsModal() {
+  document.getElementById('msg-receipts-modal').style.display = 'none';
 }
 
 // ── In-App Update ─────────────────────────────────────────────────────────────
@@ -4600,6 +4650,31 @@ function escHtml(s) {
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeMsgModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveMsg()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Message Receipts Modal (who has seen / dismissed) -->
+<div id="msg-receipts-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeReceiptsModal()">
+  <div class="modal-box" style="width:560px">
+    <div class="modal-header">
+      <span class="modal-title" id="msg-receipts-title">Read Receipts</span>
+      <button class="modal-close" onclick="closeReceiptsModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row cols-2">
+        <div class="field-group">
+          <label class="field-label">👁 SEEN (<span id="receipts-seen-count">0</span>)</label>
+          <div id="receipts-seen-list" style="max-height:320px;overflow:auto;font-size:12px"></div>
+        </div>
+        <div class="field-group">
+          <label class="field-label">✓ DISMISSED (<span id="receipts-dismissed-count">0</span>)</label>
+          <div id="receipts-dismissed-list" style="max-height:320px;overflow:auto;font-size:12px"></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeReceiptsModal()">Close</button>
     </div>
   </div>
 </div>
