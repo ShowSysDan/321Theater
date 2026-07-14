@@ -1097,3 +1097,11 @@ The git repository and codebase were previously named **ShowAdvance**. The renam
 - The **folder** should be cloned as `321theater/` on new servers (`git clone <url> 321theater`)
 - Internal table names are generic (`shows`, `asset_types`, etc.) and require no renaming
 - The `shared` schema is designed for future multi-app use — other apps can share the same user/auth system by connecting to the same database and setting their `search_path` to include the `shared` schema
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE) — free to use, modify, and
+distribute, including for a hosted offering. Copyright (c) 2026 Dr. Phillips
+Center for the Performing Arts; portions copyright (c) 2026 Thauma Systems.

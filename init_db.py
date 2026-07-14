@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS users (
     -- no effect on anything in this app.
     is_app_user INTEGER DEFAULT 0,
     is_app_admin INTEGER DEFAULT 0,
+    -- Account lock: when set, the user cannot log in and any active session
+    -- is invalidated on the next role refresh. Purely a login gate — it does
+    -- NOT delete or touch any data the user authored, so a locked account
+    -- preserves the historical record on shows/events untouched.
+    is_locked INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -2225,6 +2230,8 @@ def migrate_db():
         # directory; never consulted inside 321Theater.
         "ALTER TABLE users ADD COLUMN is_app_user INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN is_app_admin INTEGER DEFAULT 0",
+        # Account lock — blocks login without deleting the account or its data.
+        "ALTER TABLE users ADD COLUMN is_locked INTEGER DEFAULT 0",
         # Asset manager enhancements
         "ALTER TABLE asset_types ADD COLUMN supplier_name TEXT DEFAULT ''",
         "ALTER TABLE asset_types ADD COLUMN supplier_contact TEXT DEFAULT ''",
@@ -2573,6 +2580,11 @@ CREATE TABLE IF NOT EXISTS users (
     -- no effect on anything in this app.
     is_app_user INTEGER DEFAULT 0,
     is_app_admin INTEGER DEFAULT 0,
+    -- Account lock: when set, the user cannot log in and any active session
+    -- is invalidated on the next role refresh. Purely a login gate — it does
+    -- NOT delete or touch any data the user authored, so a locked account
+    -- preserves the historical record on shows/events untouched.
+    is_locked INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -3904,6 +3916,8 @@ def migrate_db_postgres():
             # user directory; 321Theater never reads them itself.
             f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS is_app_user INTEGER DEFAULT 0',
             f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS is_app_admin INTEGER DEFAULT 0',
+            # Account lock — blocks login without deleting the account or its data.
+            f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS is_locked INTEGER DEFAULT 0',
         ]
 
         n = 0

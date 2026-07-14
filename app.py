@@ -1149,13 +1149,18 @@ def _refresh_session_roles():
         user = db.execute(
             'SELECT id, role, display_name, is_readonly, is_scheduler, is_asset_manager, '
             '       is_document_viewer, viewer_venues, viewer_doc_types, '
-            '       viewer_labor_overview '
+            '       viewer_labor_overview, is_locked '
             'FROM users WHERE id=?',
             (session['user_id'],)
         ).fetchone()
         db.close()
         if not user:
             session.clear()
+            return redirect(url_for('login'))
+        # An account locked mid-session is booted on the next refresh (≤5 min).
+        if user['is_locked']:
+            session.clear()
+            flash('This account has been locked. Contact an administrator.', 'error')
             return redirect(url_for('login'))
         _populate_session_from_user(user, ts=now)
     except Exception:
@@ -3424,6 +3429,19 @@ def _login_route():
         db = get_db()
         user = db.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
         if user and check_password_hash(user['password_hash'], password):
+            # Locked accounts authenticate but are refused entry. Checked only
+            # after a correct password so it can't be used to enumerate which
+            # usernames exist. The account and all data it authored stay intact.
+            try:
+                _locked = user['is_locked']
+            except (KeyError, IndexError):
+                _locked = 0
+            if _locked:
+                db.close()
+                syslog_logger.info(
+                    f"LOGIN_BLOCKED_LOCKED user={username} ip={request.remote_addr}")
+                flash('This account has been locked. Contact an administrator.', 'error')
+                return render_template('login.html', next=request.args.get('next', ''))
             # Update last_login timestamp
             try:
                 db.execute('UPDATE users SET last_login=CURRENT_TIMESTAMP WHERE id=?', (user['id'],))
@@ -6888,7 +6906,7 @@ def settings():
         '       is_readonly, is_scheduler, is_asset_manager, '
         '       is_document_viewer, viewer_venues, viewer_doc_types, '
         '       viewer_labor_overview, '
-        '       is_app_user, is_app_admin '
+        '       is_app_user, is_app_admin, is_locked '
         'FROM users ORDER BY display_name'
     ).fetchall()
     # Decode the viewer JSON columns so the template can use |tojson cleanly
@@ -7336,6 +7354,45 @@ def delete_user(uid):
     db.commit(); db.close()
     syslog_logger.info(f"USER_DELETE user_id={uid} by={session.get('username')}")
     return jsonify({'success': True})
+
+
+@app.route('/settings/users/<int:uid>/lock', methods=['POST'])
+@admin_required
+def toggle_user_lock(uid):
+    """Lock or unlock a user account. A locked account can't log in and its
+    active sessions are killed immediately, but nothing it authored is touched
+    — the historical record on shows/events is fully preserved. This is the
+    non-destructive alternative to deleting a user.
+
+    Body: {"locked": true|false}. If omitted, the current state is toggled."""
+    if uid == session.get('user_id'):
+        return jsonify({'success': False,
+                        'error': "You can't lock your own account."}), 400
+    data = request.get_json(silent=True) or {}
+    db = get_db()
+    row = db.execute('SELECT username, is_locked FROM users WHERE id=?', (uid,)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({'success': False, 'error': 'User not found'}), 404
+    if 'locked' in data:
+        new_locked = 1 if data.get('locked') else 0
+    else:
+        new_locked = 0 if row['is_locked'] else 1
+    db.execute('UPDATE users SET is_locked=? WHERE id=?', (new_locked, uid))
+    # Locking: terminate any active sessions right away so the block takes
+    # effect immediately instead of waiting for the 5-minute role refresh.
+    if new_locked:
+        try:
+            db.execute('DELETE FROM app_sessions WHERE user_id=?', (uid,))
+        except Exception:
+            pass  # Table missing or DB-sessions disabled — refresh still catches it
+    log_audit(db, 'USER_LOCK' if new_locked else 'USER_UNLOCK', 'user', uid,
+              detail=f"{row['username']} by={session.get('username')}")
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"{'USER_LOCK' if new_locked else 'USER_UNLOCK'} user_id={uid} "
+        f"by={session.get('username')}")
+    return jsonify({'success': True, 'locked': bool(new_locked)})
 
 
 @app.route('/settings/users/<int:uid>/reset_password', methods=['POST'])

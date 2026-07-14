@@ -228,6 +228,7 @@
               {% if u.is_document_viewer %}<span style="font-size:10px;background:rgba(168,85,247,.15);color:#C084FC;padding:2px 6px;border-radius:99px;border:1px solid rgba(168,85,247,.3);margin-left:4px">Doc Viewer</span>{% endif %}
               {% if u.is_app_user %}<span title="Flag for other apps that share this user directory — no effect in 321Theater" style="font-size:10px;background:rgba(45,212,191,.15);color:#2DD4BF;padding:2px 6px;border-radius:99px;border:1px solid rgba(45,212,191,.3);margin-left:4px">App User</span>{% endif %}
               {% if u.is_app_admin %}<span title="Flag for other apps that share this user directory — no effect in 321Theater" style="font-size:10px;background:rgba(251,146,60,.15);color:#FB923C;padding:2px 6px;border-radius:99px;border:1px solid rgba(251,146,60,.3);margin-left:4px">App Admin</span>{% endif %}
+              {% if u.is_locked %}<span title="Account is locked — this user cannot log in, but their data is preserved." style="font-size:10px;background:rgba(239,68,68,.15);color:#F87171;padding:2px 6px;border-radius:99px;border:1px solid rgba(239,68,68,.3);margin-left:4px">🔒 Locked</span>{% endif %}
             </td>
             <td class="text-dim text-sm">{{ (u.created_at|string)[:10] if u.created_at else '—' }}</td>
             <td>
@@ -252,6 +253,7 @@
                         data-doc-types='{{ u.viewer_doc_types_list|tojson }}'>Edit</button>
                 <button class="btn btn-xs btn-ghost" onclick="resetPassword({{ u.id }})">Reset PW</button>
                 {% if u.id != user.id %}
+                <button class="btn btn-xs btn-ghost" onclick="toggleUserLock({{ u.id }}, {{ 1 if u.is_locked else 0 }}, this)">{{ 'Unlock' if u.is_locked else 'Lock' }}</button>
                 <button class="btn btn-xs btn-danger-ghost" onclick="deleteUser({{ u.id }}, this)">Delete</button>
                 {% endif %}
                 {% endif %}
@@ -2523,6 +2525,22 @@ async function deleteUser(id, btn) {
   const data = await resp.json();
   if (data.success) btn.closest('tr').remove();
   else alert(data.error);
+}
+
+async function toggleUserLock(id, isLocked, btn) {
+  const locking = !isLocked;
+  const msg = locking
+    ? 'Lock this account? The user will be signed out and unable to log in. '
+      + 'Their data on past shows/events is preserved and nothing is deleted.'
+    : 'Unlock this account? The user will be able to log in again.';
+  if (!confirm(msg)) return;
+  const resp = await fetch(`/settings/users/${id}/lock`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({locked: locking})
+  });
+  const data = await resp.json();
+  if (data.success) location.reload();
+  else alert(data.error || 'Could not update lock state.');
 }
 
 async function resetPassword(id) {
