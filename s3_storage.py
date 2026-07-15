@@ -1,3 +1,6 @@
+# 3·2·1→Theater
+# © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+# MIT Licensed — see LICENSE for details.
 """
 SeaweedFS / S3-compatible object storage for 321Theater.
 

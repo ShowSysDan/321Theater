@@ -1,3 +1,6 @@
+# 3·2·1→Theater
+# © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+# MIT Licensed — see LICENSE for details.
 """
 Database initialization and migration for ShowAdvance.
 
@@ -228,7 +231,8 @@ CREATE TABLE IF NOT EXISTS export_log (
     exported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     filename TEXT DEFAULT '',
     pdf_data BLOB,
-    s3_key TEXT DEFAULT NULL
+    s3_key TEXT DEFAULT NULL,
+    content_hash TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS form_sections (
@@ -1687,6 +1691,7 @@ def migrate_db():
         'ALTER TABLE export_log ADD COLUMN pdf_data BLOB',
         "ALTER TABLE export_log ADD COLUMN filename TEXT DEFAULT ''",
         'ALTER TABLE export_log ADD COLUMN s3_key TEXT DEFAULT NULL',
+        'ALTER TABLE export_log ADD COLUMN content_hash TEXT DEFAULT NULL',
         'ALTER TABLE show_attachments ADD COLUMN s3_key TEXT DEFAULT NULL',
         'ALTER TABLE show_attachments ADD COLUMN field_key TEXT DEFAULT NULL',
         "ALTER TABLE show_attachments ADD COLUMN description TEXT DEFAULT ''",
@@ -2708,7 +2713,8 @@ CREATE TABLE IF NOT EXISTS export_log (
     exported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     filename TEXT DEFAULT '',
     pdf_data BYTEA,
-    s3_key TEXT DEFAULT NULL
+    s3_key TEXT DEFAULT NULL,
+    content_hash TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS form_sections (
@@ -3740,6 +3746,7 @@ def migrate_db_postgres():
             f'ALTER TABLE "{app_schema}".export_log ADD COLUMN IF NOT EXISTS pdf_data BYTEA',
             f"ALTER TABLE \"{app_schema}\".export_log ADD COLUMN IF NOT EXISTS filename TEXT DEFAULT ''",
             f'ALTER TABLE "{app_schema}".export_log ADD COLUMN IF NOT EXISTS s3_key TEXT DEFAULT NULL',
+            f'ALTER TABLE "{app_schema}".export_log ADD COLUMN IF NOT EXISTS content_hash TEXT DEFAULT NULL',
             # Drop NOT NULL constraints so S3-migrated rows can have NULL file data
             f'ALTER TABLE "{app_schema}".show_attachments ALTER COLUMN file_data DROP NOT NULL',
             f'ALTER TABLE "{app_schema}".show_attachments ADD COLUMN IF NOT EXISTS s3_key TEXT DEFAULT NULL',

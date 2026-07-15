@@ -1,3 +1,6 @@
+# 3·2·1→Theater
+# © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+# MIT Licensed — see LICENSE for details.
 """Quick diagnostic: check where data lives in PostgreSQL schemas."""
 import os, sys
 sys.path.insert(0, os.path.dirname(__file__))

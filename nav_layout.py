@@ -1,3 +1,6 @@
+# 3·2·1→Theater
+# © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+# MIT Licensed — see LICENSE for details.
 """
 Sidebar navigation layout — admin-customizable order, grouping (section
 labels), indenting, renaming, and cosmetic hiding of the main left-nav items.
