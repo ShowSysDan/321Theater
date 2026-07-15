@@ -1104,4 +1104,4 @@ The git repository and codebase were previously named **ShowAdvance**. The renam
 
 Released under the [MIT License](LICENSE) — free to use, modify, and
 distribute, including for a hosted offering. Copyright (c) 2026 Dr. Phillips
-Center for the Performing Arts; portions copyright (c) 2026 Thauma Systems.
+Center for the Performing Arts; portions copyright (c) 2026 Thauma Systems, LLC.

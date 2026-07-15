@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# 3·2·1→Theater
+# © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+# MIT Licensed — see LICENSE for details.
 """
 One-time import script: migrate rental inventory Excel exports into ShowAdvance asset manager.
 
