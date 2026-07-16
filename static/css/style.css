@@ -133,7 +133,7 @@ a:hover { text-decoration: underline; }
 }
 .user-name { font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .user-role { font-size: 10px; color: rgba(255,255,255,0.4); text-transform: uppercase; letter-spacing: 0.06em; }
-.logout-btn { color: rgba(255,255,255,0.35); display: flex; padding: 4px; border-radius: 4px; flex-shrink: 0; }
+.logout-btn { color: rgba(255,255,255,0.35); background: none; border: none; cursor: pointer; display: flex; padding: 4px; border-radius: 4px; flex-shrink: 0; }
 .logout-btn:hover { color: var(--brand-red); background: rgba(240,78,35,0.15); }
 .logout-btn svg { width: 16px; height: 16px; }
 
