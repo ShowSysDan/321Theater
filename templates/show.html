@@ -2403,7 +2403,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
   const INITIAL_TAB = '{{ tab }}';
   const ALL_USERS = {{ all_users | tojson }};
   let _currentHistId = null;
-  initShow({{ show.id }}, INITIAL_TAB);
+  initShow({{ show.id }}, INITIAL_TAB, {{ user.id }});
 
   /* ── Restore section open/closed states from localStorage ───── */
   document.querySelectorAll('.form-section[data-key]').forEach(sec => {

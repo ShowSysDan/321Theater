@@ -5067,13 +5067,21 @@ def sync_advance(show_id):
     _upsert_active_session(db, session['user_id'], show_id, tab, focused_field)
     others = _get_other_active_users(db, session['user_id'], show_id)
 
+    # Last-saved state — lets the client seed its "another user saved" baseline
+    # from the advance tab so switching to schedule/postnotes compares against
+    # the page-load state rather than "whoever saved last".
+    saved = db.execute('SELECT last_saved_by, last_saved_at FROM shows WHERE id=?',
+                        (show_id,)).fetchone()
+
     db.commit()
     db.close()
 
     return jsonify({
-        'since':        new_since,
-        'fields':       {r['field_key']: r['field_value'] for r in changed_rows},
-        'active_users': others,
+        'since':         new_since,
+        'fields':        {r['field_key']: r['field_value'] for r in changed_rows},
+        'active_users':  others,
+        'last_saved_by': saved['last_saved_by'] if saved else None,
+        'last_saved_at': saved['last_saved_at'] if saved else None,
     })
 
 
@@ -5117,19 +5125,20 @@ def show_heartbeat(show_id):
     _upsert_active_session(db, session['user_id'], show_id, tab, focused_field)
     others = _get_other_active_users(db, session['user_id'], show_id)
 
-    # For schedule / postnotes: tell the client if someone else saved recently
-    # so it can show a "reload?" banner without fetching the full dataset.
+    # For schedule / postnotes: report who last saved the show and when. The
+    # client keeps a baseline captured at page load and only shows the "another
+    # user saved" banner when this pair changes to a save that isn't the current
+    # user's — so a show merely *last touched* by someone else before the user
+    # arrived no longer triggers a false alarm on every tab switch.
     show = db.execute('SELECT last_saved_by, last_saved_at FROM shows WHERE id=?',
                       (show_id,)).fetchone()
-    other_saved = (show and show['last_saved_by'] and
-                   show['last_saved_by'] != session['user_id'])
 
     db.commit()
     db.close()
 
     return jsonify({
-        'active_users': others,
-        'other_saved':  other_saved,
+        'active_users':  others,
+        'last_saved_by': show['last_saved_by'] if show else None,
         'last_saved_at': show['last_saved_at'] if show else None,
     })
 
