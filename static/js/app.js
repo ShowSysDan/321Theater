@@ -29,6 +29,43 @@ let _syncInterval = null;      // advance field poll handle (3 s)
 let _heartbeatInterval = null; // presence-only poll handle for other tabs (15 s)
 let _focusedField = null;      // field_key the current user has focused right now
 let _syncSeeded = false;       // false until the first poll seeds _syncSince; suppresses spurious toasts during slow page loads
+let MY_USER_ID = null;         // current user's id — seeded by initShow(); used to tell "my save" from "someone else's"
+let _savedBaselineToken = null;// opaque "(last_saved_by|last_saved_at)" snapshot captured at page load
+let _savedSeeded = false;      // false until the baseline snapshot is captured; suppresses the false "another user saved" banner
+
+/**
+ * Decide whether the show's last-save state represents a *new* save by
+ * *someone else* since this page loaded.
+ *
+ * The old logic simply asked "is last_saved_by someone other than me?" — which
+ * fires the banner for any show last touched by another user *before* the
+ * current user even opened it. Instead we snapshot the last-saved state on the
+ * first poll and only alert when it later changes to a save that isn't ours.
+ *
+ * The snapshot is an opaque string token (by|at) compared for equality, so we
+ * never have to parse or order timestamps — sidestepping the SQLite-vs-Postgres
+ * datetime-format differences that bite string comparisons.
+ *
+ * @returns {boolean} true if another user has saved since page load.
+ */
+function _checkOtherSaved(lastSavedBy, lastSavedAt) {
+  const token = `${lastSavedBy == null ? '' : lastSavedBy}|${lastSavedAt == null ? '' : lastSavedAt}`;
+  if (!_savedSeeded) {
+    // First observation — this is the state we loaded with, never an alert.
+    _savedBaselineToken = token;
+    _savedSeeded = true;
+    return false;
+  }
+  if (token === _savedBaselineToken) return false;          // unchanged since we last looked
+  if (lastSavedBy == null) return false;                    // never saved
+  if (String(lastSavedBy) === String(MY_USER_ID)) {
+    // Our own save moved the state forward — absorb it into the baseline so a
+    // later save by someone else is still detected, but don't alert ourselves.
+    _savedBaselineToken = token;
+    return false;
+  }
+  return true;
+}
 
 // Deterministic per-user colour palette (8 colours, cycled by name hash)
 const _PRESENCE_COLORS = [
@@ -99,6 +136,12 @@ async function _pollAdvanceSync() {
     // ── Update presence indicators ───────────────────────────────────────────
     _updatePresenceBadge(d.active_users || []);
     _renderFieldIndicators(d.active_users || []);
+
+    // Seed / advance the last-saved baseline so switching to a schedule /
+    // postnotes tab compares against the page-load state, not "whoever saved
+    // last". The advance tab merges other users' field edits live above, so it
+    // never shows the banner itself — this call only maintains the baseline.
+    _checkOtherSaved(d.last_saved_by, d.last_saved_at);
   } catch (_) { /* silently ignore network errors */ }
 }
 
@@ -116,7 +159,11 @@ async function _pollHeartbeat() {
     if (!resp.ok) return;
     const d = await resp.json();
     _updatePresenceBadge(d.active_users || []);
-    if (d.other_saved && !_isDirty) _showOtherSavedBanner(d.last_saved_at);
+    // Only surface the banner for a genuinely new save by another user since
+    // this page loaded — not for whoever happened to save the show last.
+    if (_checkOtherSaved(d.last_saved_by, d.last_saved_at) && !_isDirty) {
+      _showOtherSavedBanner(d.last_saved_at);
+    }
   } catch (_) {}
 }
 
@@ -217,9 +264,17 @@ function _showOtherSavedBanner(savedAt) {
   banner.innerHTML = `
     <span>⚠ Another user saved this form${time ? ' at ' + time : ''}. Reload to see their changes.</span>
     <div style="display:flex;gap:8px">
-      <button class="btn btn-xs btn-primary" onclick="location.reload()">Reload</button>
-      <button class="btn btn-xs btn-ghost" onclick="this.closest('.other-saved-banner').remove()">Dismiss</button>
+      <button class="btn btn-xs btn-primary" data-role="reload">Reload</button>
+      <button class="btn btn-xs btn-ghost" data-role="dismiss">Dismiss</button>
     </div>`;
+  banner.querySelector('[data-role="reload"]')
+    .addEventListener('click', () => location.reload());
+  banner.querySelector('[data-role="dismiss"]').addEventListener('click', () => {
+    // Re-baseline on the next poll so the dismissed save is absorbed and the
+    // banner doesn't immediately re-open for the same change.
+    _savedSeeded = false;
+    banner.remove();
+  });
   (document.getElementById('advance-form') || document.querySelector('.tab-pane.active'))
     ?.insertAdjacentElement('beforebegin', banner);
 }
@@ -295,8 +350,9 @@ async function switchTab(name) {
   }
 }
 
-function initShow(showId, initialTab) {
+function initShow(showId, initialTab, myUserId) {
   SHOW_ID = showId;
+  if (myUserId != null) MY_USER_ID = myUserId;
   switchTab(initialTab || 'advance');
   bindAdvanceForm();
   bindScheduleForm();

@@ -429,34 +429,34 @@
     </div>
   </div>
 
-  {# ── Load-In / Load-Out ──────────────────────────────────────────────────── #}
+  {# ── Show Start / Show End (stored as load_in_* / load_out_*) ─────────────── #}
   <div class="form-section" id="loadinout-section">
     <div class="form-section-header">
-      <span class="section-icon">◈</span> LOAD-IN / LOAD-OUT
+      <span class="section-icon">◈</span> SHOW START / SHOW END
     </div>
     <div class="form-section-body">
       <div class="form-row cols-4">
         <div class="field-group">
-          <label class="field-label">LOAD-IN DATE</label>
+          <label class="field-label">SHOW START DATE</label>
           <input type="date" class="field-input adv-field" data-key="load_in_date"
                  id="load-in-date" value="{{ show.load_in_date or '' }}"
                  {% if restricted %}disabled{% endif %}>
         </div>
         <div class="field-group">
-          <label class="field-label">LOAD-IN TIME</label>
+          <label class="field-label">SHOW START TIME</label>
           <input type="text" class="field-input adv-field" data-key="load_in_time"
                  id="load-in-time" value="{{ show.load_in_time or '' }}"
                  placeholder="08:00" maxlength="5"
                  {% if restricted %}disabled{% endif %}>
         </div>
         <div class="field-group">
-          <label class="field-label">LOAD-OUT DATE</label>
+          <label class="field-label">SHOW END DATE</label>
           <input type="date" class="field-input adv-field" data-key="load_out_date"
                  id="load-out-date" value="{{ show.load_out_date or '' }}"
                  {% if restricted %}disabled{% endif %}>
         </div>
         <div class="field-group">
-          <label class="field-label">LOAD-OUT TIME</label>
+          <label class="field-label">SHOW END TIME</label>
           <input type="text" class="field-input adv-field" data-key="load_out_time"
                  id="load-out-time" value="{{ show.load_out_time or '' }}"
                  placeholder="23:00" maxlength="5"
@@ -464,7 +464,7 @@
         </div>
       </div>
       <p class="field-note" style="margin:6px 0 0;font-size:11px;color:var(--text-muted)">
-        Times use 24-hour format (e.g. 08:00, 23:00). Used to calculate asset rental costs — weekly rate applies when load period is 7+ days.
+        Times use 24-hour format (e.g. 08:00, 23:00). Used to calculate asset rental costs — weekly rate applies when the show period is 7+ days.
       </p>
       <div id="load-range-warning" class="load-range-warning" style="display:none"></div>
     </div>
@@ -538,16 +538,16 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
         <p class="text-dim" style="font-size:12px;grid-column:1/-1">No fields configured. Add fields in Settings → Form Fields → Schedule Template.</p>
         {% endfor %}
 
-        {# ── Load-In / Load-Out (read-only, from Advance Sheet) ─────────── #}
+        {# ── Show Start / Show End (read-only, from Advance Sheet) ─────────── #}
         <div class="field-group">
-          <label class="field-label">LOAD-IN</label>
+          <label class="field-label">SHOW START</label>
           <div class="field-input sched-adv-mirror" data-mirror-type="load_in" style="background:var(--bg-hover);color:var(--text-muted);cursor:default">
             {% if show.load_in_date or show.load_in_time %}{{ show.load_in_date or '' }}{% if show.load_in_date and show.load_in_time %} · {% endif %}{{ show.load_in_time or '' }}{% else %}—{% endif %}
           </div>
           <p class="field-hint" style="font-size:10px;color:var(--text-muted);margin-top:3px">From Advance Sheet</p>
         </div>
         <div class="field-group">
-          <label class="field-label">LOAD-OUT</label>
+          <label class="field-label">SHOW END</label>
           <div class="field-input sched-adv-mirror" data-mirror-type="load_out" style="background:var(--bg-hover);color:var(--text-muted);cursor:default">
             {% if show.load_out_date or show.load_out_time %}{{ show.load_out_date or '' }}{% if show.load_out_date and show.load_out_time %} · {% endif %}{{ show.load_out_time or '' }}{% else %}—{% endif %}
           </div>
@@ -2403,7 +2403,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
   const INITIAL_TAB = '{{ tab }}';
   const ALL_USERS = {{ all_users | tojson }};
   let _currentHistId = null;
-  initShow({{ show.id }}, INITIAL_TAB);
+  initShow({{ show.id }}, INITIAL_TAB, {{ user.id }});
 
   /* ── Restore section open/closed states from localStorage ───── */
   document.querySelectorAll('.form-section[data-key]').forEach(sec => {
