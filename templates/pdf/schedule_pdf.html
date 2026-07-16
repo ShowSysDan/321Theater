@@ -183,11 +183,11 @@
       {% endfor %}
       {% if _has_load %}
       <div class="info-item">
-        <div class="lbl">Load-In</div>
+        <div class="lbl">Show Start</div>
         <div class="val">{{ show.load_in_date | dowdate or show.load_in_date or '' }}{% if show.load_in_date and show.load_in_time %} · {% endif %}{{ show.load_in_time or '' }}{{ '—' if not show.load_in_date and not show.load_in_time }}</div>
       </div>
       <div class="info-item">
-        <div class="lbl">Load-Out</div>
+        <div class="lbl">Show End</div>
         <div class="val">{{ show.load_out_date | dowdate or show.load_out_date or '' }}{% if show.load_out_date and show.load_out_time %} · {% endif %}{{ show.load_out_time or '' }}{{ '—' if not show.load_out_date and not show.load_out_time }}</div>
       </div>
       {% endif %}

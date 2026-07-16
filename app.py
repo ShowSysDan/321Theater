@@ -6565,10 +6565,10 @@ _SHOW_MERGE_MOVE_LABELS = {
 # EAV). Merge "fill blanks" applies to these too.
 _ADVANCE_SCALAR_FIELDS = [
     ('performance_company', 'Performance Company'),
-    ('load_in_date',  'Load-In Date'),
-    ('load_in_time',  'Load-In Time'),
-    ('load_out_date', 'Load-Out Date'),
-    ('load_out_time', 'Load-Out Time'),
+    ('load_in_date',  'Show Start Date'),
+    ('load_in_time',  'Show Start Time'),
+    ('load_out_date', 'Show End Date'),
+    ('load_out_time', 'Show End Time'),
 ]
 
 
