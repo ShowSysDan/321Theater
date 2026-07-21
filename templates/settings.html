@@ -249,6 +249,7 @@
                         data-asset-mgr="{{ 1 if u.is_asset_manager else 0 }}"
                         data-doc-viewer="{{ 1 if u.is_document_viewer else 0 }}"
                         data-labor-overview="{{ 1 if u.viewer_labor_overview else 0 }}"
+                        data-show-calendar="{{ 1 if u.viewer_show_calendar else 0 }}"
                         data-app-user="{{ 1 if u.is_app_user else 0 }}"
                         data-app-admin="{{ 1 if u.is_app_admin else 0 }}"
                         {# single-quoted on purpose: |tojson emits double quotes,
@@ -2352,6 +2353,10 @@
             <input type="checkbox" id="edit-user-labor-overview" style="width:auto;margin:0">
             Also allow read-only access to the Labor Overview page
           </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);cursor:pointer;margin-top:8px">
+            <input type="checkbox" id="edit-user-show-calendar" style="width:auto;margin:0">
+            Also show a Show Calendar page (limited to their allowed shows)
+          </label>
         </div>
         <div style="font-size:11px;color:var(--text-dim);margin-top:6px">Admins always have full access. These only apply to User/Staff accounts.</div>
       </div>
@@ -2579,12 +2584,13 @@ document.addEventListener('click', e => {
     Number(btn.dataset.appUser) ? 1 : 0,
     Number(btn.dataset.appAdmin) ? 1 : 0,
     Number(btn.dataset.laborOverview) ? 1 : 0,
+    Number(btn.dataset.showCalendar) ? 1 : 0,
   );
 });
 
 function openEditUser(id, name, email, role, isReadonly, isScheduler, isAssetManager,
                       isDocViewer, viewerVenues, viewerDocTypes, isAppUser, isAppAdmin,
-                      viewerLaborOverview) {
+                      viewerLaborOverview, viewerShowCalendar) {
   document.getElementById('edit-user-id').value = id;
   document.getElementById('edit-user-name').value = name;
   document.getElementById('edit-user-email').value = email;
@@ -2608,6 +2614,8 @@ function openEditUser(id, name, email, role, isReadonly, isScheduler, isAssetMan
   });
   const laborOverviewCb = document.getElementById('edit-user-labor-overview');
   if (laborOverviewCb) laborOverviewCb.checked = !!viewerLaborOverview;
+  const showCalendarCb = document.getElementById('edit-user-show-calendar');
+  if (showCalendarCb) showCalendarCb.checked = !!viewerShowCalendar;
   // Cross-app flags — stored only for other apps; inert in 321Theater.
   document.getElementById('edit-user-app-user').checked = !!isAppUser;
   document.getElementById('edit-user-app-admin').checked = !!isAppAdmin;
@@ -2645,6 +2653,7 @@ async function saveEditUser() {
     viewer_venues,
     viewer_doc_types,
     viewer_labor_overview: document.getElementById('edit-user-labor-overview').checked,
+    viewer_show_calendar: document.getElementById('edit-user-show-calendar').checked,
     is_app_user: document.getElementById('edit-user-app-user').checked,
     is_app_admin: document.getElementById('edit-user-app-admin').checked,
   };
