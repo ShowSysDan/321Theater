@@ -1129,6 +1129,7 @@ def _populate_session_from_user(user, ts=None):
     session['viewer_venues']      = _decode_json_list(user.get('viewer_venues'))
     session['viewer_doc_types']   = _decode_json_list(user.get('viewer_doc_types'))
     session['viewer_labor_overview'] = bool(user.get('viewer_labor_overview', 0))
+    session['viewer_show_calendar']  = bool(user.get('viewer_show_calendar', 0))
     session['_role_checked_at']   = ts if ts is not None else datetime.utcnow().timestamp()
     # If an admin is previewing via "view site as", this refresh just reloaded
     # their REAL flags from the DB — re-apply the preview override so it doesn't
@@ -1152,7 +1153,7 @@ def _refresh_session_roles():
         user = db.execute(
             'SELECT id, role, display_name, is_readonly, is_scheduler, is_asset_manager, '
             '       is_document_viewer, viewer_venues, viewer_doc_types, '
-            '       viewer_labor_overview, is_locked '
+            '       viewer_labor_overview, viewer_show_calendar, is_locked '
             'FROM users WHERE id=?',
             (session['user_id'],)
         ).fetchone()
@@ -1336,6 +1337,10 @@ def _viewer_gate():
     # Optional per-user grant: document viewers may also reach the read-only
     # Labor Overview page when their account has it enabled.
     if ep == 'labor_overview' and session.get('viewer_labor_overview'):
+        return None
+    # Optional per-user grant: document viewers may also reach the Show Calendar
+    # page (and its data endpoint) when their account has it enabled.
+    if ep in ('viewer_calendar', 'viewer_shows_calendar') and session.get('viewer_show_calendar'):
         return None
     if ep.startswith('static'):
         return None
@@ -6337,6 +6342,41 @@ def viewer_export(show_id, doc_type):
     return export_postnotes(show_id)
 
 
+@app.route('/viewer/calendar')
+@login_required
+def viewer_calendar():
+    """Read-only Show Calendar for document viewers whose account has the
+    viewer_show_calendar grant. Shows only the shows their venue allow-list
+    permits (same set as their /viewer documents page)."""
+    if not session.get('is_document_viewer'):
+        return redirect(url_for('dashboard'))
+    if not session.get('viewer_show_calendar'):
+        return redirect(url_for('viewer_home'))
+    is_viewer, venues_allow, _ = get_document_viewer_settings(session['user_id'])
+    return render_template(
+        'viewer_calendar.html',
+        user=get_current_user(),
+        venues_allow=venues_allow,
+    )
+
+
+@app.route('/viewer/shows-calendar')
+@login_required
+def viewer_shows_calendar():
+    """JSON feed for the viewer Show Calendar — restricted to the shows the
+    viewer's venue allow-list permits. Mirrors /api/dashboard/shows-calendar
+    but never reaches beyond the viewer's accessible set."""
+    if not session.get('is_document_viewer') or not session.get('viewer_show_calendar'):
+        return jsonify({'error': 'Forbidden.'}), 403
+    date_from = request.args.get('from', '')
+    date_to   = request.args.get('to', '')
+    accessible = viewer_accessible_shows(session['user_id'])
+    db = get_db()
+    days = _build_shows_calendar_days(db, accessible, date_from, date_to)
+    db.close()
+    return jsonify({'days': days})
+
+
 # ─── Show Management ──────────────────────────────────────────────────────────
 
 def _redirect_after_show_action():
@@ -7088,7 +7128,7 @@ def settings():
         'SELECT id, username, display_name, email, role, created_at, '
         '       is_readonly, is_scheduler, is_asset_manager, '
         '       is_document_viewer, viewer_venues, viewer_doc_types, '
-        '       viewer_labor_overview, '
+        '       viewer_labor_overview, viewer_show_calendar, '
         '       is_app_user, is_app_admin, is_locked '
         'FROM users ORDER BY display_name'
     ).fetchall()
@@ -7429,6 +7469,9 @@ def edit_user(uid):
     # Extra read-only grant: doc viewers can also reach the Labor Overview page.
     # Only meaningful alongside is_document_viewer, so clear it otherwise.
     viewer_labor_overview = 1 if (is_document_viewer and data.get('viewer_labor_overview')) else 0
+    # Extra read-only grant: doc viewers can also reach the Show Calendar page.
+    # Only meaningful alongside is_document_viewer, so clear it otherwise.
+    viewer_show_calendar = 1 if (is_document_viewer and data.get('viewer_show_calendar')) else 0
     # Cross-app account flags. Stored on the shared user row purely so OTHER
     # apps that share this user directory can read them; 321Theater applies
     # NO behavior to them. NEVER gate any 321Theater logic (auth, routes,
@@ -7478,13 +7521,13 @@ def edit_user(uid):
         'UPDATE users SET display_name=?, email=?, role=?, is_readonly=?, '
         '                 is_scheduler=?, is_asset_manager=?, '
         '                 is_document_viewer=?, viewer_venues=?, viewer_doc_types=?, '
-        '                 viewer_labor_overview=?, '
+        '                 viewer_labor_overview=?, viewer_show_calendar=?, '
         '                 is_app_user=?, is_app_admin=? '
         'WHERE id=?',
         (display_name or row['username'], email, role, is_readonly,
          is_scheduler, is_asset_manager,
          is_document_viewer, viewer_venues_json, viewer_doc_types_json,
-         viewer_labor_overview,
+         viewer_labor_overview, viewer_show_calendar,
          is_app_user, is_app_admin, uid)
     )
     # If the doc-viewer flag flipped (either direction), invalidate any active
@@ -7499,6 +7542,7 @@ def edit_user(uid):
               detail=(f'role={role} readonly={is_readonly} scheduler={is_scheduler} '
                       f'asset_mgr={is_asset_manager} doc_viewer={is_document_viewer} '
                       f'viewer_labor_overview={viewer_labor_overview} '
+                      f'viewer_show_calendar={viewer_show_calendar} '
                       f'app_user={is_app_user} app_admin={is_app_admin} '
                       f'by={session.get("username")}'))
     # Keep the linked contact row's name + email in sync with this user.
@@ -18790,14 +18834,15 @@ def ai_slots_status():
 
 # ─── Asset Availability Dashboard ─────────────────────────────────────────────
 
-@app.route('/api/dashboard/shows-calendar')
-def api_dashboard_shows_calendar():
-    """Return shows per day for a date range (for calendar widget). Public-safe."""
+def _build_shows_calendar_days(db, accessible, date_from, date_to):
+    """Build the per-day show buckets used by the calendar widget.
+
+    `accessible` is a list of show ids to restrict to, or None for no
+    restriction. A show appears on each of its load-in, show, and load-out
+    dates. When both `date_from` and `date_to` are given, every day in the
+    range is emitted (even empty ones) so the client can lay out a full grid.
+    """
     from datetime import date as _date, timedelta
-    date_from = request.args.get('from', '')
-    date_to   = request.args.get('to', '')
-    db = get_db()
-    accessible = get_accessible_shows(session['user_id']) if session.get('user_id') else None
     params = []
     where_parts = ["s.status != 'archived'"]
     if date_from:
@@ -18808,8 +18853,7 @@ def api_dashboard_shows_calendar():
         params.append(date_to)
     if accessible is not None:
         if not accessible:
-            db.close()
-            return jsonify({'days': []})
+            return []
         placeholders = ','.join('?' * len(accessible))
         where_parts.append(f's.id IN ({placeholders})')
         params.extend(accessible)
@@ -18819,7 +18863,6 @@ def api_dashboard_shows_calendar():
         FROM shows s {where_sql}
         ORDER BY COALESCE(s.show_date, s.load_in_date), s.name
     """, params).fetchall()
-    db.close()
 
     # Build per-day buckets: a show appears on its load_in, show, and load_out dates
     day_map = {}
@@ -18854,7 +18897,18 @@ def api_dashboard_shows_calendar():
     else:
         for d in sorted(day_map):
             days.append({'date': d, 'shows': day_map[d], 'show_count': len(day_map[d])})
+    return days
 
+
+@app.route('/api/dashboard/shows-calendar')
+def api_dashboard_shows_calendar():
+    """Return shows per day for a date range (for calendar widget). Public-safe."""
+    date_from = request.args.get('from', '')
+    date_to   = request.args.get('to', '')
+    db = get_db()
+    accessible = get_accessible_shows(session['user_id']) if session.get('user_id') else None
+    days = _build_shows_calendar_days(db, accessible, date_from, date_to)
+    db.close()
     return jsonify({'days': days})
 
 

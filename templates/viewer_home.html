@@ -33,12 +33,21 @@
     </div>
   </div>
 {% else %}
+  {# ── Search toolbar — filters the show list like the main home screen ────── #}
+  <div class="dash-toolbar" style="margin-bottom:14px">
+    <div class="dash-search-wrap">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15" class="dash-search-icon"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="viewer-search" class="dash-search-input" placeholder="Search shows…" oninput="filterViewer(this.value)" autocomplete="off">
+      <button id="viewer-clear-btn" class="dash-clear-btn" onclick="clearViewerSearch()" style="display:none" title="Clear">×</button>
+    </div>
+  </div>
+
   {% for venue, shows in grouped %}
-  <div class="form-section" style="margin-bottom:14px">
+  <div class="form-section viewer-venue-section" style="margin-bottom:14px" data-venue="{{ venue|lower }}">
     <div class="form-section-header">
       <span class="section-icon">◈</span>
       <strong style="text-transform:none;letter-spacing:normal;font-size:14px">{{ venue }}</strong>
-      <span class="text-dim" style="font-size:11px">{{ shows|length }} show{{ '' if shows|length == 1 else 's' }}</span>
+      <span class="text-dim viewer-venue-count" style="font-size:11px">{{ shows|length }} show{{ '' if shows|length == 1 else 's' }}</span>
     </div>
     <div class="form-section-body no-pad">
       <table class="data-table">
@@ -50,7 +59,7 @@
         </tr></thead>
         <tbody>
           {% for s in shows %}
-          <tr>
+          <tr class="viewer-show-row" data-search="{{ (s.name ~ ' ' ~ (venue|string) ~ ' ' ~ (s.show_date or ''))|lower }}">
             <td><a href="{{ url_for('viewer_show', show_id=s.id) }}" style="color:var(--text);text-decoration:none;font-weight:500">{{ s.name }}</a></td>
             <td class="text-dim">{{ s.show_date or '—' }}</td>
             <td class="text-dim">{{ s.show_time or '—' }}</td>
@@ -61,8 +70,43 @@
           {% endfor %}
         </tbody>
       </table>
+      <p class="viewer-venue-empty text-dim" style="display:none;font-size:12px;padding:10px 14px">No matching shows in this venue.</p>
     </div>
   </div>
   {% endfor %}
+
+  <p id="viewer-no-results" class="text-dim" style="display:none;font-size:13px;padding:24px 0">No shows match your search.</p>
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+function filterViewer(q) {
+  const term = (q || '').toLowerCase().trim();
+  document.getElementById('viewer-clear-btn').style.display = term ? '' : 'none';
+  let totalVisible = 0;
+  document.querySelectorAll('.viewer-venue-section').forEach(section => {
+    let visible = 0;
+    section.querySelectorAll('.viewer-show-row').forEach(row => {
+      const match = !term || (row.dataset.search || '').includes(term);
+      row.style.display = match ? '' : 'none';
+      if (match) visible++;
+    });
+    const emptyMsg = section.querySelector('.viewer-venue-empty');
+    if (emptyMsg) emptyMsg.style.display = visible === 0 ? '' : 'none';
+    const countEl = section.querySelector('.viewer-venue-count');
+    if (countEl) countEl.textContent = visible + ' show' + (visible === 1 ? '' : 's');
+    totalVisible += visible;
+  });
+  document.getElementById('viewer-no-results').style.display =
+    (totalVisible === 0 && term) ? '' : 'none';
+}
+
+function clearViewerSearch() {
+  const input = document.getElementById('viewer-search');
+  input.value = '';
+  filterViewer('');
+  input.focus();
+}
+</script>
 {% endblock %}

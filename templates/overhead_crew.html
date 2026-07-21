@@ -1011,6 +1011,9 @@
       <div class="oh-day-actions">
         <button class="btn btn-sm btn-ghost"
                 onclick="window.__overhead.openAddGroup('${day.work_date}')">+ Sub-group</button>
+        <button class="btn btn-sm btn-ghost"
+                onclick="window.__overhead.changeDayDate(this, '${day.work_date}')"
+                title="Move every sub-group on this date to a different day (fix a typo)">Change Date</button>
         <button class="btn btn-sm btn-danger-ghost"
                 onclick="window.__overhead.deleteDay(this, '${day.work_date}')"
                 title="Delete every sub-group on this date">Delete Day</button>
@@ -1324,6 +1327,40 @@
       alert('Delete failed: ' + ((res && res.error) || 'unknown'));
       return;
     }
+    await load();
+  }
+
+  /* Move an entire day to a new date — fixes a mistyped date without having to
+     delete and rebuild the sub-groups. Each group's work_date is updated (the
+     server cascades the new date to every labor line under it). */
+  async function changeDayDate(btn, workDate) {
+    const dayEl  = btn.closest('.oh-day');
+    const groups = Array.from(dayEl.querySelectorAll('.oh-group'));
+    if (!groups.length) return;
+    const newDate = prompt(
+      `Move ${dayLabel(workDate)} (${workDate}) to which date? (YYYY-MM-DD)`,
+      workDate
+    );
+    if (newDate === null) return;
+    const trimmed = newDate.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      alert('Enter a date as YYYY-MM-DD.');
+      return;
+    }
+    if (trimmed === workDate) return;
+    let ok = 0, fail = 0;
+    for (const g of groups) {
+      const gid = g.dataset.groupId;
+      const res = await putJSON(`/api/overhead-crew/groups/${gid}`, { work_date: trimmed });
+      if (res && res.success) ok++; else fail++;
+    }
+    // Make sure the visible range covers the new date so the moved day shows up.
+    const fromEl = document.getElementById('oh-from');
+    const toEl   = document.getElementById('oh-to');
+    if (fromEl.value && trimmed < fromEl.value) fromEl.value = trimmed;
+    if (toEl.value   && trimmed > toEl.value)   toEl.value   = trimmed;
+    if (fail) showSaveToast(`✗ ${fail} sub-group${fail===1?'':'s'} failed to move`, 'error');
+    else      showSaveToast(`✓ Moved to ${trimmed}`);
     await load();
   }
 
@@ -1738,6 +1775,7 @@
     confirmAddGroup,
     changeGroupProject,
     deleteGroup,
+    changeDayDate,
     deleteDay,
     addRequest,
     removeRequest,
