@@ -33,6 +33,7 @@
   .text-dim { color: #888; font-size: 10px; }
   .total-row td { font-weight: 700; border-top: 2px solid #ddd; border-bottom: none; padding-top: 8px; }
   .labor-day-row td { font-weight: 700; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: #1a4a7a; background: #f4f7fa; border-bottom: 1px solid #ddd; padding: 5px 8px; }
+  .ot-row td { color: #7a5a00; background: #fdf6e3; }
   .grand-total { background: #1a4a7a; color: #fff; padding: 12px 16px; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
   .grand-total-label { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
   .grand-total-amount { font-size: 20px; font-weight: 700; color: #f0c44a; }
@@ -178,7 +179,7 @@
       {% if (l.work_date or '') != ns.last %}{% set ns.last = l.work_date or '' %}
       <tr class="labor-day-row"><td colspan="7">{{ l.work_date or 'Unscheduled' }}</td></tr>
       {% endif %}
-      <tr>
+      <tr{% if l.is_overtime %} class="ot-row"{% endif %}>
         <td>{{ l.position_name or '—' }}</td>
         <td class="num text-dim">{{ l.in_time or '—' }}</td>
         <td class="num text-dim">{{ l.out_time or '—' }}</td>

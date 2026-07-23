@@ -85,6 +85,7 @@ _CONFLICT_COLS = {
     'form_sections':     ['section_key'],
     'schedule_meta_fields': ['field_key'],
     'cluster_instances': ['instance_id'],
+    'show_labor_days':   ['show_id', 'work_date'],
 }
 
 

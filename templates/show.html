@@ -1169,10 +1169,24 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     return _allAssetTypes;
   }
 
+  // Allowed rental bounds (show load-in → load-out) for the date editors.
+  let _assetRentalWindow = {start: null, end: null};
+
+  // Rental periods are date ranges — show/edit date-only. Tolerates legacy
+  // values that arrive as full GMT timestamps.
+  function _assetDateOnly(v) {
+    if (!v) return '';
+    const s = String(v);
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    const d = new Date(s);
+    return isNaN(d) ? '' : d.toISOString().slice(0, 10);
+  }
+
   // Load and render the assets tab
   window.loadAssetsTab = async function() {
     const r = await fetch(`/shows/${SHOW_ID}/assets`, {headers:{'X-Requested-With':'XMLHttpRequest'}});
     const data = await r.json();
+    _assetRentalWindow = data.rental_window || {start: null, end: null};
     renderAssets(data.assets || [], data.external_rentals || []);
     renderApprovalBadge(data.approval || {approved: false});
   };
@@ -1222,13 +1236,23 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         const qtyCell = (IS_ADMIN && !a.asset_item_id)
           ? `<input type="number" min="1" step="1" value="${a.quantity}" data-sa-id="${a.id}" data-orig="${a.quantity}" class="asset-qty-input field-input" style="width:64px;padding:2px 6px;font-size:12px;text-align:right">`
           : `${a.quantity}`;
+        const rStart = _assetDateOnly(a.rental_start);
+        const rEnd = _assetDateOnly(a.rental_end);
+        const winAttrs = `${_assetRentalWindow.start ? ` min="${_assetRentalWindow.start}"` : ''}${_assetRentalWindow.end ? ` max="${_assetRentalWindow.end}"` : ''}`;
+        // Rental period is editable in place; the server re-checks
+        // availability/unit conflicts and re-locks the rate-card price for
+        // the new duration. Bounded to the show's load-in → load-out window.
+        const rentalCell = IS_ADMIN
+          ? `<input type="date" class="asset-date-input field-input" data-sa-id="${a.id}" data-field="rental_start" value="${rStart}" data-orig="${rStart}"${winAttrs} style="width:128px;padding:2px 6px;font-size:11px"> →
+             <input type="date" class="asset-date-input field-input" data-sa-id="${a.id}" data-field="rental_end" value="${rEnd}" data-orig="${rEnd}"${winAttrs} style="width:128px;padding:2px 6px;font-size:11px">`
+          : `${rStart||'—'} → ${rEnd||'—'}`;
         const tr = document.createElement('tr');
         if (a._avail_overbooked) tr.style.background = 'rgba(197,48,48,.08)';
         tr.innerHTML = `
           <td style="color:var(--text-dim);font-size:11px">${esc(a.category_name)}</td>
           <td><div style="font-weight:500">${esc(label)}${unitBadge}${hiddenBadge}${overbookedBadge}</div>${subHtml}</td>
           <td>${qtyCell}</td>
-          <td style="font-size:11px">${a.rental_start||'—'} → ${a.rental_end||'—'}</td>
+          <td style="font-size:11px;white-space:nowrap">${rentalCell}</td>
           <td>$${Number(a.locked_price).toFixed(2)}</td>
           <td>$${lineTotal}</td>
           <td style="font-size:11px;color:var(--text-dim)">${esc(a.notes||'')}</td>
@@ -1245,6 +1269,9 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
           if (e.key === 'Escape') { inp.value = inp.dataset.orig; inp.blur(); }
         });
+      });
+      tbody.querySelectorAll('.asset-date-input').forEach(inp => {
+        inp.addEventListener('change', () => updateAssetDates(inp));
       });
     }
 
@@ -1390,8 +1417,15 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     const perfs = {{ performances | tojson }};
     const defaultStart = loadInDate  || (perfs.length > 0 ? perfs[0].perf_date          : '') || '';
     const defaultEnd   = loadOutDate || (perfs.length > 0 ? perfs[perfs.length-1].perf_date : '') || '';
-    document.getElementById('asset-add-start').value = defaultStart;
-    document.getElementById('asset-add-end').value   = defaultEnd;
+    const addStartInp = document.getElementById('asset-add-start');
+    const addEndInp   = document.getElementById('asset-add-end');
+    addStartInp.value = defaultStart;
+    addEndInp.value   = defaultEnd;
+    // Rentals may not extend past the show's load-in → load-out window.
+    [addStartInp, addEndInp].forEach(inp => {
+      if (defaultStart) inp.min = defaultStart; else inp.removeAttribute('min');
+      if (defaultEnd)   inp.max = defaultEnd;   else inp.removeAttribute('max');
+    });
 
     // Remember this type's rate card so the price + breakdown can recompute
     // live as the dates / quantity change (see _recalcAssetPrice).
@@ -1634,6 +1668,56 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       else alert('Failed to update quantity');
     } finally {
       inp.disabled = false;
+    }
+  };
+
+  // Edit a line's rental period in place. Sends BOTH dates so the server
+  // validates the full range (within the show window, start ≤ end), re-checks
+  // availability / unit conflicts, and re-locks the rate-card price for the
+  // new duration.
+  window.updateAssetDates = async function(inp) {
+    const saId = Number(inp.dataset.saId);
+    const row = inp.closest('tr');
+    const startInp = row.querySelector('.asset-date-input[data-field="rental_start"]');
+    const endInp = row.querySelector('.asset-date-input[data-field="rental_end"]');
+    const start = startInp?.value || '';
+    const end = endInp?.value || '';
+    const revert = () => {
+      if (startInp) startInp.value = startInp.dataset.orig;
+      if (endInp) endInp.value = endInp.dataset.orig;
+    };
+    if (!start || !end) { revert(); return; }
+    // Keep the range valid by pulling the other bound along with the edit
+    // (moving start past end drags end along, and vice versa).
+    if (start > end) {
+      if (inp === startInp && endInp) endInp.value = start;
+      else if (startInp) startInp.value = end;
+    }
+    try {
+      const r = await fetch(`/shows/${SHOW_ID}/assets/${saId}`, {
+        method: 'PUT',
+        headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+        body: JSON.stringify({rental_start: startInp?.value || start,
+                              rental_end: endInp?.value || end})
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const msg = d.error || 'Save failed';
+        revert();
+        if (typeof showSaveToast === 'function') showSaveToast(msg, 'error');
+        else alert(msg);
+        return;
+      }
+      if (typeof showSaveToast === 'function') {
+        showSaveToast(d.repriced
+          ? `Rental period updated — unit price re-locked at $${Number(d.locked_price).toFixed(2)} for the new duration`
+          : 'Rental period updated');
+      }
+      loadAssetsTab();
+    } catch(e) {
+      revert();
+      if (typeof showSaveToast === 'function') showSaveToast('Failed to update rental period', 'error');
+      else alert('Failed to update rental period');
     }
   };
 
@@ -2354,6 +2438,15 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
 }
 .labor-day-date { width: 150px; }
 .labor-day-actions { display: flex; gap: 6px; }
+.labor-day-pm-wrap { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.labor-day-pm-wrap label {
+  font-size: 10px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+.labor-day-pm { min-width: 130px; }
+.labor-day-notes { flex: 1; min-width: 120px; font-size: 12px; }
+/* Overtime (1.5×) line items in the labor cost / post-show tables */
+.labor-ot-row td, tr.ps-ot-row td { color: var(--warning, #e8a13c); }
 .labor-day-footer {
   padding: 8px 12px;
   border-top: 1px solid var(--border);
@@ -2910,17 +3003,29 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
 
     const header = document.createElement('div');
     header.className = 'labor-day-header';
+    const dayInfo = (window._laborDaysMap || {})[date] || {};
     header.innerHTML = `
       <span class="labor-day-label">${date ? _dayLabel(date).toUpperCase() : 'UNSCHEDULED'}</span>
       <input type="date" class="field-input field-input-sm labor-day-date" value="${date || ''}" ${RESTRICTED ? 'disabled' : ''} title="Work date for this day">
+      <span class="labor-day-pm-wrap" title="PM on duty for this day — pick one when another PM covers the show for the day. Blank = the show's main PM.">
+        <label>Day PM</label>
+        <select class="field-input field-input-sm labor-day-pm" ${RESTRICTED ? 'disabled' : ''}
+                onchange="onLaborDayPmChange(this)"></select>
+      </span>
+      <input type="text" class="field-input field-input-sm labor-day-notes"
+             value="${_esc(dayInfo.day_notes || '')}" ${RESTRICTED ? 'disabled' : ''}
+             placeholder="Day notes — shown on the scheduler &amp; Labor Overview"
+             title="Notes for this show on this day only"
+             onchange="onLaborDayNotesChange(this)">
       ${RESTRICTED ? '' : `
-        <div class="labor-day-actions ml-auto">
+        <div class="labor-day-actions">
           <button type="button" class="btn btn-xs btn-ghost" onclick="cloneLaborDay(this)" title="Copy all rows to another date">Clone to…</button>
           <button type="button" class="btn btn-xs btn-danger-ghost" onclick="deleteLaborDay(this)" title="Delete this day and all its rows">Delete Day</button>
         </div>
       `}
     `;
     block.appendChild(header);
+    _buildLaborDayPmSelect(header.querySelector('.labor-day-pm'), dayInfo.cover_pm || '');
 
     const tableWrap = document.createElement('div');
     tableWrap.className = 'form-section-body no-pad';
@@ -2985,6 +3090,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
         header.querySelector('.labor-day-label').textContent = newDate ? _dayLabel(newDate).toUpperCase() : 'UNSCHEDULED';
         const rids = Array.from(tbody.querySelectorAll('tr')).map(tr => tr.dataset.rid).filter(Boolean);
         for (const rid of rids) { await _putLabor(rid, {work_date: newDate}); }
+        await _moveLaborDayInfo(block, oldDate, newDate);
         _mergeDuplicateDayBlocks();
       });
     }
@@ -3049,6 +3155,94 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
   }
   window.saveShowLaborNotes = saveShowLaborNotes;
 
+  /* ── Per-day covering PM + day notes (show_labor_days) ─────────────────── */
+  let _pmNamesList = null;
+
+  async function _loadLaborDays() {
+    try {
+      const r = await fetch(`/shows/${SHOW_ID}/labor-days`);
+      const data = await r.json();
+      window._laborDaysMap = data.days || {};
+    } catch (e) { window._laborDaysMap = window._laborDaysMap || {}; }
+  }
+
+  async function _loadPMNames() {
+    if (_pmNamesList) return _pmNamesList;
+    try {
+      const r = await fetch('/api/production-managers');
+      const data = await r.json();
+      _pmNamesList = data.names || [];
+    } catch (e) { _pmNamesList = []; }
+    return _pmNamesList;
+  }
+
+  function _buildLaborDayPmSelect(selectEl, selected) {
+    if (!selectEl) return;
+    selectEl.innerHTML = '';
+    const def = document.createElement('option');
+    def.value = '';
+    def.textContent = '— Show PM —';
+    selectEl.appendChild(def);
+    (_pmNamesList || []).forEach(name => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      if (name === selected) opt.selected = true;
+      selectEl.appendChild(opt);
+    });
+    // Keep a saved name visible even if the contact left the department.
+    if (selected && selectEl.value !== selected) {
+      const ghost = document.createElement('option');
+      ghost.value = selected;
+      ghost.textContent = selected;
+      ghost.selected = true;
+      selectEl.appendChild(ghost);
+    }
+  }
+
+  async function _saveLaborDay(workDate, payload) {
+    if (!workDate) { showSaveToast('✗ Set the day\'s date first', 'error'); return false; }
+    try {
+      const r = await fetch(`/shows/${SHOW_ID}/labor-days`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(Object.assign({ work_date: workDate }, payload)),
+      });
+      if (!r.ok) return false;
+      const data = await r.json();
+      window._laborDaysMap = window._laborDaysMap || {};
+      if (data.day && (data.day.cover_pm || data.day.day_notes)) {
+        window._laborDaysMap[workDate] = { cover_pm: data.day.cover_pm, day_notes: data.day.day_notes };
+      } else {
+        delete window._laborDaysMap[workDate];
+      }
+      return true;
+    } catch (e) { return false; }
+  }
+
+  async function onLaborDayPmChange(select) {
+    const block = select.closest('.labor-day');
+    const ok = await _saveLaborDay(block.dataset.workDate, { cover_pm: select.value });
+    showSaveToast(ok ? '✓ Day PM saved' : '✗ Save failed', ok ? undefined : 'error');
+  }
+  window.onLaborDayPmChange = onLaborDayPmChange;
+
+  async function onLaborDayNotesChange(input) {
+    const block = input.closest('.labor-day');
+    const ok = await _saveLaborDay(block.dataset.workDate, { day_notes: input.value.trim() });
+    showSaveToast(ok ? '✓ Day notes saved' : '✗ Save failed', ok ? undefined : 'error');
+  }
+  window.onLaborDayNotesChange = onLaborDayNotesChange;
+
+  /* When a day-block is re-dated, its covering PM / notes travel with it. */
+  async function _moveLaborDayInfo(block, oldDate, newDate) {
+    const pm = block.querySelector('.labor-day-pm')?.value || '';
+    const notes = block.querySelector('.labor-day-notes')?.value.trim() || '';
+    if (!pm && !notes) return;
+    if (newDate) await _saveLaborDay(newDate, { cover_pm: pm, day_notes: notes });
+    if (oldDate) await _saveLaborDay(oldDate, { cover_pm: '', day_notes: '' });
+  }
+
   async function _putLabor(rid, fields) {
     // Send all current field values along with any overrides in `fields`,
     // scoped by finding the row in the DOM.
@@ -3083,7 +3277,8 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
   }
 
   async function initLaborTab() {
-    await Promise.all([_loadLaborPositions(), _loadCrewMembers()]);
+    await Promise.all([_loadLaborPositions(), _loadCrewMembers(),
+                       _loadLaborDays(), _loadPMNames()]);
     const container = document.getElementById('labor-days-container');
     if (!container) return;
     // Remove any previously rendered day-blocks (safe to re-init)
@@ -3412,6 +3607,18 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
               <td style="text-align:right" class="mono">$0.00</td>
             </tr>`;
         }
+        if (l.is_overtime) {
+          // Hours past 40 for one tech on this show — billed at time and a half.
+          return `
+            <tr class="labor-ot-row" title="Hours beyond 40 on this show for this technician — billed at 1.5× the labor rate">
+              <td class="text-dim text-sm">${l.work_date || '—'}</td>
+              <td>${l.position_name || '—'}${l.is_estimate ? ' ' + estTag : ''}</td>
+              <td>${l.is_scheduled ? (l.tech_name || '—') : '<span class="text-dim">Unscheduled</span>'}</td>
+              <td style="text-align:right">${parseFloat(l.hours).toFixed(2)}h</td>
+              <td style="text-align:right" class="mono">$${parseFloat(l.hourly_rate).toFixed(2)}/hr</td>
+              <td style="text-align:right" class="mono">$${parseFloat(l.line_total).toFixed(2)}</td>
+            </tr>`;
+        }
         return `
           <tr>
             <td class="text-dim text-sm">${l.work_date || '—'}</td>
@@ -3733,6 +3940,66 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     }
     const el = document.getElementById('ps-labor-total');
     if (el) el.textContent = '$' + (Math.round(total * 100) / 100).toFixed(2);
+    // The local sum above is instant feedback but knows nothing about
+    // overtime splits — the server pass overrides it moments later.
+    _refreshPostShowOvertime();
+  }
+
+  /* Fetch the authoritative Final-Invoice labor math (which splits hours past
+     40 per technician into 1.5× overtime lines) and reconcile the grid: each
+     row's HOURS/COST show its straight-time portion, OT lines render as their
+     own read-only block, and the total comes from the server so the page
+     always matches the invoice PDF. */
+  let _psOtTimer = null;
+  function _refreshPostShowOvertime() {
+    clearTimeout(_psOtTimer);
+    _psOtTimer = setTimeout(async () => {
+      try {
+        const r = await fetch(`/shows/${SHOW_ID}/post-show-labor/cost`);
+        if (!r.ok) return;
+        const d = await r.json();
+        const tbody = document.getElementById('ps-labor-tbody');
+        if (!tbody) return;
+        tbody.querySelectorAll('.ps-ot-row, .ps-ot-header').forEach(el => el.remove());
+        const lines = d.lines || [];
+        const otLines = lines.filter(l => l.is_overtime);
+        // Reconcile each grid row with its straight-time portion.
+        lines.forEach(l => {
+          if (l.is_overtime || l.is_billable_extra) return;
+          const tr = tbody.querySelector(`tr[data-id="${l.id}"]`);
+          if (!tr) return;
+          const h = tr.querySelector('.ps-hours');
+          const c = tr.querySelector('.ps-cost');
+          if (h) h.textContent = (parseFloat(l.hours) || 0).toFixed(2);
+          if (c) c.textContent = '$' + (parseFloat(l.line_total) || 0).toFixed(2);
+        });
+        if (otLines.length) {
+          const anchor = Array.from(tbody.querySelectorAll('tr.ps-day-header'))
+            .find(x => x.textContent === 'Additional Charges') || null;
+          const hr = document.createElement('tr');
+          hr.className = 'ps-day-header ps-ot-header';
+          const td = document.createElement('td');
+          td.colSpan = 11;
+          td.textContent = 'Overtime (1.5×) — hours beyond 40 per technician on this show';
+          hr.appendChild(td);
+          tbody.insertBefore(hr, anchor);
+          otLines.forEach(l => {
+            const tr = document.createElement('tr');
+            tr.className = 'ps-ot-row';
+            tr.innerHTML =
+              `<td>${_esc(l.position_name)}</td>` +
+              `<td colspan="6" class="text-dim" style="font-size:11px">${_esc(l.work_date || '')}</td>` +
+              `<td class="num" style="text-align:right">${(parseFloat(l.hours) || 0).toFixed(2)}</td>` +
+              `<td class="num" style="text-align:right">$${(parseFloat(l.hourly_rate) || 0).toFixed(2)}/hr</td>` +
+              `<td class="num ps-cost" style="text-align:right">$${(parseFloat(l.line_total) || 0).toFixed(2)}</td>` +
+              `<td></td>`;
+            tbody.insertBefore(tr, anchor);
+          });
+        }
+        const el = document.getElementById('ps-labor-total');
+        if (el) el.textContent = '$' + (parseFloat(d.total) || 0).toFixed(2);
+      } catch (e) { /* keep the local total on transient errors */ }
+    }, 250);
   }
 
   async function _savePostShowLabor(id, patch, tr) {

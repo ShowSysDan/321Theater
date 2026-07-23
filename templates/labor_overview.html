@@ -109,6 +109,13 @@
     color: var(--accent);
     margin-right: 10px; white-space: nowrap;
   }
+  .lo-day-notes-tag { color: var(--blue, #4a9eff); }
+  .lo-cover-badge {
+    display: inline-block; font-size: 9px; letter-spacing: .08em;
+    padding: 1px 5px; border-radius: 3px; margin-left: 6px;
+    text-transform: uppercase; font-weight: 700;
+    background: rgba(184,132,10,.18); color: var(--accent);
+  }
   .lo-notes-text {
     color: var(--text); font-size: 12px;
     white-space: pre-wrap; line-height: 1.4;
@@ -171,11 +178,21 @@
     </thead>
     <tbody>
       {% for r in day.rows %}
-      {% if r.is_group_first and r.group_notes %}
+      {% if r.is_group_first and (r.group_notes or r.day_notes) %}
       <tr class="lo-notes-row lo-row-{{ r.kind }}-notes">
         <td colspan="11">
-          <span class="lo-notes-tag">{{ r.name }} — Notes</span>
-          <span class="lo-notes-text">{{ r.group_notes }}</span>
+          {% if r.group_notes %}
+          <div>
+            <span class="lo-notes-tag">{{ r.name }} — Notes</span>
+            <span class="lo-notes-text">{{ r.group_notes }}</span>
+          </div>
+          {% endif %}
+          {% if r.day_notes %}
+          <div>
+            <span class="lo-notes-tag lo-day-notes-tag">{{ r.name }} — Day Notes</span>
+            <span class="lo-notes-text">{{ r.day_notes }}</span>
+          </div>
+          {% endif %}
         </td>
       </tr>
       {% endif %}
@@ -202,7 +219,7 @@
         <td class="lo-tech {% if not r.tech %}unscheduled{% endif %}">
           {{ r.tech or 'unassigned' }}
         </td>
-        <td class="lo-pm">{{ r.pm }}</td>
+        <td class="lo-pm">{{ r.pm }}{% if r.pm_is_cover %}<span class="lo-cover-badge" title="Covering PM for this day (differs from the show's main PM)">day</span>{% endif %}</td>
       </tr>
       {% endfor %}
     </tbody>

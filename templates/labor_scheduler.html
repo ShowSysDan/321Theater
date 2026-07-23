@@ -136,6 +136,15 @@
     color: var(--accent); white-space: nowrap;
   }
   .sched-day-date { width: 150px; }
+  .sched-day-pm-wrap {
+    display: flex; align-items: center; gap: 5px; white-space: nowrap;
+  }
+  .sched-day-pm-wrap label {
+    font-size: 10px; font-weight: 700; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--text-muted);
+  }
+  .sched-day-pm { min-width: 140px; }
+  .sched-day-notes { flex: 1; min-width: 140px; font-size: 12px; }
 </style>
 {% endblock %}
 
@@ -303,6 +312,9 @@
     _positions = Array.isArray(data) ? data : (data.positions || []);
     return _positions;
   }
+
+  /* Per-day covering PM + day notes — shared logic lives in window.LaborDays
+     (static/js/app.js), reused by the show staffing tab. */
 
   function buildTechnicianSelect(selectEl, positionId, selectedId) {
     selectEl.innerHTML = '';
@@ -500,7 +512,9 @@
     const block = document.createElement('div');
     block.className = 'sched-day-block';
     block.dataset.workDate = date || '';
+    block.dataset.showId = show.show_id;
 
+    const dayInfo = (show.labor_days && show.labor_days[date]) || {};
     const header = document.createElement('div');
     header.className = 'sched-day-header';
     header.innerHTML = `
@@ -508,9 +522,20 @@
       <input type="date" class="field-input field-input-sm sched-day-date" value="${date || ''}"
              title="Work date for this day — changing it moves every line in this block"
              onchange="window.__scheduler.onDayDateChange(this)">
-      <button class="btn btn-ghost btn-sm ml-auto" onclick="window.__scheduler.addRow(this, ${show.show_id})">+ Add Line</button>
+      <span class="sched-day-pm-wrap" title="PM on duty for this day — pick one when another PM covers the show for the day. Blank = the show's main PM.">
+        <label>Day PM</label>
+        <select class="field-input field-input-sm sched-day-pm"
+                onchange="window.__scheduler.onDayPmChange(this)"></select>
+      </span>
+      <input type="text" class="field-input field-input-sm sched-day-notes"
+             value="${escapeHtml(dayInfo.day_notes || '')}"
+             placeholder="Day notes — shown on the Labor Overview &amp; here"
+             title="Notes for this show on this day only"
+             onchange="window.__scheduler.onDayNotesChange(this)">
+      <button class="btn btn-ghost btn-sm" style="white-space:nowrap" onclick="window.__scheduler.addRow(this, ${show.show_id})">+ Add Line</button>
     `;
     block.appendChild(header);
+    LaborDays.buildPmSelect(header.querySelector('.sched-day-pm'), dayInfo.cover_pm || '');
 
     const bodyWrap = document.createElement('div');
     bodyWrap.className = 'form-section-body no-pad';
@@ -684,7 +709,7 @@
     }
     status.textContent = 'Loading…';
     try {
-      await Promise.all([loadCrew(), loadPositions()]);
+      await Promise.all([loadCrew(), loadPositions(), LaborDays.pmNames()]);
       let url = `/api/labor-scheduler?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
       if (_includedShowIds.size) {
         url += '&include_show_ids=' + encodeURIComponent(Array.from(_includedShowIds).join(','));
@@ -856,6 +881,7 @@
     if (!newDate) { input.value = oldDate; return; }   // don't allow clearing
     const rows = Array.from(block.querySelectorAll('tbody tr[data-rid]'));
     if (!rows.length) {
+      await _moveLaborDay(block, oldDate, newDate);
       block.dataset.workDate = newDate;
       const lbl = block.querySelector('.sched-day-label');
       if (lbl) lbl.textContent = schedDayLabel(newDate);
@@ -870,6 +896,7 @@
       const res = await _putRowQuiet(tr, { work_date: newDate });
       if (!res || !res.success) ok = false;
     }
+    await _moveLaborDay(block, oldDate, newDate);
     if (ok) { showSaveToast('✓ Dates updated'); await loadScheduler(); }
     else showSaveToast('✗ Some lines failed to move', 'error');
   }
@@ -914,6 +941,27 @@
       if (r.ok) showSaveToast('✓ Notes saved');
       else showSaveToast('✗ Save failed', 'error');
     } catch(e) { showSaveToast('✗ Network error', 'error'); }
+  }
+
+  async function onDayPmChange(select) {
+    const block = select.closest('.sched-day-block');
+    const ok = await LaborDays.save(block.dataset.showId, block.dataset.workDate,
+                                    { cover_pm: select.value });
+    showSaveToast(ok ? '✓ Day PM saved' : '✗ Save failed', ok ? undefined : 'error');
+  }
+
+  async function onDayNotesChange(input) {
+    const block = input.closest('.sched-day-block');
+    const ok = await LaborDays.save(block.dataset.showId, block.dataset.workDate,
+                                    { day_notes: input.value.trim() });
+    showSaveToast(ok ? '✓ Day notes saved' : '✗ Save failed', ok ? undefined : 'error');
+  }
+
+  /* When a day-block is re-dated, its PM/notes travel with it. */
+  async function _moveLaborDay(block, oldDate, newDate) {
+    await LaborDays.move(block.dataset.showId, oldDate, newDate,
+                         block.querySelector('.sched-day-pm')?.value || '',
+                         block.querySelector('.sched-day-notes')?.value.trim() || '');
   }
 
   async function saveGroupNotes(textarea) {
@@ -1120,6 +1168,7 @@
   }
 
   window.__scheduler = { onScheduledToggle, onTrainingShiftToggle, onCrewChange, onPositionChange, onTimeChange, addRow, addDay, onDayDateChange, addOverheadRow, removeRow, saveAll, saveShowNotes, saveGroupNotes,
+                         onDayPmChange, onDayNotesChange,
                          openAddShow, closeAddShow, submitAddShow, onPickShow, thisWeek, shiftWeek };
   window.loadScheduler = loadScheduler;
 

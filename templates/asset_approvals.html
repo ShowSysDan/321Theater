@@ -238,7 +238,7 @@
       <a href="{{ url_for('show_page', show_id=s.id, tab='assets') }}" class="btn btn-ghost btn-xs" target="_blank">Open show ↗</a>
       <span class="text-dim" style="font-size:11px">Change prices inline to override for this show only.</span>
       <div class="appr-show-actions">
-        <button class="btn btn-xs btn-ghost"  onclick="openAddAsset({{ s.id }}, '{{ s.load_in_date or s.show_date or '' }}', '{{ s.load_out_date or s.show_date or '' }}')">+ Add Asset</button>
+        <button class="btn btn-xs btn-ghost"  onclick="openAddAsset({{ s.id }}, '{{ s.rental_win_start }}', '{{ s.rental_win_end }}')">+ Add Asset</button>
         <button class="btn btn-xs btn-ghost"  onclick="openAddExternal({{ s.id }})">+ External Rental</button>
         {% if s.assets_approved %}
         <button class="btn btn-xs btn-ghost"  onclick="unapproveShow({{ s.id }})">Unapprove</button>
@@ -270,7 +270,23 @@
           <td class="text-dim">{{ a.category_name }}</td>
           <td>{{ a.type_name }}{% if a.manufacturer or a.model %}<br><span class="text-dim" style="font-size:10px">{{ a.manufacturer }} {{ a.model }}</span>{% endif %}</td>
           <td style="text-align:right">{{ a.quantity or 1 }}</td>
-          <td class="text-dim">{{ a.rental_start or '—' }} → {{ a.rental_end or '—' }}</td>
+          <td class="text-dim" style="white-space:nowrap">
+            <input type="date" class="field-input appr-date-input" data-field="rental_start"
+                   value="{{ a.rental_start or '' }}" data-orig="{{ a.rental_start or '' }}"
+                   style="width:118px;padding:2px 6px;font-size:11px"
+                   {% if s.rental_win_start %}min="{{ s.rental_win_start }}"{% endif %}
+                   {% if s.rental_win_end %}max="{{ s.rental_win_end }}"{% endif %}
+                   title="Rental start — bounded to the show's load-in → load-out window"
+                   onchange="saveRentalDates(this, {{ s.id }}, {{ a.id }})">
+            →
+            <input type="date" class="field-input appr-date-input" data-field="rental_end"
+                   value="{{ a.rental_end or '' }}" data-orig="{{ a.rental_end or '' }}"
+                   style="width:118px;padding:2px 6px;font-size:11px"
+                   {% if s.rental_win_start %}min="{{ s.rental_win_start }}"{% endif %}
+                   {% if s.rental_win_end %}max="{{ s.rental_win_end }}"{% endif %}
+                   title="Rental end — bounded to the show's load-in → load-out window"
+                   onchange="saveRentalDates(this, {{ s.id }}, {{ a.id }})">
+          </td>
           <td style="text-align:right;white-space:nowrap">
             <input type="number" step="0.01" min="0"
                    class="field-input field-input-sm appr-price-input {% if is_override %}overridden{% endif %}"
@@ -567,6 +583,54 @@ async function savePrice(input, showId, saId) {
   if (restoreBtn) restoreBtn.style.display = isOverride ? '' : 'none';
 }
 
+/* Edit a line's rental period. Sends BOTH dates; the changed field wins when
+   the range inverts (moving start past end pulls end along, and vice versa).
+   The server validates against the show's load-in → load-out window, re-checks
+   availability / unit conflicts, and re-locks the rate-card price for the new
+   duration — the price cell and line total update in place. */
+async function saveRentalDates(input, showId, saId) {
+  const tr = input.closest('tr');
+  const startInp = tr.querySelector('.appr-date-input[data-field="rental_start"]');
+  const endInp   = tr.querySelector('.appr-date-input[data-field="rental_end"]');
+  const revert = () => {
+    startInp.value = startInp.dataset.orig;
+    endInp.value   = endInp.dataset.orig;
+  };
+  if (!startInp.value || !endInp.value) { revert(); return; }
+  // Keep the range valid by pulling the other bound along with the edit.
+  if (startInp.value > endInp.value) {
+    if (input === startInp) endInp.value = startInp.value;
+    else startInp.value = endInp.value;
+  }
+  const r = await fetch(`/shows/${showId}/assets/${saId}`, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({rental_start: startInp.value, rental_end: endInp.value}),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    alert(d.error || 'Rental period save failed');
+    revert();
+    return;
+  }
+  startInp.dataset.orig = startInp.value;
+  endInp.dataset.orig   = endInp.value;
+  // The new window re-locks the rate-card price — refresh the price cell,
+  // restore-button state, and line total (mirrors savePrice/restorePrice).
+  const priceInput = tr.querySelector('.appr-price-input');
+  if (priceInput && d.locked_price !== undefined && d.locked_price !== null) {
+    const newPrice = Number(d.locked_price);
+    priceInput.value = newPrice.toFixed(2);
+    priceInput.dataset.original = newPrice.toFixed(2);
+    priceInput.dataset.addTimePrice = newPrice.toFixed(2);
+    priceInput.classList.remove('overridden');
+    const restoreBtn = tr.querySelector('.appr-restore-btn');
+    if (restoreBtn) restoreBtn.style.display = 'none';
+    const qty = parseInt(tr.dataset.qty || '1', 10);
+    tr.querySelector('.appr-line-total').textContent = '$' + (newPrice * qty).toFixed(2);
+  }
+}
+
 async function restorePrice(btn, showId, saId) {
   const tr = btn.closest('tr');
   const input = tr.querySelector('.appr-price-input');
@@ -731,8 +795,16 @@ async function selectApprAssetType(typeId, label, price, weeklyRate, isSystem, i
   document.getElementById('appr-add-title').textContent = label;
   document.getElementById('appr-add-qty').value = 1;
   document.getElementById('appr-add-notes').value = '';
-  document.getElementById('appr-add-start').value = _apprDefaultStart;
-  document.getElementById('appr-add-end').value   = _apprDefaultEnd;
+  // Default to the show window AND bound the pickers to it — rentals may not
+  // extend past the show's load-in → load-out dates.
+  const apprStartInp = document.getElementById('appr-add-start');
+  const apprEndInp   = document.getElementById('appr-add-end');
+  apprStartInp.value = _apprDefaultStart;
+  apprEndInp.value   = _apprDefaultEnd;
+  [apprStartInp, apprEndInp].forEach(inp => {
+    if (_apprDefaultStart) inp.min = _apprDefaultStart; else inp.removeAttribute('min');
+    if (_apprDefaultEnd)   inp.max = _apprDefaultEnd;   else inp.removeAttribute('max');
+  });
 
   // Smart price. Consumables are a flat rate per item (no day/week math).
   const dailyRate = Number(price) || 0;

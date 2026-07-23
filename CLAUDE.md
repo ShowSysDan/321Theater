@@ -92,6 +92,24 @@ apps. For a 321Theater access change, use this app's own flags instead
 - Actual send: `_send_pdf_email()`. SMTP/recipient failures are recorded in the
   `email_send_errors` table and the Settings "Email Send Errors" panel.
 
+## Labor billing math lives in TWO shared engines — never fork it
+- `_calc_labor_cost_for_show()` (estimates) and `_calc_post_show_labor_cost()`
+  (settlement actuals) feed the show-page tables AND every labor PDF
+  (labor-estimate, pre-show-estimate, post-show-invoice, combined-invoice).
+  Change billing behavior there, not in a template or JS.
+- **Overtime:** >40h per technician per show/event bills at 1.5×, split by
+  `_allocate_overtime()` with tech identity from `_ot_shift_key()` (crew id →
+  requested name → per-position day-slot). The 1.5× premium applies to the
+  labor rate ONLY — per-crew billable extras (parking), including the
+  fold-into-rate "hidden" mode, ride on OT hours at 1× and must never be
+  multiplied. Training shifts neither bill nor accrue OT hours.
+- The Post-Show tab's on-page total is reconciled against
+  `GET /shows/<id>/post-show-labor/cost` (server math) — don't reintroduce a
+  JS-only total.
+- Per-day covering PM + day notes live in `show_labor_days`
+  (`GET/PUT /shows/<id>/labor-days`); cover PM stores the contact NAME, same
+  convention as the `production_manager` advance field.
+
 ## Prism FM integration (SANDBOXED — keep it that way)
 Prism is the building's primary scheduling system. The integration lives in
 `prism_module.py` + `prism_bridge/` + `templates/prism.html`, wired into

@@ -4022,3 +4022,68 @@ async function loadReadReceipts() {
     }).join('');
   } catch(_) {}
 }
+
+/* ── Per-day labor info (covering PM + day notes, show_labor_days) ──────────
+   Shared by the show staffing tab and the Labor Scheduler so the fetch /
+   dropdown / save / re-date-move logic exists exactly once. */
+window.LaborDays = {
+  _pmNames: null,
+
+  /* Contact names eligible as a covering "PM for the day" — same pool the
+     show's PRODUCTION MANAGER advance field draws from. Cached per page. */
+  async pmNames() {
+    if (this._pmNames) return this._pmNames;
+    try {
+      const r = await fetch('/api/production-managers');
+      this._pmNames = (await r.json()).names || [];
+    } catch (e) { this._pmNames = []; }
+    return this._pmNames;
+  },
+
+  /* Fill a <select> with the PM pool. Blank option = use the show's main PM.
+     A saved name no longer in the pool stays visible as a ghost option. */
+  buildPmSelect(selectEl, selected) {
+    if (!selectEl) return;
+    selectEl.innerHTML = '';
+    const def = document.createElement('option');
+    def.value = '';
+    def.textContent = '— Show PM —';
+    selectEl.appendChild(def);
+    (this._pmNames || []).forEach(name => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      if (name === selected) opt.selected = true;
+      selectEl.appendChild(opt);
+    });
+    if (selected && selectEl.value !== selected) {
+      const ghost = document.createElement('option');
+      ghost.value = selected;
+      ghost.textContent = selected;
+      ghost.selected = true;
+      selectEl.appendChild(ghost);
+    }
+  },
+
+  /* Partial upsert of one day's covering PM / notes. Returns the parsed JSON
+     response, or null on failure. A day left with no PM and no notes is
+     deleted server-side. */
+  async save(showId, workDate, payload) {
+    if (!showId || !workDate) return null;
+    try {
+      const r = await fetch(`/shows/${showId}/labor-days`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(Object.assign({ work_date: workDate }, payload)),
+      });
+      return r.ok ? await r.json() : null;
+    } catch (e) { return null; }
+  },
+
+  /* When a day-block is re-dated, its PM/notes travel with it. */
+  async move(showId, oldDate, newDate, pm, notes) {
+    if (!pm && !notes) return;
+    if (newDate) await this.save(showId, newDate, { cover_pm: pm, day_notes: notes });
+    if (oldDate) await this.save(showId, oldDate, { cover_pm: '', day_notes: '' });
+  },
+};

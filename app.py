@@ -491,7 +491,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.24.0'
+APP_VERSION = '2.26.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -985,18 +985,6 @@ def login_required(f):
     def decorated(*args, **kwargs):
         if 'user_id' not in session:
             return redirect(url_for('login', next=request.path))
-        return f(*args, **kwargs)
-    return decorated
-
-
-def readonly_blocked(f):
-    """Block read-only users from mutating actions."""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if session.get('is_readonly'):
-            if request.is_json:
-                return jsonify({'error': 'Read-only access'}), 403
-            abort(403)
         return f(*args, **kwargs)
     return decorated
 
@@ -1508,54 +1496,35 @@ def _run_pg_dump(dest_path, settings):
         f.write(result.stdout)
 
 
-def _backup_file_ext():
-    """Return the expected backup file extension for the active database type."""
+def _run_db_backup(kind, ts_fmt, keep):
+    """Create one backup under BACKUP_DIR/<kind> — pg_dump on PostgreSQL, a
+    plain file copy on SQLite — then prune the directory to the newest `keep`
+    backups. Shared body of the hourly/daily jobs."""
+    _ensure_backup_dirs()
+    ts = datetime.now().strftime(ts_fmt)
+    dest_dir = os.path.join(BACKUP_DIR, kind)
     settings = db_adapter.read_db_settings(DATABASE)
-    return '.sql.gz' if settings.get('db_type') == 'postgres' else '.db'
+    ext = '.sql.gz' if settings.get('db_type') == 'postgres' else '.db'
+    dest = os.path.join(dest_dir, f'advance_{ts}{ext}')
+    if settings.get('db_type') == 'postgres':
+        _run_pg_dump(dest, settings)
+    else:
+        shutil.copy2(DATABASE, dest)
+    syslog_logger.info(f'BACKUP_CREATED type={kind} file={dest}')
+    files = sorted(
+        [f for f in os.listdir(dest_dir) if f.endswith(ext)],
+        reverse=True
+    )
+    for old in files[keep:]:
+        os.remove(os.path.join(dest_dir, old))
 
 
 def run_hourly_backup():
-    _ensure_backup_dirs()
-    ts = datetime.now().strftime('%Y%m%d_%H%M')
-    hourly_dir = os.path.join(BACKUP_DIR, 'hourly')
-    settings = db_adapter.read_db_settings(DATABASE)
-    if settings.get('db_type') == 'postgres':
-        dest = os.path.join(hourly_dir, f'advance_{ts}.sql.gz')
-        _run_pg_dump(dest, settings)
-        ext = '.sql.gz'
-    else:
-        dest = os.path.join(hourly_dir, f'advance_{ts}.db')
-        shutil.copy2(DATABASE, dest)
-        ext = '.db'
-    syslog_logger.info(f'BACKUP_CREATED type=hourly file={dest}')
-    files = sorted(
-        [f for f in os.listdir(hourly_dir) if f.endswith(ext)],
-        reverse=True
-    )
-    for old in files[24:]:
-        os.remove(os.path.join(hourly_dir, old))
+    _run_db_backup('hourly', '%Y%m%d_%H%M', keep=24)
 
 
 def run_daily_backup():
-    _ensure_backup_dirs()
-    ts = datetime.now().strftime('%Y%m%d')
-    daily_dir = os.path.join(BACKUP_DIR, 'daily')
-    settings = db_adapter.read_db_settings(DATABASE)
-    if settings.get('db_type') == 'postgres':
-        dest = os.path.join(daily_dir, f'advance_{ts}.sql.gz')
-        _run_pg_dump(dest, settings)
-        ext = '.sql.gz'
-    else:
-        dest = os.path.join(daily_dir, f'advance_{ts}.db')
-        shutil.copy2(DATABASE, dest)
-        ext = '.db'
-    syslog_logger.info(f'BACKUP_CREATED type=daily file={dest}')
-    files = sorted(
-        [f for f in os.listdir(daily_dir) if f.endswith(ext)],
-        reverse=True
-    )
-    for old in files[30:]:
-        os.remove(os.path.join(daily_dir, old))
+    _run_db_backup('daily', '%Y%m%d', keep=30)
 
 
 def _get_smtp_settings():
@@ -2864,10 +2833,15 @@ def get_show_or_404(show_id):
     return show
 
 
-def get_contacts_by_dept():
-    db = get_db()
+def get_contacts_by_dept(db=None):
+    """Contacts grouped by department → list of contact dicts. Pass an open
+    connection to reuse it; otherwise one is opened and closed here."""
+    own = db is None
+    if own:
+        db = get_db()
     contacts = db.execute('SELECT * FROM contacts ORDER BY department, name').fetchall()
-    db.close()
+    if own:
+        db.close()
     by_dept = {}
     for c in contacts:
         dept = c['department'] or 'Other'
@@ -4002,11 +3976,7 @@ def show_page(show_id):
     """, (show_id,)).fetchall()
 
     # Contacts
-    contacts = db.execute('SELECT * FROM contacts ORDER BY department, name').fetchall()
-    contacts_by_dept = {}
-    for c in contacts:
-        dept = c['department'] or 'Other'
-        contacts_by_dept.setdefault(dept, []).append(dict(c))
+    contacts_by_dept = get_contacts_by_dept(db)
 
     # All users — for @mention autocomplete in comments
     all_users_rows = db.execute(
@@ -11118,6 +11088,100 @@ def save_show_labor_notes(show_id):
     return jsonify({'success': True})
 
 
+# ─── Per-day labor info (covering PM + day notes) ────────────────────────────
+# Some shows run long and the main PM is out for a day; another PM covers that
+# day. show_labor_days stores, per (show, work_date), the covering PM and
+# day-specific notes — both surface on the Labor Overview, the Labor Scheduler,
+# and the show's staffing tab.
+
+def _get_show_labor_days(db, show_id):
+    """Per-day labor info for a show as {iso_date: {cover_pm, day_notes}}."""
+    rows = db.execute(
+        'SELECT work_date, cover_pm, day_notes FROM show_labor_days '
+        'WHERE show_id=?', (show_id,)).fetchall()
+    out = {}
+    for r in rows:
+        dv = _as_date(r['work_date'])
+        if not dv:
+            continue
+        out[dv.isoformat()] = {'cover_pm': r['cover_pm'] or '',
+                               'day_notes': r['day_notes'] or ''}
+    return out
+
+
+@app.route('/shows/<int:show_id>/labor-days', methods=['GET'])
+@login_required
+def get_show_labor_days(show_id):
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    db = get_db()
+    days = _get_show_labor_days(db, show_id)
+    db.close()
+    return jsonify({'days': days})
+
+
+@app.route('/shows/<int:show_id>/labor-days', methods=['PUT'])
+@login_required
+def save_show_labor_day(show_id):
+    """Upsert one day's covering PM / notes. Partial update: only the keys
+    present in the payload change. A day whose PM and notes are both empty is
+    deleted (no cruft rows)."""
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_restricted') or session.get('is_readonly'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    data = request.get_json(force=True) or {}
+    try:
+        wd = date.fromisoformat(str(data.get('work_date') or '').strip()).isoformat()
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work_date.'}), 400
+    db = get_db()
+    existing = db.execute(
+        'SELECT cover_pm, day_notes FROM show_labor_days '
+        'WHERE show_id=? AND work_date=?', (show_id, wd)).fetchone()
+    cover_pm = (str(data.get('cover_pm') or '').strip() if 'cover_pm' in data
+                else ((existing['cover_pm'] or '') if existing else ''))
+    day_notes = (str(data.get('day_notes') or '').strip() if 'day_notes' in data
+                 else ((existing['day_notes'] or '') if existing else ''))
+    if not cover_pm and not day_notes:
+        db.execute('DELETE FROM show_labor_days WHERE show_id=? AND work_date=?',
+                   (show_id, wd))
+    else:
+        db.execute("""
+            INSERT OR REPLACE INTO show_labor_days
+                (show_id, work_date, cover_pm, day_notes, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, (show_id, wd, cover_pm, day_notes, session['user_id']))
+    log_audit(db, 'LABOR_DAY_EDIT', 'show', show_id, show_id=show_id,
+              detail=f'{wd} cover_pm={cover_pm or "-"}')
+    db.commit()
+    db.close()
+    syslog_logger.info(
+        f"LABOR_DAY_EDIT show_id={show_id} date={wd} by={session.get('username')}")
+    return jsonify({'success': True,
+                    'day': {'work_date': wd, 'cover_pm': cover_pm,
+                            'day_notes': day_notes}})
+
+
+@app.route('/api/production-managers')
+@login_required
+def api_production_managers():
+    """Contact names eligible as a covering PM — same source the show's
+    PRODUCTION MANAGER advance field draws from (contacts in the department
+    configured on the production_manager form field; 'Production' by default)."""
+    db = get_db()
+    dept_row = db.execute(
+        "SELECT contact_dept FROM form_fields WHERE field_key=?",
+        ('production_manager',)).fetchone()
+    dept = (dept_row['contact_dept'] if dept_row and dept_row['contact_dept']
+            else 'Production')
+    rows = db.execute(
+        'SELECT name FROM contacts WHERE department=? ORDER BY name',
+        (dept,)).fetchall()
+    db.close()
+    return jsonify({'names': [r['name'] for r in rows if (r['name'] or '').strip()]})
+
+
 @app.route('/shows/<int:show_id>/labor-requests', methods=['POST'])
 @login_required
 def add_labor_request(show_id):
@@ -11227,6 +11291,15 @@ def reorder_labor_requests(show_id):
 
 # ─── Labor Scheduler ─────────────────────────────────────────────────────────
 
+def _pm_join_sql(alias='ad_pm'):
+    """SQL fragment joining a show's PRODUCTION MANAGER onto a query whose
+    shows table is aliased ``s``. There is no ``shows.pm`` column — the PM
+    lives in the ``advance_data`` EAV table under field_key
+    'production_manager', and this join is THE way to read it in bulk."""
+    return (f"LEFT JOIN advance_data {alias} ON {alias}.show_id = s.id "
+            f"AND {alias}.field_key = 'production_manager'")
+
+
 def _estimate_hourly_rate(db):
     """Highest tech billable rate used to estimate a labor line before a tech is
     assigned. Only pay-rate levels flagged ``include_in_estimate`` count, so
@@ -11238,6 +11311,68 @@ def _estimate_hourly_rate(db):
         'WHERE COALESCE(include_in_estimate, 1) = 1'
     ).fetchone()
     return float(row['r']) if row and row['r'] is not None else 0.0
+
+
+# ─── Technician overtime (per show / event) ──────────────────────────────────
+# Hours beyond 40 that ONE technician works on ONE show/event bill at time and
+# a half. Accumulation is by TOTAL HOURS on the show — never by days worked.
+# The premium applies to the labor rate only: flat per-crew pass-through
+# charges (parking passes etc.), even when folded invisibly into the hourly
+# rate, are never multiplied by 1.5.
+OT_HOURS_THRESHOLD = 40.0
+OT_RATE_MULTIPLIER = 1.5
+OT_LINE_SUFFIX = 'Overtime (1.5×)'
+
+
+def _ot_shift_key(slot_counters, crew_member_id, person_name, position_key,
+                  date_key):
+    """Best-available identity for "which technician works this shift", used to
+    accumulate hours toward the 40h overtime threshold.
+
+    Scheduled lines identify the tech exactly (crew member id). Before
+    scheduling, a requested/pulled name is the next best signal. Failing both,
+    assume the Nth line of a position each day is the same technician across
+    the run ("slot N") — the way estimates are actually built (LX #2 on Monday
+    is LX #2 on Friday). ``slot_counters`` is a dict the caller shares across
+    one show's lines."""
+    if crew_member_id:
+        return ('crew', crew_member_id)
+    name = (person_name or '').strip().lower()
+    if name:
+        return ('name', name)
+    idx = slot_counters.get((position_key, date_key), 0)
+    slot_counters[(position_key, date_key)] = idx + 1
+    return ('slot', position_key, idx)
+
+
+def _allocate_overtime(shifts):
+    """Split each shift's hours into (straight_hours, overtime_hours).
+
+    ``shifts`` is a list of dicts with keys ``key`` (technician identity from
+    :func:`_ot_shift_key`), ``date`` (ISO string or ''), ``in_time`` and
+    ``hours``. Hours accumulate chronologically per technician; once a tech
+    crosses OT_HOURS_THRESHOLD on this show the excess is overtime, splitting
+    the crossing shift. Returns (straight, ot) tuples aligned with the input
+    order."""
+    result = [(float(s['hours'] or 0), 0.0) for s in shifts]
+    by_key = {}
+    for i, s in enumerate(shifts):
+        by_key.setdefault(s['key'], []).append(i)
+    for idxs in by_key.values():
+        ordered = sorted(idxs, key=lambda i: (shifts[i]['date'] or '9999-12-31',
+                                              shifts[i]['in_time'] or '', i))
+        cum = 0.0
+        for i in ordered:
+            h = float(shifts[i]['hours'] or 0)
+            straight = min(h, max(0.0, OT_HOURS_THRESHOLD - cum))
+            result[i] = (straight, h - straight)
+            cum += h
+    return result
+
+
+def _ot_label(position_name):
+    pos = (position_name or '').strip()
+    return f'{pos} — {OT_LINE_SUFFIX}' if pos else OT_LINE_SUFFIX
 
 
 def _calc_labor_cost_for_show(db, show_id):
@@ -11260,11 +11395,16 @@ def _calc_labor_cost_for_show(db, show_id):
       • ON: the whole per-crew charge is spread across each line's worked hours
         and folded into that line's rate (no separate extra lines).
     Training / shadow shifts never bill and never count toward crew.
+
+    Overtime: hours a technician (or, pre-schedule, a per-position "slot" —
+    see _ot_shift_key) works beyond 40 on this show bill at 1.5× the labor
+    rate, emitted as a separate line right after the shift that crosses the
+    threshold. The OT premium never applies to folded-in per-crew extras.
     """
     rows = db.execute("""
-        SELECT lr.id, lr.work_date, lr.in_time, lr.out_time,
+        SELECT lr.id, lr.position_id, lr.work_date, lr.in_time, lr.out_time,
                lr.break_start, lr.break_end, lr.break2_start, lr.break2_end,
-               lr.is_scheduled, lr.scheduled_crew_member_id,
+               lr.is_scheduled, lr.scheduled_crew_member_id, lr.requested_name,
                COALESCE(lr.is_training_shift, 0) AS is_training_shift,
                jp.name as position_name, jp.override_rate,
                cm.name as tech_name,
@@ -11283,9 +11423,9 @@ def _calc_labor_cost_for_show(db, show_id):
     per_crew_total = round(
         sum(float(it['cost_per_crew'] or 0) for it in billable_items), 2)
 
-    lines = []
-    total = 0.0
-    crew_count = 0
+    # Pass 1 — resolve hours + rate per line, then split straight/OT hours
+    # per technician track across the whole show.
+    pre = []
     for r in rows:
         hours = _calc_hours(r['in_time'], r['out_time'],
                             r['break_start'], r['break_end'],
@@ -11300,41 +11440,102 @@ def _calc_labor_cost_for_show(db, show_id):
         else:
             base_rate = estimate_rate
             is_estimate = True
-        is_training = bool(r['is_training_shift'])
+        dv = _as_date(r['work_date'])
+        pre.append({
+            'row': r,
+            'hours': hours,
+            'straight': hours,
+            'ot': 0.0,
+            'base_rate': base_rate,
+            'is_estimate': is_estimate,
+            'is_training': bool(r['is_training_shift']),
+            'date_iso': dv.isoformat() if dv else '',
+        })
+
+    slot_counters = {}
+    charge_idx = [i for i, p in enumerate(pre) if not p['is_training']]
+    shifts = []
+    for i in charge_idx:
+        p, r = pre[i], pre[i]['row']
+        key = _ot_shift_key(slot_counters,
+                            r['scheduled_crew_member_id'],
+                            r['tech_name'] or r['requested_name'],
+                            r['position_id'] or (r['position_name'] or ''),
+                            p['date_iso'])
+        shifts.append({'key': key, 'date': p['date_iso'],
+                       'in_time': _normalize_perf_time(r['in_time']),
+                       'hours': p['hours']})
+    for j, (straight, ot) in enumerate(_allocate_overtime(shifts)):
+        pre[charge_idx[j]]['straight'] = straight
+        pre[charge_idx[j]]['ot'] = ot
+
+    # Pass 2 — emit line items (straight line + optional OT line per shift).
+    lines = []
+    total = 0.0
+    crew_count = 0
+    for p in pre:
+        r = p['row']
+        hours, base_rate = p['hours'], p['base_rate']
         rate = base_rate
-        if is_training:
+        spread = 0.0
+        if p['is_training']:
             # Training / shadow shifts never bill the show: a trainee parked
             # alongside the primary tech carries no cost and is excluded from
             # the per-crew billable multiplier. The line is still returned so
             # the staffing tab can show it, clearly flagged as a no-charge
-            # training shift.
+            # training shift. Training hours never accrue toward overtime.
             cost = 0.0
         else:
             crew_count += 1
             # Fold the per-crew charge into the rate when the show opts in:
             # spread the whole charge over the hours actually worked so the
             # extra stays invisible but is still recovered (mirrors
-            # _calc_post_show_labor_cost).
+            # _calc_post_show_labor_cost). The spread is a flat pass-through
+            # (parking passes etc.) so it rides on BOTH the straight and OT
+            # portions at 1× — only the labor rate earns the 1.5× premium.
             if hide and per_crew_total and hours > 0:
-                rate = round(base_rate + per_crew_total / hours, 2)
-            cost = round(hours * rate, 2)
+                spread = per_crew_total / hours
+                rate = round(base_rate + spread, 2)
+            cost = round(p['straight'] * rate, 2)
             total += cost
+        tech_name = r['tech_name'] or r['scheduled_crew_member_id'] or 'Unassigned'
         lines.append({
             'id': r['id'],
             'work_date': r['work_date'],
             'position_name': r['position_name'] or '',
-            'tech_name': r['tech_name'] or r['scheduled_crew_member_id'] or 'Unassigned',
+            'tech_name': tech_name,
             'in_time': r['in_time'],
             'out_time': r['out_time'],
-            'hours': round(hours, 2),
+            'hours': round(p['straight'] if not p['is_training'] else hours, 2),
             'hourly_rate': rate,
             'base_rate': base_rate,
             'line_total': cost,
             'level_name': r['level_name'] or '',
             'is_scheduled': bool(r['is_scheduled']),
-            'is_training': is_training,
-            'is_estimate': is_estimate,
+            'is_training': p['is_training'],
+            'is_estimate': p['is_estimate'],
         })
+        if p['ot'] > 0.0005 and not p['is_training']:
+            ot_rate = round(base_rate * OT_RATE_MULTIPLIER + spread, 2)
+            ot_cost = round(p['ot'] * ot_rate, 2)
+            total += ot_cost
+            lines.append({
+                'id': f"ot-{r['id']}",
+                'work_date': r['work_date'],
+                'position_name': _ot_label(r['position_name']),
+                'tech_name': tech_name,
+                'in_time': '',
+                'out_time': '',
+                'hours': round(p['ot'], 2),
+                'hourly_rate': ot_rate,
+                'base_rate': base_rate,
+                'line_total': ot_cost,
+                'level_name': r['level_name'] or '',
+                'is_scheduled': bool(r['is_scheduled']),
+                'is_training': False,
+                'is_estimate': p['is_estimate'],
+                'is_overtime': True,
+            })
 
     if not hide and crew_count > 0:
         # Per-crew extras the PM has selected for this show. Defaults are seeded
@@ -11526,7 +11727,8 @@ def _post_show_labor_rows(db, show_id):
     """Fetch post_show_labor rows with position_name + computed hours/line_cost.
     Hours come from the ACTUAL (billable) times; rate from the frozen snapshot."""
     rows = db.execute("""
-        SELECT psl.*, jp.name AS position_name
+        SELECT psl.*, jp.name AS position_name,
+               lr.scheduled_crew_member_id AS src_crew_member_id
         FROM post_show_labor psl
         LEFT JOIN job_positions jp ON jp.id = psl.position_id
         LEFT JOIN position_categories pc ON pc.id = jp.category_id
@@ -11586,6 +11788,12 @@ def _calc_post_show_labor_cost(db, show_id):
         across each billed line's worked hours and added to that line's hourly
         rate, so the cost is still recovered but stays invisible on the invoice.
         (e.g. $9/crew parking over a 10h line inflates a $10/hr rate to $10.90.)
+
+    Overtime on ACTUALS: once one technician's actual hours on this show pass
+    40, the excess bills at 1.5× the frozen labor rate as a separate
+    "Overtime (1.5×)" line right after the shift that crosses the threshold.
+    The folded-in per-crew spread stays at 1× on the OT portion — parking
+    passes never earn the time-and-a-half premium.
     """
     rows = _post_show_labor_rows(db, show_id)
     hide = _post_show_hide_billable(db, show_id)
@@ -11593,20 +11801,43 @@ def _calc_post_show_labor_cost(db, show_id):
     per_crew_total = round(
         sum(float(it['cost_per_crew'] or 0) for it in billable_items), 2)
 
+    # Split each shift's actual hours into straight / overtime per technician.
+    # Identity: the scheduling link's crew member when the line was pulled from
+    # the schedule, else the sched_crew_name snapshot, else the per-position
+    # slot heuristic (see _ot_shift_key).
+    slot_counters = {}
+    shifts = []
+    for d in rows:
+        shifts.append({
+            'key': _ot_shift_key(slot_counters,
+                                 d.get('src_crew_member_id'),
+                                 d.get('sched_crew_name'),
+                                 d.get('position_id') or (d.get('position_name') or ''),
+                                 d.get('work_date') or ''),
+            'date': d.get('work_date') or '',
+            'in_time': _normalize_perf_time(d.get('in_time')),
+            'hours': d['hours'],
+        })
+    splits = _allocate_overtime(shifts)
+
     lines = []
     total = 0.0
     billed_count = 0
-    for d in rows:
+    for d, (straight, ot) in zip(rows, splits):
         hours = d['hours']
         base_rate = float(d.get('pay_rate_snapshot') or 0)
         rate = base_rate
+        spread = 0.0
         # Fold the per-crew charge into the rate: spread the whole charge over
         # the hours actually worked. Rounding the inflated rate to cents keeps
         # rate × hours == line total on the invoice (cost recovery may differ by
-        # a penny or two, which never surfaces to the client).
+        # a penny or two, which never surfaces to the client). The spread is a
+        # flat pass-through, so it rides on both the straight and OT portions
+        # at 1× — only the labor rate is multiplied by 1.5.
         if hide and per_crew_total and hours > 0:
-            rate = round(base_rate + per_crew_total / hours, 2)
-        cost = round(hours * rate, 2)
+            spread = per_crew_total / hours
+            rate = round(base_rate + spread, 2)
+        cost = round(straight * rate, 2)
         total += cost
         if hours > 0:
             billed_count += 1
@@ -11617,10 +11848,26 @@ def _calc_post_show_labor_cost(db, show_id):
             'in_time': d.get('in_time') or '',
             'out_time': d.get('out_time') or '',
             'breaks': _format_break_windows(d),
-            'hours': hours,
+            'hours': round(straight, 2),
             'hourly_rate': rate,
             'line_total': cost,
         })
+        if ot > 0.0005:
+            ot_rate = round(base_rate * OT_RATE_MULTIPLIER + spread, 2)
+            ot_cost = round(ot * ot_rate, 2)
+            total += ot_cost
+            lines.append({
+                'id': f"ot-{d['id']}",
+                'work_date': d.get('work_date') or '',
+                'position_name': _ot_label(d.get('position_name')),
+                'in_time': '',
+                'out_time': '',
+                'breaks': '',
+                'hours': round(ot, 2),
+                'hourly_rate': ot_rate,
+                'line_total': ot_cost,
+                'is_overtime': True,
+            })
 
     if not hide and billed_count > 0:
         for item in billable_items:
@@ -11650,6 +11897,20 @@ def get_post_show_labor(show_id):
     rows = _post_show_labor_rows(db, show_id)
     db.close()
     return jsonify(rows)
+
+
+@app.route('/shows/<int:show_id>/post-show-labor/cost')
+@login_required
+def get_post_show_labor_cost(show_id):
+    """Authoritative Final-Invoice labor math (incl. overtime splits and folded
+    per-crew extras) for the Post-Show tab, so the on-page total always agrees
+    with the invoice PDF."""
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    db = get_db()
+    lines, total = _calc_post_show_labor_cost(db, show_id)
+    db.close()
+    return jsonify({'lines': lines, 'total': total})
 
 
 _PSL_INIT_KEY = '_post_show_labor_initialized'
@@ -11946,7 +12207,7 @@ def labor_scheduler_no_labor():
         accessible = get_accessible_shows(session['user_id'])
         shows = []
         if accessible is None or accessible:
-            sql = """
+            sql = f"""
                 SELECT s.id, s.name, s.venue, s.show_date,
                        pf.first_perf AS first_perf,
                        ad.field_value AS pm_name
@@ -11955,8 +12216,7 @@ def labor_scheduler_no_labor():
                 LEFT JOIN (SELECT show_id, MIN(perf_date) AS first_perf
                              FROM show_performances GROUP BY show_id) pf
                        ON pf.show_id = s.id
-                LEFT JOIN advance_data ad
-                       ON ad.show_id = s.id AND ad.field_key = 'production_manager'
+                {_pm_join_sql('ad')}
                 WHERE COALESCE(s.status, 'active') != 'archived'
                   AND lr.id IS NULL
             """
@@ -12020,7 +12280,7 @@ def labor_overview():
     db = get_db()
 
     # ── Show labor — joined with the show, position, and the scheduled tech.
-    show_rows = db.execute("""
+    show_rows = db.execute(f"""
         SELECT
             COALESCE(lr.work_date, s.show_date) AS work_date,
             s.id   AS show_id,
@@ -12040,8 +12300,7 @@ def labor_overview():
         JOIN shows s ON s.id = lr.show_id
         LEFT JOIN job_positions jp ON jp.id = lr.position_id
         LEFT JOIN crew_members cm ON cm.id = lr.scheduled_crew_member_id
-        LEFT JOIN advance_data ad
-               ON ad.show_id = s.id AND ad.field_key = 'production_manager'
+        {_pm_join_sql('ad')}
         -- Archived shows normally drop off this view, but scheduled labor on a
         -- past show must stay visible so hours worked can still be referenced.
         WHERE (COALESCE(s.status, 'active') != 'archived' OR lr.is_scheduled = 1)
@@ -12076,6 +12335,18 @@ def labor_overview():
         WHERE COALESCE(r.work_date, g.work_date) BETWEEN ? AND ?
         ORDER BY work_date, project_name, r.sort_order, r.id
     """, (week_start.isoformat(), week_end.isoformat())).fetchall()
+
+    # ── Per-day labor info (covering PM + day notes) for the week.
+    day_info_rows = db.execute("""
+        SELECT show_id, work_date, cover_pm, day_notes
+        FROM show_labor_days
+        WHERE work_date BETWEEN ? AND ?
+    """, (week_start.isoformat(), week_end.isoformat())).fetchall()
+    day_info = {}
+    for r in day_info_rows:
+        dv = _as_date(r['work_date'])
+        if dv:
+            day_info[(r['show_id'], dv.isoformat())] = r
     db.close()
 
     def _iso(v):
@@ -12090,6 +12361,9 @@ def labor_overview():
         d = _iso(r['work_date'])
         if d not in by_day:
             continue
+        di = day_info.get((r['show_id'], d))
+        cover_pm = (di['cover_pm'] or '').strip() if di else ''
+        day_notes = (di['day_notes'] or '').strip() if di else ''
         by_day[d].append({
             'kind': 'show',
             'group_key': f"show:{r['show_id']}",
@@ -12105,8 +12379,11 @@ def labor_overview():
             'tech': r['scheduled_tech'] or (r['requested_tech'] or ''),
             'is_scheduled': bool(r['is_scheduled']),
             'is_training_shift': bool(r['is_training_shift']),
-            'pm': r['pm_name'] or '',
+            # A covering PM set for this day replaces the show's main PM here.
+            'pm': cover_pm or (r['pm_name'] or ''),
+            'pm_is_cover': bool(cover_pm),
             'group_notes': (r['group_notes'] or '').strip() if r['group_notes'] else '',
+            'day_notes': day_notes,
             'color': '',
             'show_id': r['show_id'],
         })
@@ -12184,7 +12461,7 @@ def api_labor_scheduler_list():
     db = get_db()
     accessible = get_accessible_shows(session['user_id'])
 
-    sql = """
+    sql = f"""
         SELECT lr.id, lr.show_id, lr.position_id, lr.work_date,
                lr.in_time, lr.out_time,
                lr.break_start, lr.break_end, lr.break2_start, lr.break2_end,
@@ -12206,7 +12483,7 @@ def api_labor_scheduler_list():
         LEFT JOIN job_positions jp ON lr.position_id = jp.id
         LEFT JOIN position_categories pc ON jp.category_id = pc.id
         LEFT JOIN crew_members cm ON lr.scheduled_crew_member_id = cm.id
-        LEFT JOIN advance_data ad_pm ON ad_pm.show_id = s.id AND ad_pm.field_key = 'production_manager'
+        {_pm_join_sql()}
         -- Archived shows normally drop off the scheduler, but scheduled labor on
         -- a past show must stay visible so hours worked can still be referenced.
         WHERE (s.status != 'archived' OR lr.is_scheduled = 1)
@@ -12269,8 +12546,7 @@ def api_labor_scheduler_list():
                     f"SELECT s.id, s.name, s.venue, s.show_date, s.status, s.labor_notes, "
                     f"       ad_pm.field_value AS show_pm "
                     f"FROM shows s "
-                    f"LEFT JOIN advance_data ad_pm ON ad_pm.show_id = s.id "
-                    f"       AND ad_pm.field_key = 'production_manager' "
+                    f"{_pm_join_sql()} "
                     f"WHERE s.id IN ({ph}) AND s.status != 'archived'",
                     missing
                 ).fetchall()
@@ -12288,6 +12564,23 @@ def api_labor_scheduler_list():
                         'requests':         [],
                     }
                     order.insert(0, sid)  # surface at top so they're easy to find
+
+    # ── Per-day labor info (covering PM + day notes) per show ────────────────
+    if shows:
+        ph = ','.join(['?'] * len(shows))
+        sld_rows = db.execute(
+            f'SELECT show_id, work_date, cover_pm, day_notes '
+            f'FROM show_labor_days WHERE show_id IN ({ph})',
+            list(shows.keys())).fetchall()
+        for s in shows.values():
+            s['labor_days'] = {}
+        for r in sld_rows:
+            dv = _as_date(r['work_date'])
+            if dv and r['show_id'] in shows:
+                shows[r['show_id']]['labor_days'][dv.isoformat()] = {
+                    'cover_pm': r['cover_pm'] or '',
+                    'day_notes': r['day_notes'] or '',
+                }
 
     # ── Overhead & Project Crew labor (not tied to any show) ─────────────────
     # Pulled in here so the labor scheduler sees a single unified to-do list.
@@ -15673,6 +15966,51 @@ def _reset_asset_approval(db, show_id, reason):
     )
 
 
+def _show_rental_window(db, show_id):
+    """The show's production window — load-in → load-out, falling back to
+    first/last performance dates, then the show date. This is both the
+    default rental period for new asset lines AND the bounds a rental may
+    not extend past (rentals are tied to the show's advance dates).
+    Returns (start, end) as datetime.date, either may be None (undated show)."""
+    show = db.execute(
+        'SELECT show_date, load_in_date, load_out_date FROM shows WHERE id=?',
+        (show_id,)).fetchone()
+    if not show:
+        return None, None
+    perfs = db.execute(
+        'SELECT MIN(perf_date) AS p0, MAX(perf_date) AS p1 '
+        'FROM show_performances WHERE show_id=? AND perf_date IS NOT NULL',
+        (show_id,)).fetchone()
+    start = _as_date(show['load_in_date']) or _as_date(perfs['p0']) or _as_date(show['show_date'])
+    end = _as_date(show['load_out_date']) or _as_date(perfs['p1']) or _as_date(show['show_date'])
+    return start, end
+
+
+def _clean_rental_dates(db, show_id, rental_start, rental_end):
+    """Normalize a submitted rental period to date-only ISO strings (rental
+    periods are date ranges — any time component is dropped) and enforce that
+    it is a valid range inside the show's production window. Returns
+    (start_iso_or_None, end_iso_or_None, error_message_or_None)."""
+    d_start = _as_date(rental_start)
+    d_end = _as_date(rental_end)
+    if rental_start and not d_start:
+        return None, None, 'Invalid rental start date.'
+    if rental_end and not d_end:
+        return None, None, 'Invalid rental end date.'
+    if d_start and d_end and d_start > d_end:
+        return None, None, 'Rental start must be on or before rental end.'
+    win_start, win_end = _show_rental_window(db, show_id)
+    if win_start and win_end:
+        if (d_start and d_start < win_start) or (d_end and d_end > win_end):
+            return None, None, (
+                f'Rental period must stay within the show dates '
+                f'{win_start.isoformat()} → {win_end.isoformat()} '
+                f'(load-in → load-out on the advance page).')
+    return (d_start.isoformat() if d_start else None,
+            d_end.isoformat() if d_end else None,
+            None)
+
+
 @app.route('/shows/<int:show_id>/assets', methods=['GET'])
 @login_required
 def show_assets_list(show_id):
@@ -15719,7 +16057,10 @@ def show_assets_list(show_id):
     avail_cache = {}
     assets_out = []
     for r in rows:
-        d = dict(r)
+        # Normalize date columns to ISO (PG hands back date objects, which
+        # jsonify would render as "Fri, 24 Jul 2026 00:00:00 GMT" — useless
+        # for display and for <input type="date"> editors).
+        d = _normalize_row_dates(dict(r))
         key = (r['asset_type_id'], r['rental_start'], r['rental_end'])
         if key not in avail_cache:
             avail_cache[key] = _get_asset_availability(
@@ -15735,11 +16076,15 @@ def show_assets_list(show_id):
         )
         assets_out.append(d)
 
+    win_start, win_end = _show_rental_window(db, show_id)
     db.close()
     return jsonify({
         'assets': assets_out,
         'external_rentals': [{k: v for k, v in dict(r).items() if k != 'pdf_data'} for r in ext_rows],
         'approval': approval,
+        # Allowed rental bounds for the date editors (show load-in → load-out).
+        'rental_window': {'start': win_start.isoformat() if win_start else None,
+                          'end': win_end.isoformat() if win_end else None},
     })
 
 
@@ -15769,6 +16114,12 @@ def show_asset_add(show_id):
     default_end   = show['load_out_date'] or (perfs[-1]['perf_date'] if perfs else show['show_date'])
     rental_start = data.get('rental_start') or default_start
     rental_end   = data.get('rental_end')   or default_end
+    # Date-only, valid range, inside the show's load-in → load-out window.
+    rental_start, rental_end, date_err = _clean_rental_dates(
+        db, show_id, rental_start, rental_end)
+    if date_err:
+        db.close()
+        return jsonify({'error': date_err}), 400
 
     type_row = db.execute('SELECT rental_cost, weekly_rate, hide_from_pm, allow_unit_selection, is_system, is_package, is_consumable, name FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
 
@@ -15973,6 +16324,41 @@ def show_asset_edit(show_id, sa_id):
     is_hidden    = (1 if data.get('is_hidden') else 0) if 'is_hidden' in data else existing['is_hidden']
     notes        = (data.get('notes') or '').strip()  if 'notes'      in data else existing['notes']
 
+    # Only validate the window when the caller is actually editing dates —
+    # a qty/notes edit on a legacy line whose dates predate the current show
+    # window must not be rejected.
+    dates_touched = ('rental_start' in data) or ('rental_end' in data)
+    if dates_touched:
+        rental_start, rental_end, date_err = _clean_rental_dates(
+            db, show_id, rental_start, rental_end)
+        if date_err:
+            db.close()
+            return jsonify({'error': date_err}), 400
+
+    # A different rental window means a different duration, and the per-unit
+    # locked price is the rate-card formula over that duration — so re-lock the
+    # price for the new window. Any manual approver override was priced for the
+    # OLD window and no longer applies; the approval reset below flags the line
+    # for the asset manager to re-review (and re-override if needed).
+    window_changed = dates_touched and (
+        _as_date(rental_start) != _as_date(existing['rental_start'])
+        or _as_date(rental_end) != _as_date(existing['rental_end']))
+    locked_price = existing['locked_price']
+    original_locked_price = existing['original_locked_price']
+    repriced = False
+    if window_changed:
+        rate_row = db.execute(
+            'SELECT rental_cost, weekly_rate, is_consumable '
+            'FROM asset_types WHERE id=?', (existing['asset_type_id'],)).fetchone()
+        if rate_row:
+            new_price = _compute_locked_price(
+                rate_row['rental_cost'], rate_row['weekly_rate'],
+                rental_start, rental_end,
+                is_consumable=rate_row['is_consumable'])
+            repriced = round(float(locked_price or 0), 2) != round(new_price, 2)
+            locked_price = new_price
+            original_locked_price = new_price
+
     # Unit-pinned rows: qty is always 1, and the new date window must not
     # collide with another show that has booked this specific unit.
     if existing['asset_item_id']:
@@ -16060,9 +16446,10 @@ def show_asset_edit(show_id, sa_id):
 
     db.execute("""
         UPDATE show_assets SET quantity=?, rental_start=?, rental_end=?,
-               is_hidden=?, notes=?
+               is_hidden=?, notes=?, locked_price=?, original_locked_price=?
         WHERE id=? AND show_id=?
-    """, (quantity, rental_start, rental_end, is_hidden, notes, sa_id, show_id))
+    """, (quantity, rental_start, rental_end, is_hidden, notes,
+          locked_price, original_locked_price, sa_id, show_id))
     db.commit()
 
     # Post-commit verification — see show_asset_add for rationale. If a
@@ -16074,10 +16461,12 @@ def show_asset_edit(show_id, sa_id):
             and post_avail['available'] < 0):
         db.execute("""
             UPDATE show_assets SET quantity=?, rental_start=?, rental_end=?,
-                   is_hidden=?, notes=?
+                   is_hidden=?, notes=?, locked_price=?, original_locked_price=?
             WHERE id=? AND show_id=?
         """, (existing['quantity'], existing['rental_start'], existing['rental_end'],
-              existing['is_hidden'], existing['notes'], sa_id, show_id))
+              existing['is_hidden'], existing['notes'],
+              existing['locked_price'], existing['original_locked_price'],
+              sa_id, show_id))
         db.commit()
         type_name_row = db.execute(
             'SELECT name FROM asset_types WHERE id=?', (existing['asset_type_id'],)
@@ -16106,10 +16495,12 @@ def show_asset_edit(show_id, sa_id):
         if post_shortages:
             db.execute("""
                 UPDATE show_assets SET quantity=?, rental_start=?, rental_end=?,
-                       is_hidden=?, notes=?
+                       is_hidden=?, notes=?, locked_price=?, original_locked_price=?
                 WHERE id=? AND show_id=?
             """, (existing['quantity'], existing['rental_start'], existing['rental_end'],
-                  existing['is_hidden'], existing['notes'], sa_id, show_id))
+                  existing['is_hidden'], existing['notes'],
+                  existing['locked_price'], existing['original_locked_price'],
+                  sa_id, show_id))
             db.commit()
             sys_name = edit_type['name'] or f"System #{existing['asset_type_id']}"
             syslog_logger.warning(
@@ -16124,11 +16515,20 @@ def show_asset_edit(show_id, sa_id):
                 'shortages': post_shortages,
             }), 409
 
-    log_audit(db, 'ASSET_SHOW_EDIT', 'show_asset', sa_id, show_id=show_id)
+    audit_detail = f'qty={quantity}'
+    if window_changed:
+        audit_detail += (f' dates={rental_start}→{rental_end}'
+                         + (f' repriced={locked_price}' if repriced else ''))
+    log_audit(db, 'ASSET_SHOW_EDIT', 'show_asset', sa_id, show_id=show_id,
+              detail=audit_detail)
     _reset_asset_approval(db, show_id, 'asset_edited')
     db.commit()
     db.close()
-    return jsonify({'success': True})
+    rs, re_ = _as_date(rental_start), _as_date(rental_end)
+    return jsonify({'success': True,
+                    'rental_start': rs.isoformat() if rs else None,
+                    'rental_end': re_.isoformat() if re_ else None,
+                    'locked_price': locked_price, 'repriced': repriced})
 
 
 @app.route('/shows/<int:show_id>/assets/<int:sa_id>', methods=['DELETE'])
@@ -16441,13 +16841,17 @@ def asset_approvals():
                    (pdf_data IS NOT NULL OR s3_key IS NOT NULL) AS has_pdf
             FROM show_external_rentals WHERE show_id=? ORDER BY sort_order, id
         """, (s['id'],)).fetchall()
-        s['assets']           = [dict(r) for r in assets]
+        s['assets']           = [_normalize_row_dates(dict(r)) for r in assets]
         s['external_rentals'] = [dict(r) for r in ext]
         s['assets_total']     = sum(float(r['locked_price'] or 0) * int(r['quantity'] or 1)
                                     for r in assets)
         s['externals_total']  = sum(float(r['cost'] or 0) for r in ext)
         s['total']            = s['assets_total'] + s['externals_total']
         s['has_any']          = bool(assets) or bool(ext)
+        # Allowed rental bounds for the per-line date editors + add modal.
+        win_start, win_end = _show_rental_window(db, s['id'])
+        s['rental_win_start'] = win_start.isoformat() if win_start else ''
+        s['rental_win_end']   = win_end.isoformat() if win_end else ''
 
     db.close()
     return render_template(
