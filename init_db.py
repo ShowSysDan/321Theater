@@ -531,6 +531,21 @@ CREATE TABLE IF NOT EXISTS post_show_labor (
     created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Per-day labor info for a show: the PM covering that day (when the show's
+-- main PM is out) and day-specific notes. Both surface on the Labor Overview,
+-- the Labor Scheduler, and the show's staffing tab. cover_pm stores the
+-- contact NAME (same convention as the production_manager advance field).
+CREATE TABLE IF NOT EXISTS show_labor_days (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    show_id    INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    work_date  DATE NOT NULL,
+    cover_pm   TEXT DEFAULT '',
+    day_notes  TEXT DEFAULT '',
+    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    updated_at TIMESTAMP,
+    UNIQUE (show_id, work_date)
+);
+
 -- Overhead & Project Crew (labor not tied to any show)
 --
 -- Projects are the equivalent of "arts groups" for overhead/project crew —
@@ -2017,6 +2032,18 @@ def migrate_db():
             created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_psl_show ON post_show_labor(show_id);
+
+        CREATE TABLE IF NOT EXISTS show_labor_days (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            show_id    INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+            work_date  DATE NOT NULL,
+            cover_pm   TEXT DEFAULT '',
+            day_notes  TEXT DEFAULT '',
+            updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            updated_at TIMESTAMP,
+            UNIQUE (show_id, work_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_sld_show ON show_labor_days(show_id);
     """)
 
     # Audit trail and comment versioning tables (safe to rerun)
@@ -3033,6 +3060,19 @@ CREATE TABLE IF NOT EXISTS post_show_labor (
     created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Per-day labor info for a show: covering PM + day notes. See SQLite SCHEMA
+-- for full notes. Re-created by migrate_db_postgres() so existing PG DBs get it.
+CREATE TABLE IF NOT EXISTS show_labor_days (
+    id         SERIAL PRIMARY KEY,
+    show_id    INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    work_date  DATE NOT NULL,
+    cover_pm   TEXT DEFAULT '',
+    day_notes  TEXT DEFAULT '',
+    updated_by INTEGER,
+    updated_at TIMESTAMP,
+    UNIQUE (show_id, work_date)
+);
+
 CREATE TABLE IF NOT EXISTS overhead_projects (
     id            SERIAL PRIMARY KEY,
     name          TEXT UNIQUE NOT NULL,
@@ -3807,6 +3847,17 @@ def migrate_db_postgres():
                 FROM "{app_schema}".shows s
                 CROSS JOIN "{app_schema}".labor_billable_items b
                 ON CONFLICT DO NOTHING''',
+            f'''CREATE TABLE IF NOT EXISTS "{app_schema}".show_labor_days (
+                id         SERIAL PRIMARY KEY,
+                show_id    INTEGER NOT NULL REFERENCES "{app_schema}".shows(id) ON DELETE CASCADE,
+                work_date  DATE NOT NULL,
+                cover_pm   TEXT DEFAULT '',
+                day_notes  TEXT DEFAULT '',
+                updated_by INTEGER,
+                updated_at TIMESTAMP,
+                UNIQUE (show_id, work_date)
+            )''',
+            f'CREATE INDEX IF NOT EXISTS idx_sld_show ON "{app_schema}".show_labor_days(show_id)',
             f'ALTER TABLE "{app_schema}".form_sections ADD COLUMN IF NOT EXISTS default_open INTEGER DEFAULT 1',
             f'ALTER TABLE "{app_schema}".form_sections ADD COLUMN IF NOT EXISTS asset_category_id INTEGER REFERENCES "{app_schema}".asset_categories(id) ON DELETE SET NULL',
             f'''CREATE TABLE IF NOT EXISTS "{app_schema}".arts_groups (
@@ -4047,6 +4098,7 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
         'show_performances', 'form_history',
         'show_comments', 'show_attachments', 'advance_reads', 'export_log',
         'schedule_template_rows', 'active_sessions', 'labor_requests',
+        'show_labor_days',
         'crew_members', 'asset_items', 'asset_dashboards',
         'email_send_log', 'email_send_errors',
         # ── Depend on asset_items / show_comments / crew_members ──────────────
@@ -4210,6 +4262,7 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
         # Overhead & Project Crew
         'overhead_projects',
         'overhead_labor_groups', 'overhead_labor_requests', 'overhead_labor_templates',
+        'show_labor_days',
     ]
     for table in serial_tables:
         try:
