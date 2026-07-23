@@ -491,7 +491,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.25.0'
+APP_VERSION = '2.26.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -15966,6 +15966,51 @@ def _reset_asset_approval(db, show_id, reason):
     )
 
 
+def _show_rental_window(db, show_id):
+    """The show's production window — load-in → load-out, falling back to
+    first/last performance dates, then the show date. This is both the
+    default rental period for new asset lines AND the bounds a rental may
+    not extend past (rentals are tied to the show's advance dates).
+    Returns (start, end) as datetime.date, either may be None (undated show)."""
+    show = db.execute(
+        'SELECT show_date, load_in_date, load_out_date FROM shows WHERE id=?',
+        (show_id,)).fetchone()
+    if not show:
+        return None, None
+    perfs = db.execute(
+        'SELECT MIN(perf_date) AS p0, MAX(perf_date) AS p1 '
+        'FROM show_performances WHERE show_id=? AND perf_date IS NOT NULL',
+        (show_id,)).fetchone()
+    start = _as_date(show['load_in_date']) or _as_date(perfs['p0']) or _as_date(show['show_date'])
+    end = _as_date(show['load_out_date']) or _as_date(perfs['p1']) or _as_date(show['show_date'])
+    return start, end
+
+
+def _clean_rental_dates(db, show_id, rental_start, rental_end):
+    """Normalize a submitted rental period to date-only ISO strings (rental
+    periods are date ranges — any time component is dropped) and enforce that
+    it is a valid range inside the show's production window. Returns
+    (start_iso_or_None, end_iso_or_None, error_message_or_None)."""
+    d_start = _as_date(rental_start)
+    d_end = _as_date(rental_end)
+    if rental_start and not d_start:
+        return None, None, 'Invalid rental start date.'
+    if rental_end and not d_end:
+        return None, None, 'Invalid rental end date.'
+    if d_start and d_end and d_start > d_end:
+        return None, None, 'Rental start must be on or before rental end.'
+    win_start, win_end = _show_rental_window(db, show_id)
+    if win_start and win_end:
+        if (d_start and d_start < win_start) or (d_end and d_end > win_end):
+            return None, None, (
+                f'Rental period must stay within the show dates '
+                f'{win_start.isoformat()} → {win_end.isoformat()} '
+                f'(load-in → load-out on the advance page).')
+    return (d_start.isoformat() if d_start else None,
+            d_end.isoformat() if d_end else None,
+            None)
+
+
 @app.route('/shows/<int:show_id>/assets', methods=['GET'])
 @login_required
 def show_assets_list(show_id):
@@ -16012,7 +16057,10 @@ def show_assets_list(show_id):
     avail_cache = {}
     assets_out = []
     for r in rows:
-        d = dict(r)
+        # Normalize date columns to ISO (PG hands back date objects, which
+        # jsonify would render as "Fri, 24 Jul 2026 00:00:00 GMT" — useless
+        # for display and for <input type="date"> editors).
+        d = _normalize_row_dates(dict(r))
         key = (r['asset_type_id'], r['rental_start'], r['rental_end'])
         if key not in avail_cache:
             avail_cache[key] = _get_asset_availability(
@@ -16028,11 +16076,15 @@ def show_assets_list(show_id):
         )
         assets_out.append(d)
 
+    win_start, win_end = _show_rental_window(db, show_id)
     db.close()
     return jsonify({
         'assets': assets_out,
         'external_rentals': [{k: v for k, v in dict(r).items() if k != 'pdf_data'} for r in ext_rows],
         'approval': approval,
+        # Allowed rental bounds for the date editors (show load-in → load-out).
+        'rental_window': {'start': win_start.isoformat() if win_start else None,
+                          'end': win_end.isoformat() if win_end else None},
     })
 
 
@@ -16062,6 +16114,12 @@ def show_asset_add(show_id):
     default_end   = show['load_out_date'] or (perfs[-1]['perf_date'] if perfs else show['show_date'])
     rental_start = data.get('rental_start') or default_start
     rental_end   = data.get('rental_end')   or default_end
+    # Date-only, valid range, inside the show's load-in → load-out window.
+    rental_start, rental_end, date_err = _clean_rental_dates(
+        db, show_id, rental_start, rental_end)
+    if date_err:
+        db.close()
+        return jsonify({'error': date_err}), 400
 
     type_row = db.execute('SELECT rental_cost, weekly_rate, hide_from_pm, allow_unit_selection, is_system, is_package, is_consumable, name FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
 
@@ -16266,6 +16324,41 @@ def show_asset_edit(show_id, sa_id):
     is_hidden    = (1 if data.get('is_hidden') else 0) if 'is_hidden' in data else existing['is_hidden']
     notes        = (data.get('notes') or '').strip()  if 'notes'      in data else existing['notes']
 
+    # Only validate the window when the caller is actually editing dates —
+    # a qty/notes edit on a legacy line whose dates predate the current show
+    # window must not be rejected.
+    dates_touched = ('rental_start' in data) or ('rental_end' in data)
+    if dates_touched:
+        rental_start, rental_end, date_err = _clean_rental_dates(
+            db, show_id, rental_start, rental_end)
+        if date_err:
+            db.close()
+            return jsonify({'error': date_err}), 400
+
+    # A different rental window means a different duration, and the per-unit
+    # locked price is the rate-card formula over that duration — so re-lock the
+    # price for the new window. Any manual approver override was priced for the
+    # OLD window and no longer applies; the approval reset below flags the line
+    # for the asset manager to re-review (and re-override if needed).
+    window_changed = dates_touched and (
+        _as_date(rental_start) != _as_date(existing['rental_start'])
+        or _as_date(rental_end) != _as_date(existing['rental_end']))
+    locked_price = existing['locked_price']
+    original_locked_price = existing['original_locked_price']
+    repriced = False
+    if window_changed:
+        rate_row = db.execute(
+            'SELECT rental_cost, weekly_rate, is_consumable '
+            'FROM asset_types WHERE id=?', (existing['asset_type_id'],)).fetchone()
+        if rate_row:
+            new_price = _compute_locked_price(
+                rate_row['rental_cost'], rate_row['weekly_rate'],
+                rental_start, rental_end,
+                is_consumable=rate_row['is_consumable'])
+            repriced = round(float(locked_price or 0), 2) != round(new_price, 2)
+            locked_price = new_price
+            original_locked_price = new_price
+
     # Unit-pinned rows: qty is always 1, and the new date window must not
     # collide with another show that has booked this specific unit.
     if existing['asset_item_id']:
@@ -16353,9 +16446,10 @@ def show_asset_edit(show_id, sa_id):
 
     db.execute("""
         UPDATE show_assets SET quantity=?, rental_start=?, rental_end=?,
-               is_hidden=?, notes=?
+               is_hidden=?, notes=?, locked_price=?, original_locked_price=?
         WHERE id=? AND show_id=?
-    """, (quantity, rental_start, rental_end, is_hidden, notes, sa_id, show_id))
+    """, (quantity, rental_start, rental_end, is_hidden, notes,
+          locked_price, original_locked_price, sa_id, show_id))
     db.commit()
 
     # Post-commit verification — see show_asset_add for rationale. If a
@@ -16367,10 +16461,12 @@ def show_asset_edit(show_id, sa_id):
             and post_avail['available'] < 0):
         db.execute("""
             UPDATE show_assets SET quantity=?, rental_start=?, rental_end=?,
-                   is_hidden=?, notes=?
+                   is_hidden=?, notes=?, locked_price=?, original_locked_price=?
             WHERE id=? AND show_id=?
         """, (existing['quantity'], existing['rental_start'], existing['rental_end'],
-              existing['is_hidden'], existing['notes'], sa_id, show_id))
+              existing['is_hidden'], existing['notes'],
+              existing['locked_price'], existing['original_locked_price'],
+              sa_id, show_id))
         db.commit()
         type_name_row = db.execute(
             'SELECT name FROM asset_types WHERE id=?', (existing['asset_type_id'],)
@@ -16399,10 +16495,12 @@ def show_asset_edit(show_id, sa_id):
         if post_shortages:
             db.execute("""
                 UPDATE show_assets SET quantity=?, rental_start=?, rental_end=?,
-                       is_hidden=?, notes=?
+                       is_hidden=?, notes=?, locked_price=?, original_locked_price=?
                 WHERE id=? AND show_id=?
             """, (existing['quantity'], existing['rental_start'], existing['rental_end'],
-                  existing['is_hidden'], existing['notes'], sa_id, show_id))
+                  existing['is_hidden'], existing['notes'],
+                  existing['locked_price'], existing['original_locked_price'],
+                  sa_id, show_id))
             db.commit()
             sys_name = edit_type['name'] or f"System #{existing['asset_type_id']}"
             syslog_logger.warning(
@@ -16417,11 +16515,20 @@ def show_asset_edit(show_id, sa_id):
                 'shortages': post_shortages,
             }), 409
 
-    log_audit(db, 'ASSET_SHOW_EDIT', 'show_asset', sa_id, show_id=show_id)
+    audit_detail = f'qty={quantity}'
+    if window_changed:
+        audit_detail += (f' dates={rental_start}→{rental_end}'
+                         + (f' repriced={locked_price}' if repriced else ''))
+    log_audit(db, 'ASSET_SHOW_EDIT', 'show_asset', sa_id, show_id=show_id,
+              detail=audit_detail)
     _reset_asset_approval(db, show_id, 'asset_edited')
     db.commit()
     db.close()
-    return jsonify({'success': True})
+    rs, re_ = _as_date(rental_start), _as_date(rental_end)
+    return jsonify({'success': True,
+                    'rental_start': rs.isoformat() if rs else None,
+                    'rental_end': re_.isoformat() if re_ else None,
+                    'locked_price': locked_price, 'repriced': repriced})
 
 
 @app.route('/shows/<int:show_id>/assets/<int:sa_id>', methods=['DELETE'])
@@ -16734,13 +16841,17 @@ def asset_approvals():
                    (pdf_data IS NOT NULL OR s3_key IS NOT NULL) AS has_pdf
             FROM show_external_rentals WHERE show_id=? ORDER BY sort_order, id
         """, (s['id'],)).fetchall()
-        s['assets']           = [dict(r) for r in assets]
+        s['assets']           = [_normalize_row_dates(dict(r)) for r in assets]
         s['external_rentals'] = [dict(r) for r in ext]
         s['assets_total']     = sum(float(r['locked_price'] or 0) * int(r['quantity'] or 1)
                                     for r in assets)
         s['externals_total']  = sum(float(r['cost'] or 0) for r in ext)
         s['total']            = s['assets_total'] + s['externals_total']
         s['has_any']          = bool(assets) or bool(ext)
+        # Allowed rental bounds for the per-line date editors + add modal.
+        win_start, win_end = _show_rental_window(db, s['id'])
+        s['rental_win_start'] = win_start.isoformat() if win_start else ''
+        s['rental_win_end']   = win_end.isoformat() if win_end else ''
 
     db.close()
     return render_template(

@@ -1169,10 +1169,24 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     return _allAssetTypes;
   }
 
+  // Allowed rental bounds (show load-in → load-out) for the date editors.
+  let _assetRentalWindow = {start: null, end: null};
+
+  // Rental periods are date ranges — show/edit date-only. Tolerates legacy
+  // values that arrive as full GMT timestamps.
+  function _assetDateOnly(v) {
+    if (!v) return '';
+    const s = String(v);
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    const d = new Date(s);
+    return isNaN(d) ? '' : d.toISOString().slice(0, 10);
+  }
+
   // Load and render the assets tab
   window.loadAssetsTab = async function() {
     const r = await fetch(`/shows/${SHOW_ID}/assets`, {headers:{'X-Requested-With':'XMLHttpRequest'}});
     const data = await r.json();
+    _assetRentalWindow = data.rental_window || {start: null, end: null};
     renderAssets(data.assets || [], data.external_rentals || []);
     renderApprovalBadge(data.approval || {approved: false});
   };
@@ -1222,13 +1236,23 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         const qtyCell = (IS_ADMIN && !a.asset_item_id)
           ? `<input type="number" min="1" step="1" value="${a.quantity}" data-sa-id="${a.id}" data-orig="${a.quantity}" class="asset-qty-input field-input" style="width:64px;padding:2px 6px;font-size:12px;text-align:right">`
           : `${a.quantity}`;
+        const rStart = _assetDateOnly(a.rental_start);
+        const rEnd = _assetDateOnly(a.rental_end);
+        const winAttrs = `${_assetRentalWindow.start ? ` min="${_assetRentalWindow.start}"` : ''}${_assetRentalWindow.end ? ` max="${_assetRentalWindow.end}"` : ''}`;
+        // Rental period is editable in place; the server re-checks
+        // availability/unit conflicts and re-locks the rate-card price for
+        // the new duration. Bounded to the show's load-in → load-out window.
+        const rentalCell = IS_ADMIN
+          ? `<input type="date" class="asset-date-input field-input" data-sa-id="${a.id}" data-field="rental_start" value="${rStart}" data-orig="${rStart}"${winAttrs} style="width:128px;padding:2px 6px;font-size:11px"> →
+             <input type="date" class="asset-date-input field-input" data-sa-id="${a.id}" data-field="rental_end" value="${rEnd}" data-orig="${rEnd}"${winAttrs} style="width:128px;padding:2px 6px;font-size:11px">`
+          : `${rStart||'—'} → ${rEnd||'—'}`;
         const tr = document.createElement('tr');
         if (a._avail_overbooked) tr.style.background = 'rgba(197,48,48,.08)';
         tr.innerHTML = `
           <td style="color:var(--text-dim);font-size:11px">${esc(a.category_name)}</td>
           <td><div style="font-weight:500">${esc(label)}${unitBadge}${hiddenBadge}${overbookedBadge}</div>${subHtml}</td>
           <td>${qtyCell}</td>
-          <td style="font-size:11px">${a.rental_start||'—'} → ${a.rental_end||'—'}</td>
+          <td style="font-size:11px;white-space:nowrap">${rentalCell}</td>
           <td>$${Number(a.locked_price).toFixed(2)}</td>
           <td>$${lineTotal}</td>
           <td style="font-size:11px;color:var(--text-dim)">${esc(a.notes||'')}</td>
@@ -1245,6 +1269,9 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
           if (e.key === 'Escape') { inp.value = inp.dataset.orig; inp.blur(); }
         });
+      });
+      tbody.querySelectorAll('.asset-date-input').forEach(inp => {
+        inp.addEventListener('change', () => updateAssetDates(inp));
       });
     }
 
@@ -1390,8 +1417,15 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     const perfs = {{ performances | tojson }};
     const defaultStart = loadInDate  || (perfs.length > 0 ? perfs[0].perf_date          : '') || '';
     const defaultEnd   = loadOutDate || (perfs.length > 0 ? perfs[perfs.length-1].perf_date : '') || '';
-    document.getElementById('asset-add-start').value = defaultStart;
-    document.getElementById('asset-add-end').value   = defaultEnd;
+    const addStartInp = document.getElementById('asset-add-start');
+    const addEndInp   = document.getElementById('asset-add-end');
+    addStartInp.value = defaultStart;
+    addEndInp.value   = defaultEnd;
+    // Rentals may not extend past the show's load-in → load-out window.
+    [addStartInp, addEndInp].forEach(inp => {
+      if (defaultStart) inp.min = defaultStart; else inp.removeAttribute('min');
+      if (defaultEnd)   inp.max = defaultEnd;   else inp.removeAttribute('max');
+    });
 
     // Remember this type's rate card so the price + breakdown can recompute
     // live as the dates / quantity change (see _recalcAssetPrice).
@@ -1634,6 +1668,56 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       else alert('Failed to update quantity');
     } finally {
       inp.disabled = false;
+    }
+  };
+
+  // Edit a line's rental period in place. Sends BOTH dates so the server
+  // validates the full range (within the show window, start ≤ end), re-checks
+  // availability / unit conflicts, and re-locks the rate-card price for the
+  // new duration.
+  window.updateAssetDates = async function(inp) {
+    const saId = Number(inp.dataset.saId);
+    const row = inp.closest('tr');
+    const startInp = row.querySelector('.asset-date-input[data-field="rental_start"]');
+    const endInp = row.querySelector('.asset-date-input[data-field="rental_end"]');
+    const start = startInp?.value || '';
+    const end = endInp?.value || '';
+    const revert = () => {
+      if (startInp) startInp.value = startInp.dataset.orig;
+      if (endInp) endInp.value = endInp.dataset.orig;
+    };
+    if (!start || !end) { revert(); return; }
+    // Keep the range valid by pulling the other bound along with the edit
+    // (moving start past end drags end along, and vice versa).
+    if (start > end) {
+      if (inp === startInp && endInp) endInp.value = start;
+      else if (startInp) startInp.value = end;
+    }
+    try {
+      const r = await fetch(`/shows/${SHOW_ID}/assets/${saId}`, {
+        method: 'PUT',
+        headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+        body: JSON.stringify({rental_start: startInp?.value || start,
+                              rental_end: endInp?.value || end})
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const msg = d.error || 'Save failed';
+        revert();
+        if (typeof showSaveToast === 'function') showSaveToast(msg, 'error');
+        else alert(msg);
+        return;
+      }
+      if (typeof showSaveToast === 'function') {
+        showSaveToast(d.repriced
+          ? `Rental period updated — unit price re-locked at $${Number(d.locked_price).toFixed(2)} for the new duration`
+          : 'Rental period updated');
+      }
+      loadAssetsTab();
+    } catch(e) {
+      revert();
+      if (typeof showSaveToast === 'function') showSaveToast('Failed to update rental period', 'error');
+      else alert('Failed to update rental period');
     }
   };
 
