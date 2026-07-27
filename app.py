@@ -3642,14 +3642,17 @@ def dashboard():
             WHERE s.status = 'active'
             ORDER BY {_eff_date} ASC NULLS LAST
         """).fetchall()
+        # No LIMIT: the dashboard search is client-side over rendered cards, so
+        # every archived show must be present or it's unfindable. (A LIMIT here
+        # also interacted badly with PG's DESC NULLS FIRST default — undated
+        # shows crowded dated ones out of the window.)
         archived = db.execute(f"""
             SELECT s.*, u.display_name as creator,
               (SELECT COUNT(*) FROM show_performances WHERE show_id=s.id) as perf_count,
               {_eff_date} as show_date
             FROM shows s LEFT JOIN users u ON s.created_by = u.id
             WHERE s.status = 'archived'
-            ORDER BY {_eff_date} DESC
-            LIMIT 30
+            ORDER BY {_eff_date} DESC NULLS LAST
         """).fetchall()
     else:
         if accessible:
@@ -3668,7 +3671,7 @@ def dashboard():
                   {_eff_date} as show_date
                 FROM shows s LEFT JOIN users u ON s.created_by = u.id
                 WHERE s.status = 'archived' AND s.id IN ({placeholders})
-                ORDER BY {_eff_date} DESC LIMIT 30
+                ORDER BY {_eff_date} DESC NULLS LAST
             """, accessible).fetchall()
         else:
             active = []
@@ -16796,10 +16799,15 @@ def asset_approvals():
         start = date.today()
         end   = start + timedelta(days=DEFAULT_WINDOW_DAYS)
 
+    today = date.today()
     db = get_db()
     # Shows whose load-in date (fallback: show_date, then earliest performance)
-    # falls inside the window.  "All shows" means no status filter beyond active.
-    shows = db.execute("""
+    # falls inside the window. Past shows auto-archive, so whenever the window
+    # reaches into the past, archived shows must be included too — otherwise a
+    # past show needing a last-minute cost adjustment is invisible here no
+    # matter what date range is picked.
+    status_filter = ("IN ('active', 'archived')" if start < today else "= 'active'")
+    shows = db.execute(f"""
         SELECT s.id, s.name, s.venue, s.show_date, s.show_time,
                s.load_in_date, s.load_in_time, s.load_out_date, s.load_out_time,
                s.assets_approved, s.assets_approved_at,
@@ -16809,19 +16817,21 @@ def asset_approvals():
                           WHERE sp.show_id = s.id)) AS effective_date
         FROM shows s
         LEFT JOIN users u ON u.id = s.assets_approved_by
-        WHERE COALESCE(s.status, 'active') = 'active'
+        WHERE COALESCE(s.status, 'active') {status_filter}
         ORDER BY effective_date NULLS LAST, s.id
     """).fetchall()
     shows = [dict(r) for r in shows]
     # Filter to the date window (effective_date inside [start, end])
-    def _in_range(v):
+    def _eff_date(v):
         if not v:
-            return False
+            return None
         try:
-            return start <= date.fromisoformat(str(v)[:10]) <= end
+            return date.fromisoformat(str(v)[:10])
         except ValueError:
-            return False
-    shows = [s for s in shows if _in_range(s.get('effective_date'))]
+            return None
+    for s in shows:
+        s['_eff'] = _eff_date(s.get('effective_date'))
+    shows = [s for s in shows if s['_eff'] and start <= s['_eff'] <= end]
 
     # Aggregate per-show asset + external-rental totals, counts, and rows.
     for s in shows:
@@ -16848,6 +16858,9 @@ def asset_approvals():
         s['externals_total']  = sum(float(r['cost'] or 0) for r in ext)
         s['total']            = s['assets_total'] + s['externals_total']
         s['has_any']          = bool(assets) or bool(ext)
+        # Past shows stay adjustable (last-second cost corrections) but get a
+        # distinct tint in the template so they read as historical.
+        s['is_past'] = s.pop('_eff') < today
         # Allowed rental bounds for the per-line date editors + add modal.
         win_start, win_end = _show_rental_window(db, s['id'])
         s['rental_win_start'] = win_start.isoformat() if win_start else ''

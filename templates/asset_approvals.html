@@ -50,6 +50,7 @@
 .approvals-legend .dot.ok      { background: #22c55e; }
 .approvals-legend .dot.pending { background: #f59e0b; }
 .approvals-legend .dot.empty   { background: var(--border); }
+.approvals-legend .dot.past    { background: #8b5cf6; }
 
 .appr-show {
   margin-bottom: 14px;
@@ -59,6 +60,10 @@
 }
 .appr-show.is-approved { border-color: rgba(34,197,94,0.4); }
 .appr-show.is-pending  { border-color: rgba(245,158,11,0.4); }
+/* Past shows stay fully editable (last-second cost adjustments) but get a
+   violet tint so they read as historical at a glance. */
+.appr-show.is-past { border-left: 3px solid #8b5cf6; }
+.appr-show.is-past .appr-show-head { background: rgba(139,92,246,0.07); }
 
 .appr-show-head {
   display: flex;
@@ -94,6 +99,11 @@
   background: var(--bg-hover);
   color: var(--text-muted);
   border: 1px solid var(--border);
+}
+.appr-show-badge.past {
+  background: rgba(139,92,246,0.12);
+  color: #8b5cf6;
+  border: 1px solid rgba(139,92,246,0.35);
 }
 .appr-show-total {
   font-variant-numeric: tabular-nums;
@@ -183,6 +193,7 @@
   </div>
   <button class="btn btn-primary btn-sm" onclick="applyRange()">Apply</button>
   <div class="approvals-presets" title="Reset the window to start from today">
+    <button class="btn btn-ghost btn-sm" onclick="presetRange(-21)" title="Today − 21 days through today — includes archived past shows for cost adjustments">↻ Past 3 weeks</button>
     <button class="btn btn-ghost btn-sm" onclick="presetRange(21)" title="Today through today + 21 days">↻ Today + 3 weeks</button>
     <button class="btn btn-ghost btn-sm" onclick="presetRange(42)" title="Today through today + 42 days">↻ Today + 6 weeks</button>
   </div>
@@ -197,6 +208,7 @@
     <span><span class="dot ok"></span>Approved</span>
     <span><span class="dot pending"></span>Pending</span>
     <span><span class="dot empty"></span>No requests</span>
+    <span title="Load-in date has passed — still editable for last-second cost adjustments"><span class="dot past"></span>Past show</span>
   </div>
 </div>
 
@@ -210,7 +222,7 @@
 
 <div class="appr-list" id="appr-list">
 {% for s in shows %}
-<div class="appr-show {% if s.assets_approved %}is-approved{% elif s.has_any %}is-pending{% endif %} collapsed"
+<div class="appr-show {% if s.assets_approved %}is-approved{% elif s.has_any %}is-pending{% endif %}{% if s.is_past %} is-past{% endif %} collapsed"
      data-show-id="{{ s.id }}"
      data-approved="{{ 1 if s.assets_approved else 0 }}"
      data-has-any="{{ 1 if s.has_any else 0 }}">
@@ -222,6 +234,9 @@
       {% if not s.load_in_date and s.show_date %}Show {{ s.show_date }}{% endif %}
       {% if s.venue %}&nbsp;·&nbsp;{{ s.venue }}{% endif %}
     </span>
+    {% if s.is_past %}
+      <span class="appr-show-badge past" title="Load-in date has passed — still editable for last-second cost adjustments">Past</span>
+    {% endif %}
     {% if s.assets_approved %}
       <span class="appr-show-badge approved" title="Approved{% if s.approver_name %} by {{ s.approver_name }}{% endif %}{% if s.assets_approved_at %} on {{ s.assets_approved_at }}{% endif %}">
         ✓ Approved{% if s.approver_name %} · {{ s.approver_name }}{% endif %}
@@ -462,11 +477,13 @@ function applyRange() {
 function presetRange(days) {
   // Always anchored to today — pressing twice does NOT advance further.
   // Use the Prev/Next pager to skip past today by a window-width step.
+  // Negative days = look-back window (today − N days through today); the
+  // server includes archived shows whenever the window starts in the past.
   const today = new Date();
-  const end = new Date(today); end.setDate(today.getDate() + days);
+  const other = new Date(today); other.setDate(today.getDate() + days);
   const fmt = d => d.toISOString().slice(0,10);
-  document.getElementById('range-start').value = fmt(today);
-  document.getElementById('range-end').value   = fmt(end);
+  document.getElementById('range-start').value = fmt(days < 0 ? other : today);
+  document.getElementById('range-end').value   = fmt(days < 0 ? today : other);
   applyRange();
 }
 function shiftRange(direction) {
@@ -681,6 +698,8 @@ let _apprAllTypes = null;
 let _apprCurrentShowId = null;
 let _apprCurrentTypeId = null;
 let _apprAvailData = null;
+let _apprCurrentIsSystem = false;
+let _apprAvailSeq = 0;
 let _apprDefaultStart = '';
 let _apprDefaultEnd   = '';
 
@@ -830,16 +849,35 @@ async function selectApprAssetType(typeId, label, price, weeklyRate, isSystem, i
   closeApprAssetSearch();
   document.getElementById('appr-asset-add-modal').style.display = 'flex';
 
+  _apprCurrentIsSystem = !!isSystem;
+  await _refreshApprAvailability();
+}
+
+// Fetch availability for the current type using the dates in the modal, then
+// refresh the stock line, unit picker, and overbook warning. Called on modal
+// open AND on every rental-date change — availability is date-range dependent,
+// so narrowing the range can free up units.
+async function _refreshApprAvailability() {
+  const typeId = _apprCurrentTypeId;
   const availDiv = document.getElementById('appr-avail-info');
-  if (isSystem) {
+  if (!typeId || !availDiv) return;
+  if (_apprCurrentIsSystem) {
+    _apprAvailData = null;
     availDiv.innerHTML = '<span style="color:var(--accent)">System — no unit limit.</span>';
     updateApprAddState();
     return;
   }
+  const seq = ++_apprAvailSeq;
+  _apprAvailData = null;
   availDiv.textContent = 'Checking availability…';
+  const unitSel = document.getElementById('appr-add-unit');
+  const prevUnit = unitSel ? unitSel.value : '';
   try {
-    const r = await fetch(`/api/asset-types/${typeId}/availability?start=${_apprDefaultStart}&end=${_apprDefaultEnd}`);
+    const start = document.getElementById('appr-add-start').value;
+    const end   = document.getElementById('appr-add-end').value;
+    const r = await fetch(`/api/asset-types/${typeId}/availability?start=${start}&end=${end}`);
     const av = await r.json();
+    if (seq !== _apprAvailSeq) return; // superseded by a newer date change
     _apprAvailData = av;
     if (av.unlimited) {
       availDiv.textContent = 'Consumable — unlimited stock.';
@@ -850,9 +888,19 @@ async function selectApprAssetType(typeId, label, price, weeklyRate, isSystem, i
         `<strong style="${avClass}">${av.available} available</strong>`;
     }
     _populateApprUnitPicker(av);
-  } catch(e) { availDiv.textContent = ''; }
-  updateApprAddState();
+    // Keep a previously pinned unit if it's still selectable for the new dates.
+    if (prevUnit && unitSel) {
+      const opt = unitSel.querySelector(`option[value="${prevUnit}"]`);
+      if (opt && !opt.disabled) unitSel.value = prevUnit;
+    }
+    onApprUnitChange(); // syncs qty lock + overbook warning to the picker
+  } catch(e) {
+    if (seq === _apprAvailSeq) availDiv.textContent = '';
+    updateApprAddState();
+  }
 }
+document.getElementById('appr-add-start')?.addEventListener('change', _refreshApprAvailability);
+document.getElementById('appr-add-end')?.addEventListener('change', _refreshApprAvailability);
 
 function _populateApprUnitPicker(av) {
   const unitRow = document.getElementById('appr-add-unit-row');
