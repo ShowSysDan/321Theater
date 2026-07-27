@@ -1094,6 +1094,8 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
   let _allAssetTypes = null;
   let _currentAssetTypeId = null;
   let _currentAvailData = null;
+  let _currentAssetIsSystem = false;
+  let _availFetchSeq = 0;
   let _currentAssetRate = {daily: 0, weekly: 0, isConsumable: false};
 
   // Smart-cap rate-card math — mirrors _compute_locked_price() in app.py so the
@@ -1439,37 +1441,59 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     closeAssetSearch();
     document.getElementById('asset-add-modal').style.display = 'flex';
 
-    // Load availability
+    // Load availability (re-runs whenever the rental dates change)
+    _currentAssetIsSystem = !!isSystem;
+    await _refreshAssetAvailability();
+  };
+
+  // Fetch availability for the current type using the dates in the modal, then
+  // refresh the stock line, unit picker, and Add-button block state. Called on
+  // modal open AND on every rental-date change — availability is date-range
+  // dependent, so narrowing the range can free up units.
+  async function _refreshAssetAvailability() {
+    const typeId = _currentAssetTypeId;
+    const availDiv = document.getElementById('asset-avail-info');
+    if (!typeId || !availDiv) return;
+    if (_currentAssetIsSystem) {
+      _currentAvailData = null;
+      availDiv.innerHTML = '<span style="color:var(--accent)">System — deducts its component quantities from inventory; the add is blocked if a component is short for these dates.</span>';
+      _updateAddAssetBlockState();
+      return;
+    }
+    const seq = ++_availFetchSeq;
     _currentAvailData = null;
     _updateAddAssetBlockState();
-    const availDiv = document.getElementById('asset-avail-info');
-    if (isSystem) {
-      availDiv.innerHTML = '<span style="color:var(--accent)">System — deducts its component quantities from inventory; the add is blocked if a component is short for these dates.</span>';
-    } else {
-      availDiv.textContent = 'Checking availability…';
-      try {
-        const start = document.getElementById('asset-add-start').value;
-        const end   = document.getElementById('asset-add-end').value;
-        const r = await fetch(`/api/asset-types/${typeId}/availability?start=${start}&end=${end}`, {
-          headers:{'X-Requested-With':'XMLHttpRequest'}
-        });
-        const av = await r.json();
-        _currentAvailData = av;
-        if (av.unlimited) {
-          availDiv.textContent = 'Consumable — unlimited stock.';
-        } else {
-          const avClass = av.available > 2 ? 'color:#48BB78' : (av.available > 0 ? 'color:#FBBF24' : 'color:#FC8181');
-          availDiv.innerHTML =
-            `<span>Stock: ${av.total_items} total · ${av.in_maintenance} maintenance · ${av.reserve_count} reserved · ${av.total_reserved} allocated</span> — ` +
-            `<strong style="${avClass}">${av.available} available</strong>`;
-        }
-        _populateUnitPicker(av);
-        _updateAddAssetBlockState();
-      } catch(e) {
-        availDiv.textContent = '';
+    availDiv.textContent = 'Checking availability…';
+    const unitSel = document.getElementById('asset-add-unit');
+    const prevUnit = unitSel ? unitSel.value : '';
+    try {
+      const start = document.getElementById('asset-add-start').value;
+      const end   = document.getElementById('asset-add-end').value;
+      const r = await fetch(`/api/asset-types/${typeId}/availability?start=${start}&end=${end}`, {
+        headers:{'X-Requested-With':'XMLHttpRequest'}
+      });
+      const av = await r.json();
+      if (seq !== _availFetchSeq) return; // superseded by a newer date change
+      _currentAvailData = av;
+      if (av.unlimited) {
+        availDiv.textContent = 'Consumable — unlimited stock.';
+      } else {
+        const avClass = av.available > 2 ? 'color:#48BB78' : (av.available > 0 ? 'color:#FBBF24' : 'color:#FC8181');
+        availDiv.innerHTML =
+          `<span>Stock: ${av.total_items} total · ${av.in_maintenance} maintenance · ${av.reserve_count} reserved · ${av.total_reserved} allocated</span> — ` +
+          `<strong style="${avClass}">${av.available} available</strong>`;
       }
-    } // end if (!isSystem)
-  };
+      _populateUnitPicker(av);
+      // Keep a previously pinned unit if it's still selectable for the new dates.
+      if (prevUnit && unitSel) {
+        const opt = unitSel.querySelector(`option[value="${prevUnit}"]`);
+        if (opt && !opt.disabled) unitSel.value = prevUnit;
+      }
+      window.onAssetAddUnitChange(); // syncs qty lock + block state to the picker
+    } catch(e) {
+      if (seq === _availFetchSeq) availDiv.textContent = '';
+    }
+  }
 
   function _populateUnitPicker(av) {
     const unitRow = document.getElementById('asset-add-unit-row');
@@ -1565,6 +1589,10 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
   document.getElementById('asset-add-qty')?.addEventListener('input', _recalcAssetPrice);
   document.getElementById('asset-add-start')?.addEventListener('change', _recalcAssetPrice);
   document.getElementById('asset-add-end')?.addEventListener('change', _recalcAssetPrice);
+  // Availability depends on the rental window — re-check it on date changes so
+  // narrowing the range to a free window unblocks the Add button.
+  document.getElementById('asset-add-start')?.addEventListener('change', _refreshAssetAvailability);
+  document.getElementById('asset-add-end')?.addEventListener('change', _refreshAssetAvailability);
 
   let _addAssetInFlight = false;
   window.submitAddAsset = async function() {
