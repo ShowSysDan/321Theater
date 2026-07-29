@@ -905,6 +905,9 @@
         <button class="btn btn-xs btn-ghost"
                 onclick="window.__overhead.toggleQuickFill(this)" title="Set times for every line in this sub-group">▾ Quick Fill</button>
         <button class="btn btn-xs btn-ghost" onclick="window.__overhead.addRequest(this)">+ Add Labor Line</button>
+        <button class="btn btn-xs btn-ghost"
+                onclick="window.__overhead.changeGroupDate(this)"
+                title="Move this sub-group and its labor lines to a different day">Change Date</button>
         <button class="btn btn-xs btn-danger-ghost"
                 onclick="window.__overhead.deleteGroup(this)" title="Delete this sub-group">×</button>
         ` : ''}
@@ -1011,9 +1014,6 @@
       <div class="oh-day-actions">
         <button class="btn btn-sm btn-ghost"
                 onclick="window.__overhead.openAddGroup('${day.work_date}')">+ Sub-group</button>
-        <button class="btn btn-sm btn-ghost"
-                onclick="window.__overhead.changeDayDate(this, '${day.work_date}')"
-                title="Move every sub-group on this date to a different day (fix a typo)">Change Date</button>
         <button class="btn btn-sm btn-danger-ghost"
                 onclick="window.__overhead.deleteDay(this, '${day.work_date}')"
                 title="Delete every sub-group on this date">Delete Day</button>
@@ -1330,15 +1330,18 @@
     await load();
   }
 
-  /* Move an entire day to a new date — fixes a mistyped date without having to
-     delete and rebuild the sub-groups. Each group's work_date is updated (the
-     server cascades the new date to every labor line under it). */
-  async function changeDayDate(btn, workDate) {
-    const dayEl  = btn.closest('.oh-day');
-    const groups = Array.from(dayEl.querySelectorAll('.oh-group'));
-    if (!groups.length) return;
+  /* Move a single sub-group (project) to a new date — fixes a mistyped date
+     without touching the other sub-groups on the same day. The server cascades
+     the new work_date to every labor line under the group. */
+  async function changeGroupDate(btn) {
+    const groupEl  = btn.closest('.oh-group');
+    const dayEl    = btn.closest('.oh-day');
+    if (!groupEl || !dayEl) return;
+    const gid      = groupEl.dataset.groupId;
+    const workDate = dayEl.dataset.workDate;
+    const projName = groupEl.querySelector('.oh-group-name-text')?.textContent || 'this sub-group';
     const newDate = prompt(
-      `Move ${dayLabel(workDate)} (${workDate}) to which date? (YYYY-MM-DD)`,
+      `Move "${projName}" from ${dayLabel(workDate)} (${workDate}) to which date? (YYYY-MM-DD)`,
       workDate
     );
     if (newDate === null) return;
@@ -1348,19 +1351,17 @@
       return;
     }
     if (trimmed === workDate) return;
-    let ok = 0, fail = 0;
-    for (const g of groups) {
-      const gid = g.dataset.groupId;
-      const res = await putJSON(`/api/overhead-crew/groups/${gid}`, { work_date: trimmed });
-      if (res && res.success) ok++; else fail++;
+    const res = await putJSON(`/api/overhead-crew/groups/${gid}`, { work_date: trimmed });
+    if (!res || !res.success) {
+      showSaveToast('✗ Failed to move sub-group', 'error');
+      return;
     }
-    // Make sure the visible range covers the new date so the moved day shows up.
+    // Make sure the visible range covers the new date so the moved group shows up.
     const fromEl = document.getElementById('oh-from');
     const toEl   = document.getElementById('oh-to');
     if (fromEl.value && trimmed < fromEl.value) fromEl.value = trimmed;
     if (toEl.value   && trimmed > toEl.value)   toEl.value   = trimmed;
-    if (fail) showSaveToast(`✗ ${fail} sub-group${fail===1?'':'s'} failed to move`, 'error');
-    else      showSaveToast(`✓ Moved to ${trimmed}`);
+    showSaveToast(`✓ Moved to ${trimmed}`);
     await load();
   }
 
@@ -1775,7 +1776,7 @@
     confirmAddGroup,
     changeGroupProject,
     deleteGroup,
-    changeDayDate,
+    changeGroupDate,
     deleteDay,
     addRequest,
     removeRequest,
