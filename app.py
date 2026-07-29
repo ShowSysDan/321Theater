@@ -491,7 +491,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.26.0'
+APP_VERSION = '2.26.1'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -13483,56 +13483,55 @@ def api_overhead_group_update(gid):
     if block: return block
     data = request.get_json(force=True) or {}
     db = get_db()
-    row = db.execute('SELECT * FROM overhead_labor_groups WHERE id=?', (gid,)).fetchone()
-    if not row:
+    try:
+        row = db.execute('SELECT * FROM overhead_labor_groups WHERE id=?', (gid,)).fetchone()
+        if not row:
+            return jsonify({'success': False, 'error': 'Not found.'}), 404
+
+        updates, params = [], []
+        if 'work_date' in data:
+            wd = _parse_iso_date(data.get('work_date'))
+            if not wd:
+                return jsonify({'success': False, 'error': 'Invalid work_date.'}), 400
+            updates.append('work_date=?'); params.append(wd.isoformat())
+            # Cascade work_date to all requests under this group so the running list
+            # stays consistent if the group's date is changed.
+            db.execute(
+                'UPDATE overhead_labor_requests SET work_date=? WHERE group_id=?',
+                (wd.isoformat(), gid)
+            )
+
+        # Project linking — accept either an explicit id or a name (to upsert)
+        if 'project_id' in data:
+            pid = data.get('project_id')
+            if pid in (None, '', 0):
+                updates.append('project_id=?'); params.append(None)
+            else:
+                try:
+                    updates.append('project_id=?'); params.append(int(pid))
+                except (TypeError, ValueError):
+                    pass
+        elif 'project_name' in data:
+            nm = (data.get('project_name') or '').strip()
+            if nm:
+                new_pid = _find_or_create_project(db, nm)
+                updates.append('project_id=?'); params.append(new_pid)
+            else:
+                updates.append('project_id=?'); params.append(None)
+
+        for key in ('name', 'contact_name', 'contact_email', 'contact_phone', 'project_notes'):
+            if key in data:
+                updates.append(f'{key}=?')
+                params.append((data.get(key) or '').strip() if key != 'project_notes' else (data.get(key) or ''))
+        if not updates:
+            return jsonify({'success': False, 'error': 'No changes.'}), 400
+        params.append(gid)
+        db.execute(f"UPDATE overhead_labor_groups SET {', '.join(updates)} WHERE id=?", params)
+        log_audit(db, 'OVERHEAD_GROUP_EDIT', 'overhead_labor_group', gid)
+        db.commit()
+        refreshed = _fetch_overhead_group(db, gid)
+    finally:
         db.close()
-        return jsonify({'success': False, 'error': 'Not found.'}), 404
-
-    updates, params = [], []
-    if 'work_date' in data:
-        wd = _parse_iso_date(data.get('work_date'))
-        if not wd:
-            db.close()
-            return jsonify({'success': False, 'error': 'Invalid work_date.'}), 400
-        updates.append('work_date=?'); params.append(wd.isoformat())
-        # Cascade work_date to all requests under this group so the running list
-        # stays consistent if the group's date is changed.
-        db.execute(
-            'UPDATE overhead_labor_requests SET work_date=? WHERE group_id=?',
-            (wd.isoformat(), gid)
-        )
-
-    # Project linking — accept either an explicit id or a name (to upsert)
-    if 'project_id' in data:
-        pid = data.get('project_id')
-        if pid in (None, '', 0):
-            updates.append('project_id=?'); params.append(None)
-        else:
-            try:
-                updates.append('project_id=?'); params.append(int(pid))
-            except (TypeError, ValueError):
-                pass
-    elif 'project_name' in data:
-        nm = (data.get('project_name') or '').strip()
-        if nm:
-            new_pid = _find_or_create_project(db, nm)
-            updates.append('project_id=?'); params.append(new_pid)
-        else:
-            updates.append('project_id=?'); params.append(None)
-
-    for key in ('name', 'contact_name', 'contact_email', 'contact_phone', 'project_notes'):
-        if key in data:
-            updates.append(f'{key}=?')
-            params.append((data.get(key) or '').strip() if key != 'project_notes' else (data.get(key) or ''))
-    if not updates:
-        db.close()
-        return jsonify({'success': False, 'error': 'No changes.'}), 400
-    params.append(gid)
-    db.execute(f"UPDATE overhead_labor_groups SET {', '.join(updates)} WHERE id=?", params)
-    log_audit(db, 'OVERHEAD_GROUP_EDIT', 'overhead_labor_group', gid)
-    db.commit()
-    refreshed = _fetch_overhead_group(db, gid)
-    db.close()
     _overhead_log('OVERHEAD_GROUP_EDIT', id=gid)
     return jsonify({'success': True, 'group': _normalize_row_dates(dict(refreshed)) if refreshed else None})
 
