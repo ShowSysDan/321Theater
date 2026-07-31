@@ -1,0 +1,41 @@
+# systemd unit for the 3·2·1→Theater gateway (VPS side).
+# Install to /etc/systemd/system/321gateway.service, then:
+#   systemctl daemon-reload && systemctl enable --now 321gateway
+
+[Unit]
+Description=321Theater public gateway (email-OTP pre-auth)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gateway
+Group=gateway
+WorkingDirectory=/opt/321gateway
+EnvironmentFile=/etc/321gateway/gateway.env
+ExecStart=/opt/321gateway/venv/bin/gunicorn \
+    --workers 1 \
+    --threads 4 \
+    --bind 127.0.0.1:8100 \
+    --timeout 30 \
+    --access-logfile - \
+    gateway_app:app
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=321gateway
+
+# Hardening — this process faces the internet (via Caddy) and needs nothing
+# beyond its own directory and an outbound socket to the tunnel.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

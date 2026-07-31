@@ -47,6 +47,7 @@ import re
 import socket
 import time
 import uuid
+import hmac
 import html as _html_mod
 from datetime import datetime, date, timedelta
 from functools import wraps
@@ -109,6 +110,44 @@ def _sanitize_html(raw):
     return ''.join(s.out)
 
 app = Flask(__name__)
+
+# ── Trusted-proxy support (VPS gateway) ───────────────────────────────────────
+# When TRUSTED_PROXY_IPS is set (comma-separated IPs), requests arriving FROM
+# one of those socket peers get X-Forwarded-For / X-Forwarded-Proto applied:
+# request.remote_addr becomes the real public client (rate limiter, audit
+# logs) and request.is_secure reflects the HTTPS front end (Secure cookies).
+# Requests from any other peer are untouched, so a LAN client sending a forged
+# X-Forwarded-For gains nothing — this is why we don't use bare ProxyFix,
+# which trusts every peer. Unset (the default), the WSGI environ is
+# byte-for-byte unchanged.
+_TRUSTED_PROXY_IPS = {
+    _ip.strip() for _ip in os.environ.get('TRUSTED_PROXY_IPS', '').split(',')
+    if _ip.strip()
+}
+
+if _TRUSTED_PROXY_IPS:
+    class _TrustedProxyMiddleware:
+        def __init__(self, wsgi_app, trusted):
+            self._app = wsgi_app
+            self._trusted = trusted
+
+        def __call__(self, environ, start_response):
+            peer = environ.get('REMOTE_ADDR', '')
+            if peer in self._trusted:
+                # Same environ key ProxyFix uses, so code that needs the raw
+                # socket peer (gateway endpoint auth) can always recover it.
+                environ['werkzeug.proxy_fix.orig_remote_addr'] = peer
+                fwd_for = environ.get('HTTP_X_FORWARDED_FOR', '')
+                if fwd_for:
+                    # Rightmost entry is the one appended by the trusted
+                    # proxy itself; anything left of it is client-supplied.
+                    environ['REMOTE_ADDR'] = fwd_for.split(',')[-1].strip()
+                proto = environ.get('HTTP_X_FORWARDED_PROTO', '')
+                if proto in ('http', 'https'):
+                    environ['wsgi.url_scheme'] = proto
+            return self._app(environ, start_response)
+
+    app.wsgi_app = _TrustedProxyMiddleware(app.wsgi_app, _TRUSTED_PROXY_IPS)
 
 # ── SECRET_KEY — generate and persist if not provided via environment ─────────
 _secret = os.environ.get('SECRET_KEY', '')
@@ -283,6 +322,17 @@ class _DBSessionInterface(_FlaskSessionInterface):
             app.logger.warning(f'DB session save failed: {e}')
             return
 
+        # One instance can serve HTTPS (via the VPS gateway, which sets
+        # X-Forwarded-Proto honored by the trusted-proxy middleware) and
+        # plain-HTTP LAN clients at the same time: mark the cookie Secure
+        # whenever THIS request came over HTTPS, without breaking LAN logins
+        # the way the global SESSION_COOKIE_SECURE flag would.
+        secure = self.get_cookie_secure(app)
+        try:
+            secure = secure or request.is_secure
+        except RuntimeError:
+            pass  # No request context — keep the configured default
+
         response.set_cookie(
             cookie_name,
             session.sid,
@@ -290,7 +340,7 @@ class _DBSessionInterface(_FlaskSessionInterface):
             httponly=self.get_cookie_httponly(app),
             domain=domain,
             path=path,
-            secure=self.get_cookie_secure(app),
+            secure=secure,
             samesite=self.get_cookie_samesite(app),
         )
 
@@ -491,7 +541,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.26.1'
+APP_VERSION = '2.27.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -651,6 +701,19 @@ def get_db():
     """Return a normalized DB connection (SQLite or PostgreSQL based on settings)."""
     settings = db_adapter.read_db_settings(DATABASE)
     return db_adapter.connect(DATABASE, settings)
+
+
+def _is_stale_pg_fallback(db):
+    """True when this deployment is configured for PostgreSQL but `db` is a
+    silent SQLite fallback (db_adapter.connect does this when PG is
+    unreachable) — meaning any settings/user data read from it is STALE
+    bootstrap data. Every background job or settings-sensitive path must
+    check this and refuse to act; callers log their own context-specific
+    ERROR. A genuine SQLite install (configured == active == 'sqlite')
+    returns False and proceeds normally."""
+    configured = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
+    active = getattr(db, 'db_type', None)
+    return configured == 'postgres' and active != 'postgres'
 
 
 # ─── Cluster Heartbeat (multi-server leader election) ────────────────────────
@@ -1550,7 +1613,15 @@ def _log_email_error(recipients, subject, error, *,
         return
     err_str  = str(error)[:1000]
     code_str = str(smtp_code or '')[:50]
-    by_str   = (triggered_by or session.get('username') or 'system')[:100]
+    if not triggered_by:
+        # Callers in background threads have no request context — session
+        # access raises RuntimeError there, which would replace the real
+        # SMTP error with "Working outside of request context".
+        try:
+            triggered_by = session.get('username')
+        except RuntimeError:
+            triggered_by = None
+    by_str   = (triggered_by or 'system')[:100]
     subj_str = (subject or '')[:200]
     pdf_str  = (pdf_type or '')[:50]
     try:
@@ -2289,23 +2360,15 @@ def run_scheduled_pdf_emails():
     today = date.today()
     db = get_db()
     try:
-        # This deployment runs on PostgreSQL. If get_db() silently fell back to
-        # the SQLite bootstrap (db_adapter.connect does this when PG is
-        # unreachable), app_settings read here are STALE/empty — e.g.
-        # advance_email_enabled defaults to '0' — so the planner would return []
-        # and we'd "skip" with no error. Detect the fallback by comparing the
-        # CONFIGURED backend against the one we actually got, and refuse to act
-        # on stale config: log loudly and retry next hour. (A genuine SQLite
-        # install — configured == actual == 'sqlite' — proceeds normally.)
-        configured_backend = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
-        active_backend = getattr(db, 'db_type', None)
-        if configured_backend == 'postgres' and active_backend != 'postgres':
+        # On a stale SQLite fallback, app_settings read here are STALE/empty —
+        # e.g. advance_email_enabled defaults to '0' — so the planner would
+        # return [] and we'd "skip" with no error. Refuse to act instead.
+        if _is_stale_pg_fallback(db):
             app.logger.error(
-                'Scheduled PDF email: configured for postgres but active connection '
-                'is %r — PostgreSQL is unreachable so app_settings are STALE. Skipping '
-                'this run (auto-emails will not send until PG is reachable; retrying '
-                'next hour).',
-                active_backend
+                'Scheduled PDF email: configured for postgres but the active '
+                'connection is not — PostgreSQL is unreachable so app_settings '
+                'are STALE. Skipping this run (auto-emails will not send until '
+                'PG is reachable; retrying next hour).'
             )
             return
         plan = _plan_scheduled_emails(db, today)
@@ -2486,17 +2549,11 @@ def run_no_labor_alerts():
     today = date.today()
     db = get_db()
     try:
-        # Same stale-SQLite-fallback guard as run_scheduled_pdf_emails: if PG is
-        # the configured backend but get_db() silently fell back to the SQLite
-        # bootstrap, app_settings are stale and we must NOT act — log and retry
-        # next hour.
-        configured_backend = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
-        active_backend = getattr(db, 'db_type', None)
-        if configured_backend == 'postgres' and active_backend != 'postgres':
+        if _is_stale_pg_fallback(db):
             app.logger.error(
-                'No-labor alert: configured for postgres but active connection is %r — '
-                'app_settings are STALE; skipping this run (retry next hour).',
-                active_backend)
+                'No-labor alert: configured for postgres but the active '
+                'connection is not — app_settings are STALE; skipping this '
+                'run (retry next hour).')
             return
 
         plan = _plan_no_labor_alerts(db, today)
@@ -3402,6 +3459,16 @@ def _can_undo_audit_row(row):
 
 # ─── Auth Routes ──────────────────────────────────────────────────────────────
 
+# Dummy scrypt hash burned on don't-reveal-existence failure paths (unknown
+# username at login, unknown email at the gateway OTP endpoints) so a miss
+# costs the same CPU as a real comparison. Shared so the two sites can't
+# drift if the real hash parameters ever change.
+_DUMMY_PW_HASH = (
+    'scrypt:32768:8:1$dummy$00000000000000000000000000000000'
+    '00000000000000000000000000000000'
+)
+
+
 def _login_route():
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
@@ -3466,10 +3533,7 @@ def _login_route():
         else:
             # Constant-time failure: always hash something to prevent user enumeration
             if not user:
-                check_password_hash(
-                    'scrypt:32768:8:1$dummy$0000000000000000000000000000000000000000000000000000000000000000',
-                    password,
-                )
+                check_password_hash(_DUMMY_PW_HASH, password)
         db.close()
         flash('Invalid username or password.', 'error')
 
@@ -3497,6 +3561,231 @@ def logout():
         db.close()
     session.clear()
     return redirect(url_for('login'))
+
+
+# ─── VPS Gateway pre-auth (internal API) ──────────────────────────────────────
+# Consumed ONLY by the companion gateway app on the VPS (gateway/), which asks
+# us to email a one-time code to an address and later to check the code the
+# visitor typed. The gateway holds no DB or SMTP credentials — everything
+# stateful happens here. See GATEWAY_DESIGN.md for the full architecture.
+#
+# Both endpoints answer 404 unless GATEWAY_SHARED_SECRET is set in the
+# environment, so ordinary LAN deployments are byte-for-byte unaffected.
+# Responses never reveal whether an email has an account: /request always
+# returns {"status":"ok"} and /verify returns the same {"valid":false} for
+# wrong code, expired code, burned code, and unknown email alike.
+
+_GATEWAY_OTP_TTL_MIN = 10          # minutes a code stays valid
+_GATEWAY_OTP_MAX_ATTEMPTS = 5      # guesses allowed per code
+_GATEWAY_OTP_RATE_WINDOW_MIN = 15  # rate-limit window
+_GATEWAY_OTP_MAX_PER_EMAIL = 3     # codes per email per window
+_GATEWAY_OTP_MAX_PER_IP = 10       # codes per client IP per window
+
+# Raw socket peers allowed to call the endpoints (parsed once, like
+# _TRUSTED_PROXY_IPS). Empty set = no peer restriction.
+_GATEWAY_PEER_IPS = {
+    _ip.strip() for _ip in os.environ.get('GATEWAY_PEER_IPS', '').split(',')
+    if _ip.strip()
+}
+
+
+def _gateway_auth_ok():
+    """Shared-secret (+ optional socket-peer) check for the gateway endpoints.
+
+    False when the feature is disabled (GATEWAY_SHARED_SECRET unset) or the
+    caller fails either check. Callers 404 on False so the endpoints are
+    indistinguishable from nonexistent routes."""
+    secret = os.environ.get('GATEWAY_SHARED_SECRET', '')
+    if not secret:
+        return False
+    supplied = request.headers.get('X-Gateway-Secret', '')
+    if not hmac.compare_digest(supplied, secret):
+        return False
+    if _GATEWAY_PEER_IPS:
+        # Compare the raw socket peer, not request.remote_addr — with the
+        # trusted-proxy middleware active, remote_addr may have been rewritten
+        # from X-Forwarded-For, which anyone can forge.
+        raw_peer = request.environ.get(
+            'werkzeug.proxy_fix.orig_remote_addr', request.remote_addr)
+        if raw_peer not in _GATEWAY_PEER_IPS:
+            return False
+    return True
+
+
+def _gateway_pg_ok(db):
+    """Refuse to act on a stale SQLite fallback: configured-postgres must
+    equal the active backend (see _is_stale_pg_fallback)."""
+    if _is_stale_pg_fallback(db):
+        app.logger.error(
+            'Gateway OTP: configured for postgres but the active connection '
+            'is not — PostgreSQL unreachable, user data would be stale. '
+            'Failing closed.'
+        )
+        return False
+    return True
+
+
+def _gateway_json_body():
+    """Parsed JSON body as a dict — never raises on junk payloads."""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+def _gw_log(event, client_ip, email=None, extra=''):
+    """One consistent, fail2ban-parseable syslog line per gateway auth event.
+    Emails are logged as truncated hashes, never raw addresses."""
+    part = f' email_key={_gateway_email_key(email)}' if email else ''
+    syslog_logger.info(f'{event} ip={client_ip}{part}{extra}')
+
+
+def _gateway_email_key(email):
+    """Truncated hash of an email for syslog — lets us correlate repeated
+    requests without turning the log into an address-enumeration oracle."""
+    return hashlib.sha256(email.encode('utf-8')).hexdigest()[:12]
+
+
+def _gateway_send_otp_email(to_addr, code):
+    """Fire-and-forget OTP email; failures land in email_send_errors so they
+    show up in the Settings → Email Send Errors panel."""
+    subject = '3·2·1→THEATER: Your access code'
+    body = (
+        f'Your one-time access code is: {code}\n\n'
+        f'Enter it on the access page to continue to 3·2·1→Theater. '
+        f'The code expires in {_GATEWAY_OTP_TTL_MIN} minutes and works once.\n\n'
+        f'If you did not request this code, you can ignore this email — '
+        f'nobody can get in without both this code and your password.'
+    )
+    def _bg():
+        # _send_email writes failures to email_send_errors itself (with the
+        # SMTP code) when given error_context — logging here too would
+        # double-record every failure.
+        ctx = {'pdf_type': 'gateway_otp', 'triggered_by': 'gateway'}
+        try:
+            _send_email(subject=subject, recipients=[to_addr],
+                        body_text=body, error_context=ctx)
+        except Exception as e:
+            _log_email_error(to_addr, subject, e, **ctx)
+    threading.Thread(target=_bg, daemon=True).start()
+
+
+@app.route('/internal/gateway/otp/request', methods=['POST'])
+def gateway_otp_request():
+    if not _gateway_auth_ok():
+        abort(404)
+    data = _gateway_json_body()
+    email = (data.get('email') or '').strip().lower()
+    client_ip = (data.get('client_ip') or '')[:64]
+    generic = {'status': 'ok'}
+    if not email or '@' not in email or len(email) > 254:
+        return jsonify(generic)
+    db = get_db()
+    try:
+        if not _gateway_pg_ok(db):
+            return jsonify(generic)
+        now = datetime.utcnow()
+        # Housekeeping — codes are 10-minute ephemera, nothing needs a day.
+        db.execute('DELETE FROM gateway_otp_codes WHERE created_at < ?',
+                   (now - timedelta(days=1),))
+        user = db.execute(
+            "SELECT id FROM users WHERE lower(email) = ? AND email != '' "
+            'AND COALESCE(is_locked, 0) = 0 LIMIT 1', (email,)
+        ).fetchone()
+        if user:
+            code = f'{secrets.randbelow(10**6):06d}'
+            code_hash = generate_password_hash(code)
+            # Rate limits (3/email, 10/IP per window) enforced atomically in
+            # the INSERT itself — a separate count-then-insert would let
+            # concurrent requests across the 4 worker processes all pass the
+            # count and flood the mailbox. The guarded insert also runs
+            # AFTER the hash, so a throttled hit costs the same CPU as a
+            # miss and the throttle can't be used as a timing oracle.
+            window = now - timedelta(minutes=_GATEWAY_OTP_RATE_WINDOW_MIN)
+            cur = db.execute(
+                'INSERT INTO gateway_otp_codes '
+                '(email, code_hash, client_ip, expires_at, created_at) '
+                'SELECT ?, ?, ?, ?, ? '
+                'WHERE (SELECT COUNT(*) FROM gateway_otp_codes '
+                '       WHERE email = ? AND created_at > ?) < ? '
+                "AND (? = '' OR (SELECT COUNT(*) FROM gateway_otp_codes "
+                '     WHERE client_ip = ? AND created_at > ?) < ?)',
+                (email, code_hash, client_ip,
+                 now + timedelta(minutes=_GATEWAY_OTP_TTL_MIN), now,
+                 email, window, _GATEWAY_OTP_MAX_PER_EMAIL,
+                 client_ip, client_ip, window, _GATEWAY_OTP_MAX_PER_IP))
+            if getattr(cur, 'rowcount', 0) == 1:
+                # Invalidate older outstanding codes only once the new one
+                # is actually issued — a throttled request must never burn
+                # the live code someone is about to type.
+                db.execute(
+                    'UPDATE gateway_otp_codes SET used = 1 '
+                    'WHERE email = ? AND used = 0 AND created_at < ?',
+                    (email, now))
+                db.commit()
+                _gateway_send_otp_email(email, code)
+                _gw_log('GATEWAY_OTP_REQUEST', client_ip, email)
+            else:
+                db.commit()
+                _gw_log('GATEWAY_OTP_THROTTLED', client_ip, email)
+        else:
+            db.commit()
+            # Equalize timing with the hit path's hash generation.
+            generate_password_hash('000000')
+            _gw_log('GATEWAY_OTP_REQUEST', client_ip, email)
+        return jsonify(generic)
+    finally:
+        db.close()
+
+
+@app.route('/internal/gateway/otp/verify', methods=['POST'])
+def gateway_otp_verify():
+    if not _gateway_auth_ok():
+        abort(404)
+    data = _gateway_json_body()
+    email = (data.get('email') or '').strip().lower()
+    code = (data.get('code') or '').strip()
+    client_ip = (data.get('client_ip') or '')[:64]
+    if not email or not code or len(code) > 16:
+        return jsonify({'valid': False})
+    db = get_db()
+    try:
+        if not _gateway_pg_ok(db):
+            return jsonify({'valid': False})
+        now = datetime.utcnow()
+        row = db.execute(
+            'SELECT id, code_hash FROM gateway_otp_codes '
+            'WHERE email = ? AND used = 0 AND expires_at > ? '
+            'ORDER BY id DESC LIMIT 1', (email, now)
+        ).fetchone()
+        if not row:
+            check_password_hash(_DUMMY_PW_HASH, code)
+            _gw_log('GATEWAY_OTP_FAIL', client_ip, email)
+            return jsonify({'valid': False})
+        # Consume an attempt BEFORE comparing so parallel guesses across
+        # workers can never exceed the cap; rowcount 0 means the code is
+        # burned out of attempts (or was just used by a racing request).
+        cur = db.execute(
+            'UPDATE gateway_otp_codes SET attempts = attempts + 1 '
+            'WHERE id = ? AND attempts < ? AND used = 0',
+            (row['id'], _GATEWAY_OTP_MAX_ATTEMPTS))
+        db.commit()
+        if getattr(cur, 'rowcount', 0) != 1:
+            _gw_log('GATEWAY_OTP_FAIL', client_ip, email, ' reason=burned')
+            return jsonify({'valid': False})
+        if check_password_hash(row['code_hash'], code):
+            # Redemption is guarded too: two racing verifies of the same
+            # correct code both pass the hash check, but only the one that
+            # flips used 0→1 gets a session ("works once" means once).
+            cur = db.execute(
+                'UPDATE gateway_otp_codes SET used = 1 '
+                'WHERE id = ? AND used = 0', (row['id'],))
+            db.commit()
+            if getattr(cur, 'rowcount', 0) == 1:
+                _gw_log('GATEWAY_OTP_OK', client_ip, email)
+                return jsonify({'valid': True})
+        _gw_log('GATEWAY_OTP_FAIL', client_ip, email)
+        return jsonify({'valid': False})
+    finally:
+        db.close()
 
 
 # Supported "view site as" preview modes and the session flag profile each

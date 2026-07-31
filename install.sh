@@ -145,6 +145,23 @@ if [ "$(id -u)" -eq 0 ]; then
         info "SECRET_KEY already present in ${ENV_FILE}"
     fi
 
+    # Stub the VPS-gateway settings so admins can find them later. All three
+    # stay commented out by default — the gateway endpoints and trusted-proxy
+    # handling are fully disabled until these are set (see GATEWAY_DESIGN.md
+    # and gateway/README.md).
+    if ! grep -q 'GATEWAY_SHARED_SECRET' "$ENV_FILE" 2>/dev/null; then
+        cat >> "$ENV_FILE" << 'GWEOF'
+# ── VPS gateway pre-auth (optional — see gateway/README.md) ──────────────
+# Shared secret for the /internal/gateway/otp/* endpoints (same value as
+# GATE_SHARED_SECRET on the VPS). Unset = endpoints answer 404.
+#GATEWAY_SHARED_SECRET=
+# Restrict those endpoints to these raw socket peer IPs (comma-separated).
+#GATEWAY_PEER_IPS=10.201.4.9
+# Honor X-Forwarded-For/-Proto only from these proxy IPs (comma-separated).
+#TRUSTED_PROXY_IPS=10.201.4.9
+GWEOF
+    fi
+
     # Ensure .env is readable by service user
     chown "${RUN_USER}" "$ENV_FILE" 2>/dev/null || true
 

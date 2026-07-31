@@ -1,0 +1,65 @@
+# Caddyfile for the 3·2·1→Theater public gateway (VPS: cyclorama).
+# Install to /etc/caddy/Caddyfile, then: systemctl reload caddy
+#
+# Caddy obtains and renews the Let's Encrypt certificate automatically —
+# dpc.321.theater must already resolve to this VPS (129.121.114.249) and
+# ports 80+443 must be open before the first start.
+
+dpc.321.theater {
+	encode gzip
+
+	# Browsers that have seen this header will never try plain HTTP again.
+	header Strict-Transport-Security "max-age=31536000"
+
+	# Stay out of search engines, archives, and AI training sets. The header
+	# rides on EVERY response (gate pages and proxied app alike); robots.txt
+	# must be answered here, pre-auth — otherwise crawlers get a 302 to the
+	# gate and treat the site as having no robots policy at all.
+	header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noai, noimageai"
+	handle /robots.txt {
+		header Content-Type "text/plain; charset=utf-8"
+		respond `User-agent: GPTBot
+User-agent: ChatGPT-User
+User-agent: OAI-SearchBot
+User-agent: ClaudeBot
+User-agent: Claude-User
+User-agent: Claude-SearchBot
+User-agent: anthropic-ai
+User-agent: Google-Extended
+User-agent: Applebot-Extended
+User-agent: CCBot
+User-agent: PerplexityBot
+User-agent: Bytespider
+User-agent: meta-externalagent
+User-agent: *
+Disallow: /
+` 200
+	}
+
+	# The gateway's own UI and check endpoint — never proxied to the app.
+	handle /__gate/* {
+		reverse_proxy 127.0.0.1:8100
+	}
+
+	# Paths that must not be reachable from the internet at all:
+	#  - /internal/*      the OTP API (defense in depth on top of its secret)
+	#  - /register        self-registration undermines the "email must already
+	#                     have an account" premise; register on the LAN instead
+	#  - /confirm-email/* only used by the registration flow
+	@blocked path /internal/* /register /confirm-email/*
+	respond @blocked 404
+
+	# Everything else: ask the gateway whether this browser has passed the
+	# email-code check, then proxy to the app over the WireGuard tunnel.
+	handle {
+		forward_auth 127.0.0.1:8100 {
+			uri /__gate/check
+			copy_headers X-Gate-Email
+		}
+		# IMPORTANT: do not override the Host header here. The app's CSRF
+		# protection compares the browser's Origin against the Host it
+		# receives; Caddy passes the client Host through by default and
+		# that behavior is load-bearing.
+		reverse_proxy 10.201.2.101:5400
+	}
+}

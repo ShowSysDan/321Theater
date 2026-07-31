@@ -1,0 +1,13 @@
+{% extends "gate_base.html" %}
+{% block content %}
+  <h1>Verify your access</h1>
+  <p class="gate-sub">Enter the email address on your 3·2·1→Theater account
+  and we&rsquo;ll send you a one-time code.</p>
+  {% if error %}<div class="gate-error">{{ error }}</div>{% endif %}
+  <form method="post" action="/__gate/login?next={{ next | urlencode }}" autocomplete="on">
+    <label for="email">Email address</label>
+    <input type="email" id="email" name="email" required autofocus
+           maxlength="254" autocomplete="email" placeholder="you@example.com">
+    <button type="submit">Send code</button>
+  </form>
+{% endblock %}
