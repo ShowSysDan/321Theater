@@ -211,6 +211,11 @@ Enumeration resistance, in one place, because it's easy to regress:
 
 ## 3. Install — internal app server (5 minutes)
 
+> **Which machine:** §3 runs on the **321T server inside the building**
+> (`10.201.2.101`) — the only step that touches it. §4 runs on the **VPS**
+> (cyclorama). Do §3 first: the shared secret is generated here, and the
+> §4 installer stops and asks for it.
+
 ```bash
 # 1. Generate the shared secret (KEEP THIS — the VPS needs the same value)
 python3 -c 'import secrets; print(secrets.token_hex(32))'
