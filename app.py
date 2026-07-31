@@ -703,6 +703,19 @@ def get_db():
     return db_adapter.connect(DATABASE, settings)
 
 
+def _is_stale_pg_fallback(db):
+    """True when this deployment is configured for PostgreSQL but `db` is a
+    silent SQLite fallback (db_adapter.connect does this when PG is
+    unreachable) — meaning any settings/user data read from it is STALE
+    bootstrap data. Every background job or settings-sensitive path must
+    check this and refuse to act; callers log their own context-specific
+    ERROR. A genuine SQLite install (configured == active == 'sqlite')
+    returns False and proceeds normally."""
+    configured = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
+    active = getattr(db, 'db_type', None)
+    return configured == 'postgres' and active != 'postgres'
+
+
 # ─── Cluster Heartbeat (multi-server leader election) ────────────────────────
 #
 # PROTOCOL
@@ -1600,7 +1613,15 @@ def _log_email_error(recipients, subject, error, *,
         return
     err_str  = str(error)[:1000]
     code_str = str(smtp_code or '')[:50]
-    by_str   = (triggered_by or session.get('username') or 'system')[:100]
+    if not triggered_by:
+        # Callers in background threads have no request context — session
+        # access raises RuntimeError there, which would replace the real
+        # SMTP error with "Working outside of request context".
+        try:
+            triggered_by = session.get('username')
+        except RuntimeError:
+            triggered_by = None
+    by_str   = (triggered_by or 'system')[:100]
     subj_str = (subject or '')[:200]
     pdf_str  = (pdf_type or '')[:50]
     try:
@@ -2339,23 +2360,15 @@ def run_scheduled_pdf_emails():
     today = date.today()
     db = get_db()
     try:
-        # This deployment runs on PostgreSQL. If get_db() silently fell back to
-        # the SQLite bootstrap (db_adapter.connect does this when PG is
-        # unreachable), app_settings read here are STALE/empty — e.g.
-        # advance_email_enabled defaults to '0' — so the planner would return []
-        # and we'd "skip" with no error. Detect the fallback by comparing the
-        # CONFIGURED backend against the one we actually got, and refuse to act
-        # on stale config: log loudly and retry next hour. (A genuine SQLite
-        # install — configured == actual == 'sqlite' — proceeds normally.)
-        configured_backend = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
-        active_backend = getattr(db, 'db_type', None)
-        if configured_backend == 'postgres' and active_backend != 'postgres':
+        # On a stale SQLite fallback, app_settings read here are STALE/empty —
+        # e.g. advance_email_enabled defaults to '0' — so the planner would
+        # return [] and we'd "skip" with no error. Refuse to act instead.
+        if _is_stale_pg_fallback(db):
             app.logger.error(
-                'Scheduled PDF email: configured for postgres but active connection '
-                'is %r — PostgreSQL is unreachable so app_settings are STALE. Skipping '
-                'this run (auto-emails will not send until PG is reachable; retrying '
-                'next hour).',
-                active_backend
+                'Scheduled PDF email: configured for postgres but the active '
+                'connection is not — PostgreSQL is unreachable so app_settings '
+                'are STALE. Skipping this run (auto-emails will not send until '
+                'PG is reachable; retrying next hour).'
             )
             return
         plan = _plan_scheduled_emails(db, today)
@@ -2536,17 +2549,11 @@ def run_no_labor_alerts():
     today = date.today()
     db = get_db()
     try:
-        # Same stale-SQLite-fallback guard as run_scheduled_pdf_emails: if PG is
-        # the configured backend but get_db() silently fell back to the SQLite
-        # bootstrap, app_settings are stale and we must NOT act — log and retry
-        # next hour.
-        configured_backend = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
-        active_backend = getattr(db, 'db_type', None)
-        if configured_backend == 'postgres' and active_backend != 'postgres':
+        if _is_stale_pg_fallback(db):
             app.logger.error(
-                'No-labor alert: configured for postgres but active connection is %r — '
-                'app_settings are STALE; skipping this run (retry next hour).',
-                active_backend)
+                'No-labor alert: configured for postgres but the active '
+                'connection is not — app_settings are STALE; skipping this '
+                'run (retry next hour).')
             return
 
         plan = _plan_no_labor_alerts(db, today)
@@ -3452,6 +3459,16 @@ def _can_undo_audit_row(row):
 
 # ─── Auth Routes ──────────────────────────────────────────────────────────────
 
+# Dummy scrypt hash burned on don't-reveal-existence failure paths (unknown
+# username at login, unknown email at the gateway OTP endpoints) so a miss
+# costs the same CPU as a real comparison. Shared so the two sites can't
+# drift if the real hash parameters ever change.
+_DUMMY_PW_HASH = (
+    'scrypt:32768:8:1$dummy$00000000000000000000000000000000'
+    '00000000000000000000000000000000'
+)
+
+
 def _login_route():
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
@@ -3516,10 +3533,7 @@ def _login_route():
         else:
             # Constant-time failure: always hash something to prevent user enumeration
             if not user:
-                check_password_hash(
-                    'scrypt:32768:8:1$dummy$0000000000000000000000000000000000000000000000000000000000000000',
-                    password,
-                )
+                check_password_hash(_DUMMY_PW_HASH, password)
         db.close()
         flash('Invalid username or password.', 'error')
 
@@ -3567,11 +3581,12 @@ _GATEWAY_OTP_RATE_WINDOW_MIN = 15  # rate-limit window
 _GATEWAY_OTP_MAX_PER_EMAIL = 3     # codes per email per window
 _GATEWAY_OTP_MAX_PER_IP = 10       # codes per client IP per window
 
-# Same dummy scrypt hash the login route uses for constant-time failures.
-_GATEWAY_DUMMY_HASH = (
-    'scrypt:32768:8:1$dummy$00000000000000000000000000000000'
-    '00000000000000000000000000000000'
-)
+# Raw socket peers allowed to call the endpoints (parsed once, like
+# _TRUSTED_PROXY_IPS). Empty set = no peer restriction.
+_GATEWAY_PEER_IPS = {
+    _ip.strip() for _ip in os.environ.get('GATEWAY_PEER_IPS', '').split(',')
+    if _ip.strip()
+}
 
 
 def _gateway_auth_ok():
@@ -3586,32 +3601,41 @@ def _gateway_auth_ok():
     supplied = request.headers.get('X-Gateway-Secret', '')
     if not hmac.compare_digest(supplied, secret):
         return False
-    peers = os.environ.get('GATEWAY_PEER_IPS', '').strip()
-    if peers:
+    if _GATEWAY_PEER_IPS:
         # Compare the raw socket peer, not request.remote_addr — with the
         # trusted-proxy middleware active, remote_addr may have been rewritten
         # from X-Forwarded-For, which anyone can forge.
         raw_peer = request.environ.get(
             'werkzeug.proxy_fix.orig_remote_addr', request.remote_addr)
-        allowed = {p.strip() for p in peers.split(',') if p.strip()}
-        if raw_peer not in allowed:
+        if raw_peer not in _GATEWAY_PEER_IPS:
             return False
     return True
 
 
 def _gateway_pg_ok(db):
-    """Refuse to act on a stale SQLite fallback (same guard as the email
-    scheduler): configured-postgres must equal the active backend."""
-    configured = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
-    active = getattr(db, 'db_type', None)
-    if configured == 'postgres' and active != 'postgres':
+    """Refuse to act on a stale SQLite fallback: configured-postgres must
+    equal the active backend (see _is_stale_pg_fallback)."""
+    if _is_stale_pg_fallback(db):
         app.logger.error(
-            'Gateway OTP: configured for postgres but active connection is %r '
-            '— PostgreSQL unreachable, user data would be stale. Failing closed.',
-            active
+            'Gateway OTP: configured for postgres but the active connection '
+            'is not — PostgreSQL unreachable, user data would be stale. '
+            'Failing closed.'
         )
         return False
     return True
+
+
+def _gateway_json_body():
+    """Parsed JSON body as a dict — never raises on junk payloads."""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+def _gw_log(event, client_ip, email=None, extra=''):
+    """One consistent, fail2ban-parseable syslog line per gateway auth event.
+    Emails are logged as truncated hashes, never raw addresses."""
+    part = f' email_key={_gateway_email_key(email)}' if email else ''
+    syslog_logger.info(f'{event} ip={client_ip}{part}{extra}')
 
 
 def _gateway_email_key(email):
@@ -3632,15 +3656,15 @@ def _gateway_send_otp_email(to_addr, code):
         f'nobody can get in without both this code and your password.'
     )
     def _bg():
+        # _send_email writes failures to email_send_errors itself (with the
+        # SMTP code) when given error_context — logging here too would
+        # double-record every failure.
+        ctx = {'pdf_type': 'gateway_otp', 'triggered_by': 'gateway'}
         try:
-            ok, msg = _send_email(subject=subject, recipients=[to_addr],
-                                  body_text=body)
-            if not ok:
-                _log_email_error(to_addr, subject, msg,
-                                 pdf_type='gateway_otp', triggered_by='gateway')
+            _send_email(subject=subject, recipients=[to_addr],
+                        body_text=body, error_context=ctx)
         except Exception as e:
-            _log_email_error(to_addr, subject, e,
-                             pdf_type='gateway_otp', triggered_by='gateway')
+            _log_email_error(to_addr, subject, e, **ctx)
     threading.Thread(target=_bg, daemon=True).start()
 
 
@@ -3648,7 +3672,7 @@ def _gateway_send_otp_email(to_addr, code):
 def gateway_otp_request():
     if not _gateway_auth_ok():
         abort(404)
-    data = request.get_json(silent=True) or {}
+    data = _gateway_json_body()
     email = (data.get('email') or '').strip().lower()
     client_ip = (data.get('client_ip') or '')[:64]
     generic = {'status': 'ok'}
@@ -3662,53 +3686,51 @@ def gateway_otp_request():
         # Housekeeping — codes are 10-minute ephemera, nothing needs a day.
         db.execute('DELETE FROM gateway_otp_codes WHERE created_at < ?',
                    (now - timedelta(days=1),))
-        # Rate limits enforced here in the DB (shared across all workers),
-        # counting rows created in the window regardless of hit/miss so the
-        # throttle itself can't be used to probe which emails exist.
-        window = now - timedelta(minutes=_GATEWAY_OTP_RATE_WINDOW_MIN)
-        n = db.execute(
-            'SELECT COUNT(*) AS n FROM gateway_otp_codes '
-            'WHERE email = ? AND created_at > ?', (email, window)
-        ).fetchone()['n']
-        if n >= _GATEWAY_OTP_MAX_PER_EMAIL:
-            db.commit()
-            syslog_logger.info(
-                f'GATEWAY_OTP_THROTTLED ip={client_ip} '
-                f'email_key={_gateway_email_key(email)}')
-            return jsonify(generic)
-        if client_ip:
-            n = db.execute(
-                'SELECT COUNT(*) AS n FROM gateway_otp_codes '
-                'WHERE client_ip = ? AND created_at > ?', (client_ip, window)
-            ).fetchone()['n']
-            if n >= _GATEWAY_OTP_MAX_PER_IP:
-                db.commit()
-                syslog_logger.info(f'GATEWAY_OTP_THROTTLED ip={client_ip}')
-                return jsonify(generic)
         user = db.execute(
             "SELECT id FROM users WHERE lower(email) = ? AND email != '' "
             'AND COALESCE(is_locked, 0) = 0 LIMIT 1', (email,)
         ).fetchone()
         if user:
             code = f'{secrets.randbelow(10**6):06d}'
-            db.execute(
-                'UPDATE gateway_otp_codes SET used = 1 '
-                'WHERE email = ? AND used = 0', (email,))
-            db.execute(
+            code_hash = generate_password_hash(code)
+            # Rate limits (3/email, 10/IP per window) enforced atomically in
+            # the INSERT itself — a separate count-then-insert would let
+            # concurrent requests across the 4 worker processes all pass the
+            # count and flood the mailbox. The guarded insert also runs
+            # AFTER the hash, so a throttled hit costs the same CPU as a
+            # miss and the throttle can't be used as a timing oracle.
+            window = now - timedelta(minutes=_GATEWAY_OTP_RATE_WINDOW_MIN)
+            cur = db.execute(
                 'INSERT INTO gateway_otp_codes '
                 '(email, code_hash, client_ip, expires_at, created_at) '
-                'VALUES (?, ?, ?, ?, ?)',
-                (email, generate_password_hash(code), client_ip,
-                 now + timedelta(minutes=_GATEWAY_OTP_TTL_MIN), now))
-            db.commit()
-            _gateway_send_otp_email(email, code)
+                'SELECT ?, ?, ?, ?, ? '
+                'WHERE (SELECT COUNT(*) FROM gateway_otp_codes '
+                '       WHERE email = ? AND created_at > ?) < ? '
+                "AND (? = '' OR (SELECT COUNT(*) FROM gateway_otp_codes "
+                '     WHERE client_ip = ? AND created_at > ?) < ?)',
+                (email, code_hash, client_ip,
+                 now + timedelta(minutes=_GATEWAY_OTP_TTL_MIN), now,
+                 email, window, _GATEWAY_OTP_MAX_PER_EMAIL,
+                 client_ip, client_ip, window, _GATEWAY_OTP_MAX_PER_IP))
+            if getattr(cur, 'rowcount', 0) == 1:
+                # Invalidate older outstanding codes only once the new one
+                # is actually issued — a throttled request must never burn
+                # the live code someone is about to type.
+                db.execute(
+                    'UPDATE gateway_otp_codes SET used = 1 '
+                    'WHERE email = ? AND used = 0 AND created_at < ?',
+                    (email, now))
+                db.commit()
+                _gateway_send_otp_email(email, code)
+                _gw_log('GATEWAY_OTP_REQUEST', client_ip, email)
+            else:
+                db.commit()
+                _gw_log('GATEWAY_OTP_THROTTLED', client_ip, email)
         else:
             db.commit()
             # Equalize timing with the hit path's hash generation.
             generate_password_hash('000000')
-        syslog_logger.info(
-            f'GATEWAY_OTP_REQUEST ip={client_ip} '
-            f'email_key={_gateway_email_key(email)}')
+            _gw_log('GATEWAY_OTP_REQUEST', client_ip, email)
         return jsonify(generic)
     finally:
         db.close()
@@ -3718,7 +3740,7 @@ def gateway_otp_request():
 def gateway_otp_verify():
     if not _gateway_auth_ok():
         abort(404)
-    data = request.get_json(silent=True) or {}
+    data = _gateway_json_body()
     email = (data.get('email') or '').strip().lower()
     code = (data.get('code') or '').strip()
     client_ip = (data.get('client_ip') or '')[:64]
@@ -3735,10 +3757,8 @@ def gateway_otp_verify():
             'ORDER BY id DESC LIMIT 1', (email, now)
         ).fetchone()
         if not row:
-            check_password_hash(_GATEWAY_DUMMY_HASH, code)
-            syslog_logger.info(
-                f'GATEWAY_OTP_FAIL ip={client_ip} '
-                f'email_key={_gateway_email_key(email)}')
+            check_password_hash(_DUMMY_PW_HASH, code)
+            _gw_log('GATEWAY_OTP_FAIL', client_ip, email)
             return jsonify({'valid': False})
         # Consume an attempt BEFORE comparing so parallel guesses across
         # workers can never exceed the cap; rowcount 0 means the code is
@@ -3749,21 +3769,20 @@ def gateway_otp_verify():
             (row['id'], _GATEWAY_OTP_MAX_ATTEMPTS))
         db.commit()
         if getattr(cur, 'rowcount', 0) != 1:
-            syslog_logger.info(
-                f'GATEWAY_OTP_FAIL ip={client_ip} '
-                f'email_key={_gateway_email_key(email)} reason=burned')
+            _gw_log('GATEWAY_OTP_FAIL', client_ip, email, ' reason=burned')
             return jsonify({'valid': False})
         if check_password_hash(row['code_hash'], code):
-            db.execute('UPDATE gateway_otp_codes SET used = 1 WHERE id = ?',
-                       (row['id'],))
+            # Redemption is guarded too: two racing verifies of the same
+            # correct code both pass the hash check, but only the one that
+            # flips used 0→1 gets a session ("works once" means once).
+            cur = db.execute(
+                'UPDATE gateway_otp_codes SET used = 1 '
+                'WHERE id = ? AND used = 0', (row['id'],))
             db.commit()
-            syslog_logger.info(
-                f'GATEWAY_OTP_OK ip={client_ip} '
-                f'email_key={_gateway_email_key(email)}')
-            return jsonify({'valid': True})
-        syslog_logger.info(
-            f'GATEWAY_OTP_FAIL ip={client_ip} '
-            f'email_key={_gateway_email_key(email)}')
+            if getattr(cur, 'rowcount', 0) == 1:
+                _gw_log('GATEWAY_OTP_OK', client_ip, email)
+                return jsonify({'valid': True})
+        _gw_log('GATEWAY_OTP_FAIL', client_ip, email)
         return jsonify({'valid': False})
     finally:
         db.close()

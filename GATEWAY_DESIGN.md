@@ -112,7 +112,7 @@ Routes (all under `/__gate/` — no collision with app paths):
 - `GET/POST /__gate/login` — email form; POST normalizes email, calls `/internal/gateway/otp/request`, sets a 10-min signed "pending" cookie `{email}`, redirects to `/__gate/code`. Always shows *"If that email has an account, a code has been sent."* `next` param validated (must start with `/`, not `//` — mirrors `app.py:3452`).
 - `GET/POST /__gate/code` — code form (email from pending cookie, never in URL/logs); POST calls `/internal/gateway/otp/verify`; success ⇒ mint gate cookie via `itsdangerous.URLSafeTimedSerializer` — `Secure; HttpOnly; SameSite=Lax; Max-Age=43200`, `__Host-` prefixed — redirect to `next`. Failure ⇒ generic "invalid or expired".
 - `GET /__gate/check` — the `forward_auth` target: valid cookie (`loads(..., max_age=12h)`) ⇒ 200 + `X-Gate-Email` header (informational only, never trusted for auth); invalid ⇒ 302 to `/__gate/login?next=<X-Forwarded-Uri>`, or **401 for AJAX** (`X-Requested-With`/JSON Accept) so in-app fetches fail cleanly.
-- `GET /__gate/signout` — clears gate cookie; page links to the app's `/logout` too (the two sessions expire independently).
+- `GET /__gate/signout` — clears the gate cookies; the page explains that the app's own session expires separately (the two are independent, both ~12 h).
 
 Stateless on the VPS (no DB, no session store). Abuse controls: cheap in-process per-IP token bucket on the two POSTs (single worker ⇒ in-memory is fine), fail2ban-friendly `GATE_OTP_FAIL ip=<ip>` journald lines, real limits enforced in PG (§1a).
 

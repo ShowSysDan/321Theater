@@ -20,9 +20,10 @@ import sys
 import threading
 import time
 
+from urllib.parse import quote
+
 import requests
-from flask import (Flask, abort, make_response, redirect, render_template,
-                   request)
+from flask import (Flask, make_response, redirect, render_template, request)
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 # ── Configuration (environment only — no config files, no secrets on disk) ───
@@ -69,10 +70,13 @@ def _client_ip():
 
 def _safe_next(raw):
     """Only same-site relative paths — mirrors the main app's open-redirect
-    guard. Anything odd (or a path back into the gate itself) collapses to /."""
+    guard, including its backslash check: browsers treat '\\' as '/' when
+    parsing URLs, so '/\\evil.com' would otherwise slip past the '//' test
+    and redirect off-site. Anything odd (or a path back into the gate
+    itself) collapses to /."""
     if not raw or not raw.startswith('/') or raw.startswith('//'):
         return '/'
-    if raw.startswith('/__gate'):
+    if '\\' in raw or raw.startswith('/__gate'):
         return '/'
     return raw
 
@@ -107,7 +111,12 @@ def _set_cookie(resp, name, value, max_age):
 
 
 def _clear_cookie(resp, name):
-    resp.delete_cookie(name, path='/')
+    # The deletion Set-Cookie must itself satisfy the __Host- prefix rules
+    # (Secure, Path=/, no Domain) — browsers silently DROP a __Host- cookie
+    # write that lacks Secure, which would make sign-out a no-op while
+    # still showing the "signed out" page.
+    resp.delete_cookie(name, path='/', secure=True, httponly=True,
+                       samesite='Lax')
 
 
 def _wants_json():
@@ -218,7 +227,10 @@ def gate_check():
             data = _session_signer.loads(raw, max_age=SESSION_HOURS * 3600)
             resp = make_response('', 200)
             # Informational only — the app must never treat this as auth.
-            resp.headers['X-Gate-Email'] = data.get('e', '')
+            # ASCII-sanitized: a non-latin-1 header value would raise while
+            # building the response and turn a valid check into a 500.
+            resp.headers['X-Gate-Email'] = (
+                data.get('e', '').encode('ascii', 'ignore').decode('ascii'))
             return resp
         except (BadSignature, SignatureExpired):
             pass
@@ -226,7 +238,11 @@ def gate_check():
         return ('', 401)
     original_uri = request.headers.get('X-Forwarded-Uri', '/')
     resp = make_response('', 302)
-    resp.headers['Location'] = '/__gate/login?next=' + _safe_next(original_uri)
+    # quote() the next value or a deep link with its own query string
+    # (/shows/5?tab=labor&day=2) gets split at the first '&' when the login
+    # page parses it, silently dropping parameters after auth.
+    resp.headers['Location'] = (
+        '/__gate/login?next=' + quote(_safe_next(original_uri), safe='/'))
     return resp
 
 
