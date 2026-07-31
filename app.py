@@ -1604,7 +1604,13 @@ def _run_once_per_host(tag, fn):
     The other workers on the same host skip. Cross-host is unaffected (each
     host has its own filesystem), so per-server-redundant jobs still run once
     per server — just not once per worker. The lock name includes a hash of
-    this install's DB path so two installs sharing a host don't collide."""
+    this install's DB path so two installs sharing a host don't collide.
+
+    Best-effort: prevents CONCURRENT runs (the RAM-pressure goal — all 4
+    workers dumping at once), not strictly one run per hour, since worker
+    timers can drift enough that a later tick reacquires the freed lock. If
+    /tmp were ever an NFS mount shared across hosts, flock would serialize
+    across hosts and defeat per-server redundancy — keep it a local tmpdir."""
     _key = hashlib.md5(DATABASE.encode('utf-8')).hexdigest()[:8]
     lock_path = os.path.join(tempfile.gettempdir(), f'321theater_{tag}_{_key}.lock')
     f = open(lock_path, 'w')
@@ -3163,6 +3169,11 @@ def run_field_change_alerts():
     if not am_i_leader():
         return
     db = get_db()
+    if _is_stale_pg_fallback(db):
+        # Side-effecting job on a stale SQLite fallback would read empty
+        # bootstrap state; refuse to act, like the other scheduled jobs.
+        db.close()
+        return
     try:
         # Pick up pending rows where the latest edit is older than the quiet
         # window. SQLite stores timestamps as text — use the canonical helper
@@ -18480,42 +18491,42 @@ def show_asset_invoice(show_id):
     if not can_access_show(session['user_id'], show_id):
         abort(403)
     db = get_db()
-    show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
-    if not show:
-        db.close()
-        abort(404)
-
-    assets_list, ext_list, assets_subtotal, external_subtotal = \
-        _fetch_show_assets_and_externals(db, show_id)
-    performance_company = _show_performance_company(db, show_id)
-    grand_total = assets_subtotal + external_subtotal
-
-    html_str = render_template(
-        'pdf/asset_invoice_pdf.html',
-        show=dict(show),
-        assets=assets_list,
-        external_rentals=ext_list,
-        assets_subtotal=assets_subtotal,
-        external_subtotal=external_subtotal,
-        grand_total=grand_total,
-        performance_company=performance_company,
-        layout=pdf_layouts.PdfLayout('asset_invoice', get_app_setting),
-        generated_date=date.today().isoformat(),
-    )
-
     try:
-        from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
-    except Exception as e:
-        app.logger.error(f'WeasyPrint invoice error: {e}')
-        db.close()
-        return f'PDF generation failed: {e}', 500
+        show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
+        if not show:
+            abort(404)
 
-    # Append any uploaded external rental PDFs
-    er_pdfs = _fetch_external_rental_pdfs(db, show_id)
-    if er_pdfs:
-        pdf_bytes = _merge_pdfs(pdf_bytes, er_pdfs)
-    db.close()
+        assets_list, ext_list, assets_subtotal, external_subtotal = \
+            _fetch_show_assets_and_externals(db, show_id)
+        performance_company = _show_performance_company(db, show_id)
+        grand_total = assets_subtotal + external_subtotal
+
+        html_str = render_template(
+            'pdf/asset_invoice_pdf.html',
+            show=dict(show),
+            assets=assets_list,
+            external_rentals=ext_list,
+            assets_subtotal=assets_subtotal,
+            external_subtotal=external_subtotal,
+            grand_total=grand_total,
+            performance_company=performance_company,
+            layout=pdf_layouts.PdfLayout('asset_invoice', get_app_setting),
+            generated_date=date.today().isoformat(),
+        )
+
+        try:
+            from weasyprint import HTML as WP_HTML
+            pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+        except Exception as e:
+            app.logger.error(f'WeasyPrint invoice error: {e}')
+            return f'PDF generation failed: {e}', 500
+
+        # Append any uploaded external rental PDFs
+        er_pdfs = _fetch_external_rental_pdfs(db, show_id)
+        if er_pdfs:
+            pdf_bytes = _merge_pdfs(pdf_bytes, er_pdfs)
+    finally:
+        db.close()
 
     safe_name = secure_filename(show['name'] or f'show_{show_id}')
     resp = make_response(pdf_bytes)
@@ -19175,10 +19186,12 @@ def _register_route():
                         # Notify admins of new pending registration
                         try:
                             _adb = get_db()
-                            _admins = _adb.execute(
-                                "SELECT email FROM users WHERE role='admin' AND email != '' AND email IS NOT NULL"
-                            ).fetchall()
-                            _adb.close()
+                            try:
+                                _admins = _adb.execute(
+                                    "SELECT email FROM users WHERE role='admin' AND email != '' AND email IS NOT NULL"
+                                ).fetchall()
+                            finally:
+                                _adb.close()
                             _settings_url = url_for('settings', _external=True) + '#registrations'
                             for _adm in _admins:
                                 _send_simple_email_async(
