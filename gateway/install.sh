@@ -11,11 +11,23 @@
 # never overwrites an existing gateway.env or an existing Caddyfile that
 # already serves the site.
 #
-# Usage:  sudo bash install.sh        (run from this gateway/ directory —
-#                                      e.g. the sparse checkout in
-#                                      /opt/321gateway-src/gateway)
+# Usage:  sudo bash install.sh                 (run from this gateway/ dir —
+#                                               e.g. the sparse checkout in
+#                                               /opt/321gateway-src/gateway)
+#         sudo bash install.sh --rewrite-caddy (also regenerate the Caddyfile
+#                                               from GATE_APP_INTERNAL_URLS —
+#                                               use after changing the server
+#                                               list in gateway.env)
 
 set -euo pipefail
+
+REWRITE_CADDY=0
+for arg in "$@"; do
+    case "$arg" in
+        --rewrite-caddy) REWRITE_CADDY=1 ;;
+        *) echo "Unknown option: $arg" >&2; exit 1 ;;
+    esac
+done
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="/opt/321gateway"
@@ -89,7 +101,10 @@ else
 GATE_SECRET_KEY=${GATE_SECRET_KEY}
 # MUST equal GATEWAY_SHARED_SECRET in the app server's .env — fill this in:
 GATE_SHARED_SECRET=
-GATE_APP_INTERNAL_URL=http://10.201.2.101:5400
+# Every 321T server, comma-separated, preference order. The gateway and the
+# generated Caddyfile both follow whichever server holds the primary role.
+# After changing this list: sudo bash install.sh --rewrite-caddy
+GATE_APP_INTERNAL_URLS=http://10.201.2.101:5400
 GATE_SESSION_HOURS=12
 GATE_COOKIE_NAME=__Host-321gate
 EOF
@@ -125,15 +140,48 @@ fi
 
 # ── Caddy ─────────────────────────────────────────────────────────────────────
 step "Caddy..."
-if [ -f "${CADDYFILE}" ] && grep -q "${SITE}" "${CADDYFILE}"; then
+# The upstream server list is read from gateway.env — the single source of
+# truth for every 321T installation. Multiple servers get a health-checked
+# block that follows the app's own primary election.
+UPSTREAM_URLS=$(grep -E '^GATE_APP_INTERNAL_URLS=' "${ENV_FILE}" | tail -1 | cut -d= -f2- || true)
+if [ -z "${UPSTREAM_URLS}" ]; then
+    UPSTREAM_URLS=$(grep -E '^GATE_APP_INTERNAL_URL=' "${ENV_FILE}" | tail -1 | cut -d= -f2- || true)
+fi
+[ -n "${UPSTREAM_URLS}" ] || UPSTREAM_URLS="http://10.201.2.101:5400"
+
+if [ -f "${CADDYFILE}" ] && grep -q "${SITE}" "${CADDYFILE}" && [ "${REWRITE_CADDY}" -eq 0 ]; then
     info "Caddyfile already serves ${SITE} — leaving it untouched."
+    info "(To regenerate from GATE_APP_INTERNAL_URLS: install.sh --rewrite-caddy)"
 else
     if [ -f "${CADDYFILE}" ]; then
         cp "${CADDYFILE}" "${CADDYFILE}.bak.$(date +%Y%m%d%H%M%S)"
         warn "Existing Caddyfile backed up alongside it."
     fi
-    cp "${SRC_DIR}/Caddyfile.example" "${CADDYFILE}"
-    info "Installed Caddyfile for ${SITE}."
+    python3 - "${SRC_DIR}/Caddyfile.example" "${CADDYFILE}" "${UPSTREAM_URLS}" << 'PYEOF'
+import sys
+src, dst, raw = sys.argv[1], sys.argv[2], sys.argv[3]
+ups = []
+for u in raw.split(','):
+    u = u.strip()
+    if not u:
+        continue
+    u = u.removeprefix('http://').removeprefix('https://').split('/')[0]
+    ups.append(u)
+marker = '\t\treverse_proxy 10.201.2.101:5400\n'
+text = open(src).read()
+assert marker in text, 'upstream marker line missing from Caddyfile.example'
+if len(ups) > 1:
+    block = ('\t\treverse_proxy ' + ' '.join(ups) + ' {\n'
+             '\t\t\tlb_policy first\n'
+             '\t\t\thealth_uri /internal/cluster/primary\n'
+             '\t\t\thealth_interval 10s\n'
+             '\t\t}\n')
+else:
+    block = '\t\treverse_proxy ' + ups[0] + '\n'
+open(dst, 'w').write(text.replace(marker, block))
+print(f'    upstreams: {" ".join(ups)}')
+PYEOF
+    info "Installed Caddyfile for ${SITE} (upstreams from gateway.env)."
 fi
 if caddy validate --config "${CADDYFILE}" >/dev/null 2>&1; then
     systemctl enable caddy >/dev/null 2>&1 || true

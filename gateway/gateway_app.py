@@ -38,8 +38,18 @@ if not GATE_SECRET_KEY or not GATE_SHARED_SECRET:
     )
     sys.exit(1)
 
-APP_INTERNAL_URL = os.environ.get(
-    'GATE_APP_INTERNAL_URL', 'http://10.201.2.101:5400').rstrip('/')
+# One or more 321T servers, in preference order. GATE_APP_INTERNAL_URLS
+# (comma-separated) lists every installation for primary/secondary
+# redundancy; the single-URL GATE_APP_INTERNAL_URL is honored when the
+# list isn't set. With multiple servers the gateway polls each one's
+# /internal/cluster/primary probe and sends OTP traffic to whichever
+# currently holds the primary role (the app's own leader election).
+_urls_env = (os.environ.get('GATE_APP_INTERNAL_URLS', '')
+             or os.environ.get('GATE_APP_INTERNAL_URL',
+                               'http://10.201.2.101:5400'))
+APP_INTERNAL_URLS = [u.strip().rstrip('/') for u in _urls_env.split(',')
+                     if u.strip()]
+UPSTREAM_CACHE_SECONDS = 10   # how long a primary answer is trusted
 SESSION_HOURS = int(os.environ.get('GATE_SESSION_HOURS', '12'))
 COOKIE_NAME = os.environ.get('GATE_COOKIE_NAME', '__Host-321gate')
 PENDING_COOKIE_NAME = COOKIE_NAME + '-pending'
@@ -81,21 +91,72 @@ def _safe_next(raw):
     return raw
 
 
-def _call_internal(path, payload):
-    """POST to the main app over the tunnel. Returns the parsed JSON dict or
-    None on any failure — callers stay generic toward the visitor either way."""
+# ── Upstream selection (primary/secondary redundancy) ────────────────────────
+
+_upstream_lock = threading.Lock()
+_upstream_cache = {'url': None, 'at': 0.0}
+
+
+def _probe_primary(url):
+    """True if this server currently claims the primary role."""
     try:
-        r = requests.post(
-            APP_INTERNAL_URL + path,
-            json=payload,
-            headers={'X-Gateway-Secret': GATE_SHARED_SECRET},
-            timeout=INTERNAL_TIMEOUT,
-        )
-        if r.status_code == 200:
-            return r.json()
-        log.error('internal API %s returned HTTP %s', path, r.status_code)
-    except Exception as e:
-        log.error('internal API %s unreachable: %s', path, e)
+        r = requests.get(url + '/internal/cluster/primary', timeout=3)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _pick_upstream():
+    """The server OTP traffic should go to right now.
+
+    Single-server config: always that server, no polling. Multiple servers:
+    the first one whose primary probe answers 200, cached briefly so the
+    probe cost isn't paid on every form submit. If nobody claims primary
+    (e.g. older app version without the probe, or mid-failover), fall back
+    to list order so a functioning server still gets a chance."""
+    if len(APP_INTERNAL_URLS) == 1:
+        return APP_INTERNAL_URLS[0]
+    now = time.time()
+    with _upstream_lock:
+        if _upstream_cache['url'] and now - _upstream_cache['at'] < UPSTREAM_CACHE_SECONDS:
+            return _upstream_cache['url']
+    for url in APP_INTERNAL_URLS:
+        if _probe_primary(url):
+            with _upstream_lock:
+                _upstream_cache.update(url=url, at=now)
+            log.info('GATE_UPSTREAM primary=%s', url)
+            return url
+    log.warning('GATE_UPSTREAM no server claims primary — using list order')
+    return APP_INTERNAL_URLS[0]
+
+
+def _call_internal(path, payload):
+    """POST to the current primary 321T server over the tunnel. Returns the
+    parsed JSON dict or None on any failure — callers stay generic toward
+    the visitor either way. If the chosen server errors, each remaining
+    server is tried once in order (covers the just-failed-over window)."""
+    tried = []
+    candidates = [_pick_upstream()] + [u for u in APP_INTERNAL_URLS]
+    for url in candidates:
+        if url in tried:
+            continue
+        tried.append(url)
+        try:
+            r = requests.post(
+                url + path,
+                json=payload,
+                headers={'X-Gateway-Secret': GATE_SHARED_SECRET},
+                timeout=INTERNAL_TIMEOUT,
+            )
+            if r.status_code == 200:
+                return r.json()
+            log.error('internal API %s on %s returned HTTP %s',
+                      path, url, r.status_code)
+        except Exception as e:
+            log.error('internal API %s on %s unreachable: %s', path, url, e)
+            with _upstream_lock:
+                if _upstream_cache['url'] == url:
+                    _upstream_cache.update(url=None, at=0.0)
     return None
 
 

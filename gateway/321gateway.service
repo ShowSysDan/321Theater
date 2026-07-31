@@ -13,9 +13,13 @@ User=gateway
 Group=gateway
 WorkingDirectory=/opt/321gateway
 EnvironmentFile=/etc/321gateway/gateway.env
+# One worker (the in-memory rate bucket assumes a single process); 16
+# threads so slow OTP submissions (each holds a thread for up to the 10s
+# tunnel timeout) can never starve the sub-millisecond forward_auth
+# /__gate/check calls that every proxied request depends on.
 ExecStart=/opt/321gateway/venv/bin/gunicorn \
     --workers 1 \
-    --threads 4 \
+    --threads 16 \
     --bind 127.0.0.1:8100 \
     --timeout 30 \
     --access-logfile - \

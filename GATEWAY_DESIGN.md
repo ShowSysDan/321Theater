@@ -166,6 +166,20 @@ Run: main app `:5400` with `GATEWAY_SHARED_SECRET=… TRUSTED_PROXY_IPS=127.0.0.
 - **Edge policy:** `/register`, `/confirm-email/*`, `/internal/*` ⇒ 404 via Caddy but work on LAN; `/public/*` requires the gate cookie via Caddy but stays open on LAN.
 - **Fail-closed:** stop PG ⇒ `/otp/request` returns ok, sends nothing, logs ERROR. Known blast radius: stopped gateway service = public outage (forward_auth runs per request); verify Caddy's error page is sane.
 
+## Multi-instance redundancy (added)
+
+Multiple 321T servers sharing one PostgreSQL are supported end-to-end: each
+server answers `GET /internal/cluster/primary` (200 only while it holds the
+existing cluster-election leader role for its host; 503 when secondary or
+when PG is unreachable; single-instance installs always 200). The gateway
+reads `GATE_APP_INTERNAL_URLS` (comma list — the single source of truth for
+all installations), polls the probe with a 10 s cache for its OTP calls, and
+fails over across the list on error. `install.sh` generates the Caddyfile's
+data-path block from the same env line (`--rewrite-caddy` to regenerate):
+multiple upstreams get `lb_policy first` + `health_uri
+/internal/cluster/primary`, so browsing traffic follows the election
+automatically.
+
 ## Notes / accepted trade-offs
 
 - Gate cookie and app session both last 12 h but on independent clocks — acceptable; sign-out page links both.

@@ -3668,6 +3668,37 @@ def _gateway_send_otp_email(to_addr, code):
     threading.Thread(target=_bg, daemon=True).start()
 
 
+@app.route('/internal/cluster/primary')
+def cluster_primary_probe():
+    """Health probe for multi-instance deployments: 200 when THIS server is
+    the current primary (per the existing cluster leader election), 503
+    otherwise. The VPS gateway and Caddy's upstream health checks poll this
+    to route public traffic to whichever 321T server currently holds the
+    primary role — failover follows the election automatically when the
+    primary dies (its heartbeats go stale and the next-lowest IP wins).
+
+    Single-instance installs (no peers / heartbeat disabled) report primary,
+    so nothing changes for them. Returns only a boolean — no auth needed;
+    the public edge blocks /internal/* outright. Answers 503 on a stale
+    SQLite fallback: a server that can't see PostgreSQL must not volunteer
+    to take public traffic."""
+    db = get_db()
+    try:
+        stale = _is_stale_pg_fallback(db)
+    finally:
+        db.close()
+    if stale:
+        return jsonify({'primary': False, 'reason': 'db-unreachable'}), 503
+    try:
+        primary = bool(get_cluster_status().get('is_self_server_leader'))
+    except Exception as e:
+        app.logger.warning(f'primary probe failed: {e}')
+        return jsonify({'primary': False, 'reason': 'error'}), 503
+    if primary:
+        return jsonify({'primary': True})
+    return jsonify({'primary': False}), 503
+
+
 @app.route('/internal/gateway/otp/request', methods=['POST'])
 def gateway_otp_request():
     if not _gateway_auth_ok():
