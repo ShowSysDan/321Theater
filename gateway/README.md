@@ -183,6 +183,27 @@ curl -s -X POST http://10.201.2.101:5400/internal/gateway/otp/request \
 
 ## 4. Install — VPS (cyclorama)
 
+### The fast path: one script does all of it
+
+After getting the files onto the box (sparse checkout, §4.1):
+
+```bash
+sudo bash /opt/321gateway-src/gateway/install.sh
+```
+
+The script installs the packages, creates the `gateway` user, syncs the app
+to `/opt/321gateway`, builds the venv, writes `/etc/321gateway/gateway.env`
+with a fresh auto-generated `GATE_SECRET_KEY`, installs + enables the
+systemd unit, installs the Caddyfile (backing up any existing one; it never
+touches a Caddyfile that already serves the site), opens http/https in
+firewalld, and sets up the fail2ban jail. It is **idempotent** — re-running
+it is the update procedure — and it never overwrites an existing
+`gateway.env`. The one thing it cannot do for you: paste the
+`GATE_SHARED_SECRET` value from the app server into `gateway.env` (it stops
+and tells you exactly that if it's missing).
+
+### Manual steps (what the script does, for reference)
+
 ```bash
 # ── 0. Basics ────────────────────────────────────────────────────────────────
 apt update && apt install -y caddy python3-venv fail2ban
@@ -247,9 +268,7 @@ Deploy (first time and every update):
 
 ```bash
 cd /opt/321gateway-src && git pull
-rsync -av --exclude venv /opt/321gateway-src/gateway/ /opt/321gateway/
-chown -R gateway:gateway /opt/321gateway
-systemctl restart 321gateway
+sudo bash gateway/install.sh     # idempotent: re-sync, re-pip, restart
 ```
 
 `git pull` in a sparse+blobless clone only downloads blobs for paths in the
