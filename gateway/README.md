@@ -13,6 +13,72 @@ and is dormant until `GATEWAY_SHARED_SECRET` is set in its `.env`.
 
 ---
 
+## 0. Handoff guide — read this if you inherited this system
+
+Written for a successor who is NOT a Linux person. Everything deeper is in
+the sections below, but these ten minutes of reading keep the lights on.
+
+**What this is, in one paragraph.** Staff reach the theater app from home at
+`https://dpc.321.theater`. That address points at a small rented server (a
+"VPS", named **cyclorama**, IP `129.121.114.249`) whose only job is to be
+the front door: it makes visitors prove they own a staff email (one-time
+code) before passing them through a private tunnel to the real app server
+inside the building (`10.201.2.101`). The app itself, and all its data,
+never leave the building.
+
+**The three machines:**
+1. **cyclorama (the VPS)** — rented from a hosting provider (whoever pays
+   that bill has console access if SSH is ever lost). Runs two services:
+   `caddy` (the web server) and `321gateway` (the code-check app).
+2. **The app server** (`10.201.2.101` inside the building) — runs the
+   `321theater` service. Nothing about it changed for this feature except
+   three lines in its `.env` file.
+3. **The WireGuard/tunnel server** — the building side of the private
+   tunnel, with a firewall rule that only lets the VPS reach the app's one
+   port.
+
+**Where the secrets live** (never in git):
+- VPS: `/etc/321gateway/gateway.env` — two random keys.
+- App server: `/opt/321theater/.env` — one of those keys must match
+  (`GATE_SHARED_SECRET` there = `GATEWAY_SHARED_SECRET` here).
+- DNS for `321.theater` — whoever manages the domain registrar account.
+
+**To rebuild the VPS from absolute zero** (new VPS, old one lost):
+1. Get a Debian VPS, point the DNS `A` record for `dpc.321.theater` at its
+   IP, and set up the WireGuard tunnel to the building (copy the config
+   from the old VPS or the tunnel server).
+2. Log in as root and run:
+   ```bash
+   apt install -y git
+   git clone --depth 1 --filter=blob:none --sparse \
+       -b main <this repo's URL> /opt/321gateway-src
+   cd /opt/321gateway-src && git sparse-checkout set gateway
+   bash gateway/install.sh
+   ```
+3. The script will stop and tell you to paste one value: copy
+   `GATEWAY_SHARED_SECRET=...` from the app server's `.env` into
+   `/etc/321gateway/gateway.env` as `GATE_SHARED_SECRET=...`, then run
+   `systemctl restart 321gateway`. Done.
+
+**To update after a code change:** `cd /opt/321gateway-src && git pull &&
+bash gateway/install.sh`
+
+**Emergency OFF switch** (take the site off the internet immediately,
+building access unaffected): `ssh` to cyclorama, `systemctl stop caddy`.
+Turn it back on with `systemctl start caddy`.
+
+**Log everyone out of the public site immediately** (lost/stolen laptop):
+edit `/etc/321gateway/gateway.env`, replace the `GATE_SECRET_KEY` value
+with the output of
+`python3 -c 'import secrets; print(secrets.token_hex(32))'`, then
+`systemctl restart 321gateway`. Every browser has to redo the email code.
+
+**When something's broken,** start with the table in §7 — the two most
+common answers are "the tunnel is down" and "the shared secret doesn't
+match after someone edited an env file."
+
+---
+
 ## 1. Theory of operation
 
 ### 1.1 The moving parts
@@ -183,6 +249,27 @@ curl -s -X POST http://10.201.2.101:5400/internal/gateway/otp/request \
 
 ## 4. Install — VPS (cyclorama)
 
+### The fast path: one script does all of it
+
+After getting the files onto the box (sparse checkout, §4.1):
+
+```bash
+sudo bash /opt/321gateway-src/gateway/install.sh
+```
+
+The script installs the packages, creates the `gateway` user, syncs the app
+to `/opt/321gateway`, builds the venv, writes `/etc/321gateway/gateway.env`
+with a fresh auto-generated `GATE_SECRET_KEY`, installs + enables the
+systemd unit, installs the Caddyfile (backing up any existing one; it never
+touches a Caddyfile that already serves the site), opens http/https in
+firewalld, and sets up the fail2ban jail. It is **idempotent** — re-running
+it is the update procedure — and it never overwrites an existing
+`gateway.env`. The one thing it cannot do for you: paste the
+`GATE_SHARED_SECRET` value from the app server into `gateway.env` (it stops
+and tells you exactly that if it's missing).
+
+### Manual steps (what the script does, for reference)
+
 ```bash
 # ── 0. Basics ────────────────────────────────────────────────────────────────
 apt update && apt install -y caddy python3-venv fail2ban
@@ -209,7 +296,7 @@ chown root:gateway /etc/321gateway/gateway.env
 chmod 640 /etc/321gateway/gateway.env
 
 # ── 3. Service ───────────────────────────────────────────────────────────────
-cp 321gateway.service /etc/systemd/system/
+cp 321gateway.service /etc/systemd/system/       # 1 worker × 16 threads
 systemctl daemon-reload
 systemctl enable --now 321gateway
 curl -s http://127.0.0.1:8100/__gate/healthz     # → {"ok": true}
@@ -247,9 +334,7 @@ Deploy (first time and every update):
 
 ```bash
 cd /opt/321gateway-src && git pull
-rsync -av --exclude venv /opt/321gateway-src/gateway/ /opt/321gateway/
-chown -R gateway:gateway /opt/321gateway
-systemctl restart 321gateway
+sudo bash gateway/install.sh     # idempotent: re-sync, re-pip, restart
 ```
 
 `git pull` in a sparse+blobless clone only downloads blobs for paths in the
@@ -342,3 +427,36 @@ traffic in flight. Keep the target small:
 | Audit logs show 10.201.4.9 for everyone | `TRUSTED_PROXY_IPS` unset/wrong on the app server, or the router NATs (re-run the source-IP check in §3). |
 | `__Host-321gate` cookie rejected by the browser | The site must be reached over HTTPS with no Domain attribute — check you're not testing via plain HTTP or an IP address. |
 | Let's Encrypt issuance fails | DNS not propagated yet, or port 80 blocked. `journalctl -u caddy`. |
+
+## 8. Multiple 321T servers (primary/secondary redundancy)
+
+The app supports running several installations against the same PostgreSQL
+database — its cluster heartbeat elects one server as primary (Settings →
+System shows the LEADER badge). The gateway plugs into that same election
+instead of inventing its own:
+
+- Every 321T server (v2.27.0+) answers `GET /internal/cluster/primary` —
+  HTTP 200 while it holds the primary role, 503 otherwise (including when
+  it can't reach PostgreSQL). Single-server installs always answer 200, so
+  nothing changes for them.
+- **The server list lives in ONE place:** `GATE_APP_INTERNAL_URLS` in
+  `/etc/321gateway/gateway.env` — comma-separated, preference order:
+
+  ```
+  GATE_APP_INTERNAL_URLS=http://10.201.2.101:5400,http://10.201.2.102:5400
+  ```
+
+- After editing the list, run `sudo bash install.sh --rewrite-caddy`. That
+  regenerates the Caddyfile's proxy block with all upstreams,
+  `lb_policy first`, and a 10-second health check against the primary
+  probe — so browsing traffic follows the election and fails over
+  automatically when the primary dies (its heartbeats go stale and the
+  next server wins the election within ~30s).
+- The gateway's own OTP calls do the same thing in-process: poll the
+  probe (cached 10s), send to the primary, retry the others on error.
+
+Also required per added server: it must reach the same PostgreSQL, its
+`.env` needs the same `GATEWAY_SHARED_SECRET` + `TRUSTED_PROXY_IPS`, and
+the WireGuard-server firewall rule must allow the VPS to reach its
+`:5400` too. Cluster heartbeat must stay enabled (it is by default) —
+with it disabled, every server claims primary.

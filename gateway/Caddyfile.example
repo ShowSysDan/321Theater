@@ -60,6 +60,21 @@ Disallow: /
 		# protection compares the browser's Origin against the Host it
 		# receives; Caddy passes the client Host through by default and
 		# that behavior is load-bearing.
+		#
+		# NOTE: install.sh GENERATES this block from GATE_APP_INTERNAL_URLS
+		# in /etc/321gateway/gateway.env — edit the env file and re-run
+		# `install.sh --rewrite-caddy` rather than editing here. With
+		# multiple 321T servers listed, the block becomes:
+		#
+		#   reverse_proxy 10.201.2.101:5400 10.201.2.102:5400 {
+		#       lb_policy first
+		#       health_uri /internal/cluster/primary
+		#       health_interval 10s
+		#   }
+		#
+		# — each server's probe answers 200 only while it holds the primary
+		# role (the app's own leader election), so Caddy follows failover
+		# automatically.
 		reverse_proxy 10.201.2.101:5400
 	}
 }
