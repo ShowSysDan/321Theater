@@ -220,13 +220,14 @@ systemctl reload caddy
 journalctl -u caddy -f    # watch the Let's Encrypt issuance succeed
 
 # ── 5. Firewall (firewalld — already running, managed via Cockpit) ──────────
+# No WireGuard rule needed: this VPS is an outbound-connecting peer, it
+# doesn't listen for WG. Only the web ports are opened.
 firewall-cmd --permanent --add-service=http     # 80  (Let's Encrypt + redirect)
 firewall-cmd --permanent --add-service=https    # 443
-firewall-cmd --permanent --add-port=51820/udp   # or your WireGuard listen port
 # ssh is allowed in the default public zone already; brute-force protection
 # comes from the fail2ban sshd jail rather than a port rule.
 firewall-cmd --reload
-firewall-cmd --list-all                          # confirm: http https ssh + 51820/udp only
+firewall-cmd --list-all                          # confirm: http https ssh only
 ```
 
 ### 4.1 Optional: fail2ban jail for code-guessing
