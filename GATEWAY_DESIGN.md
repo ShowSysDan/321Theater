@@ -145,7 +145,7 @@ No `/public/*` or `/static/*` exemption — everything requires the gate cookie.
 - **DNS:** A record `dpc.321.theater` → `129.121.114.249` (must resolve before Caddy can obtain the certificate).
 - **App-server firewall (currently nothing restricts :5400 — it's reachable from every VLAN):** allow 5400 from the trusted LAN subnet(s) + the verified gateway source IP (assumed `10.201.4.9`) only; default deny inbound on 5400. This can live on the app server (ufw/firewalld) or on the inter-VLAN router ACLs — the router is fine if that's where policy already lives. Note: `app_port` is read from the SQLite bootstrap at startup (`start.sh:12-21`) — changing it in Settings requires updating these rules.
 - **WireGuard (tunnel already exists):** confirm the VPS-side peer's `AllowedIPs` covers `10.201.2.101/32` (or the `10.201.2.0/24` VLAN), and that the internal side has a return route for `10.201.4.9` (inter-VLAN routing already handles this). `PersistentKeepalive = 25` on the internal end if it's behind NAT. Runbook smoke test: `curl http://10.201.2.101:5400/login` from cyclorama, note the source IP in gunicorn's access log — that IP is the value for `TRUSTED_PROXY_IPS`/`GATEWAY_PEER_IPS` and the firewall rule.
-- **VPS (cyclorama):** ufw allow 80/443 + WG's listen port (udp) + rate-limited ssh; fail2ban sshd jail + optional `321gateway` jail on `GATE_OTP_FAIL` (e.g. 10 fails/10 min ⇒ 1 h ban). Consider restricting the WG listen port to known peer IPs if the internal side has a static egress IP.
+- **VPS (cyclorama, firewalld):** allow http + https services and the WG listen port (udp), nothing else; fail2ban sshd jail + optional `321gateway` jail on `GATE_OTP_FAIL` (e.g. 10 fails/10 min ⇒ 1 h ban), with the firewalld banaction glue (`fail2ban-firewalld`). Consider restricting the WG listen port to known peer IPs if the internal side has a static egress IP.
 - Secrets: `python3 -c 'import secrets; print(secrets.token_hex(32))'` for `GATE_SECRET_KEY` and `GATEWAY_SHARED_SECRET` (the latter identical on both hosts).
 
 ## 4. Implementation phases
@@ -153,7 +153,7 @@ No `/public/*` or `/static/*` exemption — everything requires the gate cookie.
 1. **Main-app internal API + schema** — `init_db.py` (table ×3 + `TABLE_ORDER` + `serial_tables`), `app.py` (two endpoints + helpers), `install.sh` stub. Fully testable on LAN with `curl`, no VPS needed.
 2. **Proxy correctness** — `app.py`: trusted-proxy middleware + `save_session` secure-flag tweak. Zero behavior change with env unset.
 3. **Gateway app** — new `gateway/` directory; no existing files touched.
-4. **Infrastructure** — execute the README runbook: WG, ufw both sides, Caddy, fail2ban, DNS, secrets.
+4. **Infrastructure** — execute the README runbook: WG, firewalls both sides (firewalld on the VPS), Caddy, fail2ban, DNS, secrets.
 5. **Integration test + cutover** (below).
 
 ## 5. Verification (all on one dev box — "the tunnel" is localhost)

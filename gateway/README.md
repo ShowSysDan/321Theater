@@ -129,7 +129,9 @@ Enumeration resistance, in one place, because it's easy to regress:
 
 ## 2. Prerequisites
 
-- VPS: cyclorama (`129.121.114.249`), Debian/Ubuntu assumed below.
+- VPS: cyclorama (`129.121.114.249`) — Debian, with **firewalld** as the
+  firewall (managed via Cockpit; all rules below are plain `firewall-cmd`,
+  so they show up in Cockpit's Networking → Firewall page too).
 - WireGuard tunnel up: VPS `wg0` = `10.201.4.9`, and `10.201.2.101:5400`
   reachable from the VPS through it.
 - **Firewall rule on the WireGuard server (internal side): traffic from
@@ -183,7 +185,8 @@ curl -s -X POST http://10.201.2.101:5400/internal/gateway/otp/request \
 
 ```bash
 # ── 0. Basics ────────────────────────────────────────────────────────────────
-apt update && apt install -y caddy python3-venv fail2ban ufw
+apt update && apt install -y caddy python3-venv fail2ban
+# (firewalld is already installed/managed via Cockpit on this box)
 
 # ── 1. Dedicated user + app directory ────────────────────────────────────────
 useradd --system --no-create-home --shell /usr/sbin/nologin gateway
@@ -216,12 +219,14 @@ cp Caddyfile.example /etc/caddy/Caddyfile
 systemctl reload caddy
 journalctl -u caddy -f    # watch the Let's Encrypt issuance succeed
 
-# ── 5. Firewall ──────────────────────────────────────────────────────────────
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw allow 51820/udp       # or whatever port your WireGuard listens on
-ufw limit ssh             # rate-limited SSH
-ufw --force enable
+# ── 5. Firewall (firewalld — already running, managed via Cockpit) ──────────
+firewall-cmd --permanent --add-service=http     # 80  (Let's Encrypt + redirect)
+firewall-cmd --permanent --add-service=https    # 443
+firewall-cmd --permanent --add-port=51820/udp   # or your WireGuard listen port
+# ssh is allowed in the default public zone already; brute-force protection
+# comes from the fail2ban sshd jail rather than a port rule.
+firewall-cmd --reload
+firewall-cmd --list-all                          # confirm: http https ssh + 51820/udp only
 ```
 
 ### 4.1 Optional: fail2ban jail for code-guessing
@@ -245,7 +250,18 @@ findtime = 600
 bantime  = 3600
 ```
 
-`systemctl restart fail2ban`, then `fail2ban-client status 321gateway`.
+Since this box uses firewalld, make fail2ban issue its bans through it
+(instead of raw iptables, which firewalld can clobber on reload) — in
+`/etc/fail2ban/jail.local`:
+
+```ini
+[DEFAULT]
+banaction = firewallcmd-rich-rules
+```
+
+Then `systemctl restart fail2ban` and `fail2ban-client status 321gateway`.
+Active bans appear as rich rules in `firewall-cmd --list-rich-rules` (and in
+Cockpit).
 
 (The app-side attempt cap — 5 guesses per code, 3 codes per email per
 15 min — is the real defense; this jail just cuts the noise.)
@@ -255,7 +271,7 @@ bantime  = 3600
 TLS terminates on this box, so a *fully* compromised VPS could observe
 traffic in flight. Keep the target small:
 
-- `apt install unattended-upgrades` and enable it.
+- Automatic security updates: `apt install unattended-upgrades` and enable it.
 - SSH: keys only (`PasswordAuthentication no`), consider moving off port 22.
 - Nothing else runs on this box. Don't add services to cyclorama.
 - Rotate both gateway secrets if you ever suspect exposure — takes one edit
