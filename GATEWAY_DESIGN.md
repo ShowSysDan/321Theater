@@ -12,20 +12,33 @@
 - **`/register`, `/confirm-email/*`, `/internal/*` blocked from the public side**; `/forgot-password` stays available (it has its own enumeration protection + rate limit).
 - Deliverable this session: **this design/plan only — no code yet.**
 
+## Concrete deployment values
+
+| Item | Value |
+|---|---|
+| Public domain | `dpc.321.theater` (DNS A record → `129.121.114.249`) |
+| VPS | hostname `cyclorama`, public IP `129.121.114.249` |
+| VPS wg0 address | `10.201.4.9` |
+| App server (internal) | `10.201.2.101:5400` (different VLAN than the tunnel — an internal router routes between them; this reachability already works) |
+| Gate cookie name | `__Host-321gate` |
+
+**Source-IP caveat:** with plain inter-VLAN routing (no NAT), the app server sees gateway traffic sourced from `10.201.4.9` — that's the working assumption for `TRUSTED_PROXY_IPS`/`GATEWAY_PEER_IPS` and the firewall rule below. Before setting these, verify: hit `curl http://10.201.2.101:5400/login` from cyclorama and read the source IP from gunicorn's access log on the app server. If the router masquerades, substitute the router's LAN IP everywhere `10.201.4.9` appears in app-server config.
+
 ## Architecture
 
 ```
-Public user ──HTTPS──▶ VPS
+Public user ──HTTPS──▶ dpc.321.theater (cyclorama, 129.121.114.249)
                         ├─ Caddy (TLS via Let's Encrypt, HSTS)
                         │    ├─ /__gate/*  ─────────────▶ gateway Flask app (127.0.0.1:8100)
                         │    ├─ /internal/* /register /confirm-email/* → 404
                         │    └─ everything else:
                         │         forward_auth → gateway GET /__gate/check (cookie valid?)
-                        │           ├─ 200 → reverse_proxy http://10.8.0.2:5400  (over wg0)
+                        │           ├─ 200 → reverse_proxy http://10.201.2.101:5400
                         │           └─ 302 → /__gate/login
-                        └─ wg0 10.8.0.1 ══ WireGuard ══ 10.8.0.2 internal host (gunicorn :5400)
+                        └─ wg0 10.201.4.9 ══ WireGuard ══ internal WG endpoint
+                                                └─ inter-VLAN router ──▶ 10.201.2.101:5400
 
-LAN users ──HTTP──▶ internal host :5400 directly (completely unchanged)
+LAN users ──HTTP──▶ 10.201.2.101:5400 directly (completely unchanged)
 ```
 
 Why Caddy `forward_auth` instead of a Flask streaming proxy: the app serves multi-MB weasyprint PDFs and file uploads/downloads; Caddy handles streaming, hop-by-hop headers, and **verbatim Host passthrough** (required — the app's CSRF check `_origin_matches()` at `app.py:351-366` compares Origin/Referer hostname to `request.host`, so a rewritten Host would 403 every POST). A gateway bug then only breaks login, not all traffic.
@@ -72,7 +85,7 @@ Add in **all three schema copies** (SQLite ~`init_db.py:857`, SQLite second bloc
 
 ### 1c. Proxy correctness
 
-- **Trusted-proxy middleware, env-gated — not bare ProxyFix.** If `TRUSTED_PROXY_IPS` env is set (e.g. `10.8.0.1`), wrap `app.wsgi_app` (~`app.py:111`) in a ~20-line middleware applying `X-Forwarded-For`/`X-Forwarded-Proto` **only when the socket peer is in the list**, stashing the original peer under the ProxyFix environ key. Bare ProxyFix would let LAN clients forge audit IPs (`app.py:3288/3425/3450`) and limiter keys. Unset ⇒ byte-for-byte current behavior. Side benefit: the 15/min login limiter keys on real public IPs instead of one shared tunnel IP.
+- **Trusted-proxy middleware, env-gated — not bare ProxyFix.** If `TRUSTED_PROXY_IPS` env is set (here: `10.201.4.9`, pending the source-IP verification above), wrap `app.wsgi_app` (~`app.py:111`) in a ~20-line middleware applying `X-Forwarded-For`/`X-Forwarded-Proto` **only when the socket peer is in the list**, stashing the original peer under the ProxyFix environ key. Bare ProxyFix would let LAN clients forge audit IPs (`app.py:3288/3425/3450`) and limiter keys. Unset ⇒ byte-for-byte current behavior. Side benefit: the 15/min login limiter keys on real public IPs instead of one shared tunnel IP.
 - **Session cookie Secure flag per-request:** in `_DBSessionInterface.save_session` (~`app.py:250`), set `secure = request.is_secure or app.config['SESSION_COOKIE_SECURE']`. One instance serves HTTPS-public and HTTP-LAN simultaneously; the global env flag would break LAN logins. HSTS at Caddy covers the browser side.
 - **Host passthrough:** no app change — Caddy passes client Host by default; the Caddyfile must not override it (documented in README).
 - `install.sh` (~lines 154-175): append a commented `GATEWAY_SHARED_SECRET=` stub to the `.env` generation.
@@ -85,7 +98,8 @@ gateway/
   templates/gate_email.html, gate_code.html
   static/gate.css
   requirements.txt        # flask, requests, gunicorn
-  gateway.env.example     # GATE_SECRET_KEY, GATE_SHARED_SECRET, GATE_APP_INTERNAL_URL,
+  gateway.env.example     # GATE_SECRET_KEY, GATE_SHARED_SECRET,
+                          # GATE_APP_INTERNAL_URL=http://10.201.2.101:5400,
                           # GATE_SESSION_HOURS=12, GATE_COOKIE_NAME=__Host-321gate
   321gateway.service      # systemd unit (VPS): gunicorn -w1 --threads 4 -b 127.0.0.1:8100,
                           # EnvironmentFile=/etc/321gateway/gateway.env, User=gateway,
@@ -105,7 +119,7 @@ Stateless on the VPS (no DB, no session store). Abuse controls: cheap in-process
 ### Caddyfile (per the user's "gate everything" + "block register" decisions)
 
 ```
-theater.example.com {
+dpc.321.theater {
     encode gzip
     header Strict-Transport-Security "max-age=31536000"
 
@@ -119,7 +133,7 @@ theater.example.com {
             uri /__gate/check
             copy_headers X-Gate-Email
         }
-        reverse_proxy 10.8.0.2:5400   # Host passes through by default — do not override
+        reverse_proxy 10.201.2.101:5400   # over wg0; Host passes through by default — do not override
     }
 }
 ```
@@ -128,9 +142,10 @@ No `/public/*` or `/static/*` exemption — everything requires the gate cookie.
 
 ## 3. Network hardening (runbook content, `gateway/README.md`)
 
-- **Internal host firewall (currently nothing restricts :5400 LAN-wide):** allow 5400 from LAN subnet + `10.8.0.1` only; allow 51820/udp from the VPS IP; default deny. Note: `app_port` is read from the SQLite bootstrap at startup (`start.sh:12-21`) — changing it in Settings requires updating firewall rules.
-- WG: VPS `10.8.0.1/24` ListenPort 51820, peer AllowedIPs `10.8.0.2/32`; internal host `10.8.0.2/24` with `PersistentKeepalive = 25`.
-- VPS: ufw allow 80/443/51820/udp + rate-limited ssh; fail2ban sshd jail + optional `321gateway` jail on `GATE_OTP_FAIL` (e.g. 10 fails/10 min ⇒ 1 h ban).
+- **DNS:** A record `dpc.321.theater` → `129.121.114.249` (must resolve before Caddy can obtain the certificate).
+- **App-server firewall (currently nothing restricts :5400 — it's reachable from every VLAN):** allow 5400 from the trusted LAN subnet(s) + the verified gateway source IP (assumed `10.201.4.9`) only; default deny inbound on 5400. This can live on the app server (ufw/firewalld) or on the inter-VLAN router ACLs — the router is fine if that's where policy already lives. Note: `app_port` is read from the SQLite bootstrap at startup (`start.sh:12-21`) — changing it in Settings requires updating these rules.
+- **WireGuard (tunnel already exists):** confirm the VPS-side peer's `AllowedIPs` covers `10.201.2.101/32` (or the `10.201.2.0/24` VLAN), and that the internal side has a return route for `10.201.4.9` (inter-VLAN routing already handles this). `PersistentKeepalive = 25` on the internal end if it's behind NAT. Runbook smoke test: `curl http://10.201.2.101:5400/login` from cyclorama, note the source IP in gunicorn's access log — that IP is the value for `TRUSTED_PROXY_IPS`/`GATEWAY_PEER_IPS` and the firewall rule.
+- **VPS (cyclorama):** ufw allow 80/443 + WG's listen port (udp) + rate-limited ssh; fail2ban sshd jail + optional `321gateway` jail on `GATE_OTP_FAIL` (e.g. 10 fails/10 min ⇒ 1 h ban). Consider restricting the WG listen port to known peer IPs if the internal side has a static egress IP.
 - Secrets: `python3 -c 'import secrets; print(secrets.token_hex(32))'` for `GATE_SECRET_KEY` and `GATEWAY_SHARED_SECRET` (the latter identical on both hosts).
 
 ## 4. Implementation phases
