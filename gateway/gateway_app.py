@@ -243,3 +243,12 @@ def gate_healthz():
     """Liveness only — deliberately does NOT probe the tunnel, so monitoring
     can tell 'gateway down' apart from 'app unreachable'."""
     return {'ok': True}
+
+
+@app.after_request
+def _no_indexing(resp):
+    """Belt-and-suspenders with the Caddyfile's X-Robots-Tag: nothing this
+    service emits should ever land in a search index or an AI training set."""
+    resp.headers.setdefault(
+        'X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet, noai, noimageai')
+    return resp

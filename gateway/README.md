@@ -329,6 +329,8 @@ traffic in flight. Keep the target small:
 | 10 | From the LAN: `http://10.201.2.101:5400/login` | Normal login, no gate anywhere |
 | 11 | On the app server: audit log for the test login | Shows your real public IP, not 10.201.4.9 |
 | 12 | Browser devtools → app session cookie via the gateway | Has the `Secure` flag |
+| 13 | `curl https://dpc.321.theater/robots.txt` | `Disallow: /` for `*` and the AI crawlers, served without hitting the gate |
+| 14 | `curl -sI https://dpc.321.theater/__gate/login \| grep -i x-robots` | `noindex, nofollow, noarchive, nosnippet, noai, noimageai` |
 
 ## 7. Troubleshooting
 

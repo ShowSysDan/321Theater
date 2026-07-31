@@ -11,6 +11,31 @@ dpc.321.theater {
 	# Browsers that have seen this header will never try plain HTTP again.
 	header Strict-Transport-Security "max-age=31536000"
 
+	# Stay out of search engines, archives, and AI training sets. The header
+	# rides on EVERY response (gate pages and proxied app alike); robots.txt
+	# must be answered here, pre-auth — otherwise crawlers get a 302 to the
+	# gate and treat the site as having no robots policy at all.
+	header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noai, noimageai"
+	handle /robots.txt {
+		header Content-Type "text/plain; charset=utf-8"
+		respond `User-agent: GPTBot
+User-agent: ChatGPT-User
+User-agent: OAI-SearchBot
+User-agent: ClaudeBot
+User-agent: Claude-User
+User-agent: Claude-SearchBot
+User-agent: anthropic-ai
+User-agent: Google-Extended
+User-agent: Applebot-Extended
+User-agent: CCBot
+User-agent: PerplexityBot
+User-agent: Bytespider
+User-agent: meta-externalagent
+User-agent: *
+Disallow: /
+` 200
+	}
+
 	# The gateway's own UI and check endpoint — never proxied to the app.
 	handle /__gate/* {
 		reverse_proxy 127.0.0.1:8100
