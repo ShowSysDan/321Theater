@@ -48,6 +48,8 @@ import socket
 import time
 import uuid
 import hmac
+import fcntl
+import tempfile
 import html as _html_mod
 from datetime import datetime, date, timedelta
 from functools import wraps
@@ -541,7 +543,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.27.0'
+APP_VERSION = '2.28.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -789,6 +791,7 @@ def _is_stale_pg_fallback(db):
 _CLUSTER_INSTANCE_ID = uuid.uuid4().hex
 _CLUSTER_STARTED_AT = datetime.utcnow()
 _cluster_thread = None
+_cluster_atexit_registered = False
 _cluster_stop_event = threading.Event()
 _cluster_lock = threading.RLock()
 _leader_cache = {'at': 0.0, 'is_leader': True, 'leader_id': None, 'leader_ip': None}
@@ -1022,7 +1025,7 @@ def _cluster_cleanup_on_exit():
 
 def start_cluster_heartbeat():
     """Spawn the heartbeat daemon thread. Idempotent."""
-    global _cluster_thread
+    global _cluster_thread, _cluster_atexit_registered
     if _cluster_thread and _cluster_thread.is_alive():
         return _cluster_thread
     _cluster_stop_event.clear()
@@ -1032,13 +1035,27 @@ def start_cluster_heartbeat():
         daemon=True,
     )
     _cluster_thread.start()
-    atexit.register(_cluster_cleanup_on_exit)
+    if not _cluster_atexit_registered:
+        atexit.register(_cluster_cleanup_on_exit)
+        _cluster_atexit_registered = True
     return _cluster_thread
 
 
 def stop_cluster_heartbeat():
-    """Signal the heartbeat thread to stop; best-effort. Used for restarts."""
+    """Signal the heartbeat thread to stop AND wait for it to exit.
+
+    The join matters: without it, an immediate restart (e.g. saving cluster
+    settings does stop-then-start) would call start_cluster_heartbeat() while
+    the old thread is still alive, hit its `is_alive()` guard, return without
+    spawning a replacement — and then the old thread exits on the set event,
+    leaving this worker with NO heartbeat until the next restart (silently
+    dropping out of leader election)."""
+    global _cluster_thread
     _cluster_stop_event.set()
+    t = _cluster_thread
+    if t and t.is_alive():
+        t.join(timeout=5)
+    _cluster_thread = None
 
 
 # ─── Auth Decorators ──────────────────────────────────────────────────────────
@@ -1582,12 +1599,61 @@ def _run_db_backup(kind, ts_fmt, keep):
         os.remove(os.path.join(dest_dir, old))
 
 
+def _run_once_per_host(tag, fn):
+    """Run fn() on only ONE worker of this host, via a non-blocking file lock.
+    The other workers on the same host skip. Cross-host is unaffected (each
+    host has its own filesystem), so per-server-redundant jobs still run once
+    per server — just not once per worker. The lock name includes a hash of
+    this install's DB path so two installs sharing a host don't collide."""
+    _key = hashlib.md5(DATABASE.encode('utf-8')).hexdigest()[:8]
+    lock_path = os.path.join(tempfile.gettempdir(), f'321theater_{tag}_{_key}.lock')
+    f = open(lock_path, 'w')
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return  # another worker on this host already holds it this cycle
+    try:
+        fn()
+    finally:
+        try:
+            fcntl.flock(f, fcntl.LOCK_UN)
+        finally:
+            f.close()
+
+
 def run_hourly_backup():
-    _run_db_backup('hourly', '%Y%m%d_%H%M', keep=24)
+    # Per-worker job (not leader-gated — backups are per-server-redundant by
+    # design) but a host-lock keeps all 4 workers of one host from each
+    # holding a full pg_dump in RAM simultaneously and overwriting one file.
+    _run_once_per_host('backup_hourly',
+                       lambda: _run_db_backup('hourly', '%Y%m%d_%H%M', keep=24))
 
 
 def run_daily_backup():
-    _run_db_backup('daily', '%Y%m%d', keep=30)
+    _run_once_per_host('backup_daily',
+                       lambda: _run_db_backup('daily', '%Y%m%d', keep=30))
+
+
+def run_hourly_maintenance():
+    """Leader-gated hourly housekeeping. Currently harvests expired
+    server-side session rows: the login path rotates the session id (leaving
+    the old row behind) and expired rows are only deleted if that exact sid
+    is presented again — which a rotated cookie never is — so without this
+    sweep app_sessions grows forever. Leader-gated so one worker does it."""
+    if not am_i_leader():
+        return
+    db = get_db()
+    try:
+        if _is_stale_pg_fallback(db):
+            return
+        db.execute('DELETE FROM app_sessions WHERE expires_at < ?',
+                   (datetime.utcnow(),))
+        db.commit()
+    except Exception as e:
+        app.logger.warning(f'session harvest failed: {e}')
+    finally:
+        db.close()
 
 
 def _get_smtp_settings():
@@ -1723,6 +1789,7 @@ def _send_email_smtp(subject, recipients, body_text=None, body_html=None,
     msg = _build_mime_message(subject, from_addr, recipients, body_text,
                               body_html, attachments)
 
+    server = None
     try:
         port = int(smtp_cfg.get('smtp_port') or 587)
         use_tls = smtp_cfg.get('smtp_tls', '1') not in ('0', 'false', 'False', '')
@@ -1735,17 +1802,14 @@ def _send_email_smtp(subject, recipients, body_text=None, body_html=None,
             server = smtplib.SMTP_SSL(smtp_cfg['smtp_host'], port, timeout=15)
         if smtp_cfg.get('smtp_user') and smtp_cfg.get('smtp_pass'):
             server.login(smtp_cfg['smtp_user'], smtp_cfg['smtp_pass'])
-        try:
-            # sendmail returns a dict of refused recipients for partial failures
-            refused = server.sendmail(from_addr, recipients, msg.as_string())
-            if refused:
-                # SMTP relay refused some addresses but accepted others
-                for addr, (code, why) in refused.items():
-                    _log_email_error(addr, subject, f'{code} {why!r}',
-                                     smtp_code=str(code), **(error_context or {}))
-        finally:
-            try: server.quit()
-            except Exception: pass
+        # sendmail returns a dict of refused recipients for partial failures
+        refused = server.sendmail(from_addr, recipients, msg.as_string())
+        if refused:
+            # SMTP relay refused some addresses but accepted others
+            for addr, (code, why) in refused.items():
+                _log_email_error(addr, subject, f'{code} {why!r}',
+                                 smtp_code=str(code), **(error_context or {}))
+        return True, f'Sent to {len(recipients)} recipient(s).'
     except smtplib.SMTPRecipientsRefused as e:
         # Every recipient was refused — log each with its specific code
         app.logger.error(f'SMTP all recipients refused: {e.recipients}')
@@ -1763,8 +1827,12 @@ def _send_email_smtp(subject, recipients, body_text=None, body_html=None,
         _log_email_error(recipients, subject, str(e),
                          **(error_context or {}))
         return False, f'SMTP error: {e}'
-
-    return True, f'Sent to {len(recipients)} recipient(s).'
+    finally:
+        # quit() always runs now — an ehlo/starttls/login failure used to
+        # jump to an except with the socket still open, leaking it until GC.
+        if server is not None:
+            try: server.quit()
+            except Exception: pass
 
 
 def _send_email_direct(subject, recipients, body_text=None, body_html=None,
@@ -1821,6 +1889,7 @@ def _send_email_direct(subject, recipients, body_text=None, body_html=None,
         last_error = None
         for mx in mx_hosts:
             mx_host = str(mx.exchange).rstrip('.')
+            server = None
             try:
                 server = smtplib.SMTP(mx_host, 25, timeout=15,
                                       local_hostname=ehlo_hostname)
@@ -1831,8 +1900,6 @@ def _send_email_direct(subject, recipients, body_text=None, body_html=None,
                 except smtplib.SMTPNotSupportedError:
                     pass  # Server doesn't support STARTTLS, continue unencrypted
                 refused = server.sendmail(from_addr, addrs, msg_str)
-                try: server.quit()
-                except Exception: pass
                 if refused:
                     for addr, (code, why) in refused.items():
                         _log_email_error(addr, subject, f'{code} {why!r}',
@@ -1844,6 +1911,12 @@ def _send_email_direct(subject, recipients, body_text=None, body_html=None,
                     f'Direct send to MX {mx_host} for {domain} failed: {e}'
                 )
                 continue
+            finally:
+                # Quit every attempt, not just the success path — a failed
+                # ehlo/starttls/sendmail used to `continue` with the socket open.
+                if server is not None:
+                    try: server.quit()
+                    except Exception: pass
 
         # No MX accepted the message
         detail = f' ({last_error})' if last_error else ''
@@ -2085,9 +2158,11 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
             s3_key = f"exports/{show_id}/{pdf_type}/v{pdf_version}.pdf"
             s3_storage.upload_file(s3_key, pdf_bytes, 'application/pdf')
             _db_s3 = get_db()
-            _db_s3.execute('UPDATE export_log SET s3_key=?, pdf_data=NULL WHERE id=?', (s3_key, pdf_log_id))
-            _db_s3.commit()
-            _db_s3.close()
+            try:
+                _db_s3.execute('UPDATE export_log SET s3_key=?, pdf_data=NULL WHERE id=?', (s3_key, pdf_log_id))
+                _db_s3.commit()
+            finally:
+                _db_s3.close()
         except Exception as e:
             app.logger.error(f"S3 push failed for email PDF show={show_id} type={pdf_type}: {e}")
             syslog_logger.error(f"S3_PUSH_FAILED context=email_pdf show_id={show_id} type={pdf_type} error={e}")
@@ -2104,11 +2179,13 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
         # Try pulling from advance_data
         try:
             _db2 = get_db()
-            _row = _db2.execute(
-                "SELECT field_value FROM advance_data WHERE show_id=? AND field_key='production_manager'",
-                (show_id,)
-            ).fetchone()
-            _db2.close()
+            try:
+                _row = _db2.execute(
+                    "SELECT field_value FROM advance_data WHERE show_id=? AND field_key='production_manager'",
+                    (show_id,)
+                ).fetchone()
+            finally:
+                _db2.close()
             pm_name = _row['field_value'] if _row else ''
         except Exception:
             pm_name = ''
@@ -2189,15 +2266,17 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
     # Log the send
     try:
         _db3 = get_db()
-        _db3.execute("""
-            INSERT INTO email_send_log
-              (show_id, pdf_type, trigger_type, days_before, sent_by, recipient_count)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (show_id, pdf_type,
-              'scheduled' if triggered_by == 'system' else 'manual',
-              days_before, triggered_by, len(recipients)))
-        _db3.commit()
-        _db3.close()
+        try:
+            _db3.execute("""
+                INSERT INTO email_send_log
+                  (show_id, pdf_type, trigger_type, days_before, sent_by, recipient_count)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (show_id, pdf_type,
+                  'scheduled' if triggered_by == 'system' else 'manual',
+                  days_before, triggered_by, len(recipients)))
+            _db3.commit()
+        finally:
+            _db3.close()
     except Exception as e:
         app.logger.warning(f'email_send_log write failed: {e}')
 
@@ -2405,13 +2484,16 @@ def run_scheduled_pdf_emails():
             for td in item['also_satisfies']:
                 try:
                     _db = get_db()
-                    _db.execute(
-                        "INSERT INTO email_send_log "
-                        "(show_id, pdf_type, trigger_type, days_before, sent_by, recipient_count) "
-                        "VALUES (?, ?, 'scheduled', ?, 'system', 0)",
-                        (show_id, pdf_type, td)
-                    )
-                    _db.commit(); _db.close()
+                    try:
+                        _db.execute(
+                            "INSERT INTO email_send_log "
+                            "(show_id, pdf_type, trigger_type, days_before, sent_by, recipient_count) "
+                            "VALUES (?, ?, 'scheduled', ?, 'system', 0)",
+                            (show_id, pdf_type, td)
+                        )
+                        _db.commit()
+                    finally:
+                        _db.close()
                 except Exception as e:
                     app.logger.warning(f'superseded trigger log failed: {e}')
 
@@ -2678,6 +2760,7 @@ def start_scheduler():
         # with it. The duplication is intentional.
         scheduler.add_job(run_hourly_backup, 'interval', hours=1, id='hourly_backup')
         scheduler.add_job(run_daily_backup, 'cron', hour=0, minute=0, id='daily_backup')
+        scheduler.add_job(run_hourly_maintenance, 'interval', hours=1, id='hourly_maintenance')
         # PDF emails: leader-gated inside run_scheduled_pdf_emails() so
         # recipients never receive a duplicate when multiple instances run.
         # cron (top of every hour) — not interval — so the run aligns to the
@@ -3108,7 +3191,8 @@ def run_field_change_alerts():
     now = datetime.utcnow()
     base_url = (get_app_setting('public_base_url', '') or '').rstrip('/')
 
-    for r in rows:
+    try:
+      for r in rows:
         # Parse the pending_updated_at timestamp into a datetime so we can
         # compare against the quiet window. Both backends return either a
         # datetime (psycopg) or an ISO string (sqlite3); coerce.
@@ -3203,7 +3287,8 @@ def run_field_change_alerts():
             f"emails={len(emails)} notified_users={len(user_ids)}"
         )
         db.commit()
-    db.close()
+    finally:
+        db.close()
 
 
 # ─── Contact ↔ User Sync ─────────────────────────────────────────────────────
@@ -3501,7 +3586,9 @@ def _login_route():
             # Regenerate session to prevent session fixation. session.clear()
             # empties the dict but does NOT rotate the sid on the DB-backed
             # session, so we explicitly mint a new sid here. The old DB row
-            # (if any) becomes orphaned and is harvested on expiry.
+            # (if any) becomes orphaned; the leader-gated run_hourly_maintenance
+            # job sweeps expired app_sessions rows (this per-sid path only
+            # deletes a row when that same sid is presented again).
             next_url = request.form.get('next') or url_for('dashboard')
             session.clear()
             try:
@@ -4186,7 +4273,7 @@ def save_home_layout_prefs():
 @app.route('/shows/new', methods=['GET', 'POST'])
 @login_required
 def new_show():
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         abort(403)
 
     if request.method == 'POST':
@@ -4242,6 +4329,7 @@ def show_page(show_id):
     db = get_db()
     show = db.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
     if not show:
+        db.close()
         abort(404)
 
     # Last-saved-by info
@@ -4405,7 +4493,7 @@ def show_page(show_id):
 def save_advance(show_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
 
     get_show_or_404(show_id)
@@ -4551,7 +4639,7 @@ def _perf_to_json(row):
 def add_performance(show_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     get_show_or_404(show_id)
     data = request.get_json(force=True) or {}
@@ -4576,7 +4664,7 @@ def add_performance(show_id):
 def update_performance(show_id, perf_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
     perf = db.execute(
@@ -4601,7 +4689,7 @@ def update_performance(show_id, perf_id):
 def delete_performance(show_id, perf_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
     perf = db.execute(
@@ -4622,7 +4710,7 @@ def delete_performance(show_id, perf_id):
 def save_schedule(show_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
 
     get_show_or_404(show_id)
@@ -4667,7 +4755,7 @@ def save_schedule(show_id):
 def save_postnotes(show_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
 
     get_show_or_404(show_id)
@@ -4764,7 +4852,7 @@ def history_snapshot(show_id, hist_id):
 def restore_history(show_id, hist_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
 
     db = get_db()
@@ -4888,7 +4976,7 @@ def get_comments(show_id):
 def post_comment(show_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     data = request.get_json(force=True) or {}
     body = data.get('body', '').strip()
@@ -4960,7 +5048,7 @@ def delete_comment(show_id, cid):
 def edit_comment(show_id, cid):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     data = request.get_json(force=True) or {}
     new_body = data.get('body', '').strip()
@@ -5121,7 +5209,7 @@ def get_attachments(show_id):
 def upload_attachment(show_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     f = request.files.get('file')
     if not f or not f.filename:
@@ -8480,7 +8568,7 @@ def pdf_form_data(show_id, field_key):
 def pdf_form_save(show_id, field_key):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     data = request.get_json(force=True) or {}
     values = data.get('values') or {}
@@ -11510,7 +11598,7 @@ def api_production_managers():
 def add_labor_request(show_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     data = request.get_json(force=True) or {}
     db = get_db()
@@ -11548,7 +11636,7 @@ def add_labor_request(show_id):
 def update_labor_request(show_id, rid):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     data = request.get_json(force=True) or {}
     db = get_db()
@@ -11581,7 +11669,7 @@ def update_labor_request(show_id, rid):
 def delete_labor_request(show_id, rid):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
     db.execute('DELETE FROM labor_requests WHERE id=? AND show_id=?', (rid, show_id))
@@ -11597,7 +11685,7 @@ def delete_labor_request(show_id, rid):
 def reorder_labor_requests(show_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    if session.get('is_restricted'):
+    if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     data = request.get_json(force=True) or {}
     request_ids = data.get('request_ids', [])
@@ -16047,6 +16135,8 @@ def assets_availability_bulk():
     Accessible without login for public dashboards; access control applied
     to the by-show section only when a user is logged in.
     """
+    if not _dashboard_data_access_ok():
+        abort(403)
     date_from = request.args.get('from')
     date_to   = request.args.get('to')
     db = get_db()
@@ -16929,11 +17019,14 @@ def show_asset_toggle_hidden(show_id, sa_id):
 @app.route('/shows/<int:show_id>/external-rentals', methods=['POST'])
 @show_advance_editor_required
 def external_rental_add(show_id):
-    db = get_db()
     description = (request.form.get('description') or '').strip()
-    cost = float(request.form.get('cost') or 0)
     if not description:
         return jsonify({'error': 'Description required'}), 400
+    try:
+        cost = float(request.form.get('cost') or 0)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid cost'}), 400
+    db = get_db()
     pdf_bytes = None
     pdf_filename = ''
     f = request.files.get('pdf')
@@ -18415,6 +18508,7 @@ def show_asset_invoice(show_id):
         pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
     except Exception as e:
         app.logger.error(f'WeasyPrint invoice error: {e}')
+        db.close()
         return f'PDF generation failed: {e}', 500
 
     # Append any uploaded external rental PDFs
@@ -19050,11 +19144,13 @@ def _register_route():
             existing = db.execute('SELECT id FROM users WHERE username=?', (username,)).fetchone()
             if existing:
                 error = 'That username or email is not available.'
+                db.close()
             else:
                 existing_pending = db.execute(
                     'SELECT id FROM user_pending_registration WHERE username=?', (username,)).fetchone()
                 if existing_pending:
                     error = 'That username or email is not available.'
+                    db.close()
                 else:
                     token = secrets.token_urlsafe(32)
                     expires = datetime.utcnow() + timedelta(hours=24)
@@ -19636,9 +19732,33 @@ def _build_shows_calendar_days(db, accessible, date_from, date_to):
     return days
 
 
+def _dashboard_data_access_ok():
+    """Guard for the dashboard/asset widget-data endpoints. These feed both
+    the logged-in dashboards AND the anonymous public dashboard (/d/<slug>),
+    so allow a request when EITHER the caller is signed in OR it carries the
+    ?slug= of a genuinely public dashboard. Without this, anyone who can
+    reach the server could pull crew/asset/show aggregates with no account
+    and no slug."""
+    if session.get('user_id'):
+        return True
+    slug = request.args.get('slug', '')
+    if not slug:
+        return False
+    db = get_db()
+    try:
+        row = db.execute(
+            'SELECT 1 FROM asset_dashboards WHERE public_slug = ? AND is_public = 1',
+            (slug,)).fetchone()
+    finally:
+        db.close()
+    return row is not None
+
+
 @app.route('/api/dashboard/shows-calendar')
 def api_dashboard_shows_calendar():
     """Return shows per day for a date range (for calendar widget). Public-safe."""
+    if not _dashboard_data_access_ok():
+        abort(403)
     date_from = request.args.get('from', '')
     date_to   = request.args.get('to', '')
     db = get_db()
@@ -19651,6 +19771,8 @@ def api_dashboard_shows_calendar():
 @app.route('/api/dashboard/skills-summary')
 def api_dashboard_skills_summary():
     """Return technician skill coverage per position."""
+    if not _dashboard_data_access_ok():
+        abort(403)
     db = get_db()
     total_crew = db.execute('SELECT COUNT(*) FROM crew_members').fetchone()[0]
     cats = db.execute("""
@@ -19703,6 +19825,8 @@ def api_dashboard_skills_summary():
 @app.route('/api/dashboard/asset-calendar')
 def api_dashboard_asset_calendar():
     """Per-day availability for one asset type — used by the asset calendar widget."""
+    if not _dashboard_data_access_ok():
+        abort(403)
     from datetime import date as _date, timedelta
     type_id   = request.args.get('type_id', type=int)
     date_from = request.args.get('from')
@@ -19793,6 +19917,8 @@ def api_dashboard_reservation_timeline():
     CLAUDE.md). Public-safe: mirrors the asset-calendar widget, which already
     surfaces show names per reserved day without a login.
     """
+    if not _dashboard_data_access_ok():
+        abort(403)
     date_from = _as_date(request.args.get('from'))
     date_to   = _as_date(request.args.get('to'))
     if not date_from or not date_to:
