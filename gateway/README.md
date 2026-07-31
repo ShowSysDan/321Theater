@@ -191,9 +191,9 @@ apt update && apt install -y caddy python3-venv fail2ban
 # ── 1. Dedicated user + app directory ────────────────────────────────────────
 useradd --system --no-create-home --shell /usr/sbin/nologin gateway
 mkdir -p /opt/321gateway
-# Copy THIS directory's contents (gateway_app.py, templates/, static/,
-# requirements.txt) to /opt/321gateway, e.g.:
-#   rsync -av gateway/ cyclorama:/opt/321gateway/  (from a checkout)
+# Get THIS directory's contents (gateway_app.py, templates/, static/,
+# requirements.txt) into /opt/321gateway — see §4.1 for the recommended
+# sparse-checkout setup (git pull that fetches ONLY gateway/).
 cd /opt/321gateway
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
@@ -230,7 +230,40 @@ firewall-cmd --reload
 firewall-cmd --list-all                          # confirm: http https ssh only
 ```
 
-### 4.1 Optional: fail2ban jail for code-guessing
+### 4.1 Getting the files there — and updating later (sparse checkout)
+
+You don't need (or want) the whole app source on an internet-facing box.
+A sparse, blobless clone materializes **only** `gateway/` and stays
+pullable:
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse \
+    -b main git@github.com:ShowSysDan/321Theater.git /opt/321gateway-src
+cd /opt/321gateway-src
+git sparse-checkout set gateway     # working tree now contains gateway/ only
+```
+
+Deploy (first time and every update):
+
+```bash
+cd /opt/321gateway-src && git pull
+rsync -av --exclude venv /opt/321gateway-src/gateway/ /opt/321gateway/
+chown -R gateway:gateway /opt/321gateway
+systemctl restart 321gateway
+```
+
+`git pull` in a sparse+blobless clone only downloads blobs for paths in the
+sparse set — a change to `app.py` costs you a few bytes of history metadata,
+not the file. Notes:
+
+- If the repo is private, give the VPS a **read-only deploy key** (GitHub →
+  repo Settings → Deploy keys), never your personal credentials.
+- `/opt/321gateway` (what systemd runs) is deliberately separate from the
+  checkout, so a broken pull can't take the service down until you rsync.
+- The alternative with zero credentials on the VPS: skip git entirely and
+  `rsync gateway/ cyclorama:/opt/321gateway/` from a trusted machine.
+
+### 4.2 Optional: fail2ban jail for code-guessing
 
 Both the gateway and the app log a `GATE_OTP_FAIL ip=<ip>` /
 `GATEWAY_OTP_FAIL` line per failed attempt. On the VPS:
