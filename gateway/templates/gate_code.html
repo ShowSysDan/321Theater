@@ -1,0 +1,15 @@
+{% extends "gate_base.html" %}
+{% block content %}
+  <h1>Check your email</h1>
+  <p class="gate-sub">If <strong>{{ email }}</strong> has an account, a
+  six-digit code is on its way. It expires in 10 minutes.</p>
+  {% if error %}<div class="gate-error">{{ error }}</div>{% endif %}
+  <form method="post" action="/__gate/code" autocomplete="off">
+    <label for="code">One-time code</label>
+    <input type="text" id="code" name="code" required autofocus
+           inputmode="numeric" pattern="[0-9 ]*" maxlength="8"
+           autocomplete="one-time-code" placeholder="123456">
+    <button type="submit">Continue</button>
+  </form>
+  <p class="gate-alt"><a href="/__gate/login">Use a different email or resend the code</a></p>
+{% endblock %}

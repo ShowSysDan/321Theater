@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>3·2·1→THEATER — Access</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='gate.css') }}">
+</head>
+<body>
+  <main class="gate-card">
+    <div class="gate-brand">3·2·1<span class="gate-arrow">→</span>THEATER</div>
+    {% block content %}{% endblock %}
+    <div class="gate-foot">Dr. Phillips Center &middot; authorized users only</div>
+  </main>
+</body>
+</html>

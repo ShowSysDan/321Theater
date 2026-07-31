@@ -863,6 +863,21 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- One-time codes for the public VPS gateway pre-auth. Keyed by email, not
+-- user_id: users.email is not unique, so one email may match several rows.
+CREATE TABLE IF NOT EXISTS gateway_otp_codes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    email      TEXT NOT NULL,
+    code_hash  TEXT NOT NULL,
+    client_ip  TEXT DEFAULT '',
+    expires_at TIMESTAMP NOT NULL,
+    attempts   INTEGER DEFAULT 0,
+    used       INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_gateway_otp_email ON gateway_otp_codes(email);
+
 -- ── Site-Wide Messaging ───────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS site_messages (
@@ -2410,6 +2425,19 @@ def migrate_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS gateway_otp_codes (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            email      TEXT NOT NULL,
+            code_hash  TEXT NOT NULL,
+            client_ip  TEXT DEFAULT '',
+            expires_at TIMESTAMP NOT NULL,
+            attempts   INTEGER DEFAULT 0,
+            used       INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_gateway_otp_email ON gateway_otp_codes(email);
+
         CREATE TABLE IF NOT EXISTS site_messages (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             title           TEXT NOT NULL DEFAULT '',
@@ -3404,6 +3432,21 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- One-time codes for the public VPS gateway pre-auth (keyed by email, no FK
+-- because users.email is not unique and may match several rows)
+CREATE TABLE IF NOT EXISTS gateway_otp_codes (
+    id         SERIAL PRIMARY KEY,
+    email      TEXT NOT NULL,
+    code_hash  TEXT NOT NULL,
+    client_ip  TEXT DEFAULT '',
+    expires_at TIMESTAMP NOT NULL,
+    attempts   INTEGER DEFAULT 0,
+    used       INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_gateway_otp_email ON gateway_otp_codes(email);
+
 -- ── Site-Wide Messaging ───────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS site_messages (
@@ -4092,6 +4135,7 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
         'job_positions', 'asset_types', 'site_message_dismissals',
         'site_message_views',
         'user_pending_registration', 'password_reset_tokens',
+        'gateway_otp_codes',
         'arts_group_contacts',
         # ── Depend on shows / asset_types ─────────────────────────────────────
         'advance_data', 'schedule_meta', 'post_show_notes', 'schedule_rows',
@@ -4255,6 +4299,7 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
         'asset_categories', 'asset_types', 'asset_items', 'asset_maintenance',
         'show_assets', 'show_external_rentals',
         'user_pending_registration', 'password_reset_tokens',
+        'gateway_otp_codes',
         'site_messages', 'site_message_dismissals', 'asset_dashboards',
         'ai_sessions',
         # Added in v2.3.0+

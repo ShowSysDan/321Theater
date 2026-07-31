@@ -47,6 +47,7 @@ import re
 import socket
 import time
 import uuid
+import hmac
 import html as _html_mod
 from datetime import datetime, date, timedelta
 from functools import wraps
@@ -109,6 +110,44 @@ def _sanitize_html(raw):
     return ''.join(s.out)
 
 app = Flask(__name__)
+
+# ── Trusted-proxy support (VPS gateway) ───────────────────────────────────────
+# When TRUSTED_PROXY_IPS is set (comma-separated IPs), requests arriving FROM
+# one of those socket peers get X-Forwarded-For / X-Forwarded-Proto applied:
+# request.remote_addr becomes the real public client (rate limiter, audit
+# logs) and request.is_secure reflects the HTTPS front end (Secure cookies).
+# Requests from any other peer are untouched, so a LAN client sending a forged
+# X-Forwarded-For gains nothing — this is why we don't use bare ProxyFix,
+# which trusts every peer. Unset (the default), the WSGI environ is
+# byte-for-byte unchanged.
+_TRUSTED_PROXY_IPS = {
+    _ip.strip() for _ip in os.environ.get('TRUSTED_PROXY_IPS', '').split(',')
+    if _ip.strip()
+}
+
+if _TRUSTED_PROXY_IPS:
+    class _TrustedProxyMiddleware:
+        def __init__(self, wsgi_app, trusted):
+            self._app = wsgi_app
+            self._trusted = trusted
+
+        def __call__(self, environ, start_response):
+            peer = environ.get('REMOTE_ADDR', '')
+            if peer in self._trusted:
+                # Same environ key ProxyFix uses, so code that needs the raw
+                # socket peer (gateway endpoint auth) can always recover it.
+                environ['werkzeug.proxy_fix.orig_remote_addr'] = peer
+                fwd_for = environ.get('HTTP_X_FORWARDED_FOR', '')
+                if fwd_for:
+                    # Rightmost entry is the one appended by the trusted
+                    # proxy itself; anything left of it is client-supplied.
+                    environ['REMOTE_ADDR'] = fwd_for.split(',')[-1].strip()
+                proto = environ.get('HTTP_X_FORWARDED_PROTO', '')
+                if proto in ('http', 'https'):
+                    environ['wsgi.url_scheme'] = proto
+            return self._app(environ, start_response)
+
+    app.wsgi_app = _TrustedProxyMiddleware(app.wsgi_app, _TRUSTED_PROXY_IPS)
 
 # ── SECRET_KEY — generate and persist if not provided via environment ─────────
 _secret = os.environ.get('SECRET_KEY', '')
@@ -283,6 +322,17 @@ class _DBSessionInterface(_FlaskSessionInterface):
             app.logger.warning(f'DB session save failed: {e}')
             return
 
+        # One instance can serve HTTPS (via the VPS gateway, which sets
+        # X-Forwarded-Proto honored by the trusted-proxy middleware) and
+        # plain-HTTP LAN clients at the same time: mark the cookie Secure
+        # whenever THIS request came over HTTPS, without breaking LAN logins
+        # the way the global SESSION_COOKIE_SECURE flag would.
+        secure = self.get_cookie_secure(app)
+        try:
+            secure = secure or request.is_secure
+        except RuntimeError:
+            pass  # No request context — keep the configured default
+
         response.set_cookie(
             cookie_name,
             session.sid,
@@ -290,7 +340,7 @@ class _DBSessionInterface(_FlaskSessionInterface):
             httponly=self.get_cookie_httponly(app),
             domain=domain,
             path=path,
-            secure=self.get_cookie_secure(app),
+            secure=secure,
             samesite=self.get_cookie_samesite(app),
         )
 
@@ -3497,6 +3547,226 @@ def logout():
         db.close()
     session.clear()
     return redirect(url_for('login'))
+
+
+# ─── VPS Gateway pre-auth (internal API) ──────────────────────────────────────
+# Consumed ONLY by the companion gateway app on the VPS (gateway/), which asks
+# us to email a one-time code to an address and later to check the code the
+# visitor typed. The gateway holds no DB or SMTP credentials — everything
+# stateful happens here. See GATEWAY_DESIGN.md for the full architecture.
+#
+# Both endpoints answer 404 unless GATEWAY_SHARED_SECRET is set in the
+# environment, so ordinary LAN deployments are byte-for-byte unaffected.
+# Responses never reveal whether an email has an account: /request always
+# returns {"status":"ok"} and /verify returns the same {"valid":false} for
+# wrong code, expired code, burned code, and unknown email alike.
+
+_GATEWAY_OTP_TTL_MIN = 10          # minutes a code stays valid
+_GATEWAY_OTP_MAX_ATTEMPTS = 5      # guesses allowed per code
+_GATEWAY_OTP_RATE_WINDOW_MIN = 15  # rate-limit window
+_GATEWAY_OTP_MAX_PER_EMAIL = 3     # codes per email per window
+_GATEWAY_OTP_MAX_PER_IP = 10       # codes per client IP per window
+
+# Same dummy scrypt hash the login route uses for constant-time failures.
+_GATEWAY_DUMMY_HASH = (
+    'scrypt:32768:8:1$dummy$00000000000000000000000000000000'
+    '00000000000000000000000000000000'
+)
+
+
+def _gateway_auth_ok():
+    """Shared-secret (+ optional socket-peer) check for the gateway endpoints.
+
+    False when the feature is disabled (GATEWAY_SHARED_SECRET unset) or the
+    caller fails either check. Callers 404 on False so the endpoints are
+    indistinguishable from nonexistent routes."""
+    secret = os.environ.get('GATEWAY_SHARED_SECRET', '')
+    if not secret:
+        return False
+    supplied = request.headers.get('X-Gateway-Secret', '')
+    if not hmac.compare_digest(supplied, secret):
+        return False
+    peers = os.environ.get('GATEWAY_PEER_IPS', '').strip()
+    if peers:
+        # Compare the raw socket peer, not request.remote_addr — with the
+        # trusted-proxy middleware active, remote_addr may have been rewritten
+        # from X-Forwarded-For, which anyone can forge.
+        raw_peer = request.environ.get(
+            'werkzeug.proxy_fix.orig_remote_addr', request.remote_addr)
+        allowed = {p.strip() for p in peers.split(',') if p.strip()}
+        if raw_peer not in allowed:
+            return False
+    return True
+
+
+def _gateway_pg_ok(db):
+    """Refuse to act on a stale SQLite fallback (same guard as the email
+    scheduler): configured-postgres must equal the active backend."""
+    configured = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
+    active = getattr(db, 'db_type', None)
+    if configured == 'postgres' and active != 'postgres':
+        app.logger.error(
+            'Gateway OTP: configured for postgres but active connection is %r '
+            '— PostgreSQL unreachable, user data would be stale. Failing closed.',
+            active
+        )
+        return False
+    return True
+
+
+def _gateway_email_key(email):
+    """Truncated hash of an email for syslog — lets us correlate repeated
+    requests without turning the log into an address-enumeration oracle."""
+    return hashlib.sha256(email.encode('utf-8')).hexdigest()[:12]
+
+
+def _gateway_send_otp_email(to_addr, code):
+    """Fire-and-forget OTP email; failures land in email_send_errors so they
+    show up in the Settings → Email Send Errors panel."""
+    subject = '3·2·1→THEATER: Your access code'
+    body = (
+        f'Your one-time access code is: {code}\n\n'
+        f'Enter it on the access page to continue to 3·2·1→Theater. '
+        f'The code expires in {_GATEWAY_OTP_TTL_MIN} minutes and works once.\n\n'
+        f'If you did not request this code, you can ignore this email — '
+        f'nobody can get in without both this code and your password.'
+    )
+    def _bg():
+        try:
+            ok, msg = _send_email(subject=subject, recipients=[to_addr],
+                                  body_text=body)
+            if not ok:
+                _log_email_error(to_addr, subject, msg,
+                                 pdf_type='gateway_otp', triggered_by='gateway')
+        except Exception as e:
+            _log_email_error(to_addr, subject, e,
+                             pdf_type='gateway_otp', triggered_by='gateway')
+    threading.Thread(target=_bg, daemon=True).start()
+
+
+@app.route('/internal/gateway/otp/request', methods=['POST'])
+def gateway_otp_request():
+    if not _gateway_auth_ok():
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip().lower()
+    client_ip = (data.get('client_ip') or '')[:64]
+    generic = {'status': 'ok'}
+    if not email or '@' not in email or len(email) > 254:
+        return jsonify(generic)
+    db = get_db()
+    try:
+        if not _gateway_pg_ok(db):
+            return jsonify(generic)
+        now = datetime.utcnow()
+        # Housekeeping — codes are 10-minute ephemera, nothing needs a day.
+        db.execute('DELETE FROM gateway_otp_codes WHERE created_at < ?',
+                   (now - timedelta(days=1),))
+        # Rate limits enforced here in the DB (shared across all workers),
+        # counting rows created in the window regardless of hit/miss so the
+        # throttle itself can't be used to probe which emails exist.
+        window = now - timedelta(minutes=_GATEWAY_OTP_RATE_WINDOW_MIN)
+        n = db.execute(
+            'SELECT COUNT(*) AS n FROM gateway_otp_codes '
+            'WHERE email = ? AND created_at > ?', (email, window)
+        ).fetchone()['n']
+        if n >= _GATEWAY_OTP_MAX_PER_EMAIL:
+            db.commit()
+            syslog_logger.info(
+                f'GATEWAY_OTP_THROTTLED ip={client_ip} '
+                f'email_key={_gateway_email_key(email)}')
+            return jsonify(generic)
+        if client_ip:
+            n = db.execute(
+                'SELECT COUNT(*) AS n FROM gateway_otp_codes '
+                'WHERE client_ip = ? AND created_at > ?', (client_ip, window)
+            ).fetchone()['n']
+            if n >= _GATEWAY_OTP_MAX_PER_IP:
+                db.commit()
+                syslog_logger.info(f'GATEWAY_OTP_THROTTLED ip={client_ip}')
+                return jsonify(generic)
+        user = db.execute(
+            "SELECT id FROM users WHERE lower(email) = ? AND email != '' "
+            'AND COALESCE(is_locked, 0) = 0 LIMIT 1', (email,)
+        ).fetchone()
+        if user:
+            code = f'{secrets.randbelow(10**6):06d}'
+            db.execute(
+                'UPDATE gateway_otp_codes SET used = 1 '
+                'WHERE email = ? AND used = 0', (email,))
+            db.execute(
+                'INSERT INTO gateway_otp_codes '
+                '(email, code_hash, client_ip, expires_at, created_at) '
+                'VALUES (?, ?, ?, ?, ?)',
+                (email, generate_password_hash(code), client_ip,
+                 now + timedelta(minutes=_GATEWAY_OTP_TTL_MIN), now))
+            db.commit()
+            _gateway_send_otp_email(email, code)
+        else:
+            db.commit()
+            # Equalize timing with the hit path's hash generation.
+            generate_password_hash('000000')
+        syslog_logger.info(
+            f'GATEWAY_OTP_REQUEST ip={client_ip} '
+            f'email_key={_gateway_email_key(email)}')
+        return jsonify(generic)
+    finally:
+        db.close()
+
+
+@app.route('/internal/gateway/otp/verify', methods=['POST'])
+def gateway_otp_verify():
+    if not _gateway_auth_ok():
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip().lower()
+    code = (data.get('code') or '').strip()
+    client_ip = (data.get('client_ip') or '')[:64]
+    if not email or not code or len(code) > 16:
+        return jsonify({'valid': False})
+    db = get_db()
+    try:
+        if not _gateway_pg_ok(db):
+            return jsonify({'valid': False})
+        now = datetime.utcnow()
+        row = db.execute(
+            'SELECT id, code_hash FROM gateway_otp_codes '
+            'WHERE email = ? AND used = 0 AND expires_at > ? '
+            'ORDER BY id DESC LIMIT 1', (email, now)
+        ).fetchone()
+        if not row:
+            check_password_hash(_GATEWAY_DUMMY_HASH, code)
+            syslog_logger.info(
+                f'GATEWAY_OTP_FAIL ip={client_ip} '
+                f'email_key={_gateway_email_key(email)}')
+            return jsonify({'valid': False})
+        # Consume an attempt BEFORE comparing so parallel guesses across
+        # workers can never exceed the cap; rowcount 0 means the code is
+        # burned out of attempts (or was just used by a racing request).
+        cur = db.execute(
+            'UPDATE gateway_otp_codes SET attempts = attempts + 1 '
+            'WHERE id = ? AND attempts < ? AND used = 0',
+            (row['id'], _GATEWAY_OTP_MAX_ATTEMPTS))
+        db.commit()
+        if getattr(cur, 'rowcount', 0) != 1:
+            syslog_logger.info(
+                f'GATEWAY_OTP_FAIL ip={client_ip} '
+                f'email_key={_gateway_email_key(email)} reason=burned')
+            return jsonify({'valid': False})
+        if check_password_hash(row['code_hash'], code):
+            db.execute('UPDATE gateway_otp_codes SET used = 1 WHERE id = ?',
+                       (row['id'],))
+            db.commit()
+            syslog_logger.info(
+                f'GATEWAY_OTP_OK ip={client_ip} '
+                f'email_key={_gateway_email_key(email)}')
+            return jsonify({'valid': True})
+        syslog_logger.info(
+            f'GATEWAY_OTP_FAIL ip={client_ip} '
+            f'email_key={_gateway_email_key(email)}')
+        return jsonify({'valid': False})
+    finally:
+        db.close()
 
 
 # Supported "view site as" preview modes and the session flag profile each
