@@ -58,6 +58,16 @@ class DBIntegrityError(sqlite3.IntegrityError):
     pass
 
 
+# ─── Query Timing Hook ─────────────────────────────────────────────────────────
+# app.py assigns a callable here (db_adapter.query_timer_hook = fn) that is
+# invoked with (sql, duration_seconds) after every execute()/executemany() —
+# including ones that raised. Feeds the per-page performance stats behind the
+# admin /admin/performance page. The hook must be cheap and must never raise;
+# the call site swallows exceptions anyway so a broken collector can't break
+# query execution.
+query_timer_hook = None
+
+
 # Regex patterns for SQL adaptation
 _INSERT_OR_IGNORE_RE = re.compile(r'\bINSERT\s+OR\s+IGNORE\s+INTO\b', re.IGNORECASE)
 _INSERT_OR_REPLACE_RE = re.compile(
@@ -180,6 +190,18 @@ class DBConnection:
         return result, False
 
     def execute(self, sql, params=()):
+        if query_timer_hook is None:
+            return self._execute(sql, params)
+        t0 = time.perf_counter()
+        try:
+            return self._execute(sql, params)
+        finally:
+            try:
+                query_timer_hook(sql, time.perf_counter() - t0)
+            except Exception:
+                pass
+
+    def _execute(self, sql, params=()):
         adapted_sql, needs_lastval = self._adapt_sql(sql)
 
         # psycopg2 only skips %-placeholder interpolation when vars is None —
@@ -226,6 +248,18 @@ class DBConnection:
                 raise
 
     def executemany(self, sql, params_list):
+        if query_timer_hook is None:
+            return self._executemany(sql, params_list)
+        t0 = time.perf_counter()
+        try:
+            return self._executemany(sql, params_list)
+        finally:
+            try:
+                query_timer_hook(sql, time.perf_counter() - t0)
+            except Exception:
+                pass
+
+    def _executemany(self, sql, params_list):
         adapted_sql, _ = self._adapt_sql(sql)
         if self.db_type == 'postgres':
             import psycopg2.extras

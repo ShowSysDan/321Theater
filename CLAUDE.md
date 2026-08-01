@@ -110,6 +110,20 @@ apps. For a 321Theater access change, use this app's own flags instead
   (`GET/PUT /shows/<id>/labor-days`); cover PM stores the contact NAME, same
   convention as the `production_manager` advance field.
 
+## Per-page performance stats (admin Settings → Performance)
+- `db_adapter.query_timer_hook` stopwatches every `execute()`/`executemany()`;
+  app.py's collector (`_perf_record_query` / `_perf_finish_request` /
+  `_perf_flush`) rolls finished requests up per `(day, endpoint)` in memory and
+  flushes ~once a minute per worker with an ADDITIVE upsert into
+  `perf_page_stats`, plus individual queries ≥ `perf_slow_query_ms` (default
+  100 ms) into `perf_slow_queries`. Admin UI: `/admin/performance`.
+- The upsert merges (counters add, min/max/slowest compare) so concurrent
+  workers can flush the same row — don't replace it with INSERT OR REPLACE,
+  which would clobber. Flushes on a stale SQLite fallback drop the batch
+  (background-write rule). Retention is trimmed in `run_hourly_maintenance`.
+- Background-job queries (no request context) are intentionally not tracked.
+  Keep the hook path allocation-free and never let it raise.
+
 ## Prism FM integration (SANDBOXED — keep it that way)
 Prism is the building's primary scheduling system. The integration lives in
 `prism_module.py` + `prism_bridge/` + `templates/prism.html`, wired into
