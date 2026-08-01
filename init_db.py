@@ -1024,6 +1024,43 @@ CREATE TABLE IF NOT EXISTS prism_venues (
     first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Per-page daily performance rollups (admin /admin/performance page).
+-- One row per (stat_date, endpoint) -- the in-app collector merges its
+-- buffered counters in with an additive upsert. All timings are wall-clock
+-- milliseconds. The slow_* columns describe the single slowest database
+-- query seen on that page that day.
+CREATE TABLE IF NOT EXISTS perf_page_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stat_date DATE NOT NULL,
+    endpoint TEXT NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    total_ms REAL NOT NULL DEFAULT 0,
+    min_ms REAL NOT NULL DEFAULT 0,
+    max_ms REAL NOT NULL DEFAULT 0,
+    db_ms REAL NOT NULL DEFAULT 0,
+    db_query_count INTEGER NOT NULL DEFAULT 0,
+    db_max_ms REAL NOT NULL DEFAULT 0,
+    slow_sql TEXT DEFAULT '',
+    slow_ms REAL NOT NULL DEFAULT 0,
+    slow_path TEXT DEFAULT '',
+    slow_at TIMESTAMP DEFAULT NULL,
+    UNIQUE(stat_date, endpoint)
+);
+CREATE INDEX IF NOT EXISTS idx_perf_page_stats_date ON perf_page_stats(stat_date);
+
+-- Individual slow-query log -- one row per query that ran at or above the
+-- perf_slow_query_ms app setting (default 100 ms). Trimmed to 90 days by
+-- run_hourly_maintenance().
+CREATE TABLE IF NOT EXISTS perf_slow_queries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    endpoint TEXT DEFAULT '',
+    path TEXT DEFAULT '',
+    duration_ms REAL NOT NULL DEFAULT 0,
+    sql_text TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_perf_slow_queries_at ON perf_slow_queries(occurred_at);
 """
 
 SEED_CONTACTS = [
@@ -1713,6 +1750,36 @@ def migrate_db():
             first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        -- Per-page performance stats (admin /admin/performance page)
+        CREATE TABLE IF NOT EXISTS perf_page_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stat_date DATE NOT NULL,
+            endpoint TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            total_ms REAL NOT NULL DEFAULT 0,
+            min_ms REAL NOT NULL DEFAULT 0,
+            max_ms REAL NOT NULL DEFAULT 0,
+            db_ms REAL NOT NULL DEFAULT 0,
+            db_query_count INTEGER NOT NULL DEFAULT 0,
+            db_max_ms REAL NOT NULL DEFAULT 0,
+            slow_sql TEXT DEFAULT '',
+            slow_ms REAL NOT NULL DEFAULT 0,
+            slow_path TEXT DEFAULT '',
+            slow_at TIMESTAMP DEFAULT NULL,
+            UNIQUE(stat_date, endpoint)
+        );
+        CREATE INDEX IF NOT EXISTS idx_perf_page_stats_date ON perf_page_stats(stat_date);
+
+        CREATE TABLE IF NOT EXISTS perf_slow_queries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            endpoint TEXT DEFAULT '',
+            path TEXT DEFAULT '',
+            duration_ms REAL NOT NULL DEFAULT 0,
+            sql_text TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_perf_slow_queries_at ON perf_slow_queries(occurred_at);
     """)
 
     # ALTER TABLE for new columns (SQLite errors if column already exists)
@@ -3590,6 +3657,46 @@ CREATE TABLE IF NOT EXISTS prism_venues (
     first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Per-page daily performance rollups (admin /admin/performance page).
+-- One row per (stat_date, endpoint) -- the in-app collector merges its
+-- buffered counters in with an additive upsert, so multiple Gunicorn
+-- workers on multiple servers can all flush the same row safely. All
+-- timings are wall-clock milliseconds. The slow_* columns describe the
+-- single slowest database query seen on that page that day.
+
+CREATE TABLE IF NOT EXISTS perf_page_stats (
+    id SERIAL PRIMARY KEY,
+    stat_date DATE NOT NULL,
+    endpoint TEXT NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    total_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    min_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    max_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    db_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    db_query_count INTEGER NOT NULL DEFAULT 0,
+    db_max_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    slow_sql TEXT DEFAULT '',
+    slow_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    slow_path TEXT DEFAULT '',
+    slow_at TIMESTAMP DEFAULT NULL,
+    UNIQUE(stat_date, endpoint)
+);
+CREATE INDEX IF NOT EXISTS idx_perf_page_stats_date ON perf_page_stats(stat_date);
+
+-- Individual slow-query log -- one row per query that ran at or above the
+-- perf_slow_query_ms app setting (default 100 ms). Trimmed to 90 days by
+-- run_hourly_maintenance().
+
+CREATE TABLE IF NOT EXISTS perf_slow_queries (
+    id SERIAL PRIMARY KEY,
+    occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    endpoint TEXT DEFAULT '',
+    path TEXT DEFAULT '',
+    duration_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    sql_text TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_perf_slow_queries_at ON perf_slow_queries(occurred_at);
 """
 
 
