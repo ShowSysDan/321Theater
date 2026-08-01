@@ -207,9 +207,14 @@ Enumeration resistance, in one place, because it's easy to regress:
   first starts, or Let's Encrypt issuance fails).
 - The app server runs a build of 321Theater that includes the
   `/internal/gateway/otp/*` endpoints and the `gateway_otp_codes` table
-  (run `python3 init_db.py --migrate` / restart after updating).
+  (just update and restart — schema migrations auto-apply on startup).
 
 ## 3. Install — internal app server (5 minutes)
+
+> **Which machine:** §3 runs on the **321T server inside the building**
+> (`10.201.2.101`) — the only step that touches it. §4 runs on the **VPS**
+> (cyclorama). Do §3 first: the shared secret is generated here, and the
+> §4 installer stops and asks for it.
 
 ```bash
 # 1. Generate the shared secret (KEEP THIS — the VPS needs the same value)
@@ -221,7 +226,8 @@ GATEWAY_PEER_IPS=10.201.4.9
 TRUSTED_PROXY_IPS=10.201.4.9
 
 # 3. Apply schema + restart
-cd /opt/321theater && python3 init_db.py --migrate   # creates gateway_otp_codes
+# 3. Restart — the gateway_otp_codes table is created automatically on
+#    startup (migrations auto-apply; no manual init_db step needed)
 sudo systemctl restart 321theater
 ```
 

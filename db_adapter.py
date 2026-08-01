@@ -378,6 +378,7 @@ def connect(database_path, settings=None):
     db_type = settings.get('db_type', 'sqlite')
 
     if db_type == 'postgres':
+        conn = None
         try:
             import psycopg2
             app_schema = settings.get('pg_app_schema', '') or settings.get('pg_schema', '') or 'theater321'
@@ -413,6 +414,15 @@ def connect(database_path, settings=None):
                 '(real app_settings/data live in PostgreSQL). Install psycopg2-binary.'
             )
         except Exception as e:
+            # If psycopg2.connect() succeeded but a later step (CREATE SCHEMA /
+            # SET search_path / commit) raised, close the live PG connection
+            # before falling back — otherwise it leaks until GC, and on this
+            # always-PG deployment the fallback path churns constantly.
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             import logging
             logging.getLogger('showadvance').error(
                 f'PostgreSQL connection FAILED — falling back to the SQLite bootstrap, '

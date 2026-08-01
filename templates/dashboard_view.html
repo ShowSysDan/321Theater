@@ -340,6 +340,10 @@ const ASSET_TYPES = {{ asset_types | tojson }};
 const CATEGORIES  = {{ categories | tojson }};
 const DASH_ID     = {{ dash.id }};
 const CAN_EDIT    = {{ 'true' if (not public) and dash.user_id == user.id else 'false' }};
+// On a public (/d/<slug>) view there is no session, so the widget-data
+// endpoints are authorized by this dashboard's public slug instead.
+const PUBLIC_SLUG = '{{ dash.public_slug if (public and dash.public_slug) else "" }}';
+const SLUG_Q      = PUBLIC_SLUG ? ('&slug=' + encodeURIComponent(PUBLIC_SLUG)) : '';
 
 /* Load widgets from config, backward-compatible with old single-layout dashboards */
 {% set raw_widgets = config.get('widgets') %}
@@ -579,7 +583,7 @@ async function loadAvailWidget(idx, section, loadEl, contentEl) {
   const params = new URLSearchParams();
   if (from) params.set('from', from);
   if (to)   params.set('to',   to);
-  const data = await safeFetch('/api/assets/availability?' + params.toString());
+  const data = await safeFetch('/api/assets/availability?' + params.toString() + SLUG_Q);
   loadEl.style.display = 'none';
   contentEl.style.display = 'block';
   const wtype = section.dataset.wtype;
@@ -673,7 +677,7 @@ function renderByShow(data) {
 /* ── Calendar widget ─────────────────────────────────────────────── */
 async function loadCalendarWidget(idx, section, loadEl, contentEl) {
   const { from, to } = getWidgetDates(section);
-  const data = await safeFetch(`/api/dashboard/shows-calendar?from=${from}&to=${to}`);
+  const data = await safeFetch(`/api/dashboard/shows-calendar?from=${from}&to=${to}` + SLUG_Q);
   const calDaysData = {};
   (data.days || []).forEach(d => { calDaysData[d.date] = d; });
   loadEl.style.display = 'none';
@@ -766,7 +770,8 @@ function renderCalendarLayout(from, to, _calDaysData) {
 
 /* ── Skills widget ───────────────────────────────────────────────── */
 async function loadSkillsWidget(idx, section, loadEl, contentEl) {
-  const data = await safeFetch('/api/dashboard/skills-summary');
+  const data = await safeFetch('/api/dashboard/skills-summary' +
+    (PUBLIC_SLUG ? ('?slug=' + encodeURIComponent(PUBLIC_SLUG)) : ''));
   loadEl.style.display = 'none';
   contentEl.style.display = 'block';
   contentEl.innerHTML = renderSkills(data);
@@ -835,7 +840,7 @@ async function loadAssetCalendarWidget(idx, section, loadEl, contentEl) {
   if (section._monthLabel) section._monthLabel.textContent = `${_CAL_MONTHS[month]} ${year}`;
   const from = new Date(year, month, 1).toISOString().slice(0,10);
   const to   = new Date(year, month + 1, 0).toISOString().slice(0,10);
-  const data = await safeFetch(`/api/dashboard/asset-calendar?type_id=${typeId}&from=${from}&to=${to}`);
+  const data = await safeFetch(`/api/dashboard/asset-calendar?type_id=${typeId}&from=${from}&to=${to}` + SLUG_Q);
   /* stash per-day show data so click handlers can access it */
   (data.days || []).forEach(d => { _dayDataStore[idx + '_' + d.date] = d; });
   loadEl.style.display = 'none';
@@ -1004,7 +1009,7 @@ const TL_MAX_SPAN = 900;   // soft cap on loaded days, so endless scrolling can'
 
 async function tlFetch(section) {
   const data = await safeFetch(
-    `/api/dashboard/reservation-timeline?from=${section._tlFrom}&to=${section._tlTo}`);
+    `/api/dashboard/reservation-timeline?from=${section._tlFrom}&to=${section._tlTo}` + SLUG_Q);
   section._tlData = data;
 }
 
