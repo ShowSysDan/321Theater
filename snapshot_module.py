@@ -52,6 +52,7 @@ import json
 import os
 import re
 import sqlite3
+import zlib
 from collections import Counter
 from datetime import date, datetime, time as dt_time
 from decimal import Decimal, InvalidOperation
@@ -60,6 +61,12 @@ from flask import jsonify, render_template, request
 
 # Filled by register() — mirrors prism_module's dependency-dict pattern.
 _d = {}
+
+
+class SnapshotReadError(Exception):
+    """The snapshot file exists but can't be parsed — corrupt, truncated, or
+    (for the newest hourly file) still being written by the backup job.
+    Views translate this into a friendly 422 instead of a 500."""
 
 # ─── Policy ───────────────────────────────────────────────────────────────────
 
@@ -144,12 +151,14 @@ def list_snapshots():
                 st = os.stat(p)
             except OSError:
                 continue
+            backend = 'postgres' if name.endswith('.sql.gz') else 'sqlite'
             out.append({
                 'kind': kind,
                 'name': name,
                 'size': st.st_size,
                 'mtime': datetime.fromtimestamp(st.st_mtime),
-                'backend': 'postgres' if name.endswith('.sql.gz') else 'sqlite',
+                'backend': backend,
+                'healthy': _quick_health(p, backend),
             })
     out.sort(key=lambda s: s['mtime'], reverse=True)
     return out
@@ -238,10 +247,30 @@ def _split_cols(col_list_sql):
 
 
 def _iter_dump_lines(path):
-    """Yield decoded lines of a .sql.gz dump without trailing newline."""
-    with gzip.open(path, 'rb') as f:
-        for raw in f:
-            yield raw.decode('utf-8', errors='replace').rstrip('\n')
+    """Yield decoded lines (no trailing newline) of the FIRST gzip member of
+    a .sql.gz dump, zcat-style: trailing garbage after a complete gzip stream
+    is ignored. Python's gzip module instead raises BadGzipFile on such files
+    — and torn backup writes (a second writer or a partial copy landing after
+    a complete stream) produced exactly that in the wild, turning perfectly
+    recoverable dumps into 500s. pg_dump output is always a single member, so
+    reading one member never loses data. A stream that ends before the member
+    completes still raises EOFError (truncated / mid-write)."""
+    dec = zlib.decompressobj(31)  # 31 = gzip header + max window
+    pending = b''
+    with open(path, 'rb') as f:
+        while not dec.eof:
+            chunk = f.read(1 << 16)
+            if not chunk:
+                raise EOFError('compressed stream ends mid-member')
+            pending += dec.decompress(chunk)
+            if b'\n' not in pending:
+                continue
+            lines = pending.split(b'\n')
+            pending = lines.pop()
+            for ln in lines:
+                yield ln.decode('utf-8', errors='replace')
+    for ln in pending.split(b'\n') if pending else ():
+        yield ln.decode('utf-8', errors='replace')
 
 
 def _scan_pg_dump(path):
@@ -365,17 +394,57 @@ class Snapshot:
         hit = _scan_cache.get(key)
         if hit is not None:
             return hit
-        tables = (_scan_pg_dump(self.path) if self.backend == 'postgres'
-                  else _scan_sqlite_db(self.path))
+        try:
+            tables = (_scan_pg_dump(self.path) if self.backend == 'postgres'
+                      else _scan_sqlite_db(self.path))
+        except _READ_ERRORS as e:
+            raise SnapshotReadError(self._read_error_detail(e)) from e
         while len(_scan_cache) >= _SCAN_CACHE_MAX:
             _scan_cache.pop(next(iter(_scan_cache)))
         _scan_cache[key] = tables
         return tables
 
     def read_table(self, schema, table):
-        if self.backend == 'postgres':
-            return _read_pg_dump_table(self.path, schema, table)
-        return _read_sqlite_db_table(self.path, table)
+        try:
+            if self.backend == 'postgres':
+                return _read_pg_dump_table(self.path, schema, table)
+            return _read_sqlite_db_table(self.path, table)
+        except _READ_ERRORS as e:
+            raise SnapshotReadError(self._read_error_detail(e)) from e
+
+    def _read_error_detail(self, e):
+        if isinstance(e, (gzip.BadGzipFile, zlib.error)):
+            if not _quick_health(self.path, self.backend):
+                return ('the file does not start with gzip data, so it was '
+                        'corrupted when it was WRITTEN (e.g. two processes '
+                        'writing the same backup file, or a partial copy)')
+            return ('the gzip stream breaks partway through the file — the '
+                    'backup was corrupted when it was written')
+        if isinstance(e, EOFError):
+            return ('the file ends mid-stream — it is truncated, or the '
+                    'backup job is writing it right now; try again in a minute')
+        return f'{type(e).__name__}: {e}'
+
+
+# Errors that mean "this snapshot file is unreadable", not "our code is wrong".
+# gzip.BadGzipFile subclasses OSError, so OSError also covers permission and
+# I/O errors on the file itself.
+_READ_ERRORS = (OSError, EOFError, zlib.error, sqlite3.DatabaseError,
+                UnicodeError)
+
+
+def _quick_health(path, backend):
+    """Cheap magic-byte check used by the list view and error messages.
+    Catches corruption at the head of the file only — a stream that breaks
+    mid-file still surfaces as a clean SnapshotReadError at scan time."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(16)
+    except OSError:
+        return False
+    if backend == 'postgres':
+        return head[:2] == b'\x1f\x8b'
+    return head.startswith(b'SQLite format 3\x00')
 
 
 # ─── Live-side helpers ────────────────────────────────────────────────────────
@@ -850,6 +919,10 @@ def _json_error(msg, status=400):
     return jsonify({'success': False, 'error': msg}), status
 
 
+def _snapshot_read_error(snap, e):
+    return _json_error(f'Could not read {snap.kind}/{snap.name}: {e}.', 422)
+
+
 def _open_snapshot_or_error():
     if request.method == 'POST':
         payload = request.get_json(silent=True) or {}
@@ -921,6 +994,8 @@ def _tables_view():
             warnings.append(reason)
         return jsonify({'success': True, 'tables': tables, 'warnings': warnings,
                         'restore_ok': ok})
+    except SnapshotReadError as e:
+        return _snapshot_read_error(snap, e)
     finally:
         db.close()
 
@@ -933,7 +1008,10 @@ def _diff_view():
     table = request.args.get('table') or ''
     if not _SAFE_IDENT_RE.match(schema) or not _SAFE_IDENT_RE.match(table):
         return _json_error('Invalid table.')
-    meta = snap.scan().get((schema, table))
+    try:
+        meta = snap.scan().get((schema, table))
+    except SnapshotReadError as e:
+        return _snapshot_read_error(snap, e)
     if meta is None:
         return _json_error('Table not found in snapshot.', 404)
     db = _d['get_db']()
@@ -954,6 +1032,8 @@ def _diff_view():
         diff['restorable'] = ok and table not in RESTORE_BLOCKED
         diff['blocked'] = table in RESTORE_BLOCKED
         return jsonify({'success': True, 'diff': diff})
+    except SnapshotReadError as e:
+        return _snapshot_read_error(snap, e)
     finally:
         db.close()
 
@@ -964,11 +1044,14 @@ def _shows_view():
     snap, err = _open_snapshot_or_error()
     if err:
         return err
-    scan = snap.scan()
-    shows_key = next(((s, t) for (s, t) in scan if t == 'shows'), None)
-    if shows_key is None:
-        return _json_error('Snapshot contains no shows table.', 404)
-    cols, rows = snap.read_table(*shows_key)
+    try:
+        scan = snap.scan()
+        shows_key = next(((s, t) for (s, t) in scan if t == 'shows'), None)
+        if shows_key is None:
+            return _json_error('Snapshot contains no shows table.', 404)
+        cols, rows = snap.read_table(*shows_key)
+    except SnapshotReadError as e:
+        return _snapshot_read_error(snap, e)
     if not cols:
         return _json_error('Could not read shows from snapshot.', 500)
     idx = {c: i for i, c in enumerate(cols)}
@@ -1041,6 +1124,8 @@ def _preview_view():
         if perr:
             return _json_error(perr)
         return jsonify({'success': True, 'preview': _preview_summary(plan)})
+    except SnapshotReadError as e:
+        return _snapshot_read_error(snap, e)
     finally:
         db.close()
 
@@ -1090,6 +1175,8 @@ def _apply_view():
                         f'changes={plan["total_changes"]}')
         return jsonify({'success': True, 'counts': counts,
                         'total_changes': plan['total_changes']})
+    except SnapshotReadError as e:
+        return _snapshot_read_error(snap, e)
     finally:
         db.close()
 

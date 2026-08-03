@@ -544,7 +544,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.30.0'
+APP_VERSION = '2.30.1'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -1764,7 +1764,13 @@ def _ensure_backup_dirs():
 
 
 def _run_pg_dump(dest_path, settings):
-    """Run pg_dump and write the compressed SQL dump to dest_path (.sql.gz)."""
+    """Run pg_dump and write the compressed SQL dump to dest_path (.sql.gz).
+
+    Written ATOMICALLY (temp file in the same directory + os.replace) so a
+    reader — the DB Snapshots inspector, an rsync, a second writer racing on
+    the same minute stamp — can never see a torn/interleaved file. In-place
+    writes produced real corrupt .sql.gz backups (valid gzip stream followed
+    by trailing garbage, or garbage at byte 0)."""
     env = os.environ.copy()
     env['PGPASSWORD'] = settings.get('pg_password', '')
     cmd = [
@@ -1777,8 +1783,17 @@ def _run_pg_dump(dest_path, settings):
     result = subprocess.run(cmd, capture_output=True, env=env, timeout=300)
     if result.returncode != 0:
         raise RuntimeError(f"pg_dump failed: {result.stderr.decode('utf-8', errors='replace')}")
-    with gzip.open(dest_path, 'wb') as f:
-        f.write(result.stdout)
+    tmp_path = f'{dest_path}.{os.getpid()}.tmp'
+    try:
+        with gzip.open(tmp_path, 'wb') as f:
+            f.write(result.stdout)
+        os.replace(tmp_path, dest_path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def _run_db_backup(kind, ts_fmt, keep):
@@ -1794,7 +1809,18 @@ def _run_db_backup(kind, ts_fmt, keep):
     if settings.get('db_type') == 'postgres':
         _run_pg_dump(dest, settings)
     else:
-        shutil.copy2(DATABASE, dest)
+        # Same atomic pattern as _run_pg_dump so a reader never sees a
+        # half-copied .db file.
+        tmp = f'{dest}.{os.getpid()}.tmp'
+        try:
+            shutil.copy2(DATABASE, tmp)
+            os.replace(tmp, dest)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
     syslog_logger.info(f'BACKUP_CREATED type={kind} file={dest}')
     files = sorted(
         [f for f in os.listdir(dest_dir) if f.endswith(ext)],
@@ -1802,6 +1828,15 @@ def _run_db_backup(kind, ts_fmt, keep):
     )
     for old in files[keep:]:
         os.remove(os.path.join(dest_dir, old))
+    # Sweep any .tmp leftovers from a crashed writer (>1 h old).
+    for f in os.listdir(dest_dir):
+        if f.endswith('.tmp'):
+            p = os.path.join(dest_dir, f)
+            try:
+                if time.time() - os.path.getmtime(p) > 3600:
+                    os.remove(p)
+            except OSError:
+                pass
 
 
 def _run_once_per_host(tag, fn):
