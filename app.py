@@ -61,6 +61,7 @@ import s3_storage
 import pdf_layouts
 import nav_layout
 import prism_module  # sandboxed Prism FM integration — wired up near the bottom
+import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
 
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, session, jsonify, make_response, abort, send_file,
@@ -543,7 +544,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.29.0'
+APP_VERSION = '2.30.0'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -20659,6 +20660,26 @@ prism_module.register(
     log_audit=log_audit,
     db_adapter=db_adapter,
     DATABASE=DATABASE,
+    syslog_logger=syslog_logger,
+)
+
+
+# ─── DB snapshot inspection & recovery (sandboxed) ────────────────────────────
+# Admin tooling over the hourly/daily backups written by run_hourly_backup /
+# run_daily_backup above: inspect a snapshot's contents, diff any table
+# against live data, and surgically restore rows or a whole show —
+# preview → confirm → apply, audit-logged. All logic lives in
+# snapshot_module.py + templates/snapshots.html behind this one call.
+
+snapshot_module.register(
+    app,
+    get_db=get_db,
+    get_current_user=get_current_user,
+    admin_required=admin_required,
+    log_audit=log_audit,
+    db_adapter=db_adapter,
+    DATABASE=DATABASE,
+    BACKUP_DIR=BACKUP_DIR,
     syslog_logger=syslog_logger,
 )
 

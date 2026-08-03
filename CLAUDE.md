@@ -124,6 +124,27 @@ apps. For a 321Theater access change, use this app's own flags instead
 - Background-job queries (no request context) are intentionally not tracked.
   Keep the hook path allocation-free and never let it raise.
 
+## DB snapshot inspection & recovery (Settings → DB Snapshots)
+- `snapshot_module.py` + `templates/snapshots.html`, wired by one
+  `snapshot_module.register(app, …)` call next to the Prism registration.
+  Reads the hourly/daily backups written by `run_hourly_backup` /
+  `run_daily_backup` (plain `pg_dump` .sql.gz on PG, file copy .db on SQLite;
+  per-server local disk).
+- Dumps are parsed in **pure Python** (streaming COPY-block parser) — a
+  snapshot is never loaded into the PostgreSQL server. Diff is keyed on the
+  table's primary key (parsed from the dump / PRAGMA); values are normalized
+  to COPY text form before comparing.
+- Restore is preview → confirm → apply: apply re-derives the plan and
+  compares its hash against the previewed one (409 on drift), runs in ONE
+  transaction, audit-logs every row with before-images, and on PG re-syncs
+  id sequences after inserts. Two modes: per-show rollback/resurrection
+  (`shows` row + `SHOW_CHILD_TABLES`) and row cherry-pick from the diff view.
+- `RESTORE_BLOCKED` tables (users/sessions/tokens/audit/email_send_log/
+  perf/cluster) are inspect-only — don't widen without being asked; restoring
+  `email_send_log` would re-send advance emails, `audit_log` would falsify
+  history, `users` is the shared cross-app directory. Restore also refuses on
+  a stale SQLite fallback and on snapshot↔live backend mismatch.
+
 ## Prism FM integration (SANDBOXED — keep it that way)
 Prism is the building's primary scheduling system. The integration lives in
 `prism_module.py` + `prism_bridge/` + `templates/prism.html`, wired into
