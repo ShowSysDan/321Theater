@@ -203,8 +203,8 @@
           <input type="email" name="email" class="field-input" placeholder="jsmith@example.com">
         </div>
         <div class="field-group" style="min-width:130px;flex:1">
-          <label class="field-label">PASSWORD *</label>
-          <input type="password" name="password" class="field-input" required placeholder="Temporary password">
+          <label class="field-label">PASSWORD * <span style="font-size:10px;color:var(--text-dim)">(8+ chars, uppercase + punctuation)</span></label>
+          <input type="password" name="password" class="field-input" required minlength="8" placeholder="Temporary password">
         </div>
         <div class="field-group" style="min-width:160px;flex:1">
           <label class="field-label">ROLE</label>
@@ -236,6 +236,7 @@
               {% if u.is_app_user %}<span title="Flag for other apps that share this user directory — no effect in 321Theater" style="font-size:10px;background:rgba(45,212,191,.15);color:#2DD4BF;padding:2px 6px;border-radius:99px;border:1px solid rgba(45,212,191,.3);margin-left:4px">App User</span>{% endif %}
               {% if u.is_app_admin %}<span title="Flag for other apps that share this user directory — no effect in 321Theater" style="font-size:10px;background:rgba(251,146,60,.15);color:#FB923C;padding:2px 6px;border-radius:99px;border:1px solid rgba(251,146,60,.3);margin-left:4px">App Admin</span>{% endif %}
               {% if u.is_locked %}<span title="Account is locked — this user cannot log in, but their data is preserved." style="font-size:10px;background:rgba(239,68,68,.15);color:#F87171;padding:2px 6px;border-radius:99px;border:1px solid rgba(239,68,68,.3);margin-left:4px">🔒 Locked</span>{% endif %}
+              {% if u.must_change_password %}<span title="This user must set a new password at their next login." style="font-size:10px;background:rgba(250,204,21,.15);color:#FACC15;padding:2px 6px;border-radius:99px;border:1px solid rgba(250,204,21,.3);margin-left:4px">PW Change Due</span>{% endif %}
             </td>
             <td class="text-dim text-sm">{{ (u.created_at|string)[:10] if u.created_at else '—' }}</td>
             <td>
@@ -261,6 +262,7 @@
                         data-doc-types='{{ u.viewer_doc_types_list|tojson }}'>Edit</button>
                 <button class="btn btn-xs btn-ghost" onclick="resetPassword({{ u.id }})">Reset PW</button>
                 {% if u.id != user.id %}
+                <button class="btn btn-xs btn-ghost" onclick="toggleForcePwChange({{ u.id }}, {{ 1 if u.must_change_password else 0 }})">{{ 'Cancel PW Change' if u.must_change_password else 'Require PW Change' }}</button>
                 <button class="btn btn-xs btn-ghost" onclick="toggleUserLock({{ u.id }}, {{ 1 if u.is_locked else 0 }}, this)">{{ 'Unlock' if u.is_locked else 'Lock' }}</button>
                 <button class="btn btn-xs btn-danger-ghost" onclick="deleteUser({{ u.id }}, this)">Delete</button>
                 {% endif %}
@@ -1814,7 +1816,7 @@
           <input type="password" id="pw-current" class="field-input">
         </div>
         <div class="field-group">
-          <label class="field-label">NEW PASSWORD</label>
+          <label class="field-label">NEW PASSWORD <span style="font-size:10px;color:var(--text-dim)">(8+ chars, uppercase + punctuation)</span></label>
           <input type="password" id="pw-new" class="field-input">
         </div>
         <div class="field-group">
@@ -2556,14 +2558,36 @@ async function toggleUserLock(id, isLocked, btn) {
 }
 
 async function resetPassword(id) {
-  const pw = prompt('Enter new password for this user:');
+  const pw = prompt('Enter new password for this user:\n'
+    + 'At least 8 characters, including an uppercase letter and a punctuation mark.');
   if (!pw) return;
+  const mustChange = confirm(
+    'Require this user to choose their own new password at their next login?\n\n'
+    + 'OK = yes (recommended for temporary passwords) · Cancel = no');
   const resp = await fetch(`/settings/users/${id}/reset_password`, {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({password: pw})
+    body: JSON.stringify({password: pw, must_change: mustChange})
   });
   const data = await resp.json();
-  alert(data.success ? 'Password reset successfully.' : data.error);
+  if (data.success) { alert('Password reset successfully.'); location.reload(); }
+  else alert(data.error);
+}
+
+async function toggleForcePwChange(id, isForced) {
+  const forcing = !isForced;
+  const msg = forcing
+    ? 'Require this user to set a new password at their next login? '
+      + 'Their current password keeps working until then, but they must '
+      + 'change it before doing anything else in the app.'
+    : 'Cancel the required password change for this user?';
+  if (!confirm(msg)) return;
+  const resp = await fetch(`/settings/users/${id}/force_password_change`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({force: forcing})
+  });
+  const data = await resp.json();
+  if (data.success) location.reload();
+  else alert(data.error || 'Could not update password-change requirement.');
 }
 
 document.addEventListener('click', e => {
@@ -2681,7 +2705,9 @@ async function changePassword() {
   const conf    = document.getElementById('pw-confirm').value;
   const msg     = document.getElementById('pw-msg');
   if (newpw !== conf)    { showMsg(msg,'Passwords do not match.','error'); return; }
-  if (newpw.length < 6)  { showMsg(msg,'Password must be at least 6 characters.','error'); return; }
+  if (newpw.length < 8 || !/[A-Z]/.test(newpw) || !/[^A-Za-z0-9\s]/.test(newpw)) {
+    showMsg(msg,'Password must be at least 8 characters and include an uppercase letter and a punctuation mark.','error'); return;
+  }
   const resp = await fetch('/account/change_password', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({current_password:current, new_password:newpw})

@@ -7978,7 +7978,7 @@ def settings():
         '       is_readonly, is_scheduler, is_asset_manager, '
         '       is_document_viewer, viewer_venues, viewer_doc_types, '
         '       viewer_labor_overview, viewer_show_calendar, '
-        '       is_app_user, is_app_admin, is_locked '
+        '       is_app_user, is_app_admin, is_locked, must_change_password '
         'FROM users ORDER BY display_name'
     ).fetchall()
     # Decode the viewer JSON columns so the template can use |tojson cleanly
@@ -8263,9 +8263,23 @@ _MIN_PASSWORD_LENGTH = 8
 
 
 def _validate_password(pw):
-    """Return None if password is acceptable, else an error string."""
-    if not pw or len(pw) < _MIN_PASSWORD_LENGTH:
-        return f'Password must be at least {_MIN_PASSWORD_LENGTH} characters.'
+    """Return None if password is acceptable, else an error string.
+
+    Single source of truth for password complexity — used by every path that
+    sets a password (admin create/reset, self-service change, forced change,
+    public registration, email reset). Policy: minimum length, at least one
+    uppercase letter, at least one punctuation/symbol character.
+    """
+    pw = pw or ''
+    problems = []
+    if len(pw) < _MIN_PASSWORD_LENGTH:
+        problems.append(f'be at least {_MIN_PASSWORD_LENGTH} characters')
+    if not any(c.isupper() for c in pw):
+        problems.append('include an uppercase letter')
+    if not any(not c.isalnum() and not c.isspace() for c in pw):
+        problems.append('include a punctuation mark (e.g. ! @ # . -)')
+    if problems:
+        return 'Password must ' + ', '.join(problems) + '.'
     return None
 
 
@@ -8481,12 +8495,50 @@ def admin_reset_user_password(uid):
     pw_err = _validate_password(pw)
     if pw_err:
         return jsonify({'success': False, 'error': pw_err})
+    # Optional: admin can require the user to replace this (admin-known)
+    # password at their next login. Set explicitly either way so a reset
+    # without the flag also clears a stale requirement.
+    must_change = 1 if data.get('must_change') else 0
     db = get_db()
-    db.execute('UPDATE users SET password_hash=? WHERE id=?', (generate_password_hash(pw), uid))
-    log_audit(db, 'USER_PASSWORD_RESET', 'user', uid, detail=f'reset by {session.get("username")}')
+    db.execute('UPDATE users SET password_hash=?, must_change_password=? WHERE id=?',
+               (generate_password_hash(pw), must_change, uid))
+    log_audit(db, 'USER_PASSWORD_RESET', 'user', uid,
+              detail=f'reset by {session.get("username")} must_change={must_change}')
     db.commit(); db.close()
-    syslog_logger.info(f"PASSWORD_CHANGE user_id={uid} by={session.get('username')}")
+    syslog_logger.info(
+        f"PASSWORD_CHANGE user_id={uid} by={session.get('username')} "
+        f"must_change={must_change}")
     return jsonify({'success': True})
+
+
+@app.route('/settings/users/<int:uid>/force_password_change', methods=['POST'])
+@admin_required
+def toggle_force_password_change(uid):
+    """Set or clear the must_change_password flag on a user, without touching
+    their current password. When set, the user's next successful login is
+    redirected to the forced password-change screen (and all other routes are
+    blocked) until they pick a new password meeting the complexity policy.
+
+    Body: {"force": true|false}. If omitted, the current state is toggled."""
+    data = request.get_json(silent=True) or {}
+    db = get_db()
+    row = db.execute('SELECT username, must_change_password FROM users WHERE id=?',
+                     (uid,)).fetchone()
+    if not row:
+        db.close()
+        return jsonify({'success': False, 'error': 'User not found'}), 404
+    if 'force' in data:
+        new_val = 1 if data.get('force') else 0
+    else:
+        new_val = 0 if row.get('must_change_password') else 1
+    db.execute('UPDATE users SET must_change_password=? WHERE id=?', (new_val, uid))
+    log_audit(db, 'USER_FORCE_PW_CHANGE' if new_val else 'USER_FORCE_PW_CHANGE_CLEARED',
+              'user', uid, detail=f"{row['username']} by={session.get('username')}")
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"{'USER_FORCE_PW_CHANGE' if new_val else 'USER_FORCE_PW_CHANGE_CLEARED'} "
+        f"user_id={uid} by={session.get('username')}")
+    return jsonify({'success': True, 'must_change_password': bool(new_val)})
 
 
 @app.route('/account/theme', methods=['POST'])
@@ -8519,9 +8571,11 @@ def change_own_password():
     if pw_err:
         db.close()
         return jsonify({'success': False, 'error': pw_err})
-    db.execute('UPDATE users SET password_hash=? WHERE id=?',
+    # A voluntary change also satisfies any pending forced-change requirement.
+    db.execute('UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?',
                (generate_password_hash(new_pw), session['user_id']))
     db.commit(); db.close()
+    session.pop('must_change_password', None)
     syslog_logger.info(f"PASSWORD_CHANGE user_id={session['user_id']} by={session.get('username')} (self)")
     return jsonify({'success': True})
 
@@ -19607,8 +19661,8 @@ def _register_route():
             error = 'All fields are required.'
         elif password != confirm:
             error = 'Passwords do not match.'
-        elif len(password) < 8:
-            error = 'Password must be at least 8 characters.'
+        elif _validate_password(password):
+            error = _validate_password(password)
         elif not re.match(r'^[a-z0-9_.-]{3,32}$', username):
             error = 'Username: 3-32 characters, letters/numbers/._- only.'
         else:
@@ -19856,13 +19910,15 @@ def reset_password(token):
     if request.method == 'POST':
         password = request.form.get('password', '')
         confirm  = request.form.get('confirm_password', '')
-        if len(password) < 8:
-            error = 'Password must be at least 8 characters.'
+        if _validate_password(password):
+            error = _validate_password(password)
         elif password != confirm:
             error = 'Passwords do not match.'
         else:
             pw_hash = generate_password_hash(password)
-            db.execute('UPDATE users SET password_hash=? WHERE id=?', (pw_hash, rec['user_id']))
+            # A completed reset also satisfies any pending forced-change flag.
+            db.execute('UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?',
+                       (pw_hash, rec['user_id']))
             db.execute('UPDATE password_reset_tokens SET used=1 WHERE token=?', (token,))
             db.commit()
             user_row = db.execute('SELECT username FROM users WHERE id=?', (rec['user_id'],)).fetchone()
