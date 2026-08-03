@@ -50,7 +50,7 @@
         <input type="email" name="email" class="field-input" required placeholder="you@example.com">
       </div>
       <div class="field-group">
-        <label class="field-label">PASSWORD * <span style="font-size:10px;color:var(--text-dim)">(min 8 chars)</span></label>
+        <label class="field-label">PASSWORD * <span style="font-size:10px;color:var(--text-dim)">(8+ chars, uppercase + punctuation)</span></label>
         <input type="password" name="password" class="field-input" required minlength="8" id="reg-pw" oninput="checkPwStrength(this.value,'reg-pw-meter','reg-pw-label')">
         <div style="margin-top:5px;display:flex;gap:4px;align-items:center">
           <div style="flex:1;height:4px;border-radius:2px;background:var(--border);overflow:hidden">
