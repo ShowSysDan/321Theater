@@ -53,7 +53,12 @@
         <td class="text-dim">{{ s.backend }}</td>
         <td style="text-align:right" class="text-dim">{{ '%.1f'|format(s.size / 1048576) }} MB</td>
         <td style="text-align:right">
+          {% if s.healthy %}
           <button class="btn btn-primary btn-sm" onclick="openSnapshot('{{ s.kind }}','{{ s.name }}')">Inspect</button>
+          {% else %}
+          <span style="color:var(--red);font-size:.78rem"
+                title="This file does not start with {{ 'gzip' if s.backend == 'postgres' else 'SQLite' }} data — it was corrupted when it was written and cannot be inspected or restored from.">⚠ corrupt</span>
+          {% endif %}
         </td>
       </tr>
       {% endfor %}
