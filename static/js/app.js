@@ -4087,3 +4087,40 @@ window.LaborDays = {
     if (oldDate) await this.save(showId, oldDate, { cover_pm: '', day_notes: '' });
   },
 };
+
+/* ── Live password-rule checklist ─────────────────────────────────────────────
+   Wires a <ul class="pw-rules"> (items carry data-rule="len|upper|punct|match")
+   to a new-password + repeat input pair. Rules render red and flip green as
+   each is satisfied. Mirrors the server's _validate_password() policy — keep
+   the two in sync. Returns the update function; onChange(allOk) fires on every
+   keystroke (use it to enable/disable the submit button). */
+function pwRulesCheck(pw, confirm) {
+  return {
+    len:   pw.length >= 8,
+    upper: /[A-Z]/.test(pw),
+    punct: /[^A-Za-z0-9\s]/.test(pw),
+    match: pw.length > 0 && pw === confirm,
+  };
+}
+
+function pwRulesBind(newId, confirmId, rulesId, onChange) {
+  const pwEl  = document.getElementById(newId);
+  const cfEl  = document.getElementById(confirmId);
+  const list  = document.getElementById(rulesId);
+  if (!pwEl || !cfEl || !list) return null;
+  function update() {
+    const res = pwRulesCheck(pwEl.value, cfEl.value);
+    let all = true;
+    list.querySelectorAll('li[data-rule]').forEach(li => {
+      const ok = !!res[li.dataset.rule];
+      li.classList.toggle('ok', ok);
+      if (!ok) all = false;
+    });
+    if (onChange) onChange(all);
+    return all;
+  }
+  pwEl.addEventListener('input', update);
+  cfEl.addEventListener('input', update);
+  update();
+  return update;
+}

@@ -260,7 +260,8 @@
                            blank the edit dialog's saved selections #}
                         data-venues='{{ u.viewer_venues_list|tojson }}'
                         data-doc-types='{{ u.viewer_doc_types_list|tojson }}'>Edit</button>
-                <button class="btn btn-xs btn-ghost" onclick="resetPassword({{ u.id }})">Reset PW</button>
+                {# single-quoted on purpose — |tojson escapes apostrophes (') but emits double quotes #}
+                <button class="btn btn-xs btn-ghost" onclick='openResetPw({{ u.id }}, {{ (u.display_name or u.username)|tojson }})'>Reset PW</button>
                 {% if u.id != user.id %}
                 <button class="btn btn-xs btn-ghost" onclick="toggleForcePwChange({{ u.id }}, {{ 1 if u.must_change_password else 0 }})">{{ 'Cancel PW Change' if u.must_change_password else 'Require PW Change' }}</button>
                 <button class="btn btn-xs btn-ghost" onclick="toggleUserLock({{ u.id }}, {{ 1 if u.is_locked else 0 }}, this)">{{ 'Unlock' if u.is_locked else 'Lock' }}</button>
@@ -1816,15 +1817,21 @@
           <input type="password" id="pw-current" class="field-input">
         </div>
         <div class="field-group">
-          <label class="field-label">NEW PASSWORD <span style="font-size:10px;color:var(--text-dim)">(8+ chars, uppercase + punctuation)</span></label>
-          <input type="password" id="pw-new" class="field-input">
+          <label class="field-label">NEW PASSWORD</label>
+          <input type="password" id="pw-new" class="field-input" autocomplete="new-password">
         </div>
         <div class="field-group">
           <label class="field-label">CONFIRM NEW PASSWORD</label>
-          <input type="password" id="pw-confirm" class="field-input">
+          <input type="password" id="pw-confirm" class="field-input" autocomplete="new-password">
         </div>
+        <ul class="pw-rules" id="pw-rules" style="margin-bottom:14px">
+          <li data-rule="len">At least 8 characters</li>
+          <li data-rule="upper">At least one uppercase letter</li>
+          <li data-rule="punct">At least one punctuation mark (e.g. ! @ # . -)</li>
+          <li data-rule="match">Both passwords match</li>
+        </ul>
         <div id="pw-msg" class="field-msg" style="display:none"></div>
-        <button class="btn btn-primary" onclick="changePassword()">Change Password</button>
+        <button class="btn btn-primary" id="pw-submit" onclick="changePassword()" disabled>Change Password</button>
       </div>
     </div>
   </div>
@@ -2390,6 +2397,42 @@
   </div>
 </div>
 
+<!-- Reset Password Modal (admin) -->
+<div id="reset-pw-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeResetPw()">
+  <div class="modal-card" style="max-width:420px">
+    <div class="modal-header">Reset Password <button onclick="closeResetPw()" class="modal-close">×</button></div>
+    <div class="modal-body">
+      <input type="hidden" id="reset-pw-uid">
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px">
+        Setting a new password for <strong id="reset-pw-name" style="color:var(--text)"></strong>.
+      </div>
+      <div class="field-group">
+        <label class="field-label">NEW PASSWORD</label>
+        <input type="password" id="reset-pw-new" class="field-input" autocomplete="new-password">
+      </div>
+      <div class="field-group">
+        <label class="field-label">REPEAT NEW PASSWORD</label>
+        <input type="password" id="reset-pw-confirm" class="field-input" autocomplete="new-password">
+      </div>
+      <ul class="pw-rules" id="reset-pw-rules">
+        <li data-rule="len">At least 8 characters</li>
+        <li data-rule="upper">At least one uppercase letter</li>
+        <li data-rule="punct">At least one punctuation mark (e.g. ! @ # . -)</li>
+        <li data-rule="match">Both passwords match</li>
+      </ul>
+      <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);cursor:pointer;margin-top:12px">
+        <input type="checkbox" id="reset-pw-must-change" style="width:auto;margin:0" checked>
+        Require a new password at next login (recommended for temporary passwords)
+      </label>
+      <div id="reset-pw-msg" class="field-msg field-msg-error" style="display:none;margin-top:10px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeResetPw()">Cancel</button>
+      <button class="btn btn-primary" id="reset-pw-submit" onclick="submitResetPw()" disabled>Reset Password</button>
+    </div>
+  </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
@@ -2557,20 +2600,41 @@ async function toggleUserLock(id, isLocked, btn) {
   else alert(data.error || 'Could not update lock state.');
 }
 
-async function resetPassword(id) {
-  const pw = prompt('Enter new password for this user:\n'
-    + 'At least 8 characters, including an uppercase letter and a punctuation mark.');
-  if (!pw) return;
-  const mustChange = confirm(
-    'Require this user to choose their own new password at their next login?\n\n'
-    + 'OK = yes (recommended for temporary passwords) · Cancel = no');
+let _resetPwRulesUpdate = null;
+
+function openResetPw(id, name) {
+  document.getElementById('reset-pw-uid').value = id;
+  document.getElementById('reset-pw-name').textContent = name;
+  document.getElementById('reset-pw-new').value = '';
+  document.getElementById('reset-pw-confirm').value = '';
+  document.getElementById('reset-pw-must-change').checked = true;
+  document.getElementById('reset-pw-msg').style.display = 'none';
+  if (!_resetPwRulesUpdate) {
+    _resetPwRulesUpdate = pwRulesBind('reset-pw-new', 'reset-pw-confirm', 'reset-pw-rules',
+      ok => { document.getElementById('reset-pw-submit').disabled = !ok; });
+  } else {
+    _resetPwRulesUpdate();
+  }
+  document.getElementById('reset-pw-modal').style.display = 'flex';
+  document.getElementById('reset-pw-new').focus();
+}
+
+function closeResetPw() { document.getElementById('reset-pw-modal').style.display = 'none'; }
+
+async function submitResetPw() {
+  const id  = document.getElementById('reset-pw-uid').value;
+  const pw  = document.getElementById('reset-pw-new').value;
+  const msg = document.getElementById('reset-pw-msg');
   const resp = await fetch(`/settings/users/${id}/reset_password`, {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({password: pw, must_change: mustChange})
+    body: JSON.stringify({
+      password: pw,
+      must_change: document.getElementById('reset-pw-must-change').checked,
+    })
   });
   const data = await resp.json();
-  if (data.success) { alert('Password reset successfully.'); location.reload(); }
-  else alert(data.error);
+  if (data.success) { closeResetPw(); location.reload(); }
+  else { msg.textContent = data.error || 'Could not reset password.'; msg.style.display = 'block'; }
 }
 
 async function toggleForcePwChange(id, isForced) {
@@ -2699,15 +2763,17 @@ async function saveEditUser() {
 }
 
 /* ── My Account ────────────────────────────────────────────────── */
+// The submit button stays disabled until the live rule checklist is all green,
+// so by the time changePassword() runs the policy is already satisfied
+// client-side (the server re-validates regardless).
+const _acctPwRulesUpdate = pwRulesBind('pw-new', 'pw-confirm', 'pw-rules',
+  ok => { document.getElementById('pw-submit').disabled = !ok; });
+
 async function changePassword() {
   const current = document.getElementById('pw-current').value;
   const newpw   = document.getElementById('pw-new').value;
-  const conf    = document.getElementById('pw-confirm').value;
   const msg     = document.getElementById('pw-msg');
-  if (newpw !== conf)    { showMsg(msg,'Passwords do not match.','error'); return; }
-  if (newpw.length < 8 || !/[A-Z]/.test(newpw) || !/[^A-Za-z0-9\s]/.test(newpw)) {
-    showMsg(msg,'Password must be at least 8 characters and include an uppercase letter and a punctuation mark.','error'); return;
-  }
+  if (!current) { showMsg(msg,'Enter your current password.','error'); return; }
   const resp = await fetch('/account/change_password', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({current_password:current, new_password:newpw})
@@ -2715,6 +2781,10 @@ async function changePassword() {
   const data = await resp.json();
   showMsg(msg, data.success ? 'Password changed successfully.' : data.error,
           data.success ? 'success' : 'error');
+  if (data.success) {
+    ['pw-current','pw-new','pw-confirm'].forEach(id => document.getElementById(id).value = '');
+    if (_acctPwRulesUpdate) _acctPwRulesUpdate();
+  }
 }
 
 /* ── Arts Groups ────────────────────────────────────────────────── */
