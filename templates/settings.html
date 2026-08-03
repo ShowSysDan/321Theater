@@ -895,8 +895,8 @@
     <div class="form-section-header"><span class="section-icon">◈</span> USER LAST LOGIN</div>
     <div class="form-section-body no-pad">
       <table class="data-table" id="god-users-table">
-        <thead><tr><th>USER</th><th>USERNAME</th><th>ROLE</th><th>LAST LOGIN</th></tr></thead>
-        <tbody><tr><td colspan="4" class="text-dim" style="padding:16px;font-size:12px">Loading...</td></tr></tbody>
+        <thead><tr><th>USER</th><th>USERNAME</th><th>ROLE</th><th>LAST LOGIN</th><th>LAST CONNECT</th></tr></thead>
+        <tbody><tr><td colspan="5" class="text-dim" style="padding:16px;font-size:12px">Loading...</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -2999,6 +2999,20 @@ async function saveUploadSize(form) {
 }
 
 /* ── God Mode ───────────────────────────────────────────────────── */
+function godConnCell(u) {
+  const path = u.last_conn_path || '';
+  if (!path) return '—';
+  const isGw = path === 'gateway';
+  const label = isGw ? 'GATEWAY' : 'INTERNAL';
+  // amber for gateway (came in from the public internet), green for internal
+  const bg = isGw ? 'rgba(245,127,32,.18)' : 'rgba(60,180,110,.16)';
+  const fg = isGw ? '#F0A050' : '#5FB574';
+  const ip = u.last_conn_ip ? ` <span class="mono" style="opacity:.7">${u.last_conn_ip}</span>` : '';
+  const when = u.last_conn_at ? ` · ${fmtDate(u.last_conn_at)}` : '';
+  return `<span style="display:inline-block;padding:1px 6px;border-radius:4px;`
+       + `background:${bg};color:${fg};font-size:10px;font-weight:600">${label}</span>${ip}${when}`;
+}
+
 async function loadGodMode() {
   try {
     const resp = await fetch('/api/admin/god-mode');
@@ -3029,6 +3043,7 @@ async function loadGodMode() {
         <td class="mono text-sm">${u.username}</td>
         <td><span class="role-badge role-${u.role}">${u.role.toUpperCase()}</span></td>
         <td class="text-dim" style="font-size:11px">${fmtDate(u.last_login)}</td>
+        <td class="text-dim" style="font-size:11px">${godConnCell(u)}</td>
       </tr>`).join('');
     }
   } catch(e) {

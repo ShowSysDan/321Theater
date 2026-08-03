@@ -1412,6 +1412,51 @@ def _populate_session_from_user(user, ts=None):
         _apply_view_as_override(session['_view_as'])
 
 
+def _connection_path():
+    """How the current request reached us: 'gateway' if it arrived through the
+    public VPS gateway, else 'internal' (LAN/direct).
+
+    The trusted-proxy middleware stamps `werkzeug.proxy_fix.orig_remote_addr`
+    ONLY when the raw socket peer is a configured TRUSTED_PROXY_IPS entry (the
+    gateway), so this can't be forged by a LAN client hitting :5400 directly.
+    With no gateway configured the key is never set and everything reads
+    'internal', unchanged."""
+    if request.environ.get('werkzeug.proxy_fix.orig_remote_addr'):
+        return 'gateway'
+    return 'internal'
+
+
+_GATEWAY_COOKIE_NAME = os.environ.get('GATEWAY_COOKIE_NAME', '__Host-321gate')
+
+
+def _clear_gateway_cookies(resp):
+    """If this request carries the VPS gateway's cookie, expire it on the way
+    out. The app and the gateway share the public origin (dpc.321.theater), so
+    the browser applies these deletions — logging out of the app therefore
+    also drops the gateway session, sending the user back to the email-code
+    gate rather than leaving a valid pre-auth behind. Only emits a Set-Cookie
+    for a cookie that's actually present, so LAN logouts are unaffected. The
+    deletion mirrors the __Host- prefix rules (Secure, Path=/, no Domain) or
+    browsers ignore it."""
+    for name in (_GATEWAY_COOKIE_NAME, _GATEWAY_COOKIE_NAME + '-pending'):
+        if request.cookies.get(name):
+            resp.delete_cookie(name, path='/', secure=True, httponly=True,
+                               samesite='Lax')
+
+
+def _record_connection(db, user_id):
+    """Update the user's last-connection fields (path + real client IP + time).
+    Best-effort; never raises out."""
+    try:
+        db.execute(
+            'UPDATE users SET last_conn_path=?, last_conn_ip=?, '
+            'last_conn_at=CURRENT_TIMESTAMP WHERE id=?',
+            (_connection_path(), (request.remote_addr or '')[:64], user_id))
+        db.commit()
+    except Exception:
+        pass
+
+
 @app.before_request
 def _refresh_session_roles():
     """Re-check user role/permissions from DB every 5 minutes to catch demotions."""
@@ -1423,22 +1468,27 @@ def _refresh_session_roles():
         return
     try:
         db = get_db()
-        user = db.execute(
-            'SELECT id, role, display_name, is_readonly, is_scheduler, is_asset_manager, '
-            '       is_document_viewer, viewer_venues, viewer_doc_types, '
-            '       viewer_labor_overview, viewer_show_calendar, is_locked '
-            'FROM users WHERE id=?',
-            (session['user_id'],)
-        ).fetchone()
-        db.close()
-        if not user:
-            session.clear()
-            return redirect(url_for('login'))
-        # An account locked mid-session is booted on the next refresh (≤5 min).
-        if user['is_locked']:
-            session.clear()
-            flash('This account has been locked. Contact an administrator.', 'error')
-            return redirect(url_for('login'))
+        try:
+            user = db.execute(
+                'SELECT id, role, display_name, is_readonly, is_scheduler, is_asset_manager, '
+                '       is_document_viewer, viewer_venues, viewer_doc_types, '
+                '       viewer_labor_overview, viewer_show_calendar, is_locked '
+                'FROM users WHERE id=?',
+                (session['user_id'],)
+            ).fetchone()
+            if not user:
+                session.clear()
+                return redirect(url_for('login'))
+            # An account locked mid-session is booted on the next refresh (≤5 min).
+            if user['is_locked']:
+                session.clear()
+                flash('This account has been locked. Contact an administrator.', 'error')
+                return redirect(url_for('login'))
+            # Refresh last-connection so the path stays current if a user moves
+            # between the LAN and the gateway mid-session (same session cookie).
+            _record_connection(db, session['user_id'])
+        finally:
+            db.close()
         _populate_session_from_user(user, ts=now)
     except Exception:
         pass
@@ -3835,9 +3885,14 @@ def _login_route():
                     f"LOGIN_BLOCKED_LOCKED user={username} ip={request.remote_addr}")
                 flash('This account has been locked. Contact an administrator.', 'error')
                 return render_template('login.html', next=request.args.get('next', ''))
-            # Update last_login timestamp
+            # Update last_login + how they connected (internal vs VPS gateway)
+            _cpath = _connection_path()
             try:
-                db.execute('UPDATE users SET last_login=CURRENT_TIMESTAMP WHERE id=?', (user['id'],))
+                db.execute(
+                    'UPDATE users SET last_login=CURRENT_TIMESTAMP, '
+                    'last_conn_path=?, last_conn_ip=?, last_conn_at=CURRENT_TIMESTAMP '
+                    'WHERE id=?',
+                    (_cpath, (request.remote_addr or '')[:64], user['id']))
                 db.commit()
             except Exception:
                 pass
@@ -3855,11 +3910,12 @@ def _login_route():
             except AttributeError:
                 pass  # Non-DB session backend in use (DISABLE_DB_SESSIONS=1)
             _populate_session_from_user(user)
-            log_audit(db, 'LOGIN', 'user', user['id'], detail=username)
+            log_audit(db, 'LOGIN', 'user', user['id'], detail=f'{username} via {_cpath}')
             db.commit()
             db.close()
             session.permanent = True
-            syslog_logger.info(f"LOGIN user={username} ip={request.remote_addr}")
+            syslog_logger.info(
+                f"LOGIN user={username} ip={request.remote_addr} via={_cpath}")
             # Prevent open redirect — only allow relative paths
             if not next_url or not next_url.startswith('/') or next_url.startswith('//'):
                 next_url = url_for('dashboard')
@@ -3901,11 +3957,18 @@ def logout():
     syslog_logger.info(f"LOGOUT user={session.get('username')}")
     if session.get('user_id'):
         db = get_db()
-        log_audit(db, 'LOGOUT', 'user', session['user_id'])
-        db.commit()
-        db.close()
+        try:
+            log_audit(db, 'LOGOUT', 'user', session['user_id'])
+            db.commit()
+        finally:
+            db.close()
     session.clear()
-    return redirect(url_for('login'))
+    resp = redirect(url_for('login'))
+    # Gateway users: also drop the gateway pre-auth so logout sends them back
+    # to the email-code gate, not straight to the app login behind a still-
+    # valid gate cookie.
+    _clear_gateway_cookies(resp)
+    return resp
 
 
 # ─── VPS Gateway pre-auth (internal API) ──────────────────────────────────────
@@ -10050,7 +10113,8 @@ def api_god_mode():
         ORDER BY acs.last_seen DESC
     """).fetchall()
     users = db.execute("""
-        SELECT id, display_name, username, role, last_login
+        SELECT id, display_name, username, role, last_login,
+               last_conn_path, last_conn_ip, last_conn_at
         FROM users ORDER BY display_name
     """).fetchall()
     db.close()
@@ -10068,6 +10132,9 @@ def api_god_mode():
             'username': u['username'],
             'role': u['role'],
             'last_login': u['last_login'] or '—',
+            'last_conn_path': u['last_conn_path'] or '',
+            'last_conn_ip': u['last_conn_ip'] or '',
+            'last_conn_at': u['last_conn_at'],
         } for u in users],
     })
 
