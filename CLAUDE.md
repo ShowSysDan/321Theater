@@ -172,6 +172,34 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
   log; the `/prism` page shows env checks (node/SDK/token/DB), sync history,
   and a raw-payload viewer per staged event.
 
+## Two deployment targets — ALWAYS tell the user what to redeploy
+This project ships to **two** machines, and a change often only affects one.
+At the end of any change that touches code/config, **state plainly which
+side(s) need to be redeployed** and give the commands. Never leave the user
+to guess.
+
+- **Main app** (internal server, e.g. `10.201.2.101`): anything in `app.py`,
+  `init_db.py`, `db_adapter.py`, `templates/`, `static/`, `prism_*`,
+  `start.sh`, `install.sh`, or the app's `.env`.
+  → `cd <app dir> && git pull && sudo systemctl restart 321theater`
+  (schema migrations auto-apply on startup — no manual `init_db --migrate`).
+
+- **VPS gateway** (public box `cyclorama`): anything under `gateway/`
+  (`gateway_app.py`, its templates/static, `Caddyfile.example`,
+  `321gateway.service`, `install.sh`, `gateway.env.example`), or the VPS's
+  `/etc/321gateway/gateway.env`.
+  → `cd /opt/321gateway-src && git pull && sudo bash gateway/install.sh`
+  (add `--rewrite-caddy` only when the `GATE_APP_INTERNAL_URLS` server list
+  changed).
+
+- **Both**: a change spanning the internal OTP API *and* the gateway client,
+  or a shared secret / cookie-name / server-list change — say so and give
+  both command blocks, and flag anything that must stay in sync between the
+  two `.env` files (`GATEWAY_SHARED_SECRET` == `GATE_SHARED_SECRET`).
+
+- **Neither / docs-only**: say that too, so the user knows no redeploy is
+  needed.
+
 ## Git
 Develop on the branch you were assigned; commit with clear messages; push with
 `git push -u origin <branch>`. Do not open a PR unless explicitly asked.
