@@ -79,7 +79,15 @@ button:hover { filter: brightness(1.08); }
 
 .gate-foot {
   margin-top: 1.75rem;
-  font-size: 0.72rem;
-  color: #5f6672;
   text-align: center;
+}
+.gate-foot-org {
+  font-size: 0.8rem;
+  color: #9aa0a6;
+}
+.gate-foot-fine {
+  margin-top: 0.25rem;
+  font-size: 0.68rem;
+  color: #5f6672;
+  line-height: 1.4;
 }
