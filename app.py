@@ -61,10 +61,11 @@ import s3_storage
 import pdf_layouts
 import nav_layout
 import prism_module  # sandboxed Prism FM integration — wired up near the bottom
+import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
 
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, session, jsonify, make_response, abort, send_file,
-                   has_request_context)
+                   has_request_context, g)
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
@@ -543,7 +544,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.29.0'
+APP_VERSION = '2.30.1'
 
 # Flask-Limiter for login rate limiting
 try:
@@ -716,6 +717,210 @@ def _is_stale_pg_fallback(db):
     configured = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
     active = getattr(db, 'db_type', None)
     return configured == 'postgres' and active != 'postgres'
+
+
+# ─── Per-Page Performance Stats (database query timer) ───────────────────────
+#
+# Answers "is the app getting slower as the dataset grows?" without external
+# tooling. (pg_stat_statements can time individual SQL statements but has no
+# idea which PAGE issued them, so trends live here in the app.) Three parts:
+#
+#   1. db_adapter.query_timer_hook → _perf_record_query() stopwatches every
+#      execute()/executemany() and accumulates per-request totals on flask.g.
+#      Queries from background jobs (no request context) are ignored.
+#   2. _perf_finish_request() (teardown_request) folds each finished request
+#      into an in-memory buffer keyed by (day, endpoint): request count,
+#      total/min/max wall time, DB time, query count, and the single slowest
+#      query seen. Queries at/over the perf_slow_query_ms threshold are also
+#      buffered for the individual slow-query log.
+#   3. Every _PERF_FLUSH_INTERVAL seconds the buffer is merged into the DB
+#      (perf_page_stats daily rollups + perf_slow_queries) with an ADDITIVE
+#      upsert, so 4 workers × N servers can all flush the same (day,
+#      endpoint) row without clobbering each other. Per the background-write
+#      rule, a flush that lands on a stale SQLite fallback drops its batch
+#      instead of writing stats into the bootstrap file.
+#
+# Overhead: two perf_counter() calls per query + dict math per request, and
+# one small write batch per worker per minute. Losing up to a minute of
+# buffered stats on a hard worker kill is accepted. Admin UI: /admin/performance.
+# Settings (app_settings keys, no UI — set via God Mode if ever needed):
+#   perf_tracking_enabled ('1'/'0', default '1') — checked at flush time.
+#   perf_slow_query_ms (default 100) — slow-query log threshold.
+
+_PERF_FLUSH_INTERVAL = 60        # seconds between buffer flushes (per worker)
+_PERF_SQL_SNIPPET_LEN = 400      # max chars of SQL text stored per query
+_PERF_SLOW_BUFFER_MAX = 200      # max slow-query rows buffered between flushes
+_PERF_SLOW_PER_REQUEST = 10      # max slow-query rows recorded per request
+_PERF_DEFAULT_SLOW_MS = 100.0
+
+_perf_lock = threading.Lock()
+_perf_pages = {}                 # (date_iso, endpoint) → accumulator dict
+_perf_slow = []                  # buffered perf_slow_queries rows
+_perf_last_flush = time.time()
+# Settings snapshot, refreshed once per flush so the per-query hot path never
+# reads the DB. Until the first refresh we collect with the defaults below.
+_perf_conf = {'enabled': True, 'slow_ms': _PERF_DEFAULT_SLOW_MS}
+
+
+def _perf_record_query(sql, duration_s):
+    """db_adapter query hook — accumulate DB time on the current request.
+    Must be cheap and must never raise (db_adapter guards the call anyway)."""
+    if not has_request_context() or getattr(g, '_perf_done', False):
+        return
+    ms = duration_s * 1000.0
+    g._perf_db_ms = getattr(g, '_perf_db_ms', 0.0) + ms
+    g._perf_db_count = getattr(g, '_perf_db_count', 0) + 1
+    if ms > getattr(g, '_perf_db_max_ms', 0.0):
+        g._perf_db_max_ms = ms
+        g._perf_db_max_sql = sql[:_PERF_SQL_SNIPPET_LEN]
+    if ms >= _perf_conf['slow_ms']:
+        slow = getattr(g, '_perf_slow', None)
+        if slow is None:
+            slow = g._perf_slow = []
+        if len(slow) < _PERF_SLOW_PER_REQUEST:
+            slow.append((ms, sql[:_PERF_SQL_SNIPPET_LEN]))
+
+
+db_adapter.query_timer_hook = _perf_record_query
+
+
+@app.before_request
+def _perf_start_request():
+    g._perf_start = time.perf_counter()
+
+
+# Additive daily-rollup upsert. Portable: both SQLite (≥3.24) and PostgreSQL
+# support INSERT ... ON CONFLICT with `excluded.` for the incoming values and
+# table-qualified names for the existing row. Counters add; min/max/slowest
+# merge — so concurrent flushes from other workers never clobber each other.
+_PERF_UPSERT_SQL = """
+    INSERT INTO perf_page_stats
+        (stat_date, endpoint, request_count, total_ms, min_ms, max_ms,
+         db_ms, db_query_count, db_max_ms, slow_sql, slow_ms, slow_path, slow_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (stat_date, endpoint) DO UPDATE SET
+        request_count  = perf_page_stats.request_count + excluded.request_count,
+        total_ms       = perf_page_stats.total_ms + excluded.total_ms,
+        min_ms         = CASE WHEN excluded.min_ms < perf_page_stats.min_ms
+                              THEN excluded.min_ms ELSE perf_page_stats.min_ms END,
+        max_ms         = CASE WHEN excluded.max_ms > perf_page_stats.max_ms
+                              THEN excluded.max_ms ELSE perf_page_stats.max_ms END,
+        db_ms          = perf_page_stats.db_ms + excluded.db_ms,
+        db_query_count = perf_page_stats.db_query_count + excluded.db_query_count,
+        db_max_ms      = CASE WHEN excluded.db_max_ms > perf_page_stats.db_max_ms
+                              THEN excluded.db_max_ms ELSE perf_page_stats.db_max_ms END,
+        slow_sql       = CASE WHEN excluded.slow_ms > perf_page_stats.slow_ms
+                              THEN excluded.slow_sql ELSE perf_page_stats.slow_sql END,
+        slow_path      = CASE WHEN excluded.slow_ms > perf_page_stats.slow_ms
+                              THEN excluded.slow_path ELSE perf_page_stats.slow_path END,
+        slow_at        = CASE WHEN excluded.slow_ms > perf_page_stats.slow_ms
+                              THEN excluded.slow_at ELSE perf_page_stats.slow_at END,
+        slow_ms        = CASE WHEN excluded.slow_ms > perf_page_stats.slow_ms
+                              THEN excluded.slow_ms ELSE perf_page_stats.slow_ms END
+"""
+
+
+def _perf_flush(pages, slow_rows):
+    """Merge one worker's buffered stats into the DB. Never raises.
+    Runs at most once per _PERF_FLUSH_INTERVAL per worker, from the teardown
+    of whichever request happened to cross the interval."""
+    try:
+        # Refresh the settings snapshot the hot path reads (once per flush).
+        try:
+            _perf_conf['slow_ms'] = float(
+                get_app_setting('perf_slow_query_ms', '') or _PERF_DEFAULT_SLOW_MS)
+        except (TypeError, ValueError):
+            _perf_conf['slow_ms'] = _PERF_DEFAULT_SLOW_MS
+        _perf_conf['enabled'] = get_app_setting('perf_tracking_enabled', '1') in ('1', 'true')
+        if not _perf_conf['enabled']:
+            return  # tracking off — drop the batch
+        db = get_db()
+    except Exception:
+        return
+    try:
+        if _is_stale_pg_fallback(db):
+            app.logger.error(
+                'perf stats flush skipped — PostgreSQL unreachable (stale SQLite '
+                'fallback); dropping this batch rather than writing to the bootstrap')
+            return
+        for (stat_date, endpoint), r in pages.items():
+            db.execute(_PERF_UPSERT_SQL, (
+                stat_date, endpoint,
+                r['count'], r['total_ms'], r['min_ms'], r['max_ms'],
+                r['db_ms'], r['db_count'], r['db_max_ms'],
+                r['slow_sql'], r['slow_ms'], r['slow_path'], r['slow_at'],
+            ))
+        if slow_rows:
+            db.executemany(
+                'INSERT INTO perf_slow_queries '
+                '(occurred_at, endpoint, path, duration_ms, sql_text) '
+                'VALUES (?, ?, ?, ?, ?)', slow_rows)
+        db.commit()
+    except Exception as e:
+        app.logger.warning(f'perf stats flush failed: {e}')
+    finally:
+        db.close()
+
+
+@app.teardown_request
+def _perf_finish_request(exc=None):
+    """Fold the finished request into the in-memory buffer; flush when due."""
+    global _perf_last_flush
+    try:
+        start = getattr(g, '_perf_start', None)
+        endpoint = request.endpoint
+        if start is None or not endpoint or endpoint == 'static':
+            return
+        # From here on the request is accounted for — the flush below runs its
+        # own queries inside this same request context, and this flag stops the
+        # hook from folding them into the (already-recorded) request.
+        g._perf_done = True
+        total_ms = (time.perf_counter() - start) * 1000.0
+        db_ms = getattr(g, '_perf_db_ms', 0.0)
+        db_count = getattr(g, '_perf_db_count', 0)
+        db_max_ms = getattr(g, '_perf_db_max_ms', 0.0)
+        db_max_sql = getattr(g, '_perf_db_max_sql', '')
+        slow = getattr(g, '_perf_slow', None)
+        now = datetime.now()
+        path = request.path[:200]
+        key = (date.today().isoformat(), endpoint)
+
+        flush_pages = flush_slow = None
+        with _perf_lock:
+            r = _perf_pages.get(key)
+            if r is None:
+                r = _perf_pages[key] = {
+                    'count': 0, 'total_ms': 0.0,
+                    'min_ms': total_ms, 'max_ms': 0.0,
+                    'db_ms': 0.0, 'db_count': 0, 'db_max_ms': 0.0,
+                    'slow_sql': '', 'slow_ms': 0.0, 'slow_path': '', 'slow_at': None,
+                }
+            r['count'] += 1
+            r['total_ms'] += total_ms
+            r['min_ms'] = min(r['min_ms'], total_ms)
+            r['max_ms'] = max(r['max_ms'], total_ms)
+            r['db_ms'] += db_ms
+            r['db_count'] += db_count
+            r['db_max_ms'] = max(r['db_max_ms'], db_max_ms)
+            if db_max_ms > r['slow_ms']:
+                r['slow_ms'] = db_max_ms
+                r['slow_sql'] = db_max_sql
+                r['slow_path'] = path
+                r['slow_at'] = now
+            if slow:
+                for ms, sql_text in slow:
+                    if len(_perf_slow) >= _PERF_SLOW_BUFFER_MAX:
+                        break
+                    _perf_slow.append((now, endpoint, path, ms, sql_text))
+            if time.time() - _perf_last_flush >= _PERF_FLUSH_INTERVAL:
+                _perf_last_flush = time.time()
+                flush_pages, flush_slow = dict(_perf_pages), list(_perf_slow)
+                _perf_pages.clear()
+                _perf_slow.clear()
+        if flush_pages or flush_slow:
+            _perf_flush(flush_pages or {}, flush_slow or [])
+    except Exception:
+        pass
 
 
 # ─── Cluster Heartbeat (multi-server leader election) ────────────────────────
@@ -1609,7 +1814,13 @@ def _ensure_backup_dirs():
 
 
 def _run_pg_dump(dest_path, settings):
-    """Run pg_dump and write the compressed SQL dump to dest_path (.sql.gz)."""
+    """Run pg_dump and write the compressed SQL dump to dest_path (.sql.gz).
+
+    Written ATOMICALLY (temp file in the same directory + os.replace) so a
+    reader — the DB Snapshots inspector, an rsync, a second writer racing on
+    the same minute stamp — can never see a torn/interleaved file. In-place
+    writes produced real corrupt .sql.gz backups (valid gzip stream followed
+    by trailing garbage, or garbage at byte 0)."""
     env = os.environ.copy()
     env['PGPASSWORD'] = settings.get('pg_password', '')
     cmd = [
@@ -1622,8 +1833,17 @@ def _run_pg_dump(dest_path, settings):
     result = subprocess.run(cmd, capture_output=True, env=env, timeout=300)
     if result.returncode != 0:
         raise RuntimeError(f"pg_dump failed: {result.stderr.decode('utf-8', errors='replace')}")
-    with gzip.open(dest_path, 'wb') as f:
-        f.write(result.stdout)
+    tmp_path = f'{dest_path}.{os.getpid()}.tmp'
+    try:
+        with gzip.open(tmp_path, 'wb') as f:
+            f.write(result.stdout)
+        os.replace(tmp_path, dest_path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def _run_db_backup(kind, ts_fmt, keep):
@@ -1639,7 +1859,18 @@ def _run_db_backup(kind, ts_fmt, keep):
     if settings.get('db_type') == 'postgres':
         _run_pg_dump(dest, settings)
     else:
-        shutil.copy2(DATABASE, dest)
+        # Same atomic pattern as _run_pg_dump so a reader never sees a
+        # half-copied .db file.
+        tmp = f'{dest}.{os.getpid()}.tmp'
+        try:
+            shutil.copy2(DATABASE, tmp)
+            os.replace(tmp, dest)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
     syslog_logger.info(f'BACKUP_CREATED type={kind} file={dest}')
     files = sorted(
         [f for f in os.listdir(dest_dir) if f.endswith(ext)],
@@ -1647,6 +1878,15 @@ def _run_db_backup(kind, ts_fmt, keep):
     )
     for old in files[keep:]:
         os.remove(os.path.join(dest_dir, old))
+    # Sweep any .tmp leftovers from a crashed writer (>1 h old).
+    for f in os.listdir(dest_dir):
+        if f.endswith('.tmp'):
+            p = os.path.join(dest_dir, f)
+            try:
+                if time.time() - os.path.getmtime(p) > 3600:
+                    os.remove(p)
+            except OSError:
+                pass
 
 
 def _run_once_per_host(tag, fn):
@@ -1692,11 +1932,12 @@ def run_daily_backup():
 
 
 def run_hourly_maintenance():
-    """Leader-gated hourly housekeeping. Currently harvests expired
-    server-side session rows: the login path rotates the session id (leaving
-    the old row behind) and expired rows are only deleted if that exact sid
-    is presented again — which a rotated cookie never is — so without this
-    sweep app_sessions grows forever. Leader-gated so one worker does it."""
+    """Leader-gated hourly housekeeping. Harvests expired server-side
+    session rows: the login path rotates the session id (leaving the old row
+    behind) and expired rows are only deleted if that exact sid is presented
+    again — which a rotated cookie never is — so without this sweep
+    app_sessions grows forever. Also trims the perf-stats tables to their
+    retention windows. Leader-gated so one worker does it."""
     if not am_i_leader():
         return
     db = get_db()
@@ -1705,9 +1946,15 @@ def run_hourly_maintenance():
             return
         db.execute('DELETE FROM app_sessions WHERE expires_at < ?',
                    (datetime.utcnow(),))
+        # Perf stats retention: 3 years of daily page rollups (they're tiny —
+        # one row per page per day), 90 days of the individual slow-query log.
+        db.execute('DELETE FROM perf_page_stats WHERE stat_date < ?',
+                   ((date.today() - timedelta(days=1095)).isoformat(),))
+        db.execute('DELETE FROM perf_slow_queries WHERE occurred_at < ?',
+                   (datetime.now() - timedelta(days=90),))
         db.commit()
     except Exception as e:
-        app.logger.warning(f'session harvest failed: {e}')
+        app.logger.warning(f'hourly maintenance failed: {e}')
     finally:
         db.close()
 
@@ -7459,6 +7706,107 @@ def audit_log_view():
         per_page=per_page,
         total_pages=max(1, (total + per_page - 1) // per_page),
         filters={k: v for k, v in request.args.items() if k != 'page'},
+        user=get_current_user(),
+    )
+
+
+@app.route('/admin/performance')
+@admin_required
+def performance_view():
+    """Admin page: per-page response-time and DB-time stats over a period.
+
+    Reads the perf_page_stats daily rollups (written by the collector near
+    _perf_flush) and aggregates per endpoint in Python — portable across
+    SQLite/PG and trivial at this table's size (one row per page per day)."""
+    try:
+        days = max(1, min(1095, int(request.args.get('days', 30))))
+    except (TypeError, ValueError):
+        days = 30
+    cutoff_date = (date.today() - timedelta(days=days - 1)).isoformat()
+
+    db = get_db()
+    try:
+        rows = db.execute(
+            'SELECT stat_date, endpoint, request_count, total_ms, min_ms, max_ms, '
+            '       db_ms, db_query_count, db_max_ms, slow_sql, slow_ms, slow_path, slow_at '
+            'FROM perf_page_stats WHERE stat_date >= ? ORDER BY stat_date',
+            (cutoff_date,)).fetchall()
+        slow_queries = db.execute(
+            'SELECT occurred_at, endpoint, path, duration_ms, sql_text '
+            'FROM perf_slow_queries WHERE occurred_at >= ? '
+            'ORDER BY duration_ms DESC LIMIT 25',
+            (datetime.now() - timedelta(days=days),)).fetchall()
+    finally:
+        db.close()
+
+    pages = {}   # endpoint → aggregate
+    daily = {}   # date_iso → {'requests', 'total_ms', 'db_ms'}
+    for r in rows:
+        p = pages.setdefault(r['endpoint'], {
+            'endpoint': r['endpoint'], 'requests': 0, 'total_ms': 0.0,
+            'min_ms': None, 'max_ms': 0.0, 'db_ms': 0.0, 'db_queries': 0,
+            'db_max_ms': 0.0, 'slow_ms': 0.0, 'slow_sql': '', 'slow_path': '',
+            'slow_at': None,
+        })
+        p['requests'] += r['request_count']
+        p['total_ms'] += r['total_ms']
+        p['min_ms'] = r['min_ms'] if p['min_ms'] is None else min(p['min_ms'], r['min_ms'])
+        p['max_ms'] = max(p['max_ms'], r['max_ms'])
+        p['db_ms'] += r['db_ms']
+        p['db_queries'] += r['db_query_count']
+        p['db_max_ms'] = max(p['db_max_ms'], r['db_max_ms'])
+        if r['slow_ms'] and r['slow_ms'] > p['slow_ms']:
+            p['slow_ms'] = r['slow_ms']
+            p['slow_sql'] = r['slow_sql'] or ''
+            p['slow_path'] = r['slow_path'] or ''
+            p['slow_at'] = str(r['slow_at'] or '')[:19]
+        d = daily.setdefault(str(r['stat_date'])[:10],
+                             {'requests': 0, 'total_ms': 0.0, 'db_ms': 0.0})
+        d['requests'] += r['request_count']
+        d['total_ms'] += r['total_ms']
+        d['db_ms'] += r['db_ms']
+
+    for p in pages.values():
+        n = p['requests'] or 1
+        p['avg_ms'] = p['total_ms'] / n
+        p['avg_db_ms'] = p['db_ms'] / n
+        p['avg_queries'] = p['db_queries'] / n
+        p['db_share'] = (p['db_ms'] / p['total_ms'] * 100.0) if p['total_ms'] else 0.0
+        p['min_ms'] = p['min_ms'] or 0.0
+    page_list = sorted(pages.values(), key=lambda p: p['total_ms'], reverse=True)
+
+    trend = []
+    for day in sorted(daily):
+        d = daily[day]
+        n = d['requests'] or 1
+        trend.append({'date': day, 'requests': d['requests'],
+                      'avg_ms': d['total_ms'] / n, 'avg_db_ms': d['db_ms'] / n})
+
+    total_requests = sum(p['requests'] for p in page_list)
+    sum_total_ms = sum(p['total_ms'] for p in page_list)
+    sum_db_ms = sum(p['db_ms'] for p in page_list)
+    summary = {
+        'requests': total_requests,
+        'avg_ms': (sum_total_ms / total_requests) if total_requests else 0.0,
+        'avg_db_ms': (sum_db_ms / total_requests) if total_requests else 0.0,
+        'db_share': (sum_db_ms / sum_total_ms * 100.0) if sum_total_ms else 0.0,
+    }
+
+    slow_list = [{
+        'occurred_at': str(q['occurred_at'] or '')[:19],
+        'endpoint': q['endpoint'] or '',
+        'path': q['path'] or '',
+        'duration_ms': q['duration_ms'] or 0.0,
+        'sql_text': q['sql_text'] or '',
+    } for q in slow_queries]
+
+    return render_template('performance.html',
+        days=days,
+        pages=page_list,
+        trend=trend,
+        summary=summary,
+        slow_queries=slow_list,
+        slow_threshold_ms=_perf_conf['slow_ms'],
         user=get_current_user(),
     )
 
@@ -20414,6 +20762,26 @@ prism_module.register(
     log_audit=log_audit,
     db_adapter=db_adapter,
     DATABASE=DATABASE,
+    syslog_logger=syslog_logger,
+)
+
+
+# ─── DB snapshot inspection & recovery (sandboxed) ────────────────────────────
+# Admin tooling over the hourly/daily backups written by run_hourly_backup /
+# run_daily_backup above: inspect a snapshot's contents, diff any table
+# against live data, and surgically restore rows or a whole show —
+# preview → confirm → apply, audit-logged. All logic lives in
+# snapshot_module.py + templates/snapshots.html behind this one call.
+
+snapshot_module.register(
+    app,
+    get_db=get_db,
+    get_current_user=get_current_user,
+    admin_required=admin_required,
+    log_audit=log_audit,
+    db_adapter=db_adapter,
+    DATABASE=DATABASE,
+    BACKUP_DIR=BACKUP_DIR,
     syslog_logger=syslog_logger,
 )
 

@@ -110,6 +110,41 @@ apps. For a 321Theater access change, use this app's own flags instead
   (`GET/PUT /shows/<id>/labor-days`); cover PM stores the contact NAME, same
   convention as the `production_manager` advance field.
 
+## Per-page performance stats (admin Settings → Performance)
+- `db_adapter.query_timer_hook` stopwatches every `execute()`/`executemany()`;
+  app.py's collector (`_perf_record_query` / `_perf_finish_request` /
+  `_perf_flush`) rolls finished requests up per `(day, endpoint)` in memory and
+  flushes ~once a minute per worker with an ADDITIVE upsert into
+  `perf_page_stats`, plus individual queries ≥ `perf_slow_query_ms` (default
+  100 ms) into `perf_slow_queries`. Admin UI: `/admin/performance`.
+- The upsert merges (counters add, min/max/slowest compare) so concurrent
+  workers can flush the same row — don't replace it with INSERT OR REPLACE,
+  which would clobber. Flushes on a stale SQLite fallback drop the batch
+  (background-write rule). Retention is trimmed in `run_hourly_maintenance`.
+- Background-job queries (no request context) are intentionally not tracked.
+  Keep the hook path allocation-free and never let it raise.
+
+## DB snapshot inspection & recovery (Settings → DB Snapshots)
+- `snapshot_module.py` + `templates/snapshots.html`, wired by one
+  `snapshot_module.register(app, …)` call next to the Prism registration.
+  Reads the hourly/daily backups written by `run_hourly_backup` /
+  `run_daily_backup` (plain `pg_dump` .sql.gz on PG, file copy .db on SQLite;
+  per-server local disk).
+- Dumps are parsed in **pure Python** (streaming COPY-block parser) — a
+  snapshot is never loaded into the PostgreSQL server. Diff is keyed on the
+  table's primary key (parsed from the dump / PRAGMA); values are normalized
+  to COPY text form before comparing.
+- Restore is preview → confirm → apply: apply re-derives the plan and
+  compares its hash against the previewed one (409 on drift), runs in ONE
+  transaction, audit-logs every row with before-images, and on PG re-syncs
+  id sequences after inserts. Two modes: per-show rollback/resurrection
+  (`shows` row + `SHOW_CHILD_TABLES`) and row cherry-pick from the diff view.
+- `RESTORE_BLOCKED` tables (users/sessions/tokens/audit/email_send_log/
+  perf/cluster) are inspect-only — don't widen without being asked; restoring
+  `email_send_log` would re-send advance emails, `audit_log` would falsify
+  history, `users` is the shared cross-app directory. Restore also refuses on
+  a stale SQLite fallback and on snapshot↔live backend mismatch.
+
 ## Prism FM integration (SANDBOXED — keep it that way)
 Prism is the building's primary scheduling system. The integration lives in
 `prism_module.py` + `prism_bridge/` + `templates/prism.html`, wired into

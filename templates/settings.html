@@ -39,6 +39,8 @@
   <button class="tab-btn" onclick="switchSettingsTab('system')">System</button>
   <button class="tab-btn" onclick="switchSettingsTab('email')">Email</button>
   <a href="{{ url_for('audit_log_view') }}" class="tab-btn">Audit Log</a>
+  <a href="{{ url_for('performance_view') }}" class="tab-btn" title="Per-page response times and database query timing">Performance</a>
+  <a href="{{ url_for('snapshots_page') }}" class="tab-btn" title="Inspect hourly/daily database backups, diff against live data, and recover rows or whole shows">DB Snapshots</a>
   <button class="tab-btn" onclick="switchSettingsTab('dashboards')">Dashboards</button>
   <a href="{{ url_for('prism_page') }}" class="tab-btn">Prism Sync</a>
   <a href="{{ url_for('nav_editor_page') }}" class="tab-btn">Sidebar Editor</a>

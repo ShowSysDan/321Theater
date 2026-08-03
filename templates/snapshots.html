@@ -1,0 +1,453 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+
+  DB Snapshots — inspect hourly/daily database backups, diff them against
+  live data, and surgically restore rows or whole shows. Backed by
+  snapshot_module.py (all endpoints admin-only).
+#}
+{% extends "base.html" %}
+{% block title %}DB Snapshots — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">DB Snapshots</h1>
+    <p class="page-sub">Inspect an hourly or daily backup, see what changed since, and recover pieces without a full restore.</p>
+  </div>
+  <a href="{{ url_for('settings') }}" class="btn btn-secondary">← Settings</a>
+</div>
+
+{% if stale_fallback %}
+<div class="form-section" style="margin-bottom:1.25rem;border-color:var(--red)">
+  <div class="form-section-body" style="color:var(--red)">
+    ⚠ The configured backend is PostgreSQL but this connection fell back to the SQLite bootstrap —
+    “live” data shown here is stale, and restore is disabled. Fix the PostgreSQL connection first.
+  </div>
+</div>
+{% endif %}
+
+{# ── Snapshot list ─────────────────────────────────────────────────────────── #}
+<div class="form-section" style="margin-bottom:1.5rem">
+  <div class="form-section-header"><span class="section-icon">◈</span> SNAPSHOTS ON THIS SERVER
+    <span class="text-dim" style="font-weight:400;font-size:.78rem;margin-left:.6rem">hourly = last 24 · daily = last 30 · each app server keeps its own copies</span>
+  </div>
+  {% if not snapshots %}
+  <div class="empty-state"><p>No snapshot files found yet — the backup job writes one at the top of every hour.</p></div>
+  {% else %}
+  <table class="data-table" style="font-size:.85rem">
+    <thead><tr>
+      <th>TAKEN</th><th>AGE</th><th>KIND</th><th>BACKEND</th>
+      <th style="text-align:right">SIZE</th><th></th>
+    </tr></thead>
+    <tbody>
+      {% for s in snapshots %}
+      <tr>
+        <td style="font-family:var(--font-mono,monospace)">{{ s.mtime.strftime('%Y-%m-%d %H:%M') }}</td>
+        <td class="text-dim">
+          {% set mins = ((now - s.mtime).total_seconds() // 60)|int %}
+          {% if mins < 60 %}{{ mins }} min{% elif mins < 2880 %}{{ (mins // 60) }} h {{ mins % 60 }} min{% else %}{{ (mins // 1440) }} days{% endif %}
+        </td>
+        <td>{{ s.kind }}</td>
+        <td class="text-dim">{{ s.backend }}</td>
+        <td style="text-align:right" class="text-dim">{{ '%.1f'|format(s.size / 1048576) }} MB</td>
+        <td style="text-align:right">
+          {% if s.healthy %}
+          <button class="btn btn-primary btn-sm" onclick="openSnapshot('{{ s.kind }}','{{ s.name }}')">Inspect</button>
+          {% else %}
+          <span style="color:var(--red);font-size:.78rem"
+                title="This file does not start with {{ 'gzip' if s.backend == 'postgres' else 'SQLite' }} data — it was corrupted when it was written and cannot be inspected or restored from.">⚠ corrupt</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+{# ── Inspect panel ─────────────────────────────────────────────────────────── #}
+<div id="inspect-panel" style="display:none">
+  <div class="form-section" style="margin-bottom:1.5rem">
+    <div class="form-section-header"><span class="section-icon">◈</span> INSPECTING <span id="insp-name" style="font-family:var(--font-mono,monospace)"></span></div>
+    <div class="form-section-body">
+      <div id="insp-warnings"></div>
+      <div style="display:flex;gap:.5rem;margin-bottom:1rem;flex-wrap:wrap">
+        <button class="btn btn-sm" id="tab-tables" onclick="showView('tables')">Tables &amp; Diff</button>
+        <button class="btn btn-sm" id="tab-shows" onclick="showView('shows')">Per-Show Restore</button>
+      </div>
+
+      {# Tables list #}
+      <div id="view-tables">
+        <div id="tables-loading" class="text-dim">Reading snapshot…</div>
+        <div id="tables-list" style="display:none;overflow-x:auto">
+          <table class="data-table" style="font-size:.83rem">
+            <thead><tr>
+              <th>TABLE</th>
+              <th style="text-align:right">SNAPSHOT ROWS</th>
+              <th style="text-align:right">LIVE ROWS</th>
+              <th></th><th></th>
+            </tr></thead>
+            <tbody id="tables-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      {# Table diff #}
+      <div id="view-diff" style="display:none">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:.75rem;flex-wrap:wrap;margin-bottom:.75rem">
+          <div>
+            <button class="btn btn-secondary btn-sm" onclick="showView('tables')">← All tables</button>
+            <strong id="diff-title" style="margin-left:.6rem;font-family:var(--font-mono,monospace)"></strong>
+          </div>
+          <div id="diff-summary" class="text-dim" style="font-size:.85rem"></div>
+        </div>
+        <div id="diff-warnings"></div>
+        <div id="diff-loading" class="text-dim">Comparing…</div>
+        <div id="diff-body" style="display:none">
+          <div id="diff-sections"></div>
+          <div id="diff-actions" style="display:none;margin-top:1rem;display:flex;gap:.5rem;flex-wrap:wrap">
+            <button class="btn btn-primary" onclick="previewRows()">Preview restore of selected…</button>
+            <span class="text-dim" id="diff-sel-count" style="align-self:center;font-size:.85rem"></span>
+          </div>
+        </div>
+      </div>
+
+      {# Per-show restore #}
+      <div id="view-shows" style="display:none">
+        <p class="text-dim" style="font-size:.85rem;margin-bottom:.75rem">
+          Roll one show back to how it looked in this snapshot — its show record, advance fields, schedule,
+          notes, performances, comments, attachments, labor and assets. Shows deleted from live can be resurrected.
+          Sent-email history and audit logs are never rewound.
+        </p>
+        <div id="shows-loading" class="text-dim">Reading shows…</div>
+        <div id="shows-picker" style="display:none;max-width:640px">
+          <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+            <select id="show-select" class="form-input" style="flex:1;min-width:260px"></select>
+            <button class="btn btn-primary" onclick="previewShow()">Preview restore…</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Preview / confirm modal ───────────────────────────────────────────────── #}
+<div id="preview-modal" class="modal-overlay hidden">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <span>Confirm restore</span>
+      <button class="modal-close" onclick="closePreview()">×</button>
+    </div>
+    <div class="modal-body" style="max-height:60vh;overflow-y:auto">
+      <div id="preview-warnings"></div>
+      <div id="preview-content" style="font-size:.85rem"></div>
+      <label style="display:flex;gap:.5rem;align-items:flex-start;font-size:.85rem;margin-top:.5rem">
+        <input type="checkbox" id="confirm-check" style="margin-top:2px">
+        <span>I understand this will overwrite live data with snapshot values in one transaction.
+              Every change is written to the Audit Log.</span>
+      </label>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closePreview()">Cancel</button>
+      <button class="btn btn-primary" id="apply-btn" onclick="applyPlan()" disabled>Apply restore</button>
+    </div>
+  </div>
+</div>
+
+<div id="result-banner" style="display:none;position:fixed;bottom:24px;right:24px;z-index:1100;max-width:420px"
+     class="form-section"><div class="form-section-body" id="result-text"></div></div>
+
+<script>
+const SNAP = {kind: null, name: null};
+const DIFF = {schema: null, table: null, keyed: false};
+let PENDING = null;   // payload+hash awaiting apply
+
+const HDRS = {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'};
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtVal = v => v === null ? '<span class="text-dim">NULL</span>' : esc(v) || '<span class="text-dim">″″</span>';
+
+function qs(extra) {
+  const p = new URLSearchParams({kind: SNAP.kind, name: SNAP.name, ...(extra || {})});
+  return p.toString();
+}
+
+async function getJSON(url) {
+  const r = await fetch(url, {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+  return r.json();
+}
+async function postJSON(url, payload) {
+  const r = await fetch(url, {method: 'POST', headers: HDRS, body: JSON.stringify(payload)});
+  return r.json();
+}
+
+function banner(msg, ok) {
+  const b = document.getElementById('result-banner');
+  const t = document.getElementById('result-text');
+  t.innerHTML = msg;
+  t.style.color = ok ? 'var(--green, #40c878)' : 'var(--red, #e05555)';
+  b.style.display = 'block';
+  setTimeout(() => { b.style.display = 'none'; }, ok ? 8000 : 12000);
+}
+
+function warningsHTML(list) {
+  return (list || []).map(w =>
+    `<div style="color:var(--red);font-size:.85rem;margin-bottom:.5rem">⚠ ${esc(w)}</div>`).join('');
+}
+
+function openSnapshot(kind, name) {
+  SNAP.kind = kind; SNAP.name = name;
+  document.getElementById('insp-name').textContent = `${kind}/${name}`;
+  document.getElementById('inspect-panel').style.display = 'block';
+  document.getElementById('inspect-panel').scrollIntoView({behavior: 'smooth'});
+  showView('tables');
+}
+
+function showView(which) {
+  for (const v of ['tables', 'diff', 'shows'])
+    document.getElementById('view-' + v).style.display = (v === which) ? 'block' : 'none';
+  document.getElementById('tab-tables').classList.toggle('btn-primary', which !== 'shows');
+  document.getElementById('tab-shows').classList.toggle('btn-primary', which === 'shows');
+  if (which === 'tables') loadTables();
+  if (which === 'shows') loadShows();
+}
+
+async function loadTables() {
+  document.getElementById('tables-loading').style.display = 'block';
+  document.getElementById('tables-list').style.display = 'none';
+  const data = await getJSON('{{ url_for('snapshots_tables') }}?' + qs());
+  document.getElementById('tables-loading').style.display = 'none';
+  if (!data.success) { banner(esc(data.error), false); return; }
+  document.getElementById('insp-warnings').innerHTML = warningsHTML(data.warnings);
+  const body = document.getElementById('tables-body');
+  body.innerHTML = '';
+  for (const t of data.tables) {
+    const tr = document.createElement('tr');
+    const delta = (t.snap_rows !== null && t.live_rows !== null && t.snap_rows !== t.live_rows)
+      ? `<span style="color:var(--accent)">${t.live_rows - t.snap_rows > 0 ? '+' : ''}${t.live_rows - t.snap_rows} rows</span>` : '';
+    let badge = '';
+    if (!t.in_snapshot) badge = '<span class="text-dim">not in snapshot</span>';
+    else if (!t.in_live) badge = '<span style="color:var(--red)">missing from live</span>';
+    else if (t.system) badge = '<span class="text-dim">system</span>';
+    if (!t.restorable && t.in_snapshot && t.in_live)
+      badge += ' <span class="text-dim" title="This table can be inspected but never written from here">inspect-only</span>';
+    tr.innerHTML =
+      `<td style="font-family:var(--font-mono,monospace)">${esc(t.table)}</td>` +
+      `<td style="text-align:right">${t.snap_rows === null ? '—' : t.snap_rows.toLocaleString()}</td>` +
+      `<td style="text-align:right">${t.live_rows === null ? '—' : t.live_rows.toLocaleString()}</td>` +
+      `<td>${delta}</td>` +
+      `<td style="text-align:right">${badge} ` +
+      (t.in_snapshot && t.in_live
+        ? `<button class="btn btn-secondary btn-sm" onclick="openDiff('${esc(t.schema)}','${esc(t.table)}',${t.restorable})">Diff</button>`
+        : '') + `</td>`;
+    body.appendChild(tr);
+  }
+  document.getElementById('tables-list').style.display = 'block';
+}
+
+async function openDiff(schema, table, restorable) {
+  DIFF.schema = schema; DIFF.table = table; DIFF.restorable = restorable;
+  showView('diff');
+  document.getElementById('diff-title').textContent = table;
+  document.getElementById('diff-loading').style.display = 'block';
+  document.getElementById('diff-body').style.display = 'none';
+  document.getElementById('diff-summary').textContent = '';
+  document.getElementById('diff-warnings').innerHTML = '';
+  const data = await getJSON('{{ url_for('snapshots_diff') }}?' + qs({schema, table}));
+  document.getElementById('diff-loading').style.display = 'none';
+  if (!data.success) {
+    document.getElementById('diff-warnings').innerHTML = warningsHTML([data.error]);
+    return;
+  }
+  renderDiff(data.diff);
+}
+
+function rowDetails(row) {
+  const items = Object.entries(row).map(([c, v]) =>
+    `<div><span class="text-dim" style="font-family:var(--font-mono,monospace)">${esc(c)}:</span> ${fmtVal(v)}</div>`);
+  return `<details><summary style="cursor:pointer" class="text-dim">row values</summary>
+          <div style="padding:.4rem 0 .2rem 1rem;max-width:900px;overflow-wrap:anywhere">${items.join('')}</div></details>`;
+}
+
+function renderDiff(d) {
+  DIFF.keyed = !!d.keyed_by;
+  const s = document.getElementById('diff-sections');
+  s.innerHTML = '';
+  document.getElementById('diff-summary').textContent =
+    `${d.changed_total} changed · ${d.removed_total} removed from live · ${d.added_total} added since · ${d.same_total} identical`;
+  const warns = [];
+  if (!d.keyed_by) warns.push('No usable primary key — showing set differences only; row restore is unavailable for this table.');
+  if (d.capped) warns.push('Long lists are truncated to the first 400 rows per bucket.');
+  if (d.snap_only_columns.length) warns.push('Columns only in snapshot (ignored): ' + d.snap_only_columns.join(', '));
+  if (d.live_only_columns.length) warns.push('Columns added since snapshot (kept as-is on restore): ' + d.live_only_columns.join(', '));
+  if (d.blocked) warns.push('This table is inspect-only — restore is intentionally blocked for it.');
+  document.getElementById('diff-warnings').innerHTML = warningsHTML(warns);
+
+  const canPick = DIFF.keyed && DIFF.restorable && !d.blocked;
+  const section = (title, sub, entries, kindAttr, renderer) => {
+    if (!entries.length) return;
+    const div = document.createElement('div');
+    div.className = 'form-section';
+    div.style.marginBottom = '1rem';
+    div.innerHTML = `<div class="form-section-header"><span class="section-icon">◈</span> ${title}
+        <span class="text-dim" style="font-weight:400;font-size:.75rem;margin-left:.5rem">${sub}</span></div>`;
+    const bodyDiv = document.createElement('div');
+    bodyDiv.className = 'form-section-body';
+    for (const e of entries) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:.6rem;align-items:flex-start;padding:.35rem 0;border-bottom:1px solid var(--border)';
+      if (canPick && e.key !== null) {
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'diff-pick';
+        cb.dataset.kind = kindAttr;
+        cb.dataset.key = e.key;
+        cb.style.marginTop = '3px';
+        cb.addEventListener('change', updateSelCount);
+        row.appendChild(cb);
+      }
+      const content = document.createElement('div');
+      content.style.flex = '1';
+      content.innerHTML = renderer(e);
+      row.appendChild(content);
+      bodyDiv.appendChild(row);
+    }
+    div.appendChild(bodyDiv);
+    s.appendChild(div);
+  };
+
+  section('CHANGED SINCE SNAPSHOT', 'check a row to restore its snapshot values', d.changed, 'restore', e => {
+    const pk = Object.entries(e.pk || {}).map(([c, v]) => `${esc(c)}=${esc(v)}`).join(', ');
+    const fields = e.fields.map(f =>
+      `<div style="overflow-wrap:anywhere"><span style="font-family:var(--font-mono,monospace)">${esc(f.column)}</span>:
+         <span style="color:var(--red)">${fmtVal(f.live)}</span> <span class="text-dim">← live · snapshot →</span>
+         <span style="color:var(--green,#40c878)">${fmtVal(f.snapshot)}</span></div>`).join('');
+    return `<div><strong>${esc(pk)}</strong></div>${fields}`;
+  });
+  section('REMOVED FROM LIVE', 'rows in the snapshot that no longer exist — check to re-insert', d.removed, 'restore', e => {
+    const pk = e.key ? `<strong>key ${esc(e.key)}</strong> ` : '';
+    return pk + rowDetails(e.row);
+  });
+  section('ADDED SINCE SNAPSHOT', 'rows created after the snapshot — check only if you want them DELETED', d.added, 'delete', e => {
+    const pk = e.key ? `<strong>key ${esc(e.key)}</strong> ` : '';
+    return pk + rowDetails(e.row);
+  });
+
+  if (!d.changed.length && !d.removed.length && !d.added.length)
+    s.innerHTML = '<div class="empty-state"><p>No differences — live data matches this snapshot.</p></div>';
+
+  document.getElementById('diff-actions').style.display = canPick ? 'flex' : 'none';
+  updateSelCount();
+  document.getElementById('diff-body').style.display = 'block';
+}
+
+function collectSelection() {
+  const restore = [], del = [];
+  for (const cb of document.querySelectorAll('.diff-pick:checked'))
+    (cb.dataset.kind === 'restore' ? restore : del).push(cb.dataset.key);
+  return {restore, del};
+}
+
+function updateSelCount() {
+  const {restore, del} = collectSelection();
+  const parts = [];
+  if (restore.length) parts.push(`${restore.length} to restore`);
+  if (del.length) parts.push(`${del.length} to delete`);
+  document.getElementById('diff-sel-count').textContent = parts.join(' · ');
+}
+
+async function loadShows() {
+  document.getElementById('shows-loading').style.display = 'block';
+  document.getElementById('shows-picker').style.display = 'none';
+  const data = await getJSON('{{ url_for('snapshots_shows') }}?' + qs());
+  document.getElementById('shows-loading').style.display = 'none';
+  if (!data.success) { banner(esc(data.error), false); return; }
+  const sel = document.getElementById('show-select');
+  sel.innerHTML = '';
+  sel.dataset.schema = data.schema;
+  for (const sh of data.shows) {
+    const o = document.createElement('option');
+    o.value = sh.id;
+    o.textContent = `${sh.show_date || 'no date'} — ${sh.name}` +
+      (sh.exists_live ? '' : '  [DELETED from live]') +
+      (sh.status && sh.status !== 'active' ? `  (${sh.status})` : '');
+    sel.appendChild(o);
+  }
+  document.getElementById('shows-picker').style.display = 'block';
+}
+
+function renderPreview(p) {
+  const rows = p.tables.map(t => {
+    const samples = [];
+    for (const u of t.sample_updates) {
+      const pk = Object.entries(u.pk).map(([c, v]) => `${esc(c)}=${esc(v)}`).join(', ');
+      samples.push(`<div style="padding-left:1rem">↺ ${esc(pk)}: ` + u.fields.map(f =>
+        `${esc(f.column)} <span style="color:var(--red)">${fmtVal(f.live)}</span>→<span style="color:var(--green,#40c878)">${fmtVal(f.snapshot)}</span>`
+      ).join(', ') + '</div>');
+    }
+    for (const r of t.sample_inserts) samples.push(`<div style="padding-left:1rem">+ re-insert ${rowDetails(r)}</div>`);
+    for (const r of t.sample_deletes) samples.push(`<div style="padding-left:1rem">− delete ${rowDetails(r)}</div>`);
+    const capped = (t.updates + t.inserts + t.deletes) >
+                   (t.sample_updates.length + t.sample_inserts.length + t.sample_deletes.length);
+    return `<div style="margin-bottom:.7rem"><strong style="font-family:var(--font-mono,monospace)">${esc(t.table)}</strong>
+      <span class="text-dim"> — ${t.updates} update${t.updates === 1 ? '' : 's'}, ${t.inserts} insert${t.inserts === 1 ? '' : 's'}, ${t.deletes} delete${t.deletes === 1 ? '' : 's'}</span>
+      ${samples.join('')}${capped ? '<div class="text-dim" style="padding-left:1rem">…and more (samples truncated)</div>' : ''}</div>`;
+  });
+  document.getElementById('preview-warnings').innerHTML = warningsHTML(p.warnings);
+  document.getElementById('preview-content').innerHTML =
+    `<div style="margin-bottom:.6rem"><strong>${p.total_changes}</strong> row change${p.total_changes === 1 ? '' : 's'} across ${p.tables.length} table${p.tables.length === 1 ? '' : 's'}, from <span style="font-family:var(--font-mono,monospace)">${esc(SNAP.kind)}/${esc(SNAP.name)}</span>:</div>`
+    + rows.join('');
+  document.getElementById('confirm-check').checked = false;
+  document.getElementById('apply-btn').disabled = true;
+  document.getElementById('preview-modal').classList.remove('hidden');
+}
+
+document.getElementById('confirm-check').addEventListener('change', function () {
+  document.getElementById('apply-btn').disabled = !this.checked;
+});
+
+async function previewRows() {
+  const {restore, del} = collectSelection();
+  if (!restore.length && !del.length) { banner('Nothing selected.', false); return; }
+  const payload = {kind: SNAP.kind, name: SNAP.name, mode: 'rows',
+                   schema: DIFF.schema, table: DIFF.table, restore, delete: del};
+  const data = await postJSON('{{ url_for('snapshots_preview') }}', payload);
+  if (!data.success) { banner(esc(data.error), false); return; }
+  PENDING = {...payload, hash: data.preview.hash};
+  renderPreview(data.preview);
+}
+
+async function previewShow() {
+  const sel = document.getElementById('show-select');
+  if (!sel.value) return;
+  const payload = {kind: SNAP.kind, name: SNAP.name, mode: 'show', show_id: parseInt(sel.value, 10)};
+  const data = await postJSON('{{ url_for('snapshots_preview') }}', payload);
+  if (!data.success) { banner(esc(data.error), false); return; }
+  PENDING = {...payload, hash: data.preview.hash};
+  renderPreview(data.preview);
+}
+
+function closePreview() {
+  document.getElementById('preview-modal').classList.add('hidden');
+  PENDING = null;
+}
+
+async function applyPlan() {
+  if (!PENDING) return;
+  const btn = document.getElementById('apply-btn');
+  btn.disabled = true;
+  btn.textContent = 'Applying…';
+  const data = await postJSON('{{ url_for('snapshots_apply') }}', PENDING);
+  btn.textContent = 'Apply restore';
+  document.getElementById('preview-modal').classList.add('hidden');
+  if (!data.success) { banner(esc(data.error), false); PENDING = null; return; }
+  const summary = data.counts.map(c => `${esc(c.table)}: ${c.inserted}+ ${c.updated}↺ ${c.deleted}−`).join(' · ');
+  banner(`Restored ${data.total_changes} row change${data.total_changes === 1 ? '' : 's'} — ${summary}. Details in the Audit Log.`, true);
+  const wasShow = PENDING.mode === 'show';
+  PENDING = null;
+  if (wasShow) loadShows(); else openDiff(DIFF.schema, DIFF.table, DIFF.restorable);
+}
+</script>
+{% endblock %}
