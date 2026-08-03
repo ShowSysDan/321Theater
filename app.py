@@ -546,6 +546,31 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   PATCH — bug fixes, small improvements, security patches
 APP_VERSION = '2.30.1'
 
+# ── Static asset caching ──────────────────────────────────────────────────────
+# Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
+# asset automatically gets a fresh URL on deploy; that lets us set a long
+# max-age safely (no stale files after an update). Matters most behind the VPS
+# gateway: without it, each CSS/JS/font/icon costs a full tunnel round trip on
+# every page load — with it, they're fetched once and served from cache.
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = timedelta(days=30)
+
+_STATIC_VER = {}
+
+
+@app.url_defaults
+def _static_cache_bust(endpoint, values):
+    if endpoint == 'static' and values.get('filename'):
+        fn = values['filename']
+        v = _STATIC_VER.get(fn)
+        if v is None:
+            try:
+                v = str(int(os.path.getmtime(os.path.join(app.static_folder, fn))))
+            except OSError:
+                v = APP_VERSION
+            _STATIC_VER[fn] = v
+        values['v'] = v
+
+
 # Flask-Limiter for login rate limiting
 try:
     from flask_limiter import Limiter
@@ -4055,13 +4080,34 @@ def _gateway_email_key(email):
 def _gateway_send_otp_email(to_addr, code):
     """Fire-and-forget OTP email; failures land in email_send_errors so they
     show up in the Settings → Email Send Errors panel."""
-    subject = '3·2·1→THEATER: Your access code'
+    subject = 'Your 3·2·1→Theater access code'
+    mins = _GATEWAY_OTP_TTL_MIN
     body = (
-        f'Your one-time access code is: {code}\n\n'
-        f'Enter it on the access page to continue to 3·2·1→Theater. '
-        f'The code expires in {_GATEWAY_OTP_TTL_MIN} minutes and works once.\n\n'
-        f'If you did not request this code, you can ignore this email — '
-        f'nobody can get in without both this code and your password.'
+        f'Your one-time access code for 3·2·1→Theater is:\n\n'
+        f'    {code}\n\n'
+        f'Enter this code on the access page to continue. For your security, '
+        f'it expires in {mins} minutes and can be used only once.\n\n'
+        f'If you did not request this code, you can disregard this message.\n\n'
+        f'— 3·2·1→Theater\n'
+        f'Dr. Phillips Center for the Performing Arts'
+    )
+    body_html = (
+        '<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;'
+        'max-width:480px;margin:0 auto;color:#1d2026">'
+        '<p style="font-size:15px;margin:0 0 18px">Your one-time access code for '
+        '<strong>3&middot;2&middot;1&rarr;Theater</strong> is:</p>'
+        f'<div style="font-size:32px;font-weight:700;letter-spacing:8px;text-align:center;'
+        f'padding:18px;background:#f6f7f9;border:1px solid #e3e6ea;border-radius:10px;'
+        f'color:#14161a">{code}</div>'
+        f'<p style="font-size:14px;color:#5f6672;margin:18px 0 0">Enter this code on the '
+        f'access page to continue. For your security, it expires in {mins} minutes and can '
+        f'be used only once.</p>'
+        '<p style="font-size:13px;color:#9aa0a6;margin:14px 0 0">If you did not request '
+        'this code, you can disregard this message.</p>'
+        '<hr style="border:none;border-top:1px solid #e3e6ea;margin:22px 0 12px">'
+        '<p style="font-size:12px;color:#9aa0a6;margin:0">3&middot;2&middot;1&rarr;Theater '
+        '&middot; Dr. Phillips Center for the Performing Arts</p>'
+        '</div>'
     )
     def _bg():
         # _send_email writes failures to email_send_errors itself (with the
@@ -4070,7 +4116,7 @@ def _gateway_send_otp_email(to_addr, code):
         ctx = {'pdf_type': 'gateway_otp', 'triggered_by': 'gateway'}
         try:
             _send_email(subject=subject, recipients=[to_addr],
-                        body_text=body, error_context=ctx)
+                        body_text=body, body_html=body_html, error_context=ctx)
         except Exception as e:
             _log_email_error(to_addr, subject, e, **ctx)
     threading.Thread(target=_bg, daemon=True).start()
