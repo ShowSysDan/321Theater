@@ -1383,6 +1383,75 @@ select option { background: var(--bg-surface); color: var(--text); }
   border-color: #5a2d2d;
 }
 
+/* ── Session-expiry watchdog toast (app.js _initSessionWatch) ─────── */
+.session-toast {
+  position: fixed;
+  bottom: 76px;               /* clears the save-toast slot below it */
+  right: 28px;
+  z-index: 9998;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: 400px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  background: #3a2f14;
+  color: #fcd34d;
+  border: 1px solid #92700e;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+  opacity: 0;
+  transform: translateY(12px);
+  pointer-events: none;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+.session-toast.show {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.session-toast.urgent {
+  background: #3a1e1e;
+  color: #fca5a5;
+  border-color: #7f2d2d;
+}
+.session-toast-icon { font-size: 18px; line-height: 1.2; flex-shrink: 0 }
+.session-toast-body { flex: 1; min-width: 0 }
+.session-toast-title {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin-bottom: 2px;
+}
+.session-toast-msg { font-size: 12px; line-height: 1.45; opacity: .92 }
+.session-toast-msg b { font-variant-numeric: tabular-nums }
+.session-toast-btn {
+  flex-shrink: 0;
+  align-self: center;
+  padding: 6px 12px;
+  border-radius: 5px;
+  border: 1px solid currentColor;
+  background: rgba(255,255,255,.06);
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.session-toast-btn:hover:not(:disabled) { background: rgba(255,255,255,.14) }
+.session-toast-btn:disabled { opacity: .5; cursor: default }
+.session-toast-x {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: .6;
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.session-toast-x:hover { opacity: 1 }
+
 /* ── Field message colours (shared by settings forms) ─────────────── */
 .field-msg-warning {
   color: #f59e0b;
@@ -1478,6 +1547,23 @@ html[data-theme="light"] .other-saved-banner {
   background: #fffbeb;
   border-color: #f59e0b;
   color: #92400e;
+}
+html[data-theme="light"] .session-toast {
+  background: #fffbeb;
+  color: #92400e;
+  border-color: #f59e0b;
+  box-shadow: 0 6px 24px rgba(0,0,0,.14);
+}
+html[data-theme="light"] .session-toast.urgent {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+html[data-theme="light"] .session-toast-btn {
+  background: rgba(0,0,0,.04);
+}
+html[data-theme="light"] .session-toast-btn:hover:not(:disabled) {
+  background: rgba(0,0,0,.09);
 }
 html[data-theme="light"] .presence-indicator {
   color: #b45309;

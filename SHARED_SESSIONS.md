@@ -236,7 +236,38 @@ Notes:
    once. That's usually what you want — confirm it matches your UX
    expectation.
 
-## 5. Rolling back
+## 5. Expiry semantics & the expiry-warning watchdog (2.32.0)
+
+How a session actually ages, since it's easy to misread from the code:
+
+- `save_session` only writes (and only re-issues the cookie) when the session
+  is **modified or new**. On its own that would make the 12-hour lifetime a
+  hard deadline from login.
+- In practice 321Theater's 5-minute role refresh (`_refresh_session_roles`)
+  repopulates session keys on the first request after each 5-minute window,
+  which marks the session modified — so **any activity (including an open
+  tab's background polls) slides `expires_at` forward** by the full lifetime.
+  Sessions genuinely expire only after a real gap: laptop asleep, browser
+  closed overnight, etc.
+- Expired rows are deleted lazily when their sid is presented again (now with
+  a `SESSION_EXPIRED` syslog line) and swept hourly by `run_hourly_maintenance`
+  (`SESSION_HARVEST count=N`).
+
+Client-facing endpoints added for the session-expiry warning banner:
+
+- `GET /api/session/status` → `{authenticated, seconds_remaining,
+  lifetime_seconds}`. **Deliberately read-only**: it never marks the session
+  modified, never sets a cookie, and answers JSON even for logged-out callers
+  (`authenticated: false` is the watchdog's signal that the session is dead).
+  `seconds_remaining` is `null` under `DISABLE_DB_SESSIONS=1` (no server-side
+  deadline exists to report).
+- `POST /api/session/extend` (login required) → marks the session modified so
+  `save_session` re-issues a fresh `expires_at`/cookie. Logs `SESSION_EXTEND`.
+
+A sister app sharing `app_sessions` can implement the same pair against the
+same table; extending in either app extends the shared session for both.
+
+## 6. Rolling back
 
 321Theater respects `DISABLE_DB_SESSIONS=1` in the environment — set it and
 restart and Flask's default signed-cookie sessions come back. The

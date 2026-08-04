@@ -4232,3 +4232,298 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
 
   document.addEventListener('pointerout', () => clearTimeout(hoverTimer), { passive: true });
 })();
+
+/* ═══════════════════════════════════════════════════════════════════
+   SESSION EXPIRY WATCHDOG
+   ═══════════════════════════════════════════════════════════════════
+   Warns before the user gets kicked out of a session, instead of letting
+   them keep typing into a dead one. Two independent clocks are tracked and
+   the SOONER one drives the banner:
+
+   • App session (all deployments): server-side deadline from
+     GET /api/session/status. This clock normally SLIDES — any request after
+     the 5-minute role refresh rewrites expires_at — so it only ever runs low
+     after a real gap in activity (laptop slept, tab left closed overnight).
+     The "Stay signed in" button POSTs /api/session/extend for a fresh 12 h.
+
+   • VPS gateway cookie (HTTPS/public access only): deadline from
+     GET /__gate/status. This clock is a HARD 12 h from the emailed code —
+     it cannot be extended, only re-verified. The button opens the gate's
+     login form in a new tab; completing it there re-mints the cookie without
+     losing anything in this tab (the next resync sees the new deadline and
+     clears the warning). The endpoint only exists behind the gateway, so
+     it's probed on https: origins only (plain-HTTP LAN skips it).
+
+   Behavior: resync to the real server deadlines on load, on tab focus /
+   visibility, and every 5 minutes; count down locally in between (so a tab
+   left open keeps aging even with timers throttled — focus resync corrects
+   any drift the moment the user comes back). Warning banner at 15, 10 and
+   5 minutes (dismissing hides it until the next threshold), red under 60 s.
+   At zero: verify against the server first (never trust a throttled local
+   timer alone), then show "session ended" and auto-reload after a short
+   grace countdown — the reload lands on the app login / email-code gate
+   with a next= back to this page. The auto-reload can be cancelled so
+   unsaved text can be copied out first.                                  */
+(function _initSessionWatch() {
+  // Logged-in pages only: .app-layout exists solely inside base.html's
+  // {% if user %} branch. Login, public dashboards etc. get no watchdog.
+  if (!document.querySelector('.app-layout')) return;
+
+  const WARN_STEPS     = [15 * 60, 10 * 60, 5 * 60]; // thresholds, seconds
+  const URGENT_AT      = 60;            // switch to red styling below this
+  const RESYNC_MS      = 5 * 60 * 1000; // periodic server re-check
+  const FOCUS_GAP_MS   = 30 * 1000;     // min gap between focus resyncs
+  const RELOAD_GRACE_S = 20;            // countdown before the auto-reload
+
+  let appDeadline  = null;  // epoch-ms the app session dies (null = untracked)
+  let gateDeadline = null;  // epoch-ms the gateway cookie dies
+  // Only HTTPS traffic can be behind the VPS gateway (LAN is plain HTTP by
+  // design) — don't burn a guaranteed-404 probe on every LAN page load.
+  let gateProbe    = (location.protocol === 'https:') ? 'unknown' : 'absent';
+  let shownStep    = Infinity; // smallest threshold band already announced
+  let dismissedAtStep = null;  // band the user dismissed with ×
+  let dead         = false;    // terminal state (expiry confirmed)
+  let lastSync     = 0;
+  let lastVerify   = 0;
+  let reloadTimer  = null;
+  let toast        = null;
+
+  /* ── Server resync ─────────────────────────────────────────────── */
+  async function resync() {
+    if (dead) return;
+    lastSync = Date.now();
+    // App session clock. The endpoint answers JSON logged-in or not; a 401
+    // here means the GATEWAY bounced the poll (its cookie died first).
+    try {
+      const r = await fetch('/api/session/status', { cache: 'no-store' });
+      if (r.status === 401) { markDead('gateway'); return; }
+      if (r.ok) {
+        const d = await r.json();
+        if (!d.authenticated) { markDead('app'); return; }
+        appDeadline = (d.seconds_remaining == null)
+          ? null : Date.now() + d.seconds_remaining * 1000;
+      }
+    } catch (_) { /* offline blip — keep counting on the last known deadline */ }
+
+    // Gateway clock (public HTTPS path only). 404 = no gateway on this
+    // origin — remember that and stop probing for the life of the page.
+    if (gateProbe !== 'absent') {
+      try {
+        const r = await fetch('/__gate/status', { cache: 'no-store' });
+        if (r.ok) {
+          const d = await r.json();
+          gateProbe = 'present';
+          if (!d.authenticated) { markDead('gateway'); return; }
+          gateDeadline = Date.now() + d.seconds_remaining * 1000;
+        } else if (r.status === 404) {
+          gateProbe = 'absent';
+          gateDeadline = null;
+        }
+      } catch (_) {
+        // JSON parse / network failure on the very first probe → treat as
+        // "no gateway" rather than guessing forever; keep a known one.
+        if (gateProbe === 'unknown') gateProbe = 'absent';
+      }
+    }
+  }
+
+  function remainingSec() {
+    const ds = [appDeadline, gateDeadline].filter(d => d != null);
+    if (!ds.length) return null;
+    return Math.round((Math.min(...ds) - Date.now()) / 1000);
+  }
+
+  function limitingClock() {
+    if (gateDeadline != null &&
+        (appDeadline == null || gateDeadline <= appDeadline)) return 'gateway';
+    return 'app';
+  }
+
+  /* ── Local countdown ───────────────────────────────────────────── */
+  function tick() {
+    if (dead) return;
+    const r = remainingSec();
+    if (r == null) return;
+    if (r <= 0) { verifyThenExpire(); return; }
+    if (r > WARN_STEPS[0] + 5) {
+      // Healthy again (extended / re-verified / resync corrected drift) —
+      // reset so the 15-minute warning can fire fresh next time.
+      shownStep = Infinity;
+      dismissedAtStep = null;
+      hideToast();
+      return;
+    }
+    let band = Infinity;                       // smallest step r fits under
+    for (const s of WARN_STEPS) if (r <= s) band = s;
+    if (band < shownStep) { shownStep = band; dismissedAtStep = null; }
+    if (dismissedAtStep === shownStep) { hideToast(); return; }
+    showWarn(r);
+  }
+
+  // Never expire on the local clock alone (it may have been throttled in a
+  // background tab) — confirm against the server, and don't reload a page
+  // that's simply offline: the session may well have been extended by work
+  // in another tab, and an offline reload would strand the user on a
+  // browser error page with their unsaved text gone.
+  async function verifyThenExpire() {
+    if (dead || Date.now() - lastVerify < 15 * 1000) return;
+    lastVerify = Date.now();
+    await resync();
+    if (dead) return;
+    const r = remainingSec();
+    if (r != null && r <= 0 && navigator.onLine !== false) {
+      markDead(limitingClock());
+    }
+  }
+
+  /* ── Terminal state ────────────────────────────────────────────── */
+  function markDead(which) {
+    if (dead) return;
+    dead = true;
+    // Stop the page's background pollers — they'd hammer a dead session.
+    try { clearInterval(_syncInterval); } catch (_) {}
+    try { clearInterval(_heartbeatInterval); } catch (_) {}
+    try { clearInterval(_notifPollTimer); } catch (_) {}
+    showDead(which);
+    const reloadAt = Date.now() + RELOAD_GRACE_S * 1000;
+    reloadTimer = setInterval(() => {
+      const left = Math.ceil((reloadAt - Date.now()) / 1000);
+      const el = document.getElementById('sw-reload-count');
+      if (el) el.textContent = String(Math.max(0, left));
+      if (left <= 0) {
+        clearInterval(reloadTimer);
+        reloadTimer = null;
+        location.reload();   // lands on login / the gate, with next= back here
+      }
+    }, 500);
+  }
+
+  function cancelAutoReload() {
+    if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
+    const msg = toast && toast.querySelector('[data-role="msg"]');
+    if (msg) msg.innerHTML =
+      'Auto-reload cancelled — copy out any unsaved work, then reload to sign back in.';
+  }
+
+  /* ── UI ────────────────────────────────────────────────────────── */
+  function ensureToast() {
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'session-toast';
+      toast.className = 'session-toast';
+      document.body.appendChild(toast);
+    }
+    return toast;
+  }
+
+  function hideToast() {
+    if (toast) toast.classList.remove('show', 'urgent');
+  }
+
+  function fmt(r) {
+    if (r >= 3600) return Math.floor(r / 3600) + 'h ' + Math.round((r % 3600) / 60) + 'm';
+    return Math.floor(r / 60) + ':' + String(r % 60).padStart(2, '0');
+  }
+
+  function showWarn(r) {
+    const el = ensureToast();
+    const limiting = limitingClock();
+    const mode = 'warn-' + limiting;
+    if (el._swMode !== mode) {
+      el._swMode = mode;
+      if (limiting === 'gateway') {
+        el.innerHTML = `
+          <div class="session-toast-icon">⏳</div>
+          <div class="session-toast-body">
+            <div class="session-toast-title">Secure access expiring</div>
+            <div class="session-toast-msg" data-role="msg">Your email-code access ends in
+              <b data-role="count"></b>. Save your work — a new code is needed to continue.</div>
+          </div>
+          <button type="button" class="session-toast-btn" data-role="act">Get new code</button>
+          <button type="button" class="session-toast-x" data-role="dismiss" aria-label="Dismiss">×</button>`;
+        el.querySelector('[data-role="act"]').addEventListener('click', () => {
+          // Complete the email-code flow in a second tab; the shared cookie
+          // is re-minted there, and the focus resync back on this tab sees
+          // the fresh 12 h and clears the warning — nothing here is lost.
+          window.open('/__gate/login?next=' +
+            encodeURIComponent(location.pathname + location.search), '_blank');
+        });
+      } else {
+        el.innerHTML = `
+          <div class="session-toast-icon">⏳</div>
+          <div class="session-toast-body">
+            <div class="session-toast-title">Session expiring</div>
+            <div class="session-toast-msg" data-role="msg">Your sign-in expires in
+              <b data-role="count"></b>.</div>
+          </div>
+          <button type="button" class="session-toast-btn" data-role="act">Stay signed in</button>
+          <button type="button" class="session-toast-x" data-role="dismiss" aria-label="Dismiss">×</button>`;
+        el.querySelector('[data-role="act"]').addEventListener('click', extendApp);
+      }
+      el.querySelector('[data-role="dismiss"]').addEventListener('click', () => {
+        dismissedAtStep = shownStep;   // quiet until the next threshold band
+        hideToast();
+      });
+    }
+    const count = el.querySelector('[data-role="count"]');
+    if (count) count.textContent = fmt(r);
+    el.classList.toggle('urgent', r <= URGENT_AT);
+    el.classList.add('show');
+  }
+
+  function showDead(which) {
+    const el = ensureToast();
+    el._swMode = 'dead';
+    const why = which === 'gateway'
+      ? 'Your secure access (email code) has expired.'
+      : 'Your sign-in session has ended.';
+    el.innerHTML = `
+      <div class="session-toast-icon">⛔</div>
+      <div class="session-toast-body">
+        <div class="session-toast-title">Session ended</div>
+        <div class="session-toast-msg" data-role="msg">${why}
+          Reloading in <b id="sw-reload-count">${RELOAD_GRACE_S}</b>s so you can sign back in.</div>
+      </div>
+      <button type="button" class="session-toast-btn" data-role="act">Reload now</button>
+      <button type="button" class="session-toast-x" data-role="dismiss"
+              title="Stay on this page" aria-label="Cancel auto-reload">×</button>`;
+    el.querySelector('[data-role="act"]').addEventListener('click', () => location.reload());
+    el.querySelector('[data-role="dismiss"]').addEventListener('click', cancelAutoReload);
+    el.classList.add('show', 'urgent');
+  }
+
+  async function extendApp(ev) {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    try {
+      const r = await fetch('/api/session/extend', { method: 'POST' });
+      const d = await r.json();
+      if (d.success) {
+        appDeadline = Date.now() + d.seconds_remaining * 1000;
+        shownStep = Infinity;
+        dismissedAtStep = null;
+        hideToast();
+        if (typeof showSaveToast === 'function') showSaveToast('✓ Session extended');
+        resync();   // pick up the authoritative server numbers
+        return;
+      }
+    } catch (_) { /* fall through to re-enable */ }
+    btn.disabled = false;
+  }
+
+  /* ── Wiring ────────────────────────────────────────────────────── */
+  function maybeResync() {
+    if (!dead && Date.now() - lastSync > FOCUS_GAP_MS) resync();
+  }
+
+  resync();
+  setInterval(resync, RESYNC_MS);
+  setInterval(tick, 1000);
+  // The moment someone comes back to a left-open tab, re-check the real
+  // deadlines — background-tab timer throttling makes the local countdown
+  // advisory at best while the tab is hidden.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) maybeResync();
+  });
+  window.addEventListener('focus', maybeResync);
+})();
