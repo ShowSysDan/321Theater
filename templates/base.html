@@ -14,6 +14,39 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  {% if user %}
+  {# Hover preloading (Speculation Rules, Chromium): when a link is hovered the
+     browser prefetches the page in the background so the click renders almost
+     instantly. Prefetch fetches HTML only — no JS runs, so sync polls,
+     heartbeats, presence, and read receipts are NOT triggered by a hover.
+     Multi-user safety: the advance tab silently merges the freshest field
+     values on its first sync poll, and app.js reloads any page served from a
+     prefetch that sat unused for more than ~30 s (see _initHoverPrefetch).
+     Exclusions — keep in sync with the fallback list in app.js:
+       /logout            GET destroys the session
+       *.pdf, */export/*  on-demand PDF generation + export_log writes
+       */download*        file/attachment/backup downloads
+       /static, /api      not page navigations
+     Add class="no-prefetch" to any future link that must never be prefetched
+     (e.g. a GET that mutates state — though those should be POSTs anyway). #}
+  <script>window.__PAGE_RENDERED_AT = {{ page_rendered_at }};</script>
+  <script type="speculationrules">
+  {% raw %}{
+    "prefetch": [{
+      "source": "document",
+      "where": { "and": [
+        { "href_matches": "/*" },
+        { "not": { "href_matches": [
+          "/logout", "/login*", "/static/*", "/api/*",
+          "*/export/*", "*.pdf", "*/download", "*/download/*"
+        ] } },
+        { "not": { "selector_matches": "[download], .no-prefetch" } }
+      ] },
+      "eagerness": "moderate"
+    }]
+  }{% endraw %}
+  </script>
+  {% endif %}
   <script>
     /* Apply the sidebar rail state before first paint to avoid a flash:
        honor the saved collapse preference, and force the rail on narrow

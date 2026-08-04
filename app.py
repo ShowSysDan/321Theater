@@ -421,7 +421,11 @@ def _origin_matches():
 
 @app.context_processor
 def inject_version():
-    return {'app_version': APP_VERSION}
+    # page_rendered_at (server-clock epoch) feeds the hover-preload staleness
+    # guard: a page served from the browser's prefetch cache compares this
+    # stamp against a fresh response's Date header — same clock on both sides,
+    # so client clock skew can't cause false reloads (see base.html + app.js).
+    return {'app_version': APP_VERSION, 'page_rendered_at': int(time.time())}
 
 
 @app.template_filter('pretty_json')

@@ -4124,3 +4124,94 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
   update();
   return update;
 }
+
+/* ── Hover preloading ─────────────────────────────────────────────────────────
+   Chromium browsers handle this natively via the <script type="speculationrules">
+   block in base.html (prefetch on hover, "moderate" eagerness). This section
+   adds the two pieces the declarative rules can't provide:
+
+   1. A staleness guard. A prefetched page can sit in the browser's prefetch
+      cache for up to ~5 minutes before the user clicks. The advance tab
+      self-heals (its first sync poll silently merges the freshest field
+      values), but the schedule/postnotes tabs and list pages would render the
+      old HTML with no warning — worse, the "another user saved" baseline
+      would seed from the *current* server state and mask any save that
+      happened while the page sat in cache. So: when this document was served
+      from the prefetch cache (deliveryType 'navigational-prefetch'), measure
+      its true age by comparing the render stamp baked into the page
+      (window.__PAGE_RENDERED_AT, server clock — see base.html) against the
+      Date header of a fresh HEAD request to the same server. Same clock on
+      both sides, so client clock skew can't cause false reloads. If the HTML
+      is older than 30 s, reload once for fresh state. Chrome re-anchors
+      performance.timeOrigin at activation for prefetched documents, so local
+      timing APIs cannot detect the parked time — the server clock can.
+
+   2. A best-effort <link rel="prefetch"> fallback for browsers without
+      Speculation Rules (Firefox). Safari supports neither and no-ops.
+
+   The exclusion list mirrors the speculationrules block in base.html — keep
+   the two in sync. */
+(function _initHoverPrefetch() {
+  // 1. Staleness guard for prefetch-served documents.
+  try {
+    const nav = performance.getEntriesByType('navigation')[0];
+    if (nav && nav.deliveryType === 'navigational-prefetch' && window.__PAGE_RENDERED_AT &&
+        sessionStorage.getItem('_prefetch_reloaded') !== location.href) {
+      // Cheapest same-server round trip: HEAD on a static file, cache
+      // bypassed. Only its Date response header is used.
+      fetch('/static/favicon.svg', { method: 'HEAD', cache: 'no-store' }).then(r => {
+        // Some server stacks emit a duplicated Date header ("…GMT, …GMT"),
+        // which Date.parse rejects — extract the last well-formed HTTP date.
+        const dates = (r.headers.get('Date') || '').match(/[A-Za-z]{3},[^,]*GMT/g);
+        const servedAt = dates ? Date.parse(dates[dates.length - 1]) : NaN;
+        if (servedAt && servedAt / 1000 - window.__PAGE_RENDERED_AT > 30) {
+          // One-shot latch: the reload is a normal network navigation, but if
+          // anything ever served THAT from cache too we must not loop.
+          sessionStorage.setItem('_prefetch_reloaded', location.href);
+          location.reload();
+        }
+      }).catch(() => { /* offline / gateway hiccup — keep the page we have */ });
+    } else if (nav && nav.deliveryType !== 'navigational-prefetch') {
+      sessionStorage.removeItem('_prefetch_reloaded');
+    }
+  } catch (_) { /* timing API unavailable — skip the guard */ }
+
+  // 2. Hover-prefetch fallback where Speculation Rules are unsupported.
+  if (window.HTMLScriptElement && HTMLScriptElement.supports &&
+      HTMLScriptElement.supports('speculationrules')) return;
+  const probe = document.createElement('link');
+  if (!probe.relList || !probe.relList.supports || !probe.relList.supports('prefetch')) return;
+
+  // Mirrors the href_matches exclusions in base.html's speculationrules block.
+  const EXCLUDE = [
+    /^\/logout$/, /^\/login/, /^\/static\//, /^\/api\//,
+    /\/export\//, /\.pdf$/, /\/download(\/|$)/,
+  ];
+  const prefetched = new Set();
+  let hoverTimer = null;
+
+  document.addEventListener('pointerover', (e) => {
+    if (!e.target || !e.target.closest) return;
+    const a = e.target.closest('a[href]');
+    if (!a || a.hasAttribute('download') || a.classList.contains('no-prefetch')) return;
+    if (a.target && a.target !== '_self') return;
+    let url;
+    try { url = new URL(a.href, location.href); } catch (_) { return; }
+    if (url.origin !== location.origin) return;
+    if (prefetched.has(url.href) || EXCLUDE.some(re => re.test(url.pathname))) return;
+    clearTimeout(hoverTimer);
+    // Short dwell so sweeping the cursor across the sidebar doesn't fire a
+    // server-rendered page request per link.
+    hoverTimer = setTimeout(() => {
+      if (prefetched.has(url.href)) return;
+      prefetched.add(url.href);
+      const link = document.createElement('link');
+      link.rel = 'prefetch';
+      link.href = url.href;
+      link.as = 'document';
+      document.head.appendChild(link);
+    }, 80);
+  }, { passive: true });
+
+  document.addEventListener('pointerout', () => clearTimeout(hoverTimer), { passive: true });
+})();

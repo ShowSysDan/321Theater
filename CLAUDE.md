@@ -172,6 +172,28 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
   log; the `/prism` page shows env checks (node/SDK/token/DB), sync history,
   and a raw-payload viewer per staged event.
 
+## Hover preloading (Speculation Rules)
+Logged-in pages carry a `<script type="speculationrules">` block (base.html)
+that prefetches same-origin links on hover so navigation feels instant on
+Chromium; app.js has a `<link rel=prefetch>` fallback for Firefox. Rules:
+- Prefetch fetches HTML only — no JS runs on hover, so sync polls, presence,
+  heartbeats, and read receipts are never triggered by a hover.
+- **Any new GET route with side effects or expensive generation (PDFs,
+  downloads, exports) must be added to BOTH exclusion lists** — the
+  speculationrules block in base.html and the EXCLUDE regexes in app.js's
+  `_initHoverPrefetch` — or given `class="no-prefetch"` on its links. (Better:
+  make mutating routes POST, as the rest of the app does.)
+- Multi-user staleness is handled two ways: the advance tab's first sync poll
+  silently merges the freshest field values, and app.js reloads once any page
+  served from a prefetch older than 30 s — measured by comparing the
+  `page_rendered_at` stamp (context processor in app.py) against a HEAD
+  request's Date header, both server clocks, so client clock skew can't
+  cause false reloads. Don't remove the stamp from `inject_version()`.
+- Responses must stay non-cacheable (no Cache-Control on HTML); Chrome's
+  prefetch cache is separate and capped at ~5 min. Don't add Set-Cookie to
+  ordinary GETs — a cookie change invalidates pending prefetches (the DB
+  session interface already only sets cookies when the session changes).
+
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.
 At the end of any change that touches code/config, **state plainly which
