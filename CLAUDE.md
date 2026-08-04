@@ -173,6 +173,30 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
   log; the `/prism` page shows env checks (node/SDK/token/DB), sync history,
   and a raw-payload viewer per staged event.
 
+## Sessions & the expiry watchdog (two clocks — don't conflate them)
+- **App session** (DB-backed, `app_sessions`, 12 h): SLIDES with activity —
+  the 5-minute role refresh (`_refresh_session_roles`) marks the session
+  modified, which rewrites `expires_at = now + 12 h` and re-issues the cookie.
+  Any open tab's polls keep it alive; it only runs out after a real gap
+  (sleep/closed tab).
+- **Gateway cookie** (`__Host-321gate`, signed, HttpOnly, 12 h): HARD deadline
+  from the email-code verify. By design it cannot be extended in place — only
+  re-verified. Don't add sliding behavior to it.
+- **Watchdog** (`_initSessionWatch` at the bottom of `static/js/app.js`, active
+  on any page with `.app-layout`): resyncs both clocks on load / tab focus /
+  every 5 min via `GET /api/session/status` (app) and `GET /__gate/status`
+  (gateway; HTTPS origins only — LAN would just 404), warns at 15/10/5 min,
+  red under 60 s, verifies with the server then auto-reloads at zero (20 s
+  cancellable grace). "Stay signed in" → `POST /api/session/extend`.
+- **Keep `/api/session/status` side-effect-free**: it must never mark the
+  session modified or set cookies — it's polled by idle tabs and must not
+  keep sessions alive by itself (`/api/*` is also excluded from hover
+  prefetch; keep it that way).
+- Syslog events: `SESSION_EXPIRED` (expired sid presented, fires once),
+  `SESSION_HARVEST count=N` (hourly sweep), `SESSION_EXTEND`, and
+  `GATE_SESSION_EXPIRED` in the gateway journal (HTML navigations only —
+  XHR polls stay silent).
+
 ## Hover preloading (Speculation Rules)
 Logged-in pages carry a `<script type="speculationrules">` block (base.html)
 that prefetches same-origin links on hover so navigation feels instant on

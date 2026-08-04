@@ -293,7 +293,13 @@ def gate_check():
             resp.headers['X-Gate-Email'] = (
                 data.get('e', '').encode('ascii', 'ignore').decode('ascii'))
             return resp
-        except (BadSignature, SignatureExpired):
+        except SignatureExpired:
+            # A previously-valid session just ran out (as opposed to a
+            # visitor with no/garbage cookie). Log page navigations only —
+            # a dead tab's fetch polls would spam one line per poll.
+            if not _wants_json():
+                log.info('GATE_SESSION_EXPIRED ip=%s', _client_ip())
+        except BadSignature:
             pass
     if _wants_json():
         return ('', 401)
@@ -304,6 +310,35 @@ def gate_check():
     # page parses it, silently dropping parameters after auth.
     resp.headers['Location'] = (
         '/__gate/login?next=' + quote(_safe_next(original_uri), safe='/'))
+    return resp
+
+
+@app.route('/__gate/status')
+def gate_status():
+    """Machine-readable countdown for the app's session-expiry watchdog
+    (static/js/app.js in the main repo). The gate cookie is HttpOnly and its
+    12-hour deadline lives in the itsdangerous signing timestamp, so page
+    JavaScript has no way to know when the gate will slam shut — this reports
+    seconds remaining without touching anything. Pre-auth by design (it sits
+    under /__gate/, outside forward_auth): an expired or missing cookie
+    answers authenticated=false instead of a redirect, which is exactly the
+    signal the watchdog needs. Read-only — it never re-issues the cookie;
+    re-verifying the email code is the only way to restart the 12 h clock."""
+    payload = {'authenticated': False, 'seconds_remaining': 0,
+               'lifetime_seconds': SESSION_HOURS * 3600}
+    raw = request.cookies.get(COOKIE_NAME, '')
+    if raw:
+        try:
+            _, ts = _session_signer.loads(raw, max_age=SESSION_HOURS * 3600,
+                                          return_timestamp=True)
+            remaining = int(ts.timestamp() + SESSION_HOURS * 3600 - time.time())
+            if remaining > 0:
+                payload.update(authenticated=True,
+                               seconds_remaining=remaining)
+        except (BadSignature, SignatureExpired):
+            pass
+    resp = make_response(payload)
+    resp.headers['Cache-Control'] = 'no-store'
     return resp
 
 

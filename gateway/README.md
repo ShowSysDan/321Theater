@@ -151,6 +151,20 @@ match after someone edited an env file."
 Subsequent requests skip straight to step 6 until the cookie expires
 (~12 hours), after which the visitor repeats the email-code dance.
 
+The 12 hours are a **hard** deadline — activity does not slide it. So the app
+doesn't cut people off mid-form, its pages run a session-expiry watchdog
+(2.32.0, `static/js/app.js` in the main repo) that polls the pre-auth
+`GET /__gate/status` endpoint here: it reads the seconds remaining out of the
+signed cookie's timestamp (the cookie is HttpOnly, so page JS can't do that
+itself) and warns at 15/10/5 minutes, offering to open `/__gate/login` in a
+second tab — completing the code flow there re-mints the cookie without
+losing anything in the working tab. `/__gate/status` is read-only (it never
+re-issues the cookie), answers `{authenticated, seconds_remaining,
+lifetime_seconds}` with `Cache-Control: no-store`, and reveals nothing a
+holder of the cookie doesn't already know. When a previously-valid cookie
+expires on a page navigation, the gateway logs `GATE_SESSION_EXPIRED ip=…`
+(fetch/XHR polls stay silent so a dead tab can't spam the journal).
+
 ### 1.3 Security model — what each side holds and what a compromise costs
 
 | Component | Holds | If compromised |
@@ -183,8 +197,12 @@ Enumeration resistance, in one place, because it's easy to regress:
 ### 1.5 What the gate deliberately does NOT do
 
 - It does **not** log anyone into the app — the app's session and the gate
-  cookie are independent, both ~12 h on separate clocks. `/__gate/signout`
+  cookie are independent, both ~12 h on separate clocks (the app's slides
+  with activity; the gate's is fixed — see `/__gate/status` above, which is
+  how the app's expiry-warning banner sees this clock). `/__gate/signout`
   clears only the gate; the app's own logout clears only the app.
+- It does not extend sessions. There is deliberately no "refresh my cookie"
+  endpoint — re-entering an emailed code every ~12 h is the security model.
 - It does not gate the LAN. Internal users on `10.201.2.101:5400` never see
   any of this.
 - `X-Gate-Email` (forwarded to the app for log correlation) is

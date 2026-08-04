@@ -182,6 +182,6 @@ automatically.
 
 ## Notes / accepted trade-offs
 
-- Gate cookie and app session both last 12 h but on independent clocks — acceptable; sign-out page links both.
+- Gate cookie and app session both last 12 h but on independent clocks — acceptable; sign-out page links both. (2.32.0: the gate's clock stays a HARD 12 h — no refresh endpoint, re-entering an emailed code is the model. What was added instead is visibility: pre-auth read-only `GET /__gate/status` reports seconds remaining so the app's session-expiry watchdog can warn at 15/10/5 min and offer a re-verify in a second tab. Keep it read-only; do not add cookie re-issuance to it.)
 - The per-process `memory://` Flask-Limiter weakness on `/login` is pre-existing and out of scope (real client IPs at least fix its keying).
 - LAN traffic stays HTTP; making `SESSION_COOKIE_SECURE` unconditional would require LAN HTTPS — future work.

@@ -201,6 +201,17 @@ from werkzeug.datastructures import CallbackDict as _CallbackDict
 _SID_RE = re.compile(r'^[A-Za-z0-9_-]{20,128}$')
 
 
+def _session_expires_dt(value):
+    """`app_sessions.expires_at` → datetime. PostgreSQL returns a datetime,
+    SQLite an ISO string; junk parses as already-expired (fail closed)."""
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.split('.')[0].replace('Z', ''))
+        except Exception:
+            return datetime.utcnow() - timedelta(seconds=1)
+    return value
+
+
 class _DBSession(_CallbackDict, _FlaskSessionMixin):
     def __init__(self, initial=None, sid=None, new=False):
         def _on_update(_self):
@@ -227,7 +238,7 @@ class _DBSessionInterface(_FlaskSessionInterface):
             return {}, False
         try:
             row = db.execute(
-                "SELECT data, expires_at FROM app_sessions WHERE sid = ?", (sid,)
+                "SELECT data, expires_at, user_id FROM app_sessions WHERE sid = ?", (sid,)
             ).fetchone()
         except Exception:
             try: db.close()
@@ -237,18 +248,20 @@ class _DBSessionInterface(_FlaskSessionInterface):
             try: db.close()
             except Exception: pass
             return {}, False
-        expires = row['expires_at']
-        if isinstance(expires, str):
-            try:
-                expires_dt = datetime.fromisoformat(expires.split('.')[0].replace('Z', ''))
-            except Exception:
-                expires_dt = datetime.utcnow() - timedelta(seconds=1)  # treat as expired
-        else:
-            expires_dt = expires
+        expires_dt = _session_expires_dt(row['expires_at'])
         if expires_dt < datetime.utcnow():
             try:
                 db.execute("DELETE FROM app_sessions WHERE sid = ?", (sid,))
                 db.commit()
+            except Exception:
+                pass
+            # A browser just presented a session that ran out — this user is
+            # about to be bounced to login. One line per death: the row is
+            # deleted above, so the same sid can't re-fire this.
+            try:
+                syslog_logger.info(
+                    f"SESSION_EXPIRED user_id={row['user_id']} "
+                    f"sid={sid[:8]}… ip={request.remote_addr}")
             except Exception:
                 pass
             try: db.close()
@@ -577,7 +590,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.31.0'
+APP_VERSION = '2.32.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -2002,8 +2015,12 @@ def run_hourly_maintenance():
     try:
         if _is_stale_pg_fallback(db):
             return
-        db.execute('DELETE FROM app_sessions WHERE expires_at < ?',
-                   (datetime.utcnow(),))
+        cur = db.execute('DELETE FROM app_sessions WHERE expires_at < ?',
+                         (datetime.utcnow(),))
+        try:
+            harvested = cur.rowcount or 0
+        except Exception:
+            harvested = 0
         # Perf stats retention: 3 years of daily page rollups (they're tiny —
         # one row per page per day), 90 days of the individual slow-query log.
         db.execute('DELETE FROM perf_page_stats WHERE stat_date < ?',
@@ -2011,6 +2028,11 @@ def run_hourly_maintenance():
         db.execute('DELETE FROM perf_slow_queries WHERE occurred_at < ?',
                    (datetime.now() - timedelta(days=90),))
         db.commit()
+        # Sessions that died unnoticed (logout-less departures, the login
+        # sid-rotation orphans). SESSION_EXPIRED in the session loader covers
+        # the ones a browser actually presents; this line covers the rest.
+        if harvested > 0:
+            syslog_logger.info(f'SESSION_HARVEST count={harvested}')
     except Exception as e:
         app.logger.warning(f'hourly maintenance failed: {e}')
     finally:
@@ -4027,6 +4049,74 @@ def logout():
     # valid gate cookie.
     _clear_gateway_cookies(resp)
     return resp
+
+
+# ─── Session expiry status (expiry-warning watchdog) ──────────────────────────
+# Powers the client-side session watchdog in app.js (_initSessionWatch): every
+# logged-in page resyncs to the session's real server-side deadline on load and
+# on tab-focus, counts down while the tab sits open, warns at 15/10/5 minutes,
+# and reloads at zero so nobody keeps typing into a dead session. Two clocks
+# feed it, and the sooner one wins:
+#   • this app's DB-backed session   → GET /api/session/status   (below)
+#   • the VPS gateway's 12 h cookie  → GET /__gate/status        (gateway app;
+#     only exists behind the gateway — the watchdog probes it on HTTPS only)
+# Note the two clocks age differently: the app session SLIDES with activity
+# (the 5-minute role refresh marks the session modified, which rewrites
+# expires_at = now + PERMANENT_SESSION_LIFETIME), while the gateway cookie is
+# a HARD 12 h from the email-code verification — re-auth there is by design.
+
+@app.route('/api/session/status')
+def api_session_status():
+    """Seconds until THIS app's session dies. Deliberately read-only toward
+    the session: reading flask.session never marks it modified, so this poll
+    writes no cookie and no app_sessions row. Answers JSON for logged-out
+    callers too (authenticated=false is the watchdog's death signal) — a
+    @login_required redirect-to-HTML would break the fetch()."""
+    out = {
+        'authenticated': False,
+        'seconds_remaining': 0,
+        'lifetime_seconds': int(app.permanent_session_lifetime.total_seconds()),
+    }
+    if 'user_id' in session:
+        sid = getattr(session, 'sid', None)
+        if not sid:
+            # Signed-cookie fallback (DISABLE_DB_SESSIONS=1): no server-side
+            # deadline exists. null tells the watchdog to skip this clock.
+            out.update(authenticated=True, seconds_remaining=None)
+        else:
+            db = get_db()
+            try:
+                row = db.execute(
+                    'SELECT expires_at FROM app_sessions WHERE sid = ?', (sid,)
+                ).fetchone()
+            finally:
+                db.close()
+            if row:
+                remaining = int((_session_expires_dt(row['expires_at'])
+                                 - datetime.utcnow()).total_seconds())
+                if remaining > 0:
+                    out.update(authenticated=True, seconds_remaining=remaining)
+    resp = jsonify(out)
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route('/api/session/extend', methods=['POST'])
+@login_required
+def api_session_extend():
+    """One-click "Stay signed in" from the expiry-warning banner. Touching the
+    session marks it modified, so _DBSessionInterface.save_session rewrites
+    expires_at = now + PERMANENT_SESSION_LIFETIME and re-issues the cookie
+    with the same new deadline. This can NOT extend the VPS gateway's 12 h
+    cookie — that clock belongs to the gateway and re-verifying the email
+    code is the only way to restart it (deliberate: see GATEWAY_DESIGN.md)."""
+    session.modified = True
+    syslog_logger.info(
+        f"SESSION_EXTEND user={session.get('username')} ip={request.remote_addr}")
+    return jsonify({
+        'success': True,
+        'seconds_remaining': int(app.permanent_session_lifetime.total_seconds()),
+    })
 
 
 # ─── VPS Gateway pre-auth (internal API) ──────────────────────────────────────
