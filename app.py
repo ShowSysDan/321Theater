@@ -8064,7 +8064,7 @@ def settings():
         '''SELECT cm.*, prl.name as level_name, prl.hourly_rate as level_rate
            FROM crew_members cm
            LEFT JOIN pay_rate_levels prl ON prl.id = cm.rate_level_id
-           ORDER BY cm.sort_order, cm.name'''
+           ORDER BY LOWER(cm.name)'''
     ).fetchall()] if _can_manage_crew else []
     pay_rate_levels = [dict(r) for r in db3.execute(
         'SELECT * FROM pay_rate_levels ORDER BY sort_order, name'
@@ -15070,9 +15070,9 @@ def crew_tracker():
     # Uncategorized positions
     uncategorized = pos_by_cat.get(None, [])
 
-    # Crew members
+    # Crew members — alphabetical (case-insensitive); sort_order is legacy.
     members = db.execute(
-        'SELECT * FROM crew_members ORDER BY sort_order, name'
+        'SELECT * FROM crew_members ORDER BY LOWER(name)'
     ).fetchall()
 
     # Qualifications — capture status per (crew_member_id, position_id) so the
@@ -15202,7 +15202,7 @@ def api_crew_members():
         SELECT cm.*, prl.name as level_name, prl.hourly_rate as level_rate
         FROM crew_members cm
         LEFT JOIN pay_rate_levels prl ON prl.id = cm.rate_level_id
-        ORDER BY cm.sort_order, cm.name
+        ORDER BY LOWER(cm.name)
     """).fetchall()
     quals = db.execute('SELECT crew_member_id, position_id FROM crew_qualifications').fetchall()
     qual_map = {}
