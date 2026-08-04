@@ -19,6 +19,9 @@
      browser prefetches the page in the background so the click renders almost
      instantly. Prefetch fetches HTML only — no JS runs, so sync polls,
      heartbeats, presence, and read receipts are NOT triggered by a hover.
+     NOTE: Chrome only honors this block in a secure context — HTTPS (the VPS
+     gateway) or localhost. Plain-HTTP LAN access (http://10.x.x.x) is covered
+     by the <link rel=prefetch> hover fallback in app.js instead.
      Multi-user safety: the advance tab silently merges the freshest field
      values on its first sync poll, and app.js reloads any page served from a
      prefetch that sat unused for more than ~30 s (see _initHoverPrefetch).
