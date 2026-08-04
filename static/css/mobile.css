@@ -1,0 +1,232 @@
+/*
+  3·2·1→Theater — mobile presentation layer.
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+
+  Loaded ONLY when the request resolves to mobile view (see _resolve_view_mode()
+  in app.py). Every rule is scoped under html.mobile-view so this file can never
+  leak into the desktop presentation — keep it that way. iPhone (375–430px) is
+  the reference device, but rules must also hold when mobile view is forced in
+  a wide desktop window (?site=mobile), so nothing here relies on @media width.
+
+  Specificity note: several templates append <style> blocks at the END of
+  <body> (base.html, show.html…) which out-order this file. The html.mobile-view
+  prefix (0,2,0) out-ranks their single-class rules; !important is reserved for
+  inline style="" attributes (grid spans, modal widths) that CSS can't otherwise
+  beat.
+*/
+
+/* ── Foundations ─────────────────────────────────────────────────────────── */
+html.mobile-view { -webkit-text-size-adjust: 100%; }
+html.mobile-view body { overflow-x: hidden; }
+
+/* The app shell stacks vertically; the fixed header/tab bar pad it out.
+   The sidebar leaves the flex flow entirely (it becomes the drawer). */
+html.mobile-view .app-layout {
+  flex-direction: column;
+  padding-top: calc(52px + env(safe-area-inset-top));
+}
+html.mobile-view .main-content {
+  max-width: none;
+  width: 100%;
+  padding: 14px 12px calc(84px + env(safe-area-inset-bottom));
+}
+
+/* ── Top header ──────────────────────────────────────────────────────────── */
+html.mobile-view .m-header {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 1100;
+  display: flex; align-items: center; gap: 6px;
+  height: calc(52px + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top) 6px 0;
+  background: linear-gradient(180deg, #1c5494 0%, #194980 100%);
+  box-shadow: 0 2px 8px rgba(0,0,0,.3);
+}
+html.mobile-view .m-brand {
+  flex: 1; text-align: center;
+  color: #fff; font-size: 14px; font-weight: 700; letter-spacing: .08em;
+  text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+html.mobile-view .m-icon-btn {
+  width: 44px; height: 44px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: none; border: none; color: rgba(255,255,255,.9); cursor: pointer;
+  border-radius: 8px;
+}
+html.mobile-view .m-icon-btn:active { background: rgba(255,255,255,.12); }
+
+/* ── Show-page tab strip (sticky under the header) ───────────────────────── */
+html.mobile-view .m-showtabs {
+  position: sticky; top: calc(52px + env(safe-area-inset-top)); z-index: 1000;
+  display: flex; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  background: var(--bg); border-bottom: 1px solid var(--border);
+}
+html.mobile-view .m-showtabs::-webkit-scrollbar { display: none; }
+html.mobile-view .m-showtabs a {
+  padding: 11px 13px; flex-shrink: 0;
+  font-size: 13px; font-weight: 600; color: var(--text-dim);
+  text-decoration: none; white-space: nowrap;
+  border-bottom: 2px solid transparent;
+}
+html.mobile-view .m-showtabs a.active {
+  color: var(--accent); border-bottom-color: var(--accent);
+}
+/* The desktop in-page tab bar duplicates the strip on show pages — hide it
+   there (only there: settings etc. keep their .tab-nav). :has() is fine on
+   the iOS Safari versions we target; without it you just see both bars. */
+html.mobile-view .app-layout:has(.m-showtabs) .main-content .tab-nav { display: none; }
+
+/* ── Bottom tab bar ──────────────────────────────────────────────────────── */
+html.mobile-view .m-tabbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 1100;
+  display: flex;
+  background: var(--bg-card); border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+html.mobile-view .m-tab {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 8px 0 6px; background: none; border: none; cursor: pointer;
+  color: var(--text-dim); font-size: 10px; font-weight: 600; letter-spacing: .04em;
+  text-decoration: none;
+}
+html.mobile-view .m-tab svg { width: 22px; height: 22px; }
+html.mobile-view .m-tab:active { color: var(--accent); }
+
+/* ── Sidebar → slide-in drawer ───────────────────────────────────────────── */
+/* Rail classes are never applied in mobile view (head script + app.js both
+   skip it), but keep the compound selectors as a belt-and-suspenders so a
+   stale sidebar-collapsed class can't shrink the drawer. */
+html.mobile-view .sidebar,
+html.mobile-view.sidebar-collapsed .sidebar,
+html.mobile-view.force-rail .sidebar {
+  position: fixed; top: 0; left: 0; bottom: 0;
+  height: 100dvh; min-height: 0;
+  width: min(320px, 86vw);
+  transform: translateX(-108%);
+  transition: transform .25s ease;
+  z-index: 1200;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+html.mobile-view { --sidebar-w: 0px; }
+html.mobile-view.m-drawer-open .sidebar { transform: translateX(0); }
+html.mobile-view.m-drawer-open body { overflow: hidden; }
+html.mobile-view .sidebar-collapse-btn { display: none; }
+
+html.mobile-view .m-backdrop {
+  position: fixed; inset: 0; z-index: 1150;
+  background: rgba(0,0,0,.55);
+  opacity: 0; pointer-events: none; transition: opacity .25s ease;
+}
+html.mobile-view.m-drawer-open .m-backdrop { opacity: 1; pointer-events: auto; }
+
+/* Comfortable touch targets inside the drawer */
+html.mobile-view .nav-item { padding: 13px 16px; font-size: 15px; }
+
+/* Global-search results panel: full-width sheet above the drawer */
+html.mobile-view .gs-panel {
+  left: 8px; right: 8px; width: auto;
+  max-height: 55vh; z-index: 1300;
+}
+
+/* Notification panel opens from the drawer bell — keep it above the drawer */
+html.mobile-view .notif-panel {
+  left: 8px; right: 8px; width: auto; z-index: 1300;
+  bottom: calc(70px + env(safe-area-inset-bottom));
+}
+
+/* ── Touch-friendly controls ─────────────────────────────────────────────── */
+html.mobile-view .btn { min-height: 42px; white-space: normal; }
+html.mobile-view .btn-sm { min-height: 36px; }
+/* 16px inputs stop iOS Safari from zooming the page on focus */
+html.mobile-view .field-input,
+html.mobile-view .field-input-sm,
+html.mobile-view .sched-cell,
+html.mobile-view .labor-field,
+html.mobile-view .gs-input,
+html.mobile-view .comment-input-area textarea { font-size: 16px !important; }
+html.mobile-view .field-input { padding: 11px 12px; }
+/* Comment delete is hover-revealed on desktop — always reachable on touch */
+html.mobile-view .comment-delete-btn { opacity: .55; }
+
+/* ── Generic layout collapses (mirror of the ≤900px block in style.css, but
+      class-driven so forced-mobile works in a wide window too) ───────────── */
+html.mobile-view .form-side-nav { display: none; }
+html.mobile-view .show-grid,
+html.mobile-view .two-col,
+html.mobile-view .export-grid,
+html.mobile-view .form-row.cols-2,
+html.mobile-view .form-row.cols-3,
+html.mobile-view .form-row.cols-4,
+html.mobile-view .form-row.cols-5 { grid-template-columns: 1fr; }
+html.mobile-view .adv-form-grid { grid-template-columns: 1fr !important; }
+html.mobile-view .adv-form-grid [style*="grid-column"] { grid-column: 1 / -1 !important; }
+html.mobile-view .history-drawer { width: 100% !important; right: 0; }
+
+/* Page headers stack; action rows wrap instead of overflowing */
+html.mobile-view .page-header { flex-direction: column; align-items: stretch; gap: 12px; }
+html.mobile-view .page-title { font-size: 22px; }
+html.mobile-view .header-actions { flex-wrap: wrap; gap: 8px; }
+
+/* Wide tables scroll inside their section instead of stretching the page */
+html.mobile-view .form-section-body.no-pad,
+html.mobile-view .contacts-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* ── Dashboard (home board): always stacked, one venue after another ─────── */
+html.mobile-view .venue-columns {
+  flex-direction: column; gap: 18px; overflow-x: visible;
+}
+html.mobile-view .venue-col { flex: 1 1 auto; width: 100%; }
+html.mobile-view .venue-col-body { display: flex; flex-direction: column; gap: 10px; }
+html.mobile-view .venue-columns-top-scroll { display: none; }
+html.mobile-view .dash-layout-toggles { display: none; } /* layout is forced stacked here */
+html.mobile-view .dash-toolbar { gap: 8px; }
+html.mobile-view .dash-search-wrap { flex: 1 1 100%; }
+
+/* ── Show page specifics ─────────────────────────────────────────────────── */
+/* Schedule "Venue & Tech" section uses an inline 2-col grid */
+html.mobile-view #tab-schedule .form-section-body > div[style*="grid-template-columns"] {
+  grid-template-columns: 1fr !important;
+}
+/* Comments pane: account for chrome + on-screen keyboard reality */
+html.mobile-view .comments-container {
+  height: calc(100dvh - 300px); min-height: 260px;
+}
+
+/* ── Modals: near-full-width cards, never taller than the visible viewport ─ */
+/* Desktop overlay z-indexes (400–1000) sit under the mobile chrome (1100) —
+   lift every overlay above it. !important beats the inline z-index on the
+   help/contact modals. */
+html.mobile-view .modal-overlay { z-index: 1400; }
+html.mobile-view #help-modal,
+html.mobile-view #gs-contact-modal { z-index: 1400 !important; }
+html.mobile-view .modal-card {
+  width: auto !important;
+  max-width: calc(100vw - 20px) !important;
+  max-height: 86dvh !important;
+  overflow-y: auto;
+  margin: 0 10px;
+}
+/* Help modal is a right-anchored panel on desktop → bottom sheet on phones */
+html.mobile-view #help-modal { align-items: flex-end !important; justify-content: center !important; }
+html.mobile-view #help-modal .modal-card {
+  margin: 0 !important; width: 100vw !important; max-width: 100vw !important;
+  max-height: 80dvh !important; border-radius: 14px 14px 0 0;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* ── Toasts sit above the bottom tab bar, not under the home indicator ───── */
+html.mobile-view .save-toast {
+  left: 12px; right: 12px; bottom: calc(70px + env(safe-area-inset-bottom));
+  text-align: center;
+}
+html.mobile-view .session-toast {
+  right: 12px; max-width: calc(100vw - 24px);
+  bottom: calc(126px + env(safe-area-inset-bottom));
+}
+
+/* ── Auth pages (login / register / forgot password) ─────────────────────── */
+html.mobile-view .login-page { min-height: 100dvh; padding: 16px; }
+html.mobile-view .login-card {
+  width: min(360px, 100%);
+  padding: 28px 22px;
+}

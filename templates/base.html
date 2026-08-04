@@ -4,16 +4,24 @@
   MIT Licensed — see LICENSE for details.
 #}
 <!DOCTYPE html>
-<html lang="en" data-theme="{{ user.theme if user else 'dark' }}">
+<html lang="en" data-theme="{{ user.theme if user else 'dark' }}"{% if is_mobile_view %} class="mobile-view"{% endif %}>
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>{% block title %}3·2·1→Theater{% endblock %}</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  {% if is_mobile_view %}
+  {# MOBILE VIEW: mobile.css restyles the SAME templates for phones (iPhone
+     reference). The sidebar becomes a slide-in drawer, and base.html adds a
+     fixed top header + bottom tab bar (search for `m-header` below).
+     Force/override: ?site=mobile|desktop or POST /account/view-mode — see
+     _resolve_view_mode() in app.py. #}
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/mobile.css') }}">
+  {% endif %}
   {% if user %}
   {# Hover preloading (Speculation Rules, Chromium): when a link is hovered the
      browser prefetches the page in the background so the click renders almost
@@ -50,10 +58,12 @@
   }{% endraw %}
   </script>
   {% endif %}
+  {% if not is_mobile_view %}
   <script>
     /* Apply the sidebar rail state before first paint to avoid a flash:
        honor the saved collapse preference, and force the rail on narrow
-       viewports (≤900px). app.js keeps `force-rail` in sync on resize. */
+       viewports (≤900px). app.js keeps `force-rail` in sync on resize.
+       Skipped entirely in mobile view — the drawer replaces the rail. */
     try {
       if (localStorage.getItem('sidebar_collapsed') === '1')
         document.documentElement.classList.add('sidebar-collapsed');
@@ -61,12 +71,39 @@
         document.documentElement.classList.add('force-rail');
     } catch (e) {}
   </script>
+  {% endif %}
   {% block head %}{% endblock %}
 </head>
 <body>
 
 {% if user %}
 <div class="app-layout">
+
+  {% if is_mobile_view %}
+  {# ── Mobile chrome: fixed top header + (on show pages) tab strip. The
+        sidebar below is reused as a slide-in drawer (styled by mobile.css);
+        the backdrop + bottom tab bar are after </main>. ─────────────────── #}
+  <header class="m-header">
+    <button type="button" class="m-icon-btn" onclick="mToggleDrawer()" aria-label="Menu">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="22" height="22"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <a class="m-brand" href="{{ url_for('viewer_home') if session.get('is_document_viewer') else url_for('dashboard') }}">3·2·1→THEATER</a>
+    <button type="button" class="m-icon-btn" onclick="openHelp()" aria-label="Help">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="20" height="20"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    </button>
+  </header>
+  {% if request.endpoint in ['show_page'] and show is defined %}
+  <nav class="m-showtabs">
+    <a href="{{ url_for('show_page', show_id=show.id, tab='advance') }}" class="{% if tab == 'advance' %}active{% endif %}">Advance</a>
+    <a href="{{ url_for('show_page', show_id=show.id, tab='schedule') }}" class="{% if tab == 'schedule' %}active{% endif %}">Schedule</a>
+    <a href="{{ url_for('show_page', show_id=show.id, tab='staffing') }}" class="{% if tab == 'staffing' %}active{% endif %}">Labor</a>
+    <a href="{{ url_for('show_page', show_id=show.id, tab='assets') }}" class="{% if tab == 'assets' %}active{% endif %}">Assets</a>
+    <a href="{{ url_for('show_page', show_id=show.id, tab='postnotes') }}" class="{% if tab == 'postnotes' %}active{% endif %}">Post Show</a>
+    <a href="{{ url_for('show_page', show_id=show.id, tab='comments') }}" class="{% if tab == 'comments' %}active{% endif %}">Comments</a>
+    <a href="{{ url_for('show_page', show_id=show.id, tab='export') }}" class="{% if tab == 'export' %}active{% endif %}">Export</a>
+  </nav>
+  {% endif %}
+  {% endif %}
 
   <!-- Sidebar -->
   <aside class="sidebar">
@@ -255,6 +292,14 @@
         </a>
       </div>
       <div class="app-version" style="font-size:10px;color:var(--text-dim);text-align:center;letter-spacing:.04em">v{{ app_version }}</div>
+      <div style="text-align:center;margin-top:2px">
+        <button type="button" class="view-mode-link" onclick="setSiteMode('{{ 'desktop' if is_mobile_view else 'mobile' }}')">
+          {{ 'Switch to desktop site' if is_mobile_view else 'Switch to mobile site' }}
+        </button>
+        {% if view_mode_forced %}
+        <button type="button" class="view-mode-link" onclick="setSiteMode('auto')" title="Clear the forced mode and follow device auto-detection">(auto)</button>
+        {% endif %}
+      </div>
       <div class="app-license" style="font-size:9px;color:var(--text-dim);text-align:center;letter-spacing:normal;line-height:1.4;opacity:.75;margin-top:2px">
         © Dr. Phillips Center for the Performing Arts<br>MIT Licensed · portions © Thauma Systems, LLC
       </div>
@@ -323,6 +368,27 @@
 
     {% block content %}{% endblock %}
   </main>
+
+  {% if is_mobile_view %}
+  {# ── Mobile chrome: drawer backdrop + fixed bottom tab bar ────────────── #}
+  <div class="m-backdrop" onclick="mCloseDrawer()"></div>
+  <nav class="m-tabbar">
+    <a href="{{ url_for('viewer_home') if session.get('is_document_viewer') else url_for('dashboard') }}" class="m-tab">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      <span>Home</span>
+    </a>
+    {% if not session.get('is_document_viewer') %}
+    <button type="button" class="m-tab" onclick="mOpenSearch()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+      <span>Search</span>
+    </button>
+    {% endif %}
+    <button type="button" class="m-tab" onclick="mToggleDrawer()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      <span>Menu</span>
+    </button>
+  </nav>
+  {% endif %}
 
 </div>
 {% else %}
@@ -442,6 +508,13 @@
 .view-as-select:focus { outline:none;border-color:rgba(245,127,32,.55) }
 .view-as-select option { background:var(--surface);color:var(--text) }
 
+/* Mobile/desktop switch links in the sidebar footer */
+.view-mode-link {
+  background:none;border:none;cursor:pointer;padding:2px 4px;
+  font-size:10px;color:var(--text-dim);text-decoration:underline;letter-spacing:.02em;
+}
+.view-mode-link:hover { color:var(--accent, #F57F20); }
+
 /* Pending-approvals badge on the Approvals nav link */
 .nav-approvals-badge {
   display:inline-flex;align-items:center;justify-content:center;
@@ -467,6 +540,49 @@
 }
 </style>
 <script>
+// ── Mobile / desktop view mode ────────────────────────────────────────────────
+// setSiteMode persists the preference server-side (cookie) then reloads with
+// any one-off ?site= override stripped so the new preference actually shows.
+async function setSiteMode(mode) {
+  try {
+    await fetch('/account/view-mode', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode})
+    });
+  } catch (_) {}
+  const url = new URL(location.href);
+  url.searchParams.delete('site');
+  location.href = url.toString();
+}
+// Drawer controls (mobile chrome — no-ops on desktop, nothing has the class).
+function mToggleDrawer() { document.documentElement.classList.toggle('m-drawer-open'); }
+function mCloseDrawer()  { document.documentElement.classList.remove('m-drawer-open'); }
+function mOpenSearch() {
+  document.documentElement.classList.add('m-drawer-open');
+  setTimeout(() => document.getElementById('gs-input')?.focus(), 250);
+}
+if (document.documentElement.classList.contains('mobile-view')) {
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') mCloseDrawer(); });
+  // Any sidebar navigation click closes the drawer so the next page doesn't
+  // flash it open again before the load completes.
+  document.addEventListener('click', e => {
+    if (e.target.closest('.sidebar a.nav-item')) mCloseDrawer();
+  });
+  // Show-page tab strip: switch tabs client-side (same as the desktop tab
+  // bar) instead of a full navigation; falls back to the href if app.js
+  // hasn't defined switchTab yet.
+  document.querySelectorAll('.m-showtabs a').forEach(a => {
+    a.addEventListener('click', e => {
+      const m = a.getAttribute('href').match(/[?&]tab=(\w+)/);
+      if (!m || typeof switchTab !== 'function') return;
+      e.preventDefault();
+      switchTab(m[1]);
+      document.querySelectorAll('.m-showtabs a').forEach(x =>
+        x.classList.toggle('active', x === a));
+    });
+  });
+}
+
 async function setViewAs(role) {
   const r = await fetch('/admin/view-as', {
     method:'POST', headers:{'Content-Type':'application/json'},
@@ -670,83 +786,450 @@ document.addEventListener('keydown', e => {
   </div>
 </div>
 <script>
+{# Per-page help content. Keys are internal; resolution happens in openHelp()
+   via _HELP_ROUTES (longest-prefix match) plus the show-page ?tab= special
+   case. When you add or meaningfully change a page, UPDATE ITS ENTRY —
+   inaccurate help is worse than none. Keep each entry to a short intro plus
+   4–9 bullets of the controls people actually look for. #}
+const _HELP_UL = 'padding-left:18px;margin:8px 0';
 const _HELP_PAGES = {
-  '/': {
-    title: 'Home — Shows List',
+  home: {
+    title: 'Home — Show Board',
     html: `
-      <p><strong>Your show dashboard.</strong> Each column is a venue; cards show upcoming shows.</p>
-      <ul style="padding-left:18px;margin:8px 0">
-        <li><strong>New Show</strong> — create a show with name, venue, date, and time.</li>
-        <li><strong>Advance</strong> — open the full advance sheet for riders, contacts, tech specs.</li>
-        <li><strong>Schedule</strong> — view/edit the day-of production schedule.</li>
-        <li><strong>Export</strong> — generate and email PDF advance sheets or schedules.</li>
-        <li><strong>Archive</strong> — move a finished show out of the active list.</li>
+      <p><strong>Your show board.</strong> Every active show, grouped into venue columns (stacked top-to-bottom on the mobile site).</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Happening Today</strong> — appears when there's activity today, with auto tags like Load-In, Performance, Load-Out.</li>
+        <li><strong>New Show</strong> — creates a show from just a name; dates, venue and everything else are filled in on its Advance Sheet.</li>
+        <li><strong>Search</strong> — filters by show name or venue, across active <em>and</em> archived shows at once.</li>
+        <li><strong>Date pickers</strong> — narrow the board by show date.</li>
+        <li><strong>Venue pills</strong> — toggle a whole venue column on/off.</li>
+        <li><strong>Layout / density</strong> — Columns vs Stacked, Normal vs Slim; saved to your account instantly.</li>
+        <li><strong>ARCHIVED</strong> section — view, restore, or (admins) permanently delete finished shows.</li>
       </ul>
-      <p>Use the <strong>search bar</strong> to filter by show name or venue. Use <strong>date pickers</strong> to narrow by show date. Click venue pills to toggle columns on/off.</p>
+      <p>Shows auto-archive once their last performance date passes. Card badges: <strong>EVENT</strong> (event mode), <strong>TEST</strong> (excluded from reports), and the show's Prism status tag.</p>
     `
   },
-  '/shows': {
+  new_show: {
+    title: 'New Show',
+    html: `
+      <p>Only the <strong>show name</strong> is needed here. Everything else — dates, times, venue, contacts — is filled in afterward on the show's Advance Sheet.</p>
+    `
+  },
+  show_advance: {
     title: 'Show — Advance Sheet',
     html: `
-      <p><strong>Advance Sheet</strong> collects all pre-show information in one place.</p>
-      <ul style="padding-left:18px;margin:8px 0">
-        <li>Sections collapse/expand — a section with data is always shown expanded.</li>
-        <li><strong>AI Import</strong> — paste a rider or tech spec; AI extracts fields for you to review before applying.</li>
-        <li>All changes auto-save on blur or can be saved with the Save button.</li>
-        <li><strong>Read receipts</strong> — see which team members have viewed the advance.</li>
-        <li><strong>Comments</strong> — leave notes for your team; supports @mentions.</li>
+      <p>All pre-show information in one place. <strong>Edits auto-save</strong> about 1.5 s after you stop typing (Ctrl+S / Cmd+S or the Save button also work).</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Show Dates &amp; Times</strong> — one row per performance (24-hour times).</li>
+        <li><strong>Show Start / Show End</strong> — drives the schedule day list and asset rental pricing (weekly rate at 7+ days).</li>
+        <li>Sections and fields are configured in Settings → Form Fields; some fields appear only when another field is set a certain way.</li>
+        <li><strong>AI Extract</strong> (when enabled) — upload a rider/tech spec or pick an attachment; review the suggested values and apply the ones you want.</li>
+        <li><strong>History</strong> — browse saved versions of the form and restore one.</li>
+        <li>The presence indicator shows who else is on this show; other people's edits merge in live (updated fields flash briefly).</li>
       </ul>
-      <p><strong>Schedule tab</strong> — drag-and-drop production schedule with time blocks and departments.<br>
-      <strong>Staffing tab</strong> — labor requests by position and day; tracks scheduled crew.<br>
-      <strong>Assets tab</strong> — track gear rentals and inventory items for the show.<br>
-      <strong>Post-Show tab</strong> — record actual costs, notes, and generate a post-show invoice.</p>
     `
   },
-  '/settings': {
+  show_schedule: {
+    title: 'Show — Production Schedule',
+    html: `
+      <p>The day-of timeline plus venue/tech info and contacts.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Venue &amp; Tech Info</strong> — fields marked "From Advance Sheet" are read-only mirrors; edit them on the Advance tab.</li>
+        <li><strong>Day tabs</strong> — one timeline per calendar date when the show spans multiple days.</li>
+        <li>Timeline rows: Start / End / Description / Notes; drag the ⠿ handle to reorder, × to delete, <strong>+ Add Row</strong> to append.</li>
+        <li><strong>Apply template…</strong> — insert a pre-built timeline (defined in Settings → Form Fields → Day Templates).</li>
+        <li><strong>Copy from…</strong> — copy another day's rows into this day.</li>
+        <li><strong>Pull time(s)</strong> — insert a SHOW START row for each performance that date.</li>
+        <li><strong>⇅ Sort</strong> — reorder rows by start time.</li>
+      </ul>
+    `
+  },
+  show_staffing: {
+    title: 'Show — Labor Requests',
+    html: `
+      <p>Request crew per day. Rows save individually as you edit.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>+ Add Day</strong> — each day block has its own date, a <strong>Day PM</strong> (covering PM for that date only), day notes, and Clone to… / Delete Day.</li>
+        <li>Rows: Position, In, Lunch 1 &amp; 2, Out, Requested Tech. <strong>SCHED and Scheduled Tech are read-only here</strong> — the Labor Scheduler sets them.</li>
+        <li><strong>Quick Fill</strong> — enter times once, then Apply to Selected / Apply to All.</li>
+        <li><strong>Show Labor Notes</strong> — visible to schedulers and on the Labor Overview.</li>
+        <li><strong>Per-Crew Billable Extras</strong> — pick extras (e.g. parking) and optionally fold them into the hourly rate.</li>
+        <li><strong>Estimated Labor Cost</strong> table + Labor Estimate PDF. Overtime (over 40 h per tech per Mon–Sun week) bills at 1.5×.</li>
+      </ul>
+    `
+  },
+  show_assets: {
+    title: 'Show — Assets',
+    html: `
+      <p>Gear rentals and external rentals for this show.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>+ Add Asset</strong> — search the catalog, optionally pin a specific unit, set quantity and rental dates. Availability is checked live; overbooking is blocked.</li>
+        <li><strong>Unit price is read-only here</strong> — it comes from the rate card; only the Approvals portal can override it per show.</li>
+        <li><strong>+ External Rental</strong> — description, cost, optional rental PDF.</li>
+        <li>The <strong>approval badge</strong> shows whether an asset manager has approved this list; any change resets approval.</li>
+        <li><strong>Asset Estimate PDF</strong> button and a running total in the header.</li>
+      </ul>
+    `
+  },
+  show_postnotes: {
+    title: 'Show — Post Show',
+    html: `
+      <p>What actually happened — notes and settlement.</p>
+      <ul style="${_HELP_UL}">
+        <li>Crew Called / Cast / Crew counts plus four notes areas (Tour/Client, House, Equipment, Misc).</li>
+        <li><strong>Actual Labor (Billing)</strong> — scheduled labor is pulled in with times pre-filled the first time you open the tab. Edit actual In/Out/lunches; hours, rate and cost recompute, overtime is broken out. <strong>Edits here bill the client and never change the labor schedule.</strong></li>
+        <li><strong>Re-sync from Schedule</strong> — pulls newly scheduled lines while keeping your edits; + Add Line for extra crew.</li>
+        <li><strong>Final Invoice PDF</strong>, <strong>Export PDF</strong> (post-show report) and <strong>Email</strong> buttons in the header.</li>
+        <li>A read-only copy of the production schedule is collapsible at the bottom.</li>
+      </ul>
+    `
+  },
+  show_comments: {
+    title: 'Show — Comments',
+    html: `
+      <p>Team discussion pinned to this show.</p>
+      <ul style="${_HELP_UL}">
+        <li>Type <strong>@name</strong> for the mention autocomplete — mentioned users get a notification.</li>
+        <li>You can edit (✏) and delete (×) your own comments; deletes are soft.</li>
+        <li>Admins can restore deleted comments and view/restore a comment's edit history.</li>
+      </ul>
+    `
+  },
+  show_export: {
+    title: 'Show — Export & Files',
+    html: `
+      <p>PDF exports, their history, and file attachments.</p>
+      <ul style="${_HELP_UL}">
+        <li>Export cards: <strong>Advance Sheet</strong>, <strong>Production Schedule</strong>, <strong>Post-Show Report</strong> (each with a version number and an Email button that sends to the configured recipients), <strong>Final Invoice</strong>, and <strong>Pre-Show Estimate</strong> (labor + assets quote).</li>
+        <li><strong>Export History</strong> — the last 10 exports; Download re-fetches that exact stored PDF.</li>
+        <li><strong>Attachments</strong> — + Attach File or drag-and-drop; admins can move a file to another show.</li>
+        <li><strong>Advance Read By</strong> — read receipts for who has viewed the advance.</li>
+      </ul>
+    `
+  },
+  manage_shows: {
+    title: 'Manage Shows',
+    html: `
+      <p>Every show — active and archived — in one table.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Search</strong> (name / venue / year) and a <strong>status filter</strong> (All / Active / Archived).</li>
+        <li><strong>Archive</strong> hides a show from the home board — nothing is deleted; <strong>Restore</strong> brings it back.</li>
+        <li>Shows auto-archive once their last performance date passes.</li>
+      </ul>
+    `
+  },
+  merge_shows: {
+    title: 'Merge Duplicate Shows',
+    html: `
+      <p>Fold an accidental duplicate into the real show (admin only).</p>
+      <ul style="${_HELP_UL}">
+        <li>Pick the show to <strong>KEEP</strong> and the <strong>DUPLICATE</strong> to absorb — a live preview shows exactly what moves (labor, assets, performances, comments, attachments).</li>
+        <li>Blank advance fields on the keeper are filled from the duplicate; the labor scheduler is never changed.</li>
+        <li>Type <strong>MERGE</strong> to confirm. The duplicate is permanently deleted.</li>
+      </ul>
+    `
+  },
+  labor_overview: {
+    title: 'Labor Overview',
+    html: `
+      <p><strong>Read-only</strong> week-at-a-glance of all scheduled labor — show crews and overhead/project crews together. Weeks always start Monday.</p>
+      <ul style="${_HELP_UL}">
+        <li>Navigate with ← Prev Week / Today / Next Week →, or jump to any date.</li>
+        <li>Each day card lists Show or Project, Role, Call, both meal windows, Wrap, Tech and PM.</li>
+        <li>Overhead rows carry an <strong>OH</strong> badge; training shifts a blue <strong>Training</strong> badge; a <strong>day</strong> badge next to a PM means a covering PM for that date only.</li>
+        <li>Group and per-day notes appear as highlighted rows above the crew lines.</li>
+      </ul>
+    `
+  },
+  labor_scheduler: {
+    title: 'Labor Scheduler',
+    html: `
+      <p>Assign technicians to every requested shift (schedulers, staff and admins).</p>
+      <ul style="${_HELP_UL}">
+        <li>Load a <strong>From / To</strong> range, or jump Prev / This / Next week (Mon–Sun).</li>
+        <li>Per line: <strong>SCHED ✓</strong> (counts as staffed), <strong>IN TRAINING</strong>, Position, In, Lunch, Out and the <strong>Tech</strong> picker. Rows save individually; <strong>Save All</strong> is in the header.</li>
+        <li><strong>+ Add show</strong> — quick-create a show so you can schedule before the PM builds the advance.</li>
+        <li><strong>"Add labor to existing show…"</strong> pulls in a show with no lines yet; <strong>Shows without labor</strong> lists everything still empty.</li>
+        <li>Overhead/project groups (▦) are scheduled here too, with their own date column.</li>
+      </ul>
+    `
+  },
+  crew_tracker: {
+    title: 'Skill Tracker',
+    html: `
+      <p>Which technicians are qualified for which positions.</p>
+      <ul style="${_HELP_UL}">
+        <li>Dots: empty = not qualified, half blue = <strong>in training</strong>, filled = <strong>qualified</strong>.</li>
+        <li><strong>✎</strong> (if you can edit) — clicking a position cycles none → training → qualified; every click saves immediately. The same modal holds per-tech training notes.</li>
+        <li>Sort A–Z / Z–A / by category; filter to show-positions or training-classes only; the skill filter shows who's qualified for one position.</li>
+        <li>Training/class columns are blue-tinted — they never appear in labor requests or the scheduler.</li>
+      </ul>
+    `
+  },
+  overhead_crew: {
+    title: 'Overhead & Project Crew',
+    html: `
+      <p>Labor that isn't tied to a show — internal work and projects, billed to a project catalog.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Projects</strong> modal — the shared catalog: client, billing code, color, contact, notes.</li>
+        <li><strong>Recurring Templates</strong> + <strong>Generate from Templates</strong> — e.g. "2× Overhead Tech, Mon–Fri 8–17" stamped across a date range.</li>
+        <li><strong>+ Add Day</strong> → sub-groups per project, each with Quick Fill, + Add Labor Line, Change Date and its own contact/notes.</li>
+        <li><strong>Project Hour Totals</strong> — collapsible summary; range totals follow the date filter, lifetime totals don't.</li>
+        <li>Line, group and day totals (lines / hours / cost) update live as you edit.</li>
+      </ul>
+    `
+  },
+  combined_invoice: {
+    title: 'Combined Invoice',
+    html: `
+      <p>Bill several shows or events on <strong>one</strong> invoice — labor, assets, and attached third-party rental PDFs.</p>
+      <ul style="${_HELP_UL}">
+        <li>Tick shows in the table (search / venue / status filters — defaults to Active). Selected shows become removable chips.</li>
+        <li><strong>Generate Combined Invoice</strong> opens the PDF: shows in date order, per-show subtotals, one grand total, rental PDFs appended at the end.</li>
+      </ul>
+    `
+  },
+  assets_admin: {
+    title: 'Asset Manager',
+    html: `
+      <p>The equipment catalog: <strong>Categories → Groups → Types → Details</strong>, plus a Systems &amp; Packages tab.</p>
+      <ul style="${_HELP_UL}">
+        <li>Search types/manufacturers/models; sort by name, units, or cost.</li>
+        <li>Type details: daily/weekly rates, reserve (spare) count, supplier, photo, storage location, <strong>📅 Calendar</strong> of per-day availability, and the unit list (barcodes, add units, remove-from-service with reason, unit logs).</li>
+        <li><strong>Bulk: Hide from Advance Picker</strong> — mass-toggle which types show up in the show-page asset search.</li>
+        <li><strong>⚠ Overbooked</strong> appears when demand exceeds usable units anywhere.</li>
+        <li><strong>Systems &amp; Packages</strong> — bundles of component types with per-component quantities.</li>
+      </ul>
+    `
+  },
+  asset_approvals: {
+    title: 'Asset Approvals',
+    html: `
+      <p>Approval queue for upcoming shows' asset lists, keyed on load-in date (default window: today + 6 weeks — same as the sidebar badge).</p>
+      <ul style="${_HELP_UL}">
+        <li>Adjust the FROM/TO window, use the presets, or page « Prev / Next » by the window's span.</li>
+        <li>Each show card: <strong>✓ Approve / Unapprove</strong>, Open show, + Add Asset, + External Rental.</li>
+        <li>Inline edits: rental dates (bounded to the show's load-in→load-out) and the <strong>per-show unit-price override</strong> — this is the <em>only</em> place prices can be overridden; ↻ restores the captured rate-card price.</li>
+        <li>Past shows (violet) stay editable for last-second cost corrections.</li>
+      </ul>
+    `
+  },
+  asset_reports: {
+    title: 'Asset Reports',
+    html: `
+      <p>Rental revenue and utilisation.</p>
+      <ul style="${_HELP_UL}">
+        <li>Filter by company, venue, category, type, and date range (defaults to the past year), then <strong>Run Report</strong>.</li>
+        <li>Summary cards (revenue, line items, shows, categories) plus a line-item table with a revenue total.</li>
+        <li><strong>Export CSV</strong> downloads the loaded rows.</li>
+      </ul>
+    `
+  },
+  assets_retired: {
+    title: 'Retired Archive',
+    html: `
+      <p><strong>Read-only</strong> archive of retired equipment.</p>
+      <ul style="${_HELP_UL}">
+        <li>Retired item types with their full unit tables (loaded on demand via View Units).</li>
+        <li>Individually retired units under still-active types, with their color-coded log entries.</li>
+      </ul>
+    `
+  },
+  asset_db_tools: {
+    title: 'Asset DB Tools',
+    html: `
+      <p>Raw, audited row access for fixing asset records the normal finder can't reach.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Integrity Scan</strong> — canned anomaly checks (orphaned types, duplicate names, broken references…), each with jump links.</li>
+        <li><strong>Browse &amp; Edit</strong> — categories, types, units, show lines, system members, locations, logs, maintenance; search by name/barcode/id.</li>
+        <li>Row actions: ✎ Edit, ⇄ Merge duplicate types, ⤵ Move children, ✕ Delete (two-step force confirm).</li>
+        <li>Every change is audit-logged with before/after snapshots and can be undone from the Audit Log.</li>
+      </ul>
+    `
+  },
+  audit_log: {
+    title: 'Audit Log',
+    html: `
+      <p>Full history of user actions (admin only).</p>
+      <ul style="${_HELP_UL}">
+        <li>Filter by user, show, action (e.g. FORM_SAVE), and date range; 50 entries per page.</li>
+        <li><strong>Show diff</strong> — side-by-side BEFORE / AFTER snapshots where recorded.</li>
+        <li><strong>↺ Undo</strong> on undoable rows reverses the action and records a new entry.</li>
+      </ul>
+    `
+  },
+  performance: {
+    title: 'Performance',
+    html: `
+      <p>Per-page response times and DB query timing — is anything getting slower as the data grows?</p>
+      <ul style="${_HELP_UL}">
+        <li>Pick a period (7 days → 3 years); tiles show requests, avg response, avg DB time, and DB share.</li>
+        <li>Daily stacked chart of DB vs app time; a per-page table with min/max and each page's slowest query (click to see the SQL).</li>
+        <li>Slowest individual queries are kept for 90 days. Stats flush from memory about once a minute.</li>
+      </ul>
+    `
+  },
+  settings: {
     title: 'Settings',
     html: `
-      <p>Manage everything site-wide from the Settings page.</p>
-      <ul style="padding-left:18px;margin:8px 0">
-        <li><strong>Profile</strong> — change your display name, email, password, and UI theme.</li>
-        <li><strong>Users</strong> — invite new users, set roles (Admin → Content Admin → Staff → User → Read-only), and reset passwords.</li>
-        <li><strong>Advance Fields</strong> — add, reorder, and configure custom fields for advance sheets.</li>
-        <li><strong>Schedule</strong> — configure schedule templates and departments.</li>
-        <li><strong>Job Positions</strong> — manage labor positions and venue categories. Venue list is also set here.</li>
-        <li><strong>Crew / Tech</strong> — manage your roster with pay rate levels for labor cost tracking.</li>
-        <li><strong>Contacts</strong> — shared contact book available across all shows.</li>
-        <li><strong>Assets</strong> — define asset types and inventory items.</li>
-        <li><strong>Email</strong> — configure SMTP and email distribution lists.</li>
-        <li><strong>Dashboards</strong> — manage publicly-shareable read-only dashboards.</li>
-        <li><strong>System</strong> — messages, updates, syslog, backups, file manager, database, AI, and admin tools.</li>
+      <p>Tabs you'll see depend on your role.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Contacts</strong> — the shared directory; the ADVANCE / PROD / ALL checkboxes decide who receives which auto-emails (see the "Email Routing" popover).</li>
+        <li><strong>Users</strong> — roles are User / Staff / Admin / Read-only, plus per-user flags: Scheduler, Asset Manager, Document Viewer (with venue and doc-type limits). Admins can reset passwords, force a change, lock, or delete.</li>
+        <li><strong>Form Fields</strong> — Advance Fields, Schedule Fields, and Day Templates; drag to reorder sections and fields.</li>
+        <li><strong>Job Positions / Technicians</strong> — venues, categories, positions (incl. training-only), pay rate levels, roster, and per-crew billable items.</li>
+        <li><strong>Email</strong> — SMTP setup, the Advance / Production Schedule auto-emails, send-time, the Next Scheduled Send preview, and the send-error panel.</li>
+        <li><strong>System</strong> — messages, updates, syslog, backups, files, database, AI, cluster.</li>
+        <li>Links out to: Shows, PDF Designer, Audit Log, Performance, DB Snapshots, Dashboards, Prism Sync, Sidebar Editor, Merge Duplicates.</li>
+        <li><strong>My Account</strong> — change your password. (Theme is the sun/moon button in the sidebar.)</li>
       </ul>
     `
   },
-  '/dashboards': {
-    title: 'Public Dashboards',
+  pdf_templates: {
+    title: 'PDF Form Templates',
     html: `
-      <p>Dashboards are <strong>public, read-only views</strong> of show schedules you can share with venues or clients — no login required.</p>
-      <ul style="padding-left:18px;margin:8px 0">
-        <li>Create a dashboard from the Export tab on any show.</li>
-        <li>Share the public URL with anyone — they see a live view of the schedule.</li>
-        <li>Revoke access anytime by making the dashboard private from Settings → Dashboards.</li>
+      <p>Upload a PDF and drag field boxes onto it; reference it from a <strong>pdf_form</strong> advance field so users can fill it in a popup and export the stamped PDF.</p>
+      <ul style="${_HELP_UL}">
+        <li>Upload (name + PDF) drops you straight into the field builder.</li>
+        <li>Re-point any advance fields before deleting a template.</li>
+      </ul>
+    `
+  },
+  pdf_designer: {
+    title: 'PDF Designer',
+    html: `
+      <p>Reorder sections, hide fields, rename labels and set font sizes <strong>per PDF export type</strong> (advance, schedule, post-show, invoices). Layouts apply globally.</p>
+      <ul style="${_HELP_UL}">
+        <li>Pick a type tab, drag sections, expand to toggle fields; the live preview on the right renders against a recent show of your choice.</li>
+        <li><strong>Save</strong> applies for everyone; <strong>Reset to defaults</strong> is per type.</li>
+      </ul>
+    `
+  },
+  nav_editor: {
+    title: 'Sidebar Editor',
+    html: `
+      <p>Controls the sidebar below Home <strong>for every user</strong>.</p>
+      <ul style="${_HELP_UL}">
+        <li>Drag rows (or ↑ ↓) to reorder; add section labels; per-row Indent, Hide, and rename.</li>
+        <li><strong>Spacing</strong> — Compact / Comfortable link padding.</li>
+        <li>Hiding is cosmetic only — each item's audience is fixed in code and permissions never change here. Settings can be moved but never hidden.</li>
+      </ul>
+    `
+  },
+  snapshots: {
+    title: 'DB Snapshots',
+    html: `
+      <p>Inspect hourly/daily database backups, diff them against live data, and recover pieces without a full restore.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Tables &amp; Diff</strong> — per-table changed / removed / added rows since the snapshot; cherry-pick rows to restore.</li>
+        <li><strong>Per-Show Restore</strong> — roll one show (advance, schedule, labor, assets, comments…) back to the snapshot; deleted shows can be resurrected.</li>
+        <li>Everything is preview → confirm → one transaction, fully audit-logged. Users, sessions, sent-email history and audit logs are inspect-only by design.</li>
+      </ul>
+    `
+  },
+  prism: {
+    title: 'Prism Sync',
+    html: `
+      <p>Pulls the building schedule from Prism FM into a <strong>staging area</strong> — nothing in 321Theater changes until you import.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>⟳ Sync Now</strong>, <strong>Test Connection</strong>, and <strong>Raw API Fetch</strong> (read-only debug dump).</li>
+        <li>Staged events: search, state filter (New / Imported / Ignored), <strong>Import selected</strong> (creates real shows + performances, skips duplicates), Ignore, Restore to New.</li>
+        <li>Untick a venue's <strong>Visible</strong> box to hide its events from staging (reversible).</li>
+        <li>Imported shows carry a live Hold/Confirmed tag on the home board — the only thing a sync ever changes on a real show.</li>
+        <li>The page's own <strong>"HOW THIS PAGE WORKS"</strong> panel has the full walkthrough, and Sync History keeps per-run debug logs.</li>
+      </ul>
+    `
+  },
+  dashboards: {
+    title: 'Dashboards',
+    html: `
+      <p>Asset-availability and skill-coverage dashboards — yours plus everyone's public ones.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>+ New Dashboard</strong> — pick a layout (Reservation Timeline, Asset Type Calendar, Combined, By Category, By Show, Shows Calendar, Skills Overview).</li>
+        <li>Tick <strong>"publicly accessible"</strong> to get a no-login <code>/d/&lt;link&gt;</code> URL to share; admins can force a dashboard private again from Settings → Dashboards.</li>
+        <li>You can delete dashboards you own (×).</li>
+      </ul>
+    `
+  },
+  dashboard_view: {
+    title: 'Dashboard',
+    html: `
+      <p>A widget board of availability views.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>+ Add Widget</strong> (owner only) — timelines, availability calendars, per-category/per-show views, shows calendar, skill coverage.</li>
+        <li><strong>Refresh</strong> reloads every widget. If the dashboard is public, the shareable URL is shown in a banner.</li>
+      </ul>
+    `
+  },
+  viewer_home: {
+    title: 'Documents',
+    html: `
+      <p>Read-only show documents, limited to the venues and document types your account allows (shown under the title).</p>
+      <ul style="${_HELP_UL}">
+        <li>Shows are grouped by venue; <strong>Open →</strong> shows that show's available PDFs.</li>
+        <li>The search box filters across all venues at once.</li>
+      </ul>
+    `
+  },
+  viewer_calendar: {
+    title: 'Show Calendar',
+    html: `
+      <p>Read-only calendar of the shows your account can see.</p>
+      <ul style="${_HELP_UL}">
+        <li>Chips per day: <strong>↓ Load-In</strong> (blue), <strong>★ Show day</strong> (green), <strong>↑ Load-Out</strong> (amber); click one to open that show's documents.</li>
+        <li>Navigate with ‹ Prev / Next › / Today or an explicit From / To range.</li>
       </ul>
     `
   },
 };
 
+{# Longest-prefix routing table for openHelp(). Order doesn't matter — the
+   longest matching prefix wins — but keep specific paths (e.g. /settings/…)
+   listed so they don't fall through to their parent page's entry. #}
+const _HELP_ROUTES = [
+  ['/dashboard', 'home'], ['/shows/new', 'new_show'],
+  ['/settings/shows', 'manage_shows'], ['/settings/pdf-templates', 'pdf_templates'],
+  ['/settings', 'settings'],
+  ['/admin/merge-shows', 'merge_shows'], ['/admin/audit', 'audit_log'],
+  ['/admin/performance', 'performance'], ['/admin/navigation', 'nav_editor'],
+  ['/admin/pdf-designer', 'pdf_designer'], ['/admin/snapshots', 'snapshots'],
+  ['/labor-overview', 'labor_overview'], ['/labor-scheduler', 'labor_scheduler'],
+  ['/crew', 'crew_tracker'], ['/overhead-crew', 'overhead_crew'],
+  ['/combined-invoice', 'combined_invoice'],
+  ['/assets/approvals', 'asset_approvals'], ['/assets/retired', 'assets_retired'],
+  ['/assets/db-tools', 'asset_db_tools'], ['/assets', 'assets_admin'],
+  ['/reports/assets', 'asset_reports'],
+  ['/prism', 'prism'],
+  ['/dashboards', 'dashboards'],
+  ['/viewer/calendar', 'viewer_calendar'], ['/viewer', 'viewer_home'],
+];
+
+function _helpKeyForLocation() {
+  const path = window.location.pathname;
+  if (path === '/' ) return 'home';
+  // Show pages get per-tab help; switchTab keeps ?tab= current in the URL.
+  if (/^\/shows\/\d+/.test(path)) {
+    const tab = new URLSearchParams(window.location.search).get('tab') || 'advance';
+    return _HELP_PAGES['show_' + tab] ? 'show_' + tab : 'show_advance';
+  }
+  // /dashboards/<id> is a dashboard view, /dashboards is the list.
+  if (/^\/dashboards\/\d+/.test(path)) return 'dashboard_view';
+  let best = null, bestLen = 0;
+  for (const [prefix, key] of _HELP_ROUTES) {
+    if (path.startsWith(prefix) && prefix.length > bestLen) { best = key; bestLen = prefix.length; }
+  }
+  return best;
+}
+
 function openHelp() {
   const modal = document.getElementById('help-modal');
-  const path = window.location.pathname;
-  let page = null;
-  if (path === '/' || path === '/dashboard') page = _HELP_PAGES['/'];
-  else if (path.startsWith('/shows/')) page = _HELP_PAGES['/shows'];
-  else if (path.startsWith('/settings')) page = _HELP_PAGES['/settings'];
-  else if (path.startsWith('/dashboard/')) page = _HELP_PAGES['/dashboards'];
+  let page = _HELP_PAGES[_helpKeyForLocation()];
   if (!page) {
     page = {
       title: '3·2·1→Theater Help',
       html: `<p>Use the sidebar to navigate between Shows, Settings, and more.</p>
-             <p>Press <kbd style="background:var(--bg-surface);border:1px solid var(--border);border-radius:3px;padding:1px 5px;font-size:11px">/</kbd> or <kbd style="background:var(--bg-surface);border:1px solid var(--border);border-radius:3px;padding:1px 5px;font-size:11px">Ctrl+K</kbd> to open global search anywhere.</p>`
+             <p>Press <kbd style="background:var(--bg-surface);border:1px solid var(--border);border-radius:3px;padding:1px 5px;font-size:11px">/</kbd> or <kbd style="background:var(--bg-surface);border:1px solid var(--border);border-radius:3px;padding:1px 5px;font-size:11px">Ctrl+K</kbd> to open global search anywhere.</p>
+             <p>The "Switch to mobile/desktop site" link at the bottom of the sidebar flips between the phone and desktop layouts.</p>`
     };
   }
   document.getElementById('help-modal-title').textContent = page.title;

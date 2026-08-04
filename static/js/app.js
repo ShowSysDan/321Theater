@@ -2443,6 +2443,9 @@ function toggleSidebar() {
   try { localStorage.setItem('sidebar_collapsed', collapsed ? '1' : '0'); } catch (e) {}
 }
 (function _initSidebarRail() {
+  // Mobile view replaces the sidebar with a slide-in drawer (mobile.css) —
+  // never apply the icon-rail there, it would hide the drawer's search/labels.
+  if (document.documentElement.classList.contains('mobile-view')) return;
   if (!window.matchMedia) return;
   const mq = window.matchMedia('(max-width: 900px)');
   const apply = (e) => document.documentElement.classList.toggle('force-rail', e.matches);
