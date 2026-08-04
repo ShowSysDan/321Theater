@@ -3636,9 +3636,10 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
             </tr>`;
         }
         if (l.is_overtime) {
-          // Hours past 40 for one tech on this show — billed at time and a half.
+          // Hours past 40 in a work week (Mon–Sun) for one tech on this show —
+          // billed at time and a half.
           return `
-            <tr class="labor-ot-row" title="Hours beyond 40 on this show for this technician — billed at 1.5× the labor rate">
+            <tr class="labor-ot-row" title="Hours beyond 40 in a work week (Mon–Sun) on this show for this technician — billed at 1.5× the labor rate">
               <td class="text-dim text-sm">${l.work_date || '—'}</td>
               <td>${l.position_name || '—'}${l.is_estimate ? ' ' + estTag : ''}</td>
               <td>${l.is_scheduled ? (l.tech_name || '—') : '<span class="text-dim">Unscheduled</span>'}</td>
@@ -4008,7 +4009,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
           hr.className = 'ps-day-header ps-ot-header';
           const td = document.createElement('td');
           td.colSpan = 11;
-          td.textContent = 'Overtime (1.5×) — hours beyond 40 per technician on this show';
+          td.textContent = 'Overtime (1.5×) — hours beyond 40 per technician per work week (Mon–Sun) on this show';
           hr.appendChild(td);
           tbody.insertBefore(hr, anchor);
           otLines.forEach(l => {
