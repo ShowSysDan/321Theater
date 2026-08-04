@@ -175,7 +175,12 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
 ## Hover preloading (Speculation Rules)
 Logged-in pages carry a `<script type="speculationrules">` block (base.html)
 that prefetches same-origin links on hover so navigation feels instant on
-Chromium; app.js has a `<link rel=prefetch>` fallback for Firefox. Rules:
+Chromium — but ONLY in a secure context (HTTPS via the gateway, or
+localhost). Plain-HTTP LAN access (http://10.x.x.x) is served by the
+`<link rel=prefetch>` hover fallback in app.js (also used by Firefox), and
+`_prefetch_cache_window` in app.py marks prefetch-purpose responses
+(`Sec-Purpose: prefetch`) privately cacheable for 30 s so the click can
+reuse the hover's copy — don't widen that window or its conditions. Rules:
 - Prefetch fetches HTML only — no JS runs on hover, so sync polls, presence,
   heartbeats, and read receipts are never triggered by a hover.
 - **Any new GET route with side effects or expensive generation (PDFs,
@@ -189,10 +194,12 @@ Chromium; app.js has a `<link rel=prefetch>` fallback for Firefox. Rules:
   `page_rendered_at` stamp (context processor in app.py) against a HEAD
   request's Date header, both server clocks, so client clock skew can't
   cause false reloads. Don't remove the stamp from `inject_version()`.
-- Responses must stay non-cacheable (no Cache-Control on HTML); Chrome's
-  prefetch cache is separate and capped at ~5 min. Don't add Set-Cookie to
-  ordinary GETs — a cookie change invalidates pending prefetches (the DB
-  session interface already only sets cookies when the session changes).
+- Ordinary responses must stay non-cacheable (no Cache-Control on HTML) —
+  the ONLY exception is the 30 s prefetch-purpose window above. Chrome's
+  speculation prefetch cache is separate and capped at ~5 min. Don't add
+  Set-Cookie to ordinary GETs — a cookie change invalidates pending
+  prefetches (the DB session interface already only sets cookies when the
+  session changes).
 
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.

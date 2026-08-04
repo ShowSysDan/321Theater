@@ -4146,8 +4146,15 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
       performance.timeOrigin at activation for prefetched documents, so local
       timing APIs cannot detect the parked time — the server clock can.
 
-   2. A best-effort <link rel="prefetch"> fallback for browsers without
-      Speculation Rules (Firefox). Safari supports neither and no-ops.
+   2. A hover-triggered <link rel="prefetch"> fallback wherever the native
+      rules can't act: browsers without Speculation Rules (Firefox), and —
+      critically — Chromium on a plain-HTTP origin. Chrome only honors
+      speculationrules in a secure context (HTTPS or localhost), so LAN
+      access via http://10.x.x.x gets the classic prefetch path instead,
+      which has no secure-context requirement. Chrome serves a link-prefetched
+      page from cache without revalidation for its first use within 5 min
+      (deliveryType 'cache'), so the staleness guard covers both mechanisms.
+      Safari supports neither and simply navigates normally.
 
    The exclusion list mirrors the speculationrules block in base.html — keep
    the two in sync. */
@@ -4155,7 +4162,13 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
   // 1. Staleness guard for prefetch-served documents.
   try {
     const nav = performance.getEntriesByType('navigation')[0];
-    if (nav && nav.deliveryType === 'navigational-prefetch' && window.__PAGE_RENDERED_AT &&
+    // 'navigational-prefetch' = speculation rules; 'cache' = HTTP cache with
+    // no revalidation, which for our never-cacheable HTML only happens when a
+    // link-prefetch is being reused. Only ordinary navigations — history
+    // back/forward is SUPPOSED to show the page as you left it.
+    const fromPrefetch = nav && nav.type === 'navigate' &&
+      (nav.deliveryType === 'navigational-prefetch' || nav.deliveryType === 'cache');
+    if (fromPrefetch && window.__PAGE_RENDERED_AT &&
         sessionStorage.getItem('_prefetch_reloaded') !== location.href) {
       // Cheapest same-server round trip: HEAD on a static file, cache
       // bypassed. Only its Date response header is used.
@@ -4171,13 +4184,17 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
           location.reload();
         }
       }).catch(() => { /* offline / gateway hiccup — keep the page we have */ });
-    } else if (nav && nav.deliveryType !== 'navigational-prefetch') {
+    } else if (nav && !fromPrefetch) {
       sessionStorage.removeItem('_prefetch_reloaded');
     }
   } catch (_) { /* timing API unavailable — skip the guard */ }
 
-  // 2. Hover-prefetch fallback where Speculation Rules are unsupported.
-  if (window.HTMLScriptElement && HTMLScriptElement.supports &&
+  // 2. Hover-prefetch fallback where the native speculationrules block can't
+  // act. Chrome reports supporting speculationrules even on insecure origins
+  // where it will never fire them, so the secure-context check is essential —
+  // without it, plain-HTTP LAN access gets no preloading at all.
+  if (window.isSecureContext &&
+      window.HTMLScriptElement && HTMLScriptElement.supports &&
       HTMLScriptElement.supports('speculationrules')) return;
   const probe = document.createElement('link');
   if (!probe.relList || !probe.relList.supports || !probe.relList.supports('prefetch')) return;

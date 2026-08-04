@@ -361,6 +361,35 @@ def _set_security_headers(response):
     return response
 
 
+@app.after_request
+def _prefetch_cache_window(response):
+    """Let hover-preloaded pages be reused on the plain-HTTP LAN path.
+
+    Chromium only honors the speculationrules block (base.html) in a secure
+    context, so LAN access (http://10.x.x.x) falls back to <link rel=prefetch>
+    (app.js _initHoverPrefetch), which stores the response in the ordinary
+    HTTP cache. Our HTML is deliberately uncacheable, so without help the
+    prefetched copy is thrown away and the click refetches — the hover would
+    be wasted. Prefetch requests announce themselves (Sec-Purpose/Purpose:
+    prefetch), so mark ONLY those responses privately cacheable for a short
+    window: the click within 30 s reuses the hover's copy; after that the
+    entry is stale (no validators) and Chrome refetches fresh HTML, so
+    staleness is bounded server-side. Normal navigations never send the
+    header and stay uncacheable.
+    """
+    purpose = (request.headers.get('Sec-Purpose')
+               or request.headers.get('Purpose', ''))
+    if (request.method == 'GET'
+            and 'prefetch' in purpose
+            and response.mimetype == 'text/html'
+            and 'Cache-Control' not in response.headers):
+        response.headers['Cache-Control'] = 'private, max-age=30'
+        vary = response.headers.get('Vary', '')
+        if 'cookie' not in vary.lower():
+            response.headers['Vary'] = (vary + ', Cookie').lstrip(', ') if vary else 'Cookie'
+    return response
+
+
 # ── CSRF Protection ───────────────────────────────────────────────────────────
 # For AJAX: require X-Requested-With header (cannot be set cross-origin without CORS)
 # For form POSTs: validate Origin/Referer header matches our host
