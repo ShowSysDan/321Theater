@@ -97,7 +97,8 @@ apps. For a 321Theater access change, use this app's own flags instead
   (settlement actuals) feed the show-page tables AND every labor PDF
   (labor-estimate, pre-show-estimate, post-show-invoice, combined-invoice).
   Change billing behavior there, not in a template or JS.
-- **Overtime:** >40h per technician per show/event bills at 1.5×, split by
+- **Overtime:** >40h per technician per Monday–Sunday work week (within a
+  show/event; the accumulator resets each Monday) bills at 1.5×, split by
   `_allocate_overtime()` with tech identity from `_ot_shift_key()` (crew id →
   requested name → per-position day-slot). The 1.5× premium applies to the
   labor rate ONLY — per-crew billable extras (parking), including the

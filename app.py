@@ -577,7 +577,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.30.1'
+APP_VERSION = '2.31.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -12283,9 +12283,11 @@ def _estimate_hourly_rate(db):
     return float(row['r']) if row and row['r'] is not None else 0.0
 
 
-# ─── Technician overtime (per show / event) ──────────────────────────────────
-# Hours beyond 40 that ONE technician works on ONE show/event bill at time and
-# a half. Accumulation is by TOTAL HOURS on the show — never by days worked.
+# ─── Technician overtime (per work week, within a show / event) ──────────────
+# Hours beyond 40 that ONE technician works on ONE show/event WITHIN ONE WORK
+# WEEK (Monday through Sunday) bill at time and a half. The accumulator resets
+# every Monday — a multi-week run never carries hours from one week into the
+# next. Accumulation is by total hours in the week, never by days worked.
 # The premium applies to the labor rate only: flat per-crew pass-through
 # charges (parking passes etc.), even when folded invisibly into the hourly
 # rate, are never multiplied by 1.5.
@@ -12294,10 +12296,21 @@ OT_RATE_MULTIPLIER = 1.5
 OT_LINE_SUFFIX = 'Overtime (1.5×)'
 
 
+def _ot_week_key(date_iso):
+    """Monday-through-Sunday work week containing ``date_iso``, keyed by the
+    week's Monday (ISO string). Undated shifts share one pseudo-week (None) so
+    they still accumulate against each other like before."""
+    try:
+        d = datetime.strptime((date_iso or '')[:10], '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        return None
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+
 def _ot_shift_key(slot_counters, crew_member_id, person_name, position_key,
                   date_key):
     """Best-available identity for "which technician works this shift", used to
-    accumulate hours toward the 40h overtime threshold.
+    accumulate hours toward the 40h-per-work-week overtime threshold.
 
     Scheduled lines identify the tech exactly (crew member id). Before
     scheduling, a requested/pulled name is the next best signal. Failing both,
@@ -12320,14 +12333,15 @@ def _allocate_overtime(shifts):
 
     ``shifts`` is a list of dicts with keys ``key`` (technician identity from
     :func:`_ot_shift_key`), ``date`` (ISO string or ''), ``in_time`` and
-    ``hours``. Hours accumulate chronologically per technician; once a tech
-    crosses OT_HOURS_THRESHOLD on this show the excess is overtime, splitting
-    the crossing shift. Returns (straight, ot) tuples aligned with the input
-    order."""
+    ``hours``. Hours accumulate chronologically per technician WITHIN each
+    Monday–Sunday work week (:func:`_ot_week_key`); once a tech crosses
+    OT_HOURS_THRESHOLD in a week the excess is overtime, splitting the
+    crossing shift. The accumulator resets at each new week. Returns
+    (straight, ot) tuples aligned with the input order."""
     result = [(float(s['hours'] or 0), 0.0) for s in shifts]
     by_key = {}
     for i, s in enumerate(shifts):
-        by_key.setdefault(s['key'], []).append(i)
+        by_key.setdefault((s['key'], _ot_week_key(s['date'])), []).append(i)
     for idxs in by_key.values():
         ordered = sorted(idxs, key=lambda i: (shifts[i]['date'] or '9999-12-31',
                                               shifts[i]['in_time'] or '', i))
@@ -12367,9 +12381,10 @@ def _calc_labor_cost_for_show(db, show_id):
     Training / shadow shifts never bill and never count toward crew.
 
     Overtime: hours a technician (or, pre-schedule, a per-position "slot" —
-    see _ot_shift_key) works beyond 40 on this show bill at 1.5× the labor
-    rate, emitted as a separate line right after the shift that crosses the
-    threshold. The OT premium never applies to folded-in per-crew extras.
+    see _ot_shift_key) works beyond 40 on this show within one Monday–Sunday
+    work week bill at 1.5× the labor rate, emitted as a separate line right
+    after the shift that crosses the threshold. The accumulator resets each
+    Monday. The OT premium never applies to folded-in per-crew extras.
     """
     rows = db.execute("""
         SELECT lr.id, lr.position_id, lr.work_date, lr.in_time, lr.out_time,
@@ -12394,7 +12409,7 @@ def _calc_labor_cost_for_show(db, show_id):
         sum(float(it['cost_per_crew'] or 0) for it in billable_items), 2)
 
     # Pass 1 — resolve hours + rate per line, then split straight/OT hours
-    # per technician track across the whole show.
+    # per technician track per Monday–Sunday work week.
     pre = []
     for r in rows:
         hours = _calc_hours(r['in_time'], r['out_time'],
@@ -12760,8 +12775,9 @@ def _calc_post_show_labor_cost(db, show_id):
         (e.g. $9/crew parking over a 10h line inflates a $10/hr rate to $10.90.)
 
     Overtime on ACTUALS: once one technician's actual hours on this show pass
-    40, the excess bills at 1.5× the frozen labor rate as a separate
-    "Overtime (1.5×)" line right after the shift that crosses the threshold.
+    40 within one Monday–Sunday work week, the excess bills at 1.5× the frozen
+    labor rate as a separate "Overtime (1.5×)" line right after the shift that
+    crosses the threshold. The accumulator resets each Monday.
     The folded-in per-crew spread stays at 1× on the OT portion — parking
     passes never earn the time-and-a-half premium.
     """
@@ -12771,7 +12787,8 @@ def _calc_post_show_labor_cost(db, show_id):
     per_crew_total = round(
         sum(float(it['cost_per_crew'] or 0) for it in billable_items), 2)
 
-    # Split each shift's actual hours into straight / overtime per technician.
+    # Split each shift's actual hours into straight / overtime per technician
+    # per Monday–Sunday work week.
     # Identity: the scheduling link's crew member when the line was pulled from
     # the schedule, else the sched_crew_name snapshot, else the per-position
     # slot heuristic (see _ot_shift_key).
