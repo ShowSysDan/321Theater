@@ -629,7 +629,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.34.2'
+APP_VERSION = '2.34.3'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -4519,16 +4519,20 @@ def force_change_password():
     """Force password change screen (shown after login when must_change_password is set)."""
     if not session.get('must_change_password'):
         return redirect(url_for('dashboard'))
+    # user=None on purpose: the template fills base.html's auth_content
+    # block (login-card layout), which base only renders when `user` is
+    # falsy. Passing the real user selects the app-layout branch instead,
+    # whose content block this template doesn't fill → blank page.
     if request.method == 'POST':
         new_pw = request.form.get('new_password', '')
         confirm = request.form.get('confirm_password', '')
         if new_pw != confirm:
             flash('Passwords do not match.', 'error')
-            return render_template('force_change_password.html', user=get_current_user())
+            return render_template('force_change_password.html', user=None)
         pw_err = _validate_password(new_pw)
         if pw_err:
             flash(pw_err, 'error')
-            return render_template('force_change_password.html', user=get_current_user())
+            return render_template('force_change_password.html', user=None)
         db = get_db()
         db.execute('UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?',
                    (generate_password_hash(new_pw), session['user_id']))
@@ -4538,7 +4542,7 @@ def force_change_password():
         syslog_logger.info(f"FORCED_PASSWORD_CHANGE user_id={session['user_id']}")
         flash('Password changed successfully.', 'success')
         return redirect(url_for('dashboard'))
-    return render_template('force_change_password.html', user=get_current_user())
+    return render_template('force_change_password.html', user=None)
 
 
 @app.before_request
