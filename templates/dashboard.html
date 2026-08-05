@@ -164,7 +164,7 @@
 
 {# ── Archived ─────────────────────────────────────────────────────────────── #}
 {% if archived_shows %}
-<section class="section" style="margin-top:32px">
+<section class="section" id="archived-section" style="margin-top:32px">
   <button class="section-label toggle-archived" onclick="document.getElementById('archived-list').classList.toggle('hidden')">
     ARCHIVED ({{ archived_shows|length }})
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="6 9 12 15 18 9"/></svg>
@@ -200,6 +200,7 @@
 {% block scripts %}
 <script>
 const _hiddenVenues = new Set();
+let _archAutoExpanded = false;
 
 function _cardMatchesFilter(card, term, fromDate, toDate) {
   const nameMatch = !term || (card.dataset.search || '').includes(term);
@@ -215,7 +216,8 @@ function filterDash(q) {
   const hasFilter = term || fromDate || toDate;
   document.getElementById('dash-clear-btn').style.display = hasFilter ? '' : 'none';
 
-  // Active shows (venue columns)
+  // Active shows (venue columns) — columns with no matches collapse entirely
+  // while a filter is active, so the user isn't scrolling past empty venues.
   let totalVisible = 0;
   document.querySelectorAll('.venue-col').forEach(col => {
     if (_hiddenVenues.has(col.dataset.venue)) return;
@@ -225,22 +227,32 @@ function filterDash(q) {
       card.style.display = match ? '' : 'none';
       if (match) colVisible++;
     });
-    col.querySelector('.venue-col-empty').style.display = colVisible === 0 ? '' : 'none';
+    col.style.display = (hasFilter && colVisible === 0) ? 'none' : '';
+    col.querySelector('.venue-col-empty').style.display = (colVisible === 0 && !hasFilter) ? '' : 'none';
     col.querySelector('.venue-col-count').textContent = colVisible;
     totalVisible += colVisible;
   });
 
-  // Archived shows
+  // Archived shows — the whole section hides when nothing matches, and
+  // auto-expands when something does (collapsing back once the filter clears).
   let archivedVisible = 0;
   const archivedList = document.getElementById('archived-list');
+  const archivedSection = document.getElementById('archived-section');
   if (archivedList) {
     archivedList.querySelectorAll('.show-card.archived').forEach(card => {
       const match = _cardMatchesFilter(card, term, fromDate, toDate);
       card.style.display = match ? '' : 'none';
       if (match) archivedVisible++;
     });
+    if (archivedSection) archivedSection.style.display = (hasFilter && archivedVisible === 0) ? 'none' : '';
     if (hasFilter && archivedVisible > 0) {
-      archivedList.classList.remove('hidden');
+      if (archivedList.classList.contains('hidden')) {
+        archivedList.classList.remove('hidden');
+        _archAutoExpanded = true;
+      }
+    } else if (!hasFilter && _archAutoExpanded) {
+      archivedList.classList.add('hidden');
+      _archAutoExpanded = false;
     }
   }
 
@@ -263,6 +275,9 @@ function toggleVenue(btn) {
     _hiddenVenues.delete(venue);
     btn.classList.add('active');
     if (col) col.style.display = '';
+    // Re-apply the current filter so a re-shown venue with no matches
+    // collapses again instead of reappearing empty.
+    filterDash(document.getElementById('dash-search').value);
   } else {
     _hiddenVenues.add(venue);
     btn.classList.remove('active');
