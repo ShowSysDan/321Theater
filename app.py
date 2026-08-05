@@ -15383,7 +15383,12 @@ def api_crew_members():
         LEFT JOIN pay_rate_levels prl ON prl.id = cm.rate_level_id
         ORDER BY LOWER(cm.name)
     """).fetchall()
-    quals = db.execute('SELECT crew_member_id, position_id FROM crew_qualifications').fetchall()
+    # Only fully qualified (status 2) counts here — in-training rows (status 1)
+    # must not offer someone as qualified in the schedule / labor request pickers.
+    quals = db.execute(
+        'SELECT crew_member_id, position_id FROM crew_qualifications '
+        'WHERE COALESCE(status, 2) = 2'
+    ).fetchall()
     qual_map = {}
     for q in quals:
         qual_map.setdefault(q['crew_member_id'], []).append(q['position_id'])
@@ -20529,6 +20534,7 @@ def api_dashboard_skills_summary():
                    COUNT(cq.crew_member_id) as qualified_count
             FROM job_positions jp
             LEFT JOIN crew_qualifications cq ON cq.position_id = jp.id
+                 AND COALESCE(cq.status, 2) = 2
             WHERE jp.category_id = ?
             GROUP BY jp.id
             ORDER BY jp.sort_order, jp.id
@@ -20548,6 +20554,7 @@ def api_dashboard_skills_summary():
                COUNT(cq.crew_member_id) as qualified_count
         FROM job_positions jp
         LEFT JOIN crew_qualifications cq ON cq.position_id = jp.id
+             AND COALESCE(cq.status, 2) = 2
         WHERE jp.category_id IS NULL
         GROUP BY jp.id
         ORDER BY jp.sort_order, jp.id
