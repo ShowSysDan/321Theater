@@ -629,7 +629,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.34.2'
+APP_VERSION = '2.34.4'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -2726,6 +2726,21 @@ def _as_date(v):
         return None
 
 
+def _as_dt(v):
+    """Coerce a DB TIMESTAMP value (str or datetime.datetime) to a datetime.
+    PostgreSQL hands back datetime objects while SQLite hands back ISO
+    strings, so callers must not assume either. Returns None if it can't be
+    parsed — expiry checks must treat None as expired (fail closed)."""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v
+    try:
+        return datetime.fromisoformat(str(v).strip().replace('Z', ''))
+    except (ValueError, TypeError):
+        return None
+
+
 def _scheduled_email_triggers():
     """Read the enabled (pdf_type, trigger_days) scheduled-email triggers from
     settings. Read-only; returns [] if nothing is enabled.
@@ -4519,16 +4534,20 @@ def force_change_password():
     """Force password change screen (shown after login when must_change_password is set)."""
     if not session.get('must_change_password'):
         return redirect(url_for('dashboard'))
+    # user=None on purpose: the template fills base.html's auth_content
+    # block (login-card layout), which base only renders when `user` is
+    # falsy. Passing the real user selects the app-layout branch instead,
+    # whose content block this template doesn't fill → blank page.
     if request.method == 'POST':
         new_pw = request.form.get('new_password', '')
         confirm = request.form.get('confirm_password', '')
         if new_pw != confirm:
             flash('Passwords do not match.', 'error')
-            return render_template('force_change_password.html', user=get_current_user())
+            return render_template('force_change_password.html', user=None)
         pw_err = _validate_password(new_pw)
         if pw_err:
             flash(pw_err, 'error')
-            return render_template('force_change_password.html', user=get_current_user())
+            return render_template('force_change_password.html', user=None)
         db = get_db()
         db.execute('UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?',
                    (generate_password_hash(new_pw), session['user_id']))
@@ -4538,7 +4557,7 @@ def force_change_password():
         syslog_logger.info(f"FORCED_PASSWORD_CHANGE user_id={session['user_id']}")
         flash('Password changed successfully.', 'success')
         return redirect(url_for('dashboard'))
-    return render_template('force_change_password.html', user=get_current_user())
+    return render_template('force_change_password.html', user=None)
 
 
 @app.before_request
@@ -19970,7 +19989,8 @@ def confirm_email(token):
     if not reg:
         db.close()
         return render_template('register.html', error='Invalid or expired confirmation link.', user=None)
-    if datetime.fromisoformat(reg['token_expires']) < datetime.utcnow():
+    token_expires = _as_dt(reg['token_expires'])
+    if not token_expires or token_expires < datetime.utcnow():
         db.execute('DELETE FROM user_pending_registration WHERE id=?', (reg['id'],))
         db.commit()
         db.close()
@@ -20119,7 +20139,8 @@ def reset_password(token):
     rec = db.execute(
         'SELECT * FROM password_reset_tokens WHERE token=? AND used=0', (token,)
     ).fetchone()
-    if not rec or datetime.fromisoformat(rec['expires_at']) < datetime.utcnow():
+    expires = _as_dt(rec['expires_at']) if rec else None
+    if not rec or not expires or expires < datetime.utcnow():
         db.close()
         return render_template('forgot_password.html',
                                error='This reset link has expired or already been used.', user=None)
