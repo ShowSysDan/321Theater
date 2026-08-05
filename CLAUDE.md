@@ -197,6 +197,31 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
   `GATE_SESSION_EXPIRED` in the gateway journal (HTML navigations only —
   XHR polls stay silent).
 
+## Advance sync & field presence (polling — no websockets anywhere)
+- The show page's multi-user behavior is ALL HTTP polling from app.js:
+  advance tab → `GET /shows/<id>/sync/advance` every **2 s** (merges other
+  users' field values, returns presence); other tabs → `POST /shows/<id>/
+  heartbeat` every 15 s (presence + "someone saved" banner only).
+- **2 s is the floor, not a dial**: saves are debounced 1.5 s so faster
+  polling can't deliver edits sooner, and every poll WRITES (presence upsert
+  + prune into `active_sessions`). Don't lower it; don't remove the
+  `_syncInFlight` overlap guard.
+- Per-field presence: focusin/focusout in `bindAdvanceForm()` sets
+  `_focusedField`, which rides on every poll into
+  `active_sessions.focused_field` (one row per user per show — one focused
+  field per user by design) and renders on other clients as the chip +
+  typing dots in `_renderFieldIndicators()`. That renderer must keep
+  removing `.field-presence-row` containers each poll (removing only the
+  chips leaks empty rows), and keep `CSS.escape()` on the incoming field
+  key. Server side, `_upsert_active_session()` clamps client-supplied
+  tab/focused_field — it's the single choke point for both callers; keep it.
+- Presence visibility window is 45 s (prune at 60 s): someone closing their
+  tab mid-focus leaves a chip for up to ~45 s. Known/accepted.
+- Conflict model is still last-write-wins with NO per-field versioning; the
+  "don't echo my own writes" filter is per-show (`shows.last_saved_by`),
+  not per-field. Any future live-typing work needs per-field authorship
+  first — see the 2.34.0 README entry before touching this.
+
 ## Mobile view (shared templates + mobile.css) — check EVERY UI change in both modes
 The site has a mobile presentation (iPhone is the reference device). It is NOT
 a separate set of templates — the same Jinja templates render both modes, and
