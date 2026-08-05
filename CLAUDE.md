@@ -4,6 +4,19 @@
 Dr. Phillips Center. Most of the app is in a single large `app.py`; HTML lives
 in `templates/`, static assets in `static/`.
 
+## EVERY session: bump the version and write a README changelog entry
+Before committing ANY code/template/config change (docs-only changes exempt):
+1. Bump `APP_VERSION` in `app.py` — semantic versioning: bug fix → PATCH,
+   new feature → MINOR (reset PATCH to 0), breaking schema / re-init → MAJOR.
+2. Update README.md: the **Current version** line near the top AND a new
+   entry at the top of the **Version history** list describing what changed
+   and why (match the existing entries' style; end with which deployment
+   target(s) need redeploying).
+3. Include the bump + README entry in the same commit as the change.
+Full rules live in README.md → "Version Numbering". Do not skip this — the
+version shows in every page's sidebar footer and is how the user verifies a
+deploy actually took.
+
 ## Database: ALWAYS PostgreSQL (do not "fuss about SQLite")
 
 **Production runs on PostgreSQL, always.** Treat PostgreSQL as the one source
