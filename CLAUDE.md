@@ -197,6 +197,32 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
   `GATE_SESSION_EXPIRED` in the gateway journal (HTML navigations only —
   XHR polls stay silent).
 
+## Mobile view (shared templates + mobile.css) — check EVERY UI change in both modes
+The site has a mobile presentation (iPhone is the reference device). It is NOT
+a separate set of templates — the same Jinja templates render both modes, and
+that is deliberate (no dual-maintenance drift). What switches:
+- `_resolve_view_mode()` in app.py picks `mobile`/`desktop` per request:
+  `?site=mobile|desktop` (one-off, prefetch-safe, no cookie) → `view_mode`
+  cookie (set by POST `/account/view-mode`; `auto` clears it) → User-Agent
+  sniff (phones yes, iPads deliberately desktop).
+- In mobile mode base.html adds `class="mobile-view"` on `<html>`, loads
+  `static/css/mobile.css`, and renders extra chrome: fixed top header
+  (`m-header`), show-page tab strip (`m-showtabs`), bottom tab bar
+  (`m-tabbar`), and reuses the desktop sidebar as a slide-in drawer
+  (`m-drawer-open` on `<html>`). The desktop rail/collapse script and
+  `force-rail` are skipped entirely in mobile mode.
+- ALL mobile styling lives in `static/css/mobile.css` and every rule is
+  scoped under `html.mobile-view` — don't put phone tweaks in style.css and
+  don't put desktop styles in mobile.css.
+- The "Switch to mobile/desktop site" links live in the sidebar/drawer
+  footer next to the version number (`setSiteMode()` in base.html).
+
+**Rule for future UI changes: any change to templates, style.css, or app.js
+UI behavior must be checked in BOTH modes** (append `?site=mobile` /
+`?site=desktop` to the URL to flip without a phone). New page chrome,
+modals, or wide tables usually need a companion rule in mobile.css. Do not
+gate features by view mode — mobile hides nothing; it only restyles.
+
 ## Hover preloading (Speculation Rules)
 Logged-in pages carry a `<script type="speculationrules">` block (base.html)
 that prefetches same-origin links on hover so navigation feels instant on

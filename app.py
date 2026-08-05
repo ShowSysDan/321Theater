@@ -470,6 +470,45 @@ def inject_version():
     return {'app_version': APP_VERSION, 'page_rendered_at': int(time.time())}
 
 
+# ── Mobile view mode ──────────────────────────────────────────────────────────
+# One set of Jinja templates serves both layouts; `is_mobile_view` switches the
+# chrome (sidebar vs. drawer + bottom tab bar in base.html) and loads
+# static/css/mobile.css, which restyles the shared markup for phones (iPhone
+# is the reference device). Resolution order:
+#   1. ?site=mobile|desktop  — per-request override, no persistence (testing,
+#      shareable links). Never writes a cookie, so it's prefetch-safe.
+#   2. `view_mode` cookie    — set by POST /account/view-mode ("Mobile site" /
+#      "Desktop site" links in the sidebar/drawer footer). 'auto' clears it.
+#   3. User-Agent sniff      — phones auto-get mobile. iPads deliberately get
+#      desktop (modern iPadOS Safari reports a desktop UA anyway).
+_MOBILE_UA_RE = re.compile(
+    r'iPhone|iPod|Windows Phone|BlackBerry|Opera Mini|(?=.*\bAndroid\b)(?=.*\bMobile\b)',
+    re.IGNORECASE)
+
+VIEW_MODE_COOKIE = 'view_mode'
+
+
+def _resolve_view_mode():
+    """Return ('mobile'|'desktop', forced: bool) for this request."""
+    q = request.args.get('site')
+    if q in ('mobile', 'desktop'):
+        return q, True
+    c = request.cookies.get(VIEW_MODE_COOKIE)
+    if c in ('mobile', 'desktop'):
+        return c, True
+    ua = request.headers.get('User-Agent') or ''
+    return ('mobile' if _MOBILE_UA_RE.search(ua) else 'desktop'), False
+
+
+@app.context_processor
+def _inject_view_mode():
+    try:
+        mode, forced = _resolve_view_mode()
+    except RuntimeError:  # outside a request context (e.g. background render)
+        mode, forced = 'desktop', False
+    return {'is_mobile_view': mode == 'mobile', 'view_mode_forced': forced}
+
+
 @app.template_filter('pretty_json')
 def pretty_json_filter(value):
     """Pretty-print a JSON string in templates."""
@@ -590,7 +629,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.32.0'
+APP_VERSION = '2.34.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -5868,7 +5907,14 @@ def get_advance_reads(show_id):
 # ─── Real-time Sync ───────────────────────────────────────────────────────────
 
 def _upsert_active_session(db, user_id, show_id, tab, focused_field=None):
-    """Record that a user is actively on a show page and prune stale sessions."""
+    """Record that a user is actively on a show page and prune stale sessions.
+
+    tab and focused_field are client-supplied and round-trip to OTHER users'
+    browsers via _get_other_active_users — clamp them to short plain strings
+    here (the single choke point for both the sync poll and the heartbeat) so
+    a hostile client can't stash oversized or non-string junk in the table."""
+    tab = str(tab or '')[:40]
+    focused_field = str(focused_field)[:80] if focused_field else None
     db.execute("""
         INSERT INTO active_sessions (user_id, show_id, tab, focused_field, last_seen)
         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -8662,6 +8708,32 @@ def toggle_force_password_change(uid):
         f"{'USER_FORCE_PW_CHANGE' if new_val else 'USER_FORCE_PW_CHANGE_CLEARED'} "
         f"user_id={uid} by={session.get('username')}")
     return jsonify({'success': True, 'must_change_password': bool(new_val)})
+
+
+@app.route('/account/view-mode', methods=['POST'])
+def set_view_mode():
+    """Persist the mobile/desktop preference in a long-lived cookie.
+
+    Deliberately NOT @login_required — the login page carries the switch link
+    too, and the cookie is a pure UI preference (nothing sensitive). POST-only
+    so hover prefetch can never flip it (mutating GETs are banned — see the
+    speculation-rules notes in base.html); same-origin check because with no
+    login gate this is the endpoint's only CSRF guard."""
+    if not _origin_matches():
+        abort(403)
+    data = request.get_json(silent=True) or {}
+    mode = data.get('mode') or request.form.get('mode') or ''
+    if mode not in ('mobile', 'desktop', 'auto'):
+        return jsonify({'error': 'mode must be mobile, desktop, or auto'}), 400
+    resp = jsonify({'success': True, 'mode': mode})
+    if mode == 'auto':
+        resp.delete_cookie(VIEW_MODE_COOKIE)
+    else:
+        # No `secure` flag: plain-HTTP LAN access (http://10.x.x.x) must keep
+        # working. HttpOnly — JS never needs to read it, only the server does.
+        resp.set_cookie(VIEW_MODE_COOKIE, mode, max_age=365 * 24 * 3600,
+                        httponly=True, samesite='Lax')
+    return resp
 
 
 @app.route('/account/theme', methods=['POST'])
