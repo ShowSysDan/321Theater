@@ -629,7 +629,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.34.3'
+APP_VERSION = '2.34.4'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -2722,6 +2722,21 @@ def _as_date(v):
         return v
     try:
         return date.fromisoformat(str(v)[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+def _as_dt(v):
+    """Coerce a DB TIMESTAMP value (str or datetime.datetime) to a datetime.
+    PostgreSQL hands back datetime objects while SQLite hands back ISO
+    strings, so callers must not assume either. Returns None if it can't be
+    parsed — expiry checks must treat None as expired (fail closed)."""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v
+    try:
+        return datetime.fromisoformat(str(v).strip().replace('Z', ''))
     except (ValueError, TypeError):
         return None
 
@@ -19974,7 +19989,8 @@ def confirm_email(token):
     if not reg:
         db.close()
         return render_template('register.html', error='Invalid or expired confirmation link.', user=None)
-    if datetime.fromisoformat(reg['token_expires']) < datetime.utcnow():
+    token_expires = _as_dt(reg['token_expires'])
+    if not token_expires or token_expires < datetime.utcnow():
         db.execute('DELETE FROM user_pending_registration WHERE id=?', (reg['id'],))
         db.commit()
         db.close()
@@ -20123,7 +20139,8 @@ def reset_password(token):
     rec = db.execute(
         'SELECT * FROM password_reset_tokens WHERE token=? AND used=0', (token,)
     ).fetchone()
-    if not rec or datetime.fromisoformat(rec['expires_at']) < datetime.utcnow():
+    expires = _as_dt(rec['expires_at']) if rec else None
+    if not rec or not expires or expires < datetime.utcnow():
         db.close()
         return render_template('forgot_password.html',
                                error='This reset link has expired or already been used.', user=None)
