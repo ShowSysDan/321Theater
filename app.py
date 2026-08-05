@@ -629,7 +629,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.33.0'
+APP_VERSION = '2.34.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -5907,7 +5907,14 @@ def get_advance_reads(show_id):
 # ─── Real-time Sync ───────────────────────────────────────────────────────────
 
 def _upsert_active_session(db, user_id, show_id, tab, focused_field=None):
-    """Record that a user is actively on a show page and prune stale sessions."""
+    """Record that a user is actively on a show page and prune stale sessions.
+
+    tab and focused_field are client-supplied and round-trip to OTHER users'
+    browsers via _get_other_active_users — clamp them to short plain strings
+    here (the single choke point for both the sync poll and the heartbeat) so
+    a hostile client can't stash oversized or non-string junk in the table."""
+    tab = str(tab or '')[:40]
+    focused_field = str(focused_field)[:80] if focused_field else None
     db.execute("""
         INSERT INTO active_sessions (user_id, show_id, tab, focused_field, last_seen)
         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -8710,7 +8717,10 @@ def set_view_mode():
     Deliberately NOT @login_required — the login page carries the switch link
     too, and the cookie is a pure UI preference (nothing sensitive). POST-only
     so hover prefetch can never flip it (mutating GETs are banned — see the
-    speculation-rules notes in base.html)."""
+    speculation-rules notes in base.html); same-origin check because with no
+    login gate this is the endpoint's only CSRF guard."""
+    if not _origin_matches():
+        abort(403)
     data = request.get_json(silent=True) or {}
     mode = data.get('mode') or request.form.get('mode') or ''
     if mode not in ('mobile', 'desktop', 'auto'):

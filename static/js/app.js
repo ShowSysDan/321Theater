@@ -25,9 +25,10 @@ let saveTimer = null;
 let _isDirty = false;          // true whenever there are unsaved changes
 let _isUploading = false;      // true while any file upload is in progress
 let _syncSince = '';           // ISO timestamp cursor for advance-field sync
-let _syncInterval = null;      // advance field poll handle (3 s)
+let _syncInterval = null;      // advance field poll handle (2 s)
 let _heartbeatInterval = null; // presence-only poll handle for other tabs (15 s)
-let _focusedField = null;      // field_key the current user has focused right now
+let _syncInFlight = false;     // guards against overlapping sync polls on slow networks
+let _focusedField = null;      // field_key the current user has focused right now (set by bindAdvanceForm's focusin/focusout)
 let _syncSeeded = false;       // false until the first poll seeds _syncSince; suppresses spurious toasts during slow page loads
 let MY_USER_ID = null;         // current user's id — seeded by initShow(); used to tell "my save" from "someone else's"
 let _savedBaselineToken = null;// opaque "(last_saved_by|last_saved_at)" snapshot captured at page load
@@ -84,12 +85,13 @@ function _initials(name) {
 /* ── Real-time Sync ─────────────────────────────────────────────── */
 
 /**
- * Poll every 1 s for advance-field changes made by other users.
+ * Poll every 2 s for advance-field changes made by other users.
  * Merges incoming values into any field the current user is NOT focused on.
  * Also sends which field the current user has focused (for others' indicators).
  */
 async function _pollAdvanceSync() {
-  if (!SHOW_ID) return;
+  if (!SHOW_ID || _syncInFlight) return;
+  _syncInFlight = true;
   try {
     const params = new URLSearchParams({
       since: _syncSince,
@@ -143,6 +145,7 @@ async function _pollAdvanceSync() {
     // never shows the banner itself — this call only maintains the baseline.
     _checkOtherSaved(d.last_saved_by, d.last_saved_at);
   } catch (_) { /* silently ignore network errors */ }
+  finally { _syncInFlight = false; }
 }
 
 /**
@@ -180,8 +183,9 @@ function _flashField(el) {
  * Shows a coloured avatar chip beside any field another user is focused on.
  */
 function _renderFieldIndicators(users) {
-  // Remove all existing indicators
-  document.querySelectorAll('.field-presence-chip').forEach(el => el.remove());
+  // Remove all existing indicators — the ROW containers, not just the chips
+  // inside them, or empty rows pile up in the DOM on every poll.
+  document.querySelectorAll('.field-presence-row').forEach(el => el.remove());
 
   const focusedUsers = users.filter(u => u.focused_field);
   if (!focusedUsers.length) return;
@@ -193,8 +197,10 @@ function _renderFieldIndicators(users) {
   }
 
   for (const [key, usrs] of Object.entries(byField)) {
-    // Find the field element (input/select/textarea) and its wrapping label
-    const fieldEl = document.querySelector(`#advance-form [data-key="${key}"]`);
+    // Find the field element (input/select/textarea) and its wrapping label.
+    // key is another user's reported focused_field — CSS.escape keeps a
+    // malformed/hostile value from becoming selector syntax.
+    const fieldEl = document.querySelector(`#advance-form [data-key="${CSS.escape(key)}"]`);
     if (!fieldEl) continue;
 
     // Walk up to find the .field-group wrapper, then find its label
@@ -385,10 +391,13 @@ function initShow(showId, initialTab, myUserId) {
 }
 
 function _startSync() {
-  // Advance tab: 3-second field-level sync poll
+  // Advance tab: 2-second field-level sync poll. Below 2 s the returns
+  // vanish — saves are debounced 1.5 s, so edits can't propagate faster than
+  // that anyway — while the per-poll presence UPSERT + prune write on the
+  // server doubles. Keep it at 2000 unless that trade-off changes.
   _syncInterval = setInterval(() => {
     if (activeTab === 'advance') _pollAdvanceSync();
-  }, 3000);
+  }, 2000);
 
   // All tabs: 15-second heartbeat for presence + "someone saved" notice
   _heartbeatInterval = setInterval(() => {
@@ -641,6 +650,36 @@ function bindAdvanceForm() {
   if (!form) return;
   form.addEventListener('change', () => { evaluateAllConditionals(); _syncScheduleMirrors(); scheduleSave(); });
   form.addEventListener('input', () => { _syncScheduleMirrors(); scheduleSave(); });
+
+  // ── Field presence ─────────────────────────────────────────────────────
+  // Track which field this user is focused on; _focusedField rides along on
+  // every sync/heartbeat poll so other people's pages can render the
+  // per-field "X is here" chip + typing dots (_renderFieldIndicators).
+  // The short debounce fires one extra poll right away so the chip appears
+  // for others in ~1 poll cycle instead of waiting out the full interval,
+  // without spamming requests while tabbing quickly through fields.
+  let presencePushTimer = null;
+  const pushPresence = () => {
+    clearTimeout(presencePushTimer);
+    presencePushTimer = setTimeout(() => {
+      if (activeTab === 'advance') _pollAdvanceSync();
+    }, 400);
+  };
+  form.addEventListener('focusin', e => {
+    const el = e.target.closest('.adv-field[data-key]');
+    const key = el ? el.dataset.key : null;
+    if (key !== _focusedField) { _focusedField = key; pushPresence(); }
+  });
+  form.addEventListener('focusout', () => {
+    // Let the follow-up focusin (tabbing to the next field) run first so a
+    // field-to-field move doesn't emit a null blip in between.
+    setTimeout(() => {
+      if (!form.contains(document.activeElement) && _focusedField !== null) {
+        _focusedField = null;
+        pushPresence();
+      }
+    }, 0);
+  });
 
   // Venue change: rebuild any already-rendered labor position dropdowns so
   // the user doesn't have to leave + re-enter the Labor tab to pick up the
