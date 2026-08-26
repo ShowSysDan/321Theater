@@ -65,7 +65,8 @@ import snapshot_module  # DB snapshot inspection & recovery — wired up near th
 
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, session, jsonify, make_response, abort, send_file,
-                   has_request_context, g)
+                   has_request_context, has_app_context, g)
+from markupsafe import Markup
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
@@ -584,25 +585,74 @@ def multi_filter(value, sep=', '):
     return s
 
 
-@app.template_filter('hhmm')
-def hhmm_filter(value):
-    """Normalize a time string to HH:MM for display (e.g. '1900' → '19:00')."""
+def _parse_24h_time(value):
+    """Parse a clean 24-hour time string ('17:15', '1715', '915', '17:15:00')
+    into an (hour, minute) tuple, or None when the value isn't one (free text
+    like '7pm and 9pm' or 'TBD' returns None so callers can pass it through
+    unchanged)."""
     s = (value or '').strip() if isinstance(value, str) else str(value or '').strip()
     if not s:
-        return ''
+        return None
     if ':' in s:
-        parts = s.split(':', 1)
+        parts = s.split(':')
+        if len(parts) not in (2, 3):
+            return None
         try:
             h = int(parts[0]); m = int(parts[1])
         except ValueError:
-            return s
+            return None
     elif s.isdigit() and len(s) in (3, 4):
         h = int(s[:-2]); m = int(s[-2:])
     else:
-        return s
+        return None
     if 0 <= h <= 23 and 0 <= m <= 59:
+        return h, m
+    return None
+
+
+@app.template_filter('hhmm')
+def hhmm_filter(value):
+    """Normalize a time string to HH:MM for display (e.g. '1900' → '19:00')."""
+    parsed = _parse_24h_time(value)
+    if parsed is None:
+        return (value or '').strip() if isinstance(value, str) else str(value or '').strip()
+    h, m = parsed
+    return f'{h:02d}:{m:02d}'
+
+
+def _paperwork_dual_time_enabled():
+    """True when printed paperwork should annotate 24-hour times with a
+    12-hour hint (Settings → System → Paperwork Time Format; app_settings key
+    'paperwork_dual_time', default ON). Cached on flask.g for the lifetime of
+    one app context so a PDF render with dozens of time cells costs a single
+    settings read, not one per cell."""
+    if has_app_context():
+        cached = getattr(g, '_paperwork_dual_time', None)
+        if cached is None:
+            cached = get_app_setting('paperwork_dual_time', '1') == '1'
+            g._paperwork_dual_time = cached
+        return cached
+    return get_app_setting('paperwork_dual_time', '1') == '1'
+
+
+@app.template_filter('dualtime')
+def dualtime_filter(value):
+    """Format a time for PRINTED PAPERWORK: 24-hour first with a smaller
+    12-hour hint after it — '17:15 <span class="t12">(5:15 PM)</span>' — so
+    departments that don't read 24-hour time can follow along. The app UI
+    itself stays 24-hour only; use this filter in pdf/ templates only.
+    Values that don't parse as a clean 24-hour time (free text like
+    '7pm and 9pm') fall back to hhmm's pass-through behavior, and the hint
+    is dropped entirely when the 'paperwork_dual_time' setting is off."""
+    parsed = _parse_24h_time(value)
+    if parsed is None:
+        return hhmm_filter(value)
+    h, m = parsed
+    if not _paperwork_dual_time_enabled():
         return f'{h:02d}:{m:02d}'
-    return s
+    h12 = h % 12 or 12
+    ampm = 'AM' if h < 12 else 'PM'
+    return Markup(f'{h:02d}:{m:02d} <span class="t12">({h12}:{m:02d} {ampm})</span>')
 
 
 @app.template_filter('dowdate')
@@ -629,7 +679,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.34.4'
+APP_VERSION = '2.35.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -10641,6 +10691,25 @@ def save_wifi_settings():
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, detail='wifi')
     db.commit(); db.close()
     syslog_logger.info(f"SETTINGS_CHANGE detail=wifi by={session.get('username')}")
+    return jsonify({'success': True})
+
+
+@app.route('/settings/paperwork-time', methods=['POST'])
+@admin_required
+def save_paperwork_time_settings():
+    """Toggle the 12-hour hint on printed paperwork times (see the
+    `dualtime` template filter). The app UI itself is 24-hour only —
+    this setting affects PDF output exclusively."""
+    data = request.get_json(force=True) or {}
+    enabled = '1' if data.get('paperwork_dual_time') else '0'
+    db = get_db()
+    db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+               ('paperwork_dual_time', enabled))
+    log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
+              detail=f'paperwork_dual_time={enabled}')
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"SETTINGS_CHANGE detail=paperwork_dual_time={enabled} by={session.get('username')}")
     return jsonify({'success': True})
 
 

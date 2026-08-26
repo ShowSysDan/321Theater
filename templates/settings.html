@@ -645,6 +645,29 @@
   </div>
 
   <div class="form-section" style="margin-bottom:16px">
+    <div class="form-section-header"><span class="section-icon">◈</span> PAPERWORK TIME FORMAT</div>
+    <div class="form-section-body">
+      <p class="text-dim" style="font-size:12px;margin-bottom:12px">
+        When enabled, times on printed paperwork (advance, schedule, post-show notes, and labor/invoice PDFs)
+        show a smaller 12-hour hint after the 24-hour time — e.g. <strong>17:15 <span style="font-size:11px;font-weight:normal">(5:15 PM)</span></strong>.
+        The app itself always works in 24-hour time; this only changes PDF output.
+      </p>
+      <form onsubmit="event.preventDefault(); savePaperworkTime(this)" style="max-width:420px">
+        <div class="field-group">
+          <label class="field-label">
+            <input type="checkbox" name="paperwork_dual_time"
+                   {% if syslog_settings.get('paperwork_dual_time', '1') == '1' %}checked{% endif %}
+                   style="margin-right:6px;accent-color:var(--accent)">
+            SHOW 12-HOUR HINT ON PDFS
+          </label>
+        </div>
+        <div class="paperwork-time-msg field-msg"></div>
+        <button type="submit" class="btn btn-primary">Save</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="form-section" style="margin-bottom:16px">
     <div class="form-section-header"><span class="section-icon">◈</span> ORGANIZATION LOGO</div>
     <div class="form-section-body">
       <p class="text-dim" style="font-size:12px;margin-bottom:12px">Default logo shown in PDF headers when a show's venue has no override below. Max 2 MB (PNG/JPG/GIF/WebP).</p>
@@ -2965,6 +2988,17 @@ async function saveWifiSettings(form) {
   const d = await resp.json();
   if (msg) { msg.textContent = d.success ? '✓ Saved' : (d.error || 'Error'); msg.style.color = d.success ? 'var(--accent)' : 'var(--danger)'; }
   if (d.success) showSaveToast('✓ WiFi settings saved');
+}
+
+async function savePaperworkTime(form) {
+  const msg = form.querySelector('.paperwork-time-msg');
+  const resp = await fetch('/settings/paperwork-time', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({paperwork_dual_time: form.querySelector('[name=paperwork_dual_time]').checked})
+  });
+  const d = await resp.json();
+  if (msg) { msg.textContent = d.success ? '✓ Saved' : (d.error || 'Error'); msg.style.color = d.success ? 'var(--accent)' : 'var(--danger)'; }
+  if (d.success) showSaveToast('✓ Paperwork time format saved');
 }
 
 async function uploadLogo(form) {

@@ -47,6 +47,12 @@
   .sched-table tbody tr:nth-child(even) td { background: #fafafa; }
   .sched-table tbody tr:last-child td { border-bottom: 2px solid #bbb; }
   .sched-table .time-col { font-weight: bold; white-space: nowrap; font-size: 8.5pt; color: #333; }
+  /* 12-hour hint after 24-hour times (dualtime filter) — smaller, dimmer,
+     never split mid-hint. Stacks under the time in the narrow Start/End
+     columns so they don't crowd the Description column. */
+  .t12 { font-size: 0.78em; font-weight: normal; color: #555; white-space: nowrap; }
+  .sched-table .time-col .t12 { display: block; }
+  .day-row .t12 { color: #cfe0f2; }  /* legible on the dark blue day banner */
   .sched-table .desc-col { font-size: 8.5pt; }
   .sched-table .notes-col { font-size: 7.5pt; color: #555; }
 
@@ -135,7 +141,7 @@
       <thead>
         {% if layout.visible('day_banner') and schedule_days | length > 1 %}
         <tr class="day-row">
-          <th colspan="4" style="font-size: {{ layout.font_size('day_banner', '10.5pt') }}">{{ layout.label('day_banner', 'Day') }} {{ day.day_num }}<span class="day-date">{{ day.perf.perf_date | dowdate or day.perf.perf_date or '' }}{% if day.perf.perf_time %} · {{ day.perf.perf_time | hhmm }}{% endif %}</span></th>
+          <th colspan="4" style="font-size: {{ layout.font_size('day_banner', '10.5pt') }}">{{ layout.label('day_banner', 'Day') }} {{ day.day_num }}<span class="day-date">{{ day.perf.perf_date | dowdate or day.perf.perf_date or '' }}{% if day.perf.perf_time %} · {{ day.perf.perf_time | dualtime }}{% endif %}</span></th>
         </tr>
         {% endif %}
         <tr class="cols-row">
@@ -149,8 +155,8 @@
         {% for row in day.rows %}
         {% if row.description or row.start_time %}
         <tr>
-          <td class="time-col">{{ row.start_time or '' }}</td>
-          <td class="time-col">{{ row.end_time or '' }}</td>
+          <td class="time-col">{{ row.start_time | dualtime }}</td>
+          <td class="time-col">{{ row.end_time | dualtime }}</td>
           <td class="desc-col">{{ row.description or '' }}</td>
           <td class="notes-col">{{ row.notes or '' }}</td>
         </tr>
@@ -184,11 +190,11 @@
       {% if _has_load %}
       <div class="info-item">
         <div class="lbl">Show Start</div>
-        <div class="val">{{ show.load_in_date | dowdate or show.load_in_date or '' }}{% if show.load_in_date and show.load_in_time %} · {% endif %}{{ show.load_in_time or '' }}{{ '—' if not show.load_in_date and not show.load_in_time }}</div>
+        <div class="val">{{ show.load_in_date | dowdate or show.load_in_date or '' }}{% if show.load_in_date and show.load_in_time %} · {% endif %}{{ show.load_in_time | dualtime }}{{ '—' if not show.load_in_date and not show.load_in_time }}</div>
       </div>
       <div class="info-item">
         <div class="lbl">Show End</div>
-        <div class="val">{{ show.load_out_date | dowdate or show.load_out_date or '' }}{% if show.load_out_date and show.load_out_time %} · {% endif %}{{ show.load_out_time or '' }}{{ '—' if not show.load_out_date and not show.load_out_time }}</div>
+        <div class="val">{{ show.load_out_date | dowdate or show.load_out_date or '' }}{% if show.load_out_date and show.load_out_time %} · {% endif %}{{ show.load_out_time | dualtime }}{{ '—' if not show.load_out_date and not show.load_out_time }}</div>
       </div>
       {% endif %}
     </div>
@@ -206,7 +212,7 @@
     {% if layout.visible('crew_call') and crew_call_times %}
     <div style="background:#fff8e8; border:1px solid #e8c870; padding:5px 9px; margin-bottom:10px; font-size: {{ layout.font_size('crew_call', '8.5pt') }}; border-radius:3px;">
       <strong>{{ layout.label('crew_call', 'CREW CALL') }}:</strong><br>
-      {% for t in crew_call_times %}Crew {{ loop.index }}: <strong>{{ t }}</strong>{% if not loop.last %}<br>{% endif %}{% endfor %}
+      {% for t in crew_call_times %}Crew {{ loop.index }}: <strong>{{ t | dualtime }}</strong>{% if not loop.last %}<br>{% endif %}{% endfor %}
     </div>
     {% endif %}
 
