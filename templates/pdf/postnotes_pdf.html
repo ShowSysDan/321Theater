@@ -45,6 +45,9 @@
   .sched-table td { padding: 3px 7px; border-bottom: 1px solid #eee; vertical-align: top; }
   .sched-table tr:last-child td { border-bottom: none; }
 
+  /* 12-hour hint after 24-hour times (dualtime filter) */
+  .t12 { font-size: 0.78em; font-weight: normal; color: #555; white-space: nowrap; }
+
 </style>
 </head>
 <body>
@@ -66,7 +69,7 @@
         <div class="doc-type"><span style="text-transform:none">dpc</span> {{ layout.label('header', 'POST-SHOW') }} NOTES</div>
         <div class="show-name">{{ show.name }}</div>
         <div class="show-sub">
-          {% if show.venue %}{{ show.venue }} &nbsp;·&nbsp; {% endif %}<strong>{{ show.show_date | dowdate or show.show_date or '—' }}</strong>{% if show.show_time %} &nbsp;·&nbsp; {{ show.show_time | hhmm }}{% endif %}
+          {% if show.venue %}{{ show.venue }} &nbsp;·&nbsp; {% endif %}<strong>{{ show.show_date | dowdate or show.show_date or '—' }}</strong>{% if show.show_time %} &nbsp;·&nbsp; {{ show.show_time | dualtime }}{% endif %}
         </div>
         <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
       </div>
@@ -80,7 +83,7 @@
   <div class="info-bar" style="font-size: {{ layout.font_size('info_bar', '8pt') }}">
     <div><span>Show: </span><strong>{{ show.name }}</strong></div>
     <div><span>Date: </span><strong>{{ show.show_date | dowdate or show.show_date or '—' }}</strong></div>
-    {% if show.show_time %}<div><span>Time: </span><strong>{{ show.show_time }}</strong></div>{% endif %}
+    {% if show.show_time %}<div><span>Time: </span><strong>{{ show.show_time | dualtime }}</strong></div>{% endif %}
     {% if show.venue %}<div><span>Venue: </span><strong>{{ show.venue }}</strong></div>{% endif %}
   </div>
 
@@ -137,8 +140,8 @@
         {% for row in schedule_rows %}
         {% if row.description or row.start_time %}
         <tr>
-          <td>{{ row.start_time or '' }}</td>
-          <td>{{ row.end_time or '' }}</td>
+          <td>{{ row.start_time | dualtime }}</td>
+          <td>{{ row.end_time | dualtime }}</td>
           <td>{{ row.description or '' }}</td>
           <td style="color:#555">{{ row.notes or '' }}</td>
         </tr>

@@ -32,6 +32,8 @@
   tr:last-child td { border-bottom: none; }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
   .text-dim { color: #888; font-size: 10px; }
+  /* 12-hour hint after 24-hour times (dualtime filter) */
+  .t12 { font-size: 0.82em; font-weight: normal; color: #888; white-space: nowrap; }
   .est-tag { display: inline-block; font-size: 8px; font-weight: 700; color: #B8840A; letter-spacing: 0.05em; text-transform: uppercase; margin-left: 4px; }
   .total-row td { font-weight: 700; border-top: 2px solid #ddd; border-bottom: none; padding-top: 8px; }
   .labor-day-row td { font-weight: 700; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: #1a4a7a; background: #f4f7fa; border-bottom: 1px solid #ddd; padding: 5px 8px; }
@@ -118,8 +120,8 @@
           {% if l.is_estimate %}<span class="est-tag">est.</span>{% endif %}
           {% if l.is_training %}<span class="text-dim">(training — no charge)</span>{% endif %}
         </td>
-        <td class="num text-dim">{{ l.in_time or '—' }}</td>
-        <td class="num text-dim">{{ l.out_time or '—' }}</td>
+        <td class="num text-dim">{{ l.in_time | dualtime or '—' }}</td>
+        <td class="num text-dim">{{ l.out_time | dualtime or '—' }}</td>
         <td class="num">{{ '%.2f' | format(l.hours) }}h</td>
         <td class="num">{% if l.is_training %}<span class="text-dim">—</span>{% else %}${{ '%.2f' | format(l.hourly_rate) }}/hr{% endif %}</td>
         <td class="num">${{ '%.2f' | format(l.line_total) }}</td>

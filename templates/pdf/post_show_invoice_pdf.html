@@ -31,6 +31,8 @@
   tr:last-child td { border-bottom: none; }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
   .text-dim { color: #888; font-size: 10px; }
+  /* 12-hour hint after 24-hour times (dualtime filter) */
+  .t12 { font-size: 0.82em; font-weight: normal; color: #888; white-space: nowrap; }
   .total-row td { font-weight: 700; border-top: 2px solid #ddd; border-bottom: none; padding-top: 8px; }
   .labor-day-row td { font-weight: 700; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: #1a4a7a; background: #f4f7fa; border-bottom: 1px solid #ddd; padding: 5px 8px; }
   .ot-row td { color: #7a5a00; background: #fdf6e3; }
@@ -181,8 +183,8 @@
       {% endif %}
       <tr{% if l.is_overtime %} class="ot-row"{% endif %}>
         <td>{{ l.position_name or '—' }}</td>
-        <td class="num text-dim">{{ l.in_time or '—' }}</td>
-        <td class="num text-dim">{{ l.out_time or '—' }}</td>
+        <td class="num text-dim">{{ l.in_time | dualtime or '—' }}</td>
+        <td class="num text-dim">{{ l.out_time | dualtime or '—' }}</td>
         <td class="text-dim">{{ l.breaks or '—' }}</td>
         <td class="num">{{ '%.2f' | format(l.hours) }}h</td>
         <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/hr</td>

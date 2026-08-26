@@ -61,6 +61,9 @@
   .footer-left  { position: running(footerLeft);  font-size: 6.5pt; color: #888; }
   .footer-right { position: running(footerRight); font-size: 6.5pt; color: #888; text-align: right; }
 
+  /* ── 12-hour hint after 24-hour times (dualtime filter) ── */
+  .t12 { font-size: 0.78em; font-weight: normal; color: #555; white-space: nowrap; }
+
   /* ── Checkbox indicator ── */
   .cb { display: inline-block; width: 9px; height: 9px; border: 1px solid #555; margin-right: 3px; vertical-align: middle; position: relative; }
   .cb.checked::after { content: '✓'; position: absolute; top: -2px; left: 0px; font-size: 8pt; font-weight: bold; color: #1a1a1a; }
@@ -107,7 +110,7 @@
             <div class="doc-type"><span style="text-transform:none">dpc</span> {{ layout.label('header', 'ADVANCE') }} SHEET</div>
             <div class="show-name">{{ show.name }}</div>
             <div class="show-sub">
-              {% if show.venue %}{{ show.venue }} &nbsp;·&nbsp; {% endif %}<strong>{{ show.show_date | dowdate or show.show_date or '—' }}</strong>{% if show.show_time %} &nbsp;·&nbsp; {{ show.show_time | hhmm }}{% endif %}
+              {% if show.venue %}{{ show.venue }} &nbsp;·&nbsp; {% endif %}<strong>{{ show.show_date | dowdate or show.show_date or '—' }}</strong>{% if show.show_time %} &nbsp;·&nbsp; {{ show.show_time | dualtime }}{% endif %}
             </div>
             <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
           </div>
@@ -174,7 +177,9 @@
               {% elif val and val not in ['-','—','None','none','false',''] %}
               <tr>
                 <td class="lbl">{{ _flbl }}</td>
-                <td class="val">{{ val | multi }}</td>
+                {# Fields whose key names a time get the 12-hour hint when the
+                   value is a clean 24-hour time; free text passes through. #}
+                <td class="val">{% if 'time' in field.field_key %}{{ val | multi | dualtime }}{% else %}{{ val | multi }}{% endif %}</td>
               </tr>
               {% endif %}
             {% endfor %}
@@ -219,7 +224,7 @@
         <div class="doc-type"><span style="text-transform:none">dpc</span> ADVANCE SHEET</div>
         <div class="show-name">{{ show.name }}</div>
         <div class="show-sub">
-          {% if show.venue %}{{ show.venue }} &nbsp;·&nbsp; {% endif %}<strong>{{ show.show_date | dowdate or show.show_date or '—' }}</strong>{% if show.show_time %} &nbsp;·&nbsp; {{ show.show_time | hhmm }}{% endif %}
+          {% if show.venue %}{{ show.venue }} &nbsp;·&nbsp; {% endif %}<strong>{{ show.show_date | dowdate or show.show_date or '—' }}</strong>{% if show.show_time %} &nbsp;·&nbsp; {{ show.show_time | dualtime }}{% endif %}
         </div>
         <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
       </div>
@@ -239,7 +244,7 @@
       <table class="two-col-table">
         {{ row('Show Name',  v('show_name', show.name)) }}
         {{ row('Date',       v('show_date', show.show_date or '') | dowdate) }}
-        {{ row('Time',       v('show_time', show.show_time)) }}
+        {{ row('Time',       v('show_time', show.show_time) | dualtime) }}
         {{ row('Venue',      v('venue',     show.venue)) }}
         {{ row('Prod. Manager', v('production_manager')) }}
         {{ row('Tour Manager',  v('tour_manager')) }}
