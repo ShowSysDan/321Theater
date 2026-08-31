@@ -1,0 +1,228 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+
+  Security Sign-In Sheet — per-show personnel list that prints as the sign-in
+  sheet sitting at the security desk. Backed by security_module.py; the whole
+  feature toggles in Settings → System → Modules.
+#}
+{% extends "base.html" %}
+{% block title %}Security Sign-In — {{ show.name }} — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Security Sign-In Sheet</h1>
+    <p class="page-sub">
+      {{ show.name }}{% if show.show_date %} · {{ show.show_date | dowdate or show.show_date }}{% endif %}{% if show.venue %} · {{ show.venue }}{% endif %}
+    </p>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <a href="{{ url_for('show_page', show_id=show.id, tab='export') }}" class="btn btn-secondary">← Back to Show</a>
+    <a href="{{ url_for('security_signin_pdf', show_id=show.id) }}" class="btn btn-primary" target="_blank" id="export-btn">Export PDF</a>
+  </div>
+</div>
+
+{% if can_edit %}
+<div class="form-section" style="margin-bottom:16px">
+  <div class="form-section-header"><span class="section-icon">◈</span> BULK ADD NAMES</div>
+  <div class="form-section-body">
+    <p class="text-dim" style="font-size:12px;margin:0 0 10px">
+      Paste the personnel list straight from the email — one name per line, or a single
+      comma/semicolon-separated line. Parsed names are <strong>added</strong> to the list below
+      (nothing is saved until you click Save).
+    </p>
+    <textarea id="bulk-paste" class="field-input" rows="5"
+              placeholder="Jane Doe&#10;John Smith&#10;…&#10;&#10;or:  Jane Doe, John Smith, Alex Roe"
+              style="width:100%;resize:vertical;font-family:inherit"></textarea>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">
+      <button type="button" class="btn btn-primary btn-sm" onclick="bulkAdd()">Add Pasted Names</button>
+      <label class="btn btn-ghost btn-sm" for="csv-file-input" style="cursor:pointer">Import CSV file…</label>
+      <input type="file" id="csv-file-input" accept=".csv,.txt,text/csv,text/plain"
+             style="display:none" onchange="csvImport(this)">
+      <span id="bulk-msg" class="text-dim" style="font-size:12px"></span>
+    </div>
+    <p class="text-dim" style="font-size:11px;margin:8px 0 0">
+      CSV: a <code>Name</code> column (or <code>First</code> + <code>Last</code> columns) is used when
+      the file has a header row; otherwise two-column rows are joined "First Last" and anything else
+      takes the first cell. Review the list before saving.
+    </p>
+  </div>
+</div>
+{% endif %}
+
+<div class="form-section">
+  <div class="form-section-header">
+    <span class="section-icon">◈</span> PERSONNEL
+    <span id="name-count" class="text-dim" style="font-size:11px;font-weight:normal;margin-left:8px"></span>
+    {% if can_edit %}
+    <div class="action-btns ml-auto">
+      <button type="button" class="btn btn-sm btn-ghost" onclick="addRow('')">+ Add Row</button>
+      <button type="button" class="btn btn-sm btn-danger-ghost" onclick="clearAll()">Clear All</button>
+      <button type="button" class="btn btn-sm btn-primary" id="save-btn" onclick="saveNames()">Save</button>
+    </div>
+    {% endif %}
+  </div>
+  <div class="form-section-body">
+    <p id="unsaved-note" class="text-dim" style="font-size:11px;margin:0 0 10px;display:none;color:var(--accent)">
+      Unsaved changes — click Save to keep them.
+    </p>
+    <div id="name-rows" style="display:flex;flex-direction:column;gap:6px;max-width:560px"></div>
+    <p id="empty-msg" class="text-dim" style="font-size:12px;margin:0">
+      No names yet.{% if can_edit %} Paste the list above or use "+ Add Row".{% endif %}
+    </p>
+  </div>
+</div>
+
+<script>
+(function () {
+  const CAN_EDIT = {{ 'true' if can_edit else 'false' }};
+  const MAX_NAMES = {{ max_names }};
+  const SHOW_ID = {{ show.id }};
+  let names = {{ names | tojson }};
+  let savedNames = JSON.stringify(names);
+
+  const rowsEl  = document.getElementById('name-rows');
+  const emptyEl = document.getElementById('empty-msg');
+  const countEl = document.getElementById('name-count');
+  const noteEl  = document.getElementById('unsaved-note');
+  const saveBtn = document.getElementById('save-btn');
+  const bulkMsg = document.getElementById('bulk-msg');
+
+  function dirty() { return JSON.stringify(names) !== savedNames; }
+
+  function refreshMeta() {
+    countEl.textContent = names.length ? `${names.length} name${names.length === 1 ? '' : 's'}` : '';
+    emptyEl.style.display = names.length ? 'none' : '';
+    noteEl.style.display = dirty() ? '' : 'none';
+    if (saveBtn) saveBtn.textContent = dirty() ? 'Save *' : 'Save';
+  }
+
+  function render() {
+    rowsEl.textContent = '';
+    names.forEach((n, i) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:6px;align-items:center';
+      const num = document.createElement('span');
+      num.className = 'text-dim';
+      num.style.cssText = 'font-size:11px;width:26px;text-align:right;flex:none';
+      num.textContent = (i + 1) + '.';
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.className = 'field-input';
+      inp.style.flex = '1';
+      inp.maxLength = 200;
+      inp.value = n;
+      inp.disabled = !CAN_EDIT;
+      inp.addEventListener('input', () => { names[i] = inp.value; refreshMeta(); });
+      row.appendChild(num); row.appendChild(inp);
+      if (CAN_EDIT) {
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'btn btn-xs btn-danger-ghost';
+        del.style.flex = 'none';
+        del.textContent = '×';
+        del.title = 'Remove';
+        del.addEventListener('click', () => { names.splice(i, 1); render(); });
+        row.appendChild(del);
+      }
+      rowsEl.appendChild(row);
+    });
+    refreshMeta();
+  }
+
+  window.addRow = function (val) {
+    if (names.length >= MAX_NAMES) { alert(`Max ${MAX_NAMES} names.`); return; }
+    names.push(val || '');
+    render();
+    const inputs = rowsEl.querySelectorAll('input');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+  };
+
+  window.clearAll = function () {
+    if (!names.length) return;
+    if (!confirm('Remove every name from the list? (Not saved until you click Save.)')) return;
+    names = [];
+    render();
+  };
+
+  function appendParsed(parsed) {
+    if (!parsed.length) { bulkMsg.textContent = 'No names found.'; return; }
+    const room = MAX_NAMES - names.length;
+    const cut = parsed.slice(0, room);
+    names = names.concat(cut);
+    render();
+    bulkMsg.textContent = `Added ${cut.length} name${cut.length === 1 ? '' : 's'}` +
+      (parsed.length > cut.length ? ` (${parsed.length - cut.length} over the ${MAX_NAMES} cap dropped)` : '') +
+      ' — not saved yet.';
+  }
+
+  async function postParse(body, isForm) {
+    const opts = { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } };
+    if (isForm) { opts.body = body; }
+    else { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+    const r = await fetch(`/shows/${SHOW_ID}/security/parse`, opts);
+    const j = await r.json();
+    if (!j.success) throw new Error(j.error || 'Parse failed');
+    return j.names;
+  }
+
+  window.bulkAdd = async function () {
+    const ta = document.getElementById('bulk-paste');
+    if (!ta.value.trim()) { bulkMsg.textContent = 'Nothing to add.'; return; }
+    bulkMsg.textContent = 'Parsing…';
+    try {
+      appendParsed(await postParse({ text: ta.value }, false));
+      ta.value = '';
+    } catch (e) { bulkMsg.textContent = e.message; }
+  };
+
+  window.csvImport = async function (input) {
+    if (!input.files || !input.files[0]) return;
+    const fd = new FormData();
+    fd.append('file', input.files[0]);
+    input.value = '';
+    bulkMsg.textContent = 'Parsing CSV…';
+    try { appendParsed(await postParse(fd, true)); }
+    catch (e) { bulkMsg.textContent = e.message; }
+  };
+
+  window.saveNames = async function () {
+    const cleaned = names.map(n => n.trim()).filter(n => n);
+    saveBtn.disabled = true;
+    try {
+      const r = await fetch(`/shows/${SHOW_ID}/security/names`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({ names: cleaned }),
+      });
+      const j = await r.json();
+      if (!j.success) throw new Error(j.error || 'Save failed');
+      names = j.names;
+      savedNames = JSON.stringify(names);
+      render();
+      bulkMsg.textContent = 'Saved.';
+    } catch (e) {
+      alert('Save failed: ' + e.message);
+    } finally {
+      saveBtn.disabled = false;
+    }
+  };
+
+  window.addEventListener('beforeunload', (e) => {
+    if (CAN_EDIT && dirty()) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  // The PDF only contains SAVED names — warn before exporting around edits.
+  document.getElementById('export-btn').addEventListener('click', (e) => {
+    if (CAN_EDIT && dirty() &&
+        !confirm('You have unsaved changes — the PDF only includes saved names. Export anyway?')) {
+      e.preventDefault();
+    }
+  });
+
+  render();
+})();
+</script>
+{% endblock %}

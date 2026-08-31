@@ -595,6 +595,7 @@
     <button class="tab-btn system-sub-btn" data-stab="backups" onclick="switchSystemTab('backups')">Backups</button>
     <button class="tab-btn system-sub-btn" data-stab="files" onclick="switchSystemTab('files')">Files</button>
     <button class="tab-btn system-sub-btn" data-stab="database" onclick="switchSystemTab('database')">Database</button>
+    <button class="tab-btn system-sub-btn" data-stab="modules" onclick="switchSystemTab('modules')" title="Switch optional feature modules on/off">Modules</button>
     <button class="tab-btn system-sub-btn" data-stab="ai" onclick="switchSystemTab('ai')">AI</button>
     <button class="tab-btn system-sub-btn" data-stab="cluster" onclick="switchSystemTab('cluster')">Cluster</button>
     <button class="tab-btn system-sub-btn" data-stab="godmode" onclick="switchSystemTab('godmode')">God Mode</button>
@@ -951,6 +952,26 @@
         <thead><tr><th>USER</th><th>USERNAME</th><th>ROLE</th><th>LAST LOGIN</th><th>LAST CONNECT</th></tr></thead>
         <tbody><tr><td colspan="5" class="text-dim" style="padding:16px;font-size:12px">Loading...</td></tr></tbody>
       </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{# ── MODULES (optional feature modules on/off) ─────────────────────────────── #}
+{% if user.role == 'admin' %}
+<div id="stab-modules" class="stab-pane" style="display:none">
+  <div class="form-section">
+    <div class="form-section-header"><span class="section-icon">◈</span> FEATURE MODULES</div>
+    <div class="form-section-body">
+      <p class="text-dim" style="font-size:12px;margin:0 0 14px">
+        Optional feature modules can be switched on or off here. Changes apply immediately —
+        no restart needed. A disabled module hides its UI everywhere and its pages return
+        "not found"; its saved data is kept and comes back when re-enabled.
+      </p>
+      <div id="modules-list">
+        <p class="text-dim" style="font-size:12px;margin:0">Loading...</p>
+      </div>
+      <div id="modules-msg" style="margin-top:8px"></div>
     </div>
   </div>
 </div>
@@ -3701,7 +3722,7 @@ async function adminPurgeFile(purgeUrl, btn) {
   if (document.getElementById('labor-preset-list')) loadLaborPresets();
   // Activate tab from URL hash or server-side default
   const hash = location.hash.replace('#','');
-  const validTabs = ['contacts','users','fields','arts-groups','positions','technicians','system','branding','syslog','backups','account','files','godmode','database','ai','cluster','email','dashboards','messages','update'];
+  const validTabs = ['contacts','users','fields','arts-groups','positions','technicians','system','branding','syslog','backups','account','files','godmode','database','modules','ai','cluster','email','dashboards','messages','update'];
   const defaultTab = {% if user.role == 'admin' or is_content_admin %}'contacts'{% else %}'users'{% endif %};
   switchSettingsTab(validTabs.includes(hash) ? hash : {% if active_tab %}'{{ active_tab }}'{% else %}defaultTab{% endif %});
 })();
@@ -5010,7 +5031,7 @@ async function pollUpdateStatus() {
 }
 
 /* ── System sub-tab routing ─────────────────────────────────────── */
-const _SYSTEM_SUBS = ['messages','update','branding','syslog','backups','files','database','ai','cluster','godmode'];
+const _SYSTEM_SUBS = ['messages','update','branding','syslog','backups','files','database','modules','ai','cluster','godmode'];
 let _curSystemSub = 'messages';
 
 function switchSystemTab(name) {
@@ -5033,6 +5054,65 @@ function switchSystemTab(name) {
   if (name === 'files')    loadFileManager();
   if (name === 'cluster')  startClusterPolling(); else stopClusterPolling();
   if (name === 'godmode')  loadGodMode();
+  if (name === 'modules')  loadModules();
+}
+
+/* ── Feature modules on/off (Settings → System → Modules) ─────────────────── */
+async function loadModules() {
+  const box = document.getElementById('modules-list');
+  try {
+    const r = await fetch('/settings/modules');
+    const j = await r.json();
+    box.textContent = '';
+    (j.modules || []).forEach(m => {
+      const row = document.createElement('label');
+      row.style.cssText = 'display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!m.enabled;
+      cb.style.marginTop = '2px';
+      cb.addEventListener('change', () => toggleModule(m.key, cb));
+      const txt = document.createElement('div');
+      const nm = document.createElement('div');
+      nm.style.cssText = 'font-size:13px;font-weight:600';
+      nm.textContent = m.name;
+      const desc = document.createElement('div');
+      desc.className = 'text-dim';
+      desc.style.cssText = 'font-size:11.5px;margin-top:2px';
+      desc.textContent = m.description || '';
+      txt.appendChild(nm); txt.appendChild(desc);
+      row.appendChild(cb); row.appendChild(txt);
+      box.appendChild(row);
+    });
+    if (!(j.modules || []).length)
+      box.innerHTML = '<p class="text-dim" style="font-size:12px;margin:0">No optional modules available.</p>';
+  } catch (e) {
+    box.innerHTML = '<p class="text-dim" style="font-size:12px;margin:0">Could not load modules.</p>';
+  }
+}
+
+async function toggleModule(key, cb) {
+  const msg = document.getElementById('modules-msg');
+  cb.disabled = true;
+  try {
+    const r = await fetch('/settings/modules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({ [key]: cb.checked }),
+    });
+    const j = await r.json();
+    if (!j.success) throw new Error(j.error || 'Save failed');
+    const saved = (j.modules || []).find(m => m.key === key);
+    if (saved) cb.checked = !!saved.enabled;
+    msg.textContent = `Saved — "${key}" is now ${cb.checked ? 'ON' : 'OFF'}.`;
+    msg.className = 'field-msg field-msg-success';
+  } catch (e) {
+    cb.checked = !cb.checked;   // revert
+    msg.textContent = 'Save failed: ' + e.message;
+    msg.className = 'field-msg field-msg-error';
+  } finally {
+    cb.disabled = false;
+  }
 }
 
 (function(){

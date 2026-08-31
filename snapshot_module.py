@@ -109,6 +109,7 @@ SHOW_CHILD_TABLES = [
     'field_alert_state', 'labor_requests', 'show_labor_billable_items',
     'post_show_labor', 'show_labor_days', 'show_assets',
     'show_external_rentals', 'pdf_submissions', 'form_history',
+    'security_signin_names',
 ]
 
 DIFF_ROW_CAP = 400        # max rows returned per diff bucket

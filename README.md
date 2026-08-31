@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `2.40.0`**
+**Current version: `2.41.0`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,7 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `2.41.0` — **Security Sign-In Sheets (new sandboxed module) + Settings → System → Modules on/off switchboard.** New per-show paperwork: the sign-in sheet that sits at the security desk on show day. (1) **The sheet** (`GET /shows/<id>/security/sheet.pdf`): venue-color-themed masthead (same `venue_colors` palette as the rest of the paperwork, venue logo included) headed with the show name/date/venue, then one numbered row per expected person — name printed, blank **Signature** and **Time In** cells — plus 8 blank "Additional personnel" walk-up rows; the header row repeats on every page. (2) **Entry page** (`/shows/<id>/security`, linked from the show's Export & Files tab): individual editable row inputs, plus bulk import built for the PM copy/paste-from-email workflow — a paste box (one name per line, a single comma-separated line, or Outlook-style semicolon lists) and a CSV upload (uses a `Name` or `First`+`Last` header column when present); both paths go through ONE server-side parser (`POST …/security/parse`, parse-only) so they can never disagree, and nothing saves until the explicit Save (replace-all in one transaction, 500-name/200-char caps, audit-logged with before/after lists). Anyone with show access can edit except read-only/restricted (view + export only). (3) **Sandboxed module** (`security_module.py` + `templates/security_signin.html` + `templates/pdf/security_signin_pdf.html`): wired by one `register(app, **deps)` call like Prism/Snapshots, owns only the new `security_signin_names` table (added to `PG_SCHEMA` + auto-created by the startup migration; included in show merge/move and snapshot per-show restore). (4) **Module management, the start of the pull-things-out-into-modules effort:** new `APP_MODULES` registry + `module_enabled()` in app.py and a **Settings → System → Modules** panel (admin) that switches optional modules on/off at runtime — no restart; a disabled module 404s all its routes and hides its show-page card, keeping its data. Flag stored as `module_security_signin_enabled` in `app_settings` (default ON). Syslog: `SECURITY_SIGNIN_SAVE`, `SECURITY_SIGNIN_EXPORT`, `MODULE_TOGGLE`. Deploy: main app only.
 - `2.40.0` — **Settings → System reorganized — the "Syslog" sub-tab no longer hides half the app's config.** That sub-tab had accreted the server port, WiFi defaults, paperwork time format, the organization logo, both per-venue branding panels, and the upload size limit alongside the actual syslog settings. New layout: (1) a new **Branding & Paperwork** sub-tab holds everything that shapes generated output — organization logo, per-venue logos, per-venue paperwork colors, WiFi defaults (they print on schedule PDFs), and the 12-hour time-format toggle; (2) the old tab is relabeled **Server & Logs** and keeps only what it was named for — the app port and remote-syslog configuration; (3) the **upload size limit** moved to the Files sub-tab next to the File Manager it governs. Zero route, permission, or storage changes — every pane stays inside the admin-only System tab, all forms post to the same endpoints, and the pane's element id stays `syslog` so existing `#syslog` deep links still land on Server & Logs (a new `#branding` hash deep-links to the new sub-tab; opening it refreshes both venue panels). The per-page Help entry for Settings was updated to match. Deploy: main app only.
 - `2.39.0` — **S3/SeaweedFS settings in the app, with multiple gateway endpoints + automatic failover.** Prep for the two-gateway redundant SeaweedFS deployment. (1) **Config source toggle — nothing breaks:** a new `s3_config_source` setting picks where S3 config comes from: **`ini`** (the default — `db_config.ini [seaweedfs]`, byte-for-byte the historical behavior, so every existing deployment is untouched) or **`gui`** (values saved in the new Settings panel, stored in `app_settings` in the live database like every other setting). app.py injects the GUI reader into `s3_storage` via `set_settings_provider()` (no circular import), and any settings-read failure falls back to the ini silently-but-logged (`S3_SETTINGS_PROVIDER_ERROR`) — a database hiccup can never take file storage down harder than before. (2) **Multiple endpoints with failover:** GUI mode accepts up to 4 S3 gateway URLs (`s3_endpoints` JSON, validated http(s)); `upload_file`/`download_file`/`delete_file` try them in order through a shared `_with_failover()` — all gateways front the same SeaweedFS cluster, so any of them is equivalent — remembering the last endpoint that worked so a dead primary isn't re-probed on every call (boto3 timeouts tightened: 10 s connect / 1 attempt, so failover is fast). Every endpoint error and failover hits syslog: `S3_ENDPOINT_ERROR`, `S3_FAILOVER`. (3) **Settings UI:** Settings → System → Database → new **FILE STORAGE (SeaweedFS / S3)** panel — source radio (showing the live ini summary next to it), ordered endpoint list with "+ Add endpoint", access key, write-only secret key (blank keeps the saved one), bucket, an "active right now" summary line, Save (audit + `S3_SETTINGS_CHANGE` syslog; takes effect within the 30 s settings cache on **all** instances since it lives in the shared database) and a **Test Connection** that exercises every endpoint individually and reports per-endpoint ✅/❌ — a broken gateway shows as broken even while its sibling covers for it (`/admin/s3-test` now returns the per-endpoint list). (4) **Multi-instance note:** 321Theater instances already coordinate through the shared PostgreSQL + `cluster_instances` heartbeat (Settings → System → Cluster); file changes made on one instance reach the other's open tabs via the attachments-revision poll shipped in 2.36.0, so no extra instance-to-instance channel is needed. Deploy: main app only (all app servers).
 - `2.38.0` — **Per-venue paperwork colors — each venue can have its own primary/secondary accent on every generated PDF instead of the one blue theme.** New `venue_colors` table (venue_name PK, mirrors `venue_logos`; auto-migrated on both backends) with an admin panel in Settings → next to Per-Venue Logos: a **PER-VENUE PAPERWORK COLORS** section listing every show venue with two native color pickers (primary = the structural navy, secondary = the accent gold), a CUSTOM/default badge, Save, and Reset-to-default (`GET/POST /settings/venue-colors`, hex-validated server-side; changes audit-log and syslog as `SETTINGS_CHANGE venue_colors_set/clear`). Rendering: a new `_get_venue_pdf_colors()` helper (the color sibling of `_get_logo_for_venue()`) resolves the show's venue to a full palette — the two chosen hues plus **derived tints** computed by mixing toward white/black (`_mix_hex`): banner sub-text, row backgrounds, borders, the grand-total amount, overtime-row shades — so every shade tracks the chosen colors, and it's threaded through **all eight PDF builders**: advance sheet, production schedule (public/emailed copies included, since both share the builders), post-show notes (its deliberately monochrome look keeps the black header; only the gold accent recolors), labor estimate, pre-show estimate, post-show final invoice, asset estimate, and the combined invoice (which themes only when every billed show shares one venue — mixed-venue invoices keep the default). The templates' 60+ hardcoded hex literals were replaced with Jinja variables whose per-template fallbacks are the **exact previous values** — verified by rendering each style block with no colors configured and comparing byte-for-byte against the old CSS — so **nothing changes anywhere until an admin actually saves colors for a venue** (this also preserves the two asset-invoice docs' historical `#194980`/`#F57F20` look as their default). Because PDF content hashes are computed from the rendered HTML, saving new venue colors correctly cuts a new export version instead of reusing a cached PDF. Deploy: main app only.
@@ -107,6 +108,7 @@ Version history:
    - [Asset Availability Dashboards](#asset-availability-dashboards)
    - [Comments](#comments)
    - [Export & Files](#export--files)
+   - [Security Sign-In Sheet](#security-sign-in-sheet)
    - [Email](#email)
    - [Public Show Page](#public-show-page)
 5. [Admin & Settings Guide](#admin--settings-guide)
@@ -141,6 +143,7 @@ Version history:
    - [Database Backups](#database-backups)
    - [File Manager](#file-manager)
    - [God Mode](#god-mode)
+   - [Feature Modules](#feature-modules)
    - [Prism FM Integration](#prism-fm-integration)
 6. [Database Configuration](#database-configuration)
    - [SQLite (Default)](#sqlite-default)
@@ -337,6 +340,7 @@ Show-specific comment thread with `@mention` autocomplete. Visible to all author
 | Export PDF (postnotes tab) | Generates Post-Show Notes PDF |
 | Final Invoice PDF | Generates the post-show billing invoice (internal & external assets + actual labor + costs). Also available on the Post Show tab. To bill several shows on one invoice, use Combined Invoice in the sidebar (under Settings) |
 | Generate Pre-Show Estimate | Generates a combined **labor + asset estimate/quote** PDF — the client-facing counterpart to the Final Invoice, produced before anything is scheduled. Labor uses position special rates or the highest standard tech rate; assets use reserved quantities and locked prices |
+| Security Sign-In Sheet | Opens the per-show personnel list editor and exports the sign-in sheet PDF for the security desk (see [Security Sign-In Sheet](#security-sign-in-sheet)). Card only appears while the module is enabled in Settings → System → Modules |
 | ↓ Download (history) | Re-downloads a previously generated PDF |
 
 PDFs are stored in the database — use the **↓ Download** button in Export History to re-download without generating a new version.
@@ -344,6 +348,49 @@ PDFs are stored in the database — use the **↓ Download** button in Export Hi
 **Attachments:** Drag-and-drop or click **+ Attach File**. Upload progress bar shown. Files stored in database.
 
 **Read Receipts:** Tracks who opened the advance at which version.
+
+### Security Sign-In Sheet
+
+The printed sign-in sheet that sits at the security desk on show day: the show
+name, date, and venue across the top (in the venue's paperwork colors, with the
+venue logo), then one numbered row per expected person with blank **Signature**
+and **Time In** columns, plus eight blank "Additional personnel" walk-up rows
+for anyone who wasn't on the list. On a long list the column header repeats on
+every printed page.
+
+Open it from the show page → **Export & Files** tab → **Security Sign-In
+Sheet** card → **Edit Names** (the card's **Export PDF** button prints the
+currently saved list directly).
+
+**Entering names — built for the copy/paste-from-email workflow:**
+
+1. **Paste the list** from the email into the **Bulk Add Names** box and click
+   **Add Pasted Names**. Accepted formats:
+   - one name per line (a `Last, First` line stays one name),
+   - a single line of comma-separated names (`Jane Doe, John Smith, Alex Roe`),
+   - semicolon-separated lists (Outlook-style `Jane Doe; John Smith`).
+2. **Or import a CSV** with **Import CSV file…** — if the file has a header
+   row, a `Name` column (or `First` + `Last` columns) is used; without a
+   header, two-column rows are joined `First Last` and anything else takes the
+   first cell.
+3. Parsed names are **added to the list below** — nothing is saved yet. Review
+   them: edit any row inline, remove rows with **×**, add stragglers with
+   **+ Add Row**, or start over with **Clear All**.
+4. Click **Save**. The list is stored per show (up to 500 names); an
+   "Unsaved changes" note and a `Save *` marker show whenever the list on
+   screen differs from what's saved. The PDF always prints the **saved** list —
+   exporting with unsaved edits pops a warning first.
+5. Click **Export PDF** (top right, or from the Export & Files card) and print.
+
+**Permissions:** anyone with access to the show can edit the list; read-only
+and restricted users can view and export but not edit. Every save is
+audit-logged with the before/after list; exports and saves also go to syslog
+(`SECURITY_SIGNIN_SAVE`, `SECURITY_SIGNIN_EXPORT`).
+
+**Notes:** names move with a show merge, are restorable via DB Snapshots'
+per-show restore, and are deleted with the show. The whole feature can be
+switched off in [Feature Modules](#feature-modules) — the card and pages
+disappear, but saved lists are kept and come back when re-enabled.
 
 ### Email
 
@@ -787,6 +834,35 @@ Settings → God Mode (admin only).
 
 - **Active Sessions** — users on a show page in the last 5 minutes (user, show, tab, last seen)
 - **User Last Login** — last login timestamp per user
+
+### Feature Modules
+
+Settings → System → **Modules** (admin only).
+
+The on/off switchboard for the app's optional, self-contained feature modules.
+Ticking a module's checkbox saves immediately — **no restart needed**, and the
+change reaches every server instance (the flag lives in `app_settings` in the
+shared database).
+
+What a toggle does:
+
+- **Off** — the module's UI disappears everywhere (e.g. the show-page export
+  card) and its pages/endpoints return "not found". **Saved data is kept** —
+  nothing is deleted.
+- **On** — everything comes back, including previously saved data.
+
+Every toggle is audit-logged and emits a `MODULE_TOGGLE` syslog event.
+
+Current modules:
+
+| Module | Default | What it gates |
+|--------|---------|---------------|
+| Security Sign-In Sheets | On | The per-show personnel list + sign-in sheet PDF ([user guide](#security-sign-in-sheet)) |
+
+This panel is the first step of gradually pulling app features out into
+sandboxed modules (each lives in its own Python file, wired into `app.py` by a
+single `register()` call, and owns only its own tables) — new modules will
+appear here as that work continues.
 
 ### Prism FM Integration
 

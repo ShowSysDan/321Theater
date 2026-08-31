@@ -61,6 +61,7 @@ import s3_storage
 import pdf_layouts
 import nav_layout
 import prism_module  # sandboxed Prism FM integration — wired up near the bottom
+import security_module  # security sign-in sheets — wired up near the bottom
 import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
 
 from flask import (Flask, render_template, request, redirect, url_for,
@@ -679,7 +680,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.40.0'
+APP_VERSION = '2.41.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -856,6 +857,32 @@ def get_app_setting(key, default=''):
             return row['value'] if row and row['value'] is not None else default
         except Exception:
             return default
+
+
+# ─── Optional feature modules (Settings → System → Modules) ──────────────────
+# Registry of the sandboxed feature modules an admin can switch on/off at
+# runtime. Each entry's flag lives in app_settings as
+# `module_<key>_enabled` ('1'/'0'; missing key = the entry's default), so a
+# toggle applies everywhere without a restart. As more of the app is pulled
+# out into modules, they get added here.
+APP_MODULES = [
+    {
+        'key': 'security_signin',
+        'name': 'Security Sign-In Sheets',
+        'description': 'Per-show personnel list that prints as the sign-in '
+                       'sheet at the security desk (show page → Export & Files).',
+        'default': '1',
+    },
+]
+
+
+def module_enabled(key):
+    """True when the optional module `key` is switched on. Unknown keys are
+    always off, so a stale app_settings row can't resurrect removed code."""
+    for m in APP_MODULES:
+        if m['key'] == key:
+            return get_app_setting(f'module_{key}_enabled', m['default']) == '1'
+    return False
 
 
 def _s3_gui_settings():
@@ -5084,6 +5111,7 @@ def show_page(show_id):
 
     return render_template('show.html',
                            pdf_form_status=pdf_form_status,
+                           security_signin_enabled=module_enabled('security_signin'),
                            show=show,
                            tab=tab,
                            advance_data=advance_data,
@@ -7714,14 +7742,14 @@ _SHOW_PURGE_TABLES = ['advance_data', 'schedule_rows', 'schedule_meta',
 # is preserved instead of being cascade-deleted with the duplicate.
 _SHOW_MERGE_MOVE_TABLES = ['labor_requests', 'post_show_labor', 'show_assets',
     'show_external_rentals', 'show_performances', 'show_comments',
-    'show_attachments']
+    'show_attachments', 'security_signin_names']
 
 # Friendly labels for the merge preview's "what will move" summary.
 _SHOW_MERGE_MOVE_LABELS = {
     'labor_requests': 'Labor lines', 'post_show_labor': 'Post-show labor',
     'show_assets': 'Assets', 'show_external_rentals': 'External rentals',
     'show_performances': 'Performances', 'show_comments': 'Comments',
-    'show_attachments': 'Files',
+    'show_attachments': 'Files', 'security_signin_names': 'Security sign-in names',
 }
 
 # Advance fields stored as scalar columns on the shows row (vs the advance_data
@@ -11636,6 +11664,46 @@ def venue_colors_save():
         f"SETTINGS_CHANGE detail={action} venue={venue_name} "
         f"primary={primary or '-'} secondary={secondary or '-'} by={session.get('username')}")
     return jsonify({'success': True})
+
+
+@app.route('/settings/modules', methods=['GET'])
+@admin_required
+def modules_list():
+    """The optional feature modules (APP_MODULES) with their current state,
+    for the Settings → System → Modules panel."""
+    return jsonify({'modules': [{
+        'key': m['key'],
+        'name': m['name'],
+        'description': m['description'],
+        'enabled': module_enabled(m['key']),
+    } for m in APP_MODULES]})
+
+
+@app.route('/settings/modules', methods=['POST'])
+@admin_required
+def modules_save():
+    """Switch optional feature modules on/off. Body: {key: bool, ...} — only
+    keys present in APP_MODULES are accepted. Applies immediately (module
+    routes re-check the flag per request), no restart needed."""
+    data = request.get_json(force=True) or {}
+    changed = []
+    db = get_db()
+    for m in APP_MODULES:
+        if m['key'] not in data:
+            continue
+        enabled = '1' if data[m['key']] else '0'
+        db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+                   (f"module_{m['key']}_enabled", enabled))
+        changed.append((m['key'], enabled))
+        log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
+                  detail=f"module_{m['key']}_enabled={enabled}")
+    db.commit(); db.close()
+    for key, enabled in changed:
+        syslog_logger.info(
+            f"MODULE_TOGGLE key={key} enabled={enabled} by={session.get('username')}")
+    return jsonify({'success': True, 'modules': [{
+        'key': m['key'], 'enabled': module_enabled(m['key']),
+    } for m in APP_MODULES]})
 
 
 @app.route('/settings/upload-size', methods=['POST'])
@@ -21745,6 +21813,29 @@ prism_module.register(
     db_adapter=db_adapter,
     DATABASE=DATABASE,
     syslog_logger=syslog_logger,
+)
+
+
+# ─── Security sign-in sheets (sandboxed) ──────────────────────────────────────
+# Per-show personnel list + the venue-themed sign-in sheet PDF that sits at
+# the security desk. All logic lives in security_module.py +
+# templates/security_signin.html + templates/pdf/security_signin_pdf.html
+# behind this one call. The whole feature toggles at Settings → System →
+# Modules (module_enabled('security_signin')); the module owns only the
+# security_signin_names table.
+
+security_module.register(
+    app,
+    get_db=get_db,
+    get_current_user=get_current_user,
+    login_required=login_required,
+    can_access_show=can_access_show,
+    module_enabled=module_enabled,
+    log_audit=log_audit,
+    syslog_logger=syslog_logger,
+    get_venue_pdf_colors=_get_venue_pdf_colors,
+    get_logo_for_venue=_get_logo_for_venue,
+    safe_content_disposition=_safe_content_disposition,
 )
 
 
