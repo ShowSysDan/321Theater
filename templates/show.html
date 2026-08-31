@@ -2452,6 +2452,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
 .labor-day-header {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;   /* the actions group (Apply preset… / Clone / Delete) wraps on narrow screens */
   gap: 10px;
   padding: 8px 12px;
   background: var(--bg-hover);
@@ -2465,7 +2466,8 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
   white-space: nowrap;
 }
 .labor-day-date { width: 150px; }
-.labor-day-actions { display: flex; gap: 6px; }
+.labor-day-actions { display: flex; gap: 6px; align-items: center; }
+.labor-day-preset { max-width: 170px; }
 .labor-day-pm-wrap { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .labor-day-pm-wrap label {
   font-size: 10px; font-weight: 700; letter-spacing: .06em;
@@ -2521,6 +2523,9 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
 <script>
   const RESTRICTED = {{ 'true' if restricted else 'false' }};
   const IS_ADMIN = {{ 'true' if user.role == 'admin' else 'false' }};
+  // Attachment archive (×) buttons render only for users the server would
+  // actually allow — anyone with edit access, not just the uploader.
+  const CAN_EDIT_FILES = {{ 'false' if restricted or session.get('is_readonly') else 'true' }};
   const INITIAL_TAB = '{{ tab }}';
   const ALL_USERS = {{ all_users | tojson }};
   let _currentHistId = null;
@@ -3047,6 +3052,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
              onchange="onLaborDayNotesChange(this)">
       ${RESTRICTED ? '' : `
         <div class="labor-day-actions">
+          ${_laborPresetSelectHtml()}
           <button type="button" class="btn btn-xs btn-ghost" onclick="cloneLaborDay(this)" title="Copy all rows to another date">Clone to…</button>
           <button type="button" class="btn btn-xs btn-danger-ghost" onclick="deleteLaborDay(this)" title="Delete this day and all its rows">Delete Day</button>
         </div>
@@ -3304,9 +3310,51 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     await _putLabor(rid, {});
   }
 
+  /* ── Labor day presets (authored in Settings → Job Positions) ───── */
+  async function _loadLaborPresets() {
+    try {
+      window._laborPresets = await (await fetch('/api/labor-presets')).json();
+    } catch (_) { window._laborPresets = window._laborPresets || []; }
+  }
+
+  /* "Apply preset…" dropdown for a day-block header ('' when no presets exist) */
+  function _laborPresetSelectHtml() {
+    const presets = window._laborPresets || [];
+    if (!presets.length) return '';
+    return `<select class="field-input field-input-sm labor-day-preset"
+                    onchange="applyLaborPreset(this)"
+                    title="Append a preset's standing positions to this day">
+      <option value="">Apply preset…</option>
+      ${presets.map(p => `<option value="${p.id}">${_esc(p.name)} (${p.row_count})</option>`).join('')}
+    </select>`;
+  }
+
+  async function applyLaborPreset(sel) {
+    const pid = sel.value;
+    sel.value = '';
+    if (!pid) return;
+    const block = sel.closest('.labor-day');
+    const workDate = block?.dataset.workDate || '';
+    if (!workDate) { alert('Set a date on this day before applying a preset.'); return; }
+    const preset = (window._laborPresets || []).find(p => String(p.id) === String(pid));
+    const label = preset ? `"${preset.name}" (${preset.row_count} request${preset.row_count === 1 ? '' : 's'})` : 'this preset';
+    if (!confirm(`Add ${label} to ${workDate}? Existing rows are kept.`)) return;
+    try {
+      const resp = await fetch(`/shows/${SHOW_ID}/labor-presets/${pid}/apply`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({work_date: workDate}),
+      });
+      const d = await resp.json();
+      if (!d.success) { alert(d.error || 'Apply failed.'); return; }
+      showSaveToast(`✓ ${d.created} request${d.created === 1 ? '' : 's'} added`);
+      await _refreshLaborData();
+    } catch (_) { alert('Network error.'); }
+  }
+
   async function initLaborTab() {
     await Promise.all([_loadLaborPositions(), _loadCrewMembers(),
-                       _loadLaborDays(), _loadPMNames()]);
+                       _loadLaborDays(), _loadPMNames(), _loadLaborPresets()]);
     const container = document.getElementById('labor-days-container');
     if (!container) return;
     // Remove any previously rendered day-blocks (safe to re-init)

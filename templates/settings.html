@@ -589,7 +589,9 @@
   <div class="tab-nav" style="margin-bottom:16px">
     <button class="tab-btn system-sub-btn active" data-stab="messages" onclick="switchSystemTab('messages')">Messages</button>
     <button class="tab-btn system-sub-btn" data-stab="update" onclick="switchSystemTab('update')">Updates</button>
-    <button class="tab-btn system-sub-btn" data-stab="syslog" onclick="switchSystemTab('syslog')">Syslog</button>
+    <button class="tab-btn system-sub-btn" data-stab="branding" onclick="switchSystemTab('branding')" title="Logos, per-venue paperwork colors, WiFi defaults, PDF time format">Branding &amp; Paperwork</button>
+    {# Pane id stays 'syslog' so old #syslog deep links keep working #}
+    <button class="tab-btn system-sub-btn" data-stab="syslog" onclick="switchSystemTab('syslog')">Server &amp; Logs</button>
     <button class="tab-btn system-sub-btn" data-stab="backups" onclick="switchSystemTab('backups')">Backups</button>
     <button class="tab-btn system-sub-btn" data-stab="files" onclick="switchSystemTab('files')">Files</button>
     <button class="tab-btn system-sub-btn" data-stab="database" onclick="switchSystemTab('database')">Database</button>
@@ -624,6 +626,67 @@
       </form>
     </div>
   </div>
+
+
+
+  <div class="form-section">
+    <div class="form-section-header"><span class="section-icon">◈</span> SYSLOG SETTINGS</div>
+    <div class="form-section-body">
+      <p class="text-dim" style="font-size:12px;margin-bottom:4px">
+        Send audit events (logins, saves, exports, user changes) to a remote syslog server via UDP.
+        Requires the syslog server to accept UDP on the configured port.
+      </p>
+      <form onsubmit="event.preventDefault(); saveSyslogSettings(this)" style="max-width:440px">
+        <div class="field-group">
+          <label class="field-label">
+            <input type="checkbox" name="syslog_enabled"
+                   {% if syslog_settings.get('syslog_enabled') == '1' %}checked{% endif %}
+                   style="margin-right:6px;accent-color:var(--accent)">
+            ENABLE SYSLOG
+          </label>
+        </div>
+        <div class="field-group">
+          <label class="field-label">SYSLOG HOST</label>
+          <input type="text" name="syslog_host" class="field-input"
+                 value="{{ syslog_settings.get('syslog_host', '127.0.0.1') }}"
+                 placeholder="127.0.0.1">
+        </div>
+        <div class="field-group">
+          <label class="field-label">SYSLOG PORT (UDP)</label>
+          <input type="number" name="syslog_port" class="field-input"
+                 value="{{ syslog_settings.get('syslog_port', '514') }}"
+                 placeholder="514" min="1" max="65535">
+        </div>
+        <div class="field-group">
+          <label class="field-label">FACILITY</label>
+          <select name="syslog_facility" class="field-input">
+            {% for fac in ['LOG_LOCAL0','LOG_LOCAL1','LOG_LOCAL2','LOG_LOCAL3','LOG_LOCAL4','LOG_LOCAL5','LOG_LOCAL6','LOG_LOCAL7','LOG_USER','LOG_DAEMON'] %}
+            <option value="{{ fac }}" {% if syslog_settings.get('syslog_facility','LOG_LOCAL0') == fac %}selected{% endif %}>{{ fac }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="syslog-save-msg field-msg"></div>
+        <button type="submit" class="btn btn-primary">Save Syslog Settings</button>
+      </form>
+
+      <div style="margin-top:24px">
+        <h4 class="sub-section-label">EVENTS LOGGED</h4>
+        <p class="text-dim" style="font-size:12px;margin-top:8px">
+          LOGIN / LOGOUT · SESSION_EXPIRED / EXTEND / HARVEST ·
+          SHOW_CREATE / ARCHIVE / DELETE / RESTORE ·
+          FORM_SAVE (advance, schedule, postnotes) · PDF_EXPORT ·
+          USER_CREATE / DELETE / PASSWORD_CHANGE ·
+          GROUP_ASSIGN / REMOVE · SHOW_ACCESS_ADD / REMOVE ·
+          HISTORY_RESTORE · BACKUP_CREATED · SETTINGS_CHANGE
+        </p>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+{# ── BRANDING & PAPERWORK (admin only — same gate as the rest of the System tab) #}
+<div id="stab-branding" class="stab-pane" style="display:none">
 
   <div class="form-section" style="margin-bottom:16px">
     <div class="form-section-header"><span class="section-icon">◈</span> WIFI DEFAULTS</div>
@@ -705,76 +768,24 @@
   </div>
 
   <div class="form-section" style="margin-bottom:16px">
-    <div class="form-section-header"><span class="section-icon">◈</span> UPLOAD SIZE LIMIT</div>
-    <div class="form-section-body">
-      <form onsubmit="event.preventDefault(); saveUploadSize(this)" style="max-width:250px">
-        <div class="field-group">
-          <label class="field-label">MAX UPLOAD SIZE (MB)</label>
-          <input type="number" name="upload_max_mb" class="field-input"
-                 value="{{ upload_max_mb }}" min="1" max="500" placeholder="20">
-        </div>
-        <div class="upload-size-msg field-msg"></div>
-        <button type="submit" class="btn btn-primary">Save</button>
-      </form>
+    <div class="form-section-header" style="display:flex;align-items:center;gap:10px">
+      <span class="section-icon">◈</span> PER-VENUE PAPERWORK COLORS
+      <button class="btn btn-xs btn-ghost" style="margin-left:auto" onclick="loadVenueColors()" title="Refresh list">Refresh</button>
     </div>
-  </div>
-
-  <p class="text-dim text-sm" style="padding:12px 0">Venue list is managed in the <strong>Job Positions</strong> tab.</p>
-
-
-  <div class="form-section">
-    <div class="form-section-header"><span class="section-icon">◈</span> SYSLOG SETTINGS</div>
     <div class="form-section-body">
-      <p class="text-dim" style="font-size:12px;margin-bottom:4px">
-        Send audit events (logins, saves, exports, user changes) to a remote syslog server via UDP.
-        Requires the syslog server to accept UDP on the configured port.
+      <p class="text-dim" style="font-size:12px;margin-bottom:12px">
+        Give each venue its own primary (structural navy) and secondary (accent gold) color on generated
+        PDFs — advance sheet, production schedule, labor/estimate and invoice paperwork. Lighter shades
+        (row backgrounds, banners) are derived automatically. Venues without colors keep the default theme.
       </p>
-      <form onsubmit="event.preventDefault(); saveSyslogSettings(this)" style="max-width:440px">
-        <div class="field-group">
-          <label class="field-label">
-            <input type="checkbox" name="syslog_enabled"
-                   {% if syslog_settings.get('syslog_enabled') == '1' %}checked{% endif %}
-                   style="margin-right:6px;accent-color:var(--accent)">
-            ENABLE SYSLOG
-          </label>
-        </div>
-        <div class="field-group">
-          <label class="field-label">SYSLOG HOST</label>
-          <input type="text" name="syslog_host" class="field-input"
-                 value="{{ syslog_settings.get('syslog_host', '127.0.0.1') }}"
-                 placeholder="127.0.0.1">
-        </div>
-        <div class="field-group">
-          <label class="field-label">SYSLOG PORT (UDP)</label>
-          <input type="number" name="syslog_port" class="field-input"
-                 value="{{ syslog_settings.get('syslog_port', '514') }}"
-                 placeholder="514" min="1" max="65535">
-        </div>
-        <div class="field-group">
-          <label class="field-label">FACILITY</label>
-          <select name="syslog_facility" class="field-input">
-            {% for fac in ['LOG_LOCAL0','LOG_LOCAL1','LOG_LOCAL2','LOG_LOCAL3','LOG_LOCAL4','LOG_LOCAL5','LOG_LOCAL6','LOG_LOCAL7','LOG_USER','LOG_DAEMON'] %}
-            <option value="{{ fac }}" {% if syslog_settings.get('syslog_facility','LOG_LOCAL0') == fac %}selected{% endif %}>{{ fac }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="syslog-save-msg field-msg"></div>
-        <button type="submit" class="btn btn-primary">Save Syslog Settings</button>
-      </form>
-
-      <div style="margin-top:24px">
-        <h4 class="sub-section-label">EVENTS LOGGED</h4>
-        <p class="text-dim" style="font-size:12px;margin-top:8px">
-          LOGIN / LOGOUT · SESSION_EXPIRED / EXTEND / HARVEST ·
-          SHOW_CREATE / ARCHIVE / DELETE / RESTORE ·
-          FORM_SAVE (advance, schedule, postnotes) · PDF_EXPORT ·
-          USER_CREATE / DELETE / PASSWORD_CHANGE ·
-          GROUP_ASSIGN / REMOVE · SHOW_ACCESS_ADD / REMOVE ·
-          HISTORY_RESTORE · BACKUP_CREATED · SETTINGS_CHANGE
-        </p>
+      <div id="venue-colors-list">
+        <p class="text-dim" style="font-size:12px">Loading…</p>
       </div>
     </div>
   </div>
+
+
+  <p class="text-dim text-sm" style="padding:12px 0">Venue list is managed in the <strong>Job Positions</strong> tab.</p>
 
 </div>
 
@@ -815,6 +826,21 @@
 {# ── FILES (admin only) ───────────────────────────────────────────────────── #}
 {% if user.role == 'admin' %}
 <div id="stab-files" class="stab-pane" style="display:none">
+  <div class="form-section" style="margin-bottom:16px">
+    <div class="form-section-header"><span class="section-icon">◈</span> UPLOAD SIZE LIMIT</div>
+    <div class="form-section-body">
+      <form onsubmit="event.preventDefault(); saveUploadSize(this)" style="max-width:250px">
+        <div class="field-group">
+          <label class="field-label">MAX UPLOAD SIZE (MB)</label>
+          <input type="number" name="upload_max_mb" class="field-input"
+                 value="{{ upload_max_mb }}" min="1" max="500" placeholder="20">
+        </div>
+        <div class="upload-size-msg field-msg"></div>
+        <button type="submit" class="btn btn-primary">Save</button>
+      </form>
+    </div>
+  </div>
+
   <div class="form-section">
     <div class="form-section-header">
       <span class="section-icon">◈</span> FILE MANAGER
@@ -971,6 +997,19 @@
     </div>
   </div>
   {% endif %}
+
+  <div class="form-section" style="margin-bottom:16px">
+    <div class="form-section-header"><span class="section-icon">◈</span> FILE STORAGE (SEAWEEDFS / S3)</div>
+    <div class="form-section-body" style="max-width:640px">
+      <p class="field-hint" style="margin-bottom:12px">
+        Where show file uploads, PDF exports and asset photos are stored. Config can come from
+        <code>db_config.ini [seaweedfs]</code> on the server (the historical default) or from the
+        values saved here — which support <strong>multiple S3 gateway endpoints</strong> tried in
+        order with automatic failover (for redundant SeaweedFS gateways fronting one cluster).
+      </p>
+      <div id="s3-settings-body"><p class="text-dim" style="font-size:12px">Loading…</p></div>
+    </div>
+  </div>
 </div>
 {% endif %}
 
@@ -1258,8 +1297,56 @@
     </div>
 
   </div>
+
+  {# ── Labor day presets (scheduler+ — matches the preset routes' guard) ──── #}
+  {% if user.role in ('admin', 'staff') or user.is_scheduler %}
+  <div class="form-section" style="margin-top:24px">
+    <div class="form-section-header">
+      <span class="section-icon">◈</span> LABOR DAY PRESETS
+      <div class="action-btns ml-auto">
+        <button class="btn btn-sm btn-ghost" onclick="openLaborPresetModal(null)">+ New Preset</button>
+      </div>
+    </div>
+    <div class="form-section-body" style="gap:10px">
+      <p class="text-dim" style="font-size:12px">Standing position calls (e.g. the crew every show night always needs) you can apply to any labor day on a show with one click. Quantity expands to that many request lines.</p>
+      <div id="labor-preset-list"><p class="text-dim" style="font-size:12px">Loading…</p></div>
+    </div>
+  </div>
+  {% endif %}
 </div>
 {% endif %}
+
+<!-- Labor Preset Modal -->
+<div id="labor-preset-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeLaborPresetModal()">
+  <div class="modal-card" style="max-width:860px;width:95%">
+    <div class="modal-header">Labor Day Preset <button onclick="closeLaborPresetModal()" class="modal-close">×</button></div>
+    <div class="modal-body">
+      <div class="field-group" style="margin-bottom:16px">
+        <label class="field-label">PRESET NAME *</label>
+        <input type="text" id="labor-preset-name" class="field-input" placeholder="e.g. Standard Show Night, Load In Crew">
+      </div>
+      <div style="overflow-x:auto">
+      <table class="schedule-table" style="margin-bottom:8px;min-width:720px">
+        <thead><tr>
+          <th>POSITION</th><th style="width:52px">QTY</th>
+          <th style="width:72px">IN</th><th style="width:72px">OUT</th>
+          <th style="width:72px">BRK 1 S</th><th style="width:72px">BRK 1 E</th>
+          <th style="width:72px">BRK 2 S</th><th style="width:72px">BRK 2 E</th>
+          <th style="width:120px">NOTES</th>
+          <th style="width:36px"></th>
+        </tr></thead>
+        <tbody id="labor-preset-rows"></tbody>
+      </table>
+      </div>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="addLaborPresetRow()">+ Add Position</button>
+      <p class="text-dim" style="font-size:11px;margin-top:8px">Times are 24-hour HH:MM. Leave a position's times blank to fill them in on the show.</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeLaborPresetModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveLaborPreset()">Save Preset</button>
+    </div>
+  </div>
+</div>
 
 
 {# ── CREW MEMBERS ──────────────────────────────────────────────────────────── #}
@@ -3117,6 +3204,233 @@ if (document.getElementById('venue-logos-list')) {
   loadVenueLogos();
 }
 
+/* ── Per-venue paperwork colors ─────────────────────────────────── */
+const _VC_DEFAULT_PRIMARY = '#1a4a7a';
+const _VC_DEFAULT_SECONDARY = '#B8840A';
+
+async function loadVenueColors() {
+  const host = document.getElementById('venue-colors-list');
+  if (!host) return;
+  host.innerHTML = '<p class="text-dim" style="font-size:12px">Loading…</p>';
+  try {
+    const r = await fetch('/settings/venue-colors');
+    if (!r.ok) throw new Error('http ' + r.status);
+    const d = await r.json();
+    const venues = d.venues || [];
+    if (!venues.length) {
+      host.innerHTML = '<p class="text-dim" style="font-size:12px">No venues found yet. Create a show first.</p>';
+      return;
+    }
+    host.innerHTML = venues.map(v => {
+      const safe = _venueLogoEsc(v.name);
+      const nameArg = safe.replace(/'/g, "\\'");
+      const isSet = !!(v.primary_color || v.secondary_color);
+      const p = v.primary_color || _VC_DEFAULT_PRIMARY;
+      const s = v.secondary_color || _VC_DEFAULT_SECONDARY;
+      const status = isSet
+        ? `<span class="badge" style="background:${p};color:#fff;font-size:10px;padding:1px 8px;border-radius:99px;border:2px solid ${s}">CUSTOM</span>`
+        : `<span class="text-dim" style="font-size:11px;font-style:italic">Using default theme</span>`;
+      return `<div class="venue-colors-row" data-venue="${safe}"
+                   style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);flex-wrap:wrap">
+        <div style="flex:1;min-width:160px">
+          <div style="font-weight:600;font-size:13px">${safe}</div>
+          <div style="margin-top:4px">${status}</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)">PRIMARY
+          <input type="color" class="vc-primary" value="${p}" style="width:44px;height:28px;padding:1px;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer">
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)">SECONDARY
+          <input type="color" class="vc-secondary" value="${s}" style="width:44px;height:28px;padding:1px;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer">
+        </label>
+        <button class="btn btn-sm btn-primary" onclick="saveVenueColors(this, '${nameArg}')">Save</button>
+        ${isSet ? `<button class="btn btn-sm btn-ghost" onclick="clearVenueColors('${nameArg}')" title="Back to the default theme">Reset</button>` : ''}
+        <span class="venue-colors-msg field-msg" style="display:none;flex-basis:100%;font-size:11px"></span>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    host.innerHTML = '<p class="text-dim" style="font-size:12px;color:#F56565">Failed to load venue list.</p>';
+  }
+}
+
+async function saveVenueColors(btn, venueName) {
+  const row = btn.closest('.venue-colors-row');
+  const primary = row.querySelector('.vc-primary')?.value || '';
+  const secondary = row.querySelector('.vc-secondary')?.value || '';
+  const msg = row.querySelector('.venue-colors-msg');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/settings/venue-colors', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({venue: venueName, primary_color: primary, secondary_color: secondary})
+    });
+    const d = await r.json();
+    if (msg) {
+      msg.style.display = 'block';
+      msg.textContent = d.success ? '✓ Saved — new exports use these colors' : (d.error || 'Save failed');
+      msg.style.color = d.success ? 'var(--accent)' : 'var(--danger)';
+    }
+    if (d.success) {
+      showSaveToast(`✓ Colors saved for "${venueName}"`);
+      setTimeout(loadVenueColors, 600);
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function clearVenueColors(venueName) {
+  if (!confirm(`Reset "${venueName}" to the default paperwork theme?`)) return;
+  const r = await fetch('/settings/venue-colors', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({venue: venueName, primary_color: '', secondary_color: ''})
+  });
+  const d = await r.json();
+  if (d.success) {
+    showSaveToast(`✓ "${venueName}" back on the default theme`);
+    loadVenueColors();
+  } else {
+    alert(d.error || 'Reset failed');
+  }
+}
+
+if (document.getElementById('venue-colors-list')) {
+  loadVenueColors();
+}
+
+/* ── File Storage (SeaweedFS / S3) settings ─────────────────────── */
+async function loadS3Settings() {
+  const host = document.getElementById('s3-settings-body');
+  if (!host) return;
+  try {
+    const d = await (await fetch('/settings/s3')).json();
+    const gui = d.gui || {};
+    const ini = d.ini || {};
+    const active = d.active || {};
+    const eps = (gui.endpoints && gui.endpoints.length) ? gui.endpoints : [''];
+    const epInputs = eps.map(e =>
+      `<input type="text" class="field-input s3-endpoint" value="${_venueLogoEsc(e)}"
+              placeholder="http://10.201.2.50:8333" style="margin-bottom:6px">`).join('');
+    const iniSummary = ini.present
+      ? `<code>${_venueLogoEsc(ini.endpoint || '(no endpoint)')}</code> · bucket <code>${_venueLogoEsc(ini.bucket || '—')}</code> · key ${ini.access_key ? '<code>' + _venueLogoEsc(ini.access_key) + '</code>' : '—'}`
+      : '<span class="text-dim">no [seaweedfs] section found</span>';
+    const activeSummary = active.configured
+      ? `${(active.endpoints || []).map(e => '<code>' + _venueLogoEsc(e) + '</code>').join(' → ')} · bucket <code>${_venueLogoEsc(active.bucket)}</code>`
+      : '<span style="color:var(--danger)">not configured — files fall back to database storage</span>';
+    host.innerHTML = `
+      <div class="field-group" style="margin-bottom:10px">
+        <label class="field-label">CONFIG SOURCE</label>
+        <label class="checkbox-label" style="display:block;margin:4px 0">
+          <input type="radio" name="s3-source" value="ini" ${d.source !== 'gui' ? 'checked' : ''}>
+          <strong>db_config.ini</strong> <span class="text-dim">(server file — the default; ${iniSummary})</span>
+        </label>
+        <label class="checkbox-label" style="display:block;margin:4px 0">
+          <input type="radio" name="s3-source" value="gui" ${d.source === 'gui' ? 'checked' : ''}>
+          <strong>These settings</strong> <span class="text-dim">(saved in the database, multiple endpoints + failover)</span>
+        </label>
+      </div>
+      <div class="field-group">
+        <label class="field-label">S3 GATEWAY ENDPOINTS <span class="text-dim">(tried in order — primary first)</span></label>
+        <div id="s3-endpoints">${epInputs}</div>
+        <button type="button" class="btn btn-xs btn-ghost" onclick="addS3Endpoint()">+ Add endpoint</button>
+      </div>
+      <div class="form-row cols-2">
+        <div class="field-group">
+          <label class="field-label">ACCESS KEY</label>
+          <input type="text" id="s3-access-key" class="field-input" value="${_venueLogoEsc(gui.access_key || '')}" autocomplete="off">
+        </div>
+        <div class="field-group">
+          <label class="field-label">SECRET KEY ${gui.secret_set ? '<span class="text-dim">(saved — leave blank to keep)</span>' : ''}</label>
+          <input type="password" id="s3-secret-key" class="field-input" value="" placeholder="${gui.secret_set ? '••••••••' : ''}" autocomplete="new-password">
+        </div>
+      </div>
+      <div class="field-group" style="max-width:250px">
+        <label class="field-label">BUCKET</label>
+        <input type="text" id="s3-bucket" class="field-input" value="${_venueLogoEsc(gui.bucket || '321theater')}">
+      </div>
+      <p class="field-hint" style="margin:8px 0">Active right now: ${activeSummary}</p>
+      <div id="s3-settings-msg" class="field-msg" style="display:none;margin-bottom:8px"></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="saveS3Settings()">Save</button>
+        <button class="btn btn-ghost" onclick="testS3Settings(this)">Test Connection</button>
+      </div>
+      <div id="s3-test-results" style="margin-top:10px"></div>`;
+  } catch (e) {
+    host.innerHTML = '<p class="text-dim" style="font-size:12px;color:#F56565">Failed to load S3 settings.</p>';
+  }
+}
+
+function addS3Endpoint() {
+  const wrap = document.getElementById('s3-endpoints');
+  if (!wrap || wrap.querySelectorAll('.s3-endpoint').length >= 4) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'field-input s3-endpoint';
+  input.placeholder = 'http://10.201.2.51:8333';
+  input.style.marginBottom = '6px';
+  wrap.appendChild(input);
+}
+
+function _s3Msg(text, ok) {
+  const msg = document.getElementById('s3-settings-msg');
+  if (!msg) return;
+  msg.style.display = 'block';
+  msg.textContent = text;
+  msg.style.color = ok ? 'var(--accent)' : 'var(--danger)';
+}
+
+async function saveS3Settings() {
+  const source = document.querySelector('input[name="s3-source"]:checked')?.value || 'ini';
+  const endpoints = Array.from(document.querySelectorAll('#s3-endpoints .s3-endpoint'))
+    .map(i => i.value.trim()).filter(Boolean);
+  const body = {
+    source,
+    endpoints,
+    access_key: document.getElementById('s3-access-key')?.value.trim() || '',
+    secret_key: document.getElementById('s3-secret-key')?.value.trim() || '',
+    bucket: document.getElementById('s3-bucket')?.value.trim() || '',
+  };
+  try {
+    const r = await fetch('/settings/s3', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d.success) {
+      _s3Msg('✓ Saved — takes effect within 30 seconds on all instances', true);
+      showSaveToast('✓ S3 settings saved');
+      setTimeout(loadS3Settings, 800);
+    } else {
+      _s3Msg(d.error || 'Save failed', false);
+    }
+  } catch (e) { _s3Msg('Network error', false); }
+}
+
+async function testS3Settings(btn) {
+  const out = document.getElementById('s3-test-results');
+  if (out) out.innerHTML = '<p class="text-dim" style="font-size:12px">Testing every endpoint…</p>';
+  btn.disabled = true;
+  try {
+    const d = await (await fetch('/admin/s3-test')).json();
+    const rows = (d.endpoints || []).map(r =>
+      `<div style="font-size:12px;padding:3px 0">
+         ${r.success ? '✅' : '❌'} <code>${_venueLogoEsc(r.endpoint)}</code>
+         <span class="${r.success ? 'text-dim' : ''}" ${r.success ? '' : 'style="color:var(--danger)"'}>${_venueLogoEsc(r.message)}</span>
+       </div>`).join('');
+    if (out) out.innerHTML =
+      `<div style="font-size:12px;font-weight:600;margin-bottom:4px;color:${d.success ? 'var(--accent)' : 'var(--danger)'}">${_venueLogoEsc(d.message || '')} <span class="text-dim">(source: ${_venueLogoEsc(d.source || '')}, bucket: ${_venueLogoEsc(d.bucket || '')})</span></div>` + rows;
+  } catch (e) {
+    if (out) out.innerHTML = '<p style="font-size:12px;color:var(--danger)">Test request failed.</p>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+if (document.getElementById('s3-settings-body')) {
+  loadS3Settings();
+}
+
 async function saveUploadSize(form) {
   const fd = new FormData(form);
   const msg = form.querySelector('.upload-size-msg');
@@ -3314,22 +3628,42 @@ async function loadFileManager() {
   try {
     const resp = await fetch('/api/admin/files');
     const data = await resp.json();
-    if (infoEl) infoEl.textContent = `Total: ${_fmtBytes(data.total_bytes)} across ${data.files.length} files`;
+    if (infoEl) {
+      let info = `Total: ${_fmtBytes(data.total_bytes)} across ${data.files.length} files`;
+      if (data.archived_count) {
+        info += ` · ${data.archived_count} archived (${_fmtBytes(data.archived_bytes)} reclaimable by purging)`;
+      }
+      infoEl.textContent = info;
+    }
     if (!data.files.length) {
       el.innerHTML = '<p class="text-dim" style="padding:16px;font-size:12px">No files found.</p>';
       return;
     }
     const typeLabel = { attachment: 'Attachment', export: 'PDF Export', rental: 'Rental PDF' };
+    // Archived files sort first (server-side) — they're the first candidates
+    // for deletion when freeing up space.
     el.innerHTML = `<table class="data-table"><thead><tr><th>SHOW</th><th>TYPE</th><th>FILE</th><th>SIZE</th><th>UPLOADED BY</th><th>DATE</th><th></th></tr></thead><tbody>` +
-      data.files.map(f => `<tr>
+      data.files.map(f => {
+        const archivedBadge = f.archived
+          ? ` <span class="badge" title="Archived${f.archived_by ? ' by ' + f.archived_by : ''}${f.archived_at ? ' · ' + fmtDate(f.archived_at) : ''}" style="background:rgba(240,78,35,.12);color:#f04e23;border:1px solid rgba(240,78,35,.35);font-size:10px;padding:1px 6px;border-radius:99px">ARCHIVED</span>`
+          : '';
+        let actions = '';
+        if (f.archived) {
+          actions = `<button class="btn btn-xs btn-ghost" onclick="adminRestoreFile('${f.restore_url}',this)" title="Restore to the show">↩</button>
+                     <button class="btn btn-xs btn-danger-ghost" onclick="adminPurgeFile('${f.purge_url}',this)" title="Permanently delete">✕</button>`;
+        } else if (f.delete_url) {
+          actions = `<button class="btn btn-xs btn-danger-ghost" onclick="adminDeleteFile('${f.delete_url}',this)" title="Archive (soft delete)">×</button>`;
+        }
+        return `<tr${f.archived ? ' style="opacity:.75"' : ''}>
         <td style="font-size:11px">${f.show_id ? `<a href="/shows/${f.show_id}" style="color:var(--accent)">${f.show_name}</a>` : `<span class="text-dim">${f.show_name}</span>`}</td>
         <td style="font-size:11px" class="text-dim">${typeLabel[f.file_type] || f.file_type}</td>
-        <td style="font-size:11px">${f.download_url ? `<a href="${f.download_url}">${f.filename}</a>` : f.filename}</td>
+        <td style="font-size:11px">${f.download_url ? `<a href="${f.download_url}">${f.filename}</a>` : f.filename}${archivedBadge}</td>
         <td style="font-size:11px" class="text-dim">${_fmtBytes(f.file_size)}</td>
         <td style="font-size:11px">${f.uploader}</td>
         <td style="font-size:11px" class="text-dim">${fmtDate(f.created_at)}</td>
-        <td>${f.delete_url ? `<button class="btn btn-xs btn-danger-ghost" onclick="adminDeleteFile('${f.delete_url}',this)">×</button>` : ''}</td>
-      </tr>`).join('') +
+        <td style="white-space:nowrap">${actions}</td>
+      </tr>`;
+      }).join('') +
       '</tbody></table>';
   } catch(e) {
     el.innerHTML = '<p class="text-dim" style="padding:16px;font-size:12px">Failed to load files.</p>';
@@ -3337,11 +3671,26 @@ async function loadFileManager() {
 }
 
 async function adminDeleteFile(deleteUrl, btn) {
-  if (!confirm('Delete this file?')) return;
+  if (!confirm('Archive this file? It disappears from the show page but is kept here (tagged ARCHIVED) until purged.')) return;
   const resp = await fetch(deleteUrl, {method:'POST'});
   const d = await resp.json();
-  if (d.success) btn.closest('tr').remove();
-  else alert(d.error || 'Delete failed.');
+  if (d.success) loadFileManager();
+  else alert(d.error || 'Archive failed.');
+}
+
+async function adminRestoreFile(restoreUrl, btn) {
+  const resp = await fetch(restoreUrl, {method:'POST'});
+  const d = await resp.json();
+  if (d.success) loadFileManager();
+  else alert(d.error || 'Restore failed.');
+}
+
+async function adminPurgeFile(purgeUrl, btn) {
+  if (!confirm('PERMANENTLY delete this archived file? This cannot be undone.')) return;
+  const resp = await fetch(purgeUrl, {method:'POST'});
+  const d = await resp.json();
+  if (d.success) loadFileManager();
+  else alert(d.error || 'Purge failed.');
 }
 
 /* ── Form Field Editor init ─────────────────────────────────────── */
@@ -3349,9 +3698,10 @@ async function adminDeleteFile(deleteUrl, btn) {
   initFieldDrag();
   initSectionDrag();
   initSchedMetaDrag();
+  if (document.getElementById('labor-preset-list')) loadLaborPresets();
   // Activate tab from URL hash or server-side default
   const hash = location.hash.replace('#','');
-  const validTabs = ['contacts','users','fields','arts-groups','positions','technicians','system','syslog','backups','account','files','godmode','database','ai','cluster','email','dashboards','messages','update'];
+  const validTabs = ['contacts','users','fields','arts-groups','positions','technicians','system','branding','syslog','backups','account','files','godmode','database','ai','cluster','email','dashboards','messages','update'];
   const defaultTab = {% if user.role == 'admin' or is_content_admin %}'contacts'{% else %}'users'{% endif %};
   switchSettingsTab(validTabs.includes(hash) ? hash : {% if active_tab %}'{{ active_tab }}'{% else %}defaultTab{% endif %});
 })();
@@ -4660,7 +5010,7 @@ async function pollUpdateStatus() {
 }
 
 /* ── System sub-tab routing ─────────────────────────────────────── */
-const _SYSTEM_SUBS = ['messages','update','syslog','backups','files','database','ai','cluster','godmode'];
+const _SYSTEM_SUBS = ['messages','update','branding','syslog','backups','files','database','ai','cluster','godmode'];
 let _curSystemSub = 'messages';
 
 function switchSystemTab(name) {
@@ -4678,6 +5028,7 @@ function switchSystemTab(name) {
   history.replaceState({}, '', '#' + name);
   if (name === 'messages') loadMessages();
   if (name === 'update')   detectService();
+  if (name === 'branding') { loadVenueLogos(); loadVenueColors(); }
   if (name === 'backups')  loadBackupStatus();
   if (name === 'files')    loadFileManager();
   if (name === 'cluster')  startClusterPolling(); else stopClusterPolling();

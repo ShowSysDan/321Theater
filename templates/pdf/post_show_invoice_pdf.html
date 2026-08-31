@@ -7,24 +7,35 @@
 <html>
 <head>
 <meta charset="utf-8">
+{# Per-venue paperwork colors (Settings → per-venue branding).
+   pdf_colors is None → this template's long-standing default
+   palette, so output is unchanged until colors are set. #}
+{% set _vc = pdf_colors if pdf_colors is defined else none %}
+{% set C1 = _vc.primary if _vc else '#1a4a7a' %}
+{% set C1_BG2 = _vc.primary_bg2 if _vc else '#f4f7fa' %}
+{% set C2 = _vc.secondary if _vc else '#B8840A' %}
+{% set C2_BG = _vc.secondary_bg if _vc else '#fdf6e3' %}
+{% set C2_BRIGHT = _vc.secondary_bright if _vc else '#f0c44a' %}
+{% set C2_DARK = _vc.secondary_dark if _vc else '#7a5a00' %}
+
 <style>
   @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
   * { box-sizing: border-box; }
-  /* Branding matches the Production Schedule paperwork: navy #1a4a7a as the
-     primary structural color, gold #B8840A as the accent, Arial throughout,
+  /* Branding matches the Production Schedule paperwork: navy {{ C1 }} as the
+     primary structural color, gold {{ C2 }} as the accent, Arial throughout,
      under the Dr. Phillips Center identity. */
   body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; }
-  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; border-bottom: 2.5px solid #1a4a7a; padding-bottom: 14px; }
-  .doc-type { font-size: 9px; font-weight: bold; color: #B8840A; letter-spacing: 0.12em; text-transform: uppercase; }
-  .org-name { font-size: 18px; font-weight: 900; color: #1a4a7a; letter-spacing: 0.01em; margin-top: 2px; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; border-bottom: 2.5px solid {{ C1 }}; padding-bottom: 14px; }
+  .doc-type { font-size: 9px; font-weight: bold; color: {{ C2 }}; letter-spacing: 0.12em; text-transform: uppercase; }
+  .org-name { font-size: 18px; font-weight: 900; color: {{ C1 }}; letter-spacing: 0.01em; margin-top: 2px; }
   .org-sub  { font-size: 7.5px; color: #555; letter-spacing: 0.08em; text-transform: uppercase; margin-top: 3px; }
   .doc-title { text-align: right; padding-left: 12px; }
-  .doc-title h1 { font-size: 22px; font-weight: 900; color: #1a4a7a; margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 0.05em; }
+  .doc-title h1 { font-size: 22px; font-weight: 900; color: {{ C1 }}; margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 0.05em; }
   .doc-title .doc-date { font-size: 10px; color: #555; }
-  .show-block { background: #f5f5f5; border-left: 3px solid #B8840A; padding: 10px 14px; margin-bottom: 20px; }
-  .show-name { font-size: 15px; font-weight: 700; color: #1a4a7a; }
+  .show-block { background: #f5f5f5; border-left: 3px solid {{ C2 }}; padding: 10px 14px; margin-bottom: 20px; }
+  .show-name { font-size: 15px; font-weight: 700; color: {{ C1 }}; }
   .show-meta { font-size: 10px; color: #666; margin-top: 4px; display: flex; gap: 20px; }
-  .section-title { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #1a4a7a; border-bottom: 1px solid #1a4a7a; padding-bottom: 4px; margin: 20px 0 8px 0; }
+  .section-title { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: {{ C1 }}; border-bottom: 1px solid {{ C1 }}; padding-bottom: 4px; margin: 20px 0 8px 0; }
   table { width: 100%; border-collapse: collapse; }
   th { font-size: 9px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: #666; padding: 5px 8px; border-bottom: 1px solid #ddd; text-align: left; }
   td { padding: 6px 8px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
@@ -34,11 +45,11 @@
   /* 12-hour hint after 24-hour times (dualtime filter) */
   .t12 { font-size: 0.82em; font-weight: normal; color: #888; white-space: nowrap; }
   .total-row td { font-weight: 700; border-top: 2px solid #ddd; border-bottom: none; padding-top: 8px; }
-  .labor-day-row td { font-weight: 700; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: #1a4a7a; background: #f4f7fa; border-bottom: 1px solid #ddd; padding: 5px 8px; }
-  .ot-row td { color: #7a5a00; background: #fdf6e3; }
-  .grand-total { background: #1a4a7a; color: #fff; padding: 12px 16px; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
+  .labor-day-row td { font-weight: 700; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: {{ C1 }}; background: {{ C1_BG2 }}; border-bottom: 1px solid #ddd; padding: 5px 8px; }
+  .ot-row td { color: {{ C2_DARK }}; background: {{ C2_BG }}; }
+  .grand-total { background: {{ C1 }}; color: #fff; padding: 12px 16px; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
   .grand-total-label { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
-  .grand-total-amount { font-size: 20px; font-weight: 700; color: #f0c44a; }
+  .grand-total-amount { font-size: 20px; font-weight: 700; color: {{ C2_BRIGHT }}; }
   .footer { margin-top: 24px; border-top: 1px solid #e0e0e0; padding-top: 10px; font-size: 9px; color: #aaa; text-align: center; }
   .badge { display: inline-block; background: #f0f0f0; color: #555; font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 600; letter-spacing: 0.05em; }
   .unscheduled { color: #bbb; }

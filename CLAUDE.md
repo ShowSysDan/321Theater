@@ -123,6 +123,68 @@ apps. For a 321Theater access change, use this app's own flags instead
 - Per-day covering PM + day notes live in `show_labor_days`
   (`GET/PUT /shows/<id>/labor-days`); cover PM stores the contact NAME, same
   convention as the `production_manager` advance field.
+- **Labor day presets** (2.37.0): `labor_presets` + `labor_preset_rows`
+  (position, quantity, times, notes) — authored in Settings → Job Positions
+  (`@scheduler_required`), applied from a day-block header dropdown. Apply is
+  a SERVER-side transaction (`POST /shows/<id>/labor-presets/<pid>/apply`)
+  that appends `quantity`×rows to `labor_requests` — deliberately unlike
+  schedule templates' client-side DOM apply, because labor rows autosave
+  individually (no bulk form save exists to catch a half-applied day).
+  Presets never delete or alter existing requests.
+
+## Show file attachments — deletion is ARCHIVE, never destroy (2.36.0)
+- `show_attachments` soft-deletes: `deleted_at`/`deleted_by` stamp the row,
+  DB-stored blobs are gzip-compressed in place (`is_compressed`; decompressed
+  transparently on download and on restore), and the S3 object is KEPT.
+  Only admin `…/purge` (Settings → System → Files) deletes bytes — and only
+  for rows already archived, so a purge can never hit a live file. Don't
+  reintroduce a direct hard delete, and never S3-delete on archive.
+- ANY editor with show access may archive any file (PM team shares shows) —
+  the uploader-only check is gone on purpose; readonly/restricted still 403.
+- Every query that feeds users or PDFs must filter `deleted_at IS NULL`
+  (show/field lists, the PDF attachment merge + its content-hash fingerprint,
+  the migrate-to-S3 backfill — compressed bytes must never be uploaded as-is).
+  The admin File Manager is the ONE surface that shows archived rows (sorted
+  first — they're the designated first candidates when freeing space).
+- Freshness: `_attachments_rev(db, show_id)` (`count:max(id)` of live rows,
+  indexed by `idx_show_attachments_show`) rides on the 2 s advance sync and
+  15 s heartbeat responses; app.js `_checkAttachmentsRev()` reloads file
+  lists when it changes. This is also the cross-INSTANCE refresh path (all
+  instances share one PostgreSQL) — keep it in both poll responses.
+- Syslog: FILE_ARCHIVE / FILE_RESTORE / FILE_PURGE (+ existing FILE_UPLOAD).
+
+## S3 / SeaweedFS storage (s3_storage.py) — config source + failover (2.39.0)
+- Config source is chosen by `s3_config_source` app_setting: `ini` (default —
+  `db_config.ini [seaweedfs]`, single endpoint, the historical behavior) or
+  `gui` (app_settings keys `s3_endpoints` JSON list / `s3_access_key` /
+  `s3_secret_key` / `s3_bucket`, edited in Settings → System → Database →
+  File Storage). app.py injects the GUI reader via
+  `s3_storage.set_settings_provider(_s3_gui_settings)` — s3_storage must
+  NEVER import app.py, and a provider failure falls back to the ini
+  (logged `S3_SETTINGS_PROVIDER_ERROR`), so a DB hiccup can't break storage.
+- Multiple endpoints = redundant SeaweedFS S3 gateways fronting ONE cluster:
+  `upload/download/delete` go through `_with_failover()` (try in order,
+  remember the last endpoint that worked; syslog `S3_ENDPOINT_ERROR` and
+  `S3_FAILOVER`). `test_connection()` deliberately tests every endpoint
+  WITHOUT failover so a dead gateway is visible while its sibling covers.
+- Settings are cached 30 s; call `s3_storage.clear_settings_cache()` after
+  writing S3 settings. The secret key is write-only in the UI (blank keeps).
+
+## PDF paperwork theming (per-venue colors, 2.38.0)
+- `venue_colors` table (venue_name PK, mirrors `venue_logos`) +
+  `_get_venue_pdf_colors(db, venue)` → palette dict (primary/secondary plus
+  derived tints via `_mix_hex`) or None. All 8 PDF builders pass `pdf_colors`;
+  the combined invoice themes only when every billed show shares one venue.
+- Templates in `templates/pdf/` define Jinja vars (`C1`, `C2`, `C1_BG`, …)
+  at the top whose fallbacks are each template's ORIGINAL literal hexes —
+  with no colors configured, output must stay byte-identical (this was
+  verified by diffing rendered CSS). When adding a new color to a pdf
+  template, use the vars (or add a tint to the helper), never a raw brand
+  hex; and give any new var a fallback matching the un-themed look.
+- Admin UI: Settings → System → Branding & Paperwork (`GET/POST
+  /settings/venue-colors`, hex-validated, blank-both = delete row). Colors
+  land in the rendered HTML, so the export content-hash correctly cuts a new
+  PDF version when a venue's colors change.
 
 ## Per-page performance stats (admin Settings → Performance)
 - `db_adapter.query_timer_hook` stopwatches every `execute()`/`executemany()`;

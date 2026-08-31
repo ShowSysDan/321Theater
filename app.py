@@ -679,7 +679,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.35.0'
+APP_VERSION = '2.40.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -856,6 +856,35 @@ def get_app_setting(key, default=''):
             return row['value'] if row and row['value'] is not None else default
         except Exception:
             return default
+
+
+def _s3_gui_settings():
+    """s3_storage settings provider: S3 config managed in the Settings UI.
+
+    Returns the GUI-stored config only when the admin has switched
+    `s3_config_source` to 'gui'; returning None tells s3_storage to keep
+    using db_config.ini [seaweedfs] exactly as before (the default, so
+    existing deployments are untouched until the switch is flipped).
+    Never raises — a settings-read failure must not break file storage.
+    """
+    try:
+        if get_app_setting('s3_config_source', 'ini') != 'gui':
+            return None
+        endpoints = json.loads(get_app_setting('s3_endpoints', '[]') or '[]')
+        if not isinstance(endpoints, list):
+            endpoints = []
+        return {
+            's3_endpoints':  [str(e).strip().rstrip('/') for e in endpoints if str(e).strip()],
+            's3_access_key': get_app_setting('s3_access_key', ''),
+            's3_secret_key': get_app_setting('s3_secret_key', ''),
+            's3_bucket':     get_app_setting('s3_bucket', '321theater') or '321theater',
+            's3_source':     'gui',
+        }
+    except Exception:
+        return None
+
+
+s3_storage.set_settings_provider(_s3_gui_settings)
 
 
 # ─── Database ─────────────────────────────────────────────────────────────────
@@ -3939,6 +3968,7 @@ UNDO_TABLE_MAP = {
     'form_field':             'form_fields',
     'form_section':           'form_sections',
     'schedule_template':      'schedule_templates',
+    'labor_preset':           'labor_presets',
     'position_category':      'position_categories',
     'job_position':           'job_positions',
     'labor_request':          'labor_requests',
@@ -5776,7 +5806,7 @@ def get_attachments(show_id):
                    u.display_name, u.username
             FROM show_attachments sa
             LEFT JOIN users u ON sa.uploaded_by = u.id
-            WHERE sa.show_id = ? AND sa.field_key = ?
+            WHERE sa.show_id = ? AND sa.field_key = ? AND sa.deleted_at IS NULL
             ORDER BY sa.created_at ASC
         """, (show_id, field_key)).fetchall()
     else:
@@ -5786,7 +5816,7 @@ def get_attachments(show_id):
                    u.display_name, u.username
             FROM show_attachments sa
             LEFT JOIN users u ON sa.uploaded_by = u.id
-            WHERE sa.show_id = ?
+            WHERE sa.show_id = ? AND sa.deleted_at IS NULL
             ORDER BY sa.created_at ASC
         """, (show_id,)).fetchall()
     db.close()
@@ -5886,6 +5916,9 @@ def download_attachment(show_id, aid):
             abort(503)
     elif row['file_data']:
         data = bytes(row['file_data'])
+        # Archived DB-stored files are held gzip-compressed on disk.
+        if row['is_compressed']:
+            data = gzip.decompress(data)
     else:
         abort(404)
     resp = make_response(data)
@@ -5897,8 +5930,20 @@ def download_attachment(show_id, aid):
 @app.route('/shows/<int:show_id>/attachments/<int:aid>/delete', methods=['POST'])
 @login_required
 def delete_attachment(show_id, aid):
+    """Archive (soft-delete) an attachment.
+
+    Any user who can edit the show may archive any file — the PM team works
+    across shared shows, so removal is deliberately NOT limited to the
+    uploader. Nothing is destroyed: the row is stamped deleted_at/deleted_by,
+    DB-stored bytes are gzip-compressed to shrink their footprint, and S3
+    objects are left in place. Archived files disappear from the show page
+    but stay in Settings -> File Manager tagged as first candidates for a
+    space cleanup, where an admin can restore or permanently purge them.
+    """
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_readonly') or session.get('is_restricted'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
     row = db.execute(
         'SELECT * FROM show_attachments WHERE id=? AND show_id=?', (aid, show_id)
@@ -5906,21 +5951,82 @@ def delete_attachment(show_id, aid):
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'File not found.'}), 404
-    if row['uploaded_by'] != session['user_id'] and session.get('user_role') != 'admin':
+    if row['deleted_at']:
         db.close()
-        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+        return jsonify({'success': True, 'archived': True})
+    if row['file_data'] and not row['is_compressed']:
+        packed = gzip.compress(bytes(row['file_data']))
+        if len(packed) < len(row['file_data']):
+            db.execute('UPDATE show_attachments SET file_data=?, is_compressed=1 WHERE id=?',
+                       (packed, aid))
+    db.execute('UPDATE show_attachments SET deleted_at=CURRENT_TIMESTAMP, deleted_by=? WHERE id=?',
+               (session['user_id'], aid))
+    log_audit(db, 'FILE_ARCHIVE', 'attachment', aid, show_id=show_id,
+              detail=row['filename'])
+    db.commit()
+    db.close()
+    syslog_logger.info(f"FILE_ARCHIVE show_id={show_id} aid={aid} by={session.get('username')}")
+    return jsonify({'success': True, 'archived': True})
+
+
+@app.route('/shows/<int:show_id>/attachments/<int:aid>/restore', methods=['POST'])
+@admin_required
+def restore_attachment(show_id, aid):
+    """Un-archive an attachment: clear the deletion stamp and restore
+    DB-stored bytes to their original uncompressed form."""
+    db = get_db()
+    row = db.execute(
+        'SELECT * FROM show_attachments WHERE id=? AND show_id=?', (aid, show_id)
+    ).fetchone()
+    if not row:
+        db.close()
+        return jsonify({'success': False, 'error': 'File not found.'}), 404
+    if not row['deleted_at']:
+        db.close()
+        return jsonify({'success': True})
+    if row['file_data'] and row['is_compressed']:
+        db.execute('UPDATE show_attachments SET file_data=?, is_compressed=0 WHERE id=?',
+                   (gzip.decompress(bytes(row['file_data'])), aid))
+    db.execute('UPDATE show_attachments SET deleted_at=NULL, deleted_by=NULL WHERE id=?', (aid,))
+    log_audit(db, 'FILE_RESTORE', 'attachment', aid, show_id=show_id,
+              detail=row['filename'])
+    db.commit()
+    db.close()
+    syslog_logger.info(f"FILE_RESTORE show_id={show_id} aid={aid} by={session.get('username')}")
+    return jsonify({'success': True})
+
+
+@app.route('/shows/<int:show_id>/attachments/<int:aid>/purge', methods=['POST'])
+@admin_required
+def purge_attachment(show_id, aid):
+    """Permanently delete an ARCHIVED attachment (row + S3 object).
+
+    Only archived files can be purged — deleting a live file is a two-step
+    archive-then-purge on purpose, so a purge can never destroy something a
+    user still sees on the show page.
+    """
+    db = get_db()
+    row = db.execute(
+        'SELECT * FROM show_attachments WHERE id=? AND show_id=?', (aid, show_id)
+    ).fetchone()
+    if not row:
+        db.close()
+        return jsonify({'success': False, 'error': 'File not found.'}), 404
+    if not row['deleted_at']:
+        db.close()
+        return jsonify({'success': False, 'error': 'Only archived files can be purged. Archive it first.'}), 400
     if row['s3_key']:
         try:
             s3_storage.delete_file(row['s3_key'])
         except Exception as e:
             app.logger.error(f"S3 delete failed for attachment {aid} key={row['s3_key']}: {e}")
             syslog_logger.error(f"S3_DELETE_FAILED table=show_attachments id={aid} show_id={show_id} error={e}")
-    log_audit(db, 'FILE_DELETE', 'attachment', aid, show_id=show_id,
-              detail=row['filename'] if row else str(aid))
+    log_audit(db, 'FILE_PURGE', 'attachment', aid, show_id=show_id,
+              detail=row['filename'])
     db.execute('DELETE FROM show_attachments WHERE id=?', (aid,))
     db.commit()
     db.close()
-    syslog_logger.info(f"FILE_DELETE show_id={show_id} aid={aid} by={session.get('username')}")
+    syslog_logger.info(f"FILE_PURGE show_id={show_id} aid={aid} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -6015,6 +6121,22 @@ def _get_other_active_users(db, user_id, show_id):
     } for r in rows]
 
 
+def _attachments_rev(db, show_id):
+    """Cheap fingerprint of a show's LIVE attachment set.
+
+    Rides on the sync/heartbeat polls so any open tab — including one served
+    by another 321Theater instance against the same PostgreSQL — refreshes
+    its file lists when someone uploads, archives, restores, or moves a file.
+    count:max(id) changes on every visible transition (archive and restore
+    both change the live count; upload/move change count or max id).
+    """
+    r = db.execute(
+        'SELECT COUNT(*), COALESCE(MAX(id), 0) FROM show_attachments '
+        'WHERE show_id = ? AND deleted_at IS NULL', (show_id,)
+    ).fetchone()
+    return f"{r[0]}:{r[1]}"
+
+
 @app.route('/shows/<int:show_id>/sync/advance')
 @login_required
 def sync_advance(show_id):
@@ -6064,6 +6186,8 @@ def sync_advance(show_id):
     saved = db.execute('SELECT last_saved_by, last_saved_at FROM shows WHERE id=?',
                         (show_id,)).fetchone()
 
+    attachments_rev = _attachments_rev(db, show_id)
+
     db.commit()
     db.close()
 
@@ -6073,6 +6197,7 @@ def sync_advance(show_id):
         'active_users':  others,
         'last_saved_by': saved['last_saved_by'] if saved else None,
         'last_saved_at': saved['last_saved_at'] if saved else None,
+        'attachments_rev': attachments_rev,
     })
 
 
@@ -6124,6 +6249,8 @@ def show_heartbeat(show_id):
     show = db.execute('SELECT last_saved_by, last_saved_at FROM shows WHERE id=?',
                       (show_id,)).fetchone()
 
+    attachments_rev = _attachments_rev(db, show_id)
+
     db.commit()
     db.close()
 
@@ -6131,6 +6258,7 @@ def show_heartbeat(show_id):
         'active_users':  others,
         'last_saved_by': show['last_saved_by'] if show else None,
         'last_saved_at': show['last_saved_at'] if show else None,
+        'attachments_rev': attachments_rev,
     })
 
 
@@ -6238,7 +6366,7 @@ def _advance_attachments_fingerprint(db, show_id):
         rows = db.execute("""
             SELECT id, filename, mime_type, field_key, s3_key, created_at,
                    CASE WHEN file_data IS NOT NULL THEN LENGTH(file_data) ELSE 0 END AS blob_len
-            FROM show_attachments WHERE show_id = ? ORDER BY id
+            FROM show_attachments WHERE show_id = ? AND deleted_at IS NULL ORDER BY id
         """, (show_id,)).fetchall()
     except Exception as e:
         app.logger.warning(f'Could not fingerprint advance attachments: {e}')
@@ -6277,6 +6405,7 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
     contact_map = {c['id']: dict(c) for c in contacts}
 
     logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+    pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
 
     # Fingerprint the appended file attachments (they land in the PDF but not in
     # the rendered HTML, so the content hash must account for them separately).
@@ -6327,6 +6456,7 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
                                    form_sections=form_sections,
                                    assets_by_section=assets_by_section,
                                    logo_data=logo_data,
+                                   pdf_colors=pdf_colors,
                                    version=version,
                                    layout=layout,
                                    export_date=export_date)
@@ -6338,6 +6468,7 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
                                    form_sections=[],
                                    assets_by_section={},
                                    logo_data=logo_data,
+                                   pdf_colors=pdf_colors,
                                    version=version,
                                    layout=layout,
                                    export_date=export_date)
@@ -6422,6 +6553,7 @@ def _collect_advance_field_attachments(show_id, base_url):
         LEFT JOIN form_fields   ff ON ff.field_key = sa.field_key
         LEFT JOIN form_sections fs ON fs.id = ff.section_id
         WHERE sa.show_id = ?
+          AND sa.deleted_at IS NULL
           AND sa.field_key IS NOT NULL AND sa.field_key != ''
           AND ff.field_type = 'file_upload'
         ORDER BY fs.sort_order, ff.sort_order, sa.created_at
@@ -6432,6 +6564,7 @@ def _collect_advance_field_attachments(show_id, base_url):
                NULL AS field_label, NULL AS section_label
         FROM show_attachments
         WHERE show_id = ?
+          AND deleted_at IS NULL
           AND (field_key IS NULL OR field_key = '')
         ORDER BY created_at, id
     """, (show_id,)).fetchall()
@@ -6773,6 +6906,7 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
     contact_name_map = {c['name']: dict(c) for c in contacts}
 
     logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+    pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
 
     # WiFi always from global settings (not per-show)
     wifi_ssid = get_app_setting('wifi_network', '')
@@ -6857,6 +6991,7 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
     def _render(version, export_date):
         return render_template('pdf/schedule_pdf.html',
                                show=show,
+                               pdf_colors=pdf_colors,
                                schedule_days=schedule_days,
                                schedule_meta=schedule_meta,
                                sched_meta_fields=get_schedule_meta_fields(),
@@ -7154,12 +7289,14 @@ def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
         'SELECT * FROM schedule_rows WHERE show_id=? ORDER BY sort_order,id', (show_id,)
     ).fetchall()
     logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+    pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
 
     layout = pdf_layouts.PdfLayout('postnotes', get_app_setting)
 
     def _render(version, export_date):
         return render_template('pdf/postnotes_pdf.html',
                                show=show,
+                               pdf_colors=pdf_colors,
                                notes_data=notes_data,
                                advance_data=advance_data,
                                schedule_rows=sched_rows,
@@ -7812,9 +7949,95 @@ def move_attachment(show_id, aid):
 @app.route('/admin/s3-test')
 @admin_required
 def admin_s3_test():
-    """Verify SeaweedFS S3 connectivity by uploading, reading back, and deleting a test object."""
+    """Verify SeaweedFS S3 connectivity by uploading, reading back, and deleting
+    a test object on every configured endpoint."""
     result = s3_storage.test_connection()
     return jsonify(result)
+
+
+@app.route('/settings/s3', methods=['GET'])
+@admin_required
+def s3_settings_get():
+    """Current S3 storage config: the source selector, the GUI-stored values,
+    the (read-only) ini values, and what's actually active right now."""
+    ini = s3_storage._read_ini_settings()
+    gui_endpoints = []
+    try:
+        gui_endpoints = json.loads(get_app_setting('s3_endpoints', '[]') or '[]')
+        if not isinstance(gui_endpoints, list):
+            gui_endpoints = []
+    except Exception:
+        gui_endpoints = []
+    active = s3_storage.read_s3_settings()
+    return jsonify({
+        'source': get_app_setting('s3_config_source', 'ini'),
+        'gui': {
+            'endpoints':  [str(e) for e in gui_endpoints],
+            'access_key': get_app_setting('s3_access_key', ''),
+            'secret_set': bool(get_app_setting('s3_secret_key', '')),
+            'bucket':     get_app_setting('s3_bucket', '321theater') or '321theater',
+        },
+        'ini': {
+            'endpoint':   (ini.get('s3_endpoints') or [''])[0] if ini.get('s3_endpoints') else '',
+            'access_key': ini.get('s3_access_key', ''),
+            'secret_set': bool(ini.get('s3_secret_key', '')),
+            'bucket':     ini.get('s3_bucket', ''),
+            'present':    bool(ini),
+        },
+        'active': {
+            'source':     active.get('s3_source', 'ini'),
+            'endpoints':  active.get('s3_endpoints', []),
+            'bucket':     active.get('s3_bucket', ''),
+            'configured': s3_storage.is_configured(),
+        },
+    })
+
+
+@app.route('/settings/s3', methods=['POST'])
+@admin_required
+def s3_settings_save():
+    """Save S3 storage config. `source` picks ini (db_config.ini, the
+    historical default) or gui (the values saved here). The secret key is
+    write-only: blank on save keeps the stored one."""
+    data = request.get_json(force=True) or {}
+    source = (data.get('source') or 'ini').strip().lower()
+    if source not in ('ini', 'gui'):
+        return jsonify({'success': False, 'error': "source must be 'ini' or 'gui'."}), 400
+    endpoints = data.get('endpoints') or []
+    if not isinstance(endpoints, list):
+        return jsonify({'success': False, 'error': 'endpoints must be a list.'}), 400
+    cleaned = []
+    for e in endpoints[:4]:   # two gateways today; a little headroom, no more
+        e = str(e).strip().rstrip('/')
+        if not e:
+            continue
+        if not (e.startswith('http://') or e.startswith('https://')):
+            return jsonify({'success': False,
+                            'error': f'Endpoint must be an http(s) URL: {e}'}), 400
+        cleaned.append(e)
+    access_key = (data.get('access_key') or '').strip()
+    secret_key = (data.get('secret_key') or '').strip()
+    bucket = (data.get('bucket') or '').strip() or '321theater'
+    if source == 'gui' and not cleaned:
+        return jsonify({'success': False,
+                        'error': 'GUI mode needs at least one endpoint URL.'}), 400
+    db = get_db()
+    def _set(key, value):
+        db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)', (key, value))
+    _set('s3_config_source', source)
+    _set('s3_endpoints', json.dumps(cleaned))
+    _set('s3_access_key', access_key)
+    if secret_key:   # write-only: blank keeps the stored secret
+        _set('s3_secret_key', secret_key)
+    _set('s3_bucket', bucket)
+    log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
+              detail=f's3_settings source={source} endpoints={len(cleaned)} bucket={bucket}')
+    db.commit(); db.close()
+    s3_storage.clear_settings_cache()
+    syslog_logger.info(
+        f"S3_SETTINGS_CHANGE source={source} endpoints={len(cleaned)} "
+        f"bucket={bucket} by={session.get('username')}")
+    return jsonify({'success': True})
 
 
 @app.route('/admin/migrate-files-to-s3', methods=['POST'])
@@ -7826,7 +8049,7 @@ def admin_migrate_files_to_s3():
     Returns a JSON summary of migrated / failed counts.
     """
     if not s3_storage.is_configured():
-        return jsonify({'success': False, 'error': 'SeaweedFS not configured in db_config.ini.'}), 400
+        return jsonify({'success': False, 'error': 'S3 storage is not configured (db_config.ini or Settings → File Storage).'}), 400
 
     migrated = 0
     failed = 0
@@ -7837,7 +8060,7 @@ def admin_migrate_files_to_s3():
         # ── show_attachments ──────────────────────────────────────────────────
         rows = db.execute(
             "SELECT id, show_id, filename, mime_type, file_data FROM show_attachments "
-            "WHERE file_data IS NOT NULL AND s3_key IS NULL"
+            "WHERE file_data IS NOT NULL AND s3_key IS NULL AND deleted_at IS NULL"
         ).fetchall()
         for row in rows:
             try:
@@ -10513,12 +10736,16 @@ def api_file_manager():
 
     for r in db.execute("""
         SELECT sa.id, sa.filename, sa.mime_type, sa.file_size, sa.created_at,
+               sa.deleted_at,
                s.id as show_id, COALESCE(s.name, 'Deleted Show') as show_name,
-               u.display_name, u.username
+               u.display_name, u.username,
+               du.display_name as deleter_display, du.username as deleter_username
         FROM show_attachments sa
         LEFT JOIN shows s ON sa.show_id = s.id
         LEFT JOIN users u ON sa.uploaded_by = u.id
+        LEFT JOIN users du ON sa.deleted_by = du.id
     """).fetchall():
+        archived = bool(r['deleted_at'])
         files.append({
             'id':           r['id'],
             'file_type':    'attachment',
@@ -10529,8 +10756,13 @@ def api_file_manager():
             'file_size':    r['file_size'] or 0,
             'created_at':   r['created_at'],
             'uploader':     r['display_name'] or r['username'] or 'Unknown',
+            'archived':     archived,
+            'archived_at':  r['deleted_at'],
+            'archived_by':  (r['deleter_display'] or r['deleter_username'] or '') if archived else '',
             'download_url': f"/shows/{r['show_id']}/attachments/{r['id']}/download" if r['show_id'] else None,
-            'delete_url':   f"/shows/{r['show_id']}/attachments/{r['id']}/delete" if r['show_id'] else None,
+            'delete_url':   f"/shows/{r['show_id']}/attachments/{r['id']}/delete" if (r['show_id'] and not archived) else None,
+            'restore_url':  f"/shows/{r['show_id']}/attachments/{r['id']}/restore" if (r['show_id'] and archived) else None,
+            'purge_url':    f"/shows/{r['show_id']}/attachments/{r['id']}/purge" if (r['show_id'] and archived) else None,
         })
 
     for r in db.execute("""
@@ -10580,10 +10812,16 @@ def api_file_manager():
             'delete_url':   None,
         })
 
+    # Archived attachments first — they're the designated first candidates
+    # when an admin needs to free up space — then everything else, newest first.
     files.sort(key=lambda f: f['created_at'] or '', reverse=True)
+    files.sort(key=lambda f: 0 if f.get('archived') else 1)
     total_bytes = sum(f['file_size'] for f in files)
+    archived_bytes = sum(f['file_size'] for f in files if f.get('archived'))
+    archived_count = sum(1 for f in files if f.get('archived'))
     db.close()
-    return jsonify({'files': files, 'total_bytes': total_bytes})
+    return jsonify({'files': files, 'total_bytes': total_bytes,
+                    'archived_bytes': archived_bytes, 'archived_count': archived_count})
 
 
 # ─── Schedule Templates ───────────────────────────────────────────────────────
@@ -10675,6 +10913,196 @@ def delete_schedule_template(tid):
     db.commit(); db.close()
     syslog_logger.info(f"TEMPLATE_DELETE id={tid} by={session.get('username')}")
     return jsonify({'success': True})
+
+
+# ─── Labor Day Presets ────────────────────────────────────────────────────────
+# The labor-tab counterpart of schedule templates: a named set of standing
+# position calls (position × quantity × times) that can be applied to any
+# labor day on a show. Authored in Settings → Job Positions (scheduler+);
+# applied from the day-block header on the show's Labor Requests tab.
+# Unlike schedule templates (pure client-side DOM injection, saved with the
+# form), labor rows autosave individually — so apply is a server-side endpoint
+# that inserts every row in one transaction.
+
+def _clean_preset_rows(rows):
+    """Normalize incoming preset rows: clamp quantity, normalize times."""
+    out = []
+    for r in rows or []:
+        try:
+            pid = int(r.get('position_id')) if r.get('position_id') else None
+        except (TypeError, ValueError):
+            pid = None
+        try:
+            qty = max(1, min(50, int(r.get('quantity') or 1)))
+        except (TypeError, ValueError):
+            qty = 1
+        out.append({
+            'position_id':  pid,
+            'quantity':     qty,
+            'in_time':      _normalize_perf_time(r.get('in_time', '')),
+            'out_time':     _normalize_perf_time(r.get('out_time', '')),
+            'break_start':  _normalize_perf_time(r.get('break_start', '')),
+            'break_end':    _normalize_perf_time(r.get('break_end', '')),
+            'break2_start': _normalize_perf_time(r.get('break2_start', '')),
+            'break2_end':   _normalize_perf_time(r.get('break2_end', '')),
+            'notes':        (r.get('notes') or '').strip(),
+        })
+    return out
+
+
+def _insert_preset_rows(db, pid, rows):
+    for i, r in enumerate(rows):
+        db.execute("""INSERT INTO labor_preset_rows
+                      (preset_id, sort_order, position_id, quantity, in_time, out_time,
+                       break_start, break_end, break2_start, break2_end, notes)
+                      VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                   (pid, i, r['position_id'], r['quantity'], r['in_time'], r['out_time'],
+                    r['break_start'], r['break_end'], r['break2_start'], r['break2_end'],
+                    r['notes']))
+
+
+@app.route('/api/labor-presets')
+@login_required
+def api_labor_presets():
+    db = get_db()
+    presets = [dict(p) for p in db.execute(
+        'SELECT * FROM labor_presets ORDER BY sort_order, name'
+    ).fetchall()]
+    for p in presets:
+        p['rows'] = [dict(r) for r in db.execute("""
+            SELECT lpr.*, jp.name AS position_name
+            FROM labor_preset_rows lpr
+            LEFT JOIN job_positions jp ON lpr.position_id = jp.id
+            WHERE lpr.preset_id=? ORDER BY lpr.sort_order, lpr.id
+        """, (p['id'],)).fetchall()]
+        p['row_count'] = sum(r['quantity'] or 1 for r in p['rows'])
+    db.close()
+    return jsonify(presets)
+
+
+@app.route('/api/labor-presets/<int:pid>')
+@login_required
+def api_labor_preset(pid):
+    db = get_db()
+    p = db.execute('SELECT * FROM labor_presets WHERE id=?', (pid,)).fetchone()
+    if not p:
+        db.close(); return jsonify({'error': 'Not found'}), 404
+    rows = [dict(r) for r in db.execute("""
+        SELECT lpr.*, jp.name AS position_name
+        FROM labor_preset_rows lpr
+        LEFT JOIN job_positions jp ON lpr.position_id = jp.id
+        WHERE lpr.preset_id=? ORDER BY lpr.sort_order, lpr.id
+    """, (pid,)).fetchall()]
+    db.close()
+    return jsonify({'id': p['id'], 'name': p['name'], 'rows': rows})
+
+
+@app.route('/settings/labor-presets/add', methods=['POST'])
+@scheduler_required
+def add_labor_preset():
+    data = request.get_json(force=True) or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'success': False, 'error': 'Name required.'}), 400
+    rows = _clean_preset_rows(data.get('rows'))
+    db = get_db()
+    max_o = db.execute('SELECT MAX(sort_order) FROM labor_presets').fetchone()[0] or 0
+    cur = db.execute('INSERT INTO labor_presets (name, sort_order) VALUES (?,?)',
+                     (name, max_o + 10))
+    pid = cur.lastrowid
+    _insert_preset_rows(db, pid, rows)
+    log_audit(db, 'LABOR_PRESET_ADD', 'labor_preset', pid, detail=name)
+    db.commit(); db.close()
+    syslog_logger.info(f"LABOR_PRESET_ADD id={pid} name={name!r} by={session.get('username')}")
+    return jsonify({'success': True, 'id': pid})
+
+
+@app.route('/settings/labor-presets/<int:pid>/edit', methods=['POST'])
+@scheduler_required
+def edit_labor_preset(pid):
+    data = request.get_json(force=True) or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'success': False, 'error': 'Name required.'}), 400
+    rows = _clean_preset_rows(data.get('rows'))
+    db = get_db()
+    if not db.execute('SELECT id FROM labor_presets WHERE id=?', (pid,)).fetchone():
+        db.close(); return jsonify({'success': False, 'error': 'Preset not found.'}), 404
+    db.execute('UPDATE labor_presets SET name=? WHERE id=?', (name, pid))
+    db.execute('DELETE FROM labor_preset_rows WHERE preset_id=?', (pid,))
+    _insert_preset_rows(db, pid, rows)
+    log_audit(db, 'LABOR_PRESET_EDIT', 'labor_preset', pid, detail=name)
+    db.commit(); db.close()
+    syslog_logger.info(f"LABOR_PRESET_EDIT id={pid} name={name!r} by={session.get('username')}")
+    return jsonify({'success': True})
+
+
+@app.route('/settings/labor-presets/<int:pid>/delete', methods=['POST'])
+@scheduler_required
+def delete_labor_preset(pid):
+    db = get_db()
+    row = db.execute('SELECT name FROM labor_presets WHERE id=?', (pid,)).fetchone()
+    log_audit(db, 'LABOR_PRESET_DELETE', 'labor_preset', pid,
+              detail=row['name'] if row else str(pid))
+    db.execute('DELETE FROM labor_preset_rows WHERE preset_id=?', (pid,))
+    db.execute('DELETE FROM labor_presets WHERE id=?', (pid,))
+    db.commit(); db.close()
+    syslog_logger.info(f"LABOR_PRESET_DELETE id={pid} by={session.get('username')}")
+    return jsonify({'success': True})
+
+
+@app.route('/shows/<int:show_id>/labor-presets/<int:pid>/apply', methods=['POST'])
+@login_required
+def apply_labor_preset(show_id, pid):
+    """Expand a labor preset onto one labor day of a show.
+
+    Each preset row becomes `quantity` individual labor_requests rows (one row
+    per person-slot, matching how the labor tab models a call) on the given
+    work_date, inserted in a single transaction. Rows are always APPENDED to
+    the day — applying a preset never removes or alters existing requests.
+    """
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_readonly') or session.get('is_restricted'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    data = request.get_json(force=True) or {}
+    try:
+        wd = date.fromisoformat(str(data.get('work_date') or '').strip()).isoformat()
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work_date.'}), 400
+    db = get_db()
+    preset = db.execute('SELECT * FROM labor_presets WHERE id=?', (pid,)).fetchone()
+    if not preset:
+        db.close(); return jsonify({'success': False, 'error': 'Preset not found.'}), 404
+    rows = db.execute(
+        'SELECT * FROM labor_preset_rows WHERE preset_id=? ORDER BY sort_order, id',
+        (pid,)).fetchall()
+    max_order = db.execute(
+        'SELECT MAX(sort_order) FROM labor_requests WHERE show_id=?', (show_id,)
+    ).fetchone()[0] or 0
+    created = 0
+    for r in rows:
+        for _ in range(max(1, r['quantity'] or 1)):
+            max_order += 10
+            db.execute("""
+                INSERT INTO labor_requests (show_id, position_id, work_date,
+                                            in_time, out_time, break_start, break_end,
+                                            break2_start, break2_end,
+                                            requested_name, notes, sort_order)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+            """, (show_id, r['position_id'], wd,
+                  r['in_time'] or '', r['out_time'] or '',
+                  r['break_start'] or '', r['break_end'] or '',
+                  r['break2_start'] or '', r['break2_end'] or '',
+                  r['notes'] or '', max_order))
+            created += 1
+    log_audit(db, 'LABOR_PRESET_APPLY', 'show', show_id, show_id=show_id,
+              detail=f"{preset['name']} → {wd} ({created} requests)")
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"LABOR_PRESET_APPLY show_id={show_id} preset_id={pid} date={wd} "
+        f"rows={created} by={session.get('username')}")
+    return jsonify({'success': True, 'created': created, 'work_date': wd})
 
 
 # ─── WiFi / Logo Settings ─────────────────────────────────────────────────────
@@ -11078,6 +11506,135 @@ def venue_logo_delete():
     syslog_logger.info(
         f"SETTINGS_CHANGE detail=venue_logo_delete venue={venue_name} by={session.get('username')}"
     )
+    return jsonify({'success': True})
+
+
+# ─── Per-venue paperwork colors ──────────────────────────────────────────────
+# Same shape as venue_logos: a venue_colors row overrides the app-wide theme
+# on generated PDFs; no row (or blank values) keeps each template's built-in
+# defaults (navy #1a4a7a / gold #B8840A on most docs, #194980 / #F57F20 on
+# the two asset-invoice docs), so existing paperwork is unchanged until an
+# admin actually picks colors for a venue.
+
+_HEX_COLOR_RE = re.compile(r'^#[0-9a-fA-F]{6}$')
+
+
+def _valid_hex_color(v):
+    return bool(_HEX_COLOR_RE.match((v or '').strip()))
+
+
+def _mix_hex(hex_color, factor, toward='#ffffff'):
+    """Blend hex_color toward another color (default white).
+    factor 0.0 → unchanged, 1.0 → fully `toward`."""
+    h = hex_color.lstrip('#')
+    t = toward.lstrip('#')
+    parts = []
+    for i in (0, 2, 4):
+        a = int(h[i:i + 2], 16)
+        b = int(t[i:i + 2], 16)
+        parts.append(f'{round(a + (b - a) * factor):02x}')
+    return '#' + ''.join(parts)
+
+
+def _get_venue_pdf_colors(db, venue_name):
+    """Accent palette for a venue's PDF paperwork, or None → template defaults.
+
+    When a venue has colors configured, returns the primary/secondary plus the
+    derived tints the pdf templates need (row backgrounds, on-primary text,
+    borders, the darker on-tint text) so every shade tracks the chosen hues.
+    Tint factors are calibrated so the default navy/gold reproduce the
+    long-standing literal values (#eef2f7, #cfe0f2, #f0c44a, #fdf6e3, …).
+    """
+    if not venue_name:
+        return None
+    row = db.execute(
+        'SELECT primary_color, secondary_color FROM venue_colors WHERE venue_name=?',
+        (venue_name,)).fetchone()
+    if not row:
+        return None
+    p = (row['primary_color'] or '').strip()
+    s = (row['secondary_color'] or '').strip()
+    p = p if _valid_hex_color(p) else ''
+    s = s if _valid_hex_color(s) else ''
+    if not p and not s:
+        return None
+    p = p or '#1a4a7a'
+    s = s or '#B8840A'
+    return {
+        'primary':          p,
+        'primary_mid':      _mix_hex(p, 0.18),                    # ≈ #3a6ea5
+        'primary_bright':   _mix_hex(p, 0.35),                    # ≈ #4a90d9
+        'primary_soft':     _mix_hex(p, 0.72),                    # ≈ #cfe0f2
+        'primary_border':   _mix_hex(p, 0.65),                    # ≈ #bcd0e4
+        'primary_bg':       _mix_hex(p, 0.93),                    # ≈ #eef2f7
+        'primary_bg2':      _mix_hex(p, 0.96),                    # ≈ #f4f7fa
+        'secondary':        s,
+        'secondary_bright': _mix_hex(s, 0.30),                    # ≈ #f0c44a
+        'secondary_soft':   _mix_hex(s, 0.55),                    # ≈ #e8c870
+        'secondary_bg':     _mix_hex(s, 0.90),                    # ≈ #fdf6e3
+        'secondary_bg2':    _mix_hex(s, 0.96),                    # ≈ #fff8e8
+        'secondary_dark':   _mix_hex(s, 0.40, toward='#000000'),  # ≈ #7a5a00
+    }
+
+
+@app.route('/settings/venue-colors', methods=['GET'])
+@admin_required
+def venue_colors_list():
+    """Every distinct show venue plus its configured paperwork colors (if any)."""
+    db = get_db()
+    venues = [r['venue'] for r in db.execute(
+        "SELECT DISTINCT venue FROM shows "
+        "WHERE venue IS NOT NULL AND TRIM(venue) != ''"
+    ).fetchall()]
+    colors = {r['venue_name']: r for r in db.execute(
+        'SELECT venue_name, primary_color, secondary_color FROM venue_colors'
+    ).fetchall()}
+    db.close()
+    for v in colors.keys():
+        if v not in venues:
+            venues.append(v)
+    venues.sort(key=lambda v: v.lower())
+    return jsonify({
+        'venues': [{
+            'name': v,
+            'primary_color':   (colors[v]['primary_color'] if v in colors else ''),
+            'secondary_color': (colors[v]['secondary_color'] if v in colors else ''),
+        } for v in venues]
+    })
+
+
+@app.route('/settings/venue-colors', methods=['POST'])
+@admin_required
+def venue_colors_save():
+    """Set (or clear) a venue's paperwork colors. Blank both = remove the
+    override entirely — that venue's PDFs go back to the app default theme."""
+    data = request.get_json(force=True) or {}
+    venue_name = (data.get('venue') or '').strip()
+    if not venue_name:
+        return jsonify({'success': False, 'error': 'Venue name required.'}), 400
+    primary = (data.get('primary_color') or '').strip()
+    secondary = (data.get('secondary_color') or '').strip()
+    for v in (primary, secondary):
+        if v and not _valid_hex_color(v):
+            return jsonify({'success': False,
+                            'error': 'Colors must be #rrggbb hex values.'}), 400
+    db = get_db()
+    if not primary and not secondary:
+        db.execute('DELETE FROM venue_colors WHERE venue_name=?', (venue_name,))
+        action = 'venue_colors_clear'
+    else:
+        db.execute(
+            "INSERT OR REPLACE INTO venue_colors "
+            "(venue_name, primary_color, secondary_color, updated_at) "
+            "VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+            (venue_name, primary, secondary))
+        action = 'venue_colors_set'
+    log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
+              detail=f'{action} venue={venue_name} primary={primary or "-"} secondary={secondary or "-"}')
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"SETTINGS_CHANGE detail={action} venue={venue_name} "
+        f"primary={primary or '-'} secondary={secondary or '-'} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -19319,11 +19876,13 @@ def show_asset_invoice(show_id):
         assets_list, ext_list, assets_subtotal, external_subtotal = \
             _fetch_show_assets_and_externals(db, show_id)
         performance_company = _show_performance_company(db, show_id)
+        pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
         grand_total = assets_subtotal + external_subtotal
 
         html_str = render_template(
             'pdf/asset_invoice_pdf.html',
             show=dict(show),
+            pdf_colors=pdf_colors,
             assets=assets_list,
             external_rentals=ext_list,
             assets_subtotal=assets_subtotal,
@@ -19371,12 +19930,14 @@ def show_labor_estimate(show_id):
         labor_lines, labor_total = _calc_labor_cost_for_show(db, show_id)
         performance_company = _show_performance_company(db, show_id)
         logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+        pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
     finally:
         db.close()
 
     html_str = render_template(
         'pdf/labor_estimate_pdf.html',
         show=dict(show),
+        pdf_colors=pdf_colors,
         labor_lines=labor_lines,
         labor_total=labor_total,
         performance_company=performance_company,
@@ -19417,6 +19978,7 @@ def show_pre_show_estimate(show_id):
         performance_company = _show_performance_company(db, show_id)
         er_pdfs = _fetch_external_rental_pdfs(db, show_id)
         logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+        pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
     finally:
         db.close()
 
@@ -19426,6 +19988,7 @@ def show_pre_show_estimate(show_id):
     html_str = render_template(
         'pdf/pre_show_estimate_pdf.html',
         show=dict(show),
+        pdf_colors=pdf_colors,
         assets=assets_list,
         external_rentals=ext_list,
         assets_subtotal=assets_subtotal,
@@ -19482,6 +20045,7 @@ def show_post_invoice(show_id):
         labor_lines, labor_total = _calc_post_show_labor_cost(db, show_id)
         er_pdfs = _fetch_external_rental_pdfs(db, show_id)
         logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+        pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
     finally:
         db.close()
 
@@ -19490,6 +20054,7 @@ def show_post_invoice(show_id):
     html_str = render_template(
         'pdf/post_show_invoice_pdf.html',
         show=dict(show),
+        pdf_colors=pdf_colors,
         assets=assets_list,
         external_rentals=ext_list,
         assets_subtotal=assets_subtotal,
@@ -19665,6 +20230,11 @@ def combined_invoice_pdf():
         pdfs = _fetch_external_rental_pdfs(db, sec['show']['id'])
         if pdfs:
             attachment_groups.append((sec['show'].get('name') or '', pdfs))
+    # Venue colors apply only when every billed show shares one venue — a
+    # mixed-venue combined invoice keeps the default theme.
+    _venues = {(sec['show'].get('venue') or '').strip() for sec in sections}
+    pdf_colors = (_get_venue_pdf_colors(db, next(iter(_venues)))
+                  if len(_venues) == 1 and next(iter(_venues)) else None)
     db.close()
 
     combined_assets = round(sum(sec['assets_subtotal'] for sec in sections), 2)
@@ -19689,6 +20259,7 @@ def combined_invoice_pdf():
     html_str = render_template(
         'pdf/combined_invoice_pdf.html',
         sections=sections,
+        pdf_colors=pdf_colors,
         companies=companies,
         date_span=date_span,
         combined_assets=combined_assets,
