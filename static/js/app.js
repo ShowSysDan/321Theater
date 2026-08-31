@@ -2367,6 +2367,150 @@ async function deleteSchedTemplate(tid) {
   else alert(d.error || 'Delete failed.');
 }
 
+/* ── Labor Day Preset editor (Settings → Job Positions) ──────────
+   The labor counterpart of the schedule-template editor above: a named set
+   of standing position calls (position × qty × times) applied to a show's
+   labor day from the day-block header. */
+let _editLaborPresetId = null;
+let _lpPositions = null;   // /api/job-positions cache for the modal's selects
+
+async function _lpLoadPositions() {
+  if (_lpPositions) return _lpPositions;
+  try { _lpPositions = await (await fetch('/api/job-positions')).json(); }
+  catch (_) { _lpPositions = []; }
+  return _lpPositions;
+}
+
+function _lpPositionOptions(selectedId) {
+  // Group by category, exclude training-only positions (they never bill and
+  // can't be requested on the labor tab either).
+  const groups = {};
+  (_lpPositions || []).filter(p => !p.is_training).forEach(p => {
+    const g = p.category_name || 'Uncategorized';
+    (groups[g] = groups[g] || []).push(p);
+  });
+  let html = '<option value="">— Position —</option>';
+  for (const [g, ps] of Object.entries(groups)) {
+    html += `<optgroup label="${_esc(g)}">` + ps.map(p =>
+      `<option value="${p.id}"${String(p.id) === String(selectedId || '') ? ' selected' : ''}>${_esc(p.name)}${p.venue ? ' (' + _esc(p.venue) + ')' : ''}</option>`
+    ).join('') + '</optgroup>';
+  }
+  return html;
+}
+
+async function loadLaborPresets() {
+  const el = document.getElementById('labor-preset-list');
+  if (!el) return;
+  try {
+    const presets = await (await fetch('/api/labor-presets')).json();
+    if (!presets.length) {
+      el.innerHTML = '<p class="text-dim" style="font-size:12px">No presets yet. Click + New Preset to create one.</p>';
+      return;
+    }
+    el.innerHTML = presets.map(p => `
+      <div class="section-row" style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-hover);border-radius:4px;margin-bottom:6px">
+        <span style="font-size:12px;font-weight:600">${_esc(p.name)}</span>
+        <span class="text-dim" style="font-size:11px">${p.row_count} position${p.row_count === 1 ? '' : 's'}</span>
+        <div class="action-btns ml-auto">
+          <button class="btn btn-xs btn-ghost" onclick="openLaborPresetModal(${p.id})">Edit</button>
+          <button class="btn btn-xs btn-danger-ghost" onclick="deleteLaborPreset(${p.id})">Delete</button>
+        </div>
+      </div>`).join('');
+  } catch (_) {
+    el.innerHTML = '<p class="text-dim" style="font-size:12px">Failed to load presets.</p>';
+  }
+}
+
+async function openLaborPresetModal(pid) {
+  _editLaborPresetId = pid;
+  const modal = document.getElementById('labor-preset-modal');
+  if (!modal) return;
+  await _lpLoadPositions();
+  document.getElementById('labor-preset-name').value = '';
+  const tbody = document.getElementById('labor-preset-rows');
+  tbody.innerHTML = '';
+  if (pid) {
+    try {
+      const d = await (await fetch(`/api/labor-presets/${pid}`)).json();
+      document.getElementById('labor-preset-name').value = d.name || '';
+      (d.rows || []).forEach(r => _appendLaborPresetRow(tbody, r));
+    } catch (_) {}
+  }
+  if (!tbody.children.length) _appendLaborPresetRow(tbody, {});
+  modal.style.display = '';
+}
+
+function _appendLaborPresetRow(tbody, r) {
+  const tr = document.createElement('tr');
+  tr.className = 'schedule-row labor-preset-row';
+  const time = (v, ph) =>
+    `<td><input type="text" class="sched-cell lp-cell" placeholder="${ph}" maxlength="5" pattern="[0-2][0-9]:[0-5][0-9]" value="${_esc(v || '')}"></td>`;
+  tr.innerHTML = `
+    <td><select class="sched-cell lp-pos">${_lpPositionOptions(r.position_id)}</select></td>
+    <td><input type="number" class="sched-cell lp-qty" min="1" max="50" value="${parseInt(r.quantity, 10) || 1}"></td>
+    ${time(r.in_time, '17:00')}${time(r.out_time, '23:00')}
+    ${time(r.break_start, '')}${time(r.break_end, '')}
+    ${time(r.break2_start, '')}${time(r.break2_end, '')}
+    <td><input type="text" class="sched-cell lp-notes" placeholder="Notes" value="${_esc(r.notes || '')}"></td>
+    <td><button type="button" class="row-del-btn" onclick="this.closest('tr').remove()">×</button></td>
+  `;
+  tbody.appendChild(tr);
+}
+
+function addLaborPresetRow() {
+  _appendLaborPresetRow(document.getElementById('labor-preset-rows'), {});
+}
+
+function closeLaborPresetModal() {
+  const modal = document.getElementById('labor-preset-modal');
+  if (modal) modal.style.display = 'none';
+  _editLaborPresetId = null;
+}
+
+async function saveLaborPreset() {
+  const name = document.getElementById('labor-preset-name').value.trim();
+  if (!name) { alert('Preset name is required.'); return; }
+  const rows = [];
+  document.querySelectorAll('#labor-preset-rows .labor-preset-row').forEach(tr => {
+    const cells = tr.querySelectorAll('.lp-cell');
+    const posId = tr.querySelector('.lp-pos')?.value || '';
+    if (!posId) return;   // a row without a position is meaningless — skip it
+    rows.push({
+      position_id:  posId,
+      quantity:     tr.querySelector('.lp-qty')?.value || 1,
+      in_time:      cells[0]?.value || '',
+      out_time:     cells[1]?.value || '',
+      break_start:  cells[2]?.value || '',
+      break_end:    cells[3]?.value || '',
+      break2_start: cells[4]?.value || '',
+      break2_end:   cells[5]?.value || '',
+      notes:        tr.querySelector('.lp-notes')?.value || '',
+    });
+  });
+  if (!rows.length) { alert('Add at least one position.'); return; }
+  const url = _editLaborPresetId
+    ? `/settings/labor-presets/${_editLaborPresetId}/edit`
+    : '/settings/labor-presets/add';
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, rows})
+    });
+    const d = await resp.json();
+    if (d.success) { closeLaborPresetModal(); loadLaborPresets(); }
+    else alert(d.error || 'Save failed.');
+  } catch (e) { alert('Network error.'); }
+}
+
+async function deleteLaborPreset(pid) {
+  if (!confirm('Delete this preset? Shows it was already applied to keep their labor lines.')) return;
+  const resp = await fetch(`/settings/labor-presets/${pid}/delete`, {method:'POST'});
+  const d = await resp.json();
+  if (d.success) loadLaborPresets();
+  else alert(d.error || 'Delete failed.');
+}
+
 /* ── Server Settings (port change + live restart) ────────────── */
 async function saveServerSettings(form) {
   const newPort = parseInt(form.querySelector('[name="app_port"]').value, 10);

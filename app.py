@@ -679,7 +679,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.36.0'
+APP_VERSION = '2.37.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -3939,6 +3939,7 @@ UNDO_TABLE_MAP = {
     'form_field':             'form_fields',
     'form_section':           'form_sections',
     'schedule_template':      'schedule_templates',
+    'labor_preset':           'labor_presets',
     'position_category':      'position_categories',
     'job_position':           'job_positions',
     'labor_request':          'labor_requests',
@@ -10790,6 +10791,196 @@ def delete_schedule_template(tid):
     db.commit(); db.close()
     syslog_logger.info(f"TEMPLATE_DELETE id={tid} by={session.get('username')}")
     return jsonify({'success': True})
+
+
+# ─── Labor Day Presets ────────────────────────────────────────────────────────
+# The labor-tab counterpart of schedule templates: a named set of standing
+# position calls (position × quantity × times) that can be applied to any
+# labor day on a show. Authored in Settings → Job Positions (scheduler+);
+# applied from the day-block header on the show's Labor Requests tab.
+# Unlike schedule templates (pure client-side DOM injection, saved with the
+# form), labor rows autosave individually — so apply is a server-side endpoint
+# that inserts every row in one transaction.
+
+def _clean_preset_rows(rows):
+    """Normalize incoming preset rows: clamp quantity, normalize times."""
+    out = []
+    for r in rows or []:
+        try:
+            pid = int(r.get('position_id')) if r.get('position_id') else None
+        except (TypeError, ValueError):
+            pid = None
+        try:
+            qty = max(1, min(50, int(r.get('quantity') or 1)))
+        except (TypeError, ValueError):
+            qty = 1
+        out.append({
+            'position_id':  pid,
+            'quantity':     qty,
+            'in_time':      _normalize_perf_time(r.get('in_time', '')),
+            'out_time':     _normalize_perf_time(r.get('out_time', '')),
+            'break_start':  _normalize_perf_time(r.get('break_start', '')),
+            'break_end':    _normalize_perf_time(r.get('break_end', '')),
+            'break2_start': _normalize_perf_time(r.get('break2_start', '')),
+            'break2_end':   _normalize_perf_time(r.get('break2_end', '')),
+            'notes':        (r.get('notes') or '').strip(),
+        })
+    return out
+
+
+def _insert_preset_rows(db, pid, rows):
+    for i, r in enumerate(rows):
+        db.execute("""INSERT INTO labor_preset_rows
+                      (preset_id, sort_order, position_id, quantity, in_time, out_time,
+                       break_start, break_end, break2_start, break2_end, notes)
+                      VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                   (pid, i, r['position_id'], r['quantity'], r['in_time'], r['out_time'],
+                    r['break_start'], r['break_end'], r['break2_start'], r['break2_end'],
+                    r['notes']))
+
+
+@app.route('/api/labor-presets')
+@login_required
+def api_labor_presets():
+    db = get_db()
+    presets = [dict(p) for p in db.execute(
+        'SELECT * FROM labor_presets ORDER BY sort_order, name'
+    ).fetchall()]
+    for p in presets:
+        p['rows'] = [dict(r) for r in db.execute("""
+            SELECT lpr.*, jp.name AS position_name
+            FROM labor_preset_rows lpr
+            LEFT JOIN job_positions jp ON lpr.position_id = jp.id
+            WHERE lpr.preset_id=? ORDER BY lpr.sort_order, lpr.id
+        """, (p['id'],)).fetchall()]
+        p['row_count'] = sum(r['quantity'] or 1 for r in p['rows'])
+    db.close()
+    return jsonify(presets)
+
+
+@app.route('/api/labor-presets/<int:pid>')
+@login_required
+def api_labor_preset(pid):
+    db = get_db()
+    p = db.execute('SELECT * FROM labor_presets WHERE id=?', (pid,)).fetchone()
+    if not p:
+        db.close(); return jsonify({'error': 'Not found'}), 404
+    rows = [dict(r) for r in db.execute("""
+        SELECT lpr.*, jp.name AS position_name
+        FROM labor_preset_rows lpr
+        LEFT JOIN job_positions jp ON lpr.position_id = jp.id
+        WHERE lpr.preset_id=? ORDER BY lpr.sort_order, lpr.id
+    """, (pid,)).fetchall()]
+    db.close()
+    return jsonify({'id': p['id'], 'name': p['name'], 'rows': rows})
+
+
+@app.route('/settings/labor-presets/add', methods=['POST'])
+@scheduler_required
+def add_labor_preset():
+    data = request.get_json(force=True) or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'success': False, 'error': 'Name required.'}), 400
+    rows = _clean_preset_rows(data.get('rows'))
+    db = get_db()
+    max_o = db.execute('SELECT MAX(sort_order) FROM labor_presets').fetchone()[0] or 0
+    cur = db.execute('INSERT INTO labor_presets (name, sort_order) VALUES (?,?)',
+                     (name, max_o + 10))
+    pid = cur.lastrowid
+    _insert_preset_rows(db, pid, rows)
+    log_audit(db, 'LABOR_PRESET_ADD', 'labor_preset', pid, detail=name)
+    db.commit(); db.close()
+    syslog_logger.info(f"LABOR_PRESET_ADD id={pid} name={name!r} by={session.get('username')}")
+    return jsonify({'success': True, 'id': pid})
+
+
+@app.route('/settings/labor-presets/<int:pid>/edit', methods=['POST'])
+@scheduler_required
+def edit_labor_preset(pid):
+    data = request.get_json(force=True) or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'success': False, 'error': 'Name required.'}), 400
+    rows = _clean_preset_rows(data.get('rows'))
+    db = get_db()
+    if not db.execute('SELECT id FROM labor_presets WHERE id=?', (pid,)).fetchone():
+        db.close(); return jsonify({'success': False, 'error': 'Preset not found.'}), 404
+    db.execute('UPDATE labor_presets SET name=? WHERE id=?', (name, pid))
+    db.execute('DELETE FROM labor_preset_rows WHERE preset_id=?', (pid,))
+    _insert_preset_rows(db, pid, rows)
+    log_audit(db, 'LABOR_PRESET_EDIT', 'labor_preset', pid, detail=name)
+    db.commit(); db.close()
+    syslog_logger.info(f"LABOR_PRESET_EDIT id={pid} name={name!r} by={session.get('username')}")
+    return jsonify({'success': True})
+
+
+@app.route('/settings/labor-presets/<int:pid>/delete', methods=['POST'])
+@scheduler_required
+def delete_labor_preset(pid):
+    db = get_db()
+    row = db.execute('SELECT name FROM labor_presets WHERE id=?', (pid,)).fetchone()
+    log_audit(db, 'LABOR_PRESET_DELETE', 'labor_preset', pid,
+              detail=row['name'] if row else str(pid))
+    db.execute('DELETE FROM labor_preset_rows WHERE preset_id=?', (pid,))
+    db.execute('DELETE FROM labor_presets WHERE id=?', (pid,))
+    db.commit(); db.close()
+    syslog_logger.info(f"LABOR_PRESET_DELETE id={pid} by={session.get('username')}")
+    return jsonify({'success': True})
+
+
+@app.route('/shows/<int:show_id>/labor-presets/<int:pid>/apply', methods=['POST'])
+@login_required
+def apply_labor_preset(show_id, pid):
+    """Expand a labor preset onto one labor day of a show.
+
+    Each preset row becomes `quantity` individual labor_requests rows (one row
+    per person-slot, matching how the labor tab models a call) on the given
+    work_date, inserted in a single transaction. Rows are always APPENDED to
+    the day — applying a preset never removes or alters existing requests.
+    """
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_readonly') or session.get('is_restricted'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    data = request.get_json(force=True) or {}
+    try:
+        wd = date.fromisoformat(str(data.get('work_date') or '').strip()).isoformat()
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work_date.'}), 400
+    db = get_db()
+    preset = db.execute('SELECT * FROM labor_presets WHERE id=?', (pid,)).fetchone()
+    if not preset:
+        db.close(); return jsonify({'success': False, 'error': 'Preset not found.'}), 404
+    rows = db.execute(
+        'SELECT * FROM labor_preset_rows WHERE preset_id=? ORDER BY sort_order, id',
+        (pid,)).fetchall()
+    max_order = db.execute(
+        'SELECT MAX(sort_order) FROM labor_requests WHERE show_id=?', (show_id,)
+    ).fetchone()[0] or 0
+    created = 0
+    for r in rows:
+        for _ in range(max(1, r['quantity'] or 1)):
+            max_order += 10
+            db.execute("""
+                INSERT INTO labor_requests (show_id, position_id, work_date,
+                                            in_time, out_time, break_start, break_end,
+                                            break2_start, break2_end,
+                                            requested_name, notes, sort_order)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+            """, (show_id, r['position_id'], wd,
+                  r['in_time'] or '', r['out_time'] or '',
+                  r['break_start'] or '', r['break_end'] or '',
+                  r['break2_start'] or '', r['break2_end'] or '',
+                  r['notes'] or '', max_order))
+            created += 1
+    log_audit(db, 'LABOR_PRESET_APPLY', 'show', show_id, show_id=show_id,
+              detail=f"{preset['name']} → {wd} ({created} requests)")
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"LABOR_PRESET_APPLY show_id={show_id} preset_id={pid} date={wd} "
+        f"rows={created} by={session.get('username')}")
+    return jsonify({'success': True, 'created': created, 'work_date': wd})
 
 
 # ─── WiFi / Logo Settings ─────────────────────────────────────────────────────
