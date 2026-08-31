@@ -738,6 +738,18 @@ CREATE TABLE IF NOT EXISTS venue_colors (
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Security sign-in sheet personnel names (security_module.py): one row per
+-- expected person per show, printed with a blank signature column.
+CREATE TABLE IF NOT EXISTS security_signin_names (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    show_id    INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_ssn_show ON security_signin_names(show_id);
+
 -- General outgoing-email log: one row per attempted send (recipient + result).
 -- Used by Settings → Email → Recent Activity so admins can audit what went out.
 CREATE TABLE IF NOT EXISTS email_outbox_log (
@@ -3469,6 +3481,19 @@ CREATE TABLE IF NOT EXISTS venue_colors (
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Security sign-in sheet personnel names (security_module.py, one row per
+-- expected person per show, printed with a blank signature column).
+CREATE TABLE IF NOT EXISTS security_signin_names (
+    id         SERIAL PRIMARY KEY,
+    show_id    INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0,
+    created_by INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_ssn_show ON security_signin_names(show_id);
+
 -- ── Asset Manager ─────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS warehouse_locations (
@@ -4381,7 +4406,7 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
         'show_performances', 'form_history',
         'show_comments', 'show_attachments', 'advance_reads', 'export_log',
         'schedule_template_rows', 'active_sessions', 'labor_requests',
-        'show_labor_days',
+        'show_labor_days', 'security_signin_names',
         'crew_members', 'asset_items', 'asset_dashboards',
         'email_send_log', 'email_send_errors',
         # ── Depend on asset_items / show_comments / crew_members ──────────────
@@ -4549,6 +4574,8 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
         'show_labor_days',
         # Labor day presets
         'labor_presets', 'labor_preset_rows',
+        # Security sign-in sheets
+        'security_signin_names',
     ]
     for table in serial_tables:
         try:

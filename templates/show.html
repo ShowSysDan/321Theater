@@ -2164,6 +2164,25 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
       </div>
     </div>
 
+    {% if security_signin_enabled %}
+    <!-- Security Sign-In Sheet (optional module — Settings → System → Modules) -->
+    <div class="export-card">
+      <div class="export-card-header">
+        <div class="export-card-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="24" height="24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
+        </div>
+        <h3 class="export-card-title">Security Sign-In Sheet</h3>
+      </div>
+      <p class="export-card-desc">Personnel sign-in sheet for the security desk — enter or paste the expected names, then print.</p>
+      <div class="export-card-foot">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <a href="{{ url_for('security_signin_page', show_id=show.id) }}" class="btn btn-primary btn-sm">Edit Names</a>
+          <a href="{{ url_for('security_signin_pdf', show_id=show.id) }}" class="btn btn-ghost btn-sm" target="_blank">Export PDF</a>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
     <!-- Pre-Show Estimate PDF -->
     <div class="export-card">
       <div class="export-card-header">

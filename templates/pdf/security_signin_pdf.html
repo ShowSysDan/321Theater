@@ -1,0 +1,117 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+
+  Security Sign-In Sheet — printed list that sits at the security desk on
+  show day. One row per expected person with blank signature/time cells,
+  plus a few blank walk-up rows. Rendered by security_module.py.
+#}
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+{# Per-venue paperwork colors (Settings → per-venue branding).
+   pdf_colors is None → this template's default palette (the app-wide
+   navy/gold), matching the rest of the paperwork. #}
+{% set _vc = pdf_colors if pdf_colors is defined else none %}
+{% set C1 = _vc.primary if _vc else '#1a4a7a' %}
+{% set C1_BG = _vc.primary_bg if _vc else '#eef2f7' %}
+{% set C1_BG2 = _vc.primary_bg2 if _vc else '#f4f7fa' %}
+{% set C2 = _vc.secondary if _vc else '#B8840A' %}
+{% set C2_BRIGHT = _vc.secondary_bright if _vc else '#f0c44a' %}
+
+<style>
+  @page { size: A4; margin: 16mm 14mm 16mm 14mm; }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; }
+
+  /* Venue-colored masthead: show name + date front and center for the desk. */
+  .masthead { background: {{ C1 }}; color: #fff; padding: 14px 18px; display: flex; justify-content: space-between; align-items: center; }
+  .masthead .doc-type { font-size: 9px; font-weight: bold; color: {{ C2_BRIGHT }}; letter-spacing: 0.14em; text-transform: uppercase; }
+  .masthead .show-name { font-size: 21px; font-weight: 900; margin-top: 3px; letter-spacing: 0.01em; }
+  .masthead .show-meta { font-size: 11px; margin-top: 4px; color: rgba(255,255,255,0.85); }
+  .masthead .logo-box { text-align: right; padding-left: 14px; }
+
+  .org-line { border-bottom: 2.5px solid {{ C2 }}; padding: 6px 2px 7px; font-size: 8.5px; color: #555; letter-spacing: 0.08em; text-transform: uppercase; display: flex; justify-content: space-between; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+  thead { display: table-header-group; }  /* repeat header on every page */
+  th { font-size: 9px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: #fff; background: {{ C1 }}; padding: 6px 9px; text-align: left; }
+  td { padding: 0 9px; border-bottom: 1px solid #d8d8d8; height: 30px; vertical-align: middle; }
+  tr:nth-child(even) td { background: {{ C1_BG2 }}; }
+  td.rownum { width: 30px; text-align: right; color: #999; font-size: 9px; }
+  td.name-cell { width: 38%; font-size: 12px; font-weight: 600; }
+  td.sig-cell { border-left: 1px solid #e4e4e4; }
+  td.time-cell { width: 70px; border-left: 1px solid #e4e4e4; }
+  .walkup-row td.name-cell { font-weight: normal; }
+  .walkup-head td { background: {{ C1_BG }}; color: {{ C1 }}; font-size: 8.5px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; height: 20px; border-bottom: 1px solid #ccc; }
+
+  .empty { color: #888; font-size: 11px; padding: 24px 0 8px; text-align: center; }
+  .footer { margin-top: 18px; border-top: 1px solid #e0e0e0; padding-top: 8px; font-size: 9px; color: #aaa; text-align: center; }
+</style>
+</head>
+<body>
+
+  <div class="masthead">
+    <div>
+      <div class="doc-type">Security Sign-In Sheet</div>
+      <div class="show-name">{{ show.name }}</div>
+      <div class="show-meta">
+        {% if show.show_date %}{{ show.show_date | dowdate or show.show_date }}{% endif %}
+        {% if show.venue %}{% if show.show_date %} &nbsp;·&nbsp; {% endif %}{{ show.venue }}{% endif %}
+      </div>
+    </div>
+    {% if logo_data %}
+    <div class="logo-box">
+      <img src="{{ logo_data }}" alt="Logo" style="max-height:56px;max-width:170px;object-fit:contain">
+    </div>
+    {% endif %}
+  </div>
+  <div class="org-line">
+    <span>Dr. Phillips Center for the Performing Arts &nbsp;·&nbsp; 3·2·1→Theater Production Services</span>
+    <span>Generated {{ generated_date }}</span>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="text-align:right">#</th>
+        <th>Name</th>
+        <th>Signature</th>
+        <th>Time In</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for n in names %}
+      <tr>
+        <td class="rownum">{{ loop.index }}</td>
+        <td class="name-cell">{{ n }}</td>
+        <td class="sig-cell"></td>
+        <td class="time-cell"></td>
+      </tr>
+      {% endfor %}
+      {% if not names %}
+      <tr><td colspan="4" class="empty">No personnel names have been entered for this show.</td></tr>
+      {% endif %}
+      {% if blank_rows %}
+      <tr class="walkup-head"><td colspan="4">Additional personnel (print name)</td></tr>
+      {% for i in range(blank_rows) %}
+      <tr class="walkup-row">
+        <td class="rownum">{{ (names | length) + loop.index }}</td>
+        <td class="name-cell"></td>
+        <td class="sig-cell"></td>
+        <td class="time-cell"></td>
+      </tr>
+      {% endfor %}
+      {% endif %}
+    </tbody>
+  </table>
+
+  <div class="footer">
+    3·2·1→THEATER — Dr. Phillips Center for the Performing Arts &nbsp;·&nbsp;
+    {{ show.name }} security sign-in &nbsp;·&nbsp; Generated {{ generated_date }}
+  </div>
+
+</body>
+</html>
