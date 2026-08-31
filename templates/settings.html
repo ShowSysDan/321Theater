@@ -705,6 +705,23 @@
   </div>
 
   <div class="form-section" style="margin-bottom:16px">
+    <div class="form-section-header" style="display:flex;align-items:center;gap:10px">
+      <span class="section-icon">◈</span> PER-VENUE PAPERWORK COLORS
+      <button class="btn btn-xs btn-ghost" style="margin-left:auto" onclick="loadVenueColors()" title="Refresh list">Refresh</button>
+    </div>
+    <div class="form-section-body">
+      <p class="text-dim" style="font-size:12px;margin-bottom:12px">
+        Give each venue its own primary (structural navy) and secondary (accent gold) color on generated
+        PDFs — advance sheet, production schedule, labor/estimate and invoice paperwork. Lighter shades
+        (row backgrounds, banners) are derived automatically. Venues without colors keep the default theme.
+      </p>
+      <div id="venue-colors-list">
+        <p class="text-dim" style="font-size:12px">Loading…</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="form-section" style="margin-bottom:16px">
     <div class="form-section-header"><span class="section-icon">◈</span> UPLOAD SIZE LIMIT</div>
     <div class="form-section-body">
       <form onsubmit="event.preventDefault(); saveUploadSize(this)" style="max-width:250px">
@@ -3163,6 +3180,101 @@ async function deleteVenueLogo(venueName) {
 
 if (document.getElementById('venue-logos-list')) {
   loadVenueLogos();
+}
+
+/* ── Per-venue paperwork colors ─────────────────────────────────── */
+const _VC_DEFAULT_PRIMARY = '#1a4a7a';
+const _VC_DEFAULT_SECONDARY = '#B8840A';
+
+async function loadVenueColors() {
+  const host = document.getElementById('venue-colors-list');
+  if (!host) return;
+  host.innerHTML = '<p class="text-dim" style="font-size:12px">Loading…</p>';
+  try {
+    const r = await fetch('/settings/venue-colors');
+    if (!r.ok) throw new Error('http ' + r.status);
+    const d = await r.json();
+    const venues = d.venues || [];
+    if (!venues.length) {
+      host.innerHTML = '<p class="text-dim" style="font-size:12px">No venues found yet. Create a show first.</p>';
+      return;
+    }
+    host.innerHTML = venues.map(v => {
+      const safe = _venueLogoEsc(v.name);
+      const nameArg = safe.replace(/'/g, "\\'");
+      const isSet = !!(v.primary_color || v.secondary_color);
+      const p = v.primary_color || _VC_DEFAULT_PRIMARY;
+      const s = v.secondary_color || _VC_DEFAULT_SECONDARY;
+      const status = isSet
+        ? `<span class="badge" style="background:${p};color:#fff;font-size:10px;padding:1px 8px;border-radius:99px;border:2px solid ${s}">CUSTOM</span>`
+        : `<span class="text-dim" style="font-size:11px;font-style:italic">Using default theme</span>`;
+      return `<div class="venue-colors-row" data-venue="${safe}"
+                   style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);flex-wrap:wrap">
+        <div style="flex:1;min-width:160px">
+          <div style="font-weight:600;font-size:13px">${safe}</div>
+          <div style="margin-top:4px">${status}</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)">PRIMARY
+          <input type="color" class="vc-primary" value="${p}" style="width:44px;height:28px;padding:1px;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer">
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)">SECONDARY
+          <input type="color" class="vc-secondary" value="${s}" style="width:44px;height:28px;padding:1px;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer">
+        </label>
+        <button class="btn btn-sm btn-primary" onclick="saveVenueColors(this, '${nameArg}')">Save</button>
+        ${isSet ? `<button class="btn btn-sm btn-ghost" onclick="clearVenueColors('${nameArg}')" title="Back to the default theme">Reset</button>` : ''}
+        <span class="venue-colors-msg field-msg" style="display:none;flex-basis:100%;font-size:11px"></span>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    host.innerHTML = '<p class="text-dim" style="font-size:12px;color:#F56565">Failed to load venue list.</p>';
+  }
+}
+
+async function saveVenueColors(btn, venueName) {
+  const row = btn.closest('.venue-colors-row');
+  const primary = row.querySelector('.vc-primary')?.value || '';
+  const secondary = row.querySelector('.vc-secondary')?.value || '';
+  const msg = row.querySelector('.venue-colors-msg');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/settings/venue-colors', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({venue: venueName, primary_color: primary, secondary_color: secondary})
+    });
+    const d = await r.json();
+    if (msg) {
+      msg.style.display = 'block';
+      msg.textContent = d.success ? '✓ Saved — new exports use these colors' : (d.error || 'Save failed');
+      msg.style.color = d.success ? 'var(--accent)' : 'var(--danger)';
+    }
+    if (d.success) {
+      showSaveToast(`✓ Colors saved for "${venueName}"`);
+      setTimeout(loadVenueColors, 600);
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function clearVenueColors(venueName) {
+  if (!confirm(`Reset "${venueName}" to the default paperwork theme?`)) return;
+  const r = await fetch('/settings/venue-colors', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({venue: venueName, primary_color: '', secondary_color: ''})
+  });
+  const d = await r.json();
+  if (d.success) {
+    showSaveToast(`✓ "${venueName}" back on the default theme`);
+    loadVenueColors();
+  } else {
+    alert(d.error || 'Reset failed');
+  }
+}
+
+if (document.getElementById('venue-colors-list')) {
+  loadVenueColors();
 }
 
 async function saveUploadSize(form) {

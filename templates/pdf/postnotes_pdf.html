@@ -7,6 +7,12 @@
 <html>
 <head>
 <meta charset="UTF-8">
+{# Per-venue paperwork colors (Settings → per-venue branding).
+   pdf_colors is None → this template's long-standing default
+   palette, so output is unchanged until colors are set. #}
+{% set _vc = pdf_colors if pdf_colors is defined else none %}
+{% set C2 = _vc.secondary if _vc else '#B8840A' %}
+
 <style>
   @page {
     size: letter;
@@ -21,7 +27,7 @@
   body { font-family: Arial, Helvetica, sans-serif; font-size: 9pt; color: #1a1a1a; line-height: 1.4; }
 
   .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; padding-bottom: 7px; border-bottom: 2.5px solid #000; }
-  .doc-type { font-size: 7.5pt; font-weight: bold; color: #B8840A; letter-spacing: 0.12em; text-transform: uppercase; }
+  .doc-type { font-size: 7.5pt; font-weight: bold; color: {{ C2 }}; letter-spacing: 0.12em; text-transform: uppercase; }
   .show-name { font-size: 25pt; font-weight: 900; line-height: 1.04; color: #1a1a1a; letter-spacing: 0.01em; margin: 1px 0 2px; }
   .show-sub { font-size: 8.5pt; color: #444; }
   .show-sub strong { color: #111; }

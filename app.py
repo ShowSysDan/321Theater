@@ -679,7 +679,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.37.0'
+APP_VERSION = '2.38.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -6376,6 +6376,7 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
     contact_map = {c['id']: dict(c) for c in contacts}
 
     logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+    pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
 
     # Fingerprint the appended file attachments (they land in the PDF but not in
     # the rendered HTML, so the content hash must account for them separately).
@@ -6426,6 +6427,7 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
                                    form_sections=form_sections,
                                    assets_by_section=assets_by_section,
                                    logo_data=logo_data,
+                                   pdf_colors=pdf_colors,
                                    version=version,
                                    layout=layout,
                                    export_date=export_date)
@@ -6437,6 +6439,7 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
                                    form_sections=[],
                                    assets_by_section={},
                                    logo_data=logo_data,
+                                   pdf_colors=pdf_colors,
                                    version=version,
                                    layout=layout,
                                    export_date=export_date)
@@ -6874,6 +6877,7 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
     contact_name_map = {c['name']: dict(c) for c in contacts}
 
     logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+    pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
 
     # WiFi always from global settings (not per-show)
     wifi_ssid = get_app_setting('wifi_network', '')
@@ -6958,6 +6962,7 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
     def _render(version, export_date):
         return render_template('pdf/schedule_pdf.html',
                                show=show,
+                               pdf_colors=pdf_colors,
                                schedule_days=schedule_days,
                                schedule_meta=schedule_meta,
                                sched_meta_fields=get_schedule_meta_fields(),
@@ -7255,12 +7260,14 @@ def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
         'SELECT * FROM schedule_rows WHERE show_id=? ORDER BY sort_order,id', (show_id,)
     ).fetchall()
     logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+    pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
 
     layout = pdf_layouts.PdfLayout('postnotes', get_app_setting)
 
     def _render(version, export_date):
         return render_template('pdf/postnotes_pdf.html',
                                show=show,
+                               pdf_colors=pdf_colors,
                                notes_data=notes_data,
                                advance_data=advance_data,
                                schedule_rows=sched_rows,
@@ -11384,6 +11391,135 @@ def venue_logo_delete():
     syslog_logger.info(
         f"SETTINGS_CHANGE detail=venue_logo_delete venue={venue_name} by={session.get('username')}"
     )
+    return jsonify({'success': True})
+
+
+# ─── Per-venue paperwork colors ──────────────────────────────────────────────
+# Same shape as venue_logos: a venue_colors row overrides the app-wide theme
+# on generated PDFs; no row (or blank values) keeps each template's built-in
+# defaults (navy #1a4a7a / gold #B8840A on most docs, #194980 / #F57F20 on
+# the two asset-invoice docs), so existing paperwork is unchanged until an
+# admin actually picks colors for a venue.
+
+_HEX_COLOR_RE = re.compile(r'^#[0-9a-fA-F]{6}$')
+
+
+def _valid_hex_color(v):
+    return bool(_HEX_COLOR_RE.match((v or '').strip()))
+
+
+def _mix_hex(hex_color, factor, toward='#ffffff'):
+    """Blend hex_color toward another color (default white).
+    factor 0.0 → unchanged, 1.0 → fully `toward`."""
+    h = hex_color.lstrip('#')
+    t = toward.lstrip('#')
+    parts = []
+    for i in (0, 2, 4):
+        a = int(h[i:i + 2], 16)
+        b = int(t[i:i + 2], 16)
+        parts.append(f'{round(a + (b - a) * factor):02x}')
+    return '#' + ''.join(parts)
+
+
+def _get_venue_pdf_colors(db, venue_name):
+    """Accent palette for a venue's PDF paperwork, or None → template defaults.
+
+    When a venue has colors configured, returns the primary/secondary plus the
+    derived tints the pdf templates need (row backgrounds, on-primary text,
+    borders, the darker on-tint text) so every shade tracks the chosen hues.
+    Tint factors are calibrated so the default navy/gold reproduce the
+    long-standing literal values (#eef2f7, #cfe0f2, #f0c44a, #fdf6e3, …).
+    """
+    if not venue_name:
+        return None
+    row = db.execute(
+        'SELECT primary_color, secondary_color FROM venue_colors WHERE venue_name=?',
+        (venue_name,)).fetchone()
+    if not row:
+        return None
+    p = (row['primary_color'] or '').strip()
+    s = (row['secondary_color'] or '').strip()
+    p = p if _valid_hex_color(p) else ''
+    s = s if _valid_hex_color(s) else ''
+    if not p and not s:
+        return None
+    p = p or '#1a4a7a'
+    s = s or '#B8840A'
+    return {
+        'primary':          p,
+        'primary_mid':      _mix_hex(p, 0.18),                    # ≈ #3a6ea5
+        'primary_bright':   _mix_hex(p, 0.35),                    # ≈ #4a90d9
+        'primary_soft':     _mix_hex(p, 0.72),                    # ≈ #cfe0f2
+        'primary_border':   _mix_hex(p, 0.65),                    # ≈ #bcd0e4
+        'primary_bg':       _mix_hex(p, 0.93),                    # ≈ #eef2f7
+        'primary_bg2':      _mix_hex(p, 0.96),                    # ≈ #f4f7fa
+        'secondary':        s,
+        'secondary_bright': _mix_hex(s, 0.30),                    # ≈ #f0c44a
+        'secondary_soft':   _mix_hex(s, 0.55),                    # ≈ #e8c870
+        'secondary_bg':     _mix_hex(s, 0.90),                    # ≈ #fdf6e3
+        'secondary_bg2':    _mix_hex(s, 0.96),                    # ≈ #fff8e8
+        'secondary_dark':   _mix_hex(s, 0.40, toward='#000000'),  # ≈ #7a5a00
+    }
+
+
+@app.route('/settings/venue-colors', methods=['GET'])
+@admin_required
+def venue_colors_list():
+    """Every distinct show venue plus its configured paperwork colors (if any)."""
+    db = get_db()
+    venues = [r['venue'] for r in db.execute(
+        "SELECT DISTINCT venue FROM shows "
+        "WHERE venue IS NOT NULL AND TRIM(venue) != ''"
+    ).fetchall()]
+    colors = {r['venue_name']: r for r in db.execute(
+        'SELECT venue_name, primary_color, secondary_color FROM venue_colors'
+    ).fetchall()}
+    db.close()
+    for v in colors.keys():
+        if v not in venues:
+            venues.append(v)
+    venues.sort(key=lambda v: v.lower())
+    return jsonify({
+        'venues': [{
+            'name': v,
+            'primary_color':   (colors[v]['primary_color'] if v in colors else ''),
+            'secondary_color': (colors[v]['secondary_color'] if v in colors else ''),
+        } for v in venues]
+    })
+
+
+@app.route('/settings/venue-colors', methods=['POST'])
+@admin_required
+def venue_colors_save():
+    """Set (or clear) a venue's paperwork colors. Blank both = remove the
+    override entirely — that venue's PDFs go back to the app default theme."""
+    data = request.get_json(force=True) or {}
+    venue_name = (data.get('venue') or '').strip()
+    if not venue_name:
+        return jsonify({'success': False, 'error': 'Venue name required.'}), 400
+    primary = (data.get('primary_color') or '').strip()
+    secondary = (data.get('secondary_color') or '').strip()
+    for v in (primary, secondary):
+        if v and not _valid_hex_color(v):
+            return jsonify({'success': False,
+                            'error': 'Colors must be #rrggbb hex values.'}), 400
+    db = get_db()
+    if not primary and not secondary:
+        db.execute('DELETE FROM venue_colors WHERE venue_name=?', (venue_name,))
+        action = 'venue_colors_clear'
+    else:
+        db.execute(
+            "INSERT OR REPLACE INTO venue_colors "
+            "(venue_name, primary_color, secondary_color, updated_at) "
+            "VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+            (venue_name, primary, secondary))
+        action = 'venue_colors_set'
+    log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
+              detail=f'{action} venue={venue_name} primary={primary or "-"} secondary={secondary or "-"}')
+    db.commit(); db.close()
+    syslog_logger.info(
+        f"SETTINGS_CHANGE detail={action} venue={venue_name} "
+        f"primary={primary or '-'} secondary={secondary or '-'} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -19625,11 +19761,13 @@ def show_asset_invoice(show_id):
         assets_list, ext_list, assets_subtotal, external_subtotal = \
             _fetch_show_assets_and_externals(db, show_id)
         performance_company = _show_performance_company(db, show_id)
+        pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
         grand_total = assets_subtotal + external_subtotal
 
         html_str = render_template(
             'pdf/asset_invoice_pdf.html',
             show=dict(show),
+            pdf_colors=pdf_colors,
             assets=assets_list,
             external_rentals=ext_list,
             assets_subtotal=assets_subtotal,
@@ -19677,12 +19815,14 @@ def show_labor_estimate(show_id):
         labor_lines, labor_total = _calc_labor_cost_for_show(db, show_id)
         performance_company = _show_performance_company(db, show_id)
         logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+        pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
     finally:
         db.close()
 
     html_str = render_template(
         'pdf/labor_estimate_pdf.html',
         show=dict(show),
+        pdf_colors=pdf_colors,
         labor_lines=labor_lines,
         labor_total=labor_total,
         performance_company=performance_company,
@@ -19723,6 +19863,7 @@ def show_pre_show_estimate(show_id):
         performance_company = _show_performance_company(db, show_id)
         er_pdfs = _fetch_external_rental_pdfs(db, show_id)
         logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+        pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
     finally:
         db.close()
 
@@ -19732,6 +19873,7 @@ def show_pre_show_estimate(show_id):
     html_str = render_template(
         'pdf/pre_show_estimate_pdf.html',
         show=dict(show),
+        pdf_colors=pdf_colors,
         assets=assets_list,
         external_rentals=ext_list,
         assets_subtotal=assets_subtotal,
@@ -19788,6 +19930,7 @@ def show_post_invoice(show_id):
         labor_lines, labor_total = _calc_post_show_labor_cost(db, show_id)
         er_pdfs = _fetch_external_rental_pdfs(db, show_id)
         logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
+        pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
     finally:
         db.close()
 
@@ -19796,6 +19939,7 @@ def show_post_invoice(show_id):
     html_str = render_template(
         'pdf/post_show_invoice_pdf.html',
         show=dict(show),
+        pdf_colors=pdf_colors,
         assets=assets_list,
         external_rentals=ext_list,
         assets_subtotal=assets_subtotal,
@@ -19971,6 +20115,11 @@ def combined_invoice_pdf():
         pdfs = _fetch_external_rental_pdfs(db, sec['show']['id'])
         if pdfs:
             attachment_groups.append((sec['show'].get('name') or '', pdfs))
+    # Venue colors apply only when every billed show shares one venue — a
+    # mixed-venue combined invoice keeps the default theme.
+    _venues = {(sec['show'].get('venue') or '').strip() for sec in sections}
+    pdf_colors = (_get_venue_pdf_colors(db, next(iter(_venues)))
+                  if len(_venues) == 1 and next(iter(_venues)) else None)
     db.close()
 
     combined_assets = round(sum(sec['assets_subtotal'] for sec in sections), 2)
@@ -19995,6 +20144,7 @@ def combined_invoice_pdf():
     html_str = render_template(
         'pdf/combined_invoice_pdf.html',
         sections=sections,
+        pdf_colors=pdf_colors,
         companies=companies,
         date_span=date_span,
         combined_assets=combined_assets,

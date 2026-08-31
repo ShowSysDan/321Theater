@@ -7,6 +7,21 @@
 <html>
 <head>
 <meta charset="UTF-8">
+{# Per-venue paperwork colors (Settings → per-venue branding).
+   pdf_colors is None → this template's long-standing default
+   palette, so output is unchanged until colors are set. #}
+{% set _vc = pdf_colors if pdf_colors is defined else none %}
+{% set C1 = _vc.primary if _vc else '#1a4a7a' %}
+{% set C1_BG2 = _vc.primary_bg2 if _vc else '#f0f8ff' %}
+{% set C1_BORDER = _vc.primary_border if _vc else '#bcd0e4' %}
+{% set C1_BRIGHT = _vc.primary_bright if _vc else '#4a90d9' %}
+{% set C1_MID = _vc.primary_mid if _vc else '#3a6ea5' %}
+{% set C1_SOFT = _vc.primary_soft if _vc else '#cfe0f2' %}
+{% set C2 = _vc.secondary if _vc else '#B8840A' %}
+{% set C2_BG2 = _vc.secondary_bg2 if _vc else '#fff8e8' %}
+{% set C2_BRIGHT = _vc.secondary_bright if _vc else '#f0c44a' %}
+{% set C2_SOFT = _vc.secondary_soft if _vc else '#e8c870' %}
+
 <style>
   @page {
     size: letter portrait;
@@ -26,23 +41,23 @@
   .sidebar     { display: table-cell; width: 34%; vertical-align: top; }
 
   /* ── Header ── */
-  .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; padding-bottom: 7px; border-bottom: 2.5px solid #1a4a7a; }
-  .doc-type { font-size: 7.5pt; font-weight: bold; color: #B8840A; letter-spacing: 0.12em; text-transform: uppercase; }
+  .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; padding-bottom: 7px; border-bottom: 2.5px solid {{ C1 }}; }
+  .doc-type { font-size: 7.5pt; font-weight: bold; color: {{ C2 }}; letter-spacing: 0.12em; text-transform: uppercase; }
   .show-name { font-size: 25pt; font-weight: 900; line-height: 1.04; color: #1a1a1a; letter-spacing: 0.01em; margin: 1px 0 2px; }
   .show-sub { font-size: 8.5pt; color: #444; }
   .show-sub strong { color: #111; }
   .doc-org { font-size: 7pt; color: #555; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
   .doc-meta { text-align: right; font-size: 7.5pt; color: #444; white-space: nowrap; padding-left: 12px; }
-  .doc-meta .version { font-size: 10pt; font-weight: bold; color: #B8840A; }
+  .doc-meta .version { font-size: 10pt; font-weight: bold; color: {{ C2 }}; }
 
   /* ── Schedule Table — day # and column legends share ONE blue header ── */
   .sched-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
   .sched-table thead { display: table-header-group; }
-  .day-row th { background: #1a4a7a; color: #fff; font-size: 10.5pt; font-weight: bold;
+  .day-row th { background: {{ C1 }}; color: #fff; font-size: 10.5pt; font-weight: bold;
                 letter-spacing: 0.05em; text-transform: uppercase; text-align: left; padding: 5px 8px; }
-  .day-row .day-date { float: right; font-size: 8.5pt; color: #f0c44a; font-weight: bold; text-transform: none; letter-spacing: 0; }
-  .cols-row th { background: #1a4a7a; color: #cfe0f2; font-size: 7pt; letter-spacing: 0.08em; text-align: left;
-                 padding: 3px 8px; text-transform: uppercase; border-top: 1px solid #3a6ea5; }
+  .day-row .day-date { float: right; font-size: 8.5pt; color: {{ C2_BRIGHT }}; font-weight: bold; text-transform: none; letter-spacing: 0; }
+  .cols-row th { background: {{ C1 }}; color: {{ C1_SOFT }}; font-size: 7pt; letter-spacing: 0.08em; text-align: left;
+                 padding: 3px 8px; text-transform: uppercase; border-top: 1px solid {{ C1_MID }}; }
   .sched-table td { padding: 5px 8px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
   .sched-table tbody tr:nth-child(even) td { background: #fafafa; }
   .sched-table tbody tr:last-child td { border-bottom: 2px solid #bbb; }
@@ -52,7 +67,7 @@
      columns so they don't crowd the Description column. */
   .t12 { font-size: 0.78em; font-weight: normal; color: #555; white-space: nowrap; }
   .sched-table .time-col .t12 { display: block; }
-  .day-row .t12 { color: #cfe0f2; }  /* legible on the dark blue day banner */
+  .day-row .t12 { color: {{ C1_SOFT }}; }  /* legible on the dark blue day banner */
   .sched-table .desc-col { font-size: 8.5pt; }
   .sched-table .notes-col { font-size: 7.5pt; color: #555; }
 
@@ -64,18 +79,18 @@
   .info-item .val { font-size: 8.5pt; color: #111; margin-top: 1px; font-weight: 600; }
 
   /* ── WiFi box (stacks within the sidebar column) ── */
-  .wifi-box { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; background: #f0f8ff; border: 1.5px solid #4a90d9; padding: 7px 9px; border-radius: 4px; margin-bottom: 10px; }
+  .wifi-box { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; background: {{ C1_BG2 }}; border: 1.5px solid {{ C1_BRIGHT }}; padding: 7px 9px; border-radius: 4px; margin-bottom: 10px; }
   .wifi-qr img { width: 84px; height: 84px; }
-  .wifi-info .wifi-label { font-size: 9pt; font-weight: 900; letter-spacing: 0.1em; color: #1a4a7a; text-transform: uppercase; margin-bottom: 3px; }
+  .wifi-info .wifi-label { font-size: 9pt; font-weight: 900; letter-spacing: 0.1em; color: {{ C1 }}; text-transform: uppercase; margin-bottom: 3px; }
   .wifi-info .wifi-ssid  { font-size: 10pt; font-weight: bold; color: #1a1a1a; }
   .wifi-info .wifi-pass  { font-size: 8.5pt; color: #444; margin-top: 2px; }
   .wifi-info .wifi-pass span { font-family: monospace; font-weight: bold; color: #1a1a1a; }
 
   /* ── Contacts (single column in sidebar) ── */
   .contacts-grid { display: block; }
-  .contacts-box { border: 1px solid #bcd0e4; margin-bottom: 8px; }
+  .contacts-box { border: 1px solid {{ C1_BORDER }}; margin-bottom: 8px; }
   .contacts-box:last-child { margin-bottom: 0; }
-  .contacts-box-head { background: #1a4a7a; color: #fff; font-size: 7pt; font-weight: bold; letter-spacing: 0.1em; padding: 4px 7px; text-transform: uppercase; }
+  .contacts-box-head { background: {{ C1 }}; color: #fff; font-size: 7pt; font-weight: bold; letter-spacing: 0.1em; padding: 4px 7px; text-transform: uppercase; }
   .contacts-table { width: 100%; border-collapse: collapse; }
   .contacts-table td { padding: 3px 7px; border-bottom: 1px solid #eee; font-size: 8pt; }
   .contacts-table td.lbl { font-size: 7pt; font-weight: bold; color: #666; text-transform: uppercase; width: 40%; }
@@ -202,7 +217,7 @@
     {% for f in _full_fields %}
     {% set fval = (adv(f.advance_field_key) if f.advance_field_key else m(f.field_key)) | trim %}
     {% if fval %}
-    <div style="background:#fff8e8; border:1px solid #e8c870; padding:4px 8px; margin-bottom:10px; font-size:8pt;">
+    <div style="background:{{ C2_BG2 }}; border:1px solid {{ C2_SOFT }}; padding:4px 8px; margin-bottom:10px; font-size:8pt;">
       <strong>{{ f.label }}:</strong> {{ fval }}
     </div>
     {% endif %}
@@ -210,7 +225,7 @@
     {% endif %}
 
     {% if layout.visible('crew_call') and crew_call_times %}
-    <div style="background:#fff8e8; border:1px solid #e8c870; padding:5px 9px; margin-bottom:10px; font-size: {{ layout.font_size('crew_call', '8.5pt') }}; border-radius:3px;">
+    <div style="background:{{ C2_BG2 }}; border:1px solid {{ C2_SOFT }}; padding:5px 9px; margin-bottom:10px; font-size: {{ layout.font_size('crew_call', '8.5pt') }}; border-radius:3px;">
       <strong>{{ layout.label('crew_call', 'CREW CALL') }}:</strong><br>
       {% for t in crew_call_times %}Crew {{ loop.index }}: <strong>{{ t | dualtime }}</strong>{% if not loop.last %}<br>{% endif %}{% endfor %}
     </div>
