@@ -2521,6 +2521,9 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
 <script>
   const RESTRICTED = {{ 'true' if restricted else 'false' }};
   const IS_ADMIN = {{ 'true' if user.role == 'admin' else 'false' }};
+  // Attachment archive (×) buttons render only for users the server would
+  // actually allow — anyone with edit access, not just the uploader.
+  const CAN_EDIT_FILES = {{ 'false' if restricted or session.get('is_readonly') else 'true' }};
   const INITIAL_TAB = '{{ tab }}';
   const ALL_USERS = {{ all_users | tojson }};
   let _currentHistId = null;

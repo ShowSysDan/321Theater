@@ -679,7 +679,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.35.0'
+APP_VERSION = '2.36.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -5776,7 +5776,7 @@ def get_attachments(show_id):
                    u.display_name, u.username
             FROM show_attachments sa
             LEFT JOIN users u ON sa.uploaded_by = u.id
-            WHERE sa.show_id = ? AND sa.field_key = ?
+            WHERE sa.show_id = ? AND sa.field_key = ? AND sa.deleted_at IS NULL
             ORDER BY sa.created_at ASC
         """, (show_id, field_key)).fetchall()
     else:
@@ -5786,7 +5786,7 @@ def get_attachments(show_id):
                    u.display_name, u.username
             FROM show_attachments sa
             LEFT JOIN users u ON sa.uploaded_by = u.id
-            WHERE sa.show_id = ?
+            WHERE sa.show_id = ? AND sa.deleted_at IS NULL
             ORDER BY sa.created_at ASC
         """, (show_id,)).fetchall()
     db.close()
@@ -5886,6 +5886,9 @@ def download_attachment(show_id, aid):
             abort(503)
     elif row['file_data']:
         data = bytes(row['file_data'])
+        # Archived DB-stored files are held gzip-compressed on disk.
+        if row['is_compressed']:
+            data = gzip.decompress(data)
     else:
         abort(404)
     resp = make_response(data)
@@ -5897,8 +5900,20 @@ def download_attachment(show_id, aid):
 @app.route('/shows/<int:show_id>/attachments/<int:aid>/delete', methods=['POST'])
 @login_required
 def delete_attachment(show_id, aid):
+    """Archive (soft-delete) an attachment.
+
+    Any user who can edit the show may archive any file — the PM team works
+    across shared shows, so removal is deliberately NOT limited to the
+    uploader. Nothing is destroyed: the row is stamped deleted_at/deleted_by,
+    DB-stored bytes are gzip-compressed to shrink their footprint, and S3
+    objects are left in place. Archived files disappear from the show page
+    but stay in Settings -> File Manager tagged as first candidates for a
+    space cleanup, where an admin can restore or permanently purge them.
+    """
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_readonly') or session.get('is_restricted'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
     row = db.execute(
         'SELECT * FROM show_attachments WHERE id=? AND show_id=?', (aid, show_id)
@@ -5906,21 +5921,82 @@ def delete_attachment(show_id, aid):
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'File not found.'}), 404
-    if row['uploaded_by'] != session['user_id'] and session.get('user_role') != 'admin':
+    if row['deleted_at']:
         db.close()
-        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+        return jsonify({'success': True, 'archived': True})
+    if row['file_data'] and not row['is_compressed']:
+        packed = gzip.compress(bytes(row['file_data']))
+        if len(packed) < len(row['file_data']):
+            db.execute('UPDATE show_attachments SET file_data=?, is_compressed=1 WHERE id=?',
+                       (packed, aid))
+    db.execute('UPDATE show_attachments SET deleted_at=CURRENT_TIMESTAMP, deleted_by=? WHERE id=?',
+               (session['user_id'], aid))
+    log_audit(db, 'FILE_ARCHIVE', 'attachment', aid, show_id=show_id,
+              detail=row['filename'])
+    db.commit()
+    db.close()
+    syslog_logger.info(f"FILE_ARCHIVE show_id={show_id} aid={aid} by={session.get('username')}")
+    return jsonify({'success': True, 'archived': True})
+
+
+@app.route('/shows/<int:show_id>/attachments/<int:aid>/restore', methods=['POST'])
+@admin_required
+def restore_attachment(show_id, aid):
+    """Un-archive an attachment: clear the deletion stamp and restore
+    DB-stored bytes to their original uncompressed form."""
+    db = get_db()
+    row = db.execute(
+        'SELECT * FROM show_attachments WHERE id=? AND show_id=?', (aid, show_id)
+    ).fetchone()
+    if not row:
+        db.close()
+        return jsonify({'success': False, 'error': 'File not found.'}), 404
+    if not row['deleted_at']:
+        db.close()
+        return jsonify({'success': True})
+    if row['file_data'] and row['is_compressed']:
+        db.execute('UPDATE show_attachments SET file_data=?, is_compressed=0 WHERE id=?',
+                   (gzip.decompress(bytes(row['file_data'])), aid))
+    db.execute('UPDATE show_attachments SET deleted_at=NULL, deleted_by=NULL WHERE id=?', (aid,))
+    log_audit(db, 'FILE_RESTORE', 'attachment', aid, show_id=show_id,
+              detail=row['filename'])
+    db.commit()
+    db.close()
+    syslog_logger.info(f"FILE_RESTORE show_id={show_id} aid={aid} by={session.get('username')}")
+    return jsonify({'success': True})
+
+
+@app.route('/shows/<int:show_id>/attachments/<int:aid>/purge', methods=['POST'])
+@admin_required
+def purge_attachment(show_id, aid):
+    """Permanently delete an ARCHIVED attachment (row + S3 object).
+
+    Only archived files can be purged — deleting a live file is a two-step
+    archive-then-purge on purpose, so a purge can never destroy something a
+    user still sees on the show page.
+    """
+    db = get_db()
+    row = db.execute(
+        'SELECT * FROM show_attachments WHERE id=? AND show_id=?', (aid, show_id)
+    ).fetchone()
+    if not row:
+        db.close()
+        return jsonify({'success': False, 'error': 'File not found.'}), 404
+    if not row['deleted_at']:
+        db.close()
+        return jsonify({'success': False, 'error': 'Only archived files can be purged. Archive it first.'}), 400
     if row['s3_key']:
         try:
             s3_storage.delete_file(row['s3_key'])
         except Exception as e:
             app.logger.error(f"S3 delete failed for attachment {aid} key={row['s3_key']}: {e}")
             syslog_logger.error(f"S3_DELETE_FAILED table=show_attachments id={aid} show_id={show_id} error={e}")
-    log_audit(db, 'FILE_DELETE', 'attachment', aid, show_id=show_id,
-              detail=row['filename'] if row else str(aid))
+    log_audit(db, 'FILE_PURGE', 'attachment', aid, show_id=show_id,
+              detail=row['filename'])
     db.execute('DELETE FROM show_attachments WHERE id=?', (aid,))
     db.commit()
     db.close()
-    syslog_logger.info(f"FILE_DELETE show_id={show_id} aid={aid} by={session.get('username')}")
+    syslog_logger.info(f"FILE_PURGE show_id={show_id} aid={aid} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -6015,6 +6091,22 @@ def _get_other_active_users(db, user_id, show_id):
     } for r in rows]
 
 
+def _attachments_rev(db, show_id):
+    """Cheap fingerprint of a show's LIVE attachment set.
+
+    Rides on the sync/heartbeat polls so any open tab — including one served
+    by another 321Theater instance against the same PostgreSQL — refreshes
+    its file lists when someone uploads, archives, restores, or moves a file.
+    count:max(id) changes on every visible transition (archive and restore
+    both change the live count; upload/move change count or max id).
+    """
+    r = db.execute(
+        'SELECT COUNT(*), COALESCE(MAX(id), 0) FROM show_attachments '
+        'WHERE show_id = ? AND deleted_at IS NULL', (show_id,)
+    ).fetchone()
+    return f"{r[0]}:{r[1]}"
+
+
 @app.route('/shows/<int:show_id>/sync/advance')
 @login_required
 def sync_advance(show_id):
@@ -6064,6 +6156,8 @@ def sync_advance(show_id):
     saved = db.execute('SELECT last_saved_by, last_saved_at FROM shows WHERE id=?',
                         (show_id,)).fetchone()
 
+    attachments_rev = _attachments_rev(db, show_id)
+
     db.commit()
     db.close()
 
@@ -6073,6 +6167,7 @@ def sync_advance(show_id):
         'active_users':  others,
         'last_saved_by': saved['last_saved_by'] if saved else None,
         'last_saved_at': saved['last_saved_at'] if saved else None,
+        'attachments_rev': attachments_rev,
     })
 
 
@@ -6124,6 +6219,8 @@ def show_heartbeat(show_id):
     show = db.execute('SELECT last_saved_by, last_saved_at FROM shows WHERE id=?',
                       (show_id,)).fetchone()
 
+    attachments_rev = _attachments_rev(db, show_id)
+
     db.commit()
     db.close()
 
@@ -6131,6 +6228,7 @@ def show_heartbeat(show_id):
         'active_users':  others,
         'last_saved_by': show['last_saved_by'] if show else None,
         'last_saved_at': show['last_saved_at'] if show else None,
+        'attachments_rev': attachments_rev,
     })
 
 
@@ -6238,7 +6336,7 @@ def _advance_attachments_fingerprint(db, show_id):
         rows = db.execute("""
             SELECT id, filename, mime_type, field_key, s3_key, created_at,
                    CASE WHEN file_data IS NOT NULL THEN LENGTH(file_data) ELSE 0 END AS blob_len
-            FROM show_attachments WHERE show_id = ? ORDER BY id
+            FROM show_attachments WHERE show_id = ? AND deleted_at IS NULL ORDER BY id
         """, (show_id,)).fetchall()
     except Exception as e:
         app.logger.warning(f'Could not fingerprint advance attachments: {e}')
@@ -6422,6 +6520,7 @@ def _collect_advance_field_attachments(show_id, base_url):
         LEFT JOIN form_fields   ff ON ff.field_key = sa.field_key
         LEFT JOIN form_sections fs ON fs.id = ff.section_id
         WHERE sa.show_id = ?
+          AND sa.deleted_at IS NULL
           AND sa.field_key IS NOT NULL AND sa.field_key != ''
           AND ff.field_type = 'file_upload'
         ORDER BY fs.sort_order, ff.sort_order, sa.created_at
@@ -6432,6 +6531,7 @@ def _collect_advance_field_attachments(show_id, base_url):
                NULL AS field_label, NULL AS section_label
         FROM show_attachments
         WHERE show_id = ?
+          AND deleted_at IS NULL
           AND (field_key IS NULL OR field_key = '')
         ORDER BY created_at, id
     """, (show_id,)).fetchall()
@@ -7837,7 +7937,7 @@ def admin_migrate_files_to_s3():
         # ── show_attachments ──────────────────────────────────────────────────
         rows = db.execute(
             "SELECT id, show_id, filename, mime_type, file_data FROM show_attachments "
-            "WHERE file_data IS NOT NULL AND s3_key IS NULL"
+            "WHERE file_data IS NOT NULL AND s3_key IS NULL AND deleted_at IS NULL"
         ).fetchall()
         for row in rows:
             try:
@@ -10513,12 +10613,16 @@ def api_file_manager():
 
     for r in db.execute("""
         SELECT sa.id, sa.filename, sa.mime_type, sa.file_size, sa.created_at,
+               sa.deleted_at,
                s.id as show_id, COALESCE(s.name, 'Deleted Show') as show_name,
-               u.display_name, u.username
+               u.display_name, u.username,
+               du.display_name as deleter_display, du.username as deleter_username
         FROM show_attachments sa
         LEFT JOIN shows s ON sa.show_id = s.id
         LEFT JOIN users u ON sa.uploaded_by = u.id
+        LEFT JOIN users du ON sa.deleted_by = du.id
     """).fetchall():
+        archived = bool(r['deleted_at'])
         files.append({
             'id':           r['id'],
             'file_type':    'attachment',
@@ -10529,8 +10633,13 @@ def api_file_manager():
             'file_size':    r['file_size'] or 0,
             'created_at':   r['created_at'],
             'uploader':     r['display_name'] or r['username'] or 'Unknown',
+            'archived':     archived,
+            'archived_at':  r['deleted_at'],
+            'archived_by':  (r['deleter_display'] or r['deleter_username'] or '') if archived else '',
             'download_url': f"/shows/{r['show_id']}/attachments/{r['id']}/download" if r['show_id'] else None,
-            'delete_url':   f"/shows/{r['show_id']}/attachments/{r['id']}/delete" if r['show_id'] else None,
+            'delete_url':   f"/shows/{r['show_id']}/attachments/{r['id']}/delete" if (r['show_id'] and not archived) else None,
+            'restore_url':  f"/shows/{r['show_id']}/attachments/{r['id']}/restore" if (r['show_id'] and archived) else None,
+            'purge_url':    f"/shows/{r['show_id']}/attachments/{r['id']}/purge" if (r['show_id'] and archived) else None,
         })
 
     for r in db.execute("""
@@ -10580,10 +10689,16 @@ def api_file_manager():
             'delete_url':   None,
         })
 
+    # Archived attachments first — they're the designated first candidates
+    # when an admin needs to free up space — then everything else, newest first.
     files.sort(key=lambda f: f['created_at'] or '', reverse=True)
+    files.sort(key=lambda f: 0 if f.get('archived') else 1)
     total_bytes = sum(f['file_size'] for f in files)
+    archived_bytes = sum(f['file_size'] for f in files if f.get('archived'))
+    archived_count = sum(1 for f in files if f.get('archived'))
     db.close()
-    return jsonify({'files': files, 'total_bytes': total_bytes})
+    return jsonify({'files': files, 'total_bytes': total_bytes,
+                    'archived_bytes': archived_bytes, 'archived_count': archived_count})
 
 
 # ─── Schedule Templates ───────────────────────────────────────────────────────

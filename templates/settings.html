@@ -3314,22 +3314,42 @@ async function loadFileManager() {
   try {
     const resp = await fetch('/api/admin/files');
     const data = await resp.json();
-    if (infoEl) infoEl.textContent = `Total: ${_fmtBytes(data.total_bytes)} across ${data.files.length} files`;
+    if (infoEl) {
+      let info = `Total: ${_fmtBytes(data.total_bytes)} across ${data.files.length} files`;
+      if (data.archived_count) {
+        info += ` · ${data.archived_count} archived (${_fmtBytes(data.archived_bytes)} reclaimable by purging)`;
+      }
+      infoEl.textContent = info;
+    }
     if (!data.files.length) {
       el.innerHTML = '<p class="text-dim" style="padding:16px;font-size:12px">No files found.</p>';
       return;
     }
     const typeLabel = { attachment: 'Attachment', export: 'PDF Export', rental: 'Rental PDF' };
+    // Archived files sort first (server-side) — they're the first candidates
+    // for deletion when freeing up space.
     el.innerHTML = `<table class="data-table"><thead><tr><th>SHOW</th><th>TYPE</th><th>FILE</th><th>SIZE</th><th>UPLOADED BY</th><th>DATE</th><th></th></tr></thead><tbody>` +
-      data.files.map(f => `<tr>
+      data.files.map(f => {
+        const archivedBadge = f.archived
+          ? ` <span class="badge" title="Archived${f.archived_by ? ' by ' + f.archived_by : ''}${f.archived_at ? ' · ' + fmtDate(f.archived_at) : ''}" style="background:rgba(240,78,35,.12);color:#f04e23;border:1px solid rgba(240,78,35,.35);font-size:10px;padding:1px 6px;border-radius:99px">ARCHIVED</span>`
+          : '';
+        let actions = '';
+        if (f.archived) {
+          actions = `<button class="btn btn-xs btn-ghost" onclick="adminRestoreFile('${f.restore_url}',this)" title="Restore to the show">↩</button>
+                     <button class="btn btn-xs btn-danger-ghost" onclick="adminPurgeFile('${f.purge_url}',this)" title="Permanently delete">✕</button>`;
+        } else if (f.delete_url) {
+          actions = `<button class="btn btn-xs btn-danger-ghost" onclick="adminDeleteFile('${f.delete_url}',this)" title="Archive (soft delete)">×</button>`;
+        }
+        return `<tr${f.archived ? ' style="opacity:.75"' : ''}>
         <td style="font-size:11px">${f.show_id ? `<a href="/shows/${f.show_id}" style="color:var(--accent)">${f.show_name}</a>` : `<span class="text-dim">${f.show_name}</span>`}</td>
         <td style="font-size:11px" class="text-dim">${typeLabel[f.file_type] || f.file_type}</td>
-        <td style="font-size:11px">${f.download_url ? `<a href="${f.download_url}">${f.filename}</a>` : f.filename}</td>
+        <td style="font-size:11px">${f.download_url ? `<a href="${f.download_url}">${f.filename}</a>` : f.filename}${archivedBadge}</td>
         <td style="font-size:11px" class="text-dim">${_fmtBytes(f.file_size)}</td>
         <td style="font-size:11px">${f.uploader}</td>
         <td style="font-size:11px" class="text-dim">${fmtDate(f.created_at)}</td>
-        <td>${f.delete_url ? `<button class="btn btn-xs btn-danger-ghost" onclick="adminDeleteFile('${f.delete_url}',this)">×</button>` : ''}</td>
-      </tr>`).join('') +
+        <td style="white-space:nowrap">${actions}</td>
+      </tr>`;
+      }).join('') +
       '</tbody></table>';
   } catch(e) {
     el.innerHTML = '<p class="text-dim" style="padding:16px;font-size:12px">Failed to load files.</p>';
@@ -3337,11 +3357,26 @@ async function loadFileManager() {
 }
 
 async function adminDeleteFile(deleteUrl, btn) {
-  if (!confirm('Delete this file?')) return;
+  if (!confirm('Archive this file? It disappears from the show page but is kept here (tagged ARCHIVED) until purged.')) return;
   const resp = await fetch(deleteUrl, {method:'POST'});
   const d = await resp.json();
-  if (d.success) btn.closest('tr').remove();
-  else alert(d.error || 'Delete failed.');
+  if (d.success) loadFileManager();
+  else alert(d.error || 'Archive failed.');
+}
+
+async function adminRestoreFile(restoreUrl, btn) {
+  const resp = await fetch(restoreUrl, {method:'POST'});
+  const d = await resp.json();
+  if (d.success) loadFileManager();
+  else alert(d.error || 'Restore failed.');
+}
+
+async function adminPurgeFile(purgeUrl, btn) {
+  if (!confirm('PERMANENTLY delete this archived file? This cannot be undone.')) return;
+  const resp = await fetch(purgeUrl, {method:'POST'});
+  const d = await resp.json();
+  if (d.success) loadFileManager();
+  else alert(d.error || 'Purge failed.');
 }
 
 /* ── Form Field Editor init ─────────────────────────────────────── */

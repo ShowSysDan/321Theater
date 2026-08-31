@@ -144,8 +144,25 @@ async function _pollAdvanceSync() {
     // last". The advance tab merges other users' field edits live above, so it
     // never shows the banner itself — this call only maintains the baseline.
     _checkOtherSaved(d.last_saved_by, d.last_saved_at);
+
+    _checkAttachmentsRev(d.attachments_rev);
   } catch (_) { /* silently ignore network errors */ }
   finally { _syncInFlight = false; }
+}
+
+/**
+ * Refresh visible file lists when the show's attachment set changes — covers
+ * uploads/archives by other users, including ones served by another
+ * 321Theater instance (both instances share the same database).
+ */
+let _attachmentsRev = null;
+function _checkAttachmentsRev(rev) {
+  if (rev === undefined || rev === null) return;
+  if (_attachmentsRev === null) { _attachmentsRev = rev; return; }  // seed baseline
+  if (rev === _attachmentsRev) return;
+  _attachmentsRev = rev;
+  if (typeof loadAttachments === 'function') loadAttachments();
+  if (typeof initAdvFileFields === 'function') initAdvFileFields();
 }
 
 /**
@@ -167,6 +184,7 @@ async function _pollHeartbeat() {
     if (_checkOtherSaved(d.last_saved_by, d.last_saved_at) && !_isDirty) {
       _showOtherSavedBanner(d.last_saved_at);
     }
+    _checkAttachmentsRev(d.attachments_rev);
   } catch (_) {}
 }
 
@@ -3309,6 +3327,9 @@ function renderAttachments(files) {
     const moveBtn = (typeof IS_ADMIN !== 'undefined' && IS_ADMIN)
       ? `<button class="btn btn-xs btn-ghost" onclick="moveAttachment(${f.id})" title="Move to another show">⇄</button>`
       : '';
+    const delBtn = _canEditFiles()
+      ? `<button class="btn btn-xs btn-danger-ghost" onclick="deleteAttachment(${f.id})" title="Remove (archives — an admin can restore)">×</button>`
+      : '';
     return `
       <div class="attachment-item">
         <div class="attachment-icon">${_fileIcon(f.mime_type)}</div>
@@ -3317,9 +3338,15 @@ function renderAttachments(files) {
           <span class="attachment-meta">${size} · ${_esc(f.uploader)} · ${time}${desc}</span>
         </div>
         ${moveBtn}
-        <button class="btn btn-xs btn-danger-ghost" onclick="deleteAttachment(${f.id})" title="Remove">×</button>
+        ${delBtn}
       </div>`;
   }).join('');
+}
+
+// True when the current user may archive show files (any editor — the PM
+// team shares shows, so removal is not limited to the uploader).
+function _canEditFiles() {
+  return typeof CAN_EDIT_FILES === 'undefined' || CAN_EDIT_FILES;
 }
 
 function _fileIcon(mime) {
@@ -3424,12 +3451,15 @@ async function loadAdvFieldFiles(wrap) {
         ? Math.round(f.file_size / 1024) + ' KB'
         : f.file_size + ' B';
       const desc = f.description ? ` <span class="text-dim">— ${_esc(f.description)}</span>` : '';
+      const delBtn = _canEditFiles()
+        ? `<button class="btn btn-xs btn-danger-ghost" style="margin-left:auto"
+                onclick="deleteAdvFieldFile(${f.id}, this)" title="Remove (archives — an admin can restore)">×</button>`
+        : '';
       return `<li style="display:flex;align-items:center;gap:8px;padding:3px 0">
         <span>${_fileIcon(f.mime_type)}</span>
         <a href="/shows/${SHOW_ID}/attachments/${f.id}/download" style="color:var(--accent);text-decoration:none">${_esc(f.filename)}</a>
         <span class="text-dim" style="font-size:11px">(${size})</span>${desc}
-        <button class="btn btn-xs btn-danger-ghost" style="margin-left:auto"
-                onclick="deleteAdvFieldFile(${f.id}, this)" title="Remove">×</button>
+        ${delBtn}
       </li>`;
     }).join('');
   } catch(_) {}
@@ -3485,7 +3515,7 @@ function uploadAdvField(input) {
 
 async function deleteAdvFieldFile(aid, btn) {
   if (!SHOW_ID || !aid) return;
-  if (!confirm('Remove this file?')) return;
+  if (!confirm('Remove this file? It will be archived — an admin can restore it from Settings → File Manager.')) return;
   const wrap = btn.closest('.adv-file-upload');
   const resp = await fetch(`/shows/${SHOW_ID}/attachments/${aid}/delete`, {method:'POST'});
   const d = await resp.json();
@@ -3502,7 +3532,7 @@ function initAdvFileFields() {
 }
 
 async function deleteAttachment(aid) {
-  if (!confirm('Remove this attachment?')) return;
+  if (!confirm('Remove this attachment? It will be archived — an admin can restore it from Settings → File Manager.')) return;
   const resp = await fetch(`/shows/${SHOW_ID}/attachments/${aid}/delete`, {method:'POST'});
   const d = await resp.json();
   if (d.success) loadAttachments();

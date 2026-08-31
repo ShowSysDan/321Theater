@@ -383,8 +383,16 @@ CREATE TABLE IF NOT EXISTS show_attachments (
     s3_key       TEXT DEFAULT NULL,
     field_key    TEXT DEFAULT NULL,
     description  TEXT DEFAULT '',
+    -- Soft delete: archived files keep their bytes (DB blobs gzip-compressed,
+    -- flagged by is_compressed; S3 objects left in place) so an admin can
+    -- restore or permanently purge them from Settings -> File Manager.
+    deleted_at    TIMESTAMP DEFAULT NULL,
+    deleted_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    is_compressed INTEGER DEFAULT 0,
     created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_show_attachments_show ON show_attachments(show_id);
 
 CREATE TABLE IF NOT EXISTS advance_reads (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -420,6 +428,30 @@ CREATE TABLE IF NOT EXISTS schedule_template_rows (
     end_time    TEXT DEFAULT '',
     description TEXT DEFAULT '',
     notes       TEXT DEFAULT ''
+);
+
+-- Labor day presets: a named set of standing position calls that can be
+-- applied to any labor day on a show (the labor-tab counterpart of
+-- schedule_templates). quantity expands to N labor_requests rows on apply.
+CREATE TABLE IF NOT EXISTS labor_presets (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS labor_preset_rows (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    preset_id    INTEGER NOT NULL REFERENCES labor_presets(id) ON DELETE CASCADE,
+    sort_order   INTEGER DEFAULT 0,
+    position_id  INTEGER REFERENCES job_positions(id) ON DELETE SET NULL,
+    quantity     INTEGER DEFAULT 1,
+    in_time      TEXT DEFAULT '',
+    out_time     TEXT DEFAULT '',
+    break_start  TEXT DEFAULT '',
+    break_end    TEXT DEFAULT '',
+    break2_start TEXT DEFAULT '',
+    break2_end   TEXT DEFAULT '',
+    notes        TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS position_categories (
@@ -694,6 +726,16 @@ CREATE TABLE IF NOT EXISTS venue_logos (
     venue_name TEXT PRIMARY KEY,
     logo_data  TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Per-venue accent colors for PDF paperwork. Empty / missing row falls back
+-- to the app-wide defaults (navy #1a4a7a primary, gold #B8840A secondary).
+-- Values are '#rrggbb' hex strings validated on save.
+CREATE TABLE IF NOT EXISTS venue_colors (
+    venue_name      TEXT PRIMARY KEY,
+    primary_color   TEXT NOT NULL DEFAULT '',
+    secondary_color TEXT NOT NULL DEFAULT '',
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- General outgoing-email log: one row per attempted send (recipient + result).
@@ -1616,6 +1658,9 @@ def migrate_db():
             s3_key      TEXT DEFAULT NULL,
             field_key   TEXT DEFAULT NULL,
             description TEXT DEFAULT '',
+            deleted_at    TIMESTAMP DEFAULT NULL,
+            deleted_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            is_compressed INTEGER DEFAULT 0,
             created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -1859,6 +1904,9 @@ def migrate_db():
         "ALTER TABLE users ADD COLUMN home_layout TEXT DEFAULT 'columns'",
         "ALTER TABLE users ADD COLUMN home_density TEXT DEFAULT 'normal'",
         "ALTER TABLE pay_rate_levels ADD COLUMN include_in_estimate INTEGER DEFAULT 1",
+        'ALTER TABLE show_attachments ADD COLUMN deleted_at TIMESTAMP DEFAULT NULL',
+        'ALTER TABLE show_attachments ADD COLUMN deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL',
+        'ALTER TABLE show_attachments ADD COLUMN is_compressed INTEGER DEFAULT 0',
     ]:
         try:
             conn.execute(alter_sql)
@@ -2217,6 +2265,15 @@ def migrate_db():
             logo_data  TEXT NOT NULL DEFAULT '',
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS venue_colors (
+            venue_name      TEXT PRIMARY KEY,
+            primary_color   TEXT NOT NULL DEFAULT '',
+            secondary_color TEXT NOT NULL DEFAULT '',
+            updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_show_attachments_show ON show_attachments(show_id);
     """)
 
     # Asset manager tables (safe to rerun)
@@ -2595,6 +2652,27 @@ def migrate_db():
             end_time    TEXT DEFAULT '',
             description TEXT DEFAULT '',
             notes       TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS labor_presets (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            sort_order INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS labor_preset_rows (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            preset_id    INTEGER NOT NULL REFERENCES labor_presets(id) ON DELETE CASCADE,
+            sort_order   INTEGER DEFAULT 0,
+            position_id  INTEGER REFERENCES job_positions(id) ON DELETE SET NULL,
+            quantity     INTEGER DEFAULT 1,
+            in_time      TEXT DEFAULT '',
+            out_time     TEXT DEFAULT '',
+            break_start  TEXT DEFAULT '',
+            break_end    TEXT DEFAULT '',
+            break2_start TEXT DEFAULT '',
+            break2_end   TEXT DEFAULT '',
+            notes        TEXT DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS arts_groups (
@@ -3021,8 +3099,13 @@ CREATE TABLE IF NOT EXISTS show_attachments (
     s3_key      TEXT DEFAULT NULL,
     field_key   TEXT DEFAULT NULL,
     description TEXT DEFAULT '',
+    deleted_at    TIMESTAMP DEFAULT NULL,
+    deleted_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    is_compressed INTEGER DEFAULT 0,
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_show_attachments_show ON show_attachments(show_id);
 
 CREATE TABLE IF NOT EXISTS advance_reads (
     id           SERIAL PRIMARY KEY,
@@ -3058,6 +3141,29 @@ CREATE TABLE IF NOT EXISTS schedule_template_rows (
     end_time    TEXT DEFAULT '',
     description TEXT DEFAULT '',
     notes       TEXT DEFAULT ''
+);
+
+-- Labor day presets: named sets of standing position calls applyable to a
+-- show labor day (labor_preset_rows.quantity expands to N labor_requests).
+CREATE TABLE IF NOT EXISTS labor_presets (
+    id         SERIAL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS labor_preset_rows (
+    id           SERIAL PRIMARY KEY,
+    preset_id    INTEGER NOT NULL REFERENCES labor_presets(id) ON DELETE CASCADE,
+    sort_order   INTEGER DEFAULT 0,
+    position_id  INTEGER REFERENCES job_positions(id) ON DELETE SET NULL,
+    quantity     INTEGER DEFAULT 1,
+    in_time      TEXT DEFAULT '',
+    out_time     TEXT DEFAULT '',
+    break_start  TEXT DEFAULT '',
+    break_end    TEXT DEFAULT '',
+    break2_start TEXT DEFAULT '',
+    break2_end   TEXT DEFAULT '',
+    notes        TEXT DEFAULT ''
 );
 
 -- ── Labor & Crew ──────────────────────────────────────────────────────────────
@@ -3353,6 +3459,14 @@ CREATE TABLE IF NOT EXISTS venue_logos (
     venue_name TEXT PRIMARY KEY,
     logo_data  TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Per-venue accent colors for PDF paperwork ('#rrggbb'; empty = app default).
+CREATE TABLE IF NOT EXISTS venue_colors (
+    venue_name      TEXT PRIMARY KEY,
+    primary_color   TEXT NOT NULL DEFAULT '',
+    secondary_color TEXT NOT NULL DEFAULT '',
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ── Asset Manager ─────────────────────────────────────────────────────────────
@@ -4118,6 +4232,11 @@ def migrate_db_postgres():
             f'ALTER TABLE "{app_schema}".show_assets ADD COLUMN IF NOT EXISTS original_locked_price REAL DEFAULT NULL',
             f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS cast_count INTEGER DEFAULT NULL',
             f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS crew_count INTEGER DEFAULT NULL',
+            # Attachment archive (soft delete) — 2.36.0
+            f'ALTER TABLE "{app_schema}".show_attachments ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP DEFAULT NULL',
+            f'ALTER TABLE "{app_schema}".show_attachments ADD COLUMN IF NOT EXISTS deleted_by INTEGER',
+            f'ALTER TABLE "{app_schema}".show_attachments ADD COLUMN IF NOT EXISTS is_compressed INTEGER DEFAULT 0',
+            f'CREATE INDEX IF NOT EXISTS idx_show_attachments_show ON "{app_schema}".show_attachments(show_id)',
         ]
 
         shared_alters = [
@@ -4249,9 +4368,10 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
         'users', 'contacts', 'form_sections', 'schedule_templates',
         'app_settings', 'position_categories', 'warehouse_locations',
         'asset_categories', 'site_messages', 'ai_sessions', 'arts_groups',
+        'labor_presets', 'venue_logos', 'venue_colors',
         # ── Depend on level above ─────────────────────────────────────────────
         'shows', 'form_fields', 'schedule_meta_fields',
-        'job_positions', 'asset_types', 'site_message_dismissals',
+        'job_positions', 'labor_preset_rows', 'asset_types', 'site_message_dismissals',
         'site_message_views',
         'user_pending_registration', 'password_reset_tokens',
         'gateway_otp_codes',
@@ -4427,6 +4547,8 @@ def migrate_sqlite_to_postgres(sqlite_path, pg_settings, progress_callback=None)
         'overhead_projects',
         'overhead_labor_groups', 'overhead_labor_requests', 'overhead_labor_templates',
         'show_labor_days',
+        # Labor day presets
+        'labor_presets', 'labor_preset_rows',
     ]
     for table in serial_tables:
         try:
