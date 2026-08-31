@@ -988,6 +988,19 @@
     </div>
   </div>
   {% endif %}
+
+  <div class="form-section" style="margin-bottom:16px">
+    <div class="form-section-header"><span class="section-icon">◈</span> FILE STORAGE (SEAWEEDFS / S3)</div>
+    <div class="form-section-body" style="max-width:640px">
+      <p class="field-hint" style="margin-bottom:12px">
+        Where show file uploads, PDF exports and asset photos are stored. Config can come from
+        <code>db_config.ini [seaweedfs]</code> on the server (the historical default) or from the
+        values saved here — which support <strong>multiple S3 gateway endpoints</strong> tried in
+        order with automatic failover (for redundant SeaweedFS gateways fronting one cluster).
+      </p>
+      <div id="s3-settings-body"><p class="text-dim" style="font-size:12px">Loading…</p></div>
+    </div>
+  </div>
 </div>
 {% endif %}
 
@@ -3275,6 +3288,138 @@ async function clearVenueColors(venueName) {
 
 if (document.getElementById('venue-colors-list')) {
   loadVenueColors();
+}
+
+/* ── File Storage (SeaweedFS / S3) settings ─────────────────────── */
+async function loadS3Settings() {
+  const host = document.getElementById('s3-settings-body');
+  if (!host) return;
+  try {
+    const d = await (await fetch('/settings/s3')).json();
+    const gui = d.gui || {};
+    const ini = d.ini || {};
+    const active = d.active || {};
+    const eps = (gui.endpoints && gui.endpoints.length) ? gui.endpoints : [''];
+    const epInputs = eps.map(e =>
+      `<input type="text" class="field-input s3-endpoint" value="${_venueLogoEsc(e)}"
+              placeholder="http://10.201.2.50:8333" style="margin-bottom:6px">`).join('');
+    const iniSummary = ini.present
+      ? `<code>${_venueLogoEsc(ini.endpoint || '(no endpoint)')}</code> · bucket <code>${_venueLogoEsc(ini.bucket || '—')}</code> · key ${ini.access_key ? '<code>' + _venueLogoEsc(ini.access_key) + '</code>' : '—'}`
+      : '<span class="text-dim">no [seaweedfs] section found</span>';
+    const activeSummary = active.configured
+      ? `${(active.endpoints || []).map(e => '<code>' + _venueLogoEsc(e) + '</code>').join(' → ')} · bucket <code>${_venueLogoEsc(active.bucket)}</code>`
+      : '<span style="color:var(--danger)">not configured — files fall back to database storage</span>';
+    host.innerHTML = `
+      <div class="field-group" style="margin-bottom:10px">
+        <label class="field-label">CONFIG SOURCE</label>
+        <label class="checkbox-label" style="display:block;margin:4px 0">
+          <input type="radio" name="s3-source" value="ini" ${d.source !== 'gui' ? 'checked' : ''}>
+          <strong>db_config.ini</strong> <span class="text-dim">(server file — the default; ${iniSummary})</span>
+        </label>
+        <label class="checkbox-label" style="display:block;margin:4px 0">
+          <input type="radio" name="s3-source" value="gui" ${d.source === 'gui' ? 'checked' : ''}>
+          <strong>These settings</strong> <span class="text-dim">(saved in the database, multiple endpoints + failover)</span>
+        </label>
+      </div>
+      <div class="field-group">
+        <label class="field-label">S3 GATEWAY ENDPOINTS <span class="text-dim">(tried in order — primary first)</span></label>
+        <div id="s3-endpoints">${epInputs}</div>
+        <button type="button" class="btn btn-xs btn-ghost" onclick="addS3Endpoint()">+ Add endpoint</button>
+      </div>
+      <div class="form-row cols-2">
+        <div class="field-group">
+          <label class="field-label">ACCESS KEY</label>
+          <input type="text" id="s3-access-key" class="field-input" value="${_venueLogoEsc(gui.access_key || '')}" autocomplete="off">
+        </div>
+        <div class="field-group">
+          <label class="field-label">SECRET KEY ${gui.secret_set ? '<span class="text-dim">(saved — leave blank to keep)</span>' : ''}</label>
+          <input type="password" id="s3-secret-key" class="field-input" value="" placeholder="${gui.secret_set ? '••••••••' : ''}" autocomplete="new-password">
+        </div>
+      </div>
+      <div class="field-group" style="max-width:250px">
+        <label class="field-label">BUCKET</label>
+        <input type="text" id="s3-bucket" class="field-input" value="${_venueLogoEsc(gui.bucket || '321theater')}">
+      </div>
+      <p class="field-hint" style="margin:8px 0">Active right now: ${activeSummary}</p>
+      <div id="s3-settings-msg" class="field-msg" style="display:none;margin-bottom:8px"></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="saveS3Settings()">Save</button>
+        <button class="btn btn-ghost" onclick="testS3Settings(this)">Test Connection</button>
+      </div>
+      <div id="s3-test-results" style="margin-top:10px"></div>`;
+  } catch (e) {
+    host.innerHTML = '<p class="text-dim" style="font-size:12px;color:#F56565">Failed to load S3 settings.</p>';
+  }
+}
+
+function addS3Endpoint() {
+  const wrap = document.getElementById('s3-endpoints');
+  if (!wrap || wrap.querySelectorAll('.s3-endpoint').length >= 4) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'field-input s3-endpoint';
+  input.placeholder = 'http://10.201.2.51:8333';
+  input.style.marginBottom = '6px';
+  wrap.appendChild(input);
+}
+
+function _s3Msg(text, ok) {
+  const msg = document.getElementById('s3-settings-msg');
+  if (!msg) return;
+  msg.style.display = 'block';
+  msg.textContent = text;
+  msg.style.color = ok ? 'var(--accent)' : 'var(--danger)';
+}
+
+async function saveS3Settings() {
+  const source = document.querySelector('input[name="s3-source"]:checked')?.value || 'ini';
+  const endpoints = Array.from(document.querySelectorAll('#s3-endpoints .s3-endpoint'))
+    .map(i => i.value.trim()).filter(Boolean);
+  const body = {
+    source,
+    endpoints,
+    access_key: document.getElementById('s3-access-key')?.value.trim() || '',
+    secret_key: document.getElementById('s3-secret-key')?.value.trim() || '',
+    bucket: document.getElementById('s3-bucket')?.value.trim() || '',
+  };
+  try {
+    const r = await fetch('/settings/s3', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d.success) {
+      _s3Msg('✓ Saved — takes effect within 30 seconds on all instances', true);
+      showSaveToast('✓ S3 settings saved');
+      setTimeout(loadS3Settings, 800);
+    } else {
+      _s3Msg(d.error || 'Save failed', false);
+    }
+  } catch (e) { _s3Msg('Network error', false); }
+}
+
+async function testS3Settings(btn) {
+  const out = document.getElementById('s3-test-results');
+  if (out) out.innerHTML = '<p class="text-dim" style="font-size:12px">Testing every endpoint…</p>';
+  btn.disabled = true;
+  try {
+    const d = await (await fetch('/admin/s3-test')).json();
+    const rows = (d.endpoints || []).map(r =>
+      `<div style="font-size:12px;padding:3px 0">
+         ${r.success ? '✅' : '❌'} <code>${_venueLogoEsc(r.endpoint)}</code>
+         <span class="${r.success ? 'text-dim' : ''}" ${r.success ? '' : 'style="color:var(--danger)"'}>${_venueLogoEsc(r.message)}</span>
+       </div>`).join('');
+    if (out) out.innerHTML =
+      `<div style="font-size:12px;font-weight:600;margin-bottom:4px;color:${d.success ? 'var(--accent)' : 'var(--danger)'}">${_venueLogoEsc(d.message || '')} <span class="text-dim">(source: ${_venueLogoEsc(d.source || '')}, bucket: ${_venueLogoEsc(d.bucket || '')})</span></div>` + rows;
+  } catch (e) {
+    if (out) out.innerHTML = '<p style="font-size:12px;color:var(--danger)">Test request failed.</p>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+if (document.getElementById('s3-settings-body')) {
+  loadS3Settings();
 }
 
 async function saveUploadSize(form) {

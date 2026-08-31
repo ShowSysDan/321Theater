@@ -679,7 +679,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.38.0'
+APP_VERSION = '2.39.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -856,6 +856,35 @@ def get_app_setting(key, default=''):
             return row['value'] if row and row['value'] is not None else default
         except Exception:
             return default
+
+
+def _s3_gui_settings():
+    """s3_storage settings provider: S3 config managed in the Settings UI.
+
+    Returns the GUI-stored config only when the admin has switched
+    `s3_config_source` to 'gui'; returning None tells s3_storage to keep
+    using db_config.ini [seaweedfs] exactly as before (the default, so
+    existing deployments are untouched until the switch is flipped).
+    Never raises — a settings-read failure must not break file storage.
+    """
+    try:
+        if get_app_setting('s3_config_source', 'ini') != 'gui':
+            return None
+        endpoints = json.loads(get_app_setting('s3_endpoints', '[]') or '[]')
+        if not isinstance(endpoints, list):
+            endpoints = []
+        return {
+            's3_endpoints':  [str(e).strip().rstrip('/') for e in endpoints if str(e).strip()],
+            's3_access_key': get_app_setting('s3_access_key', ''),
+            's3_secret_key': get_app_setting('s3_secret_key', ''),
+            's3_bucket':     get_app_setting('s3_bucket', '321theater') or '321theater',
+            's3_source':     'gui',
+        }
+    except Exception:
+        return None
+
+
+s3_storage.set_settings_provider(_s3_gui_settings)
 
 
 # ─── Database ─────────────────────────────────────────────────────────────────
@@ -7920,9 +7949,95 @@ def move_attachment(show_id, aid):
 @app.route('/admin/s3-test')
 @admin_required
 def admin_s3_test():
-    """Verify SeaweedFS S3 connectivity by uploading, reading back, and deleting a test object."""
+    """Verify SeaweedFS S3 connectivity by uploading, reading back, and deleting
+    a test object on every configured endpoint."""
     result = s3_storage.test_connection()
     return jsonify(result)
+
+
+@app.route('/settings/s3', methods=['GET'])
+@admin_required
+def s3_settings_get():
+    """Current S3 storage config: the source selector, the GUI-stored values,
+    the (read-only) ini values, and what's actually active right now."""
+    ini = s3_storage._read_ini_settings()
+    gui_endpoints = []
+    try:
+        gui_endpoints = json.loads(get_app_setting('s3_endpoints', '[]') or '[]')
+        if not isinstance(gui_endpoints, list):
+            gui_endpoints = []
+    except Exception:
+        gui_endpoints = []
+    active = s3_storage.read_s3_settings()
+    return jsonify({
+        'source': get_app_setting('s3_config_source', 'ini'),
+        'gui': {
+            'endpoints':  [str(e) for e in gui_endpoints],
+            'access_key': get_app_setting('s3_access_key', ''),
+            'secret_set': bool(get_app_setting('s3_secret_key', '')),
+            'bucket':     get_app_setting('s3_bucket', '321theater') or '321theater',
+        },
+        'ini': {
+            'endpoint':   (ini.get('s3_endpoints') or [''])[0] if ini.get('s3_endpoints') else '',
+            'access_key': ini.get('s3_access_key', ''),
+            'secret_set': bool(ini.get('s3_secret_key', '')),
+            'bucket':     ini.get('s3_bucket', ''),
+            'present':    bool(ini),
+        },
+        'active': {
+            'source':     active.get('s3_source', 'ini'),
+            'endpoints':  active.get('s3_endpoints', []),
+            'bucket':     active.get('s3_bucket', ''),
+            'configured': s3_storage.is_configured(),
+        },
+    })
+
+
+@app.route('/settings/s3', methods=['POST'])
+@admin_required
+def s3_settings_save():
+    """Save S3 storage config. `source` picks ini (db_config.ini, the
+    historical default) or gui (the values saved here). The secret key is
+    write-only: blank on save keeps the stored one."""
+    data = request.get_json(force=True) or {}
+    source = (data.get('source') or 'ini').strip().lower()
+    if source not in ('ini', 'gui'):
+        return jsonify({'success': False, 'error': "source must be 'ini' or 'gui'."}), 400
+    endpoints = data.get('endpoints') or []
+    if not isinstance(endpoints, list):
+        return jsonify({'success': False, 'error': 'endpoints must be a list.'}), 400
+    cleaned = []
+    for e in endpoints[:4]:   # two gateways today; a little headroom, no more
+        e = str(e).strip().rstrip('/')
+        if not e:
+            continue
+        if not (e.startswith('http://') or e.startswith('https://')):
+            return jsonify({'success': False,
+                            'error': f'Endpoint must be an http(s) URL: {e}'}), 400
+        cleaned.append(e)
+    access_key = (data.get('access_key') or '').strip()
+    secret_key = (data.get('secret_key') or '').strip()
+    bucket = (data.get('bucket') or '').strip() or '321theater'
+    if source == 'gui' and not cleaned:
+        return jsonify({'success': False,
+                        'error': 'GUI mode needs at least one endpoint URL.'}), 400
+    db = get_db()
+    def _set(key, value):
+        db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)', (key, value))
+    _set('s3_config_source', source)
+    _set('s3_endpoints', json.dumps(cleaned))
+    _set('s3_access_key', access_key)
+    if secret_key:   # write-only: blank keeps the stored secret
+        _set('s3_secret_key', secret_key)
+    _set('s3_bucket', bucket)
+    log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
+              detail=f's3_settings source={source} endpoints={len(cleaned)} bucket={bucket}')
+    db.commit(); db.close()
+    s3_storage.clear_settings_cache()
+    syslog_logger.info(
+        f"S3_SETTINGS_CHANGE source={source} endpoints={len(cleaned)} "
+        f"bucket={bucket} by={session.get('username')}")
+    return jsonify({'success': True})
 
 
 @app.route('/admin/migrate-files-to-s3', methods=['POST'])
@@ -7934,7 +8049,7 @@ def admin_migrate_files_to_s3():
     Returns a JSON summary of migrated / failed counts.
     """
     if not s3_storage.is_configured():
-        return jsonify({'success': False, 'error': 'SeaweedFS not configured in db_config.ini.'}), 400
+        return jsonify({'success': False, 'error': 'S3 storage is not configured (db_config.ini or Settings → File Storage).'}), 400
 
     migrated = 0
     failed = 0
