@@ -589,7 +589,9 @@
   <div class="tab-nav" style="margin-bottom:16px">
     <button class="tab-btn system-sub-btn active" data-stab="messages" onclick="switchSystemTab('messages')">Messages</button>
     <button class="tab-btn system-sub-btn" data-stab="update" onclick="switchSystemTab('update')">Updates</button>
-    <button class="tab-btn system-sub-btn" data-stab="syslog" onclick="switchSystemTab('syslog')">Syslog</button>
+    <button class="tab-btn system-sub-btn" data-stab="branding" onclick="switchSystemTab('branding')" title="Logos, per-venue paperwork colors, WiFi defaults, PDF time format">Branding &amp; Paperwork</button>
+    {# Pane id stays 'syslog' so old #syslog deep links keep working #}
+    <button class="tab-btn system-sub-btn" data-stab="syslog" onclick="switchSystemTab('syslog')">Server &amp; Logs</button>
     <button class="tab-btn system-sub-btn" data-stab="backups" onclick="switchSystemTab('backups')">Backups</button>
     <button class="tab-btn system-sub-btn" data-stab="files" onclick="switchSystemTab('files')">Files</button>
     <button class="tab-btn system-sub-btn" data-stab="database" onclick="switchSystemTab('database')">Database</button>
@@ -624,6 +626,67 @@
       </form>
     </div>
   </div>
+
+
+
+  <div class="form-section">
+    <div class="form-section-header"><span class="section-icon">◈</span> SYSLOG SETTINGS</div>
+    <div class="form-section-body">
+      <p class="text-dim" style="font-size:12px;margin-bottom:4px">
+        Send audit events (logins, saves, exports, user changes) to a remote syslog server via UDP.
+        Requires the syslog server to accept UDP on the configured port.
+      </p>
+      <form onsubmit="event.preventDefault(); saveSyslogSettings(this)" style="max-width:440px">
+        <div class="field-group">
+          <label class="field-label">
+            <input type="checkbox" name="syslog_enabled"
+                   {% if syslog_settings.get('syslog_enabled') == '1' %}checked{% endif %}
+                   style="margin-right:6px;accent-color:var(--accent)">
+            ENABLE SYSLOG
+          </label>
+        </div>
+        <div class="field-group">
+          <label class="field-label">SYSLOG HOST</label>
+          <input type="text" name="syslog_host" class="field-input"
+                 value="{{ syslog_settings.get('syslog_host', '127.0.0.1') }}"
+                 placeholder="127.0.0.1">
+        </div>
+        <div class="field-group">
+          <label class="field-label">SYSLOG PORT (UDP)</label>
+          <input type="number" name="syslog_port" class="field-input"
+                 value="{{ syslog_settings.get('syslog_port', '514') }}"
+                 placeholder="514" min="1" max="65535">
+        </div>
+        <div class="field-group">
+          <label class="field-label">FACILITY</label>
+          <select name="syslog_facility" class="field-input">
+            {% for fac in ['LOG_LOCAL0','LOG_LOCAL1','LOG_LOCAL2','LOG_LOCAL3','LOG_LOCAL4','LOG_LOCAL5','LOG_LOCAL6','LOG_LOCAL7','LOG_USER','LOG_DAEMON'] %}
+            <option value="{{ fac }}" {% if syslog_settings.get('syslog_facility','LOG_LOCAL0') == fac %}selected{% endif %}>{{ fac }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="syslog-save-msg field-msg"></div>
+        <button type="submit" class="btn btn-primary">Save Syslog Settings</button>
+      </form>
+
+      <div style="margin-top:24px">
+        <h4 class="sub-section-label">EVENTS LOGGED</h4>
+        <p class="text-dim" style="font-size:12px;margin-top:8px">
+          LOGIN / LOGOUT · SESSION_EXPIRED / EXTEND / HARVEST ·
+          SHOW_CREATE / ARCHIVE / DELETE / RESTORE ·
+          FORM_SAVE (advance, schedule, postnotes) · PDF_EXPORT ·
+          USER_CREATE / DELETE / PASSWORD_CHANGE ·
+          GROUP_ASSIGN / REMOVE · SHOW_ACCESS_ADD / REMOVE ·
+          HISTORY_RESTORE · BACKUP_CREATED · SETTINGS_CHANGE
+        </p>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+{# ── BRANDING & PAPERWORK (admin only — same gate as the rest of the System tab) #}
+<div id="stab-branding" class="stab-pane" style="display:none">
 
   <div class="form-section" style="margin-bottom:16px">
     <div class="form-section-header"><span class="section-icon">◈</span> WIFI DEFAULTS</div>
@@ -721,77 +784,8 @@
     </div>
   </div>
 
-  <div class="form-section" style="margin-bottom:16px">
-    <div class="form-section-header"><span class="section-icon">◈</span> UPLOAD SIZE LIMIT</div>
-    <div class="form-section-body">
-      <form onsubmit="event.preventDefault(); saveUploadSize(this)" style="max-width:250px">
-        <div class="field-group">
-          <label class="field-label">MAX UPLOAD SIZE (MB)</label>
-          <input type="number" name="upload_max_mb" class="field-input"
-                 value="{{ upload_max_mb }}" min="1" max="500" placeholder="20">
-        </div>
-        <div class="upload-size-msg field-msg"></div>
-        <button type="submit" class="btn btn-primary">Save</button>
-      </form>
-    </div>
-  </div>
 
   <p class="text-dim text-sm" style="padding:12px 0">Venue list is managed in the <strong>Job Positions</strong> tab.</p>
-
-
-  <div class="form-section">
-    <div class="form-section-header"><span class="section-icon">◈</span> SYSLOG SETTINGS</div>
-    <div class="form-section-body">
-      <p class="text-dim" style="font-size:12px;margin-bottom:4px">
-        Send audit events (logins, saves, exports, user changes) to a remote syslog server via UDP.
-        Requires the syslog server to accept UDP on the configured port.
-      </p>
-      <form onsubmit="event.preventDefault(); saveSyslogSettings(this)" style="max-width:440px">
-        <div class="field-group">
-          <label class="field-label">
-            <input type="checkbox" name="syslog_enabled"
-                   {% if syslog_settings.get('syslog_enabled') == '1' %}checked{% endif %}
-                   style="margin-right:6px;accent-color:var(--accent)">
-            ENABLE SYSLOG
-          </label>
-        </div>
-        <div class="field-group">
-          <label class="field-label">SYSLOG HOST</label>
-          <input type="text" name="syslog_host" class="field-input"
-                 value="{{ syslog_settings.get('syslog_host', '127.0.0.1') }}"
-                 placeholder="127.0.0.1">
-        </div>
-        <div class="field-group">
-          <label class="field-label">SYSLOG PORT (UDP)</label>
-          <input type="number" name="syslog_port" class="field-input"
-                 value="{{ syslog_settings.get('syslog_port', '514') }}"
-                 placeholder="514" min="1" max="65535">
-        </div>
-        <div class="field-group">
-          <label class="field-label">FACILITY</label>
-          <select name="syslog_facility" class="field-input">
-            {% for fac in ['LOG_LOCAL0','LOG_LOCAL1','LOG_LOCAL2','LOG_LOCAL3','LOG_LOCAL4','LOG_LOCAL5','LOG_LOCAL6','LOG_LOCAL7','LOG_USER','LOG_DAEMON'] %}
-            <option value="{{ fac }}" {% if syslog_settings.get('syslog_facility','LOG_LOCAL0') == fac %}selected{% endif %}>{{ fac }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="syslog-save-msg field-msg"></div>
-        <button type="submit" class="btn btn-primary">Save Syslog Settings</button>
-      </form>
-
-      <div style="margin-top:24px">
-        <h4 class="sub-section-label">EVENTS LOGGED</h4>
-        <p class="text-dim" style="font-size:12px;margin-top:8px">
-          LOGIN / LOGOUT · SESSION_EXPIRED / EXTEND / HARVEST ·
-          SHOW_CREATE / ARCHIVE / DELETE / RESTORE ·
-          FORM_SAVE (advance, schedule, postnotes) · PDF_EXPORT ·
-          USER_CREATE / DELETE / PASSWORD_CHANGE ·
-          GROUP_ASSIGN / REMOVE · SHOW_ACCESS_ADD / REMOVE ·
-          HISTORY_RESTORE · BACKUP_CREATED · SETTINGS_CHANGE
-        </p>
-      </div>
-    </div>
-  </div>
 
 </div>
 
@@ -832,6 +826,21 @@
 {# ── FILES (admin only) ───────────────────────────────────────────────────── #}
 {% if user.role == 'admin' %}
 <div id="stab-files" class="stab-pane" style="display:none">
+  <div class="form-section" style="margin-bottom:16px">
+    <div class="form-section-header"><span class="section-icon">◈</span> UPLOAD SIZE LIMIT</div>
+    <div class="form-section-body">
+      <form onsubmit="event.preventDefault(); saveUploadSize(this)" style="max-width:250px">
+        <div class="field-group">
+          <label class="field-label">MAX UPLOAD SIZE (MB)</label>
+          <input type="number" name="upload_max_mb" class="field-input"
+                 value="{{ upload_max_mb }}" min="1" max="500" placeholder="20">
+        </div>
+        <div class="upload-size-msg field-msg"></div>
+        <button type="submit" class="btn btn-primary">Save</button>
+      </form>
+    </div>
+  </div>
+
   <div class="form-section">
     <div class="form-section-header">
       <span class="section-icon">◈</span> FILE MANAGER
@@ -3692,7 +3701,7 @@ async function adminPurgeFile(purgeUrl, btn) {
   if (document.getElementById('labor-preset-list')) loadLaborPresets();
   // Activate tab from URL hash or server-side default
   const hash = location.hash.replace('#','');
-  const validTabs = ['contacts','users','fields','arts-groups','positions','technicians','system','syslog','backups','account','files','godmode','database','ai','cluster','email','dashboards','messages','update'];
+  const validTabs = ['contacts','users','fields','arts-groups','positions','technicians','system','branding','syslog','backups','account','files','godmode','database','ai','cluster','email','dashboards','messages','update'];
   const defaultTab = {% if user.role == 'admin' or is_content_admin %}'contacts'{% else %}'users'{% endif %};
   switchSettingsTab(validTabs.includes(hash) ? hash : {% if active_tab %}'{{ active_tab }}'{% else %}defaultTab{% endif %});
 })();
@@ -5001,7 +5010,7 @@ async function pollUpdateStatus() {
 }
 
 /* ── System sub-tab routing ─────────────────────────────────────── */
-const _SYSTEM_SUBS = ['messages','update','syslog','backups','files','database','ai','cluster','godmode'];
+const _SYSTEM_SUBS = ['messages','update','branding','syslog','backups','files','database','ai','cluster','godmode'];
 let _curSystemSub = 'messages';
 
 function switchSystemTab(name) {
@@ -5019,6 +5028,7 @@ function switchSystemTab(name) {
   history.replaceState({}, '', '#' + name);
   if (name === 'messages') loadMessages();
   if (name === 'update')   detectService();
+  if (name === 'branding') { loadVenueLogos(); loadVenueColors(); }
   if (name === 'backups')  loadBackupStatus();
   if (name === 'files')    loadFileManager();
   if (name === 'cluster')  startClusterPolling(); else stopClusterPolling();
