@@ -108,6 +108,7 @@ Version history:
    - [Asset Availability Dashboards](#asset-availability-dashboards)
    - [Comments](#comments)
    - [Export & Files](#export--files)
+   - [Security Sign-In Sheet](#security-sign-in-sheet)
    - [Email](#email)
    - [Public Show Page](#public-show-page)
 5. [Admin & Settings Guide](#admin--settings-guide)
@@ -142,6 +143,7 @@ Version history:
    - [Database Backups](#database-backups)
    - [File Manager](#file-manager)
    - [God Mode](#god-mode)
+   - [Feature Modules](#feature-modules)
    - [Prism FM Integration](#prism-fm-integration)
 6. [Database Configuration](#database-configuration)
    - [SQLite (Default)](#sqlite-default)
@@ -338,6 +340,7 @@ Show-specific comment thread with `@mention` autocomplete. Visible to all author
 | Export PDF (postnotes tab) | Generates Post-Show Notes PDF |
 | Final Invoice PDF | Generates the post-show billing invoice (internal & external assets + actual labor + costs). Also available on the Post Show tab. To bill several shows on one invoice, use Combined Invoice in the sidebar (under Settings) |
 | Generate Pre-Show Estimate | Generates a combined **labor + asset estimate/quote** PDF — the client-facing counterpart to the Final Invoice, produced before anything is scheduled. Labor uses position special rates or the highest standard tech rate; assets use reserved quantities and locked prices |
+| Security Sign-In Sheet | Opens the per-show personnel list editor and exports the sign-in sheet PDF for the security desk (see [Security Sign-In Sheet](#security-sign-in-sheet)). Card only appears while the module is enabled in Settings → System → Modules |
 | ↓ Download (history) | Re-downloads a previously generated PDF |
 
 PDFs are stored in the database — use the **↓ Download** button in Export History to re-download without generating a new version.
@@ -345,6 +348,49 @@ PDFs are stored in the database — use the **↓ Download** button in Export Hi
 **Attachments:** Drag-and-drop or click **+ Attach File**. Upload progress bar shown. Files stored in database.
 
 **Read Receipts:** Tracks who opened the advance at which version.
+
+### Security Sign-In Sheet
+
+The printed sign-in sheet that sits at the security desk on show day: the show
+name, date, and venue across the top (in the venue's paperwork colors, with the
+venue logo), then one numbered row per expected person with blank **Signature**
+and **Time In** columns, plus eight blank "Additional personnel" walk-up rows
+for anyone who wasn't on the list. On a long list the column header repeats on
+every printed page.
+
+Open it from the show page → **Export & Files** tab → **Security Sign-In
+Sheet** card → **Edit Names** (the card's **Export PDF** button prints the
+currently saved list directly).
+
+**Entering names — built for the copy/paste-from-email workflow:**
+
+1. **Paste the list** from the email into the **Bulk Add Names** box and click
+   **Add Pasted Names**. Accepted formats:
+   - one name per line (a `Last, First` line stays one name),
+   - a single line of comma-separated names (`Jane Doe, John Smith, Alex Roe`),
+   - semicolon-separated lists (Outlook-style `Jane Doe; John Smith`).
+2. **Or import a CSV** with **Import CSV file…** — if the file has a header
+   row, a `Name` column (or `First` + `Last` columns) is used; without a
+   header, two-column rows are joined `First Last` and anything else takes the
+   first cell.
+3. Parsed names are **added to the list below** — nothing is saved yet. Review
+   them: edit any row inline, remove rows with **×**, add stragglers with
+   **+ Add Row**, or start over with **Clear All**.
+4. Click **Save**. The list is stored per show (up to 500 names); an
+   "Unsaved changes" note and a `Save *` marker show whenever the list on
+   screen differs from what's saved. The PDF always prints the **saved** list —
+   exporting with unsaved edits pops a warning first.
+5. Click **Export PDF** (top right, or from the Export & Files card) and print.
+
+**Permissions:** anyone with access to the show can edit the list; read-only
+and restricted users can view and export but not edit. Every save is
+audit-logged with the before/after list; exports and saves also go to syslog
+(`SECURITY_SIGNIN_SAVE`, `SECURITY_SIGNIN_EXPORT`).
+
+**Notes:** names move with a show merge, are restorable via DB Snapshots'
+per-show restore, and are deleted with the show. The whole feature can be
+switched off in [Feature Modules](#feature-modules) — the card and pages
+disappear, but saved lists are kept and come back when re-enabled.
 
 ### Email
 
@@ -788,6 +834,35 @@ Settings → God Mode (admin only).
 
 - **Active Sessions** — users on a show page in the last 5 minutes (user, show, tab, last seen)
 - **User Last Login** — last login timestamp per user
+
+### Feature Modules
+
+Settings → System → **Modules** (admin only).
+
+The on/off switchboard for the app's optional, self-contained feature modules.
+Ticking a module's checkbox saves immediately — **no restart needed**, and the
+change reaches every server instance (the flag lives in `app_settings` in the
+shared database).
+
+What a toggle does:
+
+- **Off** — the module's UI disappears everywhere (e.g. the show-page export
+  card) and its pages/endpoints return "not found". **Saved data is kept** —
+  nothing is deleted.
+- **On** — everything comes back, including previously saved data.
+
+Every toggle is audit-logged and emits a `MODULE_TOGGLE` syslog event.
+
+Current modules:
+
+| Module | Default | What it gates |
+|--------|---------|---------------|
+| Security Sign-In Sheets | On | The per-show personnel list + sign-in sheet PDF ([user guide](#security-sign-in-sheet)) |
+
+This panel is the first step of gradually pulling app features out into
+sandboxed modules (each lives in its own Python file, wired into `app.py` by a
+single `register()` call, and owns only its own tables) — new modules will
+appear here as that work continues.
 
 ### Prism FM Integration
 
