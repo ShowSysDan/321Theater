@@ -15,19 +15,22 @@ comma-separated line) and a CSV upload, both parsed by ONE server-side parser
 (`_parse_names_payload`) so the two paths can never disagree. Individual rows
 can still be edited/added/removed by hand before saving.
 
+The editor UI lives on the show page as the Security tab (show.html's
+`tab-security` pane, between Labor Requests and Assets); it talks only to
+this module's JSON endpoints below.
+
 SANDBOX RULES (mirrors prism_module / snapshot_module):
   * This module owns exactly one table — `security_signin_names` — and never
     writes any other app table (audit_log via the injected log_audit only).
   * app.py's only knowledge of it is one `register(app, **deps)` call, the
     module-enabled flag it reads through the injected `module_enabled`, and
-    the show-page export card. Delete this file + that card and the app runs
-    unchanged.
+    the show-page Security tab + export card (both gated on that flag).
   * The whole feature is toggleable in Settings → System → Modules
     (app_settings key `module_security_signin_enabled`). When disabled every
-    route here 404s and the show-page card disappears.
+    route here 404s and the show-page tab/card disappear.
 
 Routes (all show-scoped, all require show access; module must be enabled):
-  GET  /shows/<id>/security            page (name editor + export)
+  GET  /shows/<id>/security            redirect to the show page Security tab
   GET  /shows/<id>/security/names      JSON list of saved names
   POST /shows/<id>/security/names      replace the saved list (editors only)
   POST /shows/<id>/security/parse      parse pasted text / uploaded CSV into
@@ -43,7 +46,8 @@ import re
 from datetime import date
 from functools import wraps
 
-from flask import abort, jsonify, make_response, render_template, request, session
+from flask import (abort, jsonify, make_response, redirect, render_template,
+                   request, session, url_for)
 from werkzeug.utils import secure_filename
 
 # Filled by register() — mirrors prism_module's dependency-dict pattern.
@@ -197,20 +201,10 @@ def _parse_names_payload():
 # ─── Views ────────────────────────────────────────────────────────────────────
 
 def _page_view(show_id):
-    show = _require_show(show_id)
-    db = _d['get_db']()
-    try:
-        names = _fetch_names(db, show_id)
-    finally:
-        db.close()
-    return render_template(
-        'security_signin.html',
-        show=dict(show),
-        names=names,
-        can_edit=_is_editor(),
-        max_names=MAX_NAMES,
-        user=_d['get_current_user'](),
-    )
+    """The editor moved onto the show page itself (Security tab, 2.42.0).
+    Keep the old standalone URL working as a redirect for bookmarks."""
+    _require_show(show_id)
+    return redirect(url_for('show_page', show_id=show_id, tab='security'))
 
 
 def _names_get_view(show_id):

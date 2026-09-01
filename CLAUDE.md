@@ -64,10 +64,14 @@ Traps that only bite on PostgreSQL (each has caused a real 500):
 - **Literal `?` anywhere in SQL text** — including inside quoted string
   literals and prose ("worker died?") — is rewritten to `%s` by db_adapter's
   blind `replace('?', '%s')`. Bind any text containing `?` as a parameter.
-- **`PG_SCHEMA` in init_db.py is split on `;` with no real parser** — never
-  put a semicolon inside a schema comment, and keep every statement
-  self-contained. SQLite's `executescript` parses properly, so the mistake
-  passes SQLite testing and only fails on PG init/migrate.
+- **`PG_SCHEMA` in init_db.py is split on `;` with no real parser** — keep
+  every statement self-contained and never put a `;` inside a string literal.
+  Full-line `--` comments are stripped before the split (2.42.0), so comment
+  semicolons no longer break — but they used to: a `;` in 2.38.0's
+  venue_colors comment glued comment-tail onto the CREATE TABLE, so the table
+  was never created on PG ("Failed to load venue list"). SQLite's
+  `executescript` parses properly, so such mistakes pass SQLite testing and
+  only fail on PG init/migrate.
 
 ## Cross-app user flags (`is_app_user` / `is_app_admin`) — NEVER used in this app
 Two columns on the (shared-schema) `users` table — `is_app_user` and
@@ -181,10 +185,30 @@ apps. For a 321Theater access change, use this app's own flags instead
   verified by diffing rendered CSS). When adding a new color to a pdf
   template, use the vars (or add a tint to the helper), never a raw brand
   hex; and give any new var a fallback matching the un-themed look.
-- Admin UI: Settings → System → Branding & Paperwork (`GET/POST
-  /settings/venue-colors`, hex-validated, blank-both = delete row). Colors
+- Admin UI: Settings → System → Branding & Paperwork → the combined **Venue
+  Branding** panel (2.42.0): ONE dataset (`GET /settings/venue-branding` —
+  venues + logo + colors; the old venue-logos/venue-colors GET lists are
+  gone) with the unchanged POSTs (`/settings/venue-logos[/delete]`,
+  `/settings/venue-colors` — hex-validated, blank-both = delete row). Colors
   land in the rendered HTML, so the export content-hash correctly cuts a new
   PDF version when a venue's colors change.
+
+## Optional feature modules (`APP_MODULES` + Settings → System → Modules)
+- `APP_MODULES` registry + `module_enabled(key)` in app.py; flags live in
+  `app_settings` as `module_<key>_enabled` ('1'/'0', missing = the entry's
+  default), toggled at runtime by an admin (`GET/POST /settings/modules`,
+  syslog `MODULE_TOGGLE`) — no restart, all instances. A disabled module's
+  routes 404 (checked per request) and its UI hides; data is always kept.
+- First module: **Security Sign-In Sheets** (`security_module.py`, 2.41.0;
+  key `security_signin`, default ON). Sandboxed like Prism/Snapshots: one
+  `register(app, **deps)` call, owns only `security_signin_names` (included
+  in show merge moves, FK-cascade delete, snapshot per-show restore). Editor
+  UI = show page **Security tab** (show.html `tab-security` pane, between
+  Labor Requests and Assets; also in base.html's mobile `m-showtabs`), which
+  only talks to the module's JSON endpoints (`/shows/<id>/security/*`);
+  paste + CSV import share ONE server parser (`…/security/parse`). The PDF
+  (`…/security/sheet.pdf`) themes via `pdf_colors` like all paperwork.
+  Syslog: SECURITY_SIGNIN_SAVE / SECURITY_SIGNIN_EXPORT.
 
 ## Per-page performance stats (admin Settings → Performance)
 - `db_adapter.query_timer_hook` stopwatches every `execute()`/`executemany()`;

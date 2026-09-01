@@ -680,7 +680,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.41.0'
+APP_VERSION = '2.42.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -4981,6 +4981,9 @@ def show_page(show_id):
         abort(403)
 
     tab = request.args.get('tab', 'advance')
+    security_signin_enabled = module_enabled('security_signin')
+    if tab == 'security' and not security_signin_enabled:
+        tab = 'advance'   # module switched off — its tab/pane doesn't render
     db = get_db()
     show = db.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
     if not show:
@@ -5111,7 +5114,8 @@ def show_page(show_id):
 
     return render_template('show.html',
                            pdf_form_status=pdf_form_status,
-                           security_signin_enabled=module_enabled('security_signin'),
+                           security_signin_enabled=security_signin_enabled,
+                           security_max_names=security_module.MAX_NAMES,
                            show=show,
                            tab=tab,
                            advance_data=advance_data,
@@ -11452,10 +11456,14 @@ def _get_logo_for_venue(db, venue_name):
 _ALLOWED_LOGO_MIMES = ('image/png', 'image/jpeg', 'image/gif', 'image/webp')
 
 
-@app.route('/settings/venue-logos', methods=['GET'])
+@app.route('/settings/venue-branding', methods=['GET'])
 @admin_required
-def venue_logos_list():
-    """Return every distinct active-show venue plus its configured logo (if any)."""
+def venue_branding_list():
+    """ONE dataset for the combined Venue Branding panel (Settings → System →
+    Branding & Paperwork): every distinct show venue with its logo override
+    AND its paperwork colors. Replaces the separate venue-logos / venue-colors
+    GET lists so the two halves of the panel can never disagree about which
+    venues exist."""
     db = get_db()
     # Distinct venues currently in use across shows (active + archived).
     # Sorting happens in Python below — keeping it out of SQL avoids the
@@ -11468,18 +11476,23 @@ def venue_logos_list():
     logos = {r['venue_name']: r['logo_data'] for r in db.execute(
         'SELECT venue_name, logo_data FROM venue_logos'
     ).fetchall()}
+    colors = {r['venue_name']: r for r in db.execute(
+        'SELECT venue_name, primary_color, secondary_color FROM venue_colors'
+    ).fetchall()}
     db.close()
-    # Include any venues that only exist as logo overrides (e.g. logo
-    # configured before a show with that venue was created).
-    for v in logos.keys():
+    # Include venues that only exist as overrides (logo or colors configured
+    # before a show with that venue was created).
+    for v in list(logos.keys()) + list(colors.keys()):
         if v not in venues:
             venues.append(v)
     venues.sort(key=lambda v: v.lower())
     return jsonify({
-        'venues': [
-            {'name': v, 'logo_data': logos.get(v, '')}
-            for v in venues
-        ]
+        'venues': [{
+            'name': v,
+            'logo_data': logos.get(v, ''),
+            'primary_color':   (colors[v]['primary_color'] if v in colors else ''),
+            'secondary_color': (colors[v]['secondary_color'] if v in colors else ''),
+        } for v in venues]
     })
 
 
@@ -11603,32 +11616,6 @@ def _get_venue_pdf_colors(db, venue_name):
         'secondary_bg2':    _mix_hex(s, 0.96),                    # ≈ #fff8e8
         'secondary_dark':   _mix_hex(s, 0.40, toward='#000000'),  # ≈ #7a5a00
     }
-
-
-@app.route('/settings/venue-colors', methods=['GET'])
-@admin_required
-def venue_colors_list():
-    """Every distinct show venue plus its configured paperwork colors (if any)."""
-    db = get_db()
-    venues = [r['venue'] for r in db.execute(
-        "SELECT DISTINCT venue FROM shows "
-        "WHERE venue IS NOT NULL AND TRIM(venue) != ''"
-    ).fetchall()]
-    colors = {r['venue_name']: r for r in db.execute(
-        'SELECT venue_name, primary_color, secondary_color FROM venue_colors'
-    ).fetchall()}
-    db.close()
-    for v in colors.keys():
-        if v not in venues:
-            venues.append(v)
-    venues.sort(key=lambda v: v.lower())
-    return jsonify({
-        'venues': [{
-            'name': v,
-            'primary_color':   (colors[v]['primary_color'] if v in colors else ''),
-            'secondary_color': (colors[v]['secondary_color'] if v in colors else ''),
-        } for v in venues]
-    })
 
 
 @app.route('/settings/venue-colors', methods=['POST'])

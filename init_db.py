@@ -3473,7 +3473,7 @@ CREATE TABLE IF NOT EXISTS venue_logos (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Per-venue accent colors for PDF paperwork ('#rrggbb'; empty = app default).
+-- Per-venue accent colors for PDF paperwork ('#rrggbb' hex, empty = app default).
 CREATE TABLE IF NOT EXISTS venue_colors (
     venue_name      TEXT PRIMARY KEY,
     primary_color   TEXT NOT NULL DEFAULT '',
@@ -3899,7 +3899,16 @@ def _apply_pg_schema(conn, app_schema, shared_schema):
     (empty on success).
     """
     cur = conn.cursor()
-    pending = [s.strip() for s in PG_SCHEMA.split(';') if s.strip()]
+    # Drop full-line `--` comments BEFORE splitting on ';'. The splitter has
+    # no real SQL parser, so a semicolon inside a comment used to cut the
+    # NEXT statement's head off — 2.38.0's venue_colors comment did exactly
+    # that ("...'#rrggbb'; empty = ..."), leaving venue_colors permanently
+    # uncreated on PostgreSQL while SQLite (a real parser) sailed through.
+    # PG_SCHEMA is pure DDL (no INSERTs), so line-level stripping is safe.
+    sql_only = '\n'.join(
+        line for line in PG_SCHEMA.splitlines()
+        if not line.lstrip().startswith('--'))
+    pending = [s.strip() for s in sql_only.split(';') if s.strip()]
     failures = []
     for _pass in range(8):
         failures = []

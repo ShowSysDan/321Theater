@@ -345,6 +345,7 @@ async function switchTab(name) {
       if (name === 'comments') loadComments();
       if (name === 'export')   { loadAttachments(); loadReadReceipts(); }
       if (name === 'assets' && typeof loadAssetsTab === 'function') loadAssetsTab();
+      if (name === 'security' && typeof loadSecurityTab === 'function') loadSecurityTab();
       // Refresh position catalog when tabbing into Labor so concurrent
       // scheduler edits (new positions, renames, retirements) show up
       // without a full page reload.
