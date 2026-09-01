@@ -1651,32 +1651,53 @@ function evaluateAllConditionals() {
   try { return _evaluateAllConditionalsImpl(); }
   finally { _evalCondDepth--; }
 }
+// Mac/iOS keyboards silently substitute smart punctuation while typing —
+// '≠' for '!=' (Option+=) and curly quotes for straight ones — which would
+// never match the stored field values. Compare everything in ASCII form.
+function _normalizeCondPunct(s) {
+  return String(s ?? '')
+    .replace(/≠/g, '!=')
+    .replace(/[‘’ʼ]/g, "'")
+    .replace(/[“”]/g, '"');
+}
 function _evaluateAllConditionalsImpl() {
   // Track <select>s whose currently-selected option got hidden so we can
   // reset them in a second pass.
   const _affectedSelects = new Set();
   document.querySelectorAll('[data-show-when]').forEach(el => {
-    const cond = el.dataset.showWhen;
-    // Operator: '!=' negates ('show unless trigger equals any of these');
+    const cond = _normalizeCondPunct(el.dataset.showWhen);
+    // One or more clauses joined by '&&' — ALL must match (AND). Each
+    // clause: '!=' negates ('show unless trigger equals any of these');
     // '=' is the default (show when trigger equals one of these).
-    let key, rhs, invert;
-    const neq = cond.indexOf('!=');
-    if (neq !== -1) {
-      key = cond.slice(0, neq).trim();
-      rhs = cond.slice(neq + 2);
-      invert = true;
-    } else {
-      const eq = cond.indexOf('=');
-      if (eq === -1) return;
-      key = cond.slice(0, eq).trim();
-      rhs = cond.slice(eq + 1);
-      invert = false;
+    const clauses = cond.split('&&').map(c => c.trim()).filter(Boolean);
+    let matches = true;
+    let evaluated = false;
+    for (const clause of clauses) {
+      let key, rhs, invert;
+      const neq = clause.indexOf('!=');
+      if (neq !== -1) {
+        key = clause.slice(0, neq).trim();
+        rhs = clause.slice(neq + 2);
+        invert = true;
+      } else {
+        const eq = clause.indexOf('=');
+        if (eq === -1) continue;
+        key = clause.slice(0, eq).trim();
+        rhs = clause.slice(eq + 1);
+        invert = false;
+      }
+      const allowed = rhs.split(',').map(v => v.trim()).filter(Boolean);
+      const trigger = document.querySelector(`[data-key="${key}"]`);
+      if (!trigger) continue;
+      evaluated = true;
+      const currentVal = _normalizeCondPunct(
+        trigger.type === 'checkbox' ? (trigger.checked ? 'true' : 'false') : trigger.value);
+      const ok = invert ? !allowed.includes(currentVal) : allowed.includes(currentVal);
+      if (!ok) { matches = false; break; }
     }
-    const allowed = rhs.split(',').map(v => v.trim()).filter(Boolean);
-    const trigger = document.querySelector(`[data-key="${key}"]`);
-    if (!trigger) return;
-    const currentVal = trigger.type === 'checkbox' ? (trigger.checked ? 'true' : 'false') : trigger.value;
-    const matches = invert ? !allowed.includes(currentVal) : allowed.includes(currentVal);
+    // No parseable clause with a live trigger → leave the element alone
+    // (same lenient behavior the single-condition parser had).
+    if (!evaluated) return;
     if (el.tagName === 'OPTION') {
       // Hide the option entirely (display:none works on <option> in modern
       // browsers; also flip the disabled attr for older Safari).
