@@ -38,6 +38,14 @@
 
 * { box-sizing: border-box; }
 html { font-size: 15px; }
+/* JetBrains Mono ships programming ligatures that draw '!=' as a single
+   ≠-looking glyph — in condition inputs (and the syntax help examples) the
+   exact characters matter, so ligatures are off app-wide. Form controls
+   don't reliably inherit font properties, hence the explicit list. */
+html, body, input, textarea, select, button, code, pre {
+  font-variant-ligatures: none;
+  font-feature-settings: 'liga' 0, 'calt' 0, 'dlig' 0;
+}
 body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-main); -webkit-font-smoothing: antialiased; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
