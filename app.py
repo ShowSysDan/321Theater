@@ -680,7 +680,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.42.0'
+APP_VERSION = '2.43.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -9111,6 +9111,34 @@ def form_fields_settings():
     return redirect(url_for('settings') + '#fields')
 
 
+def _normalize_show_when(val):
+    """Normalize a conditional show-when expression for storage. Mac/iOS
+    keyboards silently substitute smart punctuation while typing in the
+    field editor — '≠' for '!=' (Option+=) and curly quotes for straight
+    ones — which the client-side evaluator would then never match against
+    the stored field values. Store the ASCII forms."""
+    if not val:
+        return None
+    val = str(val).replace('≠', '!=')
+    for c in ('‘', '’', 'ʼ'):
+        val = val.replace(c, "'")
+    for c in ('“', '”'):
+        val = val.replace(c, '"')
+    return val.strip() or None
+
+
+def _normalize_field_options(options):
+    """Apply _normalize_show_when to option-level conditions. Options are
+    plain strings or {'value':…, 'show_when':…} dicts (see saveField in
+    app.js); strings and dicts without a condition pass through untouched."""
+    out = []
+    for o in options or []:
+        if isinstance(o, dict) and o.get('show_when'):
+            o = dict(o, show_when=_normalize_show_when(o['show_when']))
+        out.append(o)
+    return out
+
+
 @app.route('/settings/form-fields/add', methods=['POST'])
 @content_admin_required
 def add_form_field():
@@ -9121,7 +9149,7 @@ def add_form_field():
     if not section_id or not field_key or not label:
         return jsonify({'success': False, 'error': 'section_id, field_key, and label required.'}), 400
 
-    options = data.get('options', [])
+    options = _normalize_field_options(data.get('options', []))
     options_json = json.dumps(options) if options else None
 
     db = get_db()
@@ -9148,7 +9176,7 @@ def add_form_field():
               data.get('field_type','text'), max_order + 10,
               options_json,
               data.get('contact_dept'),
-              data.get('conditional_show_when'),
+              _normalize_show_when(data.get('conditional_show_when')),
               data.get('help_text'),
               data.get('placeholder',''),
               data.get('width_hint','full'),
@@ -9179,7 +9207,7 @@ def add_form_field():
 @content_admin_required
 def edit_form_field(fid):
     data = request.get_json(force=True) or {}
-    options = data.get('options', [])
+    options = _normalize_field_options(data.get('options', []))
     options_json = json.dumps(options) if options else None
     db = get_db()
     before = _snapshot_row(db, 'form_fields', fid)
@@ -9212,7 +9240,7 @@ def edit_form_field(fid):
         WHERE id=?
     """, (data.get('section_id'), data.get('label',''),
           data.get('field_type','text'), options_json,
-          data.get('contact_dept'), data.get('conditional_show_when'),
+          data.get('contact_dept'), _normalize_show_when(data.get('conditional_show_when')),
           data.get('help_text'), data.get('placeholder',''),
           data.get('width_hint','full'),
           1 if data.get('is_notes_field') else 0,
