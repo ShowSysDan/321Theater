@@ -341,6 +341,9 @@
   <button class="tab-btn {% if tab == 'advance' %}active{% endif %}" onclick="switchTab('advance')">Advance Sheet</button>
   <button class="tab-btn {% if tab == 'schedule' %}active{% endif %}" onclick="switchTab('schedule')">Production Schedule</button>
   <button class="tab-btn {% if tab == 'staffing' %}active{% endif %}" onclick="switchTab('staffing')">Labor Requests</button>
+  {% if security_signin_enabled %}
+  <button class="tab-btn {% if tab == 'security' %}active{% endif %}" onclick="switchTab('security')">Security</button>
+  {% endif %}
   <button class="tab-btn {% if tab == 'assets' %}active{% endif %}" onclick="switchTab('assets')">Assets</button>
   <button class="tab-btn {% if tab == 'postnotes' %}active{% endif %}" onclick="switchTab('postnotes')">Post Show</button>
   <button class="tab-btn {% if tab == 'comments' %}active{% endif %}" onclick="switchTab('comments')">
@@ -908,6 +911,257 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
 <script>
 window._laborRequestsData = {{ labor_requests_data | tojson }};
 </script>
+
+
+{% if security_signin_enabled %}
+{# ════════════════════════════════════════════════════════════════════════════ #}
+{#                    SECURITY SIGN-IN SHEET TAB (security_module.py)            #}
+{# Names load lazily on first activation via the module's JSON API; the pane    #}
+{# only talks to /shows/<id>/security/* endpoints. Whole tab disappears when    #}
+{# the module is switched off in Settings → System → Modules.                   #}
+{# ════════════════════════════════════════════════════════════════════════════ #}
+<div id="tab-security" class="tab-pane {% if tab == 'security' %}active{% endif %}">
+
+  <div class="form-section" style="margin-bottom:16px">
+    <div class="form-section-header">
+      <span class="section-icon">◈</span> SECURITY SIGN-IN SHEET
+      <div class="action-btns ml-auto">
+        <a href="{{ url_for('security_signin_pdf', show_id=show.id) }}" class="btn btn-sm btn-primary"
+           target="_blank" id="sec-export-btn">Export PDF</a>
+      </div>
+    </div>
+    <div class="form-section-body">
+      <p class="text-dim" style="font-size:12px;margin:0">
+        The sign-in sheet that sits at the security desk on show day: each saved name prints with blank
+        Signature / Time In columns, plus extra walk-up rows. The PDF uses this venue's paperwork colors and logo.
+      </p>
+    </div>
+  </div>
+
+  {% if can_edit_advance %}
+  <div class="form-section" style="margin-bottom:16px">
+    <div class="form-section-header"><span class="section-icon">◈</span> BULK ADD NAMES</div>
+    <div class="form-section-body">
+      <p class="text-dim" style="font-size:12px;margin:0 0 10px">
+        Paste the personnel list straight from the email — one name per line, or a single
+        comma/semicolon-separated line. Parsed names are <strong>added</strong> to the list below
+        (nothing is saved until you click Save).
+      </p>
+      <textarea id="sec-bulk-paste" class="field-input" rows="5"
+                placeholder="Jane Doe&#10;John Smith&#10;…&#10;&#10;or:  Jane Doe, John Smith, Alex Roe"
+                style="width:100%;resize:vertical;font-family:inherit"></textarea>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px">
+        <button type="button" class="btn btn-primary btn-sm" onclick="secBulkAdd()">Add Pasted Names</button>
+        <label class="btn btn-ghost btn-sm" for="sec-csv-input" style="cursor:pointer">Import CSV file…</label>
+        <input type="file" id="sec-csv-input" accept=".csv,.txt,text/csv,text/plain"
+               style="display:none" onchange="secCsvImport(this)">
+        <span id="sec-bulk-msg" class="text-dim" style="font-size:12px"></span>
+      </div>
+      <p class="text-dim" style="font-size:11px;margin:8px 0 0">
+        CSV: a <code>Name</code> column (or <code>First</code> + <code>Last</code> columns) is used when
+        the file has a header row; otherwise two-column rows are joined "First Last" and anything else
+        takes the first cell. Review the list before saving.
+      </p>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="form-section">
+    <div class="form-section-header">
+      <span class="section-icon">◈</span> PERSONNEL
+      <span id="sec-name-count" class="text-dim" style="font-size:11px;font-weight:normal;margin-left:8px"></span>
+      {% if can_edit_advance %}
+      <div class="action-btns ml-auto">
+        <button type="button" class="btn btn-sm btn-ghost" onclick="secAddRow('')">+ Add Row</button>
+        <button type="button" class="btn btn-sm btn-danger-ghost" onclick="secClearAll()">Clear All</button>
+        <button type="button" class="btn btn-sm btn-primary" id="sec-save-btn" onclick="secSaveNames()">Save</button>
+      </div>
+      {% endif %}
+    </div>
+    <div class="form-section-body">
+      <p id="sec-unsaved-note" class="text-dim" style="font-size:11px;margin:0 0 10px;display:none;color:var(--accent)">
+        Unsaved changes — click Save to keep them. The PDF only includes saved names.
+      </p>
+      <div id="sec-name-rows" style="display:flex;flex-direction:column;gap:6px;max-width:560px"></div>
+      <p id="sec-empty-msg" class="text-dim" style="font-size:12px;margin:0">
+        Loading…
+      </p>
+    </div>
+  </div>
+
+</div>{# end tab-security #}
+
+<script>
+(function () {
+  const CAN_EDIT = {{ 'true' if can_edit_advance else 'false' }};
+  const MAX_NAMES = {{ security_max_names }};
+  let names = [];
+  let savedNames = JSON.stringify(names);
+  let loaded = false;
+
+  const rowsEl  = document.getElementById('sec-name-rows');
+  const emptyEl = document.getElementById('sec-empty-msg');
+  const countEl = document.getElementById('sec-name-count');
+  const noteEl  = document.getElementById('sec-unsaved-note');
+  const saveBtn = document.getElementById('sec-save-btn');
+  const bulkMsg = document.getElementById('sec-bulk-msg');
+
+  function dirty() { return JSON.stringify(names) !== savedNames; }
+
+  function refreshMeta() {
+    countEl.textContent = names.length ? `${names.length} name${names.length === 1 ? '' : 's'}` : '';
+    emptyEl.textContent = 'No names yet.' + (CAN_EDIT ? ' Paste the list above or use "+ Add Row".' : '');
+    emptyEl.style.display = names.length ? 'none' : '';
+    noteEl.style.display = dirty() ? '' : 'none';
+    if (saveBtn) saveBtn.textContent = dirty() ? 'Save *' : 'Save';
+  }
+
+  function render() {
+    rowsEl.textContent = '';
+    names.forEach((n, i) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:6px;align-items:center';
+      const num = document.createElement('span');
+      num.className = 'text-dim';
+      num.style.cssText = 'font-size:11px;width:26px;text-align:right;flex:none';
+      num.textContent = (i + 1) + '.';
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.className = 'field-input';
+      inp.style.flex = '1';
+      inp.maxLength = 200;
+      inp.value = n;
+      inp.disabled = !CAN_EDIT;
+      inp.addEventListener('input', () => { names[i] = inp.value; refreshMeta(); });
+      row.appendChild(num); row.appendChild(inp);
+      if (CAN_EDIT) {
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'btn btn-xs btn-danger-ghost';
+        del.style.flex = 'none';
+        del.textContent = '×';
+        del.title = 'Remove';
+        del.addEventListener('click', () => { names.splice(i, 1); render(); });
+        row.appendChild(del);
+      }
+      rowsEl.appendChild(row);
+    });
+    refreshMeta();
+  }
+
+  // Called by switchTab() on every activation; fetches once.
+  window.loadSecurityTab = async function () {
+    if (loaded) return;
+    try {
+      const r = await fetch(`/shows/${SHOW_ID}/security/names`);
+      const j = await r.json();
+      if (!j.success) throw new Error(j.error || 'load failed');
+      names = j.names || [];
+      savedNames = JSON.stringify(names);
+      loaded = true;
+      render();
+    } catch (e) {
+      emptyEl.textContent = 'Could not load the name list — reload the page to retry.';
+    }
+  };
+
+  window.secAddRow = function (val) {
+    if (names.length >= MAX_NAMES) { alert(`Max ${MAX_NAMES} names.`); return; }
+    names.push(val || '');
+    render();
+    const inputs = rowsEl.querySelectorAll('input');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+  };
+
+  window.secClearAll = function () {
+    if (!names.length) return;
+    if (!confirm('Remove every name from the list? (Not saved until you click Save.)')) return;
+    names = [];
+    render();
+  };
+
+  function appendParsed(parsed) {
+    if (!parsed.length) { bulkMsg.textContent = 'No names found.'; return; }
+    const room = MAX_NAMES - names.length;
+    const cut = parsed.slice(0, room);
+    names = names.concat(cut);
+    render();
+    bulkMsg.textContent = `Added ${cut.length} name${cut.length === 1 ? '' : 's'}` +
+      (parsed.length > cut.length ? ` (${parsed.length - cut.length} over the ${MAX_NAMES} cap dropped)` : '') +
+      ' — not saved yet.';
+  }
+
+  async function postParse(body, isForm) {
+    const opts = { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } };
+    if (isForm) { opts.body = body; }
+    else { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+    const r = await fetch(`/shows/${SHOW_ID}/security/parse`, opts);
+    const j = await r.json();
+    if (!j.success) throw new Error(j.error || 'Parse failed');
+    return j.names;
+  }
+
+  window.secBulkAdd = async function () {
+    const ta = document.getElementById('sec-bulk-paste');
+    if (!ta.value.trim()) { bulkMsg.textContent = 'Nothing to add.'; return; }
+    bulkMsg.textContent = 'Parsing…';
+    try {
+      appendParsed(await postParse({ text: ta.value }, false));
+      ta.value = '';
+    } catch (e) { bulkMsg.textContent = e.message; }
+  };
+
+  window.secCsvImport = async function (input) {
+    if (!input.files || !input.files[0]) return;
+    const fd = new FormData();
+    fd.append('file', input.files[0]);
+    input.value = '';
+    bulkMsg.textContent = 'Parsing CSV…';
+    try { appendParsed(await postParse(fd, true)); }
+    catch (e) { bulkMsg.textContent = e.message; }
+  };
+
+  window.secSaveNames = async function () {
+    const cleaned = names.map(n => n.trim()).filter(n => n);
+    saveBtn.disabled = true;
+    try {
+      const r = await fetch(`/shows/${SHOW_ID}/security/names`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({ names: cleaned }),
+      });
+      const j = await r.json();
+      if (!j.success) throw new Error(j.error || 'Save failed');
+      names = j.names;
+      savedNames = JSON.stringify(names);
+      render();
+      bulkMsg.textContent = 'Saved.';
+    } catch (e) {
+      alert('Save failed: ' + e.message);
+    } finally {
+      saveBtn.disabled = false;
+    }
+  };
+
+  window.addEventListener('beforeunload', (e) => {
+    if (CAN_EDIT && dirty()) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  // The PDF only contains SAVED names — warn before exporting around edits.
+  document.getElementById('sec-export-btn').addEventListener('click', (e) => {
+    if (CAN_EDIT && dirty() &&
+        !confirm('You have unsaved changes — the PDF only includes saved names. Export anyway?')) {
+      e.preventDefault();
+    }
+  });
+
+  // Landing directly on ?tab=security: switchTab never ran, so load now.
+  if (document.getElementById('tab-security').classList.contains('active')) {
+    loadSecurityTab();
+  }
+})();
+</script>
+{% endif %}{# end security_signin_enabled #}
 
 
 {# ════════════════════════════════════════════════════════════════════════════ #}
@@ -2173,11 +2427,11 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
         </div>
         <h3 class="export-card-title">Security Sign-In Sheet</h3>
       </div>
-      <p class="export-card-desc">Personnel sign-in sheet for the security desk — enter or paste the expected names, then print.</p>
+      <p class="export-card-desc">Personnel sign-in sheet for the security desk — names are managed on this show's <strong>Security</strong> tab.</p>
       <div class="export-card-foot">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <a href="{{ url_for('security_signin_page', show_id=show.id) }}" class="btn btn-primary btn-sm">Edit Names</a>
-          <a href="{{ url_for('security_signin_pdf', show_id=show.id) }}" class="btn btn-ghost btn-sm" target="_blank">Export PDF</a>
+          <a href="{{ url_for('security_signin_pdf', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Export PDF</a>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="switchTab('security')">Edit Names</button>
         </div>
       </div>
     </div>
