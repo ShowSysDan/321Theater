@@ -222,7 +222,7 @@
     {% endif %}
     <div class="form-section-body no-pad">
       <table class="data-table">
-        <thead><tr><th>DISPLAY NAME</th><th>USERNAME</th><th>ROLE</th><th>CREATED</th><th>ACTIONS</th></tr></thead>
+        <thead><tr><th>DISPLAY NAME</th><th>USERNAME</th><th>ROLE</th><th>CREATED</th><th>LAST ACTIVE</th><th>ACTIONS</th></tr></thead>
         <tbody>
           {% for u in users %}
           <tr>
@@ -239,6 +239,14 @@
               {% if u.must_change_password %}<span title="This user must set a new password at their next login." style="font-size:10px;background:rgba(250,204,21,.15);color:#FACC15;padding:2px 6px;border-radius:99px;border:1px solid rgba(250,204,21,.3);margin-left:4px">PW Change Due</span>{% endif %}
             </td>
             <td class="text-dim text-sm">{{ (u.created_at|string)[:10] if u.created_at else '—' }}</td>
+            {# Last activity = last_conn_at (refreshed at most every 5 min by
+               the session role-refresh middleware while any tab is open),
+               falling back to last_login for accounts that pre-date the
+               connection tracking. Hover for exact stamps + connection path. #}
+            <td class="text-dim text-sm" style="white-space:nowrap"
+                title="Last activity: {{ (u.last_conn_at|string)[:19] if u.last_conn_at else 'never' }}{% if u.last_conn_path %} (via {{ u.last_conn_path }}){% endif %} · Last login: {{ (u.last_login|string)[:19] if u.last_login else 'never' }}">
+              {{ (u.last_conn_at or u.last_login) | reltime or 'never' }}
+            </td>
             <td>
               <div class="action-btns">
                 {% if user.role == 'admin' %}

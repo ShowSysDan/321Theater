@@ -691,6 +691,54 @@ def dowlongdate_filter(value):
     return f"{d.strftime('%A')} - {d.strftime('%B')} {day}{suffix} {d.year}"
 
 
+@app.template_filter('reltime')
+def reltime_filter(value):
+    """Relative time for a stored timestamp: 'just now', '12 min ago',
+    '3 h ago', 'yesterday', '5 days ago', then the plain date. Used by the
+    Settings user list's Last Active column. Empty/None → '' so callers can
+    do `... | reltime or '—'`.
+
+    DB timestamps come from CURRENT_TIMESTAMP, which is UTC on SQLite but the
+    server's local clock on PostgreSQL — rather than guess the backend/zone,
+    the delta is computed against both clocks and the smaller magnitude wins
+    (the wrong clock is off by a whole timezone offset, the right one by
+    round-trip seconds). Never raises; unparseable values pass through."""
+    if not value:
+        return ''
+    dt = None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        s = str(value).strip()
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S'):
+            try:
+                dt = datetime.strptime(s[:19], fmt)
+                break
+            except ValueError:
+                continue
+    if dt is None:
+        return str(value)
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    deltas = [(datetime.utcnow() - dt), (datetime.now() - dt)]
+    secs = min((d.total_seconds() for d in deltas), key=abs)
+    if secs < 0:
+        secs = 0
+    if secs < 90:
+        return 'just now'
+    if secs < 3600:
+        return f'{int(secs // 60)} min ago'
+    if secs < 86400:
+        h = int(secs // 3600)
+        return f'{h} h ago'
+    days = int(secs // 86400)
+    if days == 1:
+        return 'yesterday'
+    if days < 31:
+        return f'{days} days ago'
+    return dt.strftime('%Y-%m-%d')
+
+
 DATABASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'advance.db')
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 
@@ -699,7 +747,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.44.0'
+APP_VERSION = '2.45.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -8508,7 +8556,8 @@ def settings():
         '       is_readonly, is_scheduler, is_asset_manager, '
         '       is_document_viewer, viewer_venues, viewer_doc_types, '
         '       viewer_labor_overview, viewer_show_calendar, '
-        '       is_app_user, is_app_admin, is_locked, must_change_password '
+        '       is_app_user, is_app_admin, is_locked, must_change_password, '
+        '       last_login, last_conn_at, last_conn_path '
         'FROM users ORDER BY display_name'
     ).fetchall()
     # Decode the viewer JSON columns so the template can use |tojson cleanly
