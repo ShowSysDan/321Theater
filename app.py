@@ -672,6 +672,25 @@ def dowdate_filter(value):
     return f"{d.strftime('%A')}, {d.month}/{d.day}/{d.strftime('%y')}"
 
 
+@app.template_filter('dowlongdate')
+def dowlongdate_filter(value):
+    """Long-form paperwork date with weekday, e.g. 2026-06-14 ->
+    'Sunday - June 14th 2026'. Used for section headers (production schedule
+    day banners) where the date IS the heading. Same lenient contract as
+    `dowdate`: unparseable free text passes through unchanged, None -> ''."""
+    d = _as_date(value)
+    if d is None:
+        if value is None:
+            return ''
+        return value if isinstance(value, str) else str(value)
+    day = d.day
+    if 10 <= day % 100 <= 20:
+        suffix = 'th'
+    else:
+        suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(day % 10, 'th')
+    return f"{d.strftime('%A')} - {d.strftime('%B')} {day}{suffix} {d.year}"
+
+
 DATABASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'advance.db')
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 
@@ -680,7 +699,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.43.1'
+APP_VERSION = '2.44.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -3416,6 +3435,24 @@ def _schedule_span_dates(load_in, load_out, perf_dates):
         except (ValueError, TypeError):
             pass
     return sorted(dates)
+
+
+def _show_span_dates(db, show_row):
+    """Sorted ISO dates a show/event covers — the same load-in → load-out ∪
+    performance-dates span the production schedule uses, falling back to the
+    single legacy show_date. For paperwork that prints one column or section
+    per day (e.g. the security sign-in sheet's per-day initials columns)."""
+    perf_rows = db.execute(
+        'SELECT perf_date FROM show_performances '
+        'WHERE show_id=? AND perf_date IS NOT NULL', (show_row['id'],)).fetchall()
+    dates = _schedule_span_dates(show_row['load_in_date'],
+                                 show_row['load_out_date'],
+                                 [r['perf_date'] for r in perf_rows])
+    if not dates:
+        d = _as_date(show_row['show_date'])
+        if d:
+            dates = [d.isoformat()]
+    return dates
 
 
 def _build_schedule_days(db, show_id, show_row=None):
@@ -11605,6 +11642,45 @@ def _mix_hex(hex_color, factor, toward='#ffffff'):
     return '#' + ''.join(parts)
 
 
+def _rel_luminance(hex_color):
+    """WCAG relative luminance of a #rrggbb color (0.0 = black, 1.0 = white)."""
+    h = hex_color.lstrip('#')
+    lin = []
+    for i in (0, 2, 4):
+        c = int(h[i:i + 2], 16) / 255.0
+        lin.append(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+
+def _contrast_ratio(hex_a, hex_b):
+    """WCAG contrast ratio between two #rrggbb colors (1.0 – 21.0)."""
+    la, lb = _rel_luminance(hex_a), _rel_luminance(hex_b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _contrast_text(bg_hex, light='#ffffff', dark='#1a1a1a'):
+    """Whichever of `light`/`dark` reads better on top of bg_hex."""
+    return (light if _contrast_ratio(bg_hex, light) >= _contrast_ratio(bg_hex, dark)
+            else dark)
+
+
+def _ensure_contrast(fg_hex, bg_hex, min_ratio=4.5):
+    """Return fg_hex nudged toward white or black — whichever direction helps —
+    just far enough to reach min_ratio contrast against bg_hex, keeping as much
+    of the original hue as possible. Falls back to the pure pole if even a full
+    blend can't get there. Colors that already pass return unchanged, so the
+    long-standing default navy/gold palette keeps its exact historical values."""
+    if _contrast_ratio(fg_hex, bg_hex) >= min_ratio:
+        return fg_hex
+    pole = '#ffffff' if _contrast_text(bg_hex) == '#ffffff' else '#000000'
+    for step in range(1, 21):
+        cand = _mix_hex(fg_hex, step / 20.0, toward=pole)
+        if _contrast_ratio(cand, bg_hex) >= min_ratio:
+            return cand
+    return pole
+
+
 def _get_venue_pdf_colors(db, venue_name):
     """Accent palette for a venue's PDF paperwork, or None → template defaults.
 
@@ -11629,7 +11705,7 @@ def _get_venue_pdf_colors(db, venue_name):
         return None
     p = p or '#1a4a7a'
     s = s or '#B8840A'
-    return {
+    palette = {
         'primary':          p,
         'primary_mid':      _mix_hex(p, 0.18),                    # ≈ #3a6ea5
         'primary_bright':   _mix_hex(p, 0.35),                    # ≈ #4a90d9
@@ -11642,8 +11718,37 @@ def _get_venue_pdf_colors(db, venue_name):
         'secondary_soft':   _mix_hex(s, 0.55),                    # ≈ #e8c870
         'secondary_bg':     _mix_hex(s, 0.90),                    # ≈ #fdf6e3
         'secondary_bg2':    _mix_hex(s, 0.96),                    # ≈ #fff8e8
-        'secondary_dark':   _mix_hex(s, 0.40, toward='#000000'),  # ≈ #7a5a00
     }
+    # ── Contrast-aware text colors (2.44.0) ─────────────────────────────────
+    # Text printed ON TOP of a themed color must stay readable whatever hues a
+    # venue picks (a grey secondary on a red primary was unreadable). Each key
+    # starts from the historical tint and is nudged toward white/black only as
+    # far as WCAG contrast requires, so the default navy/gold values are
+    # reproduced exactly. Thresholds: 4.5 for body-size text, 3.0 for the
+    # large/bold accents (banner dates, total amounts, doc-type labels).
+    palette.update({
+        # Text sitting directly on the primary bar (section heads, day
+        # banners, total bars, sign-in masthead). Was hardcoded #fff.
+        'on_primary':        _contrast_text(p),
+        # Muted/secondary text on the primary bar (column legends, 12-hour
+        # time hints). Was primary_soft / 85% white.
+        'on_primary_soft':   _ensure_contrast(palette['primary_soft'], p, 3.0),
+        # The secondary-hued accent on the primary bar (grand-total amounts,
+        # the day banner's date, the masthead doc-type). Was secondary_bright.
+        'on_primary_accent': _ensure_contrast(palette['secondary_bright'], p, 3.0),
+        # Primary-hued TEXT on white / the light primary tints (section
+        # titles, day-group rows, subtotal bars). Was the raw primary.
+        'primary_text':      _ensure_contrast(p, '#ffffff', 4.5),
+        # Secondary-hued accent TEXT on white (doc-type, version, est. tags).
+        # Was the raw secondary; 3.0 because these are large/bold accents.
+        'secondary_text':    _ensure_contrast(s, '#ffffff', 3.0),
+        # Dark-on-tint text (OT rows, estimate notes) — darken further when
+        # a light secondary would leave it washed out on its own tint.
+        'secondary_dark':    _ensure_contrast(
+            _mix_hex(s, 0.40, toward='#000000'),                  # ≈ #7a5a00
+            palette['secondary_bg'], 4.5),
+    })
+    return palette
 
 
 @app.route('/settings/venue-colors', methods=['POST'])
@@ -13325,6 +13430,10 @@ def _calc_labor_cost_for_show(db, show_id):
             'is_estimate': is_estimate,
             'is_training': bool(r['is_training_shift']),
             'date_iso': dv.isoformat() if dv else '',
+            # Unpaid lunch/break windows, formatted for paperwork. The hours
+            # figure already has these subtracted (_calc_hours), so the
+            # estimate PDFs must show them or Out−In won't reconcile.
+            'breaks': _format_break_windows(dict(r)),
         })
 
     slot_counters = {}
@@ -13381,6 +13490,7 @@ def _calc_labor_cost_for_show(db, show_id):
             'tech_name': tech_name,
             'in_time': r['in_time'],
             'out_time': r['out_time'],
+            'breaks': p['breaks'],
             'hours': round(p['straight'] if not p['is_training'] else hours, 2),
             'hourly_rate': rate,
             'base_rate': base_rate,
@@ -13401,6 +13511,7 @@ def _calc_labor_cost_for_show(db, show_id):
                 'tech_name': tech_name,
                 'in_time': '',
                 'out_time': '',
+                'breaks': '',
                 'hours': round(p['ot'], 2),
                 'hourly_rate': ot_rate,
                 'base_rate': base_rate,
@@ -13428,6 +13539,7 @@ def _calc_labor_cost_for_show(db, show_id):
                 'tech_name': '',
                 'in_time': '',
                 'out_time': '',
+                'breaks': '',
                 'hours': crew_count,
                 'hourly_rate': cost_each,
                 'line_total': line_total,
@@ -13600,14 +13712,18 @@ def _format_break_windows(d):
 
 def _post_show_labor_rows(db, show_id):
     """Fetch post_show_labor rows with position_name + computed hours/line_cost.
-    Hours come from the ACTUAL (billable) times; rate from the frozen snapshot."""
+    Hours come from the ACTUAL (billable) times; rate from the frozen snapshot.
+    Manually added hours lines (is_added_hours — prep work etc., 2.44.0) carry
+    their hours directly in manual_hours instead of in/out times."""
     rows = db.execute("""
         SELECT psl.*, jp.name AS position_name,
-               lr.scheduled_crew_member_id AS src_crew_member_id
+               lr.scheduled_crew_member_id AS src_crew_member_id,
+               cm.name AS crew_name
         FROM post_show_labor psl
         LEFT JOIN job_positions jp ON jp.id = psl.position_id
         LEFT JOIN position_categories pc ON pc.id = jp.category_id
         LEFT JOIN labor_requests lr ON lr.id = psl.source_request_id
+        LEFT JOIN crew_members cm ON cm.id = psl.crew_member_id
         WHERE psl.show_id = ?
           AND COALESCE(lr.is_training_shift, 0) = 0
         ORDER BY (psl.work_date IS NULL), psl.work_date,
@@ -13616,9 +13732,12 @@ def _post_show_labor_rows(db, show_id):
     out = []
     for r in rows:
         d = _normalize_row_dates(dict(r))
-        hours = _calc_hours(d.get('in_time'), d.get('out_time'),
-                            d.get('break_start'), d.get('break_end'),
-                            d.get('break2_start'), d.get('break2_end'))
+        if d.get('is_added_hours'):
+            hours = max(0.0, float(d.get('manual_hours') or 0))
+        else:
+            hours = _calc_hours(d.get('in_time'), d.get('out_time'),
+                                d.get('break_start'), d.get('break_end'),
+                                d.get('break2_start'), d.get('break2_end'))
         rate = float(d.get('pay_rate_snapshot') or 0)
         d['hours'] = round(hours, 2)
         d['line_cost'] = round(hours * rate, 2)
@@ -13670,6 +13789,13 @@ def _calc_post_show_labor_cost(db, show_id):
     crosses the threshold. The accumulator resets each Monday.
     The folded-in per-crew spread stays at 1× on the OT portion — parking
     passes never earn the time-and-a-half premium.
+
+    Manually ADDED hours (is_added_hours — prep work billed weeks/months out,
+    2.44.0) always bill at straight time and are EXCLUDED from the overtime
+    accumulator in both directions: they never bill at 1.5× themselves and
+    never push a technician's regular show shifts over the 40 h threshold.
+    They also don't count as billed crew for per-crew extras and never absorb
+    the folded-in spread — a prep line must not pick up a parking charge.
     """
     rows = _post_show_labor_rows(db, show_id)
     hide = _post_show_hide_billable(db, show_id)
@@ -13678,13 +13804,16 @@ def _calc_post_show_labor_cost(db, show_id):
         sum(float(it['cost_per_crew'] or 0) for it in billable_items), 2)
 
     # Split each shift's actual hours into straight / overtime per technician
-    # per Monday–Sunday work week.
+    # per Monday–Sunday work week. Manually added hours lines are left out of
+    # the allocator entirely (always straight, never accrue).
     # Identity: the scheduling link's crew member when the line was pulled from
     # the schedule, else the sched_crew_name snapshot, else the per-position
     # slot heuristic (see _ot_shift_key).
     slot_counters = {}
+    ot_idx = [i for i, d in enumerate(rows) if not d.get('is_added_hours')]
     shifts = []
-    for d in rows:
+    for i in ot_idx:
+        d = rows[i]
         shifts.append({
             'key': _ot_shift_key(slot_counters,
                                  d.get('src_crew_member_id'),
@@ -13695,12 +13824,14 @@ def _calc_post_show_labor_cost(db, show_id):
             'in_time': _normalize_perf_time(d.get('in_time')),
             'hours': d['hours'],
         })
-    splits = _allocate_overtime(shifts)
+    splits_all = [(rows[i]['hours'], 0.0) for i in range(len(rows))]
+    for j, split in enumerate(_allocate_overtime(shifts)):
+        splits_all[ot_idx[j]] = split
 
     lines = []
     total = 0.0
     billed_count = 0
-    for d, (straight, ot) in zip(rows, splits):
+    for d, (straight, ot) in zip(rows, splits_all):
         hours = d['hours']
         base_rate = float(d.get('pay_rate_snapshot') or 0)
         rate = base_rate
@@ -13711,12 +13842,13 @@ def _calc_post_show_labor_cost(db, show_id):
         # a penny or two, which never surfaces to the client). The spread is a
         # flat pass-through, so it rides on both the straight and OT portions
         # at 1× — only the labor rate is multiplied by 1.5.
-        if hide and per_crew_total and hours > 0:
+        added = bool(d.get('is_added_hours'))
+        if hide and per_crew_total and hours > 0 and not added:
             spread = per_crew_total / hours
             rate = round(base_rate + spread, 2)
         cost = round(straight * rate, 2)
         total += cost
-        if hours > 0:
+        if hours > 0 and not added:
             billed_count += 1
         lines.append({
             'id': d['id'],
@@ -13724,10 +13856,12 @@ def _calc_post_show_labor_cost(db, show_id):
             'position_name': d.get('position_name') or '',
             'in_time': d.get('in_time') or '',
             'out_time': d.get('out_time') or '',
-            'breaks': _format_break_windows(d),
+            'breaks': _format_break_windows(d) if not added else '',
             'hours': round(straight, 2),
             'hourly_rate': rate,
             'line_total': cost,
+            'is_added_hours': added,
+            'justification': (d.get('notes') or '') if added else '',
         })
         if ot > 0.0005:
             ot_rate = round(base_rate * OT_RATE_MULTIPLIER + spread, 2)
@@ -13954,6 +14088,12 @@ def set_post_show_hide_billable(show_id):
 @app.route('/shows/<int:show_id>/post-show-labor', methods=['POST'])
 @login_required
 def add_post_show_labor(show_id):
+    """Add a settlement labor line. Two shapes:
+      • default: an empty extra-crew line the PM fills with actual times.
+      • is_added_hours (2.44.0): manually added billable hours (e.g. prep work
+        weeks before load-in) — technician + position (so the rate resolves),
+        a direct hours figure, and a REQUIRED justification (stored in notes).
+        These bill at straight time and never touch the overtime accumulator."""
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     if session.get('is_restricted') or session.get('is_readonly'):
@@ -13966,21 +14106,44 @@ def add_post_show_labor(show_id):
             position_id = int(position_id)
         except (TypeError, ValueError):
             position_id = None
+    crew_member_id = data.get('crew_member_id') or None
+    if crew_member_id:
+        try:
+            crew_member_id = int(crew_member_id)
+        except (TypeError, ValueError):
+            crew_member_id = None
+    is_added = 1 if data.get('is_added_hours') else 0
+    manual_hours = None
+    notes = (data.get('notes') or '').strip()
+    if is_added:
+        try:
+            manual_hours = round(float(data.get('manual_hours')), 2)
+        except (TypeError, ValueError):
+            manual_hours = None
+        if not manual_hours or manual_hours <= 0:
+            db.close()
+            return jsonify({'success': False,
+                            'error': 'Added hours require an hours figure greater than 0.'}), 400
+        if not notes:
+            db.close()
+            return jsonify({'success': False,
+                            'error': 'Added hours require a justification.'}), 400
     rate = data.get('pay_rate_snapshot')
     if rate in (None, ''):
-        rate = _resolve_labor_rate(db, position_id, None)
+        rate = _resolve_labor_rate(db, position_id, crew_member_id)
     else:
         try:
             rate = float(rate)
         except (TypeError, ValueError):
-            rate = _resolve_labor_rate(db, position_id, None)
+            rate = _resolve_labor_rate(db, position_id, crew_member_id)
     order = _max_sort_order(db, 'post_show_labor', 'show_id=?', (show_id,))
     cur = db.execute("""
         INSERT INTO post_show_labor
             (show_id, position_id, work_date,
              in_time, out_time, break_start, break_end, break2_start, break2_end,
-             pay_rate_snapshot, notes, sort_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             pay_rate_snapshot, notes, is_added_hours, manual_hours,
+             crew_member_id, sort_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (show_id, position_id, data.get('work_date') or None,
           _normalize_perf_time(data.get('in_time', '')),
           _normalize_perf_time(data.get('out_time', '')),
@@ -13988,13 +14151,21 @@ def add_post_show_labor(show_id):
           _normalize_perf_time(data.get('break_end', '')),
           _normalize_perf_time(data.get('break2_start', '')),
           _normalize_perf_time(data.get('break2_end', '')),
-          rate, (data.get('notes') or '').strip(), order))
+          rate, notes, is_added, manual_hours, crew_member_id, order))
     pid = cur.lastrowid
-    log_audit(db, 'POST_SHOW_LABOR_ADD', 'post_show_labor', pid, show_id=show_id)
+    log_audit(db, 'POST_SHOW_LABOR_ADD', 'post_show_labor', pid, show_id=show_id,
+              detail=(f'added_hours={manual_hours}; crew={crew_member_id}; '
+                      f'justification={notes[:200]}') if is_added else None)
     db.commit()
+    row = None
+    if is_added:
+        rows = _post_show_labor_rows(db, show_id)
+        row = next((r for r in rows if r['id'] == pid), None)
     db.close()
-    syslog_logger.info(f"POST_SHOW_LABOR_ADD show_id={show_id} id={pid} by={session.get('username')}")
-    return jsonify({'success': True, 'id': pid})
+    syslog_logger.info(
+        f"POST_SHOW_LABOR_ADD show_id={show_id} id={pid} added_hours={is_added} "
+        f"by={session.get('username')}")
+    return jsonify({'success': True, 'id': pid, 'row': row})
 
 
 @app.route('/shows/<int:show_id>/post-show-labor/<int:pid>', methods=['PUT'])
@@ -14006,7 +14177,15 @@ def update_post_show_labor(show_id, pid):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     data = request.get_json(force=True) or {}
     db = get_db()
+    existing = db.execute(
+        'SELECT id, is_added_hours, position_id, crew_member_id '
+        'FROM post_show_labor WHERE id=? AND show_id=?',
+        (pid, show_id)).fetchone()
+    if not existing:
+        db.close()
+        return jsonify({'success': False, 'error': 'Row not found.'}), 404
     updates, params = [], []
+    pidv = crew_v = None
     if 'position_id' in data:
         pidv = data.get('position_id')
         try:
@@ -14014,6 +14193,20 @@ def update_post_show_labor(show_id, pid):
         except (TypeError, ValueError):
             pidv = None
         updates.append('position_id=?'); params.append(pidv)
+    if 'crew_member_id' in data:
+        crew_v = data.get('crew_member_id')
+        try:
+            crew_v = int(crew_v) if crew_v else None
+        except (TypeError, ValueError):
+            crew_v = None
+        updates.append('crew_member_id=?'); params.append(crew_v)
+    if 'manual_hours' in data:
+        try:
+            mh = round(float(data.get('manual_hours')), 2)
+            mh = mh if mh > 0 else None
+        except (TypeError, ValueError):
+            mh = None
+        updates.append('manual_hours=?'); params.append(mh)
     for f in _PSL_TIME_FIELDS:
         if f in data:
             updates.append(f'{f}=?'); params.append(_normalize_perf_time(data.get(f, '')))
@@ -14028,6 +14221,15 @@ def update_post_show_labor(show_id, pid):
         except (TypeError, ValueError):
             rv = None
         updates.append('pay_rate_snapshot=?'); params.append(rv)
+    elif existing['is_added_hours'] and ('position_id' in data or 'crew_member_id' in data):
+        # Added-hours lines promise "the rate calculates out correctly":
+        # re-resolve the snapshot whenever the technician or position changes
+        # and the client didn't pin an explicit rate. Fields absent from the
+        # payload keep the row's current value for the lookup.
+        eff_pos = pidv if 'position_id' in data else existing['position_id']
+        eff_crew = crew_v if 'crew_member_id' in data else existing['crew_member_id']
+        updates.append('pay_rate_snapshot=?')
+        params.append(_resolve_labor_rate(db, eff_pos, eff_crew))
     if not updates:
         db.close()
         return jsonify({'success': False, 'error': 'No changes.'}), 400
@@ -21851,6 +22053,7 @@ security_module.register(
     get_venue_pdf_colors=_get_venue_pdf_colors,
     get_logo_for_venue=_get_logo_for_venue,
     safe_content_disposition=_safe_content_disposition,
+    show_span_dates=_show_span_dates,
 )
 
 

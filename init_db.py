@@ -562,6 +562,9 @@ CREATE TABLE IF NOT EXISTS post_show_labor (
     break2_end         TEXT DEFAULT '',
     pay_rate_snapshot  REAL DEFAULT NULL,
     notes              TEXT DEFAULT '',
+    is_added_hours     INTEGER DEFAULT 0,
+    manual_hours       REAL DEFAULT NULL,
+    crew_member_id     INTEGER,
     sort_order         INTEGER DEFAULT 0,
     created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -1919,6 +1922,10 @@ def migrate_db():
         'ALTER TABLE show_attachments ADD COLUMN deleted_at TIMESTAMP DEFAULT NULL',
         'ALTER TABLE show_attachments ADD COLUMN deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL',
         'ALTER TABLE show_attachments ADD COLUMN is_compressed INTEGER DEFAULT 0',
+        # Manually added billable hours (prep work etc.) — 2.44.0
+        'ALTER TABLE post_show_labor ADD COLUMN is_added_hours INTEGER DEFAULT 0',
+        'ALTER TABLE post_show_labor ADD COLUMN manual_hours REAL DEFAULT NULL',
+        'ALTER TABLE post_show_labor ADD COLUMN crew_member_id INTEGER',
     ]:
         try:
             conn.execute(alter_sql)
@@ -3278,6 +3285,9 @@ CREATE TABLE IF NOT EXISTS post_show_labor (
     break2_end         TEXT DEFAULT '',
     pay_rate_snapshot  REAL DEFAULT NULL,
     notes              TEXT DEFAULT '',
+    is_added_hours     INTEGER DEFAULT 0,
+    manual_hours       REAL DEFAULT NULL,
+    crew_member_id     INTEGER,
     sort_order         INTEGER DEFAULT 0,
     created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -4271,6 +4281,10 @@ def migrate_db_postgres():
             f'ALTER TABLE "{app_schema}".show_attachments ADD COLUMN IF NOT EXISTS deleted_by INTEGER',
             f'ALTER TABLE "{app_schema}".show_attachments ADD COLUMN IF NOT EXISTS is_compressed INTEGER DEFAULT 0',
             f'CREATE INDEX IF NOT EXISTS idx_show_attachments_show ON "{app_schema}".show_attachments(show_id)',
+            # Manually added billable hours (prep work etc.) — 2.44.0
+            f'ALTER TABLE "{app_schema}".post_show_labor ADD COLUMN IF NOT EXISTS is_added_hours INTEGER DEFAULT 0',
+            f'ALTER TABLE "{app_schema}".post_show_labor ADD COLUMN IF NOT EXISTS manual_hours REAL DEFAULT NULL',
+            f'ALTER TABLE "{app_schema}".post_show_labor ADD COLUMN IF NOT EXISTS crew_member_id INTEGER',
         ]
 
         shared_alters = [

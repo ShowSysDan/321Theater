@@ -17,6 +17,10 @@
 {% set C2_BG = _vc.secondary_bg if _vc else '#fdf6e3' %}
 {% set C2_BRIGHT = _vc.secondary_bright if _vc else '#f0c44a' %}
 {% set C2_DARK = _vc.secondary_dark if _vc else '#7a5a00' %}
+{% set C1_ON = _vc.on_primary if _vc else '#fff' %}
+{% set C1_TEXT = _vc.primary_text if _vc else '#1a4a7a' %}
+{% set C2_ON = _vc.on_primary_accent if _vc else '#f0c44a' %}
+{% set C2_TEXT = _vc.secondary_text if _vc else '#B8840A' %}
 
 <style>
   @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
@@ -26,16 +30,16 @@
      under the Dr. Phillips Center identity. */
   body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; }
   .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; border-bottom: 2.5px solid {{ C1 }}; padding-bottom: 14px; }
-  .doc-type { font-size: 9px; font-weight: bold; color: {{ C2 }}; letter-spacing: 0.12em; text-transform: uppercase; }
-  .org-name { font-size: 18px; font-weight: 900; color: {{ C1 }}; letter-spacing: 0.01em; margin-top: 2px; }
+  .doc-type { font-size: 9px; font-weight: bold; color: {{ C2_TEXT }}; letter-spacing: 0.12em; text-transform: uppercase; }
+  .org-name { font-size: 18px; font-weight: 900; color: {{ C1_TEXT }}; letter-spacing: 0.01em; margin-top: 2px; }
   .org-sub  { font-size: 7.5px; color: #555; letter-spacing: 0.08em; text-transform: uppercase; margin-top: 3px; }
   .doc-title { text-align: right; padding-left: 12px; }
-  .doc-title h1 { font-size: 22px; font-weight: 900; color: {{ C1 }}; margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 0.05em; }
+  .doc-title h1 { font-size: 22px; font-weight: 900; color: {{ C1_TEXT }}; margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 0.05em; }
   .doc-title .doc-date { font-size: 10px; color: #555; }
   .show-block { background: #f5f5f5; border-left: 3px solid {{ C2 }}; padding: 10px 14px; margin-bottom: 20px; }
-  .show-name { font-size: 15px; font-weight: 700; color: {{ C1 }}; }
+  .show-name { font-size: 15px; font-weight: 700; color: {{ C1_TEXT }}; }
   .show-meta { font-size: 10px; color: #666; margin-top: 4px; display: flex; gap: 20px; }
-  .section-title { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: {{ C1 }}; border-bottom: 1px solid {{ C1 }}; padding-bottom: 4px; margin: 20px 0 8px 0; }
+  .section-title { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: {{ C1_TEXT }}; border-bottom: 1px solid {{ C1 }}; padding-bottom: 4px; margin: 20px 0 8px 0; }
   table { width: 100%; border-collapse: collapse; }
   th { font-size: 9px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: #666; padding: 5px 8px; border-bottom: 1px solid #ddd; text-align: left; }
   td { padding: 6px 8px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
@@ -45,11 +49,12 @@
   /* 12-hour hint after 24-hour times (dualtime filter) */
   .t12 { font-size: 0.82em; font-weight: normal; color: #888; white-space: nowrap; }
   .total-row td { font-weight: 700; border-top: 2px solid #ddd; border-bottom: none; padding-top: 8px; }
-  .labor-day-row td { font-weight: 700; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: {{ C1 }}; background: {{ C1_BG2 }}; border-bottom: 1px solid #ddd; padding: 5px 8px; }
+  .labor-day-row td { font-weight: 700; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: {{ C1_TEXT }}; background: {{ C1_BG2 }}; border-bottom: 1px solid #ddd; padding: 5px 8px; }
+  .added-tag { display: inline-block; font-size: 8px; font-weight: 700; color: {{ C2_TEXT }}; letter-spacing: 0.05em; text-transform: uppercase; margin-left: 4px; }
   .ot-row td { color: {{ C2_DARK }}; background: {{ C2_BG }}; }
-  .grand-total { background: {{ C1 }}; color: #fff; padding: 12px 16px; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
+  .grand-total { background: {{ C1 }}; color: {{ C1_ON }}; padding: 12px 16px; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
   .grand-total-label { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
-  .grand-total-amount { font-size: 20px; font-weight: 700; color: {{ C2_BRIGHT }}; }
+  .grand-total-amount { font-size: 20px; font-weight: 700; color: {{ C2_ON }}; }
   .footer { margin-top: 24px; border-top: 1px solid #e0e0e0; padding-top: 10px; font-size: 9px; color: #aaa; text-align: center; }
   .badge { display: inline-block; background: #f0f0f0; color: #555; font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 600; letter-spacing: 0.05em; }
   .unscheduled { color: #bbb; }
@@ -193,7 +198,7 @@
       <tr class="labor-day-row"><td colspan="7">{{ l.work_date or 'Unscheduled' }}</td></tr>
       {% endif %}
       <tr{% if l.is_overtime %} class="ot-row"{% endif %}>
-        <td>{{ l.position_name or '—' }}</td>
+        <td>{{ l.position_name or '—' }}{% if l.is_added_hours %} <span class="added-tag">added hours</span>{% if l.justification %}<div class="text-dim" style="font-size:9px">{{ l.justification }}</div>{% endif %}{% endif %}</td>
         <td class="num text-dim">{{ l.in_time | dualtime or '—' }}</td>
         <td class="num text-dim">{{ l.out_time | dualtime or '—' }}</td>
         <td class="text-dim">{{ l.breaks or '—' }}</td>

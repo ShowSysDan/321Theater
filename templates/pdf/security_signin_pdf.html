@@ -5,7 +5,9 @@
 
   Security Sign-In Sheet — printed list that sits at the security desk on
   show day. One row per expected person with blank signature/time cells,
-  plus a few blank walk-up rows. Rendered by security_module.py.
+  plus a few blank walk-up rows. Multi-day shows/events instead print one
+  initials column per calendar day (day_groups — chunked by the module so a
+  long run wraps into a follow-on table). Rendered by security_module.py.
 #}
 <!DOCTYPE html>
 <html>
@@ -20,6 +22,10 @@
 {% set C1_BG2 = _vc.primary_bg2 if _vc else '#f4f7fa' %}
 {% set C2 = _vc.secondary if _vc else '#B8840A' %}
 {% set C2_BRIGHT = _vc.secondary_bright if _vc else '#f0c44a' %}
+{% set C1_ON = _vc.on_primary if _vc else '#fff' %}
+{% set C1_ON_SOFT = _vc.on_primary_soft if _vc else 'rgba(255,255,255,0.85)' %}
+{% set C1_TEXT = _vc.primary_text if _vc else '#1a4a7a' %}
+{% set C2_ON = _vc.on_primary_accent if _vc else '#f0c44a' %}
 
 <style>
   @page { size: A4; margin: 16mm 14mm 16mm 14mm; }
@@ -27,17 +33,17 @@
   body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; }
 
   /* Venue-colored masthead: show name + date front and center for the desk. */
-  .masthead { background: {{ C1 }}; color: #fff; padding: 14px 18px; display: flex; justify-content: space-between; align-items: center; }
-  .masthead .doc-type { font-size: 9px; font-weight: bold; color: {{ C2_BRIGHT }}; letter-spacing: 0.14em; text-transform: uppercase; }
+  .masthead { background: {{ C1 }}; color: {{ C1_ON }}; padding: 14px 18px; display: flex; justify-content: space-between; align-items: center; }
+  .masthead .doc-type { font-size: 9px; font-weight: bold; color: {{ C2_ON }}; letter-spacing: 0.14em; text-transform: uppercase; }
   .masthead .show-name { font-size: 21px; font-weight: 900; margin-top: 3px; letter-spacing: 0.01em; }
-  .masthead .show-meta { font-size: 11px; margin-top: 4px; color: rgba(255,255,255,0.85); }
+  .masthead .show-meta { font-size: 11px; margin-top: 4px; color: {{ C1_ON_SOFT }}; }
   .masthead .logo-box { text-align: right; padding-left: 14px; }
 
   .org-line { border-bottom: 2.5px solid {{ C2 }}; padding: 6px 2px 7px; font-size: 8.5px; color: #555; letter-spacing: 0.08em; text-transform: uppercase; display: flex; justify-content: space-between; }
 
   table { width: 100%; border-collapse: collapse; margin-top: 14px; }
   thead { display: table-header-group; }  /* repeat header on every page */
-  th { font-size: 9px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: #fff; background: {{ C1 }}; padding: 6px 9px; text-align: left; }
+  th { font-size: 9px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: {{ C1_ON }}; background: {{ C1 }}; padding: 6px 9px; text-align: left; }
   td { padding: 0 9px; border-bottom: 1px solid #d8d8d8; height: 30px; vertical-align: middle; }
   tr:nth-child(even) td { background: {{ C1_BG2 }}; }
   td.rownum { width: 30px; text-align: right; color: #999; font-size: 9px; }
@@ -45,7 +51,12 @@
   td.sig-cell { border-left: 1px solid #e4e4e4; }
   td.time-cell { width: 70px; border-left: 1px solid #e4e4e4; }
   .walkup-row td.name-cell { font-weight: normal; }
-  .walkup-head td { background: {{ C1_BG }}; color: {{ C1 }}; font-size: 8.5px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; height: 20px; border-bottom: 1px solid #ccc; }
+  .walkup-head td { background: {{ C1_BG }}; color: {{ C1_TEXT }}; font-size: 8.5px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; height: 20px; border-bottom: 1px solid #ccc; }
+
+  /* Multi-day: one initials column per calendar day (2.44.0) */
+  th.day-col { text-align: center; white-space: nowrap; }
+  td.day-cell { border-left: 1px solid #e4e4e4; }
+  .initials-note { margin-top: 8px; font-size: 9px; color: #777; }
 
   .empty { color: #888; font-size: 11px; padding: 24px 0 8px; text-align: center; }
   .footer { margin-top: 18px; border-top: 1px solid #e0e0e0; padding-top: 8px; font-size: 9px; color: #aaa; text-align: center; }
@@ -58,8 +69,9 @@
       <div class="doc-type">Security Sign-In Sheet</div>
       <div class="show-name">{{ show.name }}</div>
       <div class="show-meta">
-        {% if show.show_date %}{{ show.show_date | dowdate or show.show_date }}{% endif %}
-        {% if show.venue %}{% if show.show_date %} &nbsp;·&nbsp; {% endif %}{{ show.venue }}{% endif %}
+        {% if day_groups %}{{ span_first | dowdate }} – {{ span_last | dowdate }}
+        {% elif show.show_date %}{{ show.show_date | dowdate or show.show_date }}{% endif %}
+        {% if show.venue %}{% if day_groups or show.show_date %} &nbsp;·&nbsp; {% endif %}{{ show.venue }}{% endif %}
       </div>
     </div>
     {% if logo_data %}
@@ -73,6 +85,46 @@
     <span>Generated {{ generated_date }}</span>
   </div>
 
+  {% if day_groups %}
+  {# ── Multi-day: one initials column per day; a long run wraps into a
+        follow-on table (same names) for the remaining days. ── #}
+  {% for group in day_groups %}
+  {% set ncols = 2 + group | length %}
+  <table>
+    <thead>
+      <tr>
+        <th style="text-align:right">#</th>
+        <th>Name</th>
+        {% for c in group %}<th class="day-col">{{ c.label }}</th>{% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for n in names %}
+      <tr>
+        <td class="rownum">{{ loop.index }}</td>
+        <td class="name-cell">{{ n }}</td>
+        {% for c in group %}<td class="day-cell"></td>{% endfor %}
+      </tr>
+      {% endfor %}
+      {% if not names %}
+      <tr><td colspan="{{ ncols }}" class="empty">No personnel names have been entered for this show.</td></tr>
+      {% endif %}
+      {% if blank_rows %}
+      <tr class="walkup-head"><td colspan="{{ ncols }}">Additional personnel (print name)</td></tr>
+      {% for i in range(blank_rows) %}
+      <tr class="walkup-row">
+        <td class="rownum">{{ (names | length) + loop.index }}</td>
+        <td class="name-cell"></td>
+        {% for c in group %}<td class="day-cell"></td>{% endfor %}
+      </tr>
+      {% endfor %}
+      {% endif %}
+    </tbody>
+  </table>
+  {% endfor %}
+  <div class="initials-note">Multi-day event — initial the column for each day worked.</div>
+
+  {% else %}
   <table>
     <thead>
       <tr>
@@ -107,6 +159,7 @@
       {% endif %}
     </tbody>
   </table>
+  {% endif %}
 
   <div class="footer">
     3·2·1→THEATER — Dr. Phillips Center for the Performing Arts &nbsp;·&nbsp;

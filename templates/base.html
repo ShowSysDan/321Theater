@@ -857,7 +857,7 @@ const _HELP_PAGES = {
         <li><strong>Quick Fill</strong> — enter times once, then Apply to Selected / Apply to All.</li>
         <li><strong>Show Labor Notes</strong> — visible to schedulers and on the Labor Overview.</li>
         <li><strong>Per-Crew Billable Extras</strong> — pick extras (e.g. parking) and optionally fold them into the hourly rate.</li>
-        <li><strong>Estimated Labor Cost</strong> table + Labor Estimate PDF. Overtime (over 40 h per tech per Mon–Sun week) bills at 1.5×.</li>
+        <li><strong>Estimated Labor Cost</strong> table + Labor Estimate PDF. Overtime (over 40 h per tech per Mon–Sun week) bills at 1.5×. Lunch/break windows entered on a row are unpaid, deducted from its hours, and shown in the estimate PDFs' Breaks column.</li>
       </ul>
     `
   },
@@ -874,6 +874,18 @@ const _HELP_PAGES = {
       </ul>
     `
   },
+  show_security: {
+    title: 'Show — Security Sign-In Sheet',
+    html: `
+      <p>The printed sheet that sits at the security desk on show day.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Bulk add</strong> — paste the personnel list from an email (one name per line, or comma/semicolon-separated) or upload a CSV; parsed names are added to the list below.</li>
+        <li>Rows can be edited, reordered and removed by hand; <strong>Save</strong> replaces the stored list.</li>
+        <li><strong>Export PDF</strong> — prints saved names with blank Signature / Time In columns plus walk-up rows, in this venue's paperwork colors.</li>
+        <li>A <strong>multi-day</strong> show/event prints one initials column per day instead (days come from load-in → load-out and the performance dates; very long runs continue in a second table).</li>
+      </ul>
+    `
+  },
   show_postnotes: {
     title: 'Show — Post Show',
     html: `
@@ -882,6 +894,7 @@ const _HELP_PAGES = {
         <li>Crew Called / Cast / Crew counts plus four notes areas (Tour/Client, House, Equipment, Misc).</li>
         <li><strong>Actual Labor (Billing)</strong> — scheduled labor is pulled in with times pre-filled the first time you open the tab. Edit actual In/Out/lunches; hours, rate and cost recompute, overtime is broken out. <strong>Edits here bill the client and never change the labor schedule.</strong></li>
         <li><strong>Re-sync from Schedule</strong> — pulls newly scheduled lines while keeping your edits; + Add Line for extra crew.</li>
+        <li><strong>+ Add Hours</strong> — bill hours worked outside the schedule (e.g. prep work weeks out): pick the technician and position (the rate resolves automatically), enter the hours and a <strong>required justification</strong>. Added hours always bill at straight time and never count toward the 40 h overtime week.</li>
         <li><strong>Final Invoice PDF</strong>, <strong>Export PDF</strong> (post-show report) and <strong>Email</strong> buttons in the header.</li>
         <li>A read-only copy of the production schedule is collapsible at the bottom.</li>
       </ul>
@@ -1082,7 +1095,7 @@ const _HELP_PAGES = {
         <li><strong>Form Fields</strong> — Advance Fields, Schedule Fields, and Day Templates; drag to reorder sections and fields.</li>
         <li><strong>Job Positions / Technicians</strong> — venues, categories, positions (incl. training-only), pay rate levels, roster, and per-crew billable items.</li>
         <li><strong>Email</strong> — SMTP setup, the Advance / Production Schedule auto-emails, send-time, the Next Scheduled Send preview, and the send-error panel.</li>
-        <li><strong>System</strong> — messages, updates, branding &amp; paperwork (logos, per-venue colors, WiFi defaults, PDF time format), server &amp; logs (app port, remote syslog), backups, files (upload limit + file manager with archived-file restore/purge), database &amp; file storage (S3), AI, cluster.</li>
+        <li><strong>System</strong> — messages, updates, branding &amp; paperwork (logos, per-venue colors — text printed on those colors picks a contrasting shade automatically, WiFi defaults, PDF time format), server &amp; logs (app port, remote syslog), backups, files (upload limit + file manager with archived-file restore/purge), database &amp; file storage (S3), AI, cluster.</li>
         <li>Links out to: Shows, PDF Designer, Audit Log, Performance, DB Snapshots, Dashboards, Prism Sync, Sidebar Editor, Merge Duplicates.</li>
         <li><strong>My Account</strong> — change your password. (Theme is the sun/moon button in the sidebar.)</li>
       </ul>
@@ -1256,7 +1269,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeHelp();
       const typeMap = { motd:'info', maintenance:'warning', alert:'error' };
       const cls = typeMap[m.msg_type] || 'info';
       const dismissBtn = m.dismissible_by === 'user' || {{ 'true' if user.role == 'admin' else 'false' }}
-        ? `<button onclick="dismissMsg(${m.id},this)" style="background:none;border:none;font-size:18px;cursor:pointer;color:inherit;opacity:.6;margin-left:auto">×</button>`
+        ? `<button onclick="dismissMsg(${m.id},this)" title="Dismiss this message" style="background:none;border:none;cursor:pointer;color:inherit;margin-left:auto;display:flex;align-items:center;gap:5px;padding:0;font-size:13px;font-weight:600;white-space:nowrap"><span style="color:#EF4444;font-size:18px;line-height:1" aria-hidden="true">×</span>Close</button>`
         : '';
       return `<div class="flash flash-${cls}" id="site-msg-${m.id}" style="display:flex;align-items:flex-start;gap:8px">
         <div style="flex:1"><strong>${m.title}</strong>${m.body_html ? '<br><div style="margin-top:4px;font-size:12px">'+m.body_html+'</div>' : ''}</div>
