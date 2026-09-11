@@ -16,19 +16,22 @@
 {% set C2 = _vc.secondary if _vc else '#F57F20' %}
 {% set C2_BG = _vc.secondary_bg if _vc else '#fdf6e3' %}
 {% set C2_DARK = _vc.secondary_dark if _vc else '#7a5a00' %}
+{% set C1_ON = _vc.on_primary if _vc else '#fff' %}
+{% set C1_TEXT = _vc.primary_text if _vc else '#194980' %}
+{% set C2_TEXT = _vc.secondary_text if _vc else '#F57F20' %}
 
 <style>
   @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
   * { box-sizing: border-box; }
   body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; }
   .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; border-bottom: 2px solid {{ C2 }}; padding-bottom: 14px; }
-  .org-name { font-size: 18px; font-weight: 700; color: {{ C1 }}; letter-spacing: 0.04em; }
+  .org-name { font-size: 18px; font-weight: 700; color: {{ C1_TEXT }}; letter-spacing: 0.04em; }
   .org-sub  { font-size: 9px; color: #888; letter-spacing: 0.08em; text-transform: uppercase; margin-top: 3px; }
   .doc-title { text-align: right; }
-  .doc-title h1 { font-size: 22px; font-weight: 700; color: {{ C2 }}; margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 0.06em; }
+  .doc-title h1 { font-size: 22px; font-weight: 700; color: {{ C2_TEXT }}; margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 0.06em; }
   .doc-title .doc-date { font-size: 10px; color: #888; }
   .show-block { background: #f8f8f8; border-left: 3px solid {{ C2 }}; padding: 10px 14px; margin-bottom: 20px; }
-  .show-name { font-size: 15px; font-weight: 700; color: {{ C1 }}; }
+  .show-name { font-size: 15px; font-weight: 700; color: {{ C1_TEXT }}; }
   .show-meta { font-size: 10px; color: #666; margin-top: 4px; display: flex; gap: 20px; flex-wrap: wrap; }
   .section-title { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #888; border-bottom: 1px solid #e0e0e0; padding-bottom: 4px; margin: 20px 0 8px 0; }
   table { width: 100%; border-collapse: collapse; }
@@ -42,10 +45,11 @@
   .total-row td { font-weight: 700; border-top: 2px solid #ddd; border-bottom: none; padding-top: 8px; }
   .labor-day-row td { font-weight: 700; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: #555; background: #f4f4f4; border-bottom: 1px solid #ddd; padding: 5px 8px; }
   .ot-row td { color: {{ C2_DARK }}; background: {{ C2_BG }}; }
-  .grand-total { background: {{ C1 }}; color: #fff; padding: 12px 16px; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
+  .added-tag { display: inline-block; font-size: 8px; font-weight: 700; color: {{ C2_TEXT }}; letter-spacing: 0.05em; text-transform: uppercase; margin-left: 4px; }
+  .grand-total { background: {{ C1 }}; color: {{ C1_ON }}; padding: 12px 16px; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
   .grand-total-label { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
   .grand-total-amount { font-size: 20px; font-weight: 700; }
-  .show-total { background: {{ C1_BG }}; color: {{ C1 }}; padding: 9px 14px; margin-top: 16px; display: flex; justify-content: space-between; align-items: center; border-left: 3px solid {{ C1 }}; }
+  .show-total { background: {{ C1_BG }}; color: {{ C1_TEXT }}; padding: 9px 14px; margin-top: 16px; display: flex; justify-content: space-between; align-items: center; border-left: 3px solid {{ C1 }}; }
   .show-total-label { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
   .show-total-amount { font-size: 15px; font-weight: 700; }
   .footer { margin-top: 24px; border-top: 1px solid #e0e0e0; padding-top: 10px; font-size: 9px; color: #aaa; text-align: center; }
@@ -230,7 +234,7 @@
     <tr class="labor-day-row"><td colspan="7">{{ l.work_date or 'Unscheduled' }}</td></tr>
     {% endif %}
     <tr{% if l.is_overtime %} class="ot-row"{% endif %}>
-      <td>{{ l.position_name or '—' }}</td>
+      <td>{{ l.position_name or '—' }}{% if l.is_added_hours %} <span class="added-tag">added hours</span>{% if l.justification %}<div class="text-dim" style="font-size:9px">{{ l.justification }}</div>{% endif %}{% endif %}</td>
       <td class="num text-dim">{{ l.in_time | dualtime or '—' }}</td>
       <td class="num text-dim">{{ l.out_time | dualtime or '—' }}</td>
       <td class="text-dim">{{ l.breaks or '—' }}</td>

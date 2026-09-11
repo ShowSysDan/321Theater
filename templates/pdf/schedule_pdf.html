@@ -21,6 +21,11 @@
 {% set C2_BG2 = _vc.secondary_bg2 if _vc else '#fff8e8' %}
 {% set C2_BRIGHT = _vc.secondary_bright if _vc else '#f0c44a' %}
 {% set C2_SOFT = _vc.secondary_soft if _vc else '#e8c870' %}
+{% set C1_ON = _vc.on_primary if _vc else '#fff' %}
+{% set C1_ON_SOFT = _vc.on_primary_soft if _vc else '#cfe0f2' %}
+{% set C1_TEXT = _vc.primary_text if _vc else '#1a4a7a' %}
+{% set C2_ON = _vc.on_primary_accent if _vc else '#f0c44a' %}
+{% set C2_TEXT = _vc.secondary_text if _vc else '#B8840A' %}
 
 <style>
   @page {
@@ -42,21 +47,22 @@
 
   /* ── Header ── */
   .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; padding-bottom: 7px; border-bottom: 2.5px solid {{ C1 }}; }
-  .doc-type { font-size: 7.5pt; font-weight: bold; color: {{ C2 }}; letter-spacing: 0.12em; text-transform: uppercase; }
+  .doc-type { font-size: 7.5pt; font-weight: bold; color: {{ C2_TEXT }}; letter-spacing: 0.12em; text-transform: uppercase; }
   .show-name { font-size: 25pt; font-weight: 900; line-height: 1.04; color: #1a1a1a; letter-spacing: 0.01em; margin: 1px 0 2px; }
   .show-sub { font-size: 8.5pt; color: #444; }
   .show-sub strong { color: #111; }
   .doc-org { font-size: 7pt; color: #555; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
   .doc-meta { text-align: right; font-size: 7.5pt; color: #444; white-space: nowrap; padding-left: 12px; }
-  .doc-meta .version { font-size: 10pt; font-weight: bold; color: {{ C2 }}; }
+  .doc-meta .version { font-size: 10pt; font-weight: bold; color: {{ C2_TEXT }}; }
 
   /* ── Schedule Table — day # and column legends share ONE blue header ── */
   .sched-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
   .sched-table thead { display: table-header-group; }
-  .day-row th { background: {{ C1 }}; color: #fff; font-size: 10.5pt; font-weight: bold;
+  .day-row th { background: {{ C1 }}; color: {{ C1_ON }}; font-size: 10.5pt; font-weight: bold;
                 letter-spacing: 0.05em; text-transform: uppercase; text-align: left; padding: 5px 8px; }
-  .day-row .day-date { float: right; font-size: 8.5pt; color: {{ C2_BRIGHT }}; font-weight: bold; text-transform: none; letter-spacing: 0; }
-  .cols-row th { background: {{ C1 }}; color: {{ C1_SOFT }}; font-size: 7pt; letter-spacing: 0.08em; text-align: left;
+  .day-row .day-date { float: right; font-size: 8.5pt; color: {{ C2_ON }}; font-weight: bold; text-transform: none; letter-spacing: 0; }
+  .day-row .day-name { text-transform: none; letter-spacing: 0.02em; }
+  .cols-row th { background: {{ C1 }}; color: {{ C1_ON_SOFT }}; font-size: 7pt; letter-spacing: 0.08em; text-align: left;
                  padding: 3px 8px; text-transform: uppercase; border-top: 1px solid {{ C1_MID }}; }
   .sched-table td { padding: 5px 8px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
   .sched-table tbody tr:nth-child(even) td { background: #fafafa; }
@@ -67,7 +73,7 @@
      columns so they don't crowd the Description column. */
   .t12 { font-size: 0.78em; font-weight: normal; color: #555; white-space: nowrap; }
   .sched-table .time-col .t12 { display: block; }
-  .day-row .t12 { color: {{ C1_SOFT }}; }  /* legible on the dark blue day banner */
+  .day-row .t12 { color: {{ C1_ON_SOFT }}; }  /* legible on the dark blue day banner */
   .sched-table .desc-col { font-size: 8.5pt; }
   .sched-table .notes-col { font-size: 7.5pt; color: #555; }
 
@@ -81,7 +87,7 @@
   /* ── WiFi box (stacks within the sidebar column) ── */
   .wifi-box { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; background: {{ C1_BG2 }}; border: 1.5px solid {{ C1_BRIGHT }}; padding: 7px 9px; border-radius: 4px; margin-bottom: 10px; }
   .wifi-qr img { width: 84px; height: 84px; }
-  .wifi-info .wifi-label { font-size: 9pt; font-weight: 900; letter-spacing: 0.1em; color: {{ C1 }}; text-transform: uppercase; margin-bottom: 3px; }
+  .wifi-info .wifi-label { font-size: 9pt; font-weight: 900; letter-spacing: 0.1em; color: {{ C1_TEXT }}; text-transform: uppercase; margin-bottom: 3px; }
   .wifi-info .wifi-ssid  { font-size: 10pt; font-weight: bold; color: #1a1a1a; }
   .wifi-info .wifi-pass  { font-size: 8.5pt; color: #444; margin-top: 2px; }
   .wifi-info .wifi-pass span { font-family: monospace; font-weight: bold; color: #1a1a1a; }
@@ -90,7 +96,7 @@
   .contacts-grid { display: block; }
   .contacts-box { border: 1px solid {{ C1_BORDER }}; margin-bottom: 8px; }
   .contacts-box:last-child { margin-bottom: 0; }
-  .contacts-box-head { background: {{ C1 }}; color: #fff; font-size: 7pt; font-weight: bold; letter-spacing: 0.1em; padding: 4px 7px; text-transform: uppercase; }
+  .contacts-box-head { background: {{ C1 }}; color: {{ C1_ON }}; font-size: 7pt; font-weight: bold; letter-spacing: 0.1em; padding: 4px 7px; text-transform: uppercase; }
   .contacts-table { width: 100%; border-collapse: collapse; }
   .contacts-table td { padding: 3px 7px; border-bottom: 1px solid #eee; font-size: 8pt; }
   .contacts-table td.lbl { font-size: 7pt; font-weight: bold; color: #666; text-transform: uppercase; width: 40%; }
@@ -155,8 +161,12 @@
     <table class="sched-table" style="font-size: {{ layout.font_size('sched_table', '8.5pt') }}">
       <thead>
         {% if layout.visible('day_banner') and schedule_days | length > 1 %}
+        {# The banner heading is the calendar date itself ("Monday - June 14th
+           2026"); "Day N" moves to the right-hand slot so the run count is
+           still visible. Dateless days fall back to the old "Day N" heading. #}
+        {% set day_heading = day.perf.perf_date | dowlongdate %}
         <tr class="day-row">
-          <th colspan="4" style="font-size: {{ layout.font_size('day_banner', '10.5pt') }}">{{ layout.label('day_banner', 'Day') }} {{ day.day_num }}<span class="day-date">{{ day.perf.perf_date | dowdate or day.perf.perf_date or '' }}{% if day.perf.perf_time %} · {{ day.perf.perf_time | dualtime }}{% endif %}</span></th>
+          <th colspan="4" style="font-size: {{ layout.font_size('day_banner', '10.5pt') }}">{% if day_heading %}<span class="day-name">{{ day_heading }}</span>{% else %}{{ layout.label('day_banner', 'Day') }} {{ day.day_num }}{% endif %}<span class="day-date">{% if day_heading %}{{ layout.label('day_banner', 'Day') }} {{ day.day_num }}{% endif %}{% if day.perf.perf_time %} · {{ day.perf.perf_time | dualtime }}{% endif %}</span></th>
         </tr>
         {% endif %}
         <tr class="cols-row">

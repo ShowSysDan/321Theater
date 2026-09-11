@@ -7,7 +7,10 @@ Security Sign-In Sheets — SANDBOXED module (per-show paperwork).
 Generates the sign-in sheet that sits at the security desk on show day: a
 venue-color-themed PDF headed with the show name/date, then one row per
 expected person with a blank signature/time column, plus a few blank walk-up
-rows at the end.
+rows at the end. A multi-day show/event (span = load-in → load-out ∪
+performance dates, via the injected show_span_dates helper) instead prints
+one initials column per calendar day, chunked MAX_DAY_COLS per table so a
+long run wraps into a follow-on table with the same names.
 
 PMs typically receive the personnel list pasted into an email, so entry is
 built around bulk import: a paste box (one name per line, or a single
@@ -59,6 +62,8 @@ MAX_NAMES = 500          # hard cap on rows per show (also enforced client-side)
 MAX_NAME_LEN = 200       # single name length cap
 MAX_PARSE_BYTES = 512 * 1024  # pasted text / uploaded CSV size cap
 BLANK_WALKUP_ROWS = 8    # extra empty rows printed after the named rows
+MAX_DAY_COLS = 7         # per-day initials columns per table before wrapping
+                         # into a follow-on table (multi-day shows, 2.44.0)
 
 # Header cells that mean "this CSV column holds the name" (case-insensitive).
 _NAME_HEADER_RE = re.compile(r'^\s*(full\s*)?names?\s*$', re.I)
@@ -269,6 +274,23 @@ def _parse_view(show_id):
     return jsonify({'success': True, 'names': names[:MAX_NAMES]})
 
 
+def _day_columns(iso_dates):
+    """Per-day column headers for a multi-day show, chunked so each printed
+    table carries at most MAX_DAY_COLS day columns (a long run repeats the
+    name list in a follow-on table for the remaining days). Returns [] for
+    0–1 dates — the single-day sheet keeps its Signature / Time In layout."""
+    if len(iso_dates) <= 1:
+        return []
+    cols = []
+    for iso in iso_dates:
+        try:
+            d = date.fromisoformat(str(iso)[:10])
+            cols.append({'iso': iso, 'label': f'{d.strftime("%a")} {d.month}/{d.day}'})
+        except (ValueError, TypeError):
+            cols.append({'iso': iso, 'label': str(iso)})
+    return [cols[i:i + MAX_DAY_COLS] for i in range(0, len(cols), MAX_DAY_COLS)]
+
+
 def _pdf_view(show_id):
     show = _require_show(show_id)
     db = _d['get_db']()
@@ -276,14 +298,21 @@ def _pdf_view(show_id):
         names = _fetch_names(db, show_id)
         pdf_colors = _d['get_venue_pdf_colors'](db, show['venue'])
         logo_data = _d['get_logo_for_venue'](db, show['venue'])
+        # Multi-day shows get one initials column per calendar day (span
+        # computed by the injected app helper — load-in→load-out ∪ perf dates).
+        span = _d['show_span_dates'](db, show)
     finally:
         db.close()
 
+    day_groups = _day_columns(span)
     html_str = render_template(
         'pdf/security_signin_pdf.html',
         show=dict(show),
         names=names,
         blank_rows=BLANK_WALKUP_ROWS,
+        day_groups=day_groups,
+        span_first=span[0] if day_groups else '',
+        span_last=span[-1] if day_groups else '',
         pdf_colors=pdf_colors,
         logo_data=logo_data,
         generated_date=date.today().isoformat(),
@@ -314,7 +343,7 @@ def register(app, **deps):
     Wire the module into the Flask app. `deps` must provide:
       get_db, get_current_user, login_required, can_access_show,
       module_enabled, log_audit, syslog_logger, get_venue_pdf_colors,
-      get_logo_for_venue, safe_content_disposition.
+      get_logo_for_venue, safe_content_disposition, show_span_dates.
     Called once from app.py; everything else in this file is self-contained.
     """
     _d.update(deps, app=app)

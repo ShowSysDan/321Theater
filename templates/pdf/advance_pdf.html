@@ -13,6 +13,8 @@
 {% set _vc = pdf_colors if pdf_colors is defined else none %}
 {% set C1 = _vc.primary if _vc else '#1a4a7a' %}
 {% set C2 = _vc.secondary if _vc else '#B8840A' %}
+{% set C1_ON = _vc.on_primary if _vc else '#fff' %}
+{% set C2_TEXT = _vc.secondary_text if _vc else '#B8840A' %}
 
 <style>
   @page {
@@ -27,17 +29,17 @@
 
   /* ── Header ── */
   .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; padding-bottom: 7px; border-bottom: 2.5px solid {{ C1 }}; }
-  .doc-type { font-size: 7.5pt; font-weight: bold; color: {{ C2 }}; letter-spacing: 0.12em; text-transform: uppercase; }
+  .doc-type { font-size: 7.5pt; font-weight: bold; color: {{ C2_TEXT }}; letter-spacing: 0.12em; text-transform: uppercase; }
   .show-name { font-size: 25pt; font-weight: 900; line-height: 1.04; color: #1a1a1a; letter-spacing: 0.01em; margin: 1px 0 2px; }
   .show-sub { font-size: 8.5pt; color: #444; }
   .show-sub strong { color: #111; }
   .doc-org { font-size: 7pt; color: #555; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
   .doc-meta { text-align: right; font-size: 7.5pt; color: #444; white-space: nowrap; padding-left: 12px; }
-  .doc-meta .version { font-size: 10pt; font-weight: bold; color: {{ C2 }}; }
+  .doc-meta .version { font-size: 10pt; font-weight: bold; color: {{ C2_TEXT }}; }
 
   /* ── Section ── */
   .section { margin-bottom: 8px; border: 1px solid #ccc; page-break-inside: avoid; break-inside: avoid; }
-  .section-head { background: {{ C1 }}; color: #fff; font-size: 7pt; font-weight: bold; letter-spacing: 0.1em; padding: 4px 7px; text-transform: uppercase; }
+  .section-head { background: {{ C1 }}; color: {{ C1_ON }}; font-size: 7pt; font-weight: bold; letter-spacing: 0.1em; padding: 4px 7px; text-transform: uppercase; }
   .section-body { padding: 0; }
 
   /* ── Two-col layout ── */

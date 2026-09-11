@@ -19,6 +19,10 @@
 {% set C2_BRIGHT = _vc.secondary_bright if _vc else '#f0c44a' %}
 {% set C2_DARK = _vc.secondary_dark if _vc else '#7a5a00' %}
 {% set C2_SOFT = _vc.secondary_soft if _vc else '#ecd9a0' %}
+{% set C1_ON = _vc.on_primary if _vc else '#fff' %}
+{% set C1_TEXT = _vc.primary_text if _vc else '#1a4a7a' %}
+{% set C2_ON = _vc.on_primary_accent if _vc else '#f0c44a' %}
+{% set C2_TEXT = _vc.secondary_text if _vc else '#B8840A' %}
 
 <style>
   @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
@@ -27,18 +31,18 @@
      navy {{ C1 }} structural, gold {{ C2 }} accent, Arial. */
   body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; }
   .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; border-bottom: 2.5px solid {{ C1 }}; padding-bottom: 14px; }
-  .doc-type { font-size: 9px; font-weight: bold; color: {{ C2 }}; letter-spacing: 0.12em; text-transform: uppercase; }
-  .org-name { font-size: 18px; font-weight: 900; color: {{ C1 }}; letter-spacing: 0.01em; margin-top: 2px; }
+  .doc-type { font-size: 9px; font-weight: bold; color: {{ C2_TEXT }}; letter-spacing: 0.12em; text-transform: uppercase; }
+  .org-name { font-size: 18px; font-weight: 900; color: {{ C1_TEXT }}; letter-spacing: 0.01em; margin-top: 2px; }
   .org-sub  { font-size: 7.5px; color: #555; letter-spacing: 0.08em; text-transform: uppercase; margin-top: 3px; }
   .doc-title { text-align: right; padding-left: 12px; }
-  .doc-title h1 { font-size: 22px; font-weight: 900; color: {{ C1 }}; margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 0.05em; }
+  .doc-title h1 { font-size: 22px; font-weight: 900; color: {{ C1_TEXT }}; margin: 0 0 4px 0; text-transform: uppercase; letter-spacing: 0.05em; }
   .doc-title .doc-date { font-size: 10px; color: #555; }
   .show-block { background: #f5f5f5; border-left: 3px solid {{ C2 }}; padding: 10px 14px; margin-bottom: 16px; }
-  .show-name { font-size: 15px; font-weight: 700; color: {{ C1 }}; }
+  .show-name { font-size: 15px; font-weight: 700; color: {{ C1_TEXT }}; }
   .show-meta { font-size: 10px; color: #666; margin-top: 4px; display: flex; gap: 20px; }
   .estimate-note { font-size: 9.5px; color: {{ C2_DARK }}; background: {{ C2_BG }}; border: 1px solid {{ C2_SOFT }}; border-radius: 4px; padding: 8px 12px; margin-bottom: 20px; }
-  .section-title { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: {{ C1 }}; border-bottom: 1px solid {{ C1 }}; padding-bottom: 4px; margin: 20px 0 8px 0; }
-  .subtotal-bar { display: flex; justify-content: space-between; align-items: center; background: {{ C1_BG }}; border-left: 3px solid {{ C1 }}; padding: 8px 14px; margin: 8px 0 4px 0; font-size: 10px; font-weight: 700; color: {{ C1 }}; letter-spacing: 0.04em; text-transform: uppercase; }
+  .section-title { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: {{ C1_TEXT }}; border-bottom: 1px solid {{ C1 }}; padding-bottom: 4px; margin: 20px 0 8px 0; }
+  .subtotal-bar { display: flex; justify-content: space-between; align-items: center; background: {{ C1_BG }}; border-left: 3px solid {{ C1 }}; padding: 8px 14px; margin: 8px 0 4px 0; font-size: 10px; font-weight: 700; color: {{ C1_TEXT }}; letter-spacing: 0.04em; text-transform: uppercase; }
   table { width: 100%; border-collapse: collapse; }
   th { font-size: 9px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: #666; padding: 5px 8px; border-bottom: 1px solid #ddd; text-align: left; }
   td { padding: 6px 8px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
@@ -47,13 +51,13 @@
   .text-dim { color: #888; font-size: 10px; }
   /* 12-hour hint after 24-hour times (dualtime filter) */
   .t12 { font-size: 0.82em; font-weight: normal; color: #888; white-space: nowrap; }
-  .est-tag { display: inline-block; font-size: 8px; font-weight: 700; color: {{ C2 }}; letter-spacing: 0.05em; text-transform: uppercase; margin-left: 4px; }
+  .est-tag { display: inline-block; font-size: 8px; font-weight: 700; color: {{ C2_TEXT }}; letter-spacing: 0.05em; text-transform: uppercase; margin-left: 4px; }
   .total-row td { font-weight: 700; border-top: 2px solid #ddd; border-bottom: none; padding-top: 8px; }
-  .labor-day-row td { font-weight: 700; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: {{ C1 }}; background: {{ C1_BG2 }}; border-bottom: 1px solid #ddd; padding: 5px 8px; }
+  .labor-day-row td { font-weight: 700; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: {{ C1_TEXT }}; background: {{ C1_BG2 }}; border-bottom: 1px solid #ddd; padding: 5px 8px; }
   .ot-row td { color: {{ C2_DARK }}; background: {{ C2_BG }}; }
-  .grand-total { background: {{ C1 }}; color: #fff; padding: 12px 16px; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
+  .grand-total { background: {{ C1 }}; color: {{ C1_ON }}; padding: 12px 16px; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
   .grand-total-label { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
-  .grand-total-amount { font-size: 20px; font-weight: 700; color: {{ C2_BRIGHT }}; }
+  .grand-total-amount { font-size: 20px; font-weight: 700; color: {{ C2_ON }}; }
   .footer { margin-top: 24px; border-top: 1px solid #e0e0e0; padding-top: 10px; font-size: 9px; color: #aaa; text-align: center; }
   .badge { display: inline-block; background: #f0f0f0; color: #555; font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 600; letter-spacing: 0.05em; }
   .empty { color: #888; font-size: 10px; padding: 12px 0; }
@@ -90,7 +94,8 @@
   <div class="estimate-note">
     <strong>Estimate / quote only.</strong> Combines estimated labor and gear/asset costs.
     Labor uses each position's special rate where set, otherwise the highest standard technician
-    rate; lines marked <span class="est-tag">est.</span> are not yet scheduled. Asset figures use
+    rate; lines marked <span class="est-tag">est.</span> are not yet scheduled. Breaks are unpaid and
+    already deducted from each line's hours. Asset figures use
     reserved quantities and locked prices. Final billing reflects actuals.
   </div>
 
@@ -103,6 +108,7 @@
         <th>Position</th>
         <th class="num">In</th>
         <th class="num">Out</th>
+        <th>Breaks</th>
         <th class="num">Hours</th>
         <th class="num">Rate</th>
         <th class="num">Line Total</th>
@@ -113,19 +119,20 @@
       {% for l in labor_lines %}
       {% if l.is_billable_extra %}
       {% if not ns.extras %}{% set ns.extras = true %}
-      <tr class="labor-day-row"><td colspan="6">Additional Charges</td></tr>
+      <tr class="labor-day-row"><td colspan="7">Additional Charges</td></tr>
       {% endif %}
       <tr>
         <td>{{ l.position_name or '—' }} <span class="text-dim">(per crew)</span></td>
         <td class="num text-dim">—</td>
         <td class="num text-dim">—</td>
+        <td class="text-dim">—</td>
         <td class="num">× {{ l.crew_count }}</td>
         <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/crew</td>
         <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
       </tr>
       {% else %}
       {% if (l.work_date or '') != ns.last %}{% set ns.last = l.work_date or '' %}
-      <tr class="labor-day-row"><td colspan="6">{{ l.work_date or 'Undated' }}</td></tr>
+      <tr class="labor-day-row"><td colspan="7">{{ l.work_date or 'Undated' }}</td></tr>
       {% endif %}
       <tr{% if l.is_overtime %} class="ot-row"{% endif %}>
         <td>
@@ -135,6 +142,7 @@
         </td>
         <td class="num text-dim">{{ l.in_time | dualtime or '—' }}</td>
         <td class="num text-dim">{{ l.out_time | dualtime or '—' }}</td>
+        <td class="text-dim">{{ l.breaks or '—' }}</td>
         <td class="num">{{ '%.2f' | format(l.hours) }}h</td>
         <td class="num">{% if l.is_training %}<span class="text-dim">—</span>{% else %}${{ '%.2f' | format(l.hourly_rate) }}/hr{% endif %}</td>
         <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
