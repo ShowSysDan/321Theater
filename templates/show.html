@@ -1546,7 +1546,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           <td>$${Number(er.cost).toFixed(2)}</td>
           <td>${er.pdf_filename ? `<a href="/shows/${SHOW_ID}/external-rentals/${er.id}/pdf" target="_blank" style="font-size:11px">View PDF</a>` : '—'}</td>
           ${IS_ADMIN ? `<td style="white-space:nowrap">
-            <button class="btn btn-xs btn-ghost" onclick='editExternalRental(${JSON.stringify(er)})' title="Edit">✎</button>
+            <button class="btn btn-xs btn-ghost" onclick="editExternalRental(${esc(JSON.stringify(er))})" title="Edit">✎</button>
             <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="removeExternalRental(${er.id})" title="Remove">✕</button>
           </td>` : ''}
         `;
@@ -1565,7 +1565,16 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
   }
 
   function esc(s) {
-    return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // For strings embedded in a single-quoted JS literal inside a double-quoted
+  // inline onclick attribute: JS-escape FIRST, then HTML-escape. esc() alone
+  // isn't enough — an unescaped " ended the attribute early (an asset named
+  // `Macbook Air (13")` broke the whole add-asset picker with a SyntaxError),
+  // and HTML-escaping ' without the JS escape breaks names with apostrophes.
+  function escJsAttr(s) {
+    return esc(String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'"));
   }
 
   // ── Asset Search ─────────────────────────────────────────────────────────
@@ -1613,7 +1622,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
             ? `$${Number(t.rental_cost||0).toFixed(2)}/day · $${Number(t.weekly_rate||0).toFixed(2)}/wk`
             : `$${Number(t.rental_cost||0).toFixed(2)}/day`);
       const systemBadge = t.is_system ? '<span style="font-size:9px;font-weight:700;background:rgba(245,127,32,0.2);color:#F57F20;border-radius:3px;padding:1px 5px;margin-left:4px;letter-spacing:.04em">SYSTEM</span>' : '';
-      return `<button class="btn btn-ghost btn-sm" style="text-align:left;white-space:normal;align-items:flex-start;flex-direction:column;gap:2px;width:100%;min-width:0" onclick="selectAssetType(${t.id}, '${esc(label).replace(/'/g,"\\'")}', ${t.rental_cost || 0}, ${t.weekly_rate || 0}, ${t.is_system ? 1 : 0}, ${t.is_consumable ? 1 : 0})">
+      return `<button class="btn btn-ghost btn-sm" style="text-align:left;white-space:normal;align-items:flex-start;flex-direction:column;gap:2px;width:100%;min-width:0" onclick="selectAssetType(${t.id}, '${escJsAttr(label)}', ${t.rental_cost || 0}, ${t.weekly_rate || 0}, ${t.is_system ? 1 : 0}, ${t.is_consumable ? 1 : 0})">
         <div style="font-weight:500">${esc(label)}${systemBadge}</div>
         ${sub ? `<div style="font-size:10px;color:var(--text-dim)">${esc(sub)}</div>` : ''}
         <div style="font-size:10px;color:var(--text-dim)">${rateLabel}${t.is_consumable ? ' · consumable' : ''}${t.is_system ? ' · system' : ''}</div>
