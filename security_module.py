@@ -332,7 +332,7 @@ def _pdf_view(show_id):
     resp = make_response(pdf_bytes)
     resp.headers['Content-Type'] = 'application/pdf'
     resp.headers['Content-Disposition'] = \
-        _d['safe_content_disposition'](f'{safe_name}_security_signin.pdf')
+        _d['safe_content_disposition'](f'Security_SignIn_{safe_name}.pdf')
     return resp
 
 

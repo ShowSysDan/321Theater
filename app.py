@@ -747,7 +747,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.45.1'
+APP_VERSION = '2.45.2'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -20244,7 +20244,7 @@ def show_asset_invoice(show_id):
     safe_name = secure_filename(show['name'] or f'show_{show_id}')
     resp = make_response(pdf_bytes)
     resp.headers['Content-Type'] = 'application/pdf'
-    resp.headers['Content-Disposition'] = _safe_content_disposition(f'{safe_name}_asset_estimate.pdf')
+    resp.headers['Content-Disposition'] = _safe_content_disposition(f'Asset_Estimate_{safe_name}.pdf')
     return resp
 
 
@@ -20289,7 +20289,7 @@ def show_labor_estimate(show_id):
     syslog_logger.info(f"LABOR_ESTIMATE_EXPORT show_id={show_id} total={labor_total} by={session.get('username')}")
     resp = make_response(pdf_bytes)
     resp.headers['Content-Type'] = 'application/pdf'
-    resp.headers['Content-Disposition'] = _safe_content_disposition(f'{safe_name}_labor_estimate.pdf')
+    resp.headers['Content-Disposition'] = _safe_content_disposition(f'Labor_Estimate_{safe_name}.pdf')
     return resp
 
 
@@ -20349,7 +20349,7 @@ def show_pre_show_estimate(show_id):
     syslog_logger.info(f"PRE_SHOW_ESTIMATE_EXPORT show_id={show_id} labor={labor_total} assets={assets_total} total={grand_total} by={session.get('username')}")
     resp = make_response(pdf_bytes)
     resp.headers['Content-Type'] = 'application/pdf'
-    resp.headers['Content-Disposition'] = _safe_content_disposition(f'{safe_name}_pre_show_estimate.pdf')
+    resp.headers['Content-Disposition'] = _safe_content_disposition(f'Pre_Show_Estimate_{safe_name}.pdf')
     return resp
 
 
@@ -20415,7 +20415,7 @@ def show_post_invoice(show_id):
     safe_name = secure_filename(show['name'] or f'show_{show_id}')
     resp = make_response(pdf_bytes)
     resp.headers['Content-Type'] = 'application/pdf'
-    resp.headers['Content-Disposition'] = _safe_content_disposition(f'{safe_name}_post_show_invoice.pdf')
+    resp.headers['Content-Disposition'] = _safe_content_disposition(f'Post_Show_Invoice_{safe_name}.pdf')
     return resp
 
 
@@ -20616,7 +20616,8 @@ def combined_invoice_pdf():
             extras_watermark=f'3rd-party rental attachment — {show_name}')
 
     base = secure_filename(companies[0]) if len(companies) == 1 else ''
-    fname = f'{base or "combined"}_invoice_{date.today().isoformat()}.pdf'
+    fname = (f'Combined_Invoice_{base}_{date.today().isoformat()}.pdf' if base
+             else f'Combined_Invoice_{date.today().isoformat()}.pdf')
     resp = make_response(pdf_bytes)
     resp.headers['Content-Type'] = 'application/pdf'
     resp.headers['Content-Disposition'] = _safe_content_disposition(fname)
