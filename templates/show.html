@@ -3137,6 +3137,9 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     return _laborPositions;
   }
 
+  // NOTE: this whole page is one <script> scope — a second function named
+  // _loadCrewMembers anywhere in it silently hoists over this one (2.44.0's
+  // added-hours copy did exactly that and broke the requested-tech dropdown).
   async function _loadCrewMembers(force) {
     if (!force && _crewMembers !== null) return;
     try {
@@ -3165,11 +3168,11 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     anyOpt.value = '';
     anyOpt.textContent = '— Any technician —';
     selectEl.appendChild(anyOpt);
-    if (!_crewMembers || !_crewMembers.length) return;
+    const crew = _crewMembers || [];
 
-    if (positionId) {
-      const qualified = _crewMembers.filter(m => m.qualifications.includes(positionId));
-      const others    = _crewMembers.filter(m => !m.qualifications.includes(positionId));
+    if (positionId && crew.length) {
+      const qualified = crew.filter(m => (m.qualifications || []).includes(positionId));
+      const others    = crew.filter(m => !(m.qualifications || []).includes(positionId));
       if (qualified.length) {
         const og = document.createElement('optgroup');
         og.label = 'Qualified';
@@ -3193,13 +3196,15 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
         selectEl.appendChild(og);
       }
     } else {
-      _crewMembers.forEach(m => {
+      crew.forEach(m => {
         const opt = document.createElement('option');
         opt.value = m.name; opt.textContent = m.name;
         if (m.name === selectedName) opt.selected = true;
         selectEl.appendChild(opt);
       });
     }
+    // Runs even when the crew list is empty/unloaded, so a saved requested
+    // name is never silently displayed as "Any technician".
     if (selectedName && !selectEl.value) {
       const opt = document.createElement('option');
       opt.value = selectedName; opt.textContent = selectedName;
@@ -4149,7 +4154,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     // Added-hours rows need the crew list for their technician select; fetch
     // it once and re-render when it lands (first paint shows a blank select).
     if (!_psCrewList && rows.some(r => r.is_added_hours)) {
-      _loadCrewMembers().then(() => _renderPostShowLabor());
+      _loadPsCrewList().then(() => _renderPostShowLabor());
     }
     tbody.innerHTML = '';
     const empty = document.getElementById('ps-labor-empty');
@@ -4484,7 +4489,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
      the overtime accumulator and the per-crew extras. */
 
   let _psCrewList = null;
-  async function _loadCrewMembers() {
+  async function _loadPsCrewList() {
     if (_psCrewList) return _psCrewList;
     try {
       const r = await fetch('/api/crew-members');
@@ -4508,7 +4513,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
 
   async function openAddHoursForm() {
     await _loadLaborPositions();
-    await _loadCrewMembers();
+    await _loadPsCrewList();
     const form = document.getElementById('ps-addhours-form');
     if (!form) return;
     _buildCrewSelect(document.getElementById('ps-ah-crew'), null);
