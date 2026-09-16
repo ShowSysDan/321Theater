@@ -836,6 +836,12 @@ function esc(s) {
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// For strings embedded in a single-quoted JS literal inside an inline onclick
+// attribute: JS-escape (backslash + quote) FIRST, then HTML-escape.
+function escJsAttr(s) {
+  return esc(String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'"));
+}
+
 // ── Categories Column ─────────────────────────────────────────────────────────
 function renderFinderCats() {
   const c = document.getElementById('finder-cats');
@@ -856,7 +862,7 @@ function renderFinderCats() {
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(cat.name)}</span>
       <span style="font-size:10px;opacity:.5;flex-shrink:0">${cnt}</span>
       <div class="cat-actions">
-        <button class="btn btn-xs btn-ghost" style="padding:1px 5px" onclick="event.stopPropagation();openCategoryModal(${cat.id},'${esc(cat.name).replace(/'/g,"\\'")}')">✎</button>
+        <button class="btn btn-xs btn-ghost" style="padding:1px 5px" onclick="event.stopPropagation();openCategoryModal(${cat.id},'${escJsAttr(cat.name)}')">✎</button>
         <button class="btn btn-xs btn-ghost" style="padding:1px 5px;color:#e53e3e" onclick="event.stopPropagation();deleteCategory(${cat.id})">✕</button>
       </div>
       <span style="color:var(--text-dim);font-size:14px;flex-shrink:0">›</span>

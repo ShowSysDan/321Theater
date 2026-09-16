@@ -718,6 +718,10 @@ async function _loadApprAssetTypes() {
 }
 
 function _esc(s) { return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// For strings embedded in a single-quoted JS literal inside an inline onclick
+// attribute: JS-escape FIRST, then HTML-escape — _esc alone turns ' into &#39;,
+// which the attribute decodes back to a raw ' that breaks the JS string.
+function _escJsAttr(s) { return _esc(String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'")); }
 
 async function openAddAsset(showId, defaultStart, defaultEnd) {
   _apprCurrentShowId = showId;
@@ -774,7 +778,7 @@ function renderApprAssetResults(q, cat) {
       ? `$${Number(t.rental_cost||0).toFixed(2)}/item`
       : `$${Number(t.rental_cost||0).toFixed(2)}/day`;
     return `<button class="btn btn-ghost btn-sm" style="text-align:left;white-space:normal"
-             onclick="selectApprAssetType(${t.id},'${_esc(t.name).replace(/'/g,"\\'")}',${t.rental_cost||0},${t.weekly_rate||0},${t.is_system?1:0},${t.is_consumable?1:0})">
+             onclick="selectApprAssetType(${t.id},'${_escJsAttr(t.name)}',${t.rental_cost||0},${t.weekly_rate||0},${t.is_system?1:0},${t.is_consumable?1:0})">
       <div style="font-weight:500">${_esc(t.name)}</div>
       ${t.manufacturer ? `<div style="font-size:10px;color:var(--text-dim)">${_esc(t.manufacturer)} ${_esc(t.model||'')}</div>` : ''}
       <div style="font-size:10px;color:var(--text-dim)">${rate}${t.is_consumable?' · consumable':''}</div>
