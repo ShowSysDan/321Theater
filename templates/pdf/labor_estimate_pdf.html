@@ -53,6 +53,7 @@
   .est-tag { display: inline-block; font-size: 8px; font-weight: 700; color: {{ C2_TEXT }}; letter-spacing: 0.05em; text-transform: uppercase; margin-left: 4px; }
   .total-row td { font-weight: 700; border-top: 2px solid #ddd; border-bottom: none; padding-top: 8px; }
   .labor-day-row td { font-weight: 700; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: {{ C1_TEXT }}; background: {{ C1_BG2 }}; border-bottom: 1px solid #ddd; padding: 5px 8px; }
+  .day-subtotal-row td { font-weight: 700; font-size: 10px; color: #444; background: #fafafa; border-top: 1px solid #ddd; border-bottom: 1px solid #ddd; padding: 4px 8px; }
   .ot-row td { color: {{ C2_DARK }}; background: {{ C2_BG }}; }
   .grand-total { background: {{ C1 }}; color: {{ C1_ON }}; padding: 12px 16px; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
   .grand-total-label { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
@@ -126,6 +127,13 @@
         <td class="text-dim">—</td>
         <td class="num">× {{ l.crew_count }}</td>
         <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/crew</td>
+        <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
+      </tr>
+      {% elif l.is_day_subtotal %}
+      <tr class="day-subtotal-row">
+        <td colspan="4" class="num">Day subtotal</td>
+        <td class="num">{{ '%.2f' | format(l.hours) }}h</td>
+        <td></td>
         <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
       </tr>
       {% else %}
