@@ -747,7 +747,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.45.3'
+APP_VERSION = '2.46.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -13403,6 +13403,60 @@ def _ot_label(position_name):
     return f'{pos} — {OT_LINE_SUFFIX}' if pos else OT_LINE_SUFFIX
 
 
+def _insert_labor_day_subtotals(lines):
+    """Insert a synthetic per-day subtotal line (``is_day_subtotal=True``)
+    after each work day's run of labor lines.
+
+    Display-only aggregation of the engines' own line math, computed HERE
+    (both engines call it on their output) so every consumer — the show-page
+    estimate table, the Post-Show grid, and all four labor PDFs — shows the
+    same daily figures without re-deriving them. A day's subtotal includes
+    its overtime lines (they belong to that day's billed cost) and counts
+    only billable hours (training lines add no hours and no dollars).
+    Billable-extra lines (the undated "Additional Charges" block) are left
+    alone. Skipped when the lines span a single day — the subtotal would
+    just repeat the labor total. Subtotal amounts DUPLICATE the day's line
+    totals, so anything summing lines must skip ``is_day_subtotal`` rows."""
+    def _day_key(l):
+        dv = _as_date(l.get('work_date'))
+        return dv.isoformat() if dv else ''
+
+    groups = []  # consecutive day runs over the regular (non-extra) lines
+    for i, l in enumerate(lines):
+        if l.get('is_billable_extra'):
+            continue
+        key = _day_key(l)
+        if not groups or groups[-1]['key'] != key:
+            groups.append({'key': key, 'end': i, 'hours': 0.0, 'total': 0.0})
+        g = groups[-1]
+        g['end'] = i
+        if not l.get('is_training'):
+            g['hours'] += float(l.get('hours') or 0)
+        g['total'] += float(l.get('line_total') or 0)
+    if len(groups) < 2:
+        return lines
+
+    ends = {g['end']: g for g in groups}
+    out = []
+    for i, l in enumerate(lines):
+        out.append(l)
+        g = ends.get(i)
+        if g is not None:
+            out.append({
+                'id': f"day-{g['key'] or 'undated'}",
+                'work_date': g['key'],
+                'date_key': g['key'],
+                'position_name': 'Day subtotal',
+                'tech_name': '',
+                'in_time': '', 'out_time': '', 'breaks': '',
+                'hours': round(g['hours'], 2),
+                'hourly_rate': 0,
+                'line_total': round(g['total'], 2),
+                'is_day_subtotal': True,
+            })
+    return out
+
+
 def _calc_labor_cost_for_show(db, show_id):
     """Return labor line items and total for a show — a live cost ESTIMATE that
     is useful *before* anything is scheduled (for client quoting).
@@ -13598,7 +13652,7 @@ def _calc_labor_cost_for_show(db, show_id):
                 'crew_count': crew_count,
             })
 
-    return lines, round(total, 2)
+    return _insert_labor_day_subtotals(lines), round(total, 2)
 
 
 def _calc_hours(in_time, out_time, break_start=None, break_end=None,
@@ -13945,7 +13999,7 @@ def _calc_post_show_labor_cost(db, show_id):
                 'crew_count': billed_count,
             })
 
-    return lines, round(total, 2)
+    return _insert_labor_day_subtotals(lines), round(total, 2)
 
 
 @app.route('/shows/<int:show_id>/post-show-labor', methods=['GET'])
