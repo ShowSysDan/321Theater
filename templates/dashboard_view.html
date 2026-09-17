@@ -22,7 +22,9 @@
 /* ── Calendar ────────────────────────────────────────────────────── */
 .dash-cal-grid {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  /* minmax(0,…) — a plain 1fr lets a long nowrap show-name set the column's
+     min-content width, blowing the 7 columns wildly uneven. */
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 4px;
 }
 .dash-cal-dow {
@@ -36,6 +38,8 @@
 }
 .dash-cal-cell {
   min-height: 80px;
+  min-width: 0;
+  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 6px;
@@ -83,7 +87,7 @@
 /* ── Week strip ──────────────────────────────────────────────────── */
 .dash-week-strip {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 4px;
   margin-bottom: 16px;
 }
@@ -688,13 +692,28 @@ async function loadCalendarWidget(idx, section, loadEl, contentEl) {
 function renderCalendarLayout(from, to, _calDaysData) {
   const fromDate = new Date(from + 'T00:00:00');
   const toDate   = new Date(to   + 'T00:00:00');
-  const todayStr = new Date().toISOString().slice(0,10);
+  // Local calendar date — toISOString() is UTC and rolls to tomorrow after
+  // ~8 PM Eastern, shifting "today" and every derived day key off by one.
+  const localIso = d =>
+    `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const todayStr = localIso(new Date());
+
+  // Week at a Glance anchors on TODAY when it falls inside the range (a
+  // month-wide range used to show the range's first, often all-zero, week).
+  // Pull the start back so a full 7 days fit inside the range when today is
+  // near its end; outside the range, fall back to the range's first week.
+  let weekStart = (todayStr >= from && todayStr <= to)
+    ? new Date(todayStr + 'T00:00:00') : new Date(fromDate);
+  const lastFullStart = new Date(toDate);
+  lastFullStart.setDate(lastFullStart.getDate() - 6);
+  if (weekStart > lastFullStart) weekStart = lastFullStart;
+  if (weekStart < fromDate) weekStart = new Date(fromDate);
 
   const weekDays = [];
   for (let i = 0; i < 7; i++) {
-    const d = new Date(fromDate);
+    const d = new Date(weekStart);
     d.setDate(d.getDate() + i);
-    const ds = d.toISOString().slice(0,10);
+    const ds = localIso(d);
     if (ds > to) break;
     weekDays.push({ date: ds, d });
   }
