@@ -1,0 +1,72 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{% block title %}My Account — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">My Account</h1>
+    <p class="page-sub">Signed in as <strong>{{ user.display_name }}</strong> ({{ user.username }}).</p>
+  </div>
+</div>
+
+<div class="form-section" style="max-width:520px">
+  <div class="form-section-header"><span class="section-icon">◈</span> CHANGE PASSWORD</div>
+  <div class="form-section-body">
+    <div id="pw-form" style="max-width:400px">
+      <div class="field-group">
+        <label class="field-label">CURRENT PASSWORD</label>
+        <input type="password" id="pw-current" class="field-input" autocomplete="current-password">
+      </div>
+      <div class="field-group">
+        <label class="field-label">NEW PASSWORD</label>
+        <input type="password" id="pw-new" class="field-input" autocomplete="new-password">
+      </div>
+      <div class="field-group">
+        <label class="field-label">CONFIRM NEW PASSWORD</label>
+        <input type="password" id="pw-confirm" class="field-input" autocomplete="new-password">
+      </div>
+      <ul class="pw-rules" id="pw-rules" style="margin-bottom:14px">
+        <li data-rule="len">At least 8 characters</li>
+        <li data-rule="upper">At least one uppercase letter</li>
+        <li data-rule="punct">At least one punctuation mark (e.g. ! @ # . -)</li>
+        <li data-rule="match">Both passwords match</li>
+      </ul>
+      <div id="pw-msg" class="field-msg" style="display:none"></div>
+      <button class="btn btn-primary" id="pw-submit" onclick="changePassword()" disabled>Change Password</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+{# Same behavior as Settings → My Account: the submit button stays disabled
+   until the live rule checklist is all green (pwRulesBind / showMsg live in
+   app.js); the server re-validates regardless. #}
+const _acctPwRulesUpdate = pwRulesBind('pw-new', 'pw-confirm', 'pw-rules',
+  ok => { document.getElementById('pw-submit').disabled = !ok; });
+
+async function changePassword() {
+  const current = document.getElementById('pw-current').value;
+  const newpw   = document.getElementById('pw-new').value;
+  const msg     = document.getElementById('pw-msg');
+  if (!current) { showMsg(msg,'Enter your current password.','error'); return; }
+  const resp = await fetch('/account/change_password', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({current_password:current, new_password:newpw})
+  });
+  const data = await resp.json();
+  showMsg(msg, data.success ? 'Password changed successfully.' : data.error,
+          data.success ? 'success' : 'error');
+  if (data.success) {
+    ['pw-current','pw-new','pw-confirm'].forEach(id => document.getElementById(id).value = '');
+    if (_acctPwRulesUpdate) _acctPwRulesUpdate();
+  }
+}
+</script>
+{% endblock %}

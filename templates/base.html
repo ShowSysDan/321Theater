@@ -181,6 +181,10 @@
         Labor Overview
       </a>
       {% endif %}
+      <a href="{{ url_for('viewer_account') }}" class="nav-item {% if request.endpoint == 'viewer_account' %}active{% endif %}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        My Account
+      </a>
       <a href="{{ url_for('logout') }}" class="nav-item" style="margin-top:auto">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
         Log out
@@ -1197,6 +1201,16 @@ const _HELP_PAGES = {
       </ul>
     `
   },
+  viewer_account: {
+    title: 'My Account',
+    html: `
+      <p>Change your own password here. (Theme is the sun/moon button in the sidebar.)</p>
+      <ul style="${_HELP_UL}">
+        <li>The button enables once the new password meets every rule in the checklist.</li>
+        <li>Forgot your current password? Ask an administrator to reset it.</li>
+      </ul>
+    `
+  },
 };
 
 {# Longest-prefix routing table for openHelp(). Order doesn't matter — the
@@ -1217,7 +1231,8 @@ const _HELP_ROUTES = [
   ['/reports/assets', 'asset_reports'],
   ['/prism', 'prism'],
   ['/dashboards', 'dashboards'],
-  ['/viewer/calendar', 'viewer_calendar'], ['/viewer', 'viewer_home'],
+  ['/viewer/calendar', 'viewer_calendar'], ['/viewer/account', 'viewer_account'],
+  ['/viewer', 'viewer_home'],
 ];
 
 function _helpKeyForLocation() {

@@ -747,7 +747,7 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.46.0'
+APP_VERSION = '2.47.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1929,6 +1929,9 @@ _VIEWER_ALLOWED_ENDPOINTS = frozenset({
     'force_change_password',
     # Theme + password change so the user can still toggle dark/light + reset
     'set_theme', 'change_own_password',
+    # My Account page — the UI for change_own_password (viewers can't reach
+    # Settings → My Account, which the gate blocks like the rest of Settings)
+    'viewer_account',
 })
 
 
@@ -7598,6 +7601,18 @@ def viewer_calendar():
         user=get_current_user(),
         venues_allow=venues_allow,
     )
+
+
+@app.route('/viewer/account')
+@login_required
+def viewer_account():
+    """My Account page for document viewers — lets them change their own
+    password. Everyone else does this in Settings → My Account, but the
+    viewer gate blocks /settings entirely; the change_own_password endpoint
+    itself was always viewer-whitelisted, it just had no reachable UI."""
+    if not session.get('is_document_viewer'):
+        return redirect(url_for('settings'))
+    return render_template('viewer_account.html', user=get_current_user())
 
 
 @app.route('/viewer/shows-calendar')
