@@ -6,8 +6,7 @@ DB snapshot inspection & surgical recovery — SANDBOXED (read-mostly).
 
 The backup scheduler in app.py writes hourly (keep 24) and daily (keep 30)
 snapshots of the whole database to BACKUP_DIR/{hourly,daily}/ — compressed
-plain-SQL `pg_dump` output (.sql.gz) on PostgreSQL, a file copy (.db) on
-SQLite. This module lets an admin answer "what did the data look like at
+plain-SQL `pg_dump` output (.sql.gz). This module lets an admin answer "what did the data look like at
 3pm, and what changed since?" and surgically pull pieces back — without ever
 restoring the whole database:
 
@@ -32,10 +31,8 @@ SAFETY RAILS
     compares a hash against the one issued at preview time — if anything
     changed in between, the apply is refused (HTTP 409) and the admin must
     re-preview.
-  * Restore refuses to run when the configured backend is PostgreSQL but the
-    connection silently fell back to the SQLite bootstrap (stale data —
-    see CLAUDE.md), and when the snapshot's backend differs from the live
-    backend (value formats aren't comparable across backends).
+  * Only PostgreSQL (.sql.gz) snapshots are read; legacy SQLite-era .db
+    backups are ignored.
   * RESTORE_BLOCKED tables (auth/session/security/log/infra tables, plus the
     shared `users` directory owned jointly with sister apps) are inspectable
     but never writable from here.
@@ -51,7 +48,6 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
 import zlib
 from collections import Counter
 from datetime import date, datetime, time as dt_time
@@ -87,7 +83,6 @@ RESTORE_BLOCKED = {
     'gateway_otp_codes', 'ai_sessions',
     'audit_log', 'email_send_log', 'email_outbox_log', 'export_log',
     'cluster_instances', 'perf_page_stats', 'perf_slow_queries',
-    'sqlite_sequence',
 }
 
 # Churny operational tables — sorted to the bottom of the tables list so the
@@ -117,7 +112,7 @@ PREVIEW_SAMPLE_CAP = 25   # sample rows shown per table in a restore preview
 AUDIT_ROW_CAP = 200       # max per-row audit entries per apply
 DISPLAY_VALUE_CAP = 2000  # long values (form_history blobs...) truncated in UI JSON
 
-_SAFE_FILE_RE = re.compile(r'^advance_[0-9_]+\.(sql\.gz|db)$')
+_SAFE_FILE_RE = re.compile(r'^advance_[0-9_]+\.sql\.gz$')
 _SAFE_IDENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_$]*$')
 
 
@@ -152,7 +147,7 @@ def list_snapshots():
                 st = os.stat(p)
             except OSError:
                 continue
-            backend = 'postgres' if name.endswith('.sql.gz') else 'sqlite'
+            backend = 'postgres'
             out.append({
                 'kind': kind,
                 'name': name,
@@ -335,45 +330,6 @@ def _read_pg_dump_table(path, schema, table):
     return None, None
 
 
-# ─── SQLite snapshot reading (.db backups on SQLite installs) ────────────────
-
-def _sqlite_ro(path):
-    return sqlite3.connect(f'file:{path}?mode=ro', uri=True)
-
-
-def _scan_sqlite_db(path):
-    tables = {}
-    conn = _sqlite_ro(path)
-    try:
-        names = [r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name")]
-        for t in names:
-            if not _SAFE_IDENT_RE.match(t):
-                continue
-            info = conn.execute(f'PRAGMA table_info("{t}")').fetchall()
-            cols = [r[1] for r in info]
-            pk = [r[1] for r in sorted((r for r in info if r[5]), key=lambda r: r[5])]
-            count = conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
-            tables[('main', t)] = {'columns': cols, 'rows': count, 'pk': pk or None}
-    finally:
-        conn.close()
-    return tables
-
-
-def _read_sqlite_db_table(path, table):
-    conn = _sqlite_ro(path)
-    try:
-        info = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
-        cols = [r[1] for r in info]
-        if not cols:
-            return None, None
-        rows = [list(r) for r in conn.execute(f'SELECT * FROM "{table}"')]
-        return cols, rows
-    finally:
-        conn.close()
-
-
 # ─── Snapshot facade + scan cache ─────────────────────────────────────────────
 
 _scan_cache = {}  # (path, mtime, size) -> tables dict
@@ -387,7 +343,7 @@ class Snapshot:
         self.path = _snapshot_path(kind, name)
         if self.path is None:
             raise FileNotFoundError(f'unknown snapshot {kind}/{name}')
-        self.backend = 'postgres' if name.endswith('.sql.gz') else 'sqlite'
+        self.backend = 'postgres'
 
     def scan(self):
         st = os.stat(self.path)
@@ -396,8 +352,7 @@ class Snapshot:
         if hit is not None:
             return hit
         try:
-            tables = (_scan_pg_dump(self.path) if self.backend == 'postgres'
-                      else _scan_sqlite_db(self.path))
+            tables = _scan_pg_dump(self.path)
         except _READ_ERRORS as e:
             raise SnapshotReadError(self._read_error_detail(e)) from e
         while len(_scan_cache) >= _SCAN_CACHE_MAX:
@@ -407,9 +362,7 @@ class Snapshot:
 
     def read_table(self, schema, table):
         try:
-            if self.backend == 'postgres':
-                return _read_pg_dump_table(self.path, schema, table)
-            return _read_sqlite_db_table(self.path, table)
+            return _read_pg_dump_table(self.path, schema, table)
         except _READ_ERRORS as e:
             raise SnapshotReadError(self._read_error_detail(e)) from e
 
@@ -430,8 +383,7 @@ class Snapshot:
 # Errors that mean "this snapshot file is unreadable", not "our code is wrong".
 # gzip.BadGzipFile subclasses OSError, so OSError also covers permission and
 # I/O errors on the file itself.
-_READ_ERRORS = (OSError, EOFError, zlib.error, sqlite3.DatabaseError,
-                UnicodeError)
+_READ_ERRORS = (OSError, EOFError, zlib.error, UnicodeError)
 
 
 def _quick_health(path, backend):
@@ -443,29 +395,14 @@ def _quick_health(path, backend):
             head = f.read(16)
     except OSError:
         return False
-    if backend == 'postgres':
-        return head[:2] == b'\x1f\x8b'
-    return head.startswith(b'SQLite format 3\x00')
+    return head[:2] == b'\x1f\x8b'
 
 
 # ─── Live-side helpers ────────────────────────────────────────────────────────
 
-def _live_backend_info():
-    """(configured_type, and whether reads would be a stale SQLite fallback)."""
-    settings = _d['db_adapter'].read_db_settings(_d['DATABASE'])
-    return settings
-
-
-def _is_stale_fallback(db):
-    configured = _live_backend_info().get('db_type', 'sqlite')
-    return configured == 'postgres' and getattr(db, 'db_type', None) != 'postgres'
-
-
 def _live_schemas(db):
     """Schemas this app owns on the live side, in search-path order."""
-    if db.db_type != 'postgres':
-        return ['main']
-    s = _live_backend_info()
+    s = _d['db_adapter'].read_db_settings()
     return [s.get('pg_app_schema') or 'theater321',
             s.get('pg_shared_schema') or 'shared']
 
@@ -477,38 +414,27 @@ def _qi(name):
 
 
 def _qtable(db, schema, table):
-    if db.db_type == 'postgres':
-        return f'{_qi(schema)}.{_qi(table)}'
-    return _qi(table)
+    return f'{_qi(schema)}.{_qi(table)}'
 
 
 def _live_tables(db):
-    """{(schema, table): approx-owned} for the app's live schemas."""
+    """[(schema, table)] for the app's live schemas."""
     out = []
-    if db.db_type == 'postgres':
-        for schema in _live_schemas(db):
-            rows = db.execute(
-                'SELECT table_name FROM information_schema.tables '
-                'WHERE table_schema = ? AND table_type = ? ORDER BY table_name',
-                (schema, 'BASE TABLE')).fetchall()
-            out.extend((schema, r['table_name']) for r in rows)
-    else:
+    for schema in _live_schemas(db):
         rows = db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name").fetchall()
-        out.extend(('main', r['name']) for r in rows)
+            'SELECT table_name FROM information_schema.tables '
+            'WHERE table_schema = %s AND table_type = %s ORDER BY table_name',
+            (schema, 'BASE TABLE')).fetchall()
+        out.extend((schema, r['table_name']) for r in rows)
     return out
 
 
 def _live_columns(db, schema, table):
-    if db.db_type == 'postgres':
-        rows = db.execute(
-            'SELECT column_name FROM information_schema.columns '
-            'WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position',
-            (schema, table)).fetchall()
-        return [r['column_name'] for r in rows]
-    rows = db.execute(f'PRAGMA table_info({_qi(table)})').fetchall()
-    return [r['name'] for r in rows]
+    rows = db.execute(
+        'SELECT column_name FROM information_schema.columns '
+        'WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position',
+        (schema, table)).fetchall()
+    return [r['column_name'] for r in rows]
 
 
 def _live_count(db, schema, table):
@@ -666,15 +592,9 @@ def _diff_table(snap_cols, snap_rows, live_cols, live_rows, pk_cols):
 # ─── Restore planning ─────────────────────────────────────────────────────────
 
 def _restore_allowed(db, snap):
-    """(ok, reason) — global preconditions for any write-back."""
-    if _is_stale_fallback(db):
-        return False, ('Configured backend is PostgreSQL but this connection '
-                       'fell back to the SQLite bootstrap — refusing to write. '
-                       'Fix the PostgreSQL connection first.')
-    if snap.backend != db.db_type:
-        return False, (f'Snapshot backend ({snap.backend}) differs from the '
-                       f'live backend ({db.db_type}) — cross-backend restore '
-                       'is not supported.')
+    """(ok, reason) — global preconditions for any write-back. Every snapshot
+    is a PostgreSQL dump and the live side is always PostgreSQL, so there is
+    currently nothing to refuse; kept as the single hook for future rails."""
     return True, None
 
 
@@ -848,12 +768,12 @@ def _apply_plan(db, plan, snap):
     for t in plan['tables']:
         schema, table, pk_cols = t['schema'], t['table'], t['pk']
         q = _qtable(db, schema, table)
-        pk_where = ' AND '.join(f'{_qi(c)} = ?' for c in pk_cols)
+        pk_where = ' AND '.join(f'{_qi(c)} = %s' for c in pk_cols)
 
         for u in t['updates']:
             set_cols = u['set_columns']
             sql = (f'UPDATE {q} SET '
-                   + ', '.join(f'{_qi(c)} = ?' for c in set_cols)
+                   + ', '.join(f'{_qi(c)} = %s' for c in set_cols)
                    + f' WHERE {pk_where}')
             params = [u['row'][c] for c in set_cols] + [u['pk'][c] for c in pk_cols]
             cur = db.execute(sql, params)
@@ -872,7 +792,7 @@ def _apply_plan(db, plan, snap):
         cols = t['columns']
         for ins in t['inserts']:
             col_sql = ', '.join(_qi(c) for c in cols)
-            ph = ', '.join('?' for _ in cols)
+            ph = ', '.join('%s' for _ in cols)
             db.execute(f'INSERT INTO {q} ({col_sql}) VALUES ({ph})',
                        [ins['row'][c] for c in cols])
             if audit_rows_logged < AUDIT_ROW_CAP:
@@ -899,10 +819,10 @@ def _apply_plan(db, plan, snap):
                                  f'{snap.kind}/{snap.name})')
                 audit_rows_logged += 1
 
-        # Re-sync the id sequence on PostgreSQL so resurrected rows can't
-        # collide with future inserts. setval(NULL, ...) is a no-op (strict),
-        # so tables without a serial id are safe.
-        if db.db_type == 'postgres' and t['inserts'] and 'id' in cols:
+        # Re-sync the id sequence so resurrected rows can't collide with
+        # future inserts. setval(NULL, ...) is a no-op (strict), so tables
+        # without a serial id are safe.
+        if t['inserts'] and 'id' in cols:
             db.execute(
                 f"SELECT setval(pg_get_serial_sequence('{schema}.{table}', 'id'), "
                 f"GREATEST((SELECT COALESCE(MAX(id), 0) FROM {q}), 1))")
@@ -938,17 +858,9 @@ def _open_snapshot_or_error():
 
 
 def _page_view():
-    db = _d['get_db']()
-    try:
-        stale = _is_stale_fallback(db)
-        live_backend = db.db_type
-    finally:
-        db.close()
     return render_template(
         'snapshots.html',
         snapshots=list_snapshots(),
-        live_backend=live_backend,
-        stale_fallback=stale,
         now=datetime.now(),
         user=_d['get_current_user'](),
     )
@@ -963,8 +875,8 @@ def _tables_view():
         scan = snap.scan()
         live = _live_tables(db)
         live_set = set(live)
-        schemas = set(_live_schemas(db)) if db.db_type == 'postgres' else {'main'}
-        keys = sorted(set(k for k in scan if k[0] in schemas or snap.backend != db.db_type) | live_set,
+        schemas = set(_live_schemas(db))
+        keys = sorted(set(k for k in scan if k[0] in schemas) | live_set,
                       key=lambda k: (k[1] in SYSTEM_TABLES, k[0], k[1]))
         ok, reason = _restore_allowed(db, snap)
         tables = []
@@ -983,14 +895,6 @@ def _tables_view():
                                and table not in RESTORE_BLOCKED),
             })
         warnings = []
-        if _is_stale_fallback(db):
-            warnings.append('Live connection is a stale SQLite fallback — the '
-                            '"live" numbers below are NOT your PostgreSQL data. '
-                            'Restore is disabled.')
-        if snap.backend != db.db_type:
-            warnings.append(f'This snapshot is a {snap.backend} backup but the '
-                            f'live backend is {db.db_type} — comparison is '
-                            'best-effort and restore is disabled.')
         if not ok and reason and reason not in warnings:
             warnings.append(reason)
         return jsonify({'success': True, 'tables': tables, 'warnings': warnings,
@@ -1188,7 +1092,7 @@ def register(app, **deps):
     """
     Wire the module into the Flask app. `deps` must provide:
       get_db, get_current_user, admin_required, log_audit, db_adapter,
-      DATABASE, BACKUP_DIR — and optionally syslog_logger.
+      BACKUP_DIR — and optionally syslog_logger.
     Called once from app.py; everything else in this file is self-contained.
     """
     _d.update(deps, app=app)

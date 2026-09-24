@@ -6,16 +6,14 @@
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="${APP_DIR}/venv"
-DB="${APP_DIR}/advance.db"
-
-# Read port from app_settings, fall back to 5400
-PORT=$(python3 -c "
-import sqlite3, os
+# Read app_port from app_settings in PostgreSQL (db_config.ini), fall back to 5400
+PORT=$(cd "${APP_DIR}" && "${VENV}/bin/python" -c "
+import db_adapter
 try:
-    c = sqlite3.connect('${DB}')
-    r = c.execute(\"SELECT value FROM app_settings WHERE key='app_port'\").fetchone()
-    c.close()
-    print(r[0] if r else '5400')
+    db = db_adapter.connect()
+    r = db.execute(\"SELECT value FROM app_settings WHERE key='app_port'\").fetchone()
+    db.close()
+    print(r['value'] if r and r['value'] else '5400')
 except Exception:
     print('5400')
 " 2>/dev/null || echo "5400")

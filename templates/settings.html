@@ -793,8 +793,7 @@
     <div class="form-section-body" style="gap:20px">
       <p class="text-dim" style="font-size:12px">
         Automatic backups run hourly (keeping last 24) and daily at midnight (keeping last 30).
-        SQLite databases are copied as <code style="font-family:var(--font-mono);font-size:11px">.db</code> files;
-        PostgreSQL databases are dumped as compressed
+        The PostgreSQL database is dumped as compressed
         <code style="font-family:var(--font-mono);font-size:11px">.sql.gz</code> files.
         Click <strong>↓ Download</strong> next to any backup to save it to your local machine.
       </p>
@@ -976,16 +975,14 @@
   <div class="form-section" style="margin-bottom:16px">
     <div class="form-section-header"><span class="section-icon">◈</span> DATABASE STATUS</div>
     <div class="form-section-body" style="max-width:600px">
-      <p class="field-hint" style="margin-bottom:16px">Database backend is configured via <code>db_config.ini</code> on the server and <code>db_type</code> in app_settings. Use the CLI to switch backends and run migrations.</p>
-      <div class="field-hint" style="background:var(--bg-2,#23272e);border:1px solid var(--border,#333);border-radius:6px;padding:12px 14px;line-height:1.8">
-        <strong>Current backend:</strong> <code>{{ db_settings.db_type or 'sqlite' }}</code><br>
-        {% if db_settings.db_type == 'postgres' %}
+      <p class="field-hint" style="margin-bottom:16px">The app runs on PostgreSQL only. Connection settings come from <code>db_config.ini</code> on the server; schema migrations apply automatically on startup.</p>
+      <div class="field-hint" style="background:var(--bg-2,#23272e);border:1px solid var(--border,#333);border-radius:6px;padding:12px 14px;line-height:1.8;overflow-wrap:anywhere">
+        <strong>Backend:</strong> <code>PostgreSQL</code><br>
         <strong>Host:</strong> <code>{{ db_settings.pg_host }}:{{ db_settings.pg_port }}/{{ db_settings.pg_dbname }}</code><br>
         <strong>App schema:</strong> <code>{{ db_settings.pg_app_schema }}</code> &nbsp; <strong>Shared schema:</strong> <code>{{ db_settings.pg_shared_schema }}</code><br>
-        {% endif %}
         <span class="text-dim" style="font-size:11px">
-          Edit <code>db_config.ini</code> to change credentials. See <code>db_config.ini.example</code> for format.<br>
-          CLI: <code>python3 init_db.py --init-postgres</code> &nbsp;|&nbsp; <code>python3 init_db.py --migrate-to-postgres</code>
+          Edit <code>{{ db_settings.config_path }}</code> and restart to change credentials. See <code>db_config.ini.example</code> for format.<br>
+          CLI: <code>python3 init_db.py</code> (create/upgrade schema + seed a fresh install)
         </span>
       </div>
       <div id="db-msg" class="field-msg" style="display:none;margin-top:8px"></div>
@@ -994,23 +991,6 @@
       </div>
     </div>
   </div>
-
-  {% if db_settings.db_type == 'postgres' %}
-  <div class="form-section" id="migrate-section" style="margin-bottom:16px">
-    <div class="form-section-header"><span class="section-icon">◈</span> MIGRATE FROM SQLITE → POSTGRESQL</div>
-    <div class="form-section-body">
-      <p class="field-hint" style="margin-bottom:12px">Copy all data from the local SQLite file to PostgreSQL. Safe to run multiple times — duplicate rows are skipped automatically. Shared tables (users, groups, sessions) go to the <code>{{ db_settings.pg_shared_schema }}</code> schema; app tables go to <code>{{ db_settings.pg_app_schema }}</code>.</p>
-      <div id="migrate-msg" class="field-msg" style="display:none;margin-bottom:8px"></div>
-      <button class="btn btn-primary" onclick="runMigration()">Migrate Now</button>
-      <div id="migrate-results" style="display:none;margin-top:16px">
-        <table class="data-table" id="migrate-table">
-          <thead><tr><th>TABLE</th><th>COPIED</th><th>SKIPPED</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-  {% endif %}
 
   <div class="form-section" style="margin-bottom:16px">
     <div class="form-section-header"><span class="section-icon">◈</span> FILE STORAGE (SEAWEEDFS / S3)</div>
@@ -3710,39 +3690,13 @@ async function testDbConnection() {
   msg.style.display = '';
   msg.textContent = 'Testing...';
   msg.className = 'field-msg';
-  const payload = { db_type: '{{ db_settings.db_type or "sqlite" }}' };
   try {
     const resp = await fetch('/settings/database/test', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}, body: '{}'
     });
     const d = await resp.json();
     msg.textContent = d.message;
     msg.className = 'field-msg ' + (d.success ? 'field-msg-success' : 'field-msg-error');
-  } catch(e) { msg.textContent = 'Network error'; msg.className = 'field-msg field-msg-error'; }
-}
-
-async function runMigration() {
-  const msg = document.getElementById('migrate-msg');
-  const resultsEl = document.getElementById('migrate-results');
-  const tbody = document.querySelector('#migrate-table tbody');
-  msg.style.display = '';
-  msg.textContent = 'Migration running... this may take a moment.';
-  msg.className = 'field-msg';
-  resultsEl.style.display = 'none';
-  try {
-    const resp = await fetch('/settings/database/migrate', {method: 'POST'});
-    const d = await resp.json();
-    if (d.success) {
-      msg.textContent = `Migration complete. ${d.total_copied} rows copied, ${d.total_skipped} skipped (duplicates).`;
-      msg.className = 'field-msg field-msg-success';
-      tbody.innerHTML = Object.entries(d.stats).map(([t, s]) =>
-        `<tr><td style="font-family:var(--font-mono);font-size:11px">${t}</td><td>${s.copied ?? 0}</td><td class="text-dim">${s.skipped ?? 0}${s.error ? ' ⚠ '+s.error : ''}</td></tr>`
-      ).join('');
-      resultsEl.style.display = 'block';
-    } else {
-      msg.textContent = 'Migration failed: ' + (d.error || 'Unknown error');
-      msg.className = 'field-msg field-msg-error';
-    }
   } catch(e) { msg.textContent = 'Network error'; msg.className = 'field-msg field-msg-error'; }
 }
 

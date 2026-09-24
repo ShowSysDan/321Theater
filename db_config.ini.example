@@ -1,10 +1,12 @@
-# ShowAdvance PostgreSQL connection credentials
+# 3·2·1→Theater PostgreSQL connection credentials
 # Copy this file to db_config.ini and fill in your values.
 # db_config.ini is gitignored and never committed.
 #
-# The app reads db_type from the database (toggled in Settings).
-# All PostgreSQL credentials come from this file only.
+# The app runs on PostgreSQL only — this file is the ONLY place the database
+# connection is configured (override the path with THEATER_DB_CONFIG).
+# host may be a hostname/IP or a Unix-socket directory (e.g. /var/run/postgresql).
 # Edit this file and restart the app to apply changes.
+# First-time setup: python3 init_db.py  (creates schemas/tables + seeds defaults)
 #
 # Two schemas are used:
 #   app_schema    – theater-specific data (shows, schedules, contacts, etc.)

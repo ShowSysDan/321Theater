@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `2.47.0`**
+**Current version: `3.0.2`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,9 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `3.0.2` — **Hardened the one-time REAL → DOUBLE PRECISION conversion for production, and proved it's lossless.** Proof first: 28,282 values across all 13 money/rate/hours columns (edge cases like $0.10, $18.33, 3-decimal rates, $12,345.67, $999,999.99, plus 2,000 random amounts) read back **bit-for-bit identical** to what the app read before the conversion, under both PostgreSQL ≥12 and simulated ≤11 float output. No rows or values change, so invoice math can't change (all totals are computed in Python from those values). Hardening: each column now converts in its own savepoint with a 5 s lock timeout, so a column that can't convert right now (a table locked by a long transaction, or a view a sister app created on it) is skipped with a clear `[migrate_pg] could not widen …` log line and retried on the next restart. It stays REAL and fully working meanwhile, and the restart and every other column proceed. Views are no longer mistaken for convertible tables. Verified: with a held lock + a dependent view, the restart completes (exit 0), converts everything else, and converts the previously locked columns on the next start. Deploy: main app only.
+- `3.0.1` — **Memory-leak, security and data-type audit of 3.0.0, and the fixes it turned up.** Tested against a real PostgreSQL 16 with a 14-minute production-shaped soak (gunicorn 4×4, 8 users, 56k requests, a deliberate 45 s PG outage mid-run), browser heap tracking, SQL-injection fuzzing and a schema/type audit. **What was clean:** no DB connection/cursor leaks (PG connections return to 0 after load and after the outage; FDs flat); every hot endpoint (2 s advance sync, heartbeat, saves, search, dashboard) retains zero Python objects per request; the browser UI is flat over 10 min of live multi-user presence + 160 tab switches (heap, DOM nodes, listeners unchanged; the only growth was Chromium's own per-field undo history, reproduced on a blank page); SQL injection: 8 payload families × every route produced zero SQL-syntax errors and zero blind-timing hits (all errors were PG rejecting *bound* values), dynamic identifiers are all whitelisted, authz/CSRF/fail-closed-on-outage checks pass. **Fixed:** (1) **PDF memory leak** — every WeasyPrint render built a fresh `FontConfiguration` whose native fontconfig/Pango memory is never freed (~250 KB leaked per PDF; this was essentially all of a worker's steady RSS growth). PDFs now reuse one per thread (`_wp_font_config()`), cutting it ~87% (the remaining ~36 KB/PDF is inside WeasyPrint itself). (2) **Restart deadlocks + a shared-`users` lock** — every worker ran the 164-statement startup migration concurrently, and PostgreSQL takes the table lock *before* honouring `IF NOT EXISTS`, so each restart locked ~40 hot tables (including the cross-app `shared.users`) and deadlocked live requests (`DeadlockDetected` 500s). Migrations are now serialized by an advisory lock and skip anything the catalog already shows — a normal restart takes no table locks (verified: the old migration blocked behind one open transaction; the new one finishes in 0.1 s). (3) **Billing: removed billable items came back after every restart** — a one-time backfill (`show_labor_billable_items` CROSS JOIN) ran on every startup, re-enabling e.g. a parking charge a PM had unchecked on a show. It now runs only when that table is first created. (4) **PostgreSQL `REAL` is 32-bit** (SQLite's is 64-bit): 13 money/rate/hours columns couldn't hold cents above ~$262k and SQL-side sums drifted (1000 × $0.10 = $99.99905). All are now `DOUBLE PRECISION`; the one-time conversion goes via `::text` so stored values keep exactly what was typed. (5) **Advance sync re-sent the latest edit every 2 s** — its `since` cursor went through JSON as a whole-second HTTP date, so PG's microsecond timestamps always compared as newer; the cursor is now full-precision ISO (old-format cursors still accepted). (6) **AI concurrency limit silently off on a non-UTC server** — session timeouts compared the DB clock against Python's UTC clock; now compared on the DB clock. Prism sync's stale-run/daily checks likewise now share one clock. (7) Eight "`SELECT … ORDER BY id DESC LIMIT 1` after INSERT" id lookups (asset types/items/categories, show assets, external rentals, site messages, dashboards, AI sessions) could return another worker's row under concurrency; all now use `INSERT … RETURNING id`. Re-verified: 921 statements PREPARE-checked, differential fuzz of every route identical to 3.0.0, fresh-install and upgraded schemas identical (incl. index definitions). **Upgrade note:** the first restart converts the 13 REAL columns (a one-time, quick rewrite of those tables); later restarts do nothing. Deploy: main app only.
+- `3.0.0` — **PostgreSQL-native: the SQLite adapter is retired.** The app has always run on PostgreSQL in production, but every query still went through a SQLite-dialect translation layer, and a silent SQLite "bootstrap" fallback kicked in whenever PG was unreachable. That fallback caused real bugs: background jobs read stale bootstrap settings and did nothing. Both are gone. (1) **Native SQL everywhere:** all ~950 statements in app.py, init_db.py, prism/security/snapshot modules and import_assets.py were converted at the source to native psycopg2 SQL: `%s` placeholders, explicit `INSERT … ON CONFLICT (…) DO UPDATE/NOTHING` upserts (was `INSERT OR REPLACE/IGNORE`), `NOW() - INTERVAL` (was `datetime('now', …)`), and `INSERT … RETURNING id` for new ids (was a hidden `SAVEPOINT` + `SELECT lastval()` round-trip after *every* INSERT). The conversion was mechanical and verified byte-for-byte against what the old adapter emitted, so production SQL is unchanged. `db_adapter.py` now passes SQL to psycopg2 verbatim, which also kills the old "a literal `?` anywhere in SQL gets rewritten" trap. (2) **No fallback, ever:** `db_adapter.connect()` raises `DatabaseUnavailable` when PG is down. Requests get a clean **503** (JSON for API calls), scheduled emails / no-labor alerts / Prism auto-sync skip the run with a logged reason, and the gateway OTP API fails closed. The `_is_stale_pg_fallback` guards are gone because the state they guarded against can no longer happen. Connections set `search_path` via startup options (one fewer round-trip per connection; schema creation moved to init). (3) **Config = `db_config.ini` only.** `advance.db` is no longer read or written (safe to delete after upgrading). `db_type`, the Settings → Database backend switch, and the "Migrate from SQLite" button/route are removed. The Settings → Database panel now shows the *real* host/db/schemas (it was showing defaults: it read `pg_*` from app_settings, where they never lived). The `THEATER_DB_CONFIG` env var can point at a different ini. (4) **`init_db.py` rewritten PostgreSQL-only:** `python3 init_db.py` creates schemas + tables, applies column migrations, and seeds a *fresh* install (form sections/fields, app settings, job positions, schedule meta fields, contacts). Seeds only go into empty tables, and `admin/admin123` (now correctly forced to change password; the old PG init skipped that) is only created when the shared `users` table is completely empty. `--migrate` = schema only (also runs on every startup); `--reset` drops both schemas after a YES prompt. The 1,100-line SQLite schema, the SQLite migrator and `migrate_sqlite_to_postgres` are deleted. A fresh install and an upgraded 2.47 database were verified to produce identical schemas (all 852 columns + indexes). (5) **Backups/snapshots:** always `pg_dump` .sql.gz. The SQLite file-copy branch and `.db` snapshot reading are removed. (6) **`start.sh` / `install.sh` read `app_port` from PostgreSQL:** they were reading the SQLite file, so a port changed in Settings never reached `start.sh` on a PG deployment. install.sh now requires `db_config.ini` and runs `init_db.py`. `import_assets.py` writes to PG in one transaction. (7) **Pre-existing PostgreSQL bugs found by the audit and fixed:** public show links `/public/shows/<id>/advance|schedule` 500'd on PG (`status="active"` is a column name in PG, a string only in SQLite). The no-labor alert queried a nonexistent `users.is_active` column, so it never sent (it now targets unlocked, approved schedulers). Adding an asset log entry 500'd after committing (`last_insert_rowid()` is SQLite-only). Global search (`/api/search`) was case-sensitive on PG (SQLite `LIKE` isn't) and now uses `ILIKE`. **Verification:** every static SQL statement (916) was `PREPARE`d against a live PostgreSQL 16 schema. A differential fuzz of all ~220 write routes + every GET route was run against the old and new code: identical status codes on every request except the two fixed public-PDF routes. Also tested: gunicorn multi-worker boot, every background job, the snapshot inspect/diff/restore round-trip, and PG-down behaviour. **Upgrade:** nothing to do beyond the normal pull + restart (your existing `db_config.ini` is all that's needed). Deploy: main app only.
 - `2.47.0` — **Document-viewer My Account page + show-calendar layout fixes.** (1) **Viewers can finally change their own password:** document-viewer accounts had no path to any account UI — the viewer gate blocks /settings (where everyone else's Settings → My Account tab lives), and the sidebar's viewer block had no account link, even though the `change_own_password` endpoint itself was always viewer-whitelisted. New **My Account** item in the viewer sidebar (and mobile drawer) → new `/viewer/account` page (`viewer_account.html`) with the same change-password form, live rule checklist, and `/account/change_password` call as the Settings tab; endpoint added to `_VIEWER_ALLOWED_ENDPOINTS`, per-page Help entry included. (2) **Calendar columns no longer blow out on long show names:** the 7-column grids in the viewer Show Calendar and the dashboard shows-calendar widget used `repeat(7, 1fr)`, and a `1fr` track still respects a nowrap chip's min-content width — one long show name (e.g. "Orlando Philharmonic: Opening Night…") made its weekday's column several times wider than the rest and the chip spill across neighboring days. Now `repeat(7, minmax(0, 1fr))` + `min-width:0; overflow:hidden` on the cells, so all seven columns stay equal and chips truncate with an ellipsis (full name stays on the hover tooltip). (3) **Week at a Glance shows the week that matters:** the strip rendered the first 7 days of the selected range — a month view in mid-September showed Sept 1–7, all zeros. It now anchors on **today** when today falls inside the range (pulled back so a full 7 days still fit when today is near the range's end), falling back to the range's first week otherwise. (4) Day keys and the "today" highlight in both calendars now use the local calendar date instead of `toISOString()` (UTC), which rolled to tomorrow after ~8 PM Eastern and shifted the highlight and week strip off by one. Same templates serve desktop and mobile. Deploy: main app only.
 - `2.46.0` — **Daily subtotals on labor estimates and show settlements.** Multi-day shows now show what each work day costs: a **Day subtotal** row (billable hours + dollars) closes each day's block on the Labor Estimate PDF, the Pre-Show Estimate's labor section, the Final Invoice PDF, the Combined Invoice's per-show labor tables, the show page's Estimated Labor Cost table, and the Post-Show tab's Actual Labor grid. Computed in ONE place — a new `_insert_labor_day_subtotals()` helper that both billing engines (`_calc_labor_cost_for_show` / `_calc_post_show_labor_cost`) run on their output, emitting synthetic `is_day_subtotal` lines — so every surface shows identical figures and none re-derives the math (per the never-fork-the-billing-engines rule; the subtotal amounts duplicate the day's lines, so anything summing lines must skip the flag). A day's subtotal includes its Overtime (1.5×) lines and any folded-in per-crew spread — it is the day's true billed cost; training lines contribute no hours and no dollars; the undated Added Hours block subtotals as its own group; the per-crew "Additional Charges" stay outside (they're per-show, not per-day). Single-day shows are untouched — no subtotal row appears, since it would just repeat the labor total. On the Post-Show grid the row first shows the instant local sum, then the overtime reconcile pass paints the server's authoritative figure over it (`date_key` match), exactly like the grid total. Verified end-to-end on SQLite (engines + all four PDF templates render; day subtotals sum to the labor total); same templates serve desktop and mobile. Deploy: main app only.
 - `2.45.3` — **Bug fix: an asset name containing a quote broke "add asset to show".** An asset type named e.g. `Macbook Air (13")` could be created fine in the asset list, but clicking its card in the show page's Add Asset search modal threw `Uncaught SyntaxError: Invalid or unexpected token` and the add modal never opened. Cause: the search-result cards inline the asset name into an `onclick="selectAssetType(…, '<name>')"` attribute, and show.html's `esc()` helper didn't escape double quotes — the `"` in the name terminated the HTML attribute early, leaving a truncated, unparseable handler. The same pattern had sibling variants: asset_approvals.html's picker broke on names with *apostrophes* (its `_esc` entity-encoded `'` before the JS-escape ran), and the show page's external-rental Edit button broke on descriptions with apostrophes (raw `JSON.stringify` in a single-quoted attribute). Fix: `esc()` now escapes all five HTML-special characters, and a new `escJsAttr()` helper (JS-escape backslash+quote first, THEN HTML-escape — order matters) is used everywhere a name is embedded in an inline handler's JS string, in show.html, asset_approvals.html, and assets.html's category-edit button; the external-rental Edit button HTML-escapes its JSON payload. Round-trip verified for names with `"`, `'`, `\`, `<`, `&`. Same templates serve desktop and mobile, so both modes are covered. Deploy: main app only.
@@ -157,9 +160,8 @@ Version history:
    - [Feature Modules](#feature-modules)
    - [Prism FM Integration](#prism-fm-integration)
 6. [Database Configuration](#database-configuration)
-   - [SQLite (Default)](#sqlite-default)
    - [PostgreSQL (Dual-Schema)](#postgresql-dual-schema)
-   - [Migrating from SQLite to PostgreSQL](#migrating-from-sqlite-to-postgresql)
+   - [Writing SQL (PostgreSQL-native)](#writing-sql-postgresql-native)
 7. [Multi-Server Deployment](#multi-server-deployment)
    - [Cluster Heartbeat & Leader Election](#cluster-heartbeat--leader-election)
    - [Adding a New Scheduled Task](#adding-a-new-scheduled-task)
@@ -177,10 +179,10 @@ Version history:
 | RAM | 512 MB |
 | Disk | 1 GB (for database and backups) |
 | Network | LAN access for crew devices |
-| Database | SQLite (built-in) or PostgreSQL 13+ (optional) |
+| Database | PostgreSQL 13+ (required) + `pg_dump` on the app server for backups |
 | Node.js | 18+ (optional — only for the Prism FM integration, see `prism_bridge/README.md`) |
 
-Python packages installed automatically: Flask, Werkzeug, gunicorn, WeasyPrint (PDF generation), APScheduler (backups), flask-limiter (login rate limiting), qrcode[pil] + Pillow (WiFi QR codes), dnspython (direct MX email delivery), pdfplumber + python-docx + openpyxl + xlrd + striprtf (document import/AI extraction), psycopg2-binary (optional PostgreSQL support).
+Python packages installed automatically: Flask, Werkzeug, gunicorn, WeasyPrint (PDF generation), APScheduler (backups), flask-limiter (login rate limiting), qrcode[pil] + Pillow (WiFi QR codes), dnspython (direct MX email delivery), pdfplumber + python-docx + openpyxl + xlrd + striprtf (document import/AI extraction), psycopg2-binary (PostgreSQL driver).
 
 ### WeasyPrint system dependencies (Ubuntu/Debian)
 
@@ -197,6 +199,10 @@ sudo apt install libpango-1.0-0 libpangoft2-1.0-0 libffi-dev libcairo2
 git clone https://github.com/ShowSysDan/ShowAdvance 321theater
 cd 321theater
 
+# Create the PostgreSQL database + role first, then point the app at it
+# (see Database Configuration below):
+cp db_config.ini.example db_config.ini && nano db_config.ini
+
 # Full install with systemd service (recommended):
 sudo ./install.sh
 
@@ -204,7 +210,7 @@ sudo ./install.sh
 ./install.sh
 ```
 
-The installer: creates a Python venv, installs dependencies, initialises/migrates the SQLite database, creates backup directories, writes a systemd service unit (`321theater`), generates a SECRET_KEY, and starts the service. For PostgreSQL setup, see [Database Configuration](#database-configuration).
+The installer: creates a Python venv, installs dependencies, initialises/migrates the PostgreSQL database from `db_config.ini` (`python3 init_db.py`: idempotent, seeds defaults only on a fresh install), creates backup directories, writes a systemd service unit (`321theater`), generates a SECRET_KEY, and starts the service. PostgreSQL setup: see [Database Configuration](#database-configuration).
 
 After installation the app is available at `http://<server-ip>:<port>` (default port **5400**).
 
@@ -217,7 +223,7 @@ sudo systemctl restart 321theater
 
 ### Updating
 
-Re-run `./install.sh` (or `sudo ./install.sh`). It detects the existing database and runs migrations automatically — no data is lost.
+Re-run `./install.sh` (or `sudo ./install.sh`), or just `git pull && sudo systemctl restart 321theater`. Schema migrations apply automatically on startup — no data is lost.
 
 ---
 
@@ -493,7 +499,6 @@ python3 import_assets.py \
 # Options:
 #   --inventory PATH   Path to RentalInventory export (required)
 #   --items PATH       Path to Items export (required)
-#   --db PATH          Path to database file (default: advance.db)
 #   --force            Skip duplicate-data guard (use if re-running)
 #   --dry-run          Print what would be imported without writing anything
 ```
@@ -510,7 +515,7 @@ Done. Import complete.
 
 #### Notes
 
-- The script creates a backup of your database (`advance.db.bak`) before writing anything.
+- The script writes to the PostgreSQL database in `db_config.ini` inside ONE transaction: any error rolls the whole import back. (Take a `pg_dump` first if you want a restore point, or use Settings → Backups → Run Backup Now.)
 - Run `python3 import_assets.py --dry-run` first to preview the import without modifying the database.
 - If the Asset Manager already has data, the script will abort unless you pass `--force`.
 - Re-running with `--force` will skip rows that would create duplicate category or type names — existing records are left unchanged.
@@ -798,7 +803,7 @@ Settings → Email. Configure outbound email for sending schedule PDFs to contac
 | EHLO Hostname | Custom EHLO hostname for direct delivery |
 | Display Name | Friendly name shown in the From field |
 
-The Email tab also hosts the automated-send schedules: **Advance Sheet** and **Production Schedule** auto-emails, the shared **send hour**, and **Labor — No-Request Alerts**. The labor alert warns schedulers (users with the Scheduler permission) about active shows that are approaching their date with **no labor requested yet**, so they can follow up. Configure an enable toggle plus up to two day-before windows (default 14 and 7 days out, the second is optional — 0 disables it). Each show alerts once per window — a single digest email to every scheduler with an address lists all the due shows (the breakdown), **and** each show also gets its own in-app notification linking to its Labor Requests — and a show that already has any labor requested is skipped. Alerts fire at the shared send hour; the same stale-SQLite-fallback and leader-gating safeguards as the PDF auto-emails apply, and each send writes a `NO_LABOR_ALERT_SENT` syslog line.
+The Email tab also hosts the automated-send schedules: **Advance Sheet** and **Production Schedule** auto-emails, the shared **send hour**, and **Labor — No-Request Alerts**. The labor alert warns schedulers (users with the Scheduler permission) about active shows that are approaching their date with **no labor requested yet**, so they can follow up. Configure an enable toggle plus up to two day-before windows (default 14 and 7 days out, the second is optional — 0 disables it). Each show alerts once per window — a single digest email to every scheduler with an address lists all the due shows (the breakdown), **and** each show also gets its own in-app notification linking to its Labor Requests — and a show that already has any labor requested is skipped. Alerts fire at the shared send hour; the same leader-gating and skip-when-PostgreSQL-is-unreachable safeguards as the PDF auto-emails apply, and each send writes a `NO_LABOR_ALERT_SENT` syslog line.
 
 ### AI Extraction (Ollama)
 
@@ -844,18 +849,15 @@ Events: LOGIN/LOGOUT · SHOW_CREATE/ARCHIVE/DELETE/RESTORE · FORM_SAVE · PDF_E
 
 ### Database Backups
 
-Settings → Backups. Automatic hourly (keeps 24) and daily at midnight (keeps 30) SQLite backups in `backups/`. Click **Run Backup Now** for immediate backup.
+Settings → Backups. Automatic hourly (keeps 24) and daily at midnight (keeps 30) `pg_dump` backups (compressed `.sql.gz`) in `backups/` on each app server. Click **Run Backup Now** for an immediate backup, or **↓ Download** to save one. Settings → DB Snapshots can inspect, diff, and surgically restore rows or whole shows from any of them.
 
-**SQLite Restore:**
+**Full restore** (replaces everything, so stop the app first):
 ```bash
-cp backups/daily/advance_YYYYMMDD_0000.db advance.db
-sudo systemctl restart 321theater
+sudo systemctl stop 321theater
+gunzip -c backups/daily/advance_YYYYMMDD_0000.sql.gz | psql -h <host> -U <user> -d 321theater
+sudo systemctl start 321theater
 ```
-
-**PostgreSQL Backups:** When using PostgreSQL, use standard `pg_dump` for database backups. The in-app backup system backs up the SQLite bootstrap file (`advance.db`) only.
-```bash
-pg_dump -h localhost -U showadvance 321theater > backup_$(date +%Y%m%d).sql
-```
+(Restore into an empty database, or drop the `theater321` and `shared` schemas first. `python3 init_db.py --reset` does that after a confirmation prompt.)
 
 ### File Manager
 
@@ -961,17 +963,11 @@ documents all of the above for operators.
 
 ## Database Configuration
 
-321Theater supports two database backends: **SQLite** (default, zero-config) and **PostgreSQL** (recommended for production and multi-app environments).
-
-### SQLite (Default)
-
-Out of the box, all data lives in a single file: `advance.db`. No configuration needed. The installer handles initialization and migrations automatically.
-
-SQLite is ideal for single-server installs and development.
+321Theater runs on **PostgreSQL only** (since 3.0.0). The connection is configured in one place, `db_config.ini` in the app directory (or the path in the `THEATER_DB_CONFIG` environment variable). There is no SQLite backend and no fallback: if PostgreSQL is unreachable, pages return **503** and background jobs skip their run with a logged reason. Nothing silently reads stale data.
 
 ### PostgreSQL (Dual-Schema)
 
-PostgreSQL mode uses **two schemas** within one database:
+The app uses **two schemas** within one database:
 
 | Schema | Default Name | Contents | Purpose |
 |--------|-------------|----------|---------|
@@ -1010,19 +1006,13 @@ This separation means another app can connect to the same PostgreSQL database an
 
    This file is **gitignored** — credentials are never committed.
 
-3. **Initialize the PostgreSQL schemas and tables:**
+3. **Initialize the schemas, tables and default data:**
    ```bash
-   python3 init_db.py --init-postgres
+   python3 init_db.py
    ```
-   This creates both schemas and all tables. Safe to run multiple times (uses `IF NOT EXISTS`).
+   Creates both schemas and all tables, applies column migrations, and seeds a fresh install (default form, settings, job positions, contacts, and an `admin` / `admin123` account that must change its password at first login). Safe to run any number of times: seeds only go into empty tables, and the admin account is only created when there are no users at all.
 
-4. **Set the app to use PostgreSQL:**
-   ```bash
-   # In the SQLite database, set db_type to 'postgres':
-   sqlite3 advance.db "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('db_type', 'postgres');"
-   ```
-
-5. **Restart the app:**
+4. **Restart the app:**
    ```bash
    sudo systemctl restart 321theater
    ```
@@ -1031,7 +1021,7 @@ This separation means another app can connect to the same PostgreSQL database an
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `host` | `localhost` | PostgreSQL server hostname |
+| `host` | `localhost` | PostgreSQL server hostname/IP, or a Unix-socket directory |
 | `port` | `5432` | PostgreSQL server port |
 | `dbname` | `321theater` | Database name |
 | `user` | — | Database user |
@@ -1043,49 +1033,31 @@ Legacy note: the old `schema` key is still accepted as a fallback for `app_schem
 
 #### How it Works at Runtime
 
-When the app connects to PostgreSQL, it sets `search_path` to `"app_schema", "shared_schema"`. This means all SQL queries work with unqualified table names — no code changes needed. Foreign key references (e.g., `shows.created_by → users.id`) resolve correctly across schemas.
-
-SQLite remains the "bootstrap" database — it always stores the `db_type` setting so the app knows which backend to use on startup.
-
-### Migrating from SQLite to PostgreSQL
-
-Two options: **CLI** (recommended) or **Web UI**.
-
-#### CLI Migration
-
-```bash
-# 1. Ensure db_config.ini is configured (see above)
-
-# 2. Initialize PostgreSQL schemas and tables:
-python3 init_db.py --init-postgres
-
-# 3. Copy all data from SQLite to PostgreSQL:
-python3 init_db.py --migrate-to-postgres
-
-# 4. Set the app to use PostgreSQL:
-sqlite3 advance.db "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('db_type', 'postgres');"
-
-# 5. Restart:
-sudo systemctl restart 321theater
-```
-
-The migration is **idempotent** — duplicate rows are skipped via `ON CONFLICT DO NOTHING`. You can safely re-run it if interrupted. Tables are copied in foreign-key dependency order, and serial sequences are synced after copy so new inserts get correct IDs.
-
-Each table is routed to the correct schema: shared tables go to the `shared` schema, app tables go to the `theater321` schema.
-
-#### Web UI Migration
-
-If the app is already set to `db_type=postgres`, go to **Settings → Database** and click **Migrate Now**. This runs the same migration as the CLI command. Progress and per-table stats are shown in the browser.
+Each connection sets `search_path` to `"app_schema", "shared_schema"` at connect time. All SQL uses unqualified table names, and foreign keys (e.g. `shows.created_by → users.id`) resolve across schemas. Schema migrations (`CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`) run automatically on every startup.
 
 #### CLI Reference
 
 | Command | Description |
 |---------|-------------|
-| `python3 init_db.py` | Fresh SQLite init (skips if DB exists) |
-| `python3 init_db.py --force` | Destroy and reinitialize SQLite |
-| `python3 init_db.py --migrate` | Run schema migrations on existing SQLite DB |
-| `python3 init_db.py --init-postgres` | Create PostgreSQL schemas + tables from `db_config.ini` |
-| `python3 init_db.py --migrate-to-postgres` | Copy all SQLite data → PostgreSQL |
+| `python3 init_db.py` | Create/upgrade schemas + tables, apply column migrations, seed a fresh install (idempotent) |
+| `python3 init_db.py --migrate` | Schema + column migrations only, no seeding (also runs on app startup) |
+| `python3 init_db.py --reset` | **DROP both schemas and all data** (asks for `YES`), then re-initialize |
+
+(`--init-postgres` / `--reset-postgres` are accepted as aliases.)
+
+### Writing SQL (PostgreSQL-native)
+
+`db_adapter` passes SQL to psycopg2 **verbatim**, so write native PostgreSQL:
+
+- Placeholders are `%s`. A literal `%` in a statement that also has params must be `%%` (better: bind the pattern, e.g. `LIKE %s` with `'prefix_%'`).
+- Upserts: `INSERT … ON CONFLICT (key cols) DO UPDATE SET col = EXCLUDED.col` / `ON CONFLICT DO NOTHING`.
+- New ids: `INSERT … RETURNING id`, then `cur.fetchone()['id']`. There is no `lastrowid`. Never re-find a new row with `ORDER BY id DESC LIMIT 1` (races across workers).
+- Types: never `REAL` (32-bit in PostgreSQL). Use `DOUBLE PRECISION` for money/rates/hours, `INTEGER` 0/1 for flags.
+- Clocks: `CURRENT_TIMESTAMP`/`NOW()` are the PG server's local time. Compare a column on the same clock that wrote it. Timestamps used as round-trip cursors must be sent as `isoformat()` (JSON drops microseconds).
+- Startup migrations must be lock-free when there's nothing to do (see CLAUDE.md → Schema): only recognised idempotent DDL forms, and one-time backfills gated on "table just created".
+- Time math: `NOW() - INTERVAL '5 minutes'`. String literals use single quotes (`"x"` is an identifier). Use `ILIKE` for case-insensitive matching.
+- `DATE`/`TIMESTAMP` columns come back as `date`/`datetime` objects. Coerce with `_as_date()` / `_as_dt()` before date math, and `json.dumps(…, default=str)` row snapshots.
+- A `psycopg2` UniqueViolation is re-raised as `db_adapter.DBIntegrityError`. Any error rolls the transaction back before re-raising.
 
 ---
 
@@ -1207,19 +1179,19 @@ journalctl -u 321theater -f
 journalctl -u 321theater -n 100
 ```
 
-**SQLite migration errors:**
+**Schema migration errors:**
 ```bash
 venv/bin/python init_db.py --migrate
 ```
 
 **PostgreSQL "no schema has been selected to create in":** Ensure your `db_config.ini` has valid `app_schema` and `shared_schema` values. The database user must have permission to create schemas. Re-run:
 ```bash
-python3 init_db.py --init-postgres
+python3 init_db.py
 ```
 
 **PostgreSQL connection refused:** Check that PostgreSQL is running, the host/port/credentials in `db_config.ini` are correct, and `pg_hba.conf` allows connections from the app server.
 
-**Falling back to SQLite:** If the app logs `PostgreSQL connection failed — falling back to SQLite`, check `db_config.ini` credentials and PostgreSQL server status. The app silently falls back to SQLite when PostgreSQL is unreachable.
+**"The database is temporarily unavailable" (HTTP 503):** the app logs `PostgreSQL connection FAILED: …` with the driver's reason. Check `db_config.ini` credentials and PostgreSQL server status. There is no fallback database, so nothing runs against stale data while PG is down, and scheduled jobs log that they skipped.
 
 **Login rate limiting:** After 15 failed login attempts per minute from an IP, further attempts return HTTP 429. Wait 60 seconds or restart the app.
 
@@ -1230,7 +1202,7 @@ python3 init_db.py --init-postgres
 The git repository and codebase were previously named **ShowAdvance**. The rename to **321Theater** is in progress. For the current transition period:
 
 - The **service name** on new installs is `321theater` (old installs still use `showadvance` — both are auto-detected)
-- The **SQLite database file** remains `advance.db` as the bootstrap database (stores `db_type` setting even when using PostgreSQL)
+- The legacy **SQLite file** `advance.db` is no longer used (3.0.0+) and can be deleted
 - The **PostgreSQL database** is named `321theater` with schemas `theater321` (app data) and `shared` (user/auth data)
 - The **syslog identifier** (`showadvance`) will update to `321theater` on the new server install — update any syslog filters at that time
 - The **folder** should be cloned as `321theater/` on new servers (`git clone <url> 321theater`)

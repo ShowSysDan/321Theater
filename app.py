@@ -10,14 +10,15 @@ The application server for the production-management tool: auth/sessions,
 the per-show lifecycle (Advance Sheet → Production Schedule → Labor →
 Assets → Post-Show Notes), the cross-show Labor Scheduler, invoices/PDF
 export, the Asset Manager, admin/settings, and the JSON APIs the templates
-call. Data access goes through db_adapter (SQLite bootstrap file +
-optional PostgreSQL via db_config.ini); HTML lives in templates/, client
-JS in static/js/app.js.
+call. Data access goes through db_adapter — PostgreSQL only, credentials
+from db_config.ini; HTML lives in templates/, client JS in static/js/app.js.
 
 Conventions
 -----------
-- DB: `db = get_db()` … `db.close()`; `?` placeholders (db_adapter rewrites
-  for PostgreSQL); `INSERT OR REPLACE` is translated to PG upserts.
+- DB: `db = get_db()` … `db.close()`. SQL is native PostgreSQL, sent to
+  psycopg2 verbatim: `%s` placeholders, `INSERT … ON CONFLICT …` upserts,
+  `INSERT … RETURNING id` for new ids, `NOW() - INTERVAL '…'`. A literal `%`
+  in SQL that also has params must be `%%` (or bind it as a param).
 - Auth: @login_required / @admin_required / @scheduler_required read flags
   from `session`. Mutations call log_audit(...) and, for security/critical
   actions, syslog_logger.* as well.
@@ -27,11 +28,10 @@ Conventions
   bump it (and the README changelog) with every change — MINOR for features,
   PATCH for fixes.
 
-Run: python app.py   (after running init_db.py first)
+Run: python app.py   (after creating db_config.ini and running init_db.py)
 """
 import os
 import sys
-import sqlite3
 import json
 import math
 import shutil
@@ -204,8 +204,8 @@ _SID_RE = re.compile(r'^[A-Za-z0-9_-]{20,128}$')
 
 
 def _session_expires_dt(value):
-    """`app_sessions.expires_at` → datetime. PostgreSQL returns a datetime,
-    SQLite an ISO string; junk parses as already-expired (fail closed)."""
+    """`app_sessions.expires_at` → datetime. PostgreSQL returns a datetime;
+    an ISO string is also accepted; junk parses as already-expired (fail closed)."""
     if isinstance(value, str):
         try:
             return datetime.fromisoformat(value.split('.')[0].replace('Z', ''))
@@ -240,7 +240,7 @@ class _DBSessionInterface(_FlaskSessionInterface):
             return {}, False
         try:
             row = db.execute(
-                "SELECT data, expires_at, user_id FROM app_sessions WHERE sid = ?", (sid,)
+                "SELECT data, expires_at, user_id FROM app_sessions WHERE sid = %s", (sid,)
             ).fetchone()
         except Exception:
             try: db.close()
@@ -253,7 +253,7 @@ class _DBSessionInterface(_FlaskSessionInterface):
         expires_dt = _session_expires_dt(row['expires_at'])
         if expires_dt < datetime.utcnow():
             try:
-                db.execute("DELETE FROM app_sessions WHERE sid = ?", (sid,))
+                db.execute("DELETE FROM app_sessions WHERE sid = %s", (sid,))
                 db.commit()
             except Exception:
                 pass
@@ -304,7 +304,7 @@ class _DBSessionInterface(_FlaskSessionInterface):
                 try:
                     db = get_db()
                     try:
-                        db.execute("DELETE FROM app_sessions WHERE sid = ?", (session.sid,))
+                        db.execute("DELETE FROM app_sessions WHERE sid = %s", (session.sid,))
                         db.commit()
                     finally:
                         db.close()
@@ -328,9 +328,9 @@ class _DBSessionInterface(_FlaskSessionInterface):
             db = get_db()
             try:
                 db.execute(
-                    "INSERT OR REPLACE INTO app_sessions "
+                    "INSERT INTO app_sessions "
                     "(sid, user_id, data, last_seen, expires_at) "
-                    "VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)",
+                    "VALUES (%s, %s, %s, CURRENT_TIMESTAMP, %s) ON CONFLICT (sid) DO UPDATE SET user_id = EXCLUDED.user_id, data = EXCLUDED.data, last_seen = EXCLUDED.last_seen, expires_at = EXCLUDED.expires_at",
                     (session.sid, user_id, data_json, expires_dt)
                 )
                 db.commit()
@@ -698,8 +698,8 @@ def reltime_filter(value):
     Settings user list's Last Active column. Empty/None → '' so callers can
     do `... | reltime or '—'`.
 
-    DB timestamps come from CURRENT_TIMESTAMP, which is UTC on SQLite but the
-    server's local clock on PostgreSQL — rather than guess the backend/zone,
+    DB timestamps come from CURRENT_TIMESTAMP, which is the PostgreSQL
+    server's local clock (historically UTC on SQLite) — rather than guess the zone,
     the delta is computed against both clocks and the smaller magnitude wins
     (the wrong clock is off by a whole timezone offset, the right one by
     round-trip seconds). Never raises; unparseable values pass through."""
@@ -739,15 +739,15 @@ def reltime_filter(value):
     return dt.strftime('%Y-%m-%d')
 
 
-DATABASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'advance.db')
-BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backups')
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 
 # ── Application Version ───────────────────────────────────────────────────────
 # Format: MAJOR.MINOR.PATCH
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '2.47.0'
+APP_VERSION = '3.0.2'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -798,8 +798,6 @@ except ImportError:
 
 def _get_upload_max():
     """Read upload_max_mb from app_settings, default 20."""
-    if not os.path.exists(DATABASE):
-        return 20 * 1024 * 1024
     try:
         db = get_db()
         row = db.execute("SELECT value FROM app_settings WHERE key='upload_max_mb'").fetchone()
@@ -836,8 +834,6 @@ _syslog_handler = None
 def reload_syslog_handler():
     """Read syslog settings from DB and reconfigure the handler."""
     global _syslog_handler
-    if not os.path.exists(DATABASE):
-        return
     try:
         db = get_db()
         rows = db.execute(
@@ -880,50 +876,27 @@ def reload_syslog_handler():
 
 def get_app_setting(key, default=''):
     """
-    Fetch a single app_settings value from the ACTIVE database.
+    Fetch a single app_settings value from PostgreSQL — the same table the
+    Settings UI reads and writes, so a value saved in the UI is exactly what
+    the rest of the app (including background jobs) sees.
 
-    app_settings is owned by whichever DB the app is configured to use
-    (SQLite or PostgreSQL) — that is also where the Settings UI reads and
-    writes it (see settings() / save_*_settings via get_db()). Reading it
-    through get_db() here is what guarantees a value saved in the UI is the
-    same value the rest of the app — including background jobs like the
-    scheduled PDF emailer — actually sees. (Previously this read the local
-    SQLite bootstrap file unconditionally, so on a PostgreSQL deployment
-    every setting saved in the UI was invisible to this function, silently
-    defeating SMTP config, scheduled emails, etc.)
-
-    Only `db_type` (and the PG credentials in db_config.ini) live solely in
-    the SQLite bootstrap file; db_adapter resolves those before any
-    connection is opened, so they never depend on this function.
-
-    Falls back to a direct SQLite read if the active DB can't be reached
-    (very early startup or a transient outage), preserving the original
-    startup-safe behaviour.
+    Returns `default` when the key is missing, or when PostgreSQL can't be
+    reached (very early startup / an outage) — logged, never a stale copy.
     """
-    if not os.path.exists(DATABASE):
-        return default
     try:
         db = get_db()
         try:
             row = db.execute(
-                'SELECT value FROM app_settings WHERE key=?', (key,)
+                'SELECT value FROM app_settings WHERE key=%s', (key,)
             ).fetchone()
         finally:
             db.close()
         if row and row['value'] is not None:
             return row['value']
         return default
-    except Exception:
-        # Active DB unreachable — fall back to the SQLite bootstrap file so
-        # startup / outage paths still resolve to *a* value.
-        try:
-            _conn = sqlite3.connect(DATABASE)
-            _conn.row_factory = db_adapter._row_factory
-            row = _conn.execute('SELECT value FROM app_settings WHERE key=?', (key,)).fetchone()
-            _conn.close()
-            return row['value'] if row and row['value'] is not None else default
-        except Exception:
-            return default
+    except Exception as e:
+        app.logger.warning(f'get_app_setting({key!r}) failed, using default: {e}')
+        return default
 
 
 # ─── Optional feature modules (Settings → System → Modules) ──────────────────
@@ -984,22 +957,20 @@ s3_storage.set_settings_provider(_s3_gui_settings)
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 def get_db():
-    """Return a normalized DB connection (SQLite or PostgreSQL based on settings)."""
-    settings = db_adapter.read_db_settings(DATABASE)
-    return db_adapter.connect(DATABASE, settings)
+    """Return a PostgreSQL DBConnection. Raises db_adapter.DatabaseUnavailable
+    when PostgreSQL is unconfigured or unreachable — there is no fallback."""
+    return db_adapter.connect()
 
 
-def _is_stale_pg_fallback(db):
-    """True when this deployment is configured for PostgreSQL but `db` is a
-    silent SQLite fallback (db_adapter.connect does this when PG is
-    unreachable) — meaning any settings/user data read from it is STALE
-    bootstrap data. Every background job or settings-sensitive path must
-    check this and refuse to act; callers log their own context-specific
-    ERROR. A genuine SQLite install (configured == active == 'sqlite')
-    returns False and proceeds normally."""
-    configured = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
-    active = getattr(db, 'db_type', None)
-    return configured == 'postgres' and active != 'postgres'
+@app.errorhandler(db_adapter.DatabaseUnavailable)
+def _database_unavailable(e):
+    """PostgreSQL down → 503 (not a generic 500), JSON for API callers."""
+    app.logger.error(f'DB unavailable for {request.method} {request.path}: {e}')
+    msg = 'The database is temporarily unavailable. Please try again in a moment.'
+    if (request.is_json or request.path.startswith('/api/')
+            or request.headers.get('X-Requested-With') == 'XMLHttpRequest'):
+        return jsonify({'error': msg}), 503
+    return msg, 503, {'Content-Type': 'text/plain; charset=utf-8', 'Retry-After': '30'}
 
 
 # ─── Per-Page Performance Stats (database query timer) ───────────────────────
@@ -1020,8 +991,7 @@ def _is_stale_pg_fallback(db):
 #      (perf_page_stats daily rollups + perf_slow_queries) with an ADDITIVE
 #      upsert, so 4 workers × N servers can all flush the same (day,
 #      endpoint) row without clobbering each other. Per the background-write
-#      rule, a flush that lands on a stale SQLite fallback drops its batch
-#      instead of writing stats into the bootstrap file.
+#      rule, a flush that can't reach PostgreSQL drops its batch.
 #
 # Overhead: two perf_counter() calls per query + dict math per request, and
 # one small write batch per worker per minute. Losing up to a minute of
@@ -1072,15 +1042,15 @@ def _perf_start_request():
     g._perf_start = time.perf_counter()
 
 
-# Additive daily-rollup upsert. Portable: both SQLite (≥3.24) and PostgreSQL
-# support INSERT ... ON CONFLICT with `excluded.` for the incoming values and
-# table-qualified names for the existing row. Counters add; min/max/slowest
-# merge — so concurrent flushes from other workers never clobber each other.
+# Additive daily-rollup upsert: INSERT ... ON CONFLICT with `excluded.` for
+# the incoming values and table-qualified names for the existing row.
+# Counters add; min/max/slowest merge — so concurrent flushes from other
+# workers never clobber each other.
 _PERF_UPSERT_SQL = """
     INSERT INTO perf_page_stats
         (stat_date, endpoint, request_count, total_ms, min_ms, max_ms,
          db_ms, db_query_count, db_max_ms, slow_sql, slow_ms, slow_path, slow_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (stat_date, endpoint) DO UPDATE SET
         request_count  = perf_page_stats.request_count + excluded.request_count,
         total_ms       = perf_page_stats.total_ms + excluded.total_ms,
@@ -1121,11 +1091,6 @@ def _perf_flush(pages, slow_rows):
     except Exception:
         return
     try:
-        if _is_stale_pg_fallback(db):
-            app.logger.error(
-                'perf stats flush skipped — PostgreSQL unreachable (stale SQLite '
-                'fallback); dropping this batch rather than writing to the bootstrap')
-            return
         for (stat_date, endpoint), r in pages.items():
             db.execute(_PERF_UPSERT_SQL, (
                 stat_date, endpoint,
@@ -1137,7 +1102,7 @@ def _perf_flush(pages, slow_rows):
             db.executemany(
                 'INSERT INTO perf_slow_queries '
                 '(occurred_at, endpoint, path, duration_ms, sql_text) '
-                'VALUES (?, ?, ?, ?, ?)', slow_rows)
+                'VALUES (%s, %s, %s, %s, %s)', slow_rows)
         db.commit()
     except Exception as e:
         app.logger.warning(f'perf stats flush failed: {e}')
@@ -1324,9 +1289,13 @@ def _cluster_heartbeat_iteration():
         db = get_db()
         try:
             db.execute("""
-                INSERT OR REPLACE INTO cluster_instances
+                INSERT INTO cluster_instances
                     (instance_id, ip, hostname, port, app_version, started_at, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (instance_id) DO UPDATE SET
+                    ip = EXCLUDED.ip, hostname = EXCLUDED.hostname, port = EXCLUDED.port,
+                    app_version = EXCLUDED.app_version, started_at = EXCLUDED.started_at,
+                    last_seen = EXCLUDED.last_seen
             """, (_CLUSTER_INSTANCE_ID, ip, hostname, port, version,
                   _CLUSTER_STARTED_AT, now))
             db.commit()
@@ -1364,7 +1333,7 @@ def _query_live_peers():
         rows = db.execute(
             "SELECT instance_id, ip, hostname, port, app_version, "
             "started_at, last_seen FROM cluster_instances "
-            "WHERE last_seen > ? ORDER BY ip, instance_id",
+            "WHERE last_seen > %s ORDER BY ip, instance_id",
             (cutoff,)
         ).fetchall()
         return [dict(r) for r in rows]
@@ -1502,7 +1471,7 @@ def _cluster_cleanup_on_exit():
     try:
         db = get_db()
         try:
-            db.execute('DELETE FROM cluster_instances WHERE instance_id=?',
+            db.execute('DELETE FROM cluster_instances WHERE instance_id=%s',
                        (_CLUSTER_INSTANCE_ID,))
             db.commit()
         finally:
@@ -1732,8 +1701,8 @@ def _record_connection(db, user_id):
     Best-effort; never raises out."""
     try:
         db.execute(
-            'UPDATE users SET last_conn_path=?, last_conn_ip=?, '
-            'last_conn_at=CURRENT_TIMESTAMP WHERE id=?',
+            'UPDATE users SET last_conn_path=%s, last_conn_ip=%s, '
+            'last_conn_at=CURRENT_TIMESTAMP WHERE id=%s',
             (_connection_path(), (request.remote_addr or '')[:64], user_id))
         db.commit()
     except Exception:
@@ -1756,7 +1725,7 @@ def _refresh_session_roles():
                 'SELECT id, role, display_name, is_readonly, is_scheduler, is_asset_manager, '
                 '       is_document_viewer, viewer_venues, viewer_doc_types, '
                 '       viewer_labor_overview, viewer_show_calendar, is_locked '
-                'FROM users WHERE id=?',
+                'FROM users WHERE id=%s',
                 (session['user_id'],)
             ).fetchone()
             if not user:
@@ -1804,7 +1773,7 @@ def get_current_user():
 def is_content_admin(user_id):
     """True if the user is a system admin or a staff user."""
     db = get_db()
-    user = db.execute('SELECT role FROM users WHERE id=?', (user_id,)).fetchone()
+    user = db.execute('SELECT role FROM users WHERE id=%s', (user_id,)).fetchone()
     db.close()
     return bool(user) and user['role'] in ('admin', 'staff')
 
@@ -1830,7 +1799,7 @@ def is_labor_scheduler(user_id):
     NOT the full access predicate: the per-user is_scheduler permission also
     grants the page — use _can_schedule_labor for any access/visibility check."""
     db = get_db()
-    user = db.execute('SELECT role FROM users WHERE id=?', (user_id,)).fetchone()
+    user = db.execute('SELECT role FROM users WHERE id=%s', (user_id,)).fetchone()
     db.close()
     return bool(user) and user['role'] in ('admin', 'staff')
 
@@ -1869,7 +1838,7 @@ def get_document_viewer_settings(user_id):
     try:
         user = db.execute(
             'SELECT is_document_viewer, viewer_venues, viewer_doc_types '
-            'FROM users WHERE id=?', (user_id,)
+            'FROM users WHERE id=%s', (user_id,)
         ).fetchone()
     except Exception:
         user = None
@@ -1912,7 +1881,7 @@ def viewer_accessible_shows(user_id):
             "SELECT id FROM shows WHERE COALESCE(status, 'active') != 'archived'"
         ).fetchall()
     else:
-        ph = ','.join(['?'] * len(venues))
+        ph = ','.join(['%s'] * len(venues))
         rows = db.execute(
             f"SELECT id FROM shows WHERE COALESCE(status, 'active') != 'archived' "
             f"AND venue IN ({ph})", venues
@@ -2133,30 +2102,15 @@ def _run_pg_dump(dest_path, settings):
 
 
 def _run_db_backup(kind, ts_fmt, keep):
-    """Create one backup under BACKUP_DIR/<kind> — pg_dump on PostgreSQL, a
-    plain file copy on SQLite — then prune the directory to the newest `keep`
-    backups. Shared body of the hourly/daily jobs."""
+    """Create one pg_dump backup (.sql.gz) under BACKUP_DIR/<kind>, then prune
+    the directory to the newest `keep` backups. Shared body of the
+    hourly/daily jobs."""
     _ensure_backup_dirs()
     ts = datetime.now().strftime(ts_fmt)
     dest_dir = os.path.join(BACKUP_DIR, kind)
-    settings = db_adapter.read_db_settings(DATABASE)
-    ext = '.sql.gz' if settings.get('db_type') == 'postgres' else '.db'
+    ext = '.sql.gz'
     dest = os.path.join(dest_dir, f'advance_{ts}{ext}')
-    if settings.get('db_type') == 'postgres':
-        _run_pg_dump(dest, settings)
-    else:
-        # Same atomic pattern as _run_pg_dump so a reader never sees a
-        # half-copied .db file.
-        tmp = f'{dest}.{os.getpid()}.tmp'
-        try:
-            shutil.copy2(DATABASE, tmp)
-            os.replace(tmp, dest)
-        finally:
-            if os.path.exists(tmp):
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
+    _run_pg_dump(dest, db_adapter.read_db_settings())
     syslog_logger.info(f'BACKUP_CREATED type={kind} file={dest}')
     files = sorted(
         [f for f in os.listdir(dest_dir) if f.endswith(ext)],
@@ -2180,14 +2134,14 @@ def _run_once_per_host(tag, fn):
     The other workers on the same host skip. Cross-host is unaffected (each
     host has its own filesystem), so per-server-redundant jobs still run once
     per server — just not once per worker. The lock name includes a hash of
-    this install's DB path so two installs sharing a host don't collide.
+    this install's directory so two installs sharing a host don't collide.
 
     Best-effort: prevents CONCURRENT runs (the RAM-pressure goal — all 4
     workers dumping at once), not strictly one run per hour, since worker
     timers can drift enough that a later tick reacquires the freed lock. If
     /tmp were ever an NFS mount shared across hosts, flock would serialize
     across hosts and defeat per-server redundancy — keep it a local tmpdir."""
-    _key = hashlib.md5(DATABASE.encode('utf-8')).hexdigest()[:8]
+    _key = hashlib.md5(APP_DIR.encode('utf-8')).hexdigest()[:8]
     lock_path = os.path.join(tempfile.gettempdir(), f'321theater_{tag}_{_key}.lock')
     f = open(lock_path, 'w')
     try:
@@ -2228,9 +2182,7 @@ def run_hourly_maintenance():
         return
     db = get_db()
     try:
-        if _is_stale_pg_fallback(db):
-            return
-        cur = db.execute('DELETE FROM app_sessions WHERE expires_at < ?',
+        cur = db.execute('DELETE FROM app_sessions WHERE expires_at < %s',
                          (datetime.utcnow(),))
         try:
             harvested = cur.rowcount or 0
@@ -2238,9 +2190,9 @@ def run_hourly_maintenance():
             harvested = 0
         # Perf stats retention: 3 years of daily page rollups (they're tiny —
         # one row per page per day), 90 days of the individual slow-query log.
-        db.execute('DELETE FROM perf_page_stats WHERE stat_date < ?',
+        db.execute('DELETE FROM perf_page_stats WHERE stat_date < %s',
                    ((date.today() - timedelta(days=1095)).isoformat(),))
-        db.execute('DELETE FROM perf_slow_queries WHERE occurred_at < ?',
+        db.execute('DELETE FROM perf_slow_queries WHERE occurred_at < %s',
                    (datetime.now() - timedelta(days=90),))
         db.commit()
         # Sessions that died unnoticed (logout-less departures, the login
@@ -2296,7 +2248,7 @@ def _log_email_error(recipients, subject, error, *,
                     INSERT INTO email_send_errors
                         (recipient, subject, error_msg, smtp_code,
                          pdf_type, show_id, triggered_by)
-                    VALUES (?,?,?,?,?,?,?)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
                 """, (str(r)[:200], subj_str, err_str, code_str,
                       pdf_str, show_id, by_str))
             except Exception:
@@ -2573,7 +2525,7 @@ def _log_outbox_send(recipients, subject, success, error_message, error_context)
                 db.execute(
                     "INSERT INTO email_outbox_log "
                     "(recipient, subject, purpose, success, error_message, triggered_by) "
-                    "VALUES (?,?,?,?,?,?)",
+                    "VALUES (%s,%s,%s,%s,%s,%s)",
                     ((r or '')[:255], subj, (purpose or '')[:64],
                      1 if success else 0, '' if success else err, triggered_by)
                 )
@@ -2636,7 +2588,7 @@ def _pdf_email_recipients(db, show_id, pdf_type):
         'postnotes': 'postnotes_recipient',
     }.get(pdf_type, 'report_recipient')
     show_row = db.execute(
-        'SELECT venue, show_mode FROM shows WHERE id=?', (show_id,)
+        'SELECT venue, show_mode FROM shows WHERE id=%s', (show_id,)
     ).fetchone()
     show_venue = (show_row['venue'] if show_row else '') or ''
     show_mode = (show_row['show_mode'] if show_row else '') or 'show'
@@ -2757,7 +2709,7 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
             s3_storage.upload_file(s3_key, pdf_bytes, 'application/pdf')
             _db_s3 = get_db()
             try:
-                _db_s3.execute('UPDATE export_log SET s3_key=?, pdf_data=NULL WHERE id=?', (s3_key, pdf_log_id))
+                _db_s3.execute('UPDATE export_log SET s3_key=%s, pdf_data=NULL WHERE id=%s', (s3_key, pdf_log_id))
                 _db_s3.commit()
             finally:
                 _db_s3.close()
@@ -2779,7 +2731,7 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
             _db2 = get_db()
             try:
                 _row = _db2.execute(
-                    "SELECT field_value FROM advance_data WHERE show_id=? AND field_key='production_manager'",
+                    "SELECT field_value FROM advance_data WHERE show_id=%s AND field_key='production_manager'",
                     (show_id,)
                 ).fetchone()
             finally:
@@ -2868,7 +2820,7 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
             _db3.execute("""
                 INSERT INTO email_send_log
                   (show_id, pdf_type, trigger_type, days_before, sent_by, recipient_count)
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s)
             """, (show_id, pdf_type,
                   'scheduled' if triggered_by == 'system' else 'manual',
                   days_before, triggered_by, len(recipients)))
@@ -2887,9 +2839,9 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
 
 def _as_date(v):
     """Coerce a DB date value (str, datetime.date, or datetime.datetime) to a
-    plain date. Returns None if it can't be parsed. PostgreSQL hands back
-    date/datetime objects while SQLite hands back ISO strings, so callers must
-    not assume either."""
+    plain date. Returns None if it can't be parsed. PostgreSQL DATE/TIMESTAMP
+    columns come back as date/datetime objects, while TEXT columns holding
+    dates (and client input) are ISO strings, so callers must not assume either."""
     if v is None:
         return None
     if isinstance(v, datetime):
@@ -2904,8 +2856,8 @@ def _as_date(v):
 
 def _as_dt(v):
     """Coerce a DB TIMESTAMP value (str or datetime.datetime) to a datetime.
-    PostgreSQL hands back datetime objects while SQLite hands back ISO
-    strings, so callers must not assume either. Returns None if it can't be
+    PostgreSQL TIMESTAMP columns come back as datetime objects, TEXT columns
+    and client input as ISO strings, so callers must not assume either. Returns None if it can't be
     parsed — expiry checks must treat None as expired (fail closed)."""
     if v is None:
         return None
@@ -2974,7 +2926,7 @@ def _plan_scheduled_emails(db, target_date):
     first_perf = {r['show_id']: r['first_perf'] for r in perfs}
 
     show_ids = [s['id'] for s in shows]
-    placeholders = ','.join(['?'] * len(show_ids))
+    placeholders = ','.join(['%s'] * len(show_ids))
     already_sent = set()
     for r in db.execute(
         f"SELECT show_id, pdf_type, days_before FROM email_send_log "
@@ -3050,19 +3002,15 @@ def run_scheduled_pdf_emails():
         return
 
     today = date.today()
-    db = get_db()
     try:
-        # On a stale SQLite fallback, app_settings read here are STALE/empty —
-        # e.g. advance_email_enabled defaults to '0' — so the planner would
-        # return [] and we'd "skip" with no error. Refuse to act instead.
-        if _is_stale_pg_fallback(db):
-            app.logger.error(
-                'Scheduled PDF email: configured for postgres but the active '
-                'connection is not — PostgreSQL is unreachable so app_settings '
-                'are STALE. Skipping this run (auto-emails will not send until '
-                'PG is reachable; retrying next hour).'
-            )
-            return
+        db = get_db()
+    except db_adapter.DatabaseUnavailable as e:
+        app.logger.error(
+            f'Scheduled PDF email: PostgreSQL unreachable — skipping this run '
+            f'(auto-emails will not send until PG is reachable; retrying next '
+            f'hour): {e}')
+        return
+    try:
         plan = _plan_scheduled_emails(db, today)
     finally:
         db.close()
@@ -3101,7 +3049,7 @@ def run_scheduled_pdf_emails():
                         _db.execute(
                             "INSERT INTO email_send_log "
                             "(show_id, pdf_type, trigger_type, days_before, sent_by, recipient_count) "
-                            "VALUES (?, ?, 'scheduled', ?, 'system', 0)",
+                            "VALUES (%s, %s, 'scheduled', %s, 'system', 0)",
                             (show_id, pdf_type, td)
                         )
                         _db.commit()
@@ -3162,7 +3110,7 @@ def _plan_no_labor_alerts(db, target_date):
     ).fetchall()}
 
     show_ids = [s['id'] for s in shows]
-    placeholders = ','.join(['?'] * len(show_ids))
+    placeholders = ','.join(['%s'] * len(show_ids))
     # Shows that already have at least one labor line — excluded entirely.
     has_labor = {r['show_id'] for r in db.execute(
         f"SELECT DISTINCT show_id FROM labor_requests WHERE show_id IN ({placeholders})",
@@ -3210,7 +3158,8 @@ def _scheduler_alert_recipients(db):
     the alert is the schedulers' to action."""
     rows = db.execute(
         "SELECT id, email FROM users "
-        "WHERE COALESCE(is_scheduler, 0) = 1 AND COALESCE(is_active, 1) = 1"
+        "WHERE COALESCE(is_scheduler, 0) = 1 AND COALESCE(is_locked, 0) = 0 "
+        "AND COALESCE(pending_approval, 0) = 0"
     ).fetchall()
     emails = sorted({(r['email'] or '').strip() for r in rows if (r['email'] or '').strip()})
     user_ids = {r['id'] for r in rows}
@@ -3221,7 +3170,7 @@ def run_no_labor_alerts():
     """APScheduler job (cron, top of every hour; leader-gated): warns schedulers
     about active shows approaching their date with NO labor requested, so they
     can follow up. Mirrors run_scheduled_pdf_emails() exactly: acts only DURING
-    the configured send hour, refuses to act on a stale SQLite fallback, dedups
+    the configured send hour, skips the run when PostgreSQL is unreachable, dedups
     all-time per (show, trigger) via email_send_log, and catches up on missed
     days. Delivery is twofold: ONE digest email to all schedulers listing every
     due show (the breakdown), plus a per-show in-app notification that links
@@ -3242,15 +3191,14 @@ def run_no_labor_alerts():
         return
 
     today = date.today()
-    db = get_db()
     try:
-        if _is_stale_pg_fallback(db):
-            app.logger.error(
-                'No-labor alert: configured for postgres but the active '
-                'connection is not — app_settings are STALE; skipping this '
-                'run (retry next hour).')
-            return
-
+        db = get_db()
+    except db_adapter.DatabaseUnavailable as e:
+        app.logger.error(
+            f'No-labor alert: PostgreSQL unreachable — skipping this run '
+            f'(retry next hour): {e}')
+        return
+    try:
         plan = _plan_no_labor_alerts(db, today)
         if not plan:
             app.logger.info(
@@ -3334,7 +3282,7 @@ def run_no_labor_alerts():
                 db.execute(
                     "INSERT INTO email_send_log "
                     "(show_id, pdf_type, trigger_type, days_before, sent_by, recipient_count) "
-                    "VALUES (?, 'no_labor_alert', 'no_labor', ?, 'system', ?)",
+                    "VALUES (%s, 'no_labor_alert', 'no_labor', %s, 'system', %s)",
                     (sid, td, recipient_count if td == item['trigger_days'] else 0))
         db.commit()
         syslog_logger.info(
@@ -3438,13 +3386,13 @@ def auto_archive_past_shows():
             (id IN (SELECT DISTINCT show_id FROM show_performances)
              AND id NOT IN (
                SELECT DISTINCT show_id FROM show_performances
-               WHERE perf_date IS NULL OR perf_date >= ?
+               WHERE perf_date IS NULL OR perf_date >= %s
              ))
             OR
             -- No performances: use legacy show_date field
             (id NOT IN (SELECT DISTINCT show_id FROM show_performances)
              AND show_date IS NOT NULL
-             AND show_date < ?)
+             AND show_date < %s)
           )
     """, (today, today))
     db.commit()
@@ -3495,7 +3443,7 @@ def _show_span_dates(db, show_row):
     per day (e.g. the security sign-in sheet's per-day initials columns)."""
     perf_rows = db.execute(
         'SELECT perf_date FROM show_performances '
-        'WHERE show_id=? AND perf_date IS NOT NULL', (show_row['id'],)).fetchall()
+        'WHERE show_id=%s AND perf_date IS NOT NULL', (show_row['id'],)).fetchall()
     dates = _schedule_span_dates(show_row['load_in_date'],
                                  show_row['load_out_date'],
                                  [r['perf_date'] for r in perf_rows])
@@ -3515,9 +3463,9 @@ def _build_schedule_days(db, show_id, show_row=None):
     added performances without a full page reload.
     """
     if show_row is None:
-        show_row = db.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
+        show_row = db.execute('SELECT * FROM shows WHERE id = %s', (show_id,)).fetchone()
     performances = db.execute("""
-        SELECT * FROM show_performances WHERE show_id = ?
+        SELECT * FROM show_performances WHERE show_id = %s
         ORDER BY CASE WHEN perf_date IS NULL THEN 1 ELSE 0 END, perf_date, perf_time, id
     """, (show_id,)).fetchall()
     performances = [dict(p) for p in performances]
@@ -3575,29 +3523,62 @@ def _sync_show_primary_date(db, show_id):
     """Keep shows.show_date/show_time in sync with the earliest performance."""
     first = db.execute("""
         SELECT perf_date, perf_time FROM show_performances
-        WHERE show_id = ?
+        WHERE show_id = %s
         ORDER BY CASE WHEN perf_date IS NULL THEN 1 ELSE 0 END, perf_date, id
         LIMIT 1
     """, (show_id,)).fetchone()
     if first:
         db.execute("""
-            UPDATE shows SET show_date=?, show_time=?, updated_at=CURRENT_TIMESTAMP WHERE id=?
+            UPDATE shows SET show_date=%s, show_time=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s
         """, (first['perf_date'], first['perf_time'], show_id))
         for key, val in [('show_date', first['perf_date'] or ''),
                          ('show_time', first['perf_time'] or '')]:
             db.execute("""
-                INSERT OR REPLACE INTO advance_data (show_id, field_key, field_value, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO advance_data (show_id, field_key, field_value, updated_at)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value, updated_at = EXCLUDED.updated_at
             """, (show_id, key, val))
     else:
         db.execute("""
-            UPDATE shows SET show_date=NULL, show_time='', updated_at=CURRENT_TIMESTAMP WHERE id=?
+            UPDATE shows SET show_date=NULL, show_time='', updated_at=CURRENT_TIMESTAMP WHERE id=%s
         """, (show_id,))
+
+
+def _sync_cursor(v):
+    """advance_data.updated_at → the opaque `since` cursor the browser echoes
+    back. Must keep microseconds: jsonify() renders datetimes as HTTP dates
+    (whole seconds), so `updated_at > since` re-delivered the latest edit on
+    every 2 s poll until someone saved again (SQLite's second-precision
+    CURRENT_TIMESTAMP hid this)."""
+    if isinstance(v, datetime):
+        return v.isoformat(sep=' ')
+    return v or ''
+
+
+_wp_local = threading.local()
+
+
+def _wp_font_config():
+    """Per-thread reusable WeasyPrint FontConfiguration.
+
+    write_pdf() with no font_config builds a brand-new FontConfiguration
+    (a native fontconfig config + Pango font map) on EVERY render, and that
+    native memory is never returned: measured ~250 KB leaked per PDF, which
+    was essentially all of a worker's steady RSS growth under load. Reusing
+    one per thread keeps it bounded (≤ workers × threads instances) without
+    sharing a Pango font map across threads. Safe to reuse because no PDF
+    template loads @font-face fonts (system fonts only) — if one ever does,
+    those faces would accumulate in the shared config."""
+    fc = getattr(_wp_local, 'font_config', None)
+    if fc is None:
+        from weasyprint.text.fonts import FontConfiguration
+        fc = _wp_local.font_config = FontConfiguration()
+    return fc
 
 
 def get_show_or_404(show_id):
     db = get_db()
-    show = db.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
+    show = db.execute('SELECT * FROM shows WHERE id = %s', (show_id,)).fetchone()
     db.close()
     if not show:
         abort(404)
@@ -3624,14 +3605,14 @@ def _snapshot_form_history(db, show_id, form_type, snapshot_data):
     """Insert a history snapshot and prune to 50 entries."""
     db.execute("""
         INSERT INTO form_history (show_id, form_type, saved_by, snapshot_json)
-        VALUES (?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s)
     """, (show_id, form_type, session.get('user_id'), json.dumps(snapshot_data)))
     db.execute("""
         DELETE FROM form_history
-        WHERE show_id = ? AND form_type = ?
+        WHERE show_id = %s AND form_type = %s
           AND id NOT IN (
             SELECT id FROM form_history
-            WHERE show_id = ? AND form_type = ?
+            WHERE show_id = %s AND form_type = %s
             ORDER BY saved_at DESC LIMIT 50
           )
     """, (show_id, form_type, show_id, form_type))
@@ -3655,7 +3636,7 @@ def _stage_field_alerts(db, show_id, data, prev_values, actor_user_id):
     keys = [str(k) for k in data.keys()]
     if not keys:
         return
-    placeholders = ','.join('?' for _ in keys)
+    placeholders = ','.join('%s' for _ in keys)
     alert_rows = db.execute(
         f"""SELECT field_key, label, alert_departments, alert_contact_ids
               FROM form_fields
@@ -3676,7 +3657,7 @@ def _stage_field_alerts(db, show_id, data, prev_values, actor_user_id):
 
         new_hash = _hash_field_value(new_val)
         state = db.execute(
-            'SELECT * FROM field_alert_state WHERE show_id=? AND field_key=?',
+            'SELECT * FROM field_alert_state WHERE show_id=%s AND field_key=%s',
             (show_id, key)
         ).fetchone()
 
@@ -3687,14 +3668,12 @@ def _stage_field_alerts(db, show_id, data, prev_values, actor_user_id):
                       SET pending_value=NULL, pending_prev_value=NULL,
                           pending_hash=NULL, pending_updated_at=NULL,
                           pending_updated_by=NULL
-                    WHERE show_id=? AND field_key=?""",
+                    WHERE show_id=%s AND field_key=%s""",
                 (show_id, key)
             )
             continue
 
-        # Upsert pending. SQLite & PG both honor INSERT OR REPLACE-like
-        # behavior here via "ON CONFLICT" — fall back to delete-then-insert
-        # for the lowest common denominator.
+        # Upsert pending: UPDATE the existing state row, else INSERT one.
         if state:
             # Preserve the *original* prev_value if a pending alert is still
             # in flight (so the email reports the real "from" value, not an
@@ -3702,10 +3681,10 @@ def _stage_field_alerts(db, show_id, data, prev_values, actor_user_id):
             pending_prev = state['pending_prev_value'] if state['pending_prev_value'] is not None else prev_val
             db.execute(
                 """UPDATE field_alert_state
-                      SET pending_value=?, pending_prev_value=?,
-                          pending_hash=?, pending_updated_at=CURRENT_TIMESTAMP,
-                          pending_updated_by=?
-                    WHERE show_id=? AND field_key=?""",
+                      SET pending_value=%s, pending_prev_value=%s,
+                          pending_hash=%s, pending_updated_at=CURRENT_TIMESTAMP,
+                          pending_updated_by=%s
+                    WHERE show_id=%s AND field_key=%s""",
                 (new_val, pending_prev, new_hash, actor_user_id, show_id, key)
             )
         else:
@@ -3713,7 +3692,7 @@ def _stage_field_alerts(db, show_id, data, prev_values, actor_user_id):
                 """INSERT INTO field_alert_state
                       (show_id, field_key, pending_value, pending_prev_value,
                        pending_hash, pending_updated_at, pending_updated_by)
-                    VALUES (?,?,?,?,?,CURRENT_TIMESTAMP,?)""",
+                    VALUES (%s,%s,%s,%s,%s,CURRENT_TIMESTAMP,%s)""",
                 (show_id, key, new_val, prev_val, new_hash, actor_user_id)
             )
 
@@ -3733,7 +3712,7 @@ def _resolve_alert_recipients(db, alert_departments, alert_contact_ids):
         except (json.JSONDecodeError, TypeError):
             depts = []
         if depts:
-            placeholders = ','.join('?' for _ in depts)
+            placeholders = ','.join('%s' for _ in depts)
             for c in db.execute(
                 f"SELECT id, name, email, user_id FROM contacts "
                 f"WHERE department IN ({placeholders})",
@@ -3751,7 +3730,7 @@ def _resolve_alert_recipients(db, alert_departments, alert_contact_ids):
             cids = []
         cids = [int(x) for x in cids if str(x).strip().isdigit()]
         if cids:
-            placeholders = ','.join('?' for _ in cids)
+            placeholders = ','.join('%s' for _ in cids)
             for c in db.execute(
                 f"SELECT id, name, email, user_id FROM contacts WHERE id IN ({placeholders})",
                 tuple(cids)
@@ -3775,7 +3754,7 @@ def create_notification(db, user_id, title, body='', link_url=None,
         db.execute(
             """INSERT INTO notifications
                  (user_id, kind, title, body, link_url, show_id, field_key)
-               VALUES (?,?,?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s)""",
             (int(user_id), kind, title or '', body or '', link_url, show_id, field_key)
         )
     except Exception as e:
@@ -3794,15 +3773,9 @@ def run_field_change_alerts():
     if not am_i_leader():
         return
     db = get_db()
-    if _is_stale_pg_fallback(db):
-        # Side-effecting job on a stale SQLite fallback would read empty
-        # bootstrap state; refuse to act, like the other scheduled jobs.
-        db.close()
-        return
     try:
         # Pick up pending rows where the latest edit is older than the quiet
-        # window. SQLite stores timestamps as text — use the canonical helper
-        # so both backends compare correctly.
+        # window.
         rows = db.execute(
             """SELECT s.id AS state_id, s.show_id, s.field_key,
                       s.pending_value, s.pending_prev_value, s.pending_hash,
@@ -3830,10 +3803,10 @@ def run_field_change_alerts():
     try:
       for r in rows:
         # Parse the pending_updated_at timestamp into a datetime so we can
-        # compare against the quiet window. Both backends return either a
-        # datetime (psycopg) or an ISO string (sqlite3); coerce.
+        # compare against the quiet window (psycopg returns a datetime; coerce
+        # defensively in case of a legacy text value).
         state_row = db.execute(
-            'SELECT pending_updated_at FROM field_alert_state WHERE id=?',
+            'SELECT pending_updated_at FROM field_alert_state WHERE id=%s',
             (r['state_id'],)
         ).fetchone()
         if not state_row or not state_row['pending_updated_at']:
@@ -3856,7 +3829,7 @@ def run_field_change_alerts():
                       SET pending_value=NULL, pending_prev_value=NULL,
                           pending_hash=NULL, pending_updated_at=NULL,
                           pending_updated_by=NULL
-                    WHERE id=?""", (r['state_id'],)
+                    WHERE id=%s""", (r['state_id'],)
             )
             db.commit()
             continue
@@ -3910,12 +3883,12 @@ def run_field_change_alerts():
         # Mark alerted; clear pending.
         db.execute(
             """UPDATE field_alert_state
-                  SET last_alerted_value=?, last_alerted_hash=?,
+                  SET last_alerted_value=%s, last_alerted_hash=%s,
                       last_alerted_at=CURRENT_TIMESTAMP,
                       pending_value=NULL, pending_prev_value=NULL,
                       pending_hash=NULL, pending_updated_at=NULL,
                       pending_updated_by=NULL
-                WHERE id=?""",
+                WHERE id=%s""",
             (r['pending_value'], r['pending_hash'], r['state_id'])
         )
         syslog_logger.info(
@@ -3945,7 +3918,7 @@ def _sync_contact_for_user(db, user_id, *, display_name=None, email=None,
     # Fetch current user fields if not supplied
     if display_name is None or email is None:
         u = db.execute(
-            'SELECT display_name, username, email FROM users WHERE id=?', (user_id,)
+            'SELECT display_name, username, email FROM users WHERE id=%s', (user_id,)
         ).fetchone()
         if not u:
             return
@@ -3958,7 +3931,7 @@ def _sync_contact_for_user(db, user_id, *, display_name=None, email=None,
     email_val = (email or '').strip()
 
     linked = db.execute(
-        'SELECT id FROM contacts WHERE user_id=? ORDER BY id LIMIT 1', (user_id,)
+        'SELECT id FROM contacts WHERE user_id=%s ORDER BY id LIMIT 1', (user_id,)
     ).fetchone()
 
     if linked:
@@ -3967,39 +3940,39 @@ def _sync_contact_for_user(db, user_id, *, display_name=None, email=None,
         sets = []
         params = []
         if name_val:
-            sets.append('name=?'); params.append(name_val)
+            sets.append('name=%s'); params.append(name_val)
         if email_val:
-            sets.append('email=?'); params.append(email_val)
+            sets.append('email=%s'); params.append(email_val)
         if sets:
             params.append(linked['id'])
-            db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=?", tuple(params))
+            db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=%s", tuple(params))
         return
 
     # Try to match an existing contact by email or name to avoid duplicates.
     match = None
     if email_val:
         match = db.execute(
-            'SELECT id FROM contacts WHERE LOWER(email)=LOWER(?) AND (user_id IS NULL) LIMIT 1',
+            'SELECT id FROM contacts WHERE LOWER(email)=LOWER(%s) AND (user_id IS NULL) LIMIT 1',
             (email_val,)
         ).fetchone()
     if not match and name_val:
         match = db.execute(
-            'SELECT id FROM contacts WHERE LOWER(name)=LOWER(?) AND (user_id IS NULL) LIMIT 1',
+            'SELECT id FROM contacts WHERE LOWER(name)=LOWER(%s) AND (user_id IS NULL) LIMIT 1',
             (name_val,)
         ).fetchone()
 
     if match:
-        db.execute('UPDATE contacts SET user_id=? WHERE id=?', (user_id, match['id']))
+        db.execute('UPDATE contacts SET user_id=%s WHERE id=%s', (user_id, match['id']))
         # Also push name/email through so the contact reflects the user.
         sets = []
         params = []
         if name_val:
-            sets.append('name=?'); params.append(name_val)
+            sets.append('name=%s'); params.append(name_val)
         if email_val:
-            sets.append('email=?'); params.append(email_val)
+            sets.append('email=%s'); params.append(email_val)
         if sets:
             params.append(match['id'])
-            db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=?", tuple(params))
+            db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=%s", tuple(params))
         return
 
     # Fresh insert. The partial unique index on contacts(user_id) WHERE
@@ -4013,10 +3986,10 @@ def _sync_contact_for_user(db, user_id, *, display_name=None, email=None,
                                      report_recipient, advance_recipient,
                                      production_recipient, postnotes_recipient,
                                      system_recipient, venue_filter, user_id)
-                VALUES (?,?,?,?,?,0,0,0,0,0,NULL,?)""",
+                VALUES (%s,%s,%s,%s,%s,0,0,0,0,0,NULL,%s)""",
             (name_val or 'Unnamed user', '', '', '', email_val, user_id)
         )
-    except (sqlite3.IntegrityError, DBIntegrityError):
+    except DBIntegrityError:
         pass  # concurrent worker beat us to it — exactly the case the index exists for
     except Exception as e:
         app.logger.warning(f'_sync_contact_for_user insert failed for user {user_id}: {e}')
@@ -4046,14 +4019,14 @@ def log_audit(db, action, entity_type, entity_id=None, show_id=None,
     """Write one row to audit_log. Never raises — audit failure must not block normal flow."""
     try:
         # default=str: on PostgreSQL, row snapshots contain datetime/date/
-        # Decimal objects (SQLite returns strings) — without it json.dumps
+        # Decimal objects — without it json.dumps
         # raised and the silent except dropped every EDIT/DELETE audit row
         # that carried a before/after snapshot.
         db.execute("""
             INSERT INTO audit_log
               (user_id, username, action, entity_type, entity_id,
                show_id, before_json, after_json, ip_address, detail)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
             session.get('user_id'),
             session.get('username', ''),
@@ -4128,7 +4101,7 @@ _UNDO_VERB = {
 def _snapshot_row(db, table, row_id):
     """Return a dict of all columns for a single row, or None if not found."""
     try:
-        row = db.execute(f'SELECT * FROM {table} WHERE id = ?', (row_id,)).fetchone()
+        row = db.execute(f'SELECT * FROM {table} WHERE id = %s', (row_id,)).fetchone()
         return dict(row) if row else None
     except Exception:
         return None
@@ -4199,7 +4172,7 @@ def _login_route():
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '')
         db = get_db()
-        user = db.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+        user = db.execute('SELECT * FROM users WHERE username = %s', (username,)).fetchone()
         if user and check_password_hash(user['password_hash'], password):
             # Locked accounts authenticate but are refused entry. Checked only
             # after a correct password so it can't be used to enumerate which
@@ -4219,8 +4192,8 @@ def _login_route():
             try:
                 db.execute(
                     'UPDATE users SET last_login=CURRENT_TIMESTAMP, '
-                    'last_conn_path=?, last_conn_ip=?, last_conn_at=CURRENT_TIMESTAMP '
-                    'WHERE id=?',
+                    'last_conn_path=%s, last_conn_ip=%s, last_conn_at=CURRENT_TIMESTAMP '
+                    'WHERE id=%s',
                     (_cpath, (request.remote_addr or '')[:64], user['id']))
                 db.commit()
             except Exception:
@@ -4336,7 +4309,7 @@ def api_session_status():
             db = get_db()
             try:
                 row = db.execute(
-                    'SELECT expires_at FROM app_sessions WHERE sid = ?', (sid,)
+                    'SELECT expires_at FROM app_sessions WHERE sid = %s', (sid,)
                 ).fetchone()
             finally:
                 db.close()
@@ -4417,17 +4390,14 @@ def _gateway_auth_ok():
     return True
 
 
-def _gateway_pg_ok(db):
-    """Refuse to act on a stale SQLite fallback: configured-postgres must
-    equal the active backend (see _is_stale_pg_fallback)."""
-    if _is_stale_pg_fallback(db):
-        app.logger.error(
-            'Gateway OTP: configured for postgres but the active connection '
-            'is not — PostgreSQL unreachable, user data would be stale. '
-            'Failing closed.'
-        )
-        return False
-    return True
+def _gateway_db():
+    """A DB connection for the gateway OTP API, or None when PostgreSQL is
+    unreachable — callers then answer with their generic fail-closed reply."""
+    try:
+        return get_db()
+    except db_adapter.DatabaseUnavailable as e:
+        app.logger.error(f'Gateway OTP: PostgreSQL unreachable — failing closed: {e}')
+        return None
 
 
 def _gateway_json_body():
@@ -4505,15 +4475,16 @@ def cluster_primary_probe():
 
     Single-instance installs (no peers / heartbeat disabled) report primary,
     so nothing changes for them. Returns only a boolean — no auth needed;
-    the public edge blocks /internal/* outright. Answers 503 on a stale
-    SQLite fallback: a server that can't see PostgreSQL must not volunteer
+    the public edge blocks /internal/* outright. Answers 503 when PostgreSQL
+    is unreachable: a server that can't see the database must not volunteer
     to take public traffic."""
-    db = get_db()
     try:
-        stale = _is_stale_pg_fallback(db)
-    finally:
-        db.close()
-    if stale:
+        db = get_db()
+        try:
+            db.execute('SELECT 1')
+        finally:
+            db.close()
+    except Exception:
         return jsonify({'primary': False, 'reason': 'db-unreachable'}), 503
     try:
         primary = bool(get_cluster_status().get('is_self_server_leader'))
@@ -4535,16 +4506,16 @@ def gateway_otp_request():
     generic = {'status': 'ok'}
     if not email or '@' not in email or len(email) > 254:
         return jsonify(generic)
-    db = get_db()
+    db = _gateway_db()
+    if db is None:
+        return jsonify(generic)
     try:
-        if not _gateway_pg_ok(db):
-            return jsonify(generic)
         now = datetime.utcnow()
         # Housekeeping — codes are 10-minute ephemera, nothing needs a day.
-        db.execute('DELETE FROM gateway_otp_codes WHERE created_at < ?',
+        db.execute('DELETE FROM gateway_otp_codes WHERE created_at < %s',
                    (now - timedelta(days=1),))
         user = db.execute(
-            "SELECT id FROM users WHERE lower(email) = ? AND email != '' "
+            "SELECT id FROM users WHERE lower(email) = %s AND email != '' "
             'AND COALESCE(is_locked, 0) = 0 LIMIT 1', (email,)
         ).fetchone()
         if user:
@@ -4560,11 +4531,11 @@ def gateway_otp_request():
             cur = db.execute(
                 'INSERT INTO gateway_otp_codes '
                 '(email, code_hash, client_ip, expires_at, created_at) '
-                'SELECT ?, ?, ?, ?, ? '
+                'SELECT %s, %s, %s, %s, %s '
                 'WHERE (SELECT COUNT(*) FROM gateway_otp_codes '
-                '       WHERE email = ? AND created_at > ?) < ? '
-                "AND (? = '' OR (SELECT COUNT(*) FROM gateway_otp_codes "
-                '     WHERE client_ip = ? AND created_at > ?) < ?)',
+                '       WHERE email = %s AND created_at > %s) < %s '
+                "AND (%s = '' OR (SELECT COUNT(*) FROM gateway_otp_codes "
+                '     WHERE client_ip = %s AND created_at > %s) < %s)',
                 (email, code_hash, client_ip,
                  now + timedelta(minutes=_GATEWAY_OTP_TTL_MIN), now,
                  email, window, _GATEWAY_OTP_MAX_PER_EMAIL,
@@ -4575,7 +4546,7 @@ def gateway_otp_request():
                 # the live code someone is about to type.
                 db.execute(
                     'UPDATE gateway_otp_codes SET used = 1 '
-                    'WHERE email = ? AND used = 0 AND created_at < ?',
+                    'WHERE email = %s AND used = 0 AND created_at < %s',
                     (email, now))
                 db.commit()
                 _gateway_send_otp_email(email, code)
@@ -4603,14 +4574,14 @@ def gateway_otp_verify():
     client_ip = (data.get('client_ip') or '')[:64]
     if not email or not code or len(code) > 16:
         return jsonify({'valid': False})
-    db = get_db()
+    db = _gateway_db()
+    if db is None:
+        return jsonify({'valid': False})
     try:
-        if not _gateway_pg_ok(db):
-            return jsonify({'valid': False})
         now = datetime.utcnow()
         row = db.execute(
             'SELECT id, code_hash FROM gateway_otp_codes '
-            'WHERE email = ? AND used = 0 AND expires_at > ? '
+            'WHERE email = %s AND used = 0 AND expires_at > %s '
             'ORDER BY id DESC LIMIT 1', (email, now)
         ).fetchone()
         if not row:
@@ -4622,7 +4593,7 @@ def gateway_otp_verify():
         # burned out of attempts (or was just used by a racing request).
         cur = db.execute(
             'UPDATE gateway_otp_codes SET attempts = attempts + 1 '
-            'WHERE id = ? AND attempts < ? AND used = 0',
+            'WHERE id = %s AND attempts < %s AND used = 0',
             (row['id'], _GATEWAY_OTP_MAX_ATTEMPTS))
         db.commit()
         if getattr(cur, 'rowcount', 0) != 1:
@@ -4634,7 +4605,7 @@ def gateway_otp_verify():
             # flips used 0→1 gets a session ("works once" means once).
             cur = db.execute(
                 'UPDATE gateway_otp_codes SET used = 1 '
-                'WHERE id = ? AND used = 0', (row['id'],))
+                'WHERE id = %s AND used = 0', (row['id'],))
             db.commit()
             if getattr(cur, 'rowcount', 0) == 1:
                 _gw_log('GATEWAY_OTP_OK', client_ip, email)
@@ -4744,7 +4715,7 @@ def force_change_password():
             flash(pw_err, 'error')
             return render_template('force_change_password.html', user=None)
         db = get_db()
-        db.execute('UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?',
+        db.execute('UPDATE users SET password_hash=%s, must_change_password=0 WHERE id=%s',
                    (generate_password_hash(new_pw), session['user_id']))
         db.commit()
         db.close()
@@ -4806,7 +4777,7 @@ def dashboard():
         """).fetchall()
     else:
         if accessible:
-            placeholders = ','.join('?' * len(accessible))
+            placeholders = ','.join(['%s'] * len(accessible))
             active = db.execute(f"""
                 SELECT s.*, u.display_name as creator,
                   (SELECT COUNT(*) FROM show_performances WHERE show_id=s.id) as perf_count,
@@ -4838,7 +4809,7 @@ def dashboard():
         if not rows:
             return []
         ids = [r['id'] for r in rows]
-        ph = ','.join('?' * len(ids))
+        ph = ','.join(['%s'] * len(ids))
         perfs = db.execute(
             f"""SELECT show_id, perf_date, perf_time FROM show_performances
                 WHERE show_id IN ({ph})
@@ -4876,7 +4847,7 @@ def dashboard():
 
     today_shows = []
     if today_show_ids:
-        ids_ph = ','.join('?' * len(today_show_ids))
+        ids_ph = ','.join(['%s'] * len(today_show_ids))
         ids_params = list(today_show_ids)
         pm_rows = db.execute(
             f"SELECT show_id, field_value FROM advance_data "
@@ -4892,7 +4863,7 @@ def dashboard():
             f"SELECT lr.show_id, lr.in_time "
             f"FROM labor_requests lr JOIN shows s ON s.id = lr.show_id "
             f"WHERE lr.show_id IN ({ids_ph}) AND lr.in_time != '' "
-            f"  AND COALESCE(lr.work_date, s.show_date) = ?",
+            f"  AND COALESCE(lr.work_date, s.show_date) = %s",
             ids_params + [today_iso],
         ).fetchall()
         calls_by_show = {}
@@ -4956,7 +4927,7 @@ def dashboard():
     try:
         db2 = get_db()
         pref = db2.execute(
-            'SELECT home_layout, home_density FROM users WHERE id=?',
+            'SELECT home_layout, home_density FROM users WHERE id=%s',
             (session['user_id'],)
         ).fetchone()
         db2.close()
@@ -4994,18 +4965,18 @@ def save_home_layout_prefs():
     if layout is not None:
         if layout not in ('columns', 'stacked'):
             return jsonify({'error': 'Invalid layout'}), 400
-        sets.append('home_layout=?')
+        sets.append('home_layout=%s')
         params.append(layout)
     if density is not None:
         if density not in ('normal', 'slim'):
             return jsonify({'error': 'Invalid density'}), 400
-        sets.append('home_density=?')
+        sets.append('home_density=%s')
         params.append(density)
     if not sets:
         return jsonify({'error': 'No preference fields supplied'}), 400
     params.append(session['user_id'])
     db = get_db()
-    db.execute(f'UPDATE users SET {", ".join(sets)} WHERE id=?', params)
+    db.execute(f'UPDATE users SET {", ".join(sets)} WHERE id=%s', params)
     db.commit()
     db.close()
     return jsonify({'success': True, 'layout': layout, 'density': density})
@@ -5032,22 +5003,23 @@ def new_show():
         db = get_db()
         cur = db.execute("""
             INSERT INTO shows (name, show_date, show_time, venue, created_by)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s) RETURNING id
         """, (name, show_date, show_time, venue, session['user_id']))
-        show_id = cur.lastrowid
+        show_id = cur.fetchone()['id']
 
         for key, val in [('show_name', name), ('show_date', show_date or ''),
                          ('show_time', show_time), ('venue', venue)]:
             if val:
                 db.execute("""
-                    INSERT OR REPLACE INTO advance_data (show_id, field_key, field_value)
-                    VALUES (?, ?, ?)
+                    INSERT INTO advance_data (show_id, field_key, field_value)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
                 """, (show_id, key, val))
 
         if show_date:
             db.execute("""
                 INSERT INTO show_performances (show_id, perf_date, perf_time, sort_order)
-                VALUES (?, ?, ?, 0)
+                VALUES (%s, %s, %s, 0)
             """, (show_id, show_date, show_time))
 
         log_audit(db, 'SHOW_CREATE', 'show', show_id, show_id=show_id,
@@ -5073,7 +5045,7 @@ def show_page(show_id):
     if tab == 'security' and not security_signin_enabled:
         tab = 'advance'   # module switched off — its tab/pane doesn't render
     db = get_db()
-    show = db.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
+    show = db.execute('SELECT * FROM shows WHERE id = %s', (show_id,)).fetchone()
     if not show:
         db.close()
         abort(404)
@@ -5087,7 +5059,7 @@ def show_page(show_id):
         _last_saved_by_id = None
     if _last_saved_by_id:
         saver = db.execute(
-            'SELECT display_name, username FROM users WHERE id=?',
+            'SELECT display_name, username FROM users WHERE id=%s',
             (_last_saved_by_id,)
         ).fetchone()
         if saver:
@@ -5099,23 +5071,23 @@ def show_page(show_id):
 
     # Advance data
     adv_rows = db.execute(
-        'SELECT field_key, field_value FROM advance_data WHERE show_id = ?', (show_id,)
+        'SELECT field_key, field_value FROM advance_data WHERE show_id = %s', (show_id,)
     ).fetchall()
     advance_data = {r['field_key']: r['field_value'] for r in adv_rows}
 
     # Production schedule
     sched_rows = db.execute("""
-        SELECT * FROM schedule_rows WHERE show_id = ?
+        SELECT * FROM schedule_rows WHERE show_id = %s
         ORDER BY sort_order, id
     """, (show_id,)).fetchall()
     meta_rows = db.execute(
-        'SELECT field_key, field_value FROM schedule_meta WHERE show_id = ?', (show_id,)
+        'SELECT field_key, field_value FROM schedule_meta WHERE show_id = %s', (show_id,)
     ).fetchall()
     schedule_meta = {r['field_key']: r['field_value'] for r in meta_rows}
 
     # Post-show notes
     note_rows = db.execute(
-        'SELECT field_key, field_value FROM post_show_notes WHERE show_id = ?', (show_id,)
+        'SELECT field_key, field_value FROM post_show_notes WHERE show_id = %s', (show_id,)
     ).fetchall()
     notes_data = {r['field_key']: r['field_value'] for r in note_rows}
 
@@ -5127,7 +5099,7 @@ def show_page(show_id):
     exports = db.execute("""
         SELECT e.*, u.display_name as exporter
         FROM export_log e LEFT JOIN users u ON e.exported_by = u.id
-        WHERE e.show_id = ?
+        WHERE e.show_id = %s
         ORDER BY e.exported_at DESC
         LIMIT 10
     """, (show_id,)).fetchall()
@@ -5173,7 +5145,7 @@ def show_page(show_id):
         FROM labor_requests lr
         LEFT JOIN job_positions jp ON lr.position_id = jp.id
         LEFT JOIN crew_members cm ON lr.scheduled_crew_member_id = cm.id
-        WHERE lr.show_id = ?
+        WHERE lr.show_id = %s
         ORDER BY lr.sort_order, lr.id
     """, (show_id,)).fetchall()
     labor_requests_data = [_normalize_row_dates(dict(r)) for r in labor_rows]
@@ -5192,7 +5164,7 @@ def show_page(show_id):
     pdf_form_status = {}
     try:
         for r in db2.execute(
-            'SELECT field_key, status FROM pdf_submissions WHERE show_id=?', (show_id,)
+            'SELECT field_key, status FROM pdf_submissions WHERE show_id=%s', (show_id,)
         ).fetchall():
             pdf_form_status[r['field_key']] = r['status']
     except Exception:
@@ -5263,18 +5235,19 @@ def save_advance(show_id):
     submitted_keys = list(data.keys())
     prev_values = {}
     if submitted_keys:
-        placeholders = ','.join('?' for _ in submitted_keys)
+        placeholders = ','.join('%s' for _ in submitted_keys)
         for row in db.execute(
             f"SELECT field_key, field_value FROM advance_data "
-            f"WHERE show_id=? AND field_key IN ({placeholders})",
+            f"WHERE show_id=%s AND field_key IN ({placeholders})",
             tuple([show_id] + submitted_keys)
         ).fetchall():
             prev_values[row['field_key']] = row['field_value'] or ''
 
     for key, value in data.items():
         db.execute("""
-            INSERT OR REPLACE INTO advance_data (show_id, field_key, field_value, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO advance_data (show_id, field_key, field_value, updated_at)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value, updated_at = EXCLUDED.updated_at
         """, (show_id, key, str(value) if value is not None else ''))
         if key in arts_group_keys:
             name = (str(value) if value is not None else '').strip()
@@ -5284,7 +5257,7 @@ def save_advance(show_id):
                         'SELECT MAX(sort_order) FROM arts_groups'
                     ).fetchone()[0] or 0
                     db.execute(
-                        'INSERT OR IGNORE INTO arts_groups (name, sort_order) VALUES (?, ?)',
+                        'INSERT INTO arts_groups (name, sort_order) VALUES (%s, %s) ON CONFLICT DO NOTHING',
                         (name, max_order + 10)
                     )
                 except Exception as e:
@@ -5292,35 +5265,35 @@ def save_advance(show_id):
 
     # Sync core show fields
     if 'show_name' in data and data['show_name']:
-        db.execute('UPDATE shows SET name=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        db.execute('UPDATE shows SET name=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
                    (data['show_name'], show_id))
     if 'show_date' in data:
-        db.execute('UPDATE shows SET show_date=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        db.execute('UPDATE shows SET show_date=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
                    (data['show_date'] or None, show_id))
     if 'show_time' in data:
-        db.execute('UPDATE shows SET show_time=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        db.execute('UPDATE shows SET show_time=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
                    (data['show_time'], show_id))
     if 'venue' in data:
-        db.execute('UPDATE shows SET venue=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        db.execute('UPDATE shows SET venue=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
                    (data['venue'], show_id))
     if 'load_in_date' in data:
         val = data['load_in_date'].strip() if data['load_in_date'] else None
-        db.execute('UPDATE shows SET load_in_date=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        db.execute('UPDATE shows SET load_in_date=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
                    (val or None, show_id))
     if 'load_in_time' in data:
-        db.execute('UPDATE shows SET load_in_time=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        db.execute('UPDATE shows SET load_in_time=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
                    (data['load_in_time'].strip() if data['load_in_time'] else '', show_id))
     if 'load_out_date' in data:
         val = data['load_out_date'].strip() if data['load_out_date'] else None
-        db.execute('UPDATE shows SET load_out_date=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        db.execute('UPDATE shows SET load_out_date=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
                    (val or None, show_id))
     if 'load_out_time' in data:
-        db.execute('UPDATE shows SET load_out_time=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        db.execute('UPDATE shows SET load_out_time=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
                    (data['load_out_time'].strip() if data['load_out_time'] else '', show_id))
 
     # Track last saved
     db.execute("""
-        UPDATE shows SET last_saved_by=?, last_saved_at=CURRENT_TIMESTAMP WHERE id=?
+        UPDATE shows SET last_saved_by=%s, last_saved_at=CURRENT_TIMESTAMP WHERE id=%s
     """, (session['user_id'], show_id))
 
     # Stage field-change alerts (debounced — actual send happens in the
@@ -5338,9 +5311,9 @@ def save_advance(show_id):
     # Return the new MAX(updated_at) so the client can bump its sync cursor
     # past its own writes and the next poll won't echo this user's edits back.
     ts_row = db.execute(
-        "SELECT MAX(updated_at) FROM advance_data WHERE show_id = ?", (show_id,)
+        "SELECT MAX(updated_at) FROM advance_data WHERE show_id = %s", (show_id,)
     ).fetchone()
-    new_since = ts_row[0] if ts_row and ts_row[0] else ''
+    new_since = _sync_cursor(ts_row[0] if ts_row else None)
 
     db.commit()
     db.close()
@@ -5396,13 +5369,13 @@ def add_performance(show_id):
     db = get_db()
     cur = db.execute("""
         INSERT INTO show_performances (show_id, perf_date, perf_time, sort_order)
-        VALUES (?, ?, ?,
-          (SELECT COALESCE(MAX(sort_order)+1, 0) FROM show_performances WHERE show_id=?))
+        VALUES (%s, %s, %s,
+          (SELECT COALESCE(MAX(sort_order)+1, 0) FROM show_performances WHERE show_id=%s)) RETURNING id
     """, (show_id, perf_date, perf_time, show_id))
-    perf_id = cur.lastrowid
+    perf_id = cur.fetchone()['id']
     _sync_show_primary_date(db, show_id)
     db.commit()
-    perf = db.execute('SELECT * FROM show_performances WHERE id=?', (perf_id,)).fetchone()
+    perf = db.execute('SELECT * FROM show_performances WHERE id=%s', (perf_id,)).fetchone()
     db.close()
     return jsonify({'success': True, 'performance': _perf_to_json(perf)})
 
@@ -5416,18 +5389,18 @@ def update_performance(show_id, perf_id):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
     perf = db.execute(
-        'SELECT * FROM show_performances WHERE id=? AND show_id=?', (perf_id, show_id)
+        'SELECT * FROM show_performances WHERE id=%s AND show_id=%s', (perf_id, show_id)
     ).fetchone()
     if not perf:
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
     data = request.get_json(force=True) or {}
     db.execute("""
-        UPDATE show_performances SET perf_date=?, perf_time=? WHERE id=?
+        UPDATE show_performances SET perf_date=%s, perf_time=%s WHERE id=%s
     """, (data.get('perf_date') or None, _normalize_perf_time(data.get('perf_time')), perf_id))
     _sync_show_primary_date(db, show_id)
     db.commit()
-    perf = db.execute('SELECT * FROM show_performances WHERE id=?', (perf_id,)).fetchone()
+    perf = db.execute('SELECT * FROM show_performances WHERE id=%s', (perf_id,)).fetchone()
     db.close()
     return jsonify({'success': True, 'performance': _perf_to_json(perf)})
 
@@ -5441,12 +5414,12 @@ def delete_performance(show_id, perf_id):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
     perf = db.execute(
-        'SELECT * FROM show_performances WHERE id=? AND show_id=?', (perf_id, show_id)
+        'SELECT * FROM show_performances WHERE id=%s AND show_id=%s', (perf_id, show_id)
     ).fetchone()
     if not perf:
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
-    db.execute('DELETE FROM show_performances WHERE id=?', (perf_id,))
+    db.execute('DELETE FROM show_performances WHERE id=%s', (perf_id,))
     _sync_show_primary_date(db, show_id)
     db.commit()
     db.close()
@@ -5467,11 +5440,12 @@ def save_schedule(show_id):
     if 'meta' in data:
         for key, val in data['meta'].items():
             db.execute("""
-                INSERT OR REPLACE INTO schedule_meta (show_id, field_key, field_value)
-                VALUES (?, ?, ?)
+                INSERT INTO schedule_meta (show_id, field_key, field_value)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
             """, (show_id, key, val or ''))
     if 'rows' in data:
-        db.execute('DELETE FROM schedule_rows WHERE show_id = ?', (show_id,))
+        db.execute('DELETE FROM schedule_rows WHERE show_id = %s', (show_id,))
         for i, row in enumerate(data['rows']):
             perf_id = row.get('perf_id')  # None for single-day / first day
             day_date = row.get('day_date') or None
@@ -5479,14 +5453,14 @@ def save_schedule(show_id):
                 day_date = day_date.strip() or None
             db.execute("""
                 INSERT INTO schedule_rows (show_id, perf_id, day_date, sort_order, start_time, end_time, description, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """, (show_id, perf_id, day_date, i,
                   row.get('start_time', ''), row.get('end_time', ''),
                   row.get('description', ''), row.get('notes', '')))
 
-    db.execute('UPDATE shows SET updated_at=CURRENT_TIMESTAMP WHERE id=?', (show_id,))
+    db.execute('UPDATE shows SET updated_at=CURRENT_TIMESTAMP WHERE id=%s', (show_id,))
     db.execute("""
-        UPDATE shows SET last_saved_by=?, last_saved_at=CURRENT_TIMESTAMP WHERE id=?
+        UPDATE shows SET last_saved_by=%s, last_saved_at=CURRENT_TIMESTAMP WHERE id=%s
     """, (session['user_id'], show_id))
 
     _snapshot_form_history(db, show_id, 'schedule', data)
@@ -5511,8 +5485,9 @@ def save_postnotes(show_id):
     db = get_db()
     for key, val in data.items():
         db.execute("""
-            INSERT OR REPLACE INTO post_show_notes (show_id, field_key, field_value)
-            VALUES (?, ?, ?)
+            INSERT INTO post_show_notes (show_id, field_key, field_value)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
         """, (show_id, key, val or ''))
 
     # Mirror the two numeric counts to typed columns on shows so future
@@ -5532,15 +5507,15 @@ def save_postnotes(show_id):
             return None
 
     if 'cast_count' in data:
-        db.execute('UPDATE shows SET cast_count=? WHERE id=?',
+        db.execute('UPDATE shows SET cast_count=%s WHERE id=%s',
                    (_parse_count(data.get('cast_count')), show_id))
     if 'crew_count' in data:
-        db.execute('UPDATE shows SET crew_count=? WHERE id=?',
+        db.execute('UPDATE shows SET crew_count=%s WHERE id=%s',
                    (_parse_count(data.get('crew_count')), show_id))
 
-    db.execute('UPDATE shows SET updated_at=CURRENT_TIMESTAMP WHERE id=?', (show_id,))
+    db.execute('UPDATE shows SET updated_at=CURRENT_TIMESTAMP WHERE id=%s', (show_id,))
     db.execute("""
-        UPDATE shows SET last_saved_by=?, last_saved_at=CURRENT_TIMESTAMP WHERE id=?
+        UPDATE shows SET last_saved_by=%s, last_saved_at=CURRENT_TIMESTAMP WHERE id=%s
     """, (session['user_id'], show_id))
 
     _snapshot_form_history(db, show_id, 'postnotes', {'notes_data': data})
@@ -5565,7 +5540,7 @@ def form_history_list(show_id, form_type):
                u.display_name as saved_by_name, u.username as saved_by_username
         FROM form_history fh
         LEFT JOIN users u ON fh.saved_by = u.id
-        WHERE fh.show_id = ? AND fh.form_type = ?
+        WHERE fh.show_id = %s AND fh.form_type = %s
         ORDER BY fh.saved_at DESC
         LIMIT 50
     """, (show_id, form_type)).fetchall()
@@ -5585,7 +5560,7 @@ def history_snapshot(show_id, hist_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     db = get_db()
     entry = db.execute(
-        'SELECT * FROM form_history WHERE id=? AND show_id=?', (hist_id, show_id)
+        'SELECT * FROM form_history WHERE id=%s AND show_id=%s', (hist_id, show_id)
     ).fetchone()
     db.close()
     if not entry:
@@ -5605,7 +5580,7 @@ def restore_history(show_id, hist_id):
 
     db = get_db()
     entry = db.execute(
-        'SELECT * FROM form_history WHERE id=? AND show_id=?', (hist_id, show_id)
+        'SELECT * FROM form_history WHERE id=%s AND show_id=%s', (hist_id, show_id)
     ).fetchone()
     if not entry:
         db.close()
@@ -5621,7 +5596,7 @@ def restore_history(show_id, hist_id):
             SELECT fh.id, fh.saved_at, u.username, u.display_name, fh.snapshot_json
             FROM form_history fh
             LEFT JOIN users u ON fh.saved_by = u.id
-            WHERE fh.show_id=? AND fh.form_type=? AND fh.id > ?
+            WHERE fh.show_id=%s AND fh.form_type=%s AND fh.id > %s
             ORDER BY fh.saved_at DESC LIMIT 1
         """, (show_id, form_type, hist_id)).fetchone()
         if newer:
@@ -5638,23 +5613,25 @@ def restore_history(show_id, hist_id):
         adv = snapshot.get('advance_data', {})
         for key, val in adv.items():
             db.execute("""
-                INSERT OR REPLACE INTO advance_data (show_id, field_key, field_value, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO advance_data (show_id, field_key, field_value, updated_at)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value, updated_at = EXCLUDED.updated_at
             """, (show_id, key, str(val) if val is not None else ''))
 
     elif form_type == 'schedule':
         if 'meta' in snapshot:
             for key, val in snapshot['meta'].items():
                 db.execute("""
-                    INSERT OR REPLACE INTO schedule_meta (show_id, field_key, field_value)
-                    VALUES (?, ?, ?)
+                    INSERT INTO schedule_meta (show_id, field_key, field_value)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
                 """, (show_id, key, val or ''))
         if 'rows' in snapshot:
-            db.execute('DELETE FROM schedule_rows WHERE show_id=?', (show_id,))
+            db.execute('DELETE FROM schedule_rows WHERE show_id=%s', (show_id,))
             for i, row in enumerate(snapshot['rows']):
                 db.execute("""
                     INSERT INTO schedule_rows (show_id, sort_order, start_time, end_time, description, notes)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                 """, (show_id, i, row.get('start_time',''), row.get('end_time',''),
                       row.get('description',''), row.get('notes','')))
 
@@ -5662,12 +5639,13 @@ def restore_history(show_id, hist_id):
         notes = snapshot.get('notes_data', {})
         for key, val in notes.items():
             db.execute("""
-                INSERT OR REPLACE INTO post_show_notes (show_id, field_key, field_value)
-                VALUES (?, ?, ?)
+                INSERT INTO post_show_notes (show_id, field_key, field_value)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
             """, (show_id, key, val or ''))
 
     db.execute("""
-        UPDATE shows SET last_saved_by=?, last_saved_at=CURRENT_TIMESTAMP WHERE id=?
+        UPDATE shows SET last_saved_by=%s, last_saved_at=CURRENT_TIMESTAMP WHERE id=%s
     """, (session['user_id'], show_id))
     log_audit(db, 'HISTORY_RESTORE', 'form', hist_id, show_id=show_id,
               detail=f'type={form_type}')
@@ -5695,7 +5673,7 @@ def get_comments(show_id):
         FROM show_comments sc
         JOIN users u ON sc.user_id = u.id
         LEFT JOIN users du ON sc.deleted_by = du.id
-        WHERE sc.show_id = ? AND (sc.deleted_at IS NULL OR ?)
+        WHERE sc.show_id = %s AND (sc.deleted_at IS NULL OR %s)
         ORDER BY sc.created_at ASC
     """, (show_id, is_admin)).fetchall()
     db.close()
@@ -5734,10 +5712,10 @@ def post_comment(show_id):
         return jsonify({'success': False, 'error': 'Comment too long (max 2000 chars).'}), 400
     db = get_db()
     cur = db.execute(
-        'INSERT INTO show_comments (show_id, user_id, body) VALUES (?, ?, ?)',
+        'INSERT INTO show_comments (show_id, user_id, body) VALUES (%s, %s, %s) RETURNING id',
         (show_id, session['user_id'], body)
     )
-    cid = cur.lastrowid
+    cid = cur.fetchone()['id']
     log_audit(db, 'COMMENT_POST', 'comment', cid, show_id=show_id,
               after={'body': body})
     db.commit()
@@ -5745,7 +5723,7 @@ def post_comment(show_id):
         SELECT sc.id, sc.body, sc.created_at,
                u.display_name, u.username, u.id as uid
         FROM show_comments sc JOIN users u ON sc.user_id = u.id
-        WHERE sc.id = ?
+        WHERE sc.id = %s
     """, (cid,)).fetchone()
     db.close()
     syslog_logger.info(f"COMMENT_POST show_id={show_id} by={session.get('username')}")
@@ -5770,7 +5748,7 @@ def delete_comment(show_id, cid):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     db = get_db()
     comment = db.execute(
-        'SELECT * FROM show_comments WHERE id=? AND show_id=? AND deleted_at IS NULL',
+        'SELECT * FROM show_comments WHERE id=%s AND show_id=%s AND deleted_at IS NULL',
         (cid, show_id)
     ).fetchone()
     if not comment:
@@ -5782,7 +5760,7 @@ def delete_comment(show_id, cid):
     log_audit(db, 'COMMENT_DELETE', 'comment', cid, show_id=show_id,
               before={'body': comment['body']})
     db.execute(
-        'UPDATE show_comments SET deleted_at=CURRENT_TIMESTAMP, deleted_by=? WHERE id=?',
+        'UPDATE show_comments SET deleted_at=CURRENT_TIMESTAMP, deleted_by=%s WHERE id=%s',
         (session['user_id'], cid)
     )
     db.commit()
@@ -5806,7 +5784,7 @@ def edit_comment(show_id, cid):
         return jsonify({'success': False, 'error': 'Comment too long (max 2000 chars).'}), 400
     db = get_db()
     comment = db.execute(
-        'SELECT * FROM show_comments WHERE id=? AND show_id=? AND deleted_at IS NULL',
+        'SELECT * FROM show_comments WHERE id=%s AND show_id=%s AND deleted_at IS NULL',
         (cid, show_id)
     ).fetchone()
     if not comment:
@@ -5818,11 +5796,11 @@ def edit_comment(show_id, cid):
     old_body = comment['body']
     # Save previous version
     db.execute(
-        'INSERT INTO comment_versions (comment_id, body, edited_by) VALUES (?,?,?)',
+        'INSERT INTO comment_versions (comment_id, body, edited_by) VALUES (%s,%s,%s)',
         (cid, old_body, session['user_id'])
     )
     db.execute(
-        'UPDATE show_comments SET body=?, edited_at=CURRENT_TIMESTAMP WHERE id=?',
+        'UPDATE show_comments SET body=%s, edited_at=CURRENT_TIMESTAMP WHERE id=%s',
         (new_body, cid)
     )
     log_audit(db, 'COMMENT_EDIT', 'comment', cid, show_id=show_id,
@@ -5838,14 +5816,14 @@ def edit_comment(show_id, cid):
 def restore_comment(show_id, cid):
     db = get_db()
     comment = db.execute(
-        'SELECT * FROM show_comments WHERE id=? AND show_id=? AND deleted_at IS NOT NULL',
+        'SELECT * FROM show_comments WHERE id=%s AND show_id=%s AND deleted_at IS NOT NULL',
         (cid, show_id)
     ).fetchone()
     if not comment:
         db.close()
         return jsonify({'success': False, 'error': 'Comment not found.'}), 404
     db.execute(
-        'UPDATE show_comments SET deleted_at=NULL, deleted_by=NULL WHERE id=?', (cid,)
+        'UPDATE show_comments SET deleted_at=NULL, deleted_by=NULL WHERE id=%s', (cid,)
     )
     log_audit(db, 'COMMENT_RESTORE', 'comment', cid, show_id=show_id)
     db.commit()
@@ -5863,7 +5841,7 @@ def comment_versions_list(show_id, cid):
                u.display_name, u.username
         FROM comment_versions cv
         LEFT JOIN users u ON cv.edited_by = u.id
-        WHERE cv.comment_id = ?
+        WHERE cv.comment_id = %s
         ORDER BY cv.edited_at DESC
     """, (cid,)).fetchall()
     db.close()
@@ -5880,13 +5858,13 @@ def comment_versions_list(show_id, cid):
 def comment_version_restore(show_id, cid, vid):
     db = get_db()
     version = db.execute(
-        'SELECT * FROM comment_versions WHERE id=? AND comment_id=?', (vid, cid)
+        'SELECT * FROM comment_versions WHERE id=%s AND comment_id=%s', (vid, cid)
     ).fetchone()
     if not version:
         db.close()
         return jsonify({'success': False, 'error': 'Version not found.'}), 404
     comment = db.execute(
-        'SELECT body FROM show_comments WHERE id=? AND show_id=?', (cid, show_id)
+        'SELECT body FROM show_comments WHERE id=%s AND show_id=%s', (cid, show_id)
     ).fetchone()
     if not comment:
         db.close()
@@ -5894,11 +5872,11 @@ def comment_version_restore(show_id, cid, vid):
     old_body = comment['body']
     # Save current as a version before restoring
     db.execute(
-        'INSERT INTO comment_versions (comment_id, body, edited_by) VALUES (?,?,?)',
+        'INSERT INTO comment_versions (comment_id, body, edited_by) VALUES (%s,%s,%s)',
         (cid, old_body, session['user_id'])
     )
     db.execute(
-        'UPDATE show_comments SET body=?, edited_at=CURRENT_TIMESTAMP WHERE id=?',
+        'UPDATE show_comments SET body=%s, edited_at=CURRENT_TIMESTAMP WHERE id=%s',
         (version['body'], cid)
     )
     log_audit(db, 'COMMENT_VERSION_RESTORE', 'comment', cid, show_id=show_id,
@@ -5926,7 +5904,7 @@ def get_attachments(show_id):
                    u.display_name, u.username
             FROM show_attachments sa
             LEFT JOIN users u ON sa.uploaded_by = u.id
-            WHERE sa.show_id = ? AND sa.field_key = ? AND sa.deleted_at IS NULL
+            WHERE sa.show_id = %s AND sa.field_key = %s AND sa.deleted_at IS NULL
             ORDER BY sa.created_at ASC
         """, (show_id, field_key)).fetchall()
     else:
@@ -5936,7 +5914,7 @@ def get_attachments(show_id):
                    u.display_name, u.username
             FROM show_attachments sa
             LEFT JOIN users u ON sa.uploaded_by = u.id
-            WHERE sa.show_id = ? AND sa.deleted_at IS NULL
+            WHERE sa.show_id = %s AND sa.deleted_at IS NULL
             ORDER BY sa.created_at ASC
         """, (show_id,)).fetchall()
     db.close()
@@ -5976,28 +5954,28 @@ def upload_attachment(show_id):
     # Insert row first (without file data) to get the auto-assigned id
     cur = db.execute("""
         INSERT INTO show_attachments (show_id, uploaded_by, filename, mime_type, file_data, file_size, field_key, description)
-        VALUES (?, ?, ?, ?, NULL, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, NULL, %s, %s, %s) RETURNING id
     """, (show_id, session['user_id'], filename, mime_type, len(data), field_key, description))
-    aid = cur.lastrowid
+    aid = cur.fetchone()['id']
     # Upload to S3; fall back to DB storage if S3 is unavailable
     if s3_storage.is_configured():
         try:
             s3_key = f"attachments/{show_id}/{aid}/{filename}"
             s3_storage.upload_file(s3_key, data, mime_type)
-            db.execute('UPDATE show_attachments SET s3_key=? WHERE id=?', (s3_key, aid))
+            db.execute('UPDATE show_attachments SET s3_key=%s WHERE id=%s', (s3_key, aid))
         except Exception as e:
             app.logger.warning(f"S3 upload failed for attachment {aid}, falling back to DB: {e}")
             syslog_logger.warning(f"S3_UPLOAD_FAILED table=show_attachments id={aid} show_id={show_id} error={e}")
-            db.execute('UPDATE show_attachments SET file_data=? WHERE id=?', (data, aid))
+            db.execute('UPDATE show_attachments SET file_data=%s WHERE id=%s', (data, aid))
     else:
-        db.execute('UPDATE show_attachments SET file_data=? WHERE id=?', (data, aid))
+        db.execute('UPDATE show_attachments SET file_data=%s WHERE id=%s', (data, aid))
     log_audit(db, 'FILE_UPLOAD', 'attachment', aid, show_id=show_id, detail=filename)
     db.commit()
     row = db.execute("""
         SELECT sa.id, sa.filename, sa.mime_type, sa.file_size, sa.created_at,
                u.display_name, u.username
         FROM show_attachments sa LEFT JOIN users u ON sa.uploaded_by = u.id
-        WHERE sa.id = ?
+        WHERE sa.id = %s
     """, (aid,)).fetchone()
     db.close()
     syslog_logger.info(f"FILE_UPLOAD show_id={show_id} filename={filename} field_key={field_key} by={session.get('username')}")
@@ -6023,7 +6001,7 @@ def download_attachment(show_id, aid):
         abort(403)
     db = get_db()
     row = db.execute(
-        'SELECT * FROM show_attachments WHERE id=? AND show_id=?', (aid, show_id)
+        'SELECT * FROM show_attachments WHERE id=%s AND show_id=%s', (aid, show_id)
     ).fetchone()
     db.close()
     if not row:
@@ -6066,7 +6044,7 @@ def delete_attachment(show_id, aid):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
     row = db.execute(
-        'SELECT * FROM show_attachments WHERE id=? AND show_id=?', (aid, show_id)
+        'SELECT * FROM show_attachments WHERE id=%s AND show_id=%s', (aid, show_id)
     ).fetchone()
     if not row:
         db.close()
@@ -6077,9 +6055,9 @@ def delete_attachment(show_id, aid):
     if row['file_data'] and not row['is_compressed']:
         packed = gzip.compress(bytes(row['file_data']))
         if len(packed) < len(row['file_data']):
-            db.execute('UPDATE show_attachments SET file_data=?, is_compressed=1 WHERE id=?',
+            db.execute('UPDATE show_attachments SET file_data=%s, is_compressed=1 WHERE id=%s',
                        (packed, aid))
-    db.execute('UPDATE show_attachments SET deleted_at=CURRENT_TIMESTAMP, deleted_by=? WHERE id=?',
+    db.execute('UPDATE show_attachments SET deleted_at=CURRENT_TIMESTAMP, deleted_by=%s WHERE id=%s',
                (session['user_id'], aid))
     log_audit(db, 'FILE_ARCHIVE', 'attachment', aid, show_id=show_id,
               detail=row['filename'])
@@ -6096,7 +6074,7 @@ def restore_attachment(show_id, aid):
     DB-stored bytes to their original uncompressed form."""
     db = get_db()
     row = db.execute(
-        'SELECT * FROM show_attachments WHERE id=? AND show_id=?', (aid, show_id)
+        'SELECT * FROM show_attachments WHERE id=%s AND show_id=%s', (aid, show_id)
     ).fetchone()
     if not row:
         db.close()
@@ -6105,9 +6083,9 @@ def restore_attachment(show_id, aid):
         db.close()
         return jsonify({'success': True})
     if row['file_data'] and row['is_compressed']:
-        db.execute('UPDATE show_attachments SET file_data=?, is_compressed=0 WHERE id=?',
+        db.execute('UPDATE show_attachments SET file_data=%s, is_compressed=0 WHERE id=%s',
                    (gzip.decompress(bytes(row['file_data'])), aid))
-    db.execute('UPDATE show_attachments SET deleted_at=NULL, deleted_by=NULL WHERE id=?', (aid,))
+    db.execute('UPDATE show_attachments SET deleted_at=NULL, deleted_by=NULL WHERE id=%s', (aid,))
     log_audit(db, 'FILE_RESTORE', 'attachment', aid, show_id=show_id,
               detail=row['filename'])
     db.commit()
@@ -6127,7 +6105,7 @@ def purge_attachment(show_id, aid):
     """
     db = get_db()
     row = db.execute(
-        'SELECT * FROM show_attachments WHERE id=? AND show_id=?', (aid, show_id)
+        'SELECT * FROM show_attachments WHERE id=%s AND show_id=%s', (aid, show_id)
     ).fetchone()
     if not row:
         db.close()
@@ -6143,7 +6121,7 @@ def purge_attachment(show_id, aid):
             syslog_logger.error(f"S3_DELETE_FAILED table=show_attachments id={aid} show_id={show_id} error={e}")
     log_audit(db, 'FILE_PURGE', 'attachment', aid, show_id=show_id,
               detail=row['filename'])
-    db.execute('DELETE FROM show_attachments WHERE id=?', (aid,))
+    db.execute('DELETE FROM show_attachments WHERE id=%s', (aid,))
     db.commit()
     db.close()
     syslog_logger.info(f"FILE_PURGE show_id={show_id} aid={aid} by={session.get('username')}")
@@ -6158,14 +6136,14 @@ def mark_advance_read(show_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     db = get_db()
-    show = db.execute('SELECT advance_version FROM shows WHERE id=?', (show_id,)).fetchone()
+    show = db.execute('SELECT advance_version FROM shows WHERE id=%s', (show_id,)).fetchone()
     if not show:
         db.close()
         return jsonify({'success': False, 'error': 'Show not found.'}), 404
     version = show['advance_version'] or 0
     db.execute("""
         INSERT INTO advance_reads (show_id, user_id, version_read, read_at)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
         ON CONFLICT(show_id, user_id) DO UPDATE SET
             version_read = excluded.version_read,
             read_at      = excluded.read_at
@@ -6186,7 +6164,7 @@ def get_advance_reads(show_id):
                u.display_name, u.username, u.id as uid
         FROM advance_reads ar
         JOIN users u ON ar.user_id = u.id
-        WHERE ar.show_id = ?
+        WHERE ar.show_id = %s
         ORDER BY ar.read_at DESC
     """, (show_id,)).fetchall()
     db.close()
@@ -6212,14 +6190,14 @@ def _upsert_active_session(db, user_id, show_id, tab, focused_field=None):
     focused_field = str(focused_field)[:80] if focused_field else None
     db.execute("""
         INSERT INTO active_sessions (user_id, show_id, tab, focused_field, last_seen)
-        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
         ON CONFLICT(user_id, show_id) DO UPDATE SET
             tab=excluded.tab,
             focused_field=excluded.focused_field,
             last_seen=excluded.last_seen
     """, (user_id, show_id, tab, focused_field or None))
     # Prune sessions idle > 60 s
-    db.execute("DELETE FROM active_sessions WHERE last_seen < datetime('now', '-60 seconds')")
+    db.execute("DELETE FROM active_sessions WHERE last_seen < (NOW() - INTERVAL '60 seconds')")
 
 
 def _get_other_active_users(db, user_id, show_id):
@@ -6228,9 +6206,9 @@ def _get_other_active_users(db, user_id, show_id):
         SELECT u.display_name, u.username, acs.tab, acs.focused_field
         FROM active_sessions acs
         JOIN users u ON acs.user_id = u.id
-        WHERE acs.show_id = ?
-          AND acs.user_id != ?
-          AND acs.last_seen > datetime('now', '-45 seconds')
+        WHERE acs.show_id = %s
+          AND acs.user_id != %s
+          AND acs.last_seen > (NOW() - INTERVAL '45 seconds')
         ORDER BY acs.last_seen DESC
     """, (show_id, user_id)).fetchall()
     return [{
@@ -6252,7 +6230,7 @@ def _attachments_rev(db, show_id):
     """
     r = db.execute(
         'SELECT COUNT(*), COALESCE(MAX(id), 0) FROM show_attachments '
-        'WHERE show_id = ? AND deleted_at IS NULL', (show_id,)
+        'WHERE show_id = %s AND deleted_at IS NULL', (show_id,)
     ).fetchone()
     return f"{r[0]}:{r[1]}"
 
@@ -6281,20 +6259,20 @@ def sync_advance(show_id):
         changed_rows = db.execute("""
             SELECT ad.field_key, ad.field_value
             FROM advance_data ad
-            WHERE ad.show_id = ?
-              AND ad.updated_at > ?
+            WHERE ad.show_id = %s
+              AND ad.updated_at > %s
               AND (
                 SELECT last_saved_by FROM shows WHERE id = ad.show_id
-              ) != ?
+              ) != %s
         """, (show_id, since, session['user_id'])).fetchall()
     else:
         changed_rows = []
 
     # New "since" cursor = latest updated_at across the whole show's advance data
     ts_row = db.execute(
-        "SELECT MAX(updated_at) FROM advance_data WHERE show_id = ?", (show_id,)
+        "SELECT MAX(updated_at) FROM advance_data WHERE show_id = %s", (show_id,)
     ).fetchone()
-    new_since = ts_row[0] if ts_row and ts_row[0] else since
+    new_since = _sync_cursor(ts_row[0] if ts_row and ts_row[0] else since)
 
     # Update presence (including which field is focused) and get other active users
     _upsert_active_session(db, session['user_id'], show_id, tab, focused_field)
@@ -6303,7 +6281,7 @@ def sync_advance(show_id):
     # Last-saved state — lets the client seed its "another user saved" baseline
     # from the advance tab so switching to schedule/postnotes compares against
     # the page-load state rather than "whoever saved last".
-    saved = db.execute('SELECT last_saved_by, last_saved_at FROM shows WHERE id=?',
+    saved = db.execute('SELECT last_saved_by, last_saved_at FROM shows WHERE id=%s',
                         (show_id,)).fetchone()
 
     attachments_rev = _attachments_rev(db, show_id)
@@ -6333,7 +6311,7 @@ def schedule_state(show_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     db = get_db()
-    show = db.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
+    show = db.execute('SELECT * FROM shows WHERE id = %s', (show_id,)).fetchone()
     if not show:
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
@@ -6366,7 +6344,7 @@ def show_heartbeat(show_id):
     # user saved" banner when this pair changes to a save that isn't the current
     # user's — so a show merely *last touched* by someone else before the user
     # arrived no longer triggers a false alarm on every tab switch.
-    show = db.execute('SELECT last_saved_by, last_saved_at FROM shows WHERE id=?',
+    show = db.execute('SELECT last_saved_by, last_saved_at FROM shows WHERE id=%s',
                       (show_id,)).fetchone()
 
     attachments_rev = _attachments_rev(db, show_id)
@@ -6444,7 +6422,7 @@ def _find_reusable_export(db, show_id, export_type, content_hash):
     if not content_hash:
         return None, None
     row = db.execute(
-        "SELECT * FROM export_log WHERE show_id=? AND export_type=? "
+        "SELECT * FROM export_log WHERE show_id=%s AND export_type=%s "
         "ORDER BY version DESC, id DESC LIMIT 1",
         (show_id, export_type)
     ).fetchone()
@@ -6469,7 +6447,7 @@ def _stash_export_bytes(log_id, pdf_bytes):
         return
     try:
         db = get_db()
-        db.execute('UPDATE export_log SET pdf_data=? WHERE id=?', (pdf_bytes, log_id))
+        db.execute('UPDATE export_log SET pdf_data=%s WHERE id=%s', (pdf_bytes, log_id))
         db.commit()
         db.close()
     except Exception as e:
@@ -6486,7 +6464,7 @@ def _advance_attachments_fingerprint(db, show_id):
         rows = db.execute("""
             SELECT id, filename, mime_type, field_key, s3_key, created_at,
                    CASE WHEN file_data IS NOT NULL THEN LENGTH(file_data) ELSE 0 END AS blob_len
-            FROM show_attachments WHERE show_id = ? AND deleted_at IS NULL ORDER BY id
+            FROM show_attachments WHERE show_id = %s AND deleted_at IS NULL ORDER BY id
         """, (show_id,)).fetchall()
     except Exception as e:
         app.logger.warning(f'Could not fingerprint advance attachments: {e}')
@@ -6516,9 +6494,9 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
         base_url = request.url_root
 
     db = get_db()
-    show = db.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
+    show = db.execute('SELECT * FROM shows WHERE id = %s', (show_id,)).fetchone()
     adv_rows = db.execute(
-        'SELECT field_key, field_value FROM advance_data WHERE show_id = ?', (show_id,)
+        'SELECT field_key, field_value FROM advance_data WHERE show_id = %s', (show_id,)
     ).fetchall()
     advance_data = {r['field_key']: r['field_value'] for r in adv_rows}
     contacts = db.execute('SELECT * FROM contacts ORDER BY name').fetchall()
@@ -6550,7 +6528,7 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
             FROM show_assets sa
             JOIN asset_types at ON at.id = sa.asset_type_id
             JOIN asset_categories ac ON ac.id = at.category_id
-            WHERE sa.show_id = ? AND sa.is_hidden = 0
+            WHERE sa.show_id = %s AND sa.is_hidden = 0
             ORDER BY ac.sort_order, ac.name, at.name
         """, (show_id,)).fetchall()
         for r in rental_rows:
@@ -6607,11 +6585,11 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
         return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
 
     new_v = (show['advance_version'] or 0) + 1
-    db.execute('UPDATE shows SET advance_version=? WHERE id=?', (new_v, show_id))
+    db.execute('UPDATE shows SET advance_version=%s WHERE id=%s', (new_v, show_id))
     log_cur = db.execute(
         "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
-        "VALUES (?, 'advance', ?, ?, ?)", (show_id, new_v, exported_by_id, content_hash))
-    log_id = log_cur.lastrowid
+        "VALUES (%s, 'advance', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
+    log_id = log_cur.fetchone()['id']
     db.commit()
     db.close()
 
@@ -6620,7 +6598,7 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
     # Generate PDF bytes (S3 push is handled by the caller)
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f"PDF_GENERATION_FAILED show_id={show_id} type=advance error={e}")
         pdf_bytes = None
@@ -6672,7 +6650,7 @@ def _collect_advance_field_attachments(show_id, base_url):
         FROM show_attachments sa
         LEFT JOIN form_fields   ff ON ff.field_key = sa.field_key
         LEFT JOIN form_sections fs ON fs.id = ff.section_id
-        WHERE sa.show_id = ?
+        WHERE sa.show_id = %s
           AND sa.deleted_at IS NULL
           AND sa.field_key IS NOT NULL AND sa.field_key != ''
           AND ff.field_type = 'file_upload'
@@ -6683,7 +6661,7 @@ def _collect_advance_field_attachments(show_id, base_url):
                field_key, description, created_at,
                NULL AS field_label, NULL AS section_label
         FROM show_attachments
-        WHERE show_id = ?
+        WHERE show_id = %s
           AND deleted_at IS NULL
           AND (field_key IS NULL OR field_key = '')
         ORDER BY created_at, id
@@ -6896,7 +6874,7 @@ def _render_omitted_files_index_pdf(omitted, base_url):
             </table>
         </body></html>"""
         from weasyprint import HTML as WP_HTML
-        return WP_HTML(string=html, base_url=base_url).write_pdf()
+        return WP_HTML(string=html, base_url=base_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.warning(f"Omitted-files index render failed: {e}")
         return None
@@ -6982,7 +6960,7 @@ def _render_attachment_wrapper_pdf(data, mime, filename, section_label,
         </body></html>"""
 
         from weasyprint import HTML as WP_HTML
-        return WP_HTML(string=html, base_url=base_url).write_pdf()
+        return WP_HTML(string=html, base_url=base_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.warning(f"Wrapper PDF render failed for {filename}: {e}")
         return None
@@ -7006,20 +6984,20 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
         base_url = request.url_root
 
     db = get_db()
-    show = db.execute('SELECT * FROM shows WHERE id = ?', (show_id,)).fetchone()
+    show = db.execute('SELECT * FROM shows WHERE id = %s', (show_id,)).fetchone()
     all_sched_rows = db.execute(
-        'SELECT * FROM schedule_rows WHERE show_id=? ORDER BY sort_order,id', (show_id,)
+        'SELECT * FROM schedule_rows WHERE show_id=%s ORDER BY sort_order,id', (show_id,)
     ).fetchall()
     meta_rows = db.execute(
-        'SELECT field_key, field_value FROM schedule_meta WHERE show_id=?', (show_id,)
+        'SELECT field_key, field_value FROM schedule_meta WHERE show_id=%s', (show_id,)
     ).fetchall()
     schedule_meta = {r['field_key']: r['field_value'] for r in meta_rows}
     adv_rows = db.execute(
-        'SELECT field_key, field_value FROM advance_data WHERE show_id=?', (show_id,)
+        'SELECT field_key, field_value FROM advance_data WHERE show_id=%s', (show_id,)
     ).fetchall()
     advance_data = {r['field_key']: r['field_value'] for r in adv_rows}
     performances = [dict(p) for p in db.execute(
-        'SELECT * FROM show_performances WHERE show_id=? ORDER BY sort_order, perf_date, perf_time, id', (show_id,)
+        'SELECT * FROM show_performances WHERE show_id=%s ORDER BY sort_order, perf_date, perf_time, id', (show_id,)
     ).fetchall()]
     contacts = db.execute('SELECT * FROM contacts ORDER BY name').fetchall()
     contact_map = {c['id']: dict(c) for c in contacts}
@@ -7100,7 +7078,7 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
     # Crew call times — unique in_times from labor_requests, sorted. Training /
     # shadow shifts are excluded so they never surface on show paperwork.
     labor_in_times = db.execute(
-        "SELECT in_time FROM labor_requests WHERE show_id=? AND in_time != '' "
+        "SELECT in_time FROM labor_requests WHERE show_id=%s AND in_time != '' "
         "AND COALESCE(is_training_shift, 0) = 0 ORDER BY in_time",
         (show_id,)
     ).fetchall()
@@ -7138,11 +7116,11 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
         return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
 
     new_v = (show['schedule_version'] or 0) + 1
-    db.execute('UPDATE shows SET schedule_version=? WHERE id=?', (new_v, show_id))
+    db.execute('UPDATE shows SET schedule_version=%s WHERE id=%s', (new_v, show_id))
     log_cur = db.execute(
         "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
-        "VALUES (?, 'schedule', ?, ?, ?)", (show_id, new_v, exported_by_id, content_hash))
-    log_id = log_cur.lastrowid
+        "VALUES (%s, 'schedule', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
+    log_id = log_cur.fetchone()['id']
     db.commit()
     db.close()
 
@@ -7151,7 +7129,7 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
     # Generate PDF bytes (S3 push is handled by the caller)
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f"PDF_GENERATION_FAILED show_id={show_id} type=schedule error={e}")
         pdf_bytes = None
@@ -7187,7 +7165,7 @@ def export_advance(show_id):
                     s3_storage.upload_file(_s3_key, _pdf, 'application/pdf')
                     with app.app_context():
                         db2 = get_db()
-                        db2.execute('UPDATE export_log SET s3_key=?, pdf_data=NULL WHERE id=?', (_s3_key, _lid))
+                        db2.execute('UPDATE export_log SET s3_key=%s, pdf_data=NULL WHERE id=%s', (_s3_key, _lid))
                         db2.commit()
                         db2.close()
                 except Exception as e:
@@ -7198,7 +7176,7 @@ def export_advance(show_id):
     # Fallback to HTML if weasyprint failed
     try:
         from weasyprint import HTML
-        pdf = HTML(string=html, base_url=request.url_root).write_pdf()
+        pdf = HTML(string=html, base_url=request.url_root).write_pdf(font_config=_wp_font_config())
         resp = make_response(pdf)
         resp.headers['Content-Type'] = 'application/pdf'
         resp.headers['Content-Disposition'] = _safe_content_disposition(filename)
@@ -7234,7 +7212,7 @@ def export_schedule(show_id):
                     s3_storage.upload_file(_s3_key, _pdf, 'application/pdf')
                     with app.app_context():
                         db2 = get_db()
-                        db2.execute('UPDATE export_log SET s3_key=?, pdf_data=NULL WHERE id=?', (_s3_key, _lid))
+                        db2.execute('UPDATE export_log SET s3_key=%s, pdf_data=NULL WHERE id=%s', (_s3_key, _lid))
                         db2.commit()
                         db2.close()
                 except Exception as e:
@@ -7244,7 +7222,7 @@ def export_schedule(show_id):
         return resp
     try:
         from weasyprint import HTML
-        pdf = HTML(string=html, base_url=request.url_root).write_pdf()
+        pdf = HTML(string=html, base_url=request.url_root).write_pdf(font_config=_wp_font_config())
         resp = make_response(pdf)
         resp.headers['Content-Type'] = 'application/pdf'
         resp.headers['Content-Disposition'] = _safe_content_disposition(filename)
@@ -7263,7 +7241,7 @@ def download_export_history(show_id, log_id):
         abort(403)
     db = get_db()
     row = db.execute(
-        'SELECT * FROM export_log WHERE id=? AND show_id=?', (log_id, show_id)
+        'SELECT * FROM export_log WHERE id=%s AND show_id=%s', (log_id, show_id)
     ).fetchone()
     db.close()
     if not row or (not row['s3_key'] and not row['pdf_data']):
@@ -7396,17 +7374,17 @@ def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
         base_url = request.url_root
 
     db = get_db()
-    show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
+    show = db.execute('SELECT * FROM shows WHERE id=%s', (show_id,)).fetchone()
     note_rows = db.execute(
-        'SELECT field_key, field_value FROM post_show_notes WHERE show_id=?', (show_id,)
+        'SELECT field_key, field_value FROM post_show_notes WHERE show_id=%s', (show_id,)
     ).fetchall()
     notes_data = {r['field_key']: r['field_value'] for r in note_rows}
     adv_rows = db.execute(
-        'SELECT field_key, field_value FROM advance_data WHERE show_id=?', (show_id,)
+        'SELECT field_key, field_value FROM advance_data WHERE show_id=%s', (show_id,)
     ).fetchall()
     advance_data = {r['field_key']: r['field_value'] for r in adv_rows}
     sched_rows = db.execute(
-        'SELECT * FROM schedule_rows WHERE show_id=? ORDER BY sort_order,id', (show_id,)
+        'SELECT * FROM schedule_rows WHERE show_id=%s ORDER BY sort_order,id', (show_id,)
     ).fetchall()
     logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
     pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
@@ -7436,18 +7414,18 @@ def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
         return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
 
     new_v = (show['postnotes_version'] or 0) + 1
-    db.execute('UPDATE shows SET postnotes_version=? WHERE id=?', (new_v, show_id))
+    db.execute('UPDATE shows SET postnotes_version=%s WHERE id=%s', (new_v, show_id))
     log_cur = db.execute(
         "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
-        "VALUES (?, 'postnotes', ?, ?, ?)", (show_id, new_v, exported_by_id, content_hash))
-    log_id = log_cur.lastrowid
+        "VALUES (%s, 'postnotes', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
+    log_id = log_cur.fetchone()['id']
     db.commit()
     db.close()
 
     html = _render(new_v, datetime.now().strftime('%B %d, %Y at %I:%M %p'))
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f"PDF_GENERATION_FAILED show_id={show_id} type=postnotes error={e}")
         pdf_bytes = None
@@ -7495,7 +7473,7 @@ def viewer_home():
     if not accessible:
         rows = []
     else:
-        ph = ','.join(['?'] * len(accessible))
+        ph = ','.join(['%s'] * len(accessible))
         rows = db.execute(
             f"SELECT id, name, venue, show_date, show_time "
             f"FROM shows WHERE id IN ({ph}) AND COALESCE(status, 'active') != 'archived' "
@@ -7532,7 +7510,7 @@ def viewer_show(show_id):
         abort(403)
     db = get_db()
     show = db.execute(
-        "SELECT id, name, venue, show_date, show_time FROM shows WHERE id=?",
+        "SELECT id, name, venue, show_date, show_time FROM shows WHERE id=%s",
         (show_id,)
     ).fetchone()
     db.close()
@@ -7565,7 +7543,7 @@ def viewer_export(show_id, doc_type):
     if not accessible or show_id not in accessible:
         abort(403)
     db = get_db()
-    show = db.execute("SELECT venue FROM shows WHERE id=?", (show_id,)).fetchone()
+    show = db.execute("SELECT venue FROM shows WHERE id=%s", (show_id,)).fetchone()
     db.close()
     if not show:
         abort(404)
@@ -7695,7 +7673,7 @@ def archive_show(show_id):
     if session.get('user_role') != 'admin' and not can_access_show(session['user_id'], show_id):
         abort(403)
     db = get_db()
-    db.execute("UPDATE shows SET status='archived' WHERE id=?", (show_id,))
+    db.execute("UPDATE shows SET status='archived' WHERE id=%s", (show_id,))
     log_audit(db, 'SHOW_ARCHIVE', 'show', show_id, show_id=show_id)
     db.commit(); db.close()
     syslog_logger.info(f"SHOW_ARCHIVE show_id={show_id} by={session.get('username')}")
@@ -7709,7 +7687,7 @@ def restore_show(show_id):
     if session.get('user_role') != 'admin' and not can_access_show(session['user_id'], show_id):
         abort(403)
     db = get_db()
-    db.execute("UPDATE shows SET status='active' WHERE id=?", (show_id,))
+    db.execute("UPDATE shows SET status='active' WHERE id=%s", (show_id,))
     log_audit(db, 'SHOW_RESTORE', 'show', show_id, show_id=show_id)
     db.commit(); db.close()
     syslog_logger.info(f"SHOW_RESTORE show_id={show_id} by={session.get('username')}")
@@ -7726,7 +7704,7 @@ def toggle_show_test_mode(show_id):
     data = request.get_json(force=True) or {}
     is_test = 1 if data.get('is_test') else 0
     db = get_db()
-    db.execute('UPDATE shows SET is_test=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+    db.execute('UPDATE shows SET is_test=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
                (is_test, show_id))
     log_audit(db, 'SHOW_TEST_FLAG', 'show', show_id, show_id=show_id,
               detail=f'is_test={is_test}')
@@ -7749,7 +7727,7 @@ def toggle_show_mode(show_id):
     data = request.get_json(force=True) or {}
     mode = 'event' if data.get('show_mode') == 'event' else 'show'
     db = get_db()
-    db.execute('UPDATE shows SET show_mode=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+    db.execute('UPDATE shows SET show_mode=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
                (mode, show_id))
     log_audit(db, 'SHOW_MODE', 'show', show_id, show_id=show_id,
               detail=f'show_mode={mode}')
@@ -7769,7 +7747,7 @@ def bulk_archive_shows():
     if not ids:
         return jsonify({'success': False, 'error': 'No show_ids provided.'}), 400
     db = get_db()
-    placeholders = ','.join('?' for _ in ids)
+    placeholders = ','.join('%s' for _ in ids)
     rows = db.execute(
         f"SELECT id, name FROM shows WHERE id IN ({placeholders}) AND status='active'",
         tuple(ids)
@@ -7778,7 +7756,7 @@ def bulk_archive_shows():
     if archived:
         db.execute(
             f"UPDATE shows SET status='archived', updated_at=CURRENT_TIMESTAMP "
-            f"WHERE id IN ({','.join('?' for _ in archived)})",
+            f"WHERE id IN ({','.join('%s' for _ in archived)})",
             tuple(archived)
         )
         for r in rows:
@@ -7804,7 +7782,7 @@ def bulk_delete_shows():
         return jsonify({'success': False,
                         'error': 'Bulk delete requires confirm="DELETE".'}), 400
     db = get_db()
-    placeholders = ','.join('?' for _ in ids)
+    placeholders = ','.join('%s' for _ in ids)
     rows = db.execute(
         f"SELECT id, name FROM shows WHERE id IN ({placeholders})",
         tuple(ids)
@@ -7819,7 +7797,7 @@ def bulk_delete_shows():
         # records, not per-show) — but their body text still mentions the
         # deleted show. Scrub them explicitly so the values aren't preserved
         # in the bell forever.
-        del_ph = ','.join('?' for _ in deleted_ids)
+        del_ph = ','.join('%s' for _ in deleted_ids)
         db.execute(
             f"DELETE FROM notifications WHERE show_id IN ({del_ph})",
             tuple(deleted_ids)
@@ -7871,15 +7849,15 @@ def _purge_show(db, show_id):
     """Delete a show plus the child rows not handled by ON DELETE CASCADE.
     Caller commits. Used by both delete_show and merge_shows."""
     for tbl in _SHOW_PURGE_TABLES:
-        db.execute(f'DELETE FROM {tbl} WHERE show_id=?', (show_id,))
-    db.execute('DELETE FROM shows WHERE id=?', (show_id,))
+        db.execute(f'DELETE FROM {tbl} WHERE show_id=%s', (show_id,))
+    db.execute('DELETE FROM shows WHERE id=%s', (show_id,))
 
 
 def _show_child_counts(db, show_id):
     """Counts of the reassign-on-merge child rows for a show (merge preview)."""
     out = {}
     for tbl in _SHOW_MERGE_MOVE_TABLES:
-        n = db.execute(f'SELECT COUNT(*) AS c FROM {tbl} WHERE show_id=?',
+        n = db.execute(f'SELECT COUNT(*) AS c FROM {tbl} WHERE show_id=%s',
                        (show_id,)).fetchone()['c']
         out[tbl] = {'label': _SHOW_MERGE_MOVE_LABELS[tbl], 'count': n}
     return out
@@ -7899,7 +7877,7 @@ def _advance_field_catalog():
 @admin_required
 def delete_show(show_id):
     db = get_db()
-    show = db.execute('SELECT name FROM shows WHERE id=?', (show_id,)).fetchone()
+    show = db.execute('SELECT name FROM shows WHERE id=%s', (show_id,)).fetchone()
     show_name = show['name'] if show else str(show_id)
     _purge_show(db, show_id)
     log_audit(db, 'SHOW_DELETE', 'show', show_id, detail=show_name)
@@ -7936,8 +7914,8 @@ def merge_shows_preview(keeper_id):
     if source_id == keeper_id:
         return jsonify({'success': False, 'error': 'Pick two different shows.'}), 400
     db = get_db()
-    keeper = db.execute('SELECT * FROM shows WHERE id=?', (keeper_id,)).fetchone()
-    source = db.execute('SELECT * FROM shows WHERE id=?', (source_id,)).fetchone()
+    keeper = db.execute('SELECT * FROM shows WHERE id=%s', (keeper_id,)).fetchone()
+    source = db.execute('SELECT * FROM shows WHERE id=%s', (source_id,)).fetchone()
     if not keeper or not source:
         db.close()
         return jsonify({'success': False, 'error': 'Show not found.'}), 404
@@ -7945,7 +7923,7 @@ def merge_shows_preview(keeper_id):
 
     def _eav(sid):
         return {r['field_key']: (r['field_value'] or '') for r in db.execute(
-            'SELECT field_key, field_value FROM advance_data WHERE show_id=?',
+            'SELECT field_key, field_value FROM advance_data WHERE show_id=%s',
             (sid,)).fetchall()}
     k_eav, s_eav = _eav(keeper_id), _eav(source_id)
 
@@ -7991,8 +7969,8 @@ def merge_shows(keeper_id):
     if source_id == keeper_id:
         return jsonify({'success': False, 'error': 'Pick two different shows.'}), 400
     db = get_db()
-    keeper = db.execute('SELECT * FROM shows WHERE id=?', (keeper_id,)).fetchone()
-    source = db.execute('SELECT * FROM shows WHERE id=?', (source_id,)).fetchone()
+    keeper = db.execute('SELECT * FROM shows WHERE id=%s', (keeper_id,)).fetchone()
+    source = db.execute('SELECT * FROM shows WHERE id=%s', (source_id,)).fetchone()
     if not keeper or not source:
         db.close()
         return jsonify({'success': False, 'error': 'Show not found.'}), 404
@@ -8001,33 +7979,33 @@ def merge_shows(keeper_id):
         moved = {t: c['count'] for t, c in _show_child_counts(db, source_id).items()}
         # 1. Reassign additive child rows onto the keeper.
         for tbl in _SHOW_MERGE_MOVE_TABLES:
-            db.execute(f'UPDATE {tbl} SET show_id=? WHERE show_id=?', (keeper_id, source_id))
+            db.execute(f'UPDATE {tbl} SET show_id=%s WHERE show_id=%s', (keeper_id, source_id))
         # 2. Preserve the duplicate's per-crew billable selections.
         db.execute(
-            'INSERT OR IGNORE INTO show_labor_billable_items (show_id, billable_item_id) '
-            'SELECT ?, billable_item_id FROM show_labor_billable_items WHERE show_id=?',
+            'INSERT INTO show_labor_billable_items (show_id, billable_item_id) '
+            'SELECT %s, billable_item_id FROM show_labor_billable_items WHERE show_id=%s ON CONFLICT DO NOTHING',
             (keeper_id, source_id))
         # 3. Advance fill-blanks — EAV fields.
         k_eav = {r['field_key']: (r['field_value'] or '') for r in db.execute(
-            'SELECT field_key, field_value FROM advance_data WHERE show_id=?',
+            'SELECT field_key, field_value FROM advance_data WHERE show_id=%s',
             (keeper_id,)).fetchall()}
         filled = 0
         for r in db.execute(
             "SELECT field_key, field_value FROM advance_data "
-            "WHERE show_id=? AND COALESCE(field_value,'')<>''", (source_id,)).fetchall():
+            "WHERE show_id=%s AND COALESCE(field_value,'')<>''", (source_id,)).fetchall():
             if not (k_eav.get(r['field_key']) or '').strip():
                 db.execute(
-                    'INSERT OR REPLACE INTO advance_data (show_id, field_key, field_value) '
-                    'VALUES (?, ?, ?)', (keeper_id, r['field_key'], r['field_value']))
+                    'INSERT INTO advance_data (show_id, field_key, field_value) '
+                    'VALUES (%s, %s, %s) ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value', (keeper_id, r['field_key'], r['field_value']))
                 filled += 1
         # 4. Advance fill-blanks — scalar columns on the shows row.
         sets, params = [], []
         for key, _label in _ADVANCE_SCALAR_FIELDS:
             if not str(keeper.get(key) or '').strip() and str(source.get(key) or '').strip():
-                sets.append(f'{key}=?'); params.append(source.get(key))
+                sets.append(f'{key}=%s'); params.append(source.get(key))
         if sets:
             params.append(keeper_id)
-            db.execute(f"UPDATE shows SET {', '.join(sets)} WHERE id=?", params)
+            db.execute(f"UPDATE shows SET {', '.join(sets)} WHERE id=%s", params)
         # 5. Delete the now-emptied duplicate.
         _purge_show(db, source_id)
         log_audit(db, 'SHOW_MERGE', 'show', keeper_id, show_id=keeper_id,
@@ -8060,13 +8038,13 @@ def move_attachment(show_id, aid):
     if target_id == show_id:
         return jsonify({'success': False, 'error': 'That file is already on this show.'}), 400
     db = get_db()
-    att = db.execute('SELECT id FROM show_attachments WHERE id=? AND show_id=?',
+    att = db.execute('SELECT id FROM show_attachments WHERE id=%s AND show_id=%s',
                      (aid, show_id)).fetchone()
-    target = db.execute('SELECT name FROM shows WHERE id=?', (target_id,)).fetchone()
+    target = db.execute('SELECT name FROM shows WHERE id=%s', (target_id,)).fetchone()
     if not att or not target:
         db.close()
         return jsonify({'success': False, 'error': 'File or target show not found.'}), 404
-    db.execute('UPDATE show_attachments SET show_id=? WHERE id=? AND show_id=?',
+    db.execute('UPDATE show_attachments SET show_id=%s WHERE id=%s AND show_id=%s',
                (target_id, aid, show_id))
     log_audit(db, 'ATTACHMENT_MOVE', 'show_attachment', aid, show_id=show_id,
               detail=f"moved to show {target_id} ('{target['name']}')")
@@ -8155,7 +8133,7 @@ def s3_settings_save():
                         'error': 'GUI mode needs at least one endpoint URL.'}), 400
     db = get_db()
     def _set(key, value):
-        db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)', (key, value))
+        db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', (key, value))
     _set('s3_config_source', source)
     _set('s3_endpoints', json.dumps(cleaned))
     _set('s3_access_key', access_key)
@@ -8199,7 +8177,7 @@ def admin_migrate_files_to_s3():
                 key = f"attachments/{row['show_id']}/{row['id']}/{row['filename']}"
                 s3_storage.upload_file(key, bytes(row['file_data']),
                                        row['mime_type'] or 'application/octet-stream')
-                db.execute('UPDATE show_attachments SET s3_key=?, file_data=NULL WHERE id=?',
+                db.execute('UPDATE show_attachments SET s3_key=%s, file_data=NULL WHERE id=%s',
                            (key, row['id']))
                 migrated += 1
             except Exception as e:
@@ -8216,7 +8194,7 @@ def admin_migrate_files_to_s3():
             try:
                 key = f"exports/{row['show_id']}/{row['export_type']}/v{row['version']}.pdf"
                 s3_storage.upload_file(key, bytes(row['pdf_data']), 'application/pdf')
-                db.execute('UPDATE export_log SET s3_key=?, pdf_data=NULL WHERE id=?',
+                db.execute('UPDATE export_log SET s3_key=%s, pdf_data=NULL WHERE id=%s',
                            (key, row['id']))
                 migrated += 1
             except Exception as e:
@@ -8234,7 +8212,7 @@ def admin_migrate_files_to_s3():
                 key = f"asset-photos/{row['id']}"
                 s3_storage.upload_file(key, bytes(row['photo']),
                                        row['photo_mime'] or 'image/jpeg')
-                db.execute('UPDATE asset_types SET photo_s3_key=?, photo=NULL WHERE id=?',
+                db.execute('UPDATE asset_types SET photo_s3_key=%s, photo=NULL WHERE id=%s',
                            (key, row['id']))
                 migrated += 1
             except Exception as e:
@@ -8252,7 +8230,7 @@ def admin_migrate_files_to_s3():
                 fname = row['pdf_filename'] or 'rental.pdf'
                 key = f"external-rentals/{row['id']}/{fname}"
                 s3_storage.upload_file(key, bytes(row['pdf_data']), 'application/pdf')
-                db.execute('UPDATE show_external_rentals SET s3_key=?, pdf_data=NULL WHERE id=?',
+                db.execute('UPDATE show_external_rentals SET s3_key=%s, pdf_data=NULL WHERE id=%s',
                            (key, row['id']))
                 migrated += 1
             except Exception as e:
@@ -8278,24 +8256,24 @@ def audit_log_view():
     params = []
     if request.args.get('user_id'):
         try:
-            filters.append('al.user_id = ?')
+            filters.append('al.user_id = %s')
             params.append(int(request.args['user_id']))
         except ValueError:
             pass
     if request.args.get('show_id'):
         try:
-            filters.append('al.show_id = ?')
+            filters.append('al.show_id = %s')
             params.append(int(request.args['show_id']))
         except ValueError:
             pass
     if request.args.get('action'):
-        filters.append('al.action LIKE ?')
+        filters.append('al.action LIKE %s')
         params.append(f"%{request.args['action'].upper()}%")
     if request.args.get('date_from'):
-        filters.append('al.timestamp >= ?')
+        filters.append('al.timestamp >= %s')
         params.append(request.args['date_from'])
     if request.args.get('date_to'):
-        filters.append('al.timestamp <= ?')
+        filters.append('al.timestamp <= %s')
         params.append(request.args['date_to'] + ' 23:59:59')
 
     where = ('WHERE ' + ' AND '.join(filters)) if filters else ''
@@ -8317,7 +8295,7 @@ def audit_log_view():
         LEFT JOIN users u ON al.user_id = u.id
         {where}
         ORDER BY al.timestamp DESC
-        LIMIT ? OFFSET ?
+        LIMIT %s OFFSET %s
     """, params + [per_page, offset]).fetchall()
 
     users = db.execute(
@@ -8355,8 +8333,8 @@ def performance_view():
     """Admin page: per-page response-time and DB-time stats over a period.
 
     Reads the perf_page_stats daily rollups (written by the collector near
-    _perf_flush) and aggregates per endpoint in Python — portable across
-    SQLite/PG and trivial at this table's size (one row per page per day)."""
+    _perf_flush) and aggregates per endpoint in Python — trivial at this
+    table's size (one row per page per day)."""
     try:
         days = max(1, min(1095, int(request.args.get('days', 30))))
     except (TypeError, ValueError):
@@ -8368,11 +8346,11 @@ def performance_view():
         rows = db.execute(
             'SELECT stat_date, endpoint, request_count, total_ms, min_ms, max_ms, '
             '       db_ms, db_query_count, db_max_ms, slow_sql, slow_ms, slow_path, slow_at '
-            'FROM perf_page_stats WHERE stat_date >= ? ORDER BY stat_date',
+            'FROM perf_page_stats WHERE stat_date >= %s ORDER BY stat_date',
             (cutoff_date,)).fetchall()
         slow_queries = db.execute(
             'SELECT occurred_at, endpoint, path, duration_ms, sql_text '
-            'FROM perf_slow_queries WHERE occurred_at >= ? '
+            'FROM perf_slow_queries WHERE occurred_at >= %s '
             'ORDER BY duration_ms DESC LIMIT 25',
             (datetime.now() - timedelta(days=days),)).fetchall()
     finally:
@@ -8465,7 +8443,7 @@ def audit_undo(log_id):
     row = db.execute("""
         SELECT id, action, entity_type, entity_id, show_id,
                before_json, after_json, undone_at
-        FROM audit_log WHERE id = ?
+        FROM audit_log WHERE id = %s
     """, (log_id,)).fetchone()
     if not row:
         db.close()
@@ -8486,7 +8464,7 @@ def audit_undo(log_id):
         if kind == 'create':
             # Snapshot the current row before deletion (so the undo is itself undoable)
             before_undo = _snapshot_row(db, table, entity_id)
-            db.execute(f'DELETE FROM {table} WHERE id = ?', (entity_id,))
+            db.execute(f'DELETE FROM {table} WHERE id = %s', (entity_id,))
             undo_before, undo_after = before_undo, None
 
         elif kind == 'update':
@@ -8500,15 +8478,15 @@ def audit_undo(log_id):
             if not cols:
                 db.close()
                 return jsonify({'error': 'No matching columns to restore'}), 400
-            set_clause = ', '.join(f'{c} = ?' for c in cols)
+            set_clause = ', '.join(f'{c} = %s' for c in cols)
             values = [before[c] for c in cols] + [entity_id]
-            db.execute(f'UPDATE {table} SET {set_clause} WHERE id = ?', values)
+            db.execute(f'UPDATE {table} SET {set_clause} WHERE id = %s', values)
             undo_before, undo_after = before_undo, before
 
         elif kind == 'delete':
             # Re-insert the deleted row from before_json, preserving its id
             cols = list(before.keys())
-            placeholders = ', '.join('?' for _ in cols)
+            placeholders = ', '.join('%s' for _ in cols)
             col_list = ', '.join(cols)
             values = [before[c] for c in cols]
             db.execute(f'INSERT INTO {table} ({col_list}) VALUES ({placeholders})', values)
@@ -8523,7 +8501,8 @@ def audit_undo(log_id):
             INSERT INTO audit_log
               (user_id, username, action, entity_type, entity_id,
                show_id, before_json, after_json, ip_address, detail)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id
         """, (
             session.get('user_id'),
             session.get('username', ''),
@@ -8536,15 +8515,15 @@ def audit_undo(log_id):
             request.remote_addr,
             f'Undid audit #{log_id} ({row["action"]})',
         ))
-        new_log_id = getattr(undo_cur, 'lastrowid', None)
+        new_log_id = undo_cur.fetchone()['id']
 
         # Mark the original row as undone
         db.execute("""
             UPDATE audit_log
                SET undone_at = CURRENT_TIMESTAMP,
-                   undone_by = ?,
-                   undone_by_log_id = ?
-             WHERE id = ?
+                   undone_by = %s,
+                   undone_by_log_id = %s
+             WHERE id = %s
         """, (session.get('user_id'), new_log_id, log_id))
 
         db.commit()
@@ -8635,14 +8614,15 @@ def settings():
     ).fetchall()] if _can_manage_crew else []
     db3.close()
 
+    _pg = db_adapter.read_db_settings()
     db_settings = {
-        'db_type':          all_settings.get('db_type', 'sqlite'),
-        'pg_host':          all_settings.get('pg_host', 'localhost'),
-        'pg_port':          all_settings.get('pg_port', '5432'),
-        'pg_dbname':        all_settings.get('pg_dbname', '321theater'),
-        'pg_user':          all_settings.get('pg_user', ''),
-        'pg_app_schema':    all_settings.get('pg_app_schema', 'theater321'),
-        'pg_shared_schema': all_settings.get('pg_shared_schema', 'shared'),
+        'pg_host':          _pg.get('pg_host', ''),
+        'pg_port':          _pg.get('pg_port', '5432'),
+        'pg_dbname':        _pg.get('pg_dbname', ''),
+        'pg_user':          _pg.get('pg_user', ''),
+        'pg_app_schema':    _pg.get('pg_app_schema', db_adapter.DEFAULT_APP_SCHEMA),
+        'pg_shared_schema': _pg.get('pg_shared_schema', db_adapter.DEFAULT_SHARED_SCHEMA),
+        'config_path':      db_adapter.CONFIG_PATH,
     }
     ai_settings = {
         'ollama_enabled':   all_settings.get('ollama_enabled', '0'),
@@ -8780,7 +8760,7 @@ def add_contact():
         INSERT INTO contacts (name, title, department, phone, email,
                               report_recipient, advance_recipient, production_recipient,
                               postnotes_recipient, venue_filter, mode_filter)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
     """, (name,
           request.form.get('title','').strip(),
           request.form.get('department','').strip(),
@@ -8791,7 +8771,7 @@ def add_contact():
           1 if request.form.get('production_recipient') else 0,
           1 if request.form.get('postnotes_recipient') else 0,
           None, None))
-    cid_new = cur.lastrowid
+    cid_new = cur.fetchone()['id']
     log_audit_change(db, 'CONTACT_ADD', 'contact', cid_new, detail=name,
                      table='contacts')
     db.commit(); db.close()
@@ -8808,9 +8788,9 @@ def edit_contact(cid):
     before = _snapshot_row(db, 'contacts', cid)
     # venue_filter is only updated when the key is present in the payload;
     # otherwise we preserve the existing value (no accidental clears).
-    sets = ["name=?", "title=?", "department=?", "phone=?", "email=?",
-            "report_recipient=?", "advance_recipient=?",
-            "production_recipient=?", "postnotes_recipient=?"]
+    sets = ["name=%s", "title=%s", "department=%s", "phone=%s", "email=%s",
+            "report_recipient=%s", "advance_recipient=%s",
+            "production_recipient=%s", "postnotes_recipient=%s"]
     params = [data.get('name',''), data.get('title',''), data.get('department',''),
               data.get('phone',''), data.get('email',''),
               1 if data.get('report_recipient') else 0,
@@ -8818,13 +8798,13 @@ def edit_contact(cid):
               1 if data.get('production_recipient') else 0,
               1 if data.get('postnotes_recipient') else 0]
     if 'venue_filter' in data:
-        sets.append('venue_filter=?')
+        sets.append('venue_filter=%s')
         params.append(_normalize_venue_filter(data.get('venue_filter')))
     if 'mode_filter' in data:
-        sets.append('mode_filter=?')
+        sets.append('mode_filter=%s')
         params.append(_normalize_mode_filter(data.get('mode_filter')))
     params.append(cid)
-    db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=?", params)
+    db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=%s", params)
     after = _snapshot_row(db, 'contacts', cid)
     log_audit(db, 'CONTACT_EDIT', 'contact', cid, detail=data.get('name',''),
               before=before, after=after)
@@ -8847,7 +8827,7 @@ def delete_contact(cid):
         }), 400
     name = before['name'] if before else str(cid)
     log_audit(db, 'CONTACT_DELETE', 'contact', cid, detail=name, before=before)
-    db.execute('DELETE FROM contacts WHERE id=?', (cid,))
+    db.execute('DELETE FROM contacts WHERE id=%s', (cid,))
     db.commit(); db.close()
     syslog_logger.info(f"CONTACT_DELETE id={cid} by={session.get('username')}")
     return jsonify({'success': True})
@@ -8896,9 +8876,9 @@ def add_user():
     db = get_db()
     try:
         cur = db.execute("""INSERT INTO users (username, password_hash, display_name, role, email, is_readonly)
-                      VALUES (?, ?, ?, ?, ?, ?)""",
+                      VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
                    (username, generate_password_hash(password), display, role, email, is_readonly))
-        new_uid = cur.lastrowid
+        new_uid = cur.fetchone()['id']
         log_audit(db, 'USER_CREATE', 'user', new_uid, detail=f'{username} role={role}')
         # Auto-create / link a contact row so the new user shows up in
         # contact pickers without manual data entry.
@@ -8906,7 +8886,7 @@ def add_user():
         db.commit()
         flash(f'User "{username}" created.', 'success')
         syslog_logger.info(f"USER_CREATE username={username} role={role} by={session.get('username')}")
-    except sqlite3.IntegrityError:
+    except DBIntegrityError:
         flash('Username already exists.', 'error')
     db.close()
     return redirect(url_for('settings') + '#users')
@@ -8968,19 +8948,19 @@ def edit_user(uid):
                                  "you'd be locked out of admin."}), 400
     db = get_db()
     row = db.execute(
-        'SELECT username, is_document_viewer FROM users WHERE id=?', (uid,)
+        'SELECT username, is_document_viewer FROM users WHERE id=%s', (uid,)
     ).fetchone()
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'User not found'}), 404
     was_document_viewer = bool(row.get('is_document_viewer', 0))
     db.execute(
-        'UPDATE users SET display_name=?, email=?, role=?, is_readonly=?, '
-        '                 is_scheduler=?, is_asset_manager=?, '
-        '                 is_document_viewer=?, viewer_venues=?, viewer_doc_types=?, '
-        '                 viewer_labor_overview=?, viewer_show_calendar=?, '
-        '                 is_app_user=?, is_app_admin=? '
-        'WHERE id=?',
+        'UPDATE users SET display_name=%s, email=%s, role=%s, is_readonly=%s, '
+        '                 is_scheduler=%s, is_asset_manager=%s, '
+        '                 is_document_viewer=%s, viewer_venues=%s, viewer_doc_types=%s, '
+        '                 viewer_labor_overview=%s, viewer_show_calendar=%s, '
+        '                 is_app_user=%s, is_app_admin=%s '
+        'WHERE id=%s',
         (display_name or row['username'], email, role, is_readonly,
          is_scheduler, is_asset_manager,
          is_document_viewer, viewer_venues_json, viewer_doc_types_json,
@@ -8992,7 +8972,7 @@ def edit_user(uid):
     # instead of waiting for the next 5-minute role refresh.
     if was_document_viewer != bool(is_document_viewer):
         try:
-            db.execute('DELETE FROM app_sessions WHERE user_id=?', (uid,))
+            db.execute('DELETE FROM app_sessions WHERE user_id=%s', (uid,))
         except Exception:
             pass  # Table missing or DB-sessions disabled — fall through
     log_audit(db, 'USER_EDIT', 'user', uid,
@@ -9022,7 +9002,7 @@ def delete_user(uid):
     if uid == session['user_id']:
         return jsonify({'success': False, 'error': "You can't delete your own account."})
     db = get_db()
-    row = db.execute('SELECT username FROM users WHERE id=?', (uid,)).fetchone()
+    row = db.execute('SELECT username FROM users WHERE id=%s', (uid,)).fetchone()
     log_audit(db, 'USER_DELETE', 'user', uid, detail=row['username'] if row else str(uid))
     # Most tables that reference users(id) are declared ON DELETE SET NULL /
     # CASCADE, so they clear themselves. A few audit/history columns
@@ -9031,10 +9011,10 @@ def delete_user(uid):
     # raw DELETE raises a ForeignKeyViolation on PostgreSQL and 500s. Unlink
     # those rows first — keeping the historical record, dropping only the
     # author reference — to mirror the ON DELETE SET NULL behavior elsewhere.
-    db.execute('UPDATE shows SET created_by=NULL WHERE created_by=?', (uid,))
-    db.execute('UPDATE shows SET last_saved_by=NULL WHERE last_saved_by=?', (uid,))
-    db.execute('UPDATE export_log SET exported_by=NULL WHERE exported_by=?', (uid,))
-    db.execute('DELETE FROM users WHERE id=?', (uid,))
+    db.execute('UPDATE shows SET created_by=NULL WHERE created_by=%s', (uid,))
+    db.execute('UPDATE shows SET last_saved_by=NULL WHERE last_saved_by=%s', (uid,))
+    db.execute('UPDATE export_log SET exported_by=NULL WHERE exported_by=%s', (uid,))
+    db.execute('DELETE FROM users WHERE id=%s', (uid,))
     db.commit(); db.close()
     syslog_logger.info(f"USER_DELETE user_id={uid} by={session.get('username')}")
     return jsonify({'success': True})
@@ -9054,7 +9034,7 @@ def toggle_user_lock(uid):
                         'error': "You can't lock your own account."}), 400
     data = request.get_json(silent=True) or {}
     db = get_db()
-    row = db.execute('SELECT username, is_locked FROM users WHERE id=?', (uid,)).fetchone()
+    row = db.execute('SELECT username, is_locked FROM users WHERE id=%s', (uid,)).fetchone()
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'User not found'}), 404
@@ -9062,12 +9042,12 @@ def toggle_user_lock(uid):
         new_locked = 1 if data.get('locked') else 0
     else:
         new_locked = 0 if row['is_locked'] else 1
-    db.execute('UPDATE users SET is_locked=? WHERE id=?', (new_locked, uid))
+    db.execute('UPDATE users SET is_locked=%s WHERE id=%s', (new_locked, uid))
     # Locking: terminate any active sessions right away so the block takes
     # effect immediately instead of waiting for the 5-minute role refresh.
     if new_locked:
         try:
-            db.execute('DELETE FROM app_sessions WHERE user_id=?', (uid,))
+            db.execute('DELETE FROM app_sessions WHERE user_id=%s', (uid,))
         except Exception:
             pass  # Table missing or DB-sessions disabled — refresh still catches it
     log_audit(db, 'USER_LOCK' if new_locked else 'USER_UNLOCK', 'user', uid,
@@ -9094,7 +9074,7 @@ def admin_reset_user_password(uid):
     # without the flag also clears a stale requirement.
     must_change = 1 if data.get('must_change') else 0
     db = get_db()
-    db.execute('UPDATE users SET password_hash=?, must_change_password=? WHERE id=?',
+    db.execute('UPDATE users SET password_hash=%s, must_change_password=%s WHERE id=%s',
                (generate_password_hash(pw), must_change, uid))
     log_audit(db, 'USER_PASSWORD_RESET', 'user', uid,
               detail=f'reset by {session.get("username")} must_change={must_change}')
@@ -9116,7 +9096,7 @@ def toggle_force_password_change(uid):
     Body: {"force": true|false}. If omitted, the current state is toggled."""
     data = request.get_json(silent=True) or {}
     db = get_db()
-    row = db.execute('SELECT username, must_change_password FROM users WHERE id=?',
+    row = db.execute('SELECT username, must_change_password FROM users WHERE id=%s',
                      (uid,)).fetchone()
     if not row:
         db.close()
@@ -9125,7 +9105,7 @@ def toggle_force_password_change(uid):
         new_val = 1 if data.get('force') else 0
     else:
         new_val = 0 if row.get('must_change_password') else 1
-    db.execute('UPDATE users SET must_change_password=? WHERE id=?', (new_val, uid))
+    db.execute('UPDATE users SET must_change_password=%s WHERE id=%s', (new_val, uid))
     log_audit(db, 'USER_FORCE_PW_CHANGE' if new_val else 'USER_FORCE_PW_CHANGE_CLEARED',
               'user', uid, detail=f"{row['username']} by={session.get('username')}")
     db.commit(); db.close()
@@ -9169,7 +9149,7 @@ def set_theme():
     if theme not in ('dark', 'light'):
         theme = 'dark'
     db = get_db()
-    db.execute('UPDATE users SET theme=? WHERE id=?', (theme, session['user_id']))
+    db.execute('UPDATE users SET theme=%s WHERE id=%s', (theme, session['user_id']))
     db.commit()
     db.close()
     session['theme'] = theme
@@ -9183,7 +9163,7 @@ def change_own_password():
     current = data.get('current_password','')
     new_pw  = data.get('new_password','')
     db = get_db()
-    user = db.execute('SELECT * FROM users WHERE id=?', (session['user_id'],)).fetchone()
+    user = db.execute('SELECT * FROM users WHERE id=%s', (session['user_id'],)).fetchone()
     if not check_password_hash(user['password_hash'], current):
         db.close()
         return jsonify({'success': False, 'error': 'Current password incorrect.'})
@@ -9192,7 +9172,7 @@ def change_own_password():
         db.close()
         return jsonify({'success': False, 'error': pw_err})
     # A voluntary change also satisfies any pending forced-change requirement.
-    db.execute('UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?',
+    db.execute('UPDATE users SET password_hash=%s, must_change_password=0 WHERE id=%s',
                (generate_password_hash(new_pw), session['user_id']))
     db.commit(); db.close()
     session.pop('must_change_password', None)
@@ -9256,7 +9236,7 @@ def add_form_field():
     db = get_db()
     # Put it at the end of the section
     max_order = db.execute(
-        'SELECT MAX(sort_order) FROM form_fields WHERE section_id=?', (section_id,)
+        'SELECT MAX(sort_order) FROM form_fields WHERE section_id=%s', (section_id,)
     ).fetchone()[0] or 0
     alert_depts = data.get('alert_departments') or []
     alert_contacts = data.get('alert_contact_ids') or []
@@ -9272,7 +9252,7 @@ def add_form_field():
              help_text, placeholder, width_hint, is_notes_field, ai_hint,
              display_as, allow_multi, auto_select_visible, hide_from_pdf, upload_button_only,
              notes_content, alert_departments, alert_contact_ids, pdf_template_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
         """, (section_id, field_key, label,
               data.get('field_type','text'), max_order + 10,
               options_json,
@@ -9292,13 +9272,13 @@ def add_form_field():
               alert_depts_json,
               alert_contacts_json,
               pdf_tid))
-        fid = cur.lastrowid
+        fid = cur.fetchone()['id']
         log_audit_change(db, 'FIELD_ADD', 'form_field', fid, detail=field_key,
                          table='form_fields')
         db.commit()
         syslog_logger.info(f"FIELD_ADD key={field_key} by={session.get('username')}")
         return jsonify({'success': True, 'id': fid})
-    except (sqlite3.IntegrityError, DBIntegrityError):
+    except DBIntegrityError:
         return jsonify({'success': False, 'error': f'field_key "{field_key}" already exists.'}), 400
     finally:
         db.close()
@@ -9333,12 +9313,12 @@ def edit_form_field(fid):
         pdf_tid = before['pdf_template_id']
     db.execute("""
         UPDATE form_fields SET
-            section_id=?, label=?, field_type=?,
-            options_json=?, contact_dept=?, conditional_show_when=?,
-            help_text=?, placeholder=?, width_hint=?, is_notes_field=?, ai_hint=?,
-            display_as=?, allow_multi=?, auto_select_visible=?, hide_from_pdf=?, upload_button_only=?,
-            notes_content=?, alert_departments=?, alert_contact_ids=?, pdf_template_id=?
-        WHERE id=?
+            section_id=%s, label=%s, field_type=%s,
+            options_json=%s, contact_dept=%s, conditional_show_when=%s,
+            help_text=%s, placeholder=%s, width_hint=%s, is_notes_field=%s, ai_hint=%s,
+            display_as=%s, allow_multi=%s, auto_select_visible=%s, hide_from_pdf=%s, upload_button_only=%s,
+            notes_content=%s, alert_departments=%s, alert_contact_ids=%s, pdf_template_id=%s
+        WHERE id=%s
     """, (data.get('section_id'), data.get('label',''),
           data.get('field_type','text'), options_json,
           data.get('contact_dept'), _normalize_show_when(data.get('conditional_show_when')),
@@ -9370,7 +9350,7 @@ def delete_form_field(fid):
     db = get_db()
     before = _snapshot_row(db, 'form_fields', fid)
     log_audit(db, 'FIELD_DELETE', 'form_field', fid, before=before)
-    db.execute('DELETE FROM form_fields WHERE id=?', (fid,))
+    db.execute('DELETE FROM form_fields WHERE id=%s', (fid,))
     db.commit(); db.close()
     syslog_logger.info(f"FIELD_DELETE id={fid} by={session.get('username')}")
     return jsonify({'success': True})
@@ -9383,7 +9363,7 @@ def reorder_form_fields():
     field_ids = data.get('field_ids', [])
     db = get_db()
     for i, fid in enumerate(field_ids):
-        db.execute('UPDATE form_fields SET sort_order=? WHERE id=?', (i * 10, fid))
+        db.execute('UPDATE form_fields SET sort_order=%s WHERE id=%s', (i * 10, fid))
     db.commit(); db.close()
     return jsonify({'success': True})
 
@@ -9472,10 +9452,10 @@ def upload_pdf_template():
     cur = db.execute(
         """INSERT INTO pdf_templates (name, description, pdf_data, fields_json,
                                        page_count, created_by, updated_at)
-            VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            VALUES (%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP) RETURNING id""",
         (name, description, raw, '[]', page_count, session.get('user_id'))
     )
-    tid = cur.lastrowid
+    tid = cur.fetchone()['id']
     log_audit(db, 'PDF_TEMPLATE_CREATE', 'pdf_template', tid, detail=name)
     db.commit(); db.close()
     syslog_logger.info(
@@ -9490,7 +9470,7 @@ def upload_pdf_template():
 def edit_pdf_template(tid):
     db = get_db()
     row = db.execute(
-        'SELECT id, name, description, fields_json, page_count FROM pdf_templates WHERE id=?', (tid,)
+        'SELECT id, name, description, fields_json, page_count FROM pdf_templates WHERE id=%s', (tid,)
     ).fetchone()
     db.close()
     if not row:
@@ -9520,7 +9500,7 @@ def pdf_template_file(tid):
         abort(403)
     db = get_db()
     row = db.execute(
-        'SELECT pdf_data, s3_key, name FROM pdf_templates WHERE id=?', (tid,)
+        'SELECT pdf_data, s3_key, name FROM pdf_templates WHERE id=%s', (tid,)
     ).fetchone()
     db.close()
     if not row:
@@ -9565,7 +9545,7 @@ def save_pdf_template_fields(tid):
         })
     db = get_db()
     db.execute(
-        'UPDATE pdf_templates SET fields_json=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        'UPDATE pdf_templates SET fields_json=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
         (json.dumps(clean), tid)
     )
     log_audit(db, 'PDF_TEMPLATE_FIELDS', 'pdf_template', tid,
@@ -9588,7 +9568,7 @@ def rename_pdf_template(tid):
         return jsonify({'success': False, 'error': 'Name required.'}), 400
     db = get_db()
     db.execute(
-        'UPDATE pdf_templates SET name=?, description=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+        'UPDATE pdf_templates SET name=%s, description=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
         (name, description, tid)
     )
     db.commit(); db.close()
@@ -9601,7 +9581,7 @@ def delete_pdf_template(tid):
     db = get_db()
     # Refuse if any form_fields still reference this template.
     refs = db.execute(
-        'SELECT field_key FROM form_fields WHERE pdf_template_id=?', (tid,)
+        'SELECT field_key FROM form_fields WHERE pdf_template_id=%s', (tid,)
     ).fetchall()
     if refs:
         db.close()
@@ -9614,7 +9594,7 @@ def delete_pdf_template(tid):
     before = _snapshot_row(db, 'pdf_templates', tid)
     log_audit(db, 'PDF_TEMPLATE_DELETE', 'pdf_template', tid,
               detail=before['name'] if before else str(tid), before=before)
-    db.execute('DELETE FROM pdf_templates WHERE id=?', (tid,))
+    db.execute('DELETE FROM pdf_templates WHERE id=%s', (tid,))
     db.commit(); db.close()
     syslog_logger.info(
         f"PDF_TEMPLATE_DELETE id={tid} name={(before['name'] if before else '?')!r} "
@@ -9643,7 +9623,7 @@ def _get_pdf_field_for_show(db, show_id, field_key):
         """SELECT id, field_key, label, field_type, pdf_template_id,
                   alert_departments, alert_contact_ids
              FROM form_fields
-            WHERE field_key=? AND field_type='pdf_form'""",
+            WHERE field_key=%s AND field_type='pdf_form'""",
         (field_key,)
     ).fetchone()
     return dict(row) if row else None
@@ -9660,7 +9640,7 @@ def pdf_form_data(show_id, field_key):
         db.close()
         return jsonify({'error': 'Field not found or no template bound.'}), 404
     tmpl = db.execute(
-        'SELECT id, name, description, fields_json, page_count FROM pdf_templates WHERE id=?',
+        'SELECT id, name, description, fields_json, page_count FROM pdf_templates WHERE id=%s',
         (field['pdf_template_id'],)
     ).fetchone()
     if not tmpl:
@@ -9668,7 +9648,7 @@ def pdf_form_data(show_id, field_key):
         return jsonify({'error': 'Template missing.'}), 404
     sub = db.execute(
         'SELECT values_json, status, template_fields_snapshot, last_saved_at FROM pdf_submissions '
-        'WHERE show_id=? AND field_key=?',
+        'WHERE show_id=%s AND field_key=%s',
         (show_id, field_key)
     ).fetchone()
     # Pull current advance values for any source_key referenced by this
@@ -9682,10 +9662,10 @@ def pdf_form_data(show_id, field_key):
                           if f.get('source_key')})
     advance_values = {}
     if source_keys:
-        placeholders = ','.join('?' for _ in source_keys)
+        placeholders = ','.join('%s' for _ in source_keys)
         for row in db.execute(
             f"SELECT field_key, field_value FROM advance_data "
-            f"WHERE show_id=? AND field_key IN ({placeholders})",
+            f"WHERE show_id=%s AND field_key IN ({placeholders})",
             tuple([show_id] + source_keys)
         ).fetchall():
             advance_values[row['field_key']] = row['field_value']
@@ -9753,14 +9733,14 @@ def pdf_form_save(show_id, field_key):
     # Snapshot template field config on first save so later template edits
     # don't break this submission.
     existing = db.execute(
-        'SELECT id, template_fields_snapshot FROM pdf_submissions WHERE show_id=? AND field_key=?',
+        'SELECT id, template_fields_snapshot FROM pdf_submissions WHERE show_id=%s AND field_key=%s',
         (show_id, field_key)
     ).fetchone()
     if existing and existing['template_fields_snapshot']:
         snapshot = existing['template_fields_snapshot']
     else:
         tmpl = db.execute(
-            'SELECT fields_json FROM pdf_templates WHERE id=?', (template_id,)
+            'SELECT fields_json FROM pdf_templates WHERE id=%s', (template_id,)
         ).fetchone()
         snapshot = tmpl['fields_json'] if tmpl else '[]'
 
@@ -9768,9 +9748,9 @@ def pdf_form_save(show_id, field_key):
     if existing:
         db.execute(
             """UPDATE pdf_submissions
-                  SET values_json=?, last_saved_by=?, last_saved_at=CURRENT_TIMESTAMP,
-                      template_fields_snapshot=?
-                WHERE id=?""",
+                  SET values_json=%s, last_saved_by=%s, last_saved_at=CURRENT_TIMESTAMP,
+                      template_fields_snapshot=%s
+                WHERE id=%s""",
             (values_json, session.get('user_id'), snapshot, existing['id'])
         )
     else:
@@ -9778,7 +9758,7 @@ def pdf_form_save(show_id, field_key):
             """INSERT INTO pdf_submissions
                  (show_id, field_key, template_id, template_fields_snapshot,
                   values_json, status, last_saved_by, last_saved_at)
-               VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)""",
             (show_id, field_key, template_id, snapshot, values_json,
              'draft', session.get('user_id'))
         )
@@ -9787,8 +9767,8 @@ def pdf_form_save(show_id, field_key):
     # store the full values there — just a non-empty string so existing
     # "has any answers" checks pick it up.
     db.execute(
-        """INSERT OR REPLACE INTO advance_data (show_id, field_key, field_value, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)""",
+        """INSERT INTO advance_data (show_id, field_key, field_value, updated_at)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP) ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value, updated_at = EXCLUDED.updated_at""",
         (show_id, field_key, '[pdf_form]' if values else '')
     )
     db.commit(); db.close()
@@ -9811,7 +9791,7 @@ def pdf_form_export(show_id, field_key):
         db.close()
         abort(404)
     tmpl = db.execute(
-        'SELECT id, name, pdf_data, s3_key, fields_json FROM pdf_templates WHERE id=?',
+        'SELECT id, name, pdf_data, s3_key, fields_json FROM pdf_templates WHERE id=%s',
         (field['pdf_template_id'],)
     ).fetchone()
     if not tmpl:
@@ -9819,7 +9799,7 @@ def pdf_form_export(show_id, field_key):
         abort(404)
     sub = db.execute(
         'SELECT values_json, template_fields_snapshot FROM pdf_submissions '
-        'WHERE show_id=? AND field_key=?',
+        'WHERE show_id=%s AND field_key=%s',
         (show_id, field_key)
     ).fetchone()
     db.close()
@@ -9853,10 +9833,10 @@ def pdf_form_export(show_id, field_key):
     source_keys = sorted({f['source_key'] for f in fields if f.get('source_key')})
     if source_keys:
         db2 = get_db()
-        placeholders = ','.join('?' for _ in source_keys)
+        placeholders = ','.join('%s' for _ in source_keys)
         for row in db2.execute(
             f"SELECT field_key, field_value FROM advance_data "
-            f"WHERE show_id=? AND field_key IN ({placeholders})",
+            f"WHERE show_id=%s AND field_key IN ({placeholders})",
             tuple([show_id] + source_keys)
         ).fetchall():
             advance_values[row['field_key']] = row['field_value']
@@ -10062,19 +10042,19 @@ def add_form_section():
     try:
         cur = db.execute("""
             INSERT INTO form_sections (section_key, label, sort_order, collapsible, icon, default_open, asset_category_id)
-            VALUES (?,?,?,?,?,?,?)
+            VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id
         """, (section_key, label, max_order + 10,
               1 if data.get('collapsible', True) else 0,
               data.get('icon', '◈'),
               0 if str(data.get('default_open', '1')) == '0' else 1,
               asset_cat_id))
-        sid = cur.lastrowid
+        sid = cur.fetchone()['id']
         log_audit_change(db, 'SECTION_ADD', 'form_section', sid, detail=label,
                          table='form_sections')
         db.commit()
         syslog_logger.info(f"SECTION_ADD id={sid} label={label!r} by={session.get('username')}")
         return jsonify({'success': True, 'id': sid})
-    except sqlite3.IntegrityError:
+    except DBIntegrityError:
         return jsonify({'success': False, 'error': f'section_key "{section_key}" already exists.'}), 400
     finally:
         db.close()
@@ -10089,7 +10069,7 @@ def edit_form_section(sid):
     asset_cat_raw = data.get('asset_category_id')
     asset_cat_id = int(asset_cat_raw) if str(asset_cat_raw or '').strip().isdigit() else None
     db.execute("""
-        UPDATE form_sections SET label=?, collapsible=?, icon=?, default_open=?, asset_category_id=? WHERE id=?
+        UPDATE form_sections SET label=%s, collapsible=%s, icon=%s, default_open=%s, asset_category_id=%s WHERE id=%s
     """, (data.get('label',''),
           1 if data.get('collapsible', True) else 0,
           data.get('icon','◈'),
@@ -10110,7 +10090,7 @@ def delete_form_section(sid):
     db = get_db()
     before = _snapshot_row(db, 'form_sections', sid)
     log_audit(db, 'SECTION_DELETE', 'form_section', sid, before=before)
-    db.execute('DELETE FROM form_sections WHERE id=?', (sid,))
+    db.execute('DELETE FROM form_sections WHERE id=%s', (sid,))
     db.commit(); db.close()
     syslog_logger.info(f"SECTION_DELETE id={sid} by={session.get('username')}")
     return jsonify({'success': True})
@@ -10123,7 +10103,7 @@ def reorder_form_sections():
     section_ids = data.get('section_ids', [])
     db = get_db()
     for i, sid in enumerate(section_ids):
-        db.execute('UPDATE form_sections SET sort_order=? WHERE id=?', (i * 10, sid))
+        db.execute('UPDATE form_sections SET sort_order=%s WHERE id=%s', (i * 10, sid))
     db.commit(); db.close()
     return jsonify({'success': True})
 
@@ -10217,7 +10197,7 @@ def pdf_designer_layout_save(pdf_type):
     except Exception:
         before_obj = None
     new_value = json.dumps(cleaned)
-    db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)',
+    db.execute('INSERT INTO app_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                (key, new_value))
     log_audit_change(db, 'LAYOUT_EDIT', 'pdf_layout', None,
                      detail=pdf_type, before=before_obj, after=cleaned)
@@ -10239,7 +10219,7 @@ def pdf_designer_layout_reset(pdf_type):
         before_obj = json.loads(before_raw) if before_raw else None
     except Exception:
         before_obj = None
-    db.execute('DELETE FROM app_settings WHERE key=?', (key,))
+    db.execute('DELETE FROM app_settings WHERE key=%s', (key,))
     log_audit_change(db, 'LAYOUT_RESET', 'pdf_layout', None,
                      detail=pdf_type, before=before_obj, after=None)
     db.commit(); db.close()
@@ -10261,7 +10241,7 @@ def pdf_designer_preview(pdf_type):
         return ('show_id query param required', 400)
 
     db = get_db()
-    show = db.execute('SELECT id FROM shows WHERE id=?', (show_id,)).fetchone()
+    show = db.execute('SELECT id FROM shows WHERE id=%s', (show_id,)).fetchone()
     db.close()
     if not show:
         return ('show not found', 404)
@@ -10341,7 +10321,7 @@ def nav_editor_layout_save():
         before_obj = json.loads(before_raw) if before_raw else None
     except Exception:
         before_obj = None
-    db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)',
+    db.execute('INSERT INTO app_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                (nav_layout.NAV_SETTING_KEY, json.dumps(cleaned)))
     log_audit_change(db, 'LAYOUT_EDIT', 'nav_layout', None,
                      detail='sidebar', before=before_obj, after=cleaned)
@@ -10358,7 +10338,7 @@ def nav_editor_layout_reset():
         before_obj = json.loads(before_raw) if before_raw else None
     except Exception:
         before_obj = None
-    db.execute('DELETE FROM app_settings WHERE key=?', (nav_layout.NAV_SETTING_KEY,))
+    db.execute('DELETE FROM app_settings WHERE key=%s', (nav_layout.NAV_SETTING_KEY,))
     log_audit_change(db, 'LAYOUT_RESET', 'nav_layout', None,
                      detail='sidebar', before=before_obj, after=None)
     db.commit(); db.close()
@@ -10393,17 +10373,17 @@ def add_sched_meta_field():
         cur = db.execute("""
             INSERT INTO schedule_meta_fields
               (field_key, label, field_type, advance_field_key, sort_order, width_hint, show_in_contacts)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
         """, (field_key, label,
               data.get('field_type', 'text'),
               data.get('advance_field_key', '').strip() or None,
               max_order + 10,
               data.get('width_hint', 'half'),
               1 if data.get('show_in_contacts') else 0))
-        fid = cur.lastrowid
+        fid = cur.fetchone()['id']
         db.commit()
         return jsonify({'success': True, 'id': fid})
-    except sqlite3.IntegrityError:
+    except DBIntegrityError:
         return jsonify({'success': False, 'error': f'field_key "{field_key}" already exists.'}), 400
     finally:
         db.close()
@@ -10416,8 +10396,8 @@ def edit_sched_meta_field(fid):
     db = get_db()
     db.execute("""
         UPDATE schedule_meta_fields
-        SET label=?, field_type=?, advance_field_key=?, width_hint=?, show_in_contacts=?
-        WHERE id=?
+        SET label=%s, field_type=%s, advance_field_key=%s, width_hint=%s, show_in_contacts=%s
+        WHERE id=%s
     """, (data.get('label', ''),
           data.get('field_type', 'text'),
           data.get('advance_field_key', '').strip() or None,
@@ -10432,7 +10412,7 @@ def edit_sched_meta_field(fid):
 @content_admin_required
 def delete_sched_meta_field(fid):
     db = get_db()
-    db.execute('DELETE FROM schedule_meta_fields WHERE id=?', (fid,))
+    db.execute('DELETE FROM schedule_meta_fields WHERE id=%s', (fid,))
     db.commit(); db.close()
     return jsonify({'success': True})
 
@@ -10444,7 +10424,7 @@ def reorder_sched_meta_fields():
     field_ids = data.get('field_ids', [])
     db = get_db()
     for i, fid in enumerate(field_ids):
-        db.execute('UPDATE schedule_meta_fields SET sort_order=? WHERE id=?', (i * 10, fid))
+        db.execute('UPDATE schedule_meta_fields SET sort_order=%s WHERE id=%s', (i * 10, fid))
     db.commit(); db.close()
     return jsonify({'success': True})
 
@@ -10471,7 +10451,7 @@ def save_server_settings():
         return jsonify({'success': False, 'error': 'Invalid port number.'}), 400
 
     db = get_db()
-    db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+    db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                ('app_port', str(port_val)))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, detail=f'app_port={port_val}')
     db.commit(); db.close()
@@ -10539,7 +10519,7 @@ def save_syslog_settings():
     db = get_db()
     for key in ('syslog_host', 'syslog_port', 'syslog_facility', 'syslog_enabled'):
         if key in data:
-            db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+            db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                        (key, str(data[key])))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, detail='syslog')
     db.commit(); db.close()
@@ -10553,12 +10533,12 @@ def save_syslog_settings():
 @app.route('/settings/backups')
 @admin_required
 def backup_status():
-    result = {'hourly': [], 'daily': [], 'db_type': db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')}
+    result = {'hourly': [], 'daily': []}
     for kind in ('hourly', 'daily'):
         d = os.path.join(BACKUP_DIR, kind)
         if os.path.isdir(d):
             files = sorted(
-                [f for f in os.listdir(d) if f.endswith('.db') or f.endswith('.sql.gz')],
+                [f for f in os.listdir(d) if f.endswith('.sql.gz')],
                 reverse=True
             )
             result[kind] = [{
@@ -10616,31 +10596,31 @@ def global_search():
 
     try:
         # ── Shows ────────────────────────────────────────────────────────────
-        # show_date is a DATE column on PostgreSQL, so LIKE needs an explicit
-        # text cast there (`date LIKE text` has no operator — this 500'd every
-        # search after the PG migration); the cast is a no-op on SQLite.
+        # ILIKE: case-insensitive, as users expect (plain LIKE was only
+        # case-insensitive on SQLite). show_date is a DATE column, so it needs
+        # an explicit text cast (`date LIKE text` has no operator).
         accessible = get_accessible_shows(session['user_id'])  # None=all, []=none, list=ids
         if accessible != []:
             if accessible is None:
                 show_rows = db.execute("""
                     SELECT id, name, show_date, venue, performance_company, status
                     FROM shows
-                    WHERE name LIKE ? OR venue LIKE ? OR performance_company LIKE ?
-                       OR CAST(show_date AS TEXT) LIKE ?
+                    WHERE name ILIKE %s OR venue ILIKE %s OR performance_company ILIKE %s
+                       OR CAST(show_date AS TEXT) ILIKE %s
                     ORDER BY show_date DESC LIMIT 6
                 """, (like, like, like, like)).fetchall()
             else:
-                placeholders = ','.join('?' * len(accessible))
+                placeholders = ','.join(['%s'] * len(accessible))
                 show_rows = db.execute(f"""
                     SELECT id, name, show_date, venue, performance_company, status
                     FROM shows
                     WHERE id IN ({placeholders})
-                      AND (name LIKE ? OR venue LIKE ? OR performance_company LIKE ?
-                           OR CAST(show_date AS TEXT) LIKE ?)
+                      AND (name ILIKE %s OR venue ILIKE %s OR performance_company ILIKE %s
+                           OR CAST(show_date AS TEXT) ILIKE %s)
                     ORDER BY show_date DESC LIMIT 6
                 """, (*accessible, like, like, like, like)).fetchall()
             for r in show_rows:
-                # PG returns date objects, SQLite ISO strings — joinable text only
+                # PG returns date objects — joinable text only
                 date_str = str(r['show_date']) if r['show_date'] else None
                 sub_parts = [p for p in [date_str, r['venue'], r['performance_company']] if p]
                 results.append({
@@ -10656,7 +10636,7 @@ def global_search():
         contact_rows = db.execute("""
             SELECT id, name, title, department, email, phone
             FROM contacts
-            WHERE name LIKE ? OR department LIKE ? OR email LIKE ? OR phone LIKE ? OR title LIKE ?
+            WHERE name ILIKE %s OR department ILIKE %s OR email ILIKE %s OR phone ILIKE %s OR title ILIKE %s
             ORDER BY department, name LIMIT 5
         """, (like, like, like, like, like)).fetchall()
         for r in contact_rows:
@@ -10676,7 +10656,7 @@ def global_search():
                        at.storage_location, at.is_retired
                 FROM asset_types at
                 JOIN asset_categories ac ON ac.id = at.category_id
-                WHERE at.name LIKE ? OR at.manufacturer LIKE ? OR at.model LIKE ?
+                WHERE at.name ILIKE %s OR at.manufacturer ILIKE %s OR at.model ILIKE %s
                 ORDER BY at.is_retired, at.name LIMIT 5
             """, (like, like, like)).fetchall()
             for r in type_rows:
@@ -10700,9 +10680,9 @@ def global_search():
                 FROM asset_items ai
                 JOIN asset_types at ON at.id = ai.asset_type_id
                 JOIN asset_categories ac ON ac.id = at.category_id
-                WHERE ai.barcode LIKE ?
-                   OR ltrim(ai.barcode, '0') = ?
-                   OR ai.barcode = ?
+                WHERE ai.barcode ILIKE %s
+                   OR ltrim(ai.barcode, '0') = %s
+                   OR ai.barcode = %s
                 ORDER BY ai.status, ai.id LIMIT 5
             """, (like, norm_q, q)).fetchall()
             for r in item_rows:
@@ -10754,13 +10734,13 @@ def api_notifications():
         """SELECT id, kind, title, body, link_url, show_id, field_key,
                   created_at, read_at
              FROM notifications
-            WHERE user_id=?
+            WHERE user_id=%s
             ORDER BY created_at DESC
             LIMIT 100""",
         (uid,)
     ).fetchall()
     unread = db.execute(
-        'SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND read_at IS NULL',
+        'SELECT COUNT(*) AS n FROM notifications WHERE user_id=%s AND read_at IS NULL',
         (uid,)
     ).fetchone()['n']
     db.close()
@@ -10786,7 +10766,7 @@ def api_notifications_unread_count():
         return jsonify({'unread': 0})
     db = get_db()
     row = db.execute(
-        'SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND read_at IS NULL',
+        'SELECT COUNT(*) AS n FROM notifications WHERE user_id=%s AND read_at IS NULL',
         (uid,)
     ).fetchone()
     db.close()
@@ -10800,7 +10780,7 @@ def api_notifications_mark_read(nid):
     db = get_db()
     db.execute(
         'UPDATE notifications SET read_at=CURRENT_TIMESTAMP '
-        'WHERE id=? AND user_id=? AND read_at IS NULL',
+        'WHERE id=%s AND user_id=%s AND read_at IS NULL',
         (nid, uid)
     )
     db.commit()
@@ -10815,7 +10795,7 @@ def api_notifications_mark_all_read():
     db = get_db()
     db.execute(
         'UPDATE notifications SET read_at=CURRENT_TIMESTAMP '
-        'WHERE user_id=? AND read_at IS NULL',
+        'WHERE user_id=%s AND read_at IS NULL',
         (uid,)
     )
     db.commit()
@@ -10857,7 +10837,7 @@ def api_god_mode():
         FROM active_sessions acs
         JOIN users u ON acs.user_id = u.id
         JOIN shows s ON acs.show_id = s.id
-        WHERE acs.last_seen > datetime('now', '-5 minutes')
+        WHERE acs.last_seen > (NOW() - INTERVAL '5 minutes')
         ORDER BY acs.last_seen DESC
     """).fetchall()
     users = db.execute("""
@@ -10996,7 +10976,7 @@ def api_schedule_templates():
     ).fetchall()]
     for t in templates:
         t['rows'] = [dict(r) for r in db.execute(
-            'SELECT * FROM schedule_template_rows WHERE template_id=? ORDER BY sort_order',
+            'SELECT * FROM schedule_template_rows WHERE template_id=%s ORDER BY sort_order',
             (t['id'],)
         ).fetchall()]
     db.close()
@@ -11007,11 +10987,11 @@ def api_schedule_templates():
 @login_required
 def api_schedule_template(tid):
     db = get_db()
-    t = db.execute('SELECT * FROM schedule_templates WHERE id=?', (tid,)).fetchone()
+    t = db.execute('SELECT * FROM schedule_templates WHERE id=%s', (tid,)).fetchone()
     if not t:
         db.close(); return jsonify({'error': 'Not found'}), 404
     rows = [dict(r) for r in db.execute(
-        'SELECT * FROM schedule_template_rows WHERE template_id=? ORDER BY sort_order', (tid,)
+        'SELECT * FROM schedule_template_rows WHERE template_id=%s ORDER BY sort_order', (tid,)
     ).fetchall()]
     db.close()
     return jsonify({'id': t['id'], 'name': t['name'], 'rows': rows})
@@ -11026,13 +11006,13 @@ def add_schedule_template():
         return jsonify({'success': False, 'error': 'Name required.'}), 400
     db = get_db()
     max_o = db.execute('SELECT MAX(sort_order) FROM schedule_templates').fetchone()[0] or 0
-    cur = db.execute('INSERT INTO schedule_templates (name, sort_order) VALUES (?,?)',
+    cur = db.execute('INSERT INTO schedule_templates (name, sort_order) VALUES (%s,%s) RETURNING id',
                      (name, max_o + 10))
-    tid = cur.lastrowid
+    tid = cur.fetchone()['id']
     for i, row in enumerate(data.get('rows', [])):
         db.execute("""INSERT INTO schedule_template_rows
                       (template_id, sort_order, start_time, end_time, description, notes)
-                      VALUES (?,?,?,?,?,?)""",
+                      VALUES (%s,%s,%s,%s,%s,%s)""",
                    (tid, i, row.get('start_time',''), row.get('end_time',''),
                     row.get('description',''), row.get('notes','')))
     log_audit(db, 'TEMPLATE_ADD', 'schedule_template', tid, detail=name)
@@ -11049,12 +11029,12 @@ def edit_schedule_template(tid):
     if not name:
         return jsonify({'success': False, 'error': 'Name required.'}), 400
     db = get_db()
-    db.execute('UPDATE schedule_templates SET name=? WHERE id=?', (name, tid))
-    db.execute('DELETE FROM schedule_template_rows WHERE template_id=?', (tid,))
+    db.execute('UPDATE schedule_templates SET name=%s WHERE id=%s', (name, tid))
+    db.execute('DELETE FROM schedule_template_rows WHERE template_id=%s', (tid,))
     for i, row in enumerate(data.get('rows', [])):
         db.execute("""INSERT INTO schedule_template_rows
                       (template_id, sort_order, start_time, end_time, description, notes)
-                      VALUES (?,?,?,?,?,?)""",
+                      VALUES (%s,%s,%s,%s,%s,%s)""",
                    (tid, i, row.get('start_time',''), row.get('end_time',''),
                     row.get('description',''), row.get('notes','')))
     log_audit(db, 'TEMPLATE_EDIT', 'schedule_template', tid, detail=name)
@@ -11067,10 +11047,10 @@ def edit_schedule_template(tid):
 @content_admin_required
 def delete_schedule_template(tid):
     db = get_db()
-    row = db.execute('SELECT name FROM schedule_templates WHERE id=?', (tid,)).fetchone()
+    row = db.execute('SELECT name FROM schedule_templates WHERE id=%s', (tid,)).fetchone()
     log_audit(db, 'TEMPLATE_DELETE', 'schedule_template', tid,
               detail=row['name'] if row else str(tid))
-    db.execute('DELETE FROM schedule_templates WHERE id=?', (tid,))
+    db.execute('DELETE FROM schedule_templates WHERE id=%s', (tid,))
     db.commit(); db.close()
     syslog_logger.info(f"TEMPLATE_DELETE id={tid} by={session.get('username')}")
     return jsonify({'success': True})
@@ -11116,7 +11096,7 @@ def _insert_preset_rows(db, pid, rows):
         db.execute("""INSERT INTO labor_preset_rows
                       (preset_id, sort_order, position_id, quantity, in_time, out_time,
                        break_start, break_end, break2_start, break2_end, notes)
-                      VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                      VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                    (pid, i, r['position_id'], r['quantity'], r['in_time'], r['out_time'],
                     r['break_start'], r['break_end'], r['break2_start'], r['break2_end'],
                     r['notes']))
@@ -11134,7 +11114,7 @@ def api_labor_presets():
             SELECT lpr.*, jp.name AS position_name
             FROM labor_preset_rows lpr
             LEFT JOIN job_positions jp ON lpr.position_id = jp.id
-            WHERE lpr.preset_id=? ORDER BY lpr.sort_order, lpr.id
+            WHERE lpr.preset_id=%s ORDER BY lpr.sort_order, lpr.id
         """, (p['id'],)).fetchall()]
         p['row_count'] = sum(r['quantity'] or 1 for r in p['rows'])
     db.close()
@@ -11145,14 +11125,14 @@ def api_labor_presets():
 @login_required
 def api_labor_preset(pid):
     db = get_db()
-    p = db.execute('SELECT * FROM labor_presets WHERE id=?', (pid,)).fetchone()
+    p = db.execute('SELECT * FROM labor_presets WHERE id=%s', (pid,)).fetchone()
     if not p:
         db.close(); return jsonify({'error': 'Not found'}), 404
     rows = [dict(r) for r in db.execute("""
         SELECT lpr.*, jp.name AS position_name
         FROM labor_preset_rows lpr
         LEFT JOIN job_positions jp ON lpr.position_id = jp.id
-        WHERE lpr.preset_id=? ORDER BY lpr.sort_order, lpr.id
+        WHERE lpr.preset_id=%s ORDER BY lpr.sort_order, lpr.id
     """, (pid,)).fetchall()]
     db.close()
     return jsonify({'id': p['id'], 'name': p['name'], 'rows': rows})
@@ -11168,9 +11148,9 @@ def add_labor_preset():
     rows = _clean_preset_rows(data.get('rows'))
     db = get_db()
     max_o = db.execute('SELECT MAX(sort_order) FROM labor_presets').fetchone()[0] or 0
-    cur = db.execute('INSERT INTO labor_presets (name, sort_order) VALUES (?,?)',
+    cur = db.execute('INSERT INTO labor_presets (name, sort_order) VALUES (%s,%s) RETURNING id',
                      (name, max_o + 10))
-    pid = cur.lastrowid
+    pid = cur.fetchone()['id']
     _insert_preset_rows(db, pid, rows)
     log_audit(db, 'LABOR_PRESET_ADD', 'labor_preset', pid, detail=name)
     db.commit(); db.close()
@@ -11187,10 +11167,10 @@ def edit_labor_preset(pid):
         return jsonify({'success': False, 'error': 'Name required.'}), 400
     rows = _clean_preset_rows(data.get('rows'))
     db = get_db()
-    if not db.execute('SELECT id FROM labor_presets WHERE id=?', (pid,)).fetchone():
+    if not db.execute('SELECT id FROM labor_presets WHERE id=%s', (pid,)).fetchone():
         db.close(); return jsonify({'success': False, 'error': 'Preset not found.'}), 404
-    db.execute('UPDATE labor_presets SET name=? WHERE id=?', (name, pid))
-    db.execute('DELETE FROM labor_preset_rows WHERE preset_id=?', (pid,))
+    db.execute('UPDATE labor_presets SET name=%s WHERE id=%s', (name, pid))
+    db.execute('DELETE FROM labor_preset_rows WHERE preset_id=%s', (pid,))
     _insert_preset_rows(db, pid, rows)
     log_audit(db, 'LABOR_PRESET_EDIT', 'labor_preset', pid, detail=name)
     db.commit(); db.close()
@@ -11202,11 +11182,11 @@ def edit_labor_preset(pid):
 @scheduler_required
 def delete_labor_preset(pid):
     db = get_db()
-    row = db.execute('SELECT name FROM labor_presets WHERE id=?', (pid,)).fetchone()
+    row = db.execute('SELECT name FROM labor_presets WHERE id=%s', (pid,)).fetchone()
     log_audit(db, 'LABOR_PRESET_DELETE', 'labor_preset', pid,
               detail=row['name'] if row else str(pid))
-    db.execute('DELETE FROM labor_preset_rows WHERE preset_id=?', (pid,))
-    db.execute('DELETE FROM labor_presets WHERE id=?', (pid,))
+    db.execute('DELETE FROM labor_preset_rows WHERE preset_id=%s', (pid,))
+    db.execute('DELETE FROM labor_presets WHERE id=%s', (pid,))
     db.commit(); db.close()
     syslog_logger.info(f"LABOR_PRESET_DELETE id={pid} by={session.get('username')}")
     return jsonify({'success': True})
@@ -11232,14 +11212,14 @@ def apply_labor_preset(show_id, pid):
     except ValueError:
         return jsonify({'success': False, 'error': 'Invalid work_date.'}), 400
     db = get_db()
-    preset = db.execute('SELECT * FROM labor_presets WHERE id=?', (pid,)).fetchone()
+    preset = db.execute('SELECT * FROM labor_presets WHERE id=%s', (pid,)).fetchone()
     if not preset:
         db.close(); return jsonify({'success': False, 'error': 'Preset not found.'}), 404
     rows = db.execute(
-        'SELECT * FROM labor_preset_rows WHERE preset_id=? ORDER BY sort_order, id',
+        'SELECT * FROM labor_preset_rows WHERE preset_id=%s ORDER BY sort_order, id',
         (pid,)).fetchall()
     max_order = db.execute(
-        'SELECT MAX(sort_order) FROM labor_requests WHERE show_id=?', (show_id,)
+        'SELECT MAX(sort_order) FROM labor_requests WHERE show_id=%s', (show_id,)
     ).fetchone()[0] or 0
     created = 0
     for r in rows:
@@ -11250,7 +11230,7 @@ def apply_labor_preset(show_id, pid):
                                             in_time, out_time, break_start, break_end,
                                             break2_start, break2_end,
                                             requested_name, notes, sort_order)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, '', %s, %s)
             """, (show_id, r['position_id'], wd,
                   r['in_time'] or '', r['out_time'] or '',
                   r['break_start'] or '', r['break_end'] or '',
@@ -11275,7 +11255,7 @@ def save_wifi_settings():
     db = get_db()
     for key in ('wifi_network', 'wifi_password'):
         if key in data:
-            db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+            db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                        (key, data[key]))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, detail='wifi')
     db.commit(); db.close()
@@ -11292,7 +11272,7 @@ def save_paperwork_time_settings():
     data = request.get_json(force=True) or {}
     enabled = '1' if data.get('paperwork_dual_time') else '0'
     db = get_db()
-    db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+    db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                ('paperwork_dual_time', enabled))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
               detail=f'paperwork_dual_time={enabled}')
@@ -11375,17 +11355,17 @@ def arts_groups_add():
         max_order = db.execute('SELECT MAX(sort_order) FROM arts_groups').fetchone()[0] or 0
         cur = db.execute(
             'INSERT INTO arts_groups (name, sort_order, primary_contact_name, '
-            'primary_contact_email, primary_contact_phone, notes) VALUES (?,?,?,?,?,?)',
+            'primary_contact_email, primary_contact_phone, notes) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id',
             (name, max_order + 10, pc_name, pc_email, pc_phone, notes)
         )
-        gid = cur.lastrowid
+        gid = cur.fetchone()['id']
         log_audit(db, 'ARTS_GROUP_ADD', 'arts_group', gid, detail=name)
         db.commit()
         syslog_logger.info(f"ARTS_GROUP_ADD id={gid} name={name!r} by={session.get('username')}")
         return jsonify({'success': True, 'id': gid, 'name': name,
                         'primary_contact_name': pc_name, 'primary_contact_email': pc_email,
                         'primary_contact_phone': pc_phone, 'notes': notes})
-    except sqlite3.IntegrityError:
+    except DBIntegrityError:
         return jsonify({'success': False, 'error': f'"{name}" already exists.'}), 400
     finally:
         db.close()
@@ -11398,13 +11378,13 @@ def arts_groups_get(gid):
     try:
         row = db.execute(
             'SELECT id, name, sort_order, primary_contact_name, primary_contact_email, '
-            'primary_contact_phone, notes FROM arts_groups WHERE id=?', (gid,)
+            'primary_contact_phone, notes FROM arts_groups WHERE id=%s', (gid,)
         ).fetchone()
         if not row:
             return jsonify({'success': False, 'error': 'Not found.'}), 404
         contacts = db.execute(
             'SELECT id, name, email, phone, sort_order FROM arts_group_contacts '
-            'WHERE arts_group_id=? ORDER BY sort_order, id', (gid,)
+            'WHERE arts_group_id=%s ORDER BY sort_order, id', (gid,)
         ).fetchall()
         return jsonify({'success': True, 'group': dict(row),
                         'contacts': [dict(c) for c in contacts]})
@@ -11427,8 +11407,8 @@ def arts_groups_edit(gid):
     try:
         before = _snapshot_row(db, 'arts_groups', gid)
         db.execute(
-            'UPDATE arts_groups SET name=?, primary_contact_name=?, '
-            'primary_contact_email=?, primary_contact_phone=?, notes=? WHERE id=?',
+            'UPDATE arts_groups SET name=%s, primary_contact_name=%s, '
+            'primary_contact_email=%s, primary_contact_phone=%s, notes=%s WHERE id=%s',
             (name, pc_name, pc_email, pc_phone, notes, gid)
         )
         after = _snapshot_row(db, 'arts_groups', gid)
@@ -11437,7 +11417,7 @@ def arts_groups_edit(gid):
         db.commit()
         syslog_logger.info(f"ARTS_GROUP_EDIT id={gid} name={name!r} by={session.get('username')}")
         return jsonify({'success': True})
-    except sqlite3.IntegrityError:
+    except DBIntegrityError:
         return jsonify({'success': False, 'error': f'"{name}" already exists.'}), 400
     finally:
         db.close()
@@ -11450,20 +11430,20 @@ def arts_group_contact_add(gid):
     c_name = (data.get('name') or '').strip()
     db = get_db()
     try:
-        if not db.execute('SELECT id FROM arts_groups WHERE id=?', (gid,)).fetchone():
+        if not db.execute('SELECT id FROM arts_groups WHERE id=%s', (gid,)).fetchone():
             return jsonify({'success': False, 'error': 'Group not found.'}), 404
         max_order = db.execute(
-            'SELECT MAX(sort_order) FROM arts_group_contacts WHERE arts_group_id=?', (gid,)
+            'SELECT MAX(sort_order) FROM arts_group_contacts WHERE arts_group_id=%s', (gid,)
         ).fetchone()[0] or 0
         cur = db.execute(
             'INSERT INTO arts_group_contacts (arts_group_id, name, email, phone, sort_order) '
-            'VALUES (?,?,?,?,?)',
+            'VALUES (%s,%s,%s,%s,%s) RETURNING id',
             (gid, c_name,
              (data.get('email') or '').strip(),
              (data.get('phone') or '').strip(),
              max_order + 10)
         )
-        cid = cur.lastrowid
+        cid = cur.fetchone()['id']
         log_audit(db, 'ARTS_GROUP_CONTACT_ADD', 'arts_group_contact', cid, detail=c_name)
         db.commit()
         syslog_logger.info(f"ARTS_GROUP_CONTACT_ADD id={cid} group={gid} name={c_name!r} by={session.get('username')}")
@@ -11481,7 +11461,7 @@ def arts_group_contact_edit(gid, cid):
     try:
         before = _snapshot_row(db, 'arts_group_contacts', cid)
         db.execute(
-            'UPDATE arts_group_contacts SET name=?, email=?, phone=? WHERE id=? AND arts_group_id=?',
+            'UPDATE arts_group_contacts SET name=%s, email=%s, phone=%s WHERE id=%s AND arts_group_id=%s',
             (c_name,
              (data.get('email') or '').strip(),
              (data.get('phone') or '').strip(),
@@ -11504,7 +11484,7 @@ def arts_group_contact_delete(gid, cid):
     try:
         before = _snapshot_row(db, 'arts_group_contacts', cid)
         log_audit(db, 'ARTS_GROUP_CONTACT_DELETE', 'arts_group_contact', cid, before=before)
-        db.execute('DELETE FROM arts_group_contacts WHERE id=? AND arts_group_id=?', (cid, gid))
+        db.execute('DELETE FROM arts_group_contacts WHERE id=%s AND arts_group_id=%s', (cid, gid))
         db.commit()
         syslog_logger.info(f"ARTS_GROUP_CONTACT_DELETE id={cid} group={gid} by={session.get('username')}")
         return jsonify({'success': True})
@@ -11519,7 +11499,7 @@ def arts_groups_delete(gid):
     try:
         before = _snapshot_row(db, 'arts_groups', gid)
         log_audit(db, 'ARTS_GROUP_DELETE', 'arts_group', gid, before=before)
-        db.execute('DELETE FROM arts_groups WHERE id=?', (gid,))
+        db.execute('DELETE FROM arts_groups WHERE id=%s', (gid,))
         db.commit()
         syslog_logger.info(f"ARTS_GROUP_DELETE id={gid} by={session.get('username')}")
         return jsonify({'success': True})
@@ -11549,7 +11529,7 @@ def save_logo():
         logo_data = data_uri
 
     db = get_db()
-    db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+    db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                ('logo_data', logo_data))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, detail='logo_upload')
     db.commit(); db.close()
@@ -11561,7 +11541,7 @@ def save_logo():
 @admin_required
 def delete_logo():
     db = get_db()
-    db.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('logo_data', '')")
+    db.execute("INSERT INTO app_settings (key, value) VALUES ('logo_data', '') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, detail='logo_delete')
     db.commit(); db.close()
     syslog_logger.info(f"SETTINGS_CHANGE detail=logo_delete by={session.get('username')}")
@@ -11574,7 +11554,7 @@ def _get_logo_for_venue(db, venue_name):
     returns a string ('' if no logo configured anywhere)."""
     if venue_name:
         row = db.execute(
-            'SELECT logo_data FROM venue_logos WHERE venue_name=?',
+            'SELECT logo_data FROM venue_logos WHERE venue_name=%s',
             (venue_name,)
         ).fetchone()
         if row and row['logo_data']:
@@ -11648,8 +11628,8 @@ def venue_logo_upload():
     logo_data = f'data:{mime};base64,{b64}'
     db = get_db()
     db.execute(
-        "INSERT OR REPLACE INTO venue_logos (venue_name, logo_data, updated_at) "
-        "VALUES (?, ?, CURRENT_TIMESTAMP)",
+        "INSERT INTO venue_logos (venue_name, logo_data, updated_at) "
+        "VALUES (%s, %s, CURRENT_TIMESTAMP) ON CONFLICT (venue_name) DO UPDATE SET logo_data = EXCLUDED.logo_data, updated_at = EXCLUDED.updated_at",
         (venue_name, logo_data)
     )
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
@@ -11669,7 +11649,7 @@ def venue_logo_delete():
     if not venue_name:
         return jsonify({'success': False, 'error': 'Venue name required.'}), 400
     db = get_db()
-    db.execute('DELETE FROM venue_logos WHERE venue_name=?', (venue_name,))
+    db.execute('DELETE FROM venue_logos WHERE venue_name=%s', (venue_name,))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
               detail=f'venue_logo_delete venue={venue_name}')
     db.commit(); db.close()
@@ -11757,7 +11737,7 @@ def _get_venue_pdf_colors(db, venue_name):
     if not venue_name:
         return None
     row = db.execute(
-        'SELECT primary_color, secondary_color FROM venue_colors WHERE venue_name=?',
+        'SELECT primary_color, secondary_color FROM venue_colors WHERE venue_name=%s',
         (venue_name,)).fetchone()
     if not row:
         return None
@@ -11832,13 +11812,13 @@ def venue_colors_save():
                             'error': 'Colors must be #rrggbb hex values.'}), 400
     db = get_db()
     if not primary and not secondary:
-        db.execute('DELETE FROM venue_colors WHERE venue_name=?', (venue_name,))
+        db.execute('DELETE FROM venue_colors WHERE venue_name=%s', (venue_name,))
         action = 'venue_colors_clear'
     else:
         db.execute(
-            "INSERT OR REPLACE INTO venue_colors "
+            "INSERT INTO venue_colors "
             "(venue_name, primary_color, secondary_color, updated_at) "
-            "VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+            "VALUES (%s, %s, %s, CURRENT_TIMESTAMP) ON CONFLICT (venue_name) DO UPDATE SET primary_color = EXCLUDED.primary_color, secondary_color = EXCLUDED.secondary_color, updated_at = EXCLUDED.updated_at",
             (venue_name, primary, secondary))
         action = 'venue_colors_set'
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
@@ -11876,7 +11856,7 @@ def modules_save():
         if m['key'] not in data:
             continue
         enabled = '1' if data[m['key']] else '0'
-        db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+        db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                    (f"module_{m['key']}_enabled", enabled))
         changed.append((m['key'], enabled))
         log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
@@ -11900,7 +11880,7 @@ def save_upload_size():
     except (ValueError, TypeError):
         mb = 20
     db = get_db()
-    db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+    db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                ('upload_max_mb', str(mb)))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, detail=f'upload_max_mb={mb}')
     db.commit(); db.close()
@@ -11927,10 +11907,10 @@ def public_advance_pdf(show_id):
     db = get_db()
     row = db.execute("""
         SELECT s3_key, pdf_data FROM export_log
-        WHERE show_id=? AND export_type='advance'
+        WHERE show_id=%s AND export_type='advance'
         ORDER BY exported_at DESC LIMIT 1
     """, (show_id,)).fetchone()
-    show = db.execute('SELECT * FROM shows WHERE id=? AND status="active"', (show_id,)).fetchone()
+    show = db.execute("SELECT * FROM shows WHERE id=%s AND status='active'", (show_id,)).fetchone()
     db.close()
     if not show:
         abort(404)
@@ -11957,10 +11937,10 @@ def public_schedule_pdf(show_id):
     db = get_db()
     row = db.execute("""
         SELECT s3_key, pdf_data FROM export_log
-        WHERE show_id=? AND export_type='schedule'
+        WHERE show_id=%s AND export_type='schedule'
         ORDER BY exported_at DESC LIMIT 1
     """, (show_id,)).fetchone()
-    show = db.execute('SELECT * FROM shows WHERE id=? AND status="active"', (show_id,)).fetchone()
+    show = db.execute("SELECT * FROM shows WHERE id=%s AND status='active'", (show_id,)).fetchone()
     db.close()
     if not show:
         abort(404)
@@ -11994,11 +11974,11 @@ def check_field_key():
     db = get_db()
     if exclude_id:
         row = db.execute(
-            'SELECT id, label FROM form_fields WHERE field_key=? AND id!=?', (key, exclude_id)
+            'SELECT id, label FROM form_fields WHERE field_key=%s AND id!=%s', (key, exclude_id)
         ).fetchone()
     else:
         row = db.execute(
-            'SELECT id, label FROM form_fields WHERE field_key=?', (key,)
+            'SELECT id, label FROM form_fields WHERE field_key=%s', (key,)
         ).fetchone()
     db.close()
     if row:
@@ -12008,87 +11988,26 @@ def check_field_key():
 
 # ─── Database Settings ─────────────────────────────────────────────────────────
 
-@app.route('/settings/database', methods=['POST'])
-@admin_required
-def save_database_settings():
-    data = request.get_json(force=True) or {}
-    db_type = data.get('db_type', 'sqlite')
-
-    # Only db_type is stored in the database. PG credentials live in db_config.ini.
-    # Write to SQLite bootstrap directly so it works even when active DB is PostgreSQL.
-    _sqlite_conn = sqlite3.connect(DATABASE)
-    _sqlite_conn.execute(
-        'INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)', ('db_type', db_type)
-    )
-    _sqlite_conn.commit(); _sqlite_conn.close()
-
-    db_adapter.clear_settings_cache()
-    syslog_logger.info(f"SETTINGS_CHANGE key=database db_type={db_type} by={session.get('username')}")
-    return jsonify({'success': True})
-
-
 @app.route('/settings/database/test', methods=['POST'])
 @admin_required
 def test_database_connection():
-    data = request.get_json(force=True) or {}
-    db_type = data.get('db_type', 'sqlite')
-
-    if db_type == 'sqlite':
-        if os.path.exists(DATABASE):
-            return jsonify({'success': True, 'message': 'SQLite database found and accessible.'})
-        return jsonify({'success': False, 'message': 'SQLite database not found. Run init_db.py first.'})
-
-    if db_type == 'postgres':
-        # Credentials come from db_config.ini, not the request
-        settings = db_adapter.read_db_settings(DATABASE)
-        if not settings.get('pg_host'):
-            return jsonify({'success': False, 'message': 'db_config.ini not found or missing [postgresql] section. See db_config.ini.example.'})
-        ok, err = db_adapter.test_postgres_connection(
-            host=settings.get('pg_host', 'localhost'),
-            port=settings.get('pg_port', 5432),
-            dbname=settings.get('pg_dbname', '321theater'),
-            user=settings.get('pg_user', ''),
-            password=settings.get('pg_password', ''),
-            app_schema=settings.get('pg_app_schema', 'theater321'),
-            shared_schema=settings.get('pg_shared_schema', 'shared'),
-        )
-        if ok:
-            return jsonify({'success': True, 'message': 'Connected to PostgreSQL successfully.'})
-        app.logger.warning(f'PostgreSQL test failed: {err}')
-        return jsonify({'success': False, 'message': err or 'PostgreSQL connection failed.'})
-
-    return jsonify({'success': False, 'message': 'Unknown database type.'})
-
-
-@app.route('/settings/database/migrate', methods=['POST'])
-@admin_required
-def migrate_database():
-    """Migrate data from SQLite to PostgreSQL. Safe to run multiple times."""
-    from init_db import migrate_sqlite_to_postgres
-
-    settings = db_adapter.read_db_settings(DATABASE)
-    if settings.get('db_type') != 'postgres':
-        return jsonify({'success': False, 'error': 'Database type must be PostgreSQL to migrate.'}), 400
-
-    try:
-        stats = migrate_sqlite_to_postgres(DATABASE, settings)
-    except Exception as e:
-        app.logger.error(f'Database migration failed: {e}')
-        return jsonify({'success': False, 'error': 'Migration failed. Check server logs.'}), 500
-
-    if 'error' in stats:
-        return jsonify({'success': False, 'error': stats['error']}), 500
-
-    total_copied = sum(v.get('copied', 0) for v in stats.values() if isinstance(v, dict))
-    total_skipped = sum(v.get('skipped', 0) for v in stats.values() if isinstance(v, dict))
-
-    syslog_logger.info(f"DB_MIGRATE copied={total_copied} skipped={total_skipped} by={session.get('username')}")
-    return jsonify({
-        'success': True,
-        'stats': stats,
-        'total_copied': total_copied,
-        'total_skipped': total_skipped,
-    })
+    """Test the PostgreSQL connection described by db_config.ini."""
+    settings = db_adapter.read_db_settings()
+    if not db_adapter.is_configured(settings):
+        return jsonify({'success': False, 'message': f'{db_adapter.CONFIG_PATH} not found or missing [postgresql] section. See db_config.ini.example.'})
+    ok, err = db_adapter.test_postgres_connection(
+        host=settings.get('pg_host', 'localhost'),
+        port=settings.get('pg_port', 5432),
+        dbname=settings.get('pg_dbname', '321theater'),
+        user=settings.get('pg_user', ''),
+        password=settings.get('pg_password', ''),
+        app_schema=settings.get('pg_app_schema', db_adapter.DEFAULT_APP_SCHEMA),
+        shared_schema=settings.get('pg_shared_schema', db_adapter.DEFAULT_SHARED_SCHEMA),
+    )
+    if ok:
+        return jsonify({'success': True, 'message': 'Connected to PostgreSQL successfully.'})
+    app.logger.warning(f'PostgreSQL test failed: {err}')
+    return jsonify({'success': False, 'message': err or 'PostgreSQL connection failed.'})
 
 
 # ─── AI / Ollama Settings ──────────────────────────────────────────────────────
@@ -12145,7 +12064,7 @@ def save_ai_settings():
     db = get_db()
     for key in ('ollama_enabled', 'ollama_url', 'ollama_model', 'ai_max_sessions', 'ai_system_prompt'):
         if key in data:
-            db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+            db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                        (key, str(data[key])))
     db.commit(); db.close()
     syslog_logger.info(f"SETTINGS_CHANGE key=ai by={session.get('username')}")
@@ -12191,7 +12110,7 @@ def save_smtp_settings():
     for key in ('smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass',
                 'smtp_from', 'smtp_tls'):
         if key in data:
-            db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+            db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                        (key, str(data[key])))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
               after={k: v for k, v in data.items() if 'pass' not in k},
@@ -12258,12 +12177,12 @@ def save_email_provider_settings():
     provider = data.get('email_provider', 'smtp')
     if provider not in ('smtp', 'direct'):
         provider = 'smtp'
-    db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+    db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                ('email_provider', provider))
     # Save direct send settings
     for key in ('smtp_from', 'direct_ehlo_hostname', 'direct_display_name'):
         if key in data:
-            db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+            db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                        (key, str(data[key])))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
               after={'email_provider': provider}, detail='email_provider')
@@ -12315,7 +12234,7 @@ def email_outbox_log_list():
         sql += ' WHERE l.success = 1'
     elif status == 'failed':
         sql += ' WHERE l.success = 0'
-    sql += ' ORDER BY l.sent_at DESC, l.id DESC LIMIT ?'
+    sql += ' ORDER BY l.sent_at DESC, l.id DESC LIMIT %s'
     params.append(limit)
     rows = db.execute(sql, params).fetchall()
     counts = db.execute("""
@@ -12374,7 +12293,7 @@ def email_errors_list():
     params = []
     if status == 'unresolved':
         sql += ' WHERE COALESCE(e.resolved, 0) = 0'
-    sql += ' ORDER BY e.sent_at DESC, e.id DESC LIMIT ?'
+    sql += ' ORDER BY e.sent_at DESC, e.id DESC LIMIT %s'
     params.append(limit)
     rows = db.execute(sql, params).fetchall()
     counts = db.execute("""
@@ -12396,12 +12315,12 @@ def email_errors_list():
 def email_errors_resolve(eid):
     """Mark a single error as reviewed/handled."""
     db = get_db()
-    row = db.execute('SELECT id FROM email_send_errors WHERE id=?', (eid,)).fetchone()
+    row = db.execute('SELECT id FROM email_send_errors WHERE id=%s', (eid,)).fetchone()
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
     db.execute(
-        'UPDATE email_send_errors SET resolved=1, resolved_at=CURRENT_TIMESTAMP, resolved_by=? WHERE id=?',
+        'UPDATE email_send_errors SET resolved=1, resolved_at=CURRENT_TIMESTAMP, resolved_by=%s WHERE id=%s',
         (session['user_id'], eid),
     )
     db.commit()
@@ -12415,7 +12334,7 @@ def email_errors_resolve_all():
     """Mark every currently-unresolved error as reviewed in one click."""
     db = get_db()
     cur = db.execute(
-        'UPDATE email_send_errors SET resolved=1, resolved_at=CURRENT_TIMESTAMP, resolved_by=? '
+        'UPDATE email_send_errors SET resolved=1, resolved_at=CURRENT_TIMESTAMP, resolved_by=%s '
         'WHERE COALESCE(resolved,0)=0',
         (session['user_id'],),
     )
@@ -12463,7 +12382,7 @@ def save_pdf_email_settings():
             'no_labor_alert_days_2')
     for key in keys:
         if key in data:
-            db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+            db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                        (key, str(data[key])))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, after=data, detail='pdf_email_settings')
     db.commit(); db.close()
@@ -12577,10 +12496,8 @@ def pdf_email_diagnose():
     # 2. Cluster / leader state (global election + this worker's verdict).
     cluster = get_cluster_status()
 
-    # 3. Active backend + the plan the real job would build right now.
-    configured_backend = db_adapter.read_db_settings(DATABASE).get('db_type', 'sqlite')
+    # 3. The plan the real job would build right now.
     db = get_db()
-    active_backend = getattr(db, 'db_type', None)
     try:
         plan = _plan_scheduled_emails(db, date.today())
         # Resolve recipients per planned document. A due show whose venue has no
@@ -12610,12 +12527,6 @@ def pdf_email_diagnose():
             'leader_ip':    cluster.get('leader_ip'),
             'self_id':      cluster.get('self_id'),
             'peers':        cluster.get('peers'),
-        },
-        'db_backend': {
-            'configured':          configured_backend,
-            'active':              active_backend,
-            'fell_back_to_sqlite': (configured_backend == 'postgres'
-                                    and active_backend != 'postgres'),
         },
         'plan_count': len(plan),
         'plan': [{
@@ -12664,7 +12575,7 @@ def save_cluster_settings():
                 continue
         if key == 'cluster_heartbeat_enabled':
             val = '1' if val in ('1', 'true', 'on') else '0'
-        db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)',
+        db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                    (key, val))
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None, after=data, detail='cluster_settings')
     db.commit(); db.close()
@@ -12692,7 +12603,7 @@ def toggle_contact_recipient(cid):
                     'postnotes': 'postnotes_recipient'}
     col = allowed_cols.get(email_type, 'report_recipient')
     db = get_db()
-    db.execute(f'UPDATE contacts SET {col}=? WHERE id=?', (val, cid))
+    db.execute(f'UPDATE contacts SET {col}=%s WHERE id=%s', (val, cid))
     log_audit(db, 'CONTACT_RECIPIENT_TOGGLE', 'contact', cid,
               detail=f"type={email_type} recipient={'yes' if val else 'no'}")
     db.commit(); db.close()
@@ -12737,7 +12648,7 @@ def _ai_extract_impl(show_id):
     if attachment_id:
         db = get_db()
         row = db.execute(
-            'SELECT file_data, mime_type, filename FROM show_attachments WHERE id=? AND show_id=?',
+            'SELECT file_data, mime_type, filename FROM show_attachments WHERE id=%s AND show_id=%s',
             (attachment_id, show_id)
         ).fetchone()
         db.close()
@@ -12948,10 +12859,10 @@ def add_position_category():
     db = get_db()
     max_order = db.execute('SELECT MAX(sort_order) FROM position_categories').fetchone()[0] or 0
     cur = db.execute(
-        'INSERT INTO position_categories (name, sort_order) VALUES (?, ?)',
+        'INSERT INTO position_categories (name, sort_order) VALUES (%s, %s) RETURNING id',
         (name, max_order + 10)
     )
-    cid = cur.lastrowid
+    cid = cur.fetchone()['id']
     log_audit_change(db, 'POSITION_CATEGORY_ADD', 'position_category', cid, detail=name,
                      table='position_categories')
     db.commit()
@@ -12969,7 +12880,7 @@ def edit_position_category(cid):
         return jsonify({'success': False, 'error': 'Name is required.'}), 400
     db = get_db()
     before = _snapshot_row(db, 'position_categories', cid)
-    db.execute('UPDATE position_categories SET name=? WHERE id=?', (name, cid))
+    db.execute('UPDATE position_categories SET name=%s WHERE id=%s', (name, cid))
     after = _snapshot_row(db, 'position_categories', cid)
     log_audit(db, 'POSITION_CATEGORY_EDIT', 'position_category', cid, detail=name,
               before=before, after=after)
@@ -12985,8 +12896,8 @@ def delete_position_category(cid):
     db = get_db()
     # Null out category_id on positions in this category
     before = _snapshot_row(db, 'position_categories', cid)
-    db.execute('UPDATE job_positions SET category_id=NULL WHERE category_id=?', (cid,))
-    db.execute('DELETE FROM position_categories WHERE id=?', (cid,))
+    db.execute('UPDATE job_positions SET category_id=NULL WHERE category_id=%s', (cid,))
+    db.execute('DELETE FROM position_categories WHERE id=%s', (cid,))
     log_audit(db, 'POSITION_CATEGORY_DELETE', 'position_category', cid,
               detail=before['name'] if before else str(cid), before=before)
     db.commit()
@@ -13010,10 +12921,10 @@ def add_job_position():
     override_rate = data.get('override_rate')
     override_rate = float(override_rate) if override_rate not in (None, '') else None
     cur = db.execute(
-        'INSERT INTO job_positions (category_id, name, venue, override_rate, sort_order, is_training) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO job_positions (category_id, name, venue, override_rate, sort_order, is_training) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id',
         (category_id, name, venue, override_rate, max_order + 10, is_training)
     )
-    pid = cur.lastrowid
+    pid = cur.fetchone()['id']
     log_audit_change(db, 'JOB_POSITION_ADD', 'job_position', pid, detail=name,
                      table='job_positions')
     db.commit()
@@ -13037,7 +12948,7 @@ def edit_job_position(pid):
     db = get_db()
     before = _snapshot_row(db, 'job_positions', pid)
     db.execute(
-        'UPDATE job_positions SET name=?, category_id=?, venue=?, override_rate=?, is_training=? WHERE id=?',
+        'UPDATE job_positions SET name=%s, category_id=%s, venue=%s, override_rate=%s, is_training=%s WHERE id=%s',
         (name, category_id, venue, override_rate, is_training, pid)
     )
     after = _snapshot_row(db, 'job_positions', pid)
@@ -13056,7 +12967,7 @@ def delete_job_position(pid):
     before = _snapshot_row(db, 'job_positions', pid)
     log_audit(db, 'JOB_POSITION_DELETE', 'job_position', pid,
               detail=before['name'] if before else str(pid), before=before)
-    db.execute('DELETE FROM job_positions WHERE id=?', (pid,))
+    db.execute('DELETE FROM job_positions WHERE id=%s', (pid,))
     db.commit()
     db.close()
     syslog_logger.info(f"JOB_POSITION_DELETE id={pid} by={session.get('username')}")
@@ -13070,7 +12981,7 @@ def reorder_job_positions():
     position_ids = data.get('position_ids', [])
     db = get_db()
     for i, pid in enumerate(position_ids):
-        db.execute('UPDATE job_positions SET sort_order=? WHERE id=?', (i * 10, pid))
+        db.execute('UPDATE job_positions SET sort_order=%s WHERE id=%s', (i * 10, pid))
     db.commit()
     db.close()
     return jsonify({'success': True})
@@ -13090,7 +13001,7 @@ def get_labor_requests(show_id):
         FROM labor_requests lr
         LEFT JOIN job_positions jp ON lr.position_id = jp.id
         LEFT JOIN crew_members cm ON lr.scheduled_crew_member_id = cm.id
-        WHERE lr.show_id = ?
+        WHERE lr.show_id = %s
         ORDER BY lr.sort_order, lr.id
     """, (show_id,)).fetchall()
     db.close()
@@ -13110,7 +13021,7 @@ def save_show_labor_notes(show_id):
     data = request.get_json(force=True) or {}
     notes = (data.get('labor_notes') or '').strip()
     db = get_db()
-    db.execute('UPDATE shows SET labor_notes=? WHERE id=?', (notes, show_id))
+    db.execute('UPDATE shows SET labor_notes=%s WHERE id=%s', (notes, show_id))
     log_audit(db, 'SHOW_LABOR_NOTES_EDIT', 'show', show_id, show_id=show_id)
     db.commit()
     db.close()
@@ -13127,7 +13038,7 @@ def _get_show_labor_days(db, show_id):
     """Per-day labor info for a show as {iso_date: {cover_pm, day_notes}}."""
     rows = db.execute(
         'SELECT work_date, cover_pm, day_notes FROM show_labor_days '
-        'WHERE show_id=?', (show_id,)).fetchall()
+        'WHERE show_id=%s', (show_id,)).fetchall()
     out = {}
     for r in rows:
         dv = _as_date(r['work_date'])
@@ -13167,19 +13078,22 @@ def save_show_labor_day(show_id):
     db = get_db()
     existing = db.execute(
         'SELECT cover_pm, day_notes FROM show_labor_days '
-        'WHERE show_id=? AND work_date=?', (show_id, wd)).fetchone()
+        'WHERE show_id=%s AND work_date=%s', (show_id, wd)).fetchone()
     cover_pm = (str(data.get('cover_pm') or '').strip() if 'cover_pm' in data
                 else ((existing['cover_pm'] or '') if existing else ''))
     day_notes = (str(data.get('day_notes') or '').strip() if 'day_notes' in data
                  else ((existing['day_notes'] or '') if existing else ''))
     if not cover_pm and not day_notes:
-        db.execute('DELETE FROM show_labor_days WHERE show_id=? AND work_date=?',
+        db.execute('DELETE FROM show_labor_days WHERE show_id=%s AND work_date=%s',
                    (show_id, wd))
     else:
         db.execute("""
-            INSERT OR REPLACE INTO show_labor_days
+            INSERT INTO show_labor_days
                 (show_id, work_date, cover_pm, day_notes, updated_by, updated_at)
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (show_id, work_date) DO UPDATE SET
+                cover_pm = EXCLUDED.cover_pm, day_notes = EXCLUDED.day_notes,
+                updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at
         """, (show_id, wd, cover_pm, day_notes, session['user_id']))
     log_audit(db, 'LABOR_DAY_EDIT', 'show', show_id, show_id=show_id,
               detail=f'{wd} cover_pm={cover_pm or "-"}')
@@ -13200,12 +13114,12 @@ def api_production_managers():
     configured on the production_manager form field; 'Production' by default)."""
     db = get_db()
     dept_row = db.execute(
-        "SELECT contact_dept FROM form_fields WHERE field_key=?",
+        "SELECT contact_dept FROM form_fields WHERE field_key=%s",
         ('production_manager',)).fetchone()
     dept = (dept_row['contact_dept'] if dept_row and dept_row['contact_dept']
             else 'Production')
     rows = db.execute(
-        'SELECT name FROM contacts WHERE department=? ORDER BY name',
+        'SELECT name FROM contacts WHERE department=%s ORDER BY name',
         (dept,)).fetchall()
     db.close()
     return jsonify({'names': [r['name'] for r in rows if (r['name'] or '').strip()]})
@@ -13221,13 +13135,13 @@ def add_labor_request(show_id):
     data = request.get_json(force=True) or {}
     db = get_db()
     max_order = db.execute(
-        'SELECT MAX(sort_order) FROM labor_requests WHERE show_id=?', (show_id,)
+        'SELECT MAX(sort_order) FROM labor_requests WHERE show_id=%s', (show_id,)
     ).fetchone()[0] or 0
     cur = db.execute("""
         INSERT INTO labor_requests (show_id, position_id, work_date, in_time, out_time,
                                     break_start, break_end, break2_start, break2_end,
                                     requested_name, notes, sort_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
     """, (show_id,
           data.get('position_id') or None,
           data.get('work_date') or None,
@@ -13240,7 +13154,7 @@ def add_labor_request(show_id):
           data.get('requested_name', ''),
           (data.get('notes') or '').strip(),
           max_order + 10))
-    rid = cur.lastrowid
+    rid = cur.fetchone()['id']
     log_audit(db, 'LABOR_REQUEST_ADD', 'labor_request', rid, show_id=show_id,
               detail=data.get('requested_name', '') or f'position_id={data.get("position_id")}')
     db.commit()
@@ -13260,10 +13174,10 @@ def update_labor_request(show_id, rid):
     db = get_db()
     db.execute("""
         UPDATE labor_requests
-        SET position_id=?, work_date=?, in_time=?, out_time=?,
-            break_start=?, break_end=?, break2_start=?, break2_end=?,
-            requested_name=?, notes=?
-        WHERE id=? AND show_id=?
+        SET position_id=%s, work_date=%s, in_time=%s, out_time=%s,
+            break_start=%s, break_end=%s, break2_start=%s, break2_end=%s,
+            requested_name=%s, notes=%s
+        WHERE id=%s AND show_id=%s
     """, (data.get('position_id') or None,
           data.get('work_date') or None,
           _normalize_perf_time(data.get('in_time', '')),
@@ -13290,7 +13204,7 @@ def delete_labor_request(show_id, rid):
     if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
-    db.execute('DELETE FROM labor_requests WHERE id=? AND show_id=?', (rid, show_id))
+    db.execute('DELETE FROM labor_requests WHERE id=%s AND show_id=%s', (rid, show_id))
     log_audit(db, 'LABOR_REQUEST_DELETE', 'labor_request', rid, show_id=show_id)
     db.commit()
     db.close()
@@ -13310,7 +13224,7 @@ def reorder_labor_requests(show_id):
     db = get_db()
     for i, rid in enumerate(request_ids):
         db.execute(
-            'UPDATE labor_requests SET sort_order=? WHERE id=? AND show_id=?',
+            'UPDATE labor_requests SET sort_order=%s WHERE id=%s AND show_id=%s',
             (i * 10, rid, show_id)
         )
     db.commit()
@@ -13511,7 +13425,7 @@ def _calc_labor_cost_for_show(db, show_id):
         LEFT JOIN job_positions jp ON jp.id = lr.position_id
         LEFT JOIN crew_members cm ON cm.id = lr.scheduled_crew_member_id
         LEFT JOIN pay_rate_levels prl ON prl.id = cm.rate_level_id
-        WHERE lr.show_id = ?
+        WHERE lr.show_id = %s
         ORDER BY lr.work_date, lr.sort_order
     """, (show_id,)).fetchall()
 
@@ -13730,7 +13644,7 @@ def get_show_billable_items(show_id):
                CASE WHEN sb.show_id IS NULL THEN 0 ELSE 1 END AS selected
         FROM labor_billable_items b
         LEFT JOIN show_labor_billable_items sb
-          ON sb.billable_item_id = b.id AND sb.show_id = ?
+          ON sb.billable_item_id = b.id AND sb.show_id = %s
         ORDER BY b.sort_order, b.name
     """, (show_id,)).fetchall()
     db.close()
@@ -13756,7 +13670,7 @@ def set_show_billable_items(show_id):
     db = get_db()
     if ids:
         # Restrict to ids that actually exist in the catalogue.
-        placeholders = ','.join(['?'] * len(ids))
+        placeholders = ','.join(['%s'] * len(ids))
         valid_rows = db.execute(
             f'SELECT id FROM labor_billable_items WHERE id IN ({placeholders})',
             ids
@@ -13764,10 +13678,10 @@ def set_show_billable_items(show_id):
         valid_ids = [r['id'] for r in valid_rows]
     else:
         valid_ids = []
-    db.execute('DELETE FROM show_labor_billable_items WHERE show_id=?', (show_id,))
+    db.execute('DELETE FROM show_labor_billable_items WHERE show_id=%s', (show_id,))
     for bid in valid_ids:
         db.execute(
-            'INSERT INTO show_labor_billable_items (show_id, billable_item_id) VALUES (?, ?)',
+            'INSERT INTO show_labor_billable_items (show_id, billable_item_id) VALUES (%s, %s)',
             (show_id, bid)
         )
     log_audit(db, 'SHOW_BILLABLES_EDIT', 'show', show_id, show_id=show_id,
@@ -13799,7 +13713,7 @@ def _resolve_labor_rate(db, position_id, crew_member_id):
     a position override_rate wins, else the crew member's pay-level
     hourly_rate, else 0."""
     if position_id:
-        row = db.execute('SELECT override_rate FROM job_positions WHERE id=?',
+        row = db.execute('SELECT override_rate FROM job_positions WHERE id=%s',
                          (position_id,)).fetchone()
         if row and row['override_rate'] is not None:
             return float(row['override_rate'])
@@ -13808,7 +13722,7 @@ def _resolve_labor_rate(db, position_id, crew_member_id):
             SELECT prl.hourly_rate
             FROM crew_members cm
             LEFT JOIN pay_rate_levels prl ON prl.id = cm.rate_level_id
-            WHERE cm.id=?
+            WHERE cm.id=%s
         """, (crew_member_id,)).fetchone()
         if row and row['hourly_rate'] is not None:
             return float(row['hourly_rate'])
@@ -13842,7 +13756,7 @@ def _post_show_labor_rows(db, show_id):
         LEFT JOIN position_categories pc ON pc.id = jp.category_id
         LEFT JOIN labor_requests lr ON lr.id = psl.source_request_id
         LEFT JOIN crew_members cm ON cm.id = psl.crew_member_id
-        WHERE psl.show_id = ?
+        WHERE psl.show_id = %s
           AND COALESCE(lr.is_training_shift, 0) = 0
         ORDER BY (psl.work_date IS NULL), psl.work_date,
                  pc.sort_order, jp.sort_order, psl.sort_order, psl.id
@@ -13870,7 +13784,7 @@ def _get_show_billable_items(db, show_id):
         'SELECT b.id, b.name, b.cost_per_crew '
         'FROM labor_billable_items b '
         'JOIN show_labor_billable_items sb '
-        '  ON sb.billable_item_id = b.id AND sb.show_id = ? '
+        '  ON sb.billable_item_id = b.id AND sb.show_id = %s '
         'ORDER BY b.sort_order, b.name',
         (show_id,)
     ).fetchall()
@@ -13882,7 +13796,7 @@ def _post_show_hide_billable(db, show_id):
     separate "Additional Charges" lines. Per-show toggle on the Post-Show tab,
     stored in post_show_notes; defaults off."""
     row = db.execute(
-        'SELECT field_value FROM post_show_notes WHERE show_id=? AND field_key=?',
+        'SELECT field_value FROM post_show_notes WHERE show_id=%s AND field_key=%s',
         (show_id, 'hide_billable_in_rate')
     ).fetchone()
     return bool(row and str(row['field_value']).strip() == '1')
@@ -14065,17 +13979,17 @@ def _pull_scheduled_into_post_show(db, show_id):
     existing = {r['source_request_id']: r for r in db.execute(
         'SELECT source_request_id, sched_crew_name, pay_rate_snapshot '
         'FROM post_show_labor '
-        'WHERE show_id=? AND source_request_id IS NOT NULL', (show_id,)
+        'WHERE show_id=%s AND source_request_id IS NOT NULL', (show_id,)
     ).fetchall()}
     sched = db.execute("""
         SELECT lr.*, cm.name AS scheduled_crew_name
         FROM labor_requests lr
         LEFT JOIN crew_members cm ON cm.id = lr.scheduled_crew_member_id
-        WHERE lr.show_id = ? AND lr.is_scheduled = 1
+        WHERE lr.show_id = %s AND lr.is_scheduled = 1
           AND COALESCE(lr.is_training_shift, 0) = 0
         ORDER BY lr.sort_order, lr.id
     """, (show_id,)).fetchall()
-    order = _max_sort_order(db, 'post_show_labor', 'show_id=?', (show_id,))
+    order = _max_sort_order(db, 'post_show_labor', 'show_id=%s', (show_id,))
     added = 0
     refreshed = 0
     for s in sched:
@@ -14085,7 +13999,7 @@ def _pull_scheduled_into_post_show(db, show_id):
             # Only act when the line gained a crew member after the initial
             # pull: the snapshot's name is blank but the schedule now has one.
             if crew_name and not (prev['sched_crew_name'] or '').strip():
-                sets = ['sched_crew_name=?']
+                sets = ['sched_crew_name=%s']
                 vals = [crew_name]
                 # Backfill the rate too, but only if the PM hasn't already set
                 # a real (non-zero) one — manual rate edits must survive.
@@ -14093,12 +14007,12 @@ def _pull_scheduled_into_post_show(db, show_id):
                     rate = _resolve_labor_rate(
                         db, s['position_id'], s['scheduled_crew_member_id'])
                     if rate:
-                        sets.append('pay_rate_snapshot=?')
+                        sets.append('pay_rate_snapshot=%s')
                         vals.append(rate)
                 vals.extend([show_id, s['id']])
                 db.execute(
                     f"UPDATE post_show_labor SET {', '.join(sets)} "
-                    "WHERE show_id=? AND source_request_id=?", vals)
+                    "WHERE show_id=%s AND source_request_id=%s", vals)
                 refreshed += 1
             continue
         rate = _resolve_labor_rate(db, s['position_id'], s['scheduled_crew_member_id'])
@@ -14109,7 +14023,7 @@ def _pull_scheduled_into_post_show(db, show_id):
                  sched_break2_start, sched_break2_end, sched_crew_name,
                  in_time, out_time, break_start, break_end, break2_start, break2_end,
                  pay_rate_snapshot, sort_order)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (show_id, s['id'], s['position_id'], s['work_date'],
               s['in_time'], s['out_time'], s['break_start'], s['break_end'],
               s['break2_start'], s['break2_end'], s['scheduled_crew_name'] or '',
@@ -14130,7 +14044,7 @@ def _ensure_post_show_labor(db, show_id):
     read path; swallows errors so it can't break a page render."""
     try:
         marker = db.execute(
-            'SELECT field_value FROM post_show_notes WHERE show_id=? AND field_key=?',
+            'SELECT field_value FROM post_show_notes WHERE show_id=%s AND field_key=%s',
             (show_id, _PSL_INIT_KEY)
         ).fetchone()
         if marker:
@@ -14138,8 +14052,8 @@ def _ensure_post_show_labor(db, show_id):
         added, _ = _pull_scheduled_into_post_show(db, show_id)
         if added:
             db.execute(
-                'INSERT OR REPLACE INTO post_show_notes (show_id, field_key, field_value) '
-                'VALUES (?, ?, ?)',
+                'INSERT INTO post_show_notes (show_id, field_key, field_value) '
+                'VALUES (%s, %s, %s) ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value',
                 (show_id, _PSL_INIT_KEY, '1')
             )
             db.commit()
@@ -14163,8 +14077,8 @@ def pull_post_show_labor(show_id):
     db = get_db()
     added, refreshed = _pull_scheduled_into_post_show(db, show_id)
     db.execute(
-        'INSERT OR REPLACE INTO post_show_notes (show_id, field_key, field_value) '
-        'VALUES (?, ?, ?)',
+        'INSERT INTO post_show_notes (show_id, field_key, field_value) '
+        'VALUES (%s, %s, %s) ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value',
         (show_id, _PSL_INIT_KEY, '1')
     )
     log_audit(db, 'POST_SHOW_LABOR_PULL', 'show', show_id, show_id=show_id,
@@ -14190,8 +14104,8 @@ def set_post_show_hide_billable(show_id):
     val = '1' if data.get('hide') else '0'
     db = get_db()
     db.execute(
-        'INSERT OR REPLACE INTO post_show_notes (show_id, field_key, field_value) '
-        'VALUES (?, ?, ?)',
+        'INSERT INTO post_show_notes (show_id, field_key, field_value) '
+        'VALUES (%s, %s, %s) ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value',
         (show_id, 'hide_billable_in_rate', val)
     )
     log_audit(db, 'POST_SHOW_HIDE_BILLABLE', 'show', show_id, show_id=show_id,
@@ -14254,14 +14168,14 @@ def add_post_show_labor(show_id):
             rate = float(rate)
         except (TypeError, ValueError):
             rate = _resolve_labor_rate(db, position_id, crew_member_id)
-    order = _max_sort_order(db, 'post_show_labor', 'show_id=?', (show_id,))
+    order = _max_sort_order(db, 'post_show_labor', 'show_id=%s', (show_id,))
     cur = db.execute("""
         INSERT INTO post_show_labor
             (show_id, position_id, work_date,
              in_time, out_time, break_start, break_end, break2_start, break2_end,
              pay_rate_snapshot, notes, is_added_hours, manual_hours,
              crew_member_id, sort_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
     """, (show_id, position_id, data.get('work_date') or None,
           _normalize_perf_time(data.get('in_time', '')),
           _normalize_perf_time(data.get('out_time', '')),
@@ -14270,7 +14184,7 @@ def add_post_show_labor(show_id):
           _normalize_perf_time(data.get('break2_start', '')),
           _normalize_perf_time(data.get('break2_end', '')),
           rate, notes, is_added, manual_hours, crew_member_id, order))
-    pid = cur.lastrowid
+    pid = cur.fetchone()['id']
     log_audit(db, 'POST_SHOW_LABOR_ADD', 'post_show_labor', pid, show_id=show_id,
               detail=(f'added_hours={manual_hours}; crew={crew_member_id}; '
                       f'justification={notes[:200]}') if is_added else None)
@@ -14297,7 +14211,7 @@ def update_post_show_labor(show_id, pid):
     db = get_db()
     existing = db.execute(
         'SELECT id, is_added_hours, position_id, crew_member_id '
-        'FROM post_show_labor WHERE id=? AND show_id=?',
+        'FROM post_show_labor WHERE id=%s AND show_id=%s',
         (pid, show_id)).fetchone()
     if not existing:
         db.close()
@@ -14310,35 +14224,35 @@ def update_post_show_labor(show_id, pid):
             pidv = int(pidv) if pidv else None
         except (TypeError, ValueError):
             pidv = None
-        updates.append('position_id=?'); params.append(pidv)
+        updates.append('position_id=%s'); params.append(pidv)
     if 'crew_member_id' in data:
         crew_v = data.get('crew_member_id')
         try:
             crew_v = int(crew_v) if crew_v else None
         except (TypeError, ValueError):
             crew_v = None
-        updates.append('crew_member_id=?'); params.append(crew_v)
+        updates.append('crew_member_id=%s'); params.append(crew_v)
     if 'manual_hours' in data:
         try:
             mh = round(float(data.get('manual_hours')), 2)
             mh = mh if mh > 0 else None
         except (TypeError, ValueError):
             mh = None
-        updates.append('manual_hours=?'); params.append(mh)
+        updates.append('manual_hours=%s'); params.append(mh)
     for f in _PSL_TIME_FIELDS:
         if f in data:
-            updates.append(f'{f}=?'); params.append(_normalize_perf_time(data.get(f, '')))
+            updates.append(f'{f}=%s'); params.append(_normalize_perf_time(data.get(f, '')))
     if 'work_date' in data:
-        updates.append('work_date=?'); params.append(data.get('work_date') or None)
+        updates.append('work_date=%s'); params.append(data.get('work_date') or None)
     if 'notes' in data:
-        updates.append('notes=?'); params.append((data.get('notes') or '').strip())
+        updates.append('notes=%s'); params.append((data.get('notes') or '').strip())
     if 'pay_rate_snapshot' in data:
         rv = data.get('pay_rate_snapshot')
         try:
             rv = float(rv) if rv not in (None, '') else None
         except (TypeError, ValueError):
             rv = None
-        updates.append('pay_rate_snapshot=?'); params.append(rv)
+        updates.append('pay_rate_snapshot=%s'); params.append(rv)
     elif existing['is_added_hours'] and ('position_id' in data or 'crew_member_id' in data):
         # Added-hours lines promise "the rate calculates out correctly":
         # re-resolve the snapshot whenever the technician or position changes
@@ -14346,13 +14260,13 @@ def update_post_show_labor(show_id, pid):
         # payload keep the row's current value for the lookup.
         eff_pos = pidv if 'position_id' in data else existing['position_id']
         eff_crew = crew_v if 'crew_member_id' in data else existing['crew_member_id']
-        updates.append('pay_rate_snapshot=?')
+        updates.append('pay_rate_snapshot=%s')
         params.append(_resolve_labor_rate(db, eff_pos, eff_crew))
     if not updates:
         db.close()
         return jsonify({'success': False, 'error': 'No changes.'}), 400
     params.extend([pid, show_id])
-    db.execute(f"UPDATE post_show_labor SET {', '.join(updates)} WHERE id=? AND show_id=?", params)
+    db.execute(f"UPDATE post_show_labor SET {', '.join(updates)} WHERE id=%s AND show_id=%s", params)
     log_audit(db, 'POST_SHOW_LABOR_EDIT', 'post_show_labor', pid, show_id=show_id)
     db.commit()
     rows = _post_show_labor_rows(db, show_id)
@@ -14369,7 +14283,7 @@ def delete_post_show_labor(show_id, pid):
     if session.get('is_restricted') or session.get('is_readonly'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
-    db.execute('DELETE FROM post_show_labor WHERE id=? AND show_id=?', (pid, show_id))
+    db.execute('DELETE FROM post_show_labor WHERE id=%s AND show_id=%s', (pid, show_id))
     log_audit(db, 'POST_SHOW_LABOR_DELETE', 'post_show_labor', pid, show_id=show_id)
     db.commit()
     db.close()
@@ -14419,7 +14333,7 @@ def labor_scheduler_no_labor():
             """
             params = []
             if accessible is not None:
-                ph = ','.join(['?'] * len(accessible))
+                ph = ','.join(['%s'] * len(accessible))
                 sql += f' AND s.id IN ({ph})'
                 params.extend(accessible)
             for r in db.execute(sql, params).fetchall():
@@ -14501,7 +14415,7 @@ def labor_overview():
         -- Archived shows normally drop off this view, but scheduled labor on a
         -- past show must stay visible so hours worked can still be referenced.
         WHERE (COALESCE(s.status, 'active') != 'archived' OR lr.is_scheduled = 1)
-          AND COALESCE(lr.work_date, s.show_date) BETWEEN ? AND ?
+          AND COALESCE(lr.work_date, s.show_date) BETWEEN %s AND %s
         ORDER BY work_date, s.name, lr.sort_order, lr.id
     """, (week_start.isoformat(), week_end.isoformat())).fetchall()
 
@@ -14529,7 +14443,7 @@ def labor_overview():
         LEFT JOIN overhead_projects p ON p.id = g.project_id
         LEFT JOIN job_positions jp ON jp.id = r.position_id
         LEFT JOIN crew_members cm ON cm.id = r.scheduled_crew_member_id
-        WHERE COALESCE(r.work_date, g.work_date) BETWEEN ? AND ?
+        WHERE COALESCE(r.work_date, g.work_date) BETWEEN %s AND %s
         ORDER BY work_date, project_name, r.sort_order, r.id
     """, (week_start.isoformat(), week_end.isoformat())).fetchall()
 
@@ -14537,7 +14451,7 @@ def labor_overview():
     day_info_rows = db.execute("""
         SELECT show_id, work_date, cover_pm, day_notes
         FROM show_labor_days
-        WHERE work_date BETWEEN ? AND ?
+        WHERE work_date BETWEEN %s AND %s
     """, (week_start.isoformat(), week_end.isoformat())).fetchall()
     day_info = {}
     for r in day_info_rows:
@@ -14684,14 +14598,14 @@ def api_labor_scheduler_list():
         -- Archived shows normally drop off the scheduler, but scheduled labor on
         -- a past show must stay visible so hours worked can still be referenced.
         WHERE (s.status != 'archived' OR lr.is_scheduled = 1)
-          AND COALESCE(lr.work_date, s.show_date) BETWEEN ? AND ?
+          AND COALESCE(lr.work_date, s.show_date) BETWEEN %s AND %s
     """
     params = [date_from, date_to]
     if accessible is not None:
         if not accessible:
             db.close()
             return jsonify({'shows': []})
-        placeholders = ','.join(['?'] * len(accessible))
+        placeholders = ','.join(['%s'] * len(accessible))
         sql += f' AND lr.show_id IN ({placeholders})'
         params.extend(accessible)
     sql += ' ORDER BY COALESCE(lr.work_date, s.show_date), s.name, pc.sort_order, jp.sort_order, lr.sort_order, lr.id'
@@ -14738,7 +14652,7 @@ def api_labor_scheduler_list():
             if accessible is not None:
                 missing = [sid for sid in missing if sid in accessible]
             if missing:
-                ph = ','.join(['?'] * len(missing))
+                ph = ','.join(['%s'] * len(missing))
                 extra_rows = db.execute(
                     f"SELECT s.id, s.name, s.venue, s.show_date, s.status, s.labor_notes, "
                     f"       ad_pm.field_value AS show_pm "
@@ -14764,7 +14678,7 @@ def api_labor_scheduler_list():
 
     # ── Per-day labor info (covering PM + day notes) per show ────────────────
     if shows:
-        ph = ','.join(['?'] * len(shows))
+        ph = ','.join(['%s'] * len(shows))
         sld_rows = db.execute(
             f'SELECT show_id, work_date, cover_pm, day_notes '
             f'FROM show_labor_days WHERE show_id IN ({ph})',
@@ -14802,7 +14716,7 @@ def api_labor_scheduler_list():
         LEFT JOIN job_positions jp ON jp.id = r.position_id
         LEFT JOIN position_categories pc ON pc.id = jp.category_id
         LEFT JOIN crew_members cm ON cm.id = r.scheduled_crew_member_id
-        WHERE r.work_date BETWEEN ? AND ?
+        WHERE r.work_date BETWEEN %s AND %s
         ORDER BY r.work_date, g.sort_order, g.id, pc.sort_order, jp.sort_order,
                  r.sort_order, r.id
     """, (date_from, date_to)).fetchall()
@@ -14841,7 +14755,7 @@ def api_labor_scheduler_update(rid):
     data = request.get_json(force=True) or {}
     db = get_db()
     row = db.execute(
-        'SELECT show_id FROM labor_requests WHERE id=?', (rid,)
+        'SELECT show_id FROM labor_requests WHERE id=%s', (rid,)
     ).fetchone()
     if not row:
         db.close()
@@ -14857,31 +14771,31 @@ def api_labor_scheduler_update(rid):
     if 'position_id' in data:
         pid = data.get('position_id')
         pid = int(pid) if pid else None
-        updates.append('position_id=?')
+        updates.append('position_id=%s')
         params.append(pid)
         detail_parts.append(f"position_id={pid}")
     if 'is_scheduled' in data:
-        updates.append('is_scheduled=?')
+        updates.append('is_scheduled=%s')
         params.append(1 if data.get('is_scheduled') else 0)
         detail_parts.append(f"is_scheduled={1 if data.get('is_scheduled') else 0}")
     if 'is_training_shift' in data:
-        updates.append('is_training_shift=?')
+        updates.append('is_training_shift=%s')
         params.append(1 if data.get('is_training_shift') else 0)
         detail_parts.append(f"is_training_shift={1 if data.get('is_training_shift') else 0}")
     if 'scheduled_crew_member_id' in data:
         cmid = data.get('scheduled_crew_member_id')
         cmid = int(cmid) if cmid else None
-        updates.append('scheduled_crew_member_id=?')
+        updates.append('scheduled_crew_member_id=%s')
         params.append(cmid)
         detail_parts.append(f"crew_id={cmid}")
     for field in ('in_time', 'out_time', 'break_start', 'break_end',
                   'break2_start', 'break2_end'):
         if field in data:
-            updates.append(f'{field}=?')
+            updates.append(f'{field}=%s')
             params.append(_normalize_perf_time((data[field] or '').strip()))
             detail_parts.append(f"{field}={data[field]}")
     if 'notes' in data:
-        updates.append('notes=?')
+        updates.append('notes=%s')
         params.append((data['notes'] or '').strip())
         detail_parts.append('notes=updated')
     if 'work_date' in data:
@@ -14889,7 +14803,7 @@ def api_labor_scheduler_update(rid):
         # day-block in the scheduler). Empty string clears it back to NULL, in
         # which case it falls back to the show's date in list queries.
         wd = (data.get('work_date') or '').strip() or None
-        updates.append('work_date=?')
+        updates.append('work_date=%s')
         params.append(wd)
         detail_parts.append(f"work_date={wd}")
 
@@ -14897,13 +14811,13 @@ def api_labor_scheduler_update(rid):
         db.close()
         return jsonify({'success': False, 'error': 'No changes.'}), 400
 
-    updates.append('scheduled_by=?')
+    updates.append('scheduled_by=%s')
     params.append(session['user_id'])
     updates.append('scheduled_at=CURRENT_TIMESTAMP')
 
     params.append(rid)
     db.execute(
-        f"UPDATE labor_requests SET {', '.join(updates)} WHERE id=?",
+        f"UPDATE labor_requests SET {', '.join(updates)} WHERE id=%s",
         params,
     )
     log_audit(db, 'LABOR_SCHEDULED', 'labor_request', rid, show_id=show_id,
@@ -14916,7 +14830,7 @@ def api_labor_scheduler_update(rid):
                cm.name as scheduled_crew_name
         FROM labor_requests lr
         LEFT JOIN crew_members cm ON lr.scheduled_crew_member_id = cm.id
-        WHERE lr.id = ?
+        WHERE lr.id = %s
     """, (rid,)).fetchone()
     db.close()
     syslog_logger.info(
@@ -14930,14 +14844,14 @@ def api_labor_scheduler_update(rid):
 def api_labor_scheduler_delete(rid):
     """Delete a labor request from the scheduler view."""
     db = get_db()
-    row = db.execute('SELECT show_id FROM labor_requests WHERE id=?', (rid,)).fetchone()
+    row = db.execute('SELECT show_id FROM labor_requests WHERE id=%s', (rid,)).fetchone()
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
     if not can_access_show(session['user_id'], row['show_id']):
         db.close()
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
-    db.execute('DELETE FROM labor_requests WHERE id=?', (rid,))
+    db.execute('DELETE FROM labor_requests WHERE id=%s', (rid,))
     log_audit(db, 'LABOR_REQUEST_DELETE', 'labor_request', rid, show_id=row['show_id'])
     db.commit()
     db.close()
@@ -14957,13 +14871,13 @@ def api_labor_scheduler_add():
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     db = get_db()
     max_order = db.execute(
-        'SELECT MAX(sort_order) FROM labor_requests WHERE show_id=?', (show_id,)
+        'SELECT MAX(sort_order) FROM labor_requests WHERE show_id=%s', (show_id,)
     ).fetchone()[0] or 0
     cur = db.execute("""
         INSERT INTO labor_requests (show_id, position_id, work_date, in_time, out_time,
                                     break_start, break_end, break2_start, break2_end,
                                     requested_name, sort_order)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (show_id,
           data.get('position_id') or None,
           data.get('work_date') or None,
@@ -14974,7 +14888,7 @@ def api_labor_scheduler_add():
           _normalize_perf_time(data.get('break2_start', '')),
           _normalize_perf_time(data.get('break2_end', '')),
           data.get('requested_name', ''), max_order + 10))
-    rid = cur.lastrowid
+    rid = cur.fetchone()['id']
     log_audit(db, 'LABOR_REQUEST_ADD', 'labor_request', rid, show_id=show_id, detail='via scheduler')
     db.commit()
     row = db.execute("""
@@ -14988,7 +14902,7 @@ def api_labor_scheduler_add():
         LEFT JOIN job_positions jp ON lr.position_id = jp.id
         LEFT JOIN position_categories pc ON jp.category_id = pc.id
         LEFT JOIN crew_members cm ON lr.scheduled_crew_member_id = cm.id
-        WHERE lr.id=?
+        WHERE lr.id=%s
     """, (rid,)).fetchone()
     db.close()
     syslog_logger.info(f"LABOR_REQUEST_ADD (scheduler) show_id={show_id} id={rid} by={session.get('username')}")
@@ -15017,23 +14931,23 @@ def api_labor_scheduler_create_show():
     db = get_db()
     cur = db.execute("""
         INSERT INTO shows (name, show_date, show_time, venue, created_by)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s) RETURNING id
     """, (name, show_date, show_time, venue, session['user_id']))
-    show_id = cur.lastrowid
+    show_id = cur.fetchone()['id']
 
     for key, val in [('show_name', name), ('show_date', show_date or ''),
                      ('show_time', show_time), ('venue', venue)]:
         if val:
             db.execute(
-                "INSERT OR REPLACE INTO advance_data (show_id, field_key, field_value) "
-                "VALUES (?, ?, ?)",
+                "INSERT INTO advance_data (show_id, field_key, field_value) "
+                "VALUES (%s, %s, %s) ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value",
                 (show_id, key, val)
             )
 
     if show_date:
         db.execute(
             "INSERT INTO show_performances (show_id, perf_date, perf_time, sort_order) "
-            "VALUES (?, ?, ?, 0)",
+            "VALUES (%s, %s, %s, 0)",
             (show_id, show_date, show_time)
         )
 
@@ -15079,13 +14993,13 @@ def api_labor_scheduler_shows_without_labor():
     if date_from and date_to:
         # Either show_date in range, OR no show_date set at all (so brand-new
         # shows that haven't picked a date yet still appear).
-        sql += " AND (s.show_date IS NULL OR s.show_date BETWEEN ? AND ?)"
+        sql += " AND (s.show_date IS NULL OR s.show_date BETWEEN %s AND %s)"
         params.extend([date_from, date_to])
     if accessible is not None:
         if not accessible:
             db.close()
             return jsonify({'shows': []})
-        ph = ','.join(['?'] * len(accessible))
+        ph = ','.join(['%s'] * len(accessible))
         sql += f' AND s.id IN ({ph})'
         params.extend(accessible)
     sql += ' ORDER BY s.show_date IS NULL, s.show_date, s.name'
@@ -15157,12 +15071,12 @@ _OVERHEAD_GROUP_JOIN_SELECT = """
 
 def _fetch_overhead_request(db, rid):
     """Fetch a single labor request row joined to position + crew + rate level."""
-    return db.execute(_OVERHEAD_REQUEST_JOIN_SELECT + ' WHERE r.id=?', (rid,)).fetchone()
+    return db.execute(_OVERHEAD_REQUEST_JOIN_SELECT + ' WHERE r.id=%s', (rid,)).fetchone()
 
 
 def _fetch_overhead_group(db, gid):
     """Fetch a single sub-group row joined to its project (if any)."""
-    return db.execute(_OVERHEAD_GROUP_JOIN_SELECT + ' WHERE g.id=?', (gid,)).fetchone()
+    return db.execute(_OVERHEAD_GROUP_JOIN_SELECT + ' WHERE g.id=%s', (gid,)).fetchone()
 
 
 def _annotate_request_metrics(req_dict, *, rate_keys=('scheduled_level_rate',)):
@@ -15252,13 +15166,13 @@ def api_overhead_list():
     db = get_db()
     groups = db.execute(
         _OVERHEAD_GROUP_JOIN_SELECT +
-        ' WHERE g.work_date BETWEEN ? AND ? ORDER BY g.work_date, g.sort_order, g.id',
+        ' WHERE g.work_date BETWEEN %s AND %s ORDER BY g.work_date, g.sort_order, g.id',
         (date_from, date_to),
     ).fetchall()
 
     requests_rows = db.execute(
         _OVERHEAD_REQUEST_JOIN_SELECT +
-        ' WHERE r.work_date BETWEEN ? AND ? ORDER BY r.work_date, r.group_id, r.sort_order, r.id',
+        ' WHERE r.work_date BETWEEN %s AND %s ORDER BY r.work_date, r.group_id, r.sort_order, r.id',
         (date_from, date_to),
     ).fetchall()
     db.close()
@@ -15339,7 +15253,7 @@ def _find_or_create_project(db, name, *, defaults=None):
     if not name:
         return None
     row = db.execute(
-        'SELECT id FROM overhead_projects WHERE LOWER(name) = LOWER(?)',
+        'SELECT id FROM overhead_projects WHERE LOWER(name) = LOWER(%s)',
         (name,)
     ).fetchone()
     if row:
@@ -15350,7 +15264,7 @@ def _find_or_create_project(db, name, *, defaults=None):
             (name, description, client_name, billing_code,
              contact_name, contact_email, contact_phone, project_notes, color,
              archived, sort_order, created_by)
-        VALUES (?,?,?,?,?,?,?,?,?,0,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s) RETURNING id
     """, (
         name,
         (d.get('description') or '').strip(),
@@ -15364,7 +15278,7 @@ def _find_or_create_project(db, name, *, defaults=None):
         _max_sort_order(db, 'overhead_projects'),
         session.get('user_id'),
     ))
-    pid = cur.lastrowid
+    pid = cur.fetchone()['id']
     log_audit(db, 'OVERHEAD_PROJECT_ADD', 'overhead_project', pid,
               detail=f'auto-created via group: {name}')
     _overhead_log('OVERHEAD_PROJECT_ADD', id=pid, name=name, source='auto')
@@ -15382,7 +15296,7 @@ def api_overhead_projects_add():
         return jsonify({'success': False, 'error': 'Project name is required.'}), 400
     db = get_db()
     existing = db.execute(
-        'SELECT id FROM overhead_projects WHERE LOWER(name) = LOWER(?)', (payload['name'],)
+        'SELECT id FROM overhead_projects WHERE LOWER(name) = LOWER(%s)', (payload['name'],)
     ).fetchone()
     if existing:
         db.close()
@@ -15392,7 +15306,7 @@ def api_overhead_projects_add():
             (name, description, client_name, billing_code,
              contact_name, contact_email, contact_phone, project_notes, color,
              archived, sort_order, created_by)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (
         payload['name'], payload['description'], payload['client_name'],
         payload['billing_code'], payload['contact_name'], payload['contact_email'],
@@ -15400,10 +15314,10 @@ def api_overhead_projects_add():
         payload['archived'], _max_sort_order(db, 'overhead_projects'),
         session.get('user_id'),
     ))
-    pid = cur.lastrowid
+    pid = cur.fetchone()['id']
     log_audit(db, 'OVERHEAD_PROJECT_ADD', 'overhead_project', pid, detail=payload['name'])
     db.commit()
-    row = db.execute('SELECT * FROM overhead_projects WHERE id=?', (pid,)).fetchone()
+    row = db.execute('SELECT * FROM overhead_projects WHERE id=%s', (pid,)).fetchone()
     db.close()
     _overhead_log('OVERHEAD_PROJECT_ADD', id=pid, name=payload['name'])
     return jsonify({'success': True, 'project': _normalize_row_dates(dict(row)) if row else {'id': pid}})
@@ -15419,26 +15333,26 @@ def api_overhead_projects_update(pid):
     if not payload['name']:
         return jsonify({'success': False, 'error': 'Project name is required.'}), 400
     db = get_db()
-    row = db.execute('SELECT id FROM overhead_projects WHERE id=?', (pid,)).fetchone()
+    row = db.execute('SELECT id FROM overhead_projects WHERE id=%s', (pid,)).fetchone()
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
     # Detect a name collision against a *different* project
     dup = db.execute(
-        'SELECT id FROM overhead_projects WHERE LOWER(name) = LOWER(?) AND id <> ?',
+        'SELECT id FROM overhead_projects WHERE LOWER(name) = LOWER(%s) AND id <> %s',
         (payload['name'], pid)
     ).fetchone()
     if dup:
         db.close()
         return jsonify({'success': False, 'error': 'Another project already uses that name.'}), 409
-    set_clause = ', '.join(f'{k}=?' for k in payload.keys())
+    set_clause = ', '.join(f'{k}=%s' for k in payload.keys())
     db.execute(
-        f'UPDATE overhead_projects SET {set_clause} WHERE id=?',
+        f'UPDATE overhead_projects SET {set_clause} WHERE id=%s',
         list(payload.values()) + [pid],
     )
     log_audit(db, 'OVERHEAD_PROJECT_EDIT', 'overhead_project', pid, detail=payload['name'])
     db.commit()
-    refreshed = db.execute('SELECT * FROM overhead_projects WHERE id=?', (pid,)).fetchone()
+    refreshed = db.execute('SELECT * FROM overhead_projects WHERE id=%s', (pid,)).fetchone()
     db.close()
     _overhead_log('OVERHEAD_PROJECT_EDIT', id=pid, name=payload['name'])
     return jsonify({'success': True, 'project': _normalize_row_dates(dict(refreshed)) if refreshed else None})
@@ -15453,19 +15367,19 @@ def api_overhead_projects_delete(pid):
     if block: return block
     hard = request.args.get('hard') == '1'
     db = get_db()
-    row = db.execute('SELECT * FROM overhead_projects WHERE id=?', (pid,)).fetchone()
+    row = db.execute('SELECT * FROM overhead_projects WHERE id=%s', (pid,)).fetchone()
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
     in_use = db.execute(
-        'SELECT COUNT(*) FROM overhead_labor_groups WHERE project_id=?', (pid,)
+        'SELECT COUNT(*) FROM overhead_labor_groups WHERE project_id=%s', (pid,)
     ).fetchone()[0] or 0
     if hard and not in_use:
-        db.execute('DELETE FROM overhead_projects WHERE id=?', (pid,))
+        db.execute('DELETE FROM overhead_projects WHERE id=%s', (pid,))
         log_audit(db, 'OVERHEAD_PROJECT_DELETE', 'overhead_project', pid, detail=row['name'])
         action = 'OVERHEAD_PROJECT_DELETE'
     else:
-        db.execute('UPDATE overhead_projects SET archived=1 WHERE id=?', (pid,))
+        db.execute('UPDATE overhead_projects SET archived=1 WHERE id=%s', (pid,))
         log_audit(db, 'OVERHEAD_PROJECT_ARCHIVE', 'overhead_project', pid,
                   detail=f"{row['name']} (in_use={in_use})")
         action = 'OVERHEAD_PROJECT_ARCHIVE'
@@ -15628,7 +15542,7 @@ def api_overhead_group_add():
     # Pull project defaults so the group display can resolve a sensible name
     proj = None
     if project_id:
-        proj = db.execute('SELECT * FROM overhead_projects WHERE id=?', (project_id,)).fetchone()
+        proj = db.execute('SELECT * FROM overhead_projects WHERE id=%s', (project_id,)).fetchone()
 
     # Sub-group display name: prefer explicit override, then project name, then 'General'
     name = (data.get('name') or '').strip()
@@ -15639,7 +15553,7 @@ def api_overhead_group_add():
         INSERT INTO overhead_labor_groups
             (work_date, project_id, name, contact_name, contact_email, contact_phone,
              project_notes, sort_order, created_by)
-        VALUES (?,?,?,?,?,?,?,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (
         wd.isoformat(),
         project_id,
@@ -15648,10 +15562,10 @@ def api_overhead_group_add():
         (data.get('contact_email') or '').strip(),
         (data.get('contact_phone') or '').strip(),
         data.get('project_notes') or '',
-        _max_sort_order(db, 'overhead_labor_groups', 'work_date=?', (wd.isoformat(),)),
+        _max_sort_order(db, 'overhead_labor_groups', 'work_date=%s', (wd.isoformat(),)),
         session.get('user_id'),
     ))
-    gid = cur.lastrowid
+    gid = cur.fetchone()['id']
     log_audit(db, 'OVERHEAD_GROUP_ADD', 'overhead_labor_group', gid,
               detail=f"{wd.isoformat()} · project={project_id} · {name}")
     db.commit()
@@ -15678,7 +15592,7 @@ def api_overhead_group_update(gid):
     data = request.get_json(force=True) or {}
     db = get_db()
     try:
-        row = db.execute('SELECT * FROM overhead_labor_groups WHERE id=?', (gid,)).fetchone()
+        row = db.execute('SELECT * FROM overhead_labor_groups WHERE id=%s', (gid,)).fetchone()
         if not row:
             return jsonify({'success': False, 'error': 'Not found.'}), 404
 
@@ -15687,11 +15601,11 @@ def api_overhead_group_update(gid):
             wd = _parse_iso_date(data.get('work_date'))
             if not wd:
                 return jsonify({'success': False, 'error': 'Invalid work_date.'}), 400
-            updates.append('work_date=?'); params.append(wd.isoformat())
+            updates.append('work_date=%s'); params.append(wd.isoformat())
             # Cascade work_date to all requests under this group so the running list
             # stays consistent if the group's date is changed.
             db.execute(
-                'UPDATE overhead_labor_requests SET work_date=? WHERE group_id=?',
+                'UPDATE overhead_labor_requests SET work_date=%s WHERE group_id=%s',
                 (wd.isoformat(), gid)
             )
 
@@ -15699,28 +15613,28 @@ def api_overhead_group_update(gid):
         if 'project_id' in data:
             pid = data.get('project_id')
             if pid in (None, '', 0):
-                updates.append('project_id=?'); params.append(None)
+                updates.append('project_id=%s'); params.append(None)
             else:
                 try:
-                    updates.append('project_id=?'); params.append(int(pid))
+                    updates.append('project_id=%s'); params.append(int(pid))
                 except (TypeError, ValueError):
                     pass
         elif 'project_name' in data:
             nm = (data.get('project_name') or '').strip()
             if nm:
                 new_pid = _find_or_create_project(db, nm)
-                updates.append('project_id=?'); params.append(new_pid)
+                updates.append('project_id=%s'); params.append(new_pid)
             else:
-                updates.append('project_id=?'); params.append(None)
+                updates.append('project_id=%s'); params.append(None)
 
         for key in ('name', 'contact_name', 'contact_email', 'contact_phone', 'project_notes'):
             if key in data:
-                updates.append(f'{key}=?')
+                updates.append(f'{key}=%s')
                 params.append((data.get(key) or '').strip() if key != 'project_notes' else (data.get(key) or ''))
         if not updates:
             return jsonify({'success': False, 'error': 'No changes.'}), 400
         params.append(gid)
-        db.execute(f"UPDATE overhead_labor_groups SET {', '.join(updates)} WHERE id=?", params)
+        db.execute(f"UPDATE overhead_labor_groups SET {', '.join(updates)} WHERE id=%s", params)
         log_audit(db, 'OVERHEAD_GROUP_EDIT', 'overhead_labor_group', gid)
         db.commit()
         refreshed = _fetch_overhead_group(db, gid)
@@ -15737,12 +15651,12 @@ def api_overhead_group_delete(gid):
     block = _overhead_write_check()
     if block: return block
     db = get_db()
-    row = db.execute('SELECT * FROM overhead_labor_groups WHERE id=?', (gid,)).fetchone()
+    row = db.execute('SELECT * FROM overhead_labor_groups WHERE id=%s', (gid,)).fetchone()
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
-    db.execute('DELETE FROM overhead_labor_requests WHERE group_id=?', (gid,))
-    db.execute('DELETE FROM overhead_labor_groups WHERE id=?', (gid,))
+    db.execute('DELETE FROM overhead_labor_requests WHERE group_id=%s', (gid,))
+    db.execute('DELETE FROM overhead_labor_groups WHERE id=%s', (gid,))
     log_audit(db, 'OVERHEAD_GROUP_DELETE', 'overhead_labor_group', gid,
               detail=f"{row['work_date']} · {row['name']}")
     db.commit()
@@ -15762,7 +15676,7 @@ def api_overhead_request_add():
     if not gid:
         return jsonify({'success': False, 'error': 'group_id required'}), 400
     db = get_db()
-    grp = db.execute('SELECT id, work_date FROM overhead_labor_groups WHERE id=?', (gid,)).fetchone()
+    grp = db.execute('SELECT id, work_date FROM overhead_labor_groups WHERE id=%s', (gid,)).fetchone()
     if not grp:
         db.close()
         return jsonify({'success': False, 'error': 'Group not found.'}), 404
@@ -15770,7 +15684,7 @@ def api_overhead_request_add():
         INSERT INTO overhead_labor_requests
             (group_id, work_date, position_id, in_time, out_time, break_start, break_end,
              break2_start, break2_end, requested_name, sort_order, created_by)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (
         gid,
         grp['work_date'],
@@ -15782,10 +15696,10 @@ def api_overhead_request_add():
         _normalize_perf_time((data.get('break2_start') or '').strip()),
         _normalize_perf_time((data.get('break2_end') or '').strip()),
         (data.get('requested_name') or '').strip(),
-        _max_sort_order(db, 'overhead_labor_requests', 'group_id=?', (gid,)),
+        _max_sort_order(db, 'overhead_labor_requests', 'group_id=%s', (gid,)),
         session.get('user_id'),
     ))
-    rid = cur.lastrowid
+    rid = cur.fetchone()['id']
     log_audit(db, 'OVERHEAD_REQUEST_ADD', 'overhead_labor_request', rid,
               detail=f"group={gid}")
     db.commit()
@@ -15805,7 +15719,7 @@ def api_overhead_request_update(rid):
     if block: return block
     data = request.get_json(force=True) or {}
     db = get_db()
-    row = db.execute('SELECT * FROM overhead_labor_requests WHERE id=?', (rid,)).fetchone()
+    row = db.execute('SELECT * FROM overhead_labor_requests WHERE id=%s', (rid,)).fetchone()
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
@@ -15824,7 +15738,7 @@ def api_overhead_request_update(rid):
     if 'position_id' in data:
         pid = data.get('position_id')
         pid = int(pid) if pid else None
-        updates.append('position_id=?'); params.append(pid)
+        updates.append('position_id=%s'); params.append(pid)
         detail_parts.append(f'pos={pid}')
     for f in ('in_time', 'out_time',
               'break_start', 'break_end', 'break2_start', 'break2_end',
@@ -15838,18 +15752,18 @@ def api_overhead_request_update(rid):
             if f.endswith('_time') or f.startswith('break_') or f.startswith('break2_') \
                     or f.startswith('actual_break_') or f.startswith('actual_break2_'):
                 val = _normalize_perf_time(val)
-            updates.append(f'{f}=?'); params.append(val)
+            updates.append(f'{f}=%s'); params.append(val)
     if 'is_scheduled' in data:
-        updates.append('is_scheduled=?'); params.append(1 if data.get('is_scheduled') else 0)
+        updates.append('is_scheduled=%s'); params.append(1 if data.get('is_scheduled') else 0)
         detail_parts.append(f"sched={1 if data.get('is_scheduled') else 0}")
     if 'is_training_shift' in data:
-        updates.append('is_training_shift=?'); params.append(1 if data.get('is_training_shift') else 0)
+        updates.append('is_training_shift=%s'); params.append(1 if data.get('is_training_shift') else 0)
         detail_parts.append(f"training_shift={1 if data.get('is_training_shift') else 0}")
     if 'scheduled_crew_member_id' in data:
         cmid = data.get('scheduled_crew_member_id')
         cmid = int(cmid) if cmid else None
-        updates.append('scheduled_crew_member_id=?'); params.append(cmid)
-        updates.append('scheduled_by=?'); params.append(session['user_id'])
+        updates.append('scheduled_crew_member_id=%s'); params.append(cmid)
+        updates.append('scheduled_by=%s'); params.append(session['user_id'])
         updates.append('scheduled_at=CURRENT_TIMESTAMP')
         detail_parts.append(f'crew={cmid}')
 
@@ -15860,21 +15774,21 @@ def api_overhead_request_update(rid):
                 SELECT prl.id, prl.hourly_rate
                 FROM crew_members cm
                 LEFT JOIN pay_rate_levels prl ON prl.id = cm.rate_level_id
-                WHERE cm.id=?
+                WHERE cm.id=%s
             """, (cmid,)).fetchone()
             if level:
-                updates.append('pay_rate_snapshot=?');           params.append(level['hourly_rate'])
-                updates.append('pay_rate_level_id_snapshot=?');  params.append(level['id'])
+                updates.append('pay_rate_snapshot=%s');           params.append(level['hourly_rate'])
+                updates.append('pay_rate_level_id_snapshot=%s');  params.append(level['id'])
         else:
-            updates.append('pay_rate_snapshot=?');          params.append(None)
-            updates.append('pay_rate_level_id_snapshot=?'); params.append(None)
+            updates.append('pay_rate_snapshot=%s');          params.append(None)
+            updates.append('pay_rate_level_id_snapshot=%s'); params.append(None)
 
     if not updates:
         db.close()
         return jsonify({'success': False, 'error': 'No changes.'}), 400
 
     params.append(rid)
-    db.execute(f"UPDATE overhead_labor_requests SET {', '.join(updates)} WHERE id=?", params)
+    db.execute(f"UPDATE overhead_labor_requests SET {', '.join(updates)} WHERE id=%s", params)
     log_audit(db, 'OVERHEAD_REQUEST_EDIT', 'overhead_labor_request', rid,
               detail='; '.join(detail_parts))
     db.commit()
@@ -15892,11 +15806,11 @@ def api_overhead_request_delete(rid):
     block = _overhead_write_check()
     if block: return block
     db = get_db()
-    row = db.execute('SELECT id FROM overhead_labor_requests WHERE id=?', (rid,)).fetchone()
+    row = db.execute('SELECT id FROM overhead_labor_requests WHERE id=%s', (rid,)).fetchone()
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
-    db.execute('DELETE FROM overhead_labor_requests WHERE id=?', (rid,))
+    db.execute('DELETE FROM overhead_labor_requests WHERE id=%s', (rid,))
     log_audit(db, 'OVERHEAD_REQUEST_DELETE', 'overhead_labor_request', rid)
     db.commit()
     db.close()
@@ -15944,7 +15858,7 @@ def _prune_template_requests(db, tid, *, today=None):
     today = today or date.today()
     t = db.execute(
         'SELECT id, start_date, end_date, days_of_week, is_active '
-        'FROM overhead_labor_templates WHERE id=?',
+        'FROM overhead_labor_templates WHERE id=%s',
         (tid,),
     ).fetchone()
     if not t:
@@ -15960,7 +15874,7 @@ def _prune_template_requests(db, tid, *, today=None):
     # the generator (Python weekday Mon=0..Sun=6 → JS getDay Sun=0..Sat=6).
     rows = db.execute(
         'SELECT id, work_date FROM overhead_labor_requests '
-        'WHERE template_id=? AND work_date >= ?',
+        'WHERE template_id=%s AND work_date >= %s',
         (tid, today.isoformat()),
     ).fetchall()
     to_delete = []
@@ -15983,7 +15897,7 @@ def _prune_template_requests(db, tid, *, today=None):
     if not to_delete:
         return 0
 
-    placeholders = ','.join(['?'] * len(to_delete))
+    placeholders = ','.join(['%s'] * len(to_delete))
     db.execute(
         f'DELETE FROM overhead_labor_requests WHERE id IN ({placeholders})',
         to_delete,
@@ -16034,16 +15948,16 @@ def api_overhead_templates_add():
     db = get_db()
     cols = list(payload.keys()) + ['sort_order']
     vals = list(payload.values()) + [_max_sort_order(db, 'overhead_labor_templates')]
-    placeholders = ','.join(['?'] * len(cols))
+    placeholders = ','.join(['%s'] * len(cols))
     cur = db.execute(
-        f"INSERT INTO overhead_labor_templates ({','.join(cols)}) VALUES ({placeholders})",
+        f"INSERT INTO overhead_labor_templates ({','.join(cols)}) VALUES ({placeholders}) RETURNING id",
         vals,
     )
-    tid = cur.lastrowid
+    tid = cur.fetchone()['id']
     log_audit(db, 'OVERHEAD_TEMPLATE_ADD', 'overhead_labor_template', tid,
               detail=payload['name'])
     db.commit()
-    row = db.execute(_OVERHEAD_TEMPLATE_JOIN_SELECT + ' WHERE t.id=?', (tid,)).fetchone()
+    row = db.execute(_OVERHEAD_TEMPLATE_JOIN_SELECT + ' WHERE t.id=%s', (tid,)).fetchone()
     db.close()
     _overhead_log('OVERHEAD_TEMPLATE_ADD', id=tid, name=payload['name'])
     return jsonify({'success': True, 'template': _template_row_to_dict(row) if row else {'id': tid}})
@@ -16059,13 +15973,13 @@ def api_overhead_templates_update(tid):
     if not payload['name']:
         return jsonify({'success': False, 'error': 'Template name is required.'}), 400
     db = get_db()
-    row = db.execute('SELECT id FROM overhead_labor_templates WHERE id=?', (tid,)).fetchone()
+    row = db.execute('SELECT id FROM overhead_labor_templates WHERE id=%s', (tid,)).fetchone()
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
-    set_clause = ', '.join(f'{k}=?' for k in payload.keys())
+    set_clause = ', '.join(f'{k}=%s' for k in payload.keys())
     db.execute(
-        f'UPDATE overhead_labor_templates SET {set_clause} WHERE id=?',
+        f'UPDATE overhead_labor_templates SET {set_clause} WHERE id=%s',
         list(payload.values()) + [tid],
     )
     # Sync future requests with the (possibly narrowed) template — drops any
@@ -16075,7 +15989,7 @@ def api_overhead_templates_update(tid):
     log_audit(db, 'OVERHEAD_TEMPLATE_EDIT', 'overhead_labor_template', tid,
               detail=f"{payload['name']} (pruned={pruned})" if pruned else payload['name'])
     db.commit()
-    refreshed = db.execute(_OVERHEAD_TEMPLATE_JOIN_SELECT + ' WHERE t.id=?', (tid,)).fetchone()
+    refreshed = db.execute(_OVERHEAD_TEMPLATE_JOIN_SELECT + ' WHERE t.id=%s', (tid,)).fetchone()
     db.close()
     _overhead_log('OVERHEAD_TEMPLATE_EDIT', id=tid, name=payload['name'], pruned=pruned)
     return jsonify({
@@ -16091,11 +16005,11 @@ def api_overhead_templates_delete(tid):
     block = _overhead_write_check()
     if block: return block
     db = get_db()
-    row = db.execute('SELECT * FROM overhead_labor_templates WHERE id=?', (tid,)).fetchone()
+    row = db.execute('SELECT * FROM overhead_labor_templates WHERE id=%s', (tid,)).fetchone()
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
-    db.execute('DELETE FROM overhead_labor_templates WHERE id=?', (tid,))
+    db.execute('DELETE FROM overhead_labor_templates WHERE id=%s', (tid,))
     log_audit(db, 'OVERHEAD_TEMPLATE_DELETE', 'overhead_labor_template', tid,
               detail=row['name'])
     db.commit()
@@ -16129,7 +16043,7 @@ def api_overhead_templates_generate():
     sql = "SELECT * FROM overhead_labor_templates WHERE is_active=1"
     params = []
     if only_id:
-        sql += " AND id=?"
+        sql += " AND id=%s"
         params.append(int(only_id))
     templates = db.execute(sql, params).fetchall()
 
@@ -16171,7 +16085,7 @@ def api_overhead_templates_generate():
             pos_pred  = 'position_id IS NULL'
             pos_param = []
         else:
-            pos_pred  = 'position_id = ?'
+            pos_pred  = 'position_id = %s'
             pos_param = [pos_id]
 
         cur_date = df
@@ -16188,7 +16102,7 @@ def api_overhead_templates_generate():
 
                 # Find or create the target group (same date + group name).
                 grp = db.execute(
-                    "SELECT id FROM overhead_labor_groups WHERE work_date=? AND name=? LIMIT 1",
+                    "SELECT id FROM overhead_labor_groups WHERE work_date=%s AND name=%s LIMIT 1",
                     (iso, gname),
                 ).fetchone()
                 if not grp:
@@ -16196,17 +16110,17 @@ def api_overhead_templates_generate():
                         INSERT INTO overhead_labor_groups
                             (work_date, project_id, name, contact_name, contact_email,
                              contact_phone, project_notes, sort_order, created_by)
-                        VALUES (?,?,?,?,?,?,?,?,?)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
                     """, (
                         iso, project_id, gname,
                         t['default_contact_name'] or '',
                         t['default_contact_email'] or '',
                         t['default_contact_phone'] or '',
                         t['default_project_notes'] or '',
-                        _max_sort_order(db, 'overhead_labor_groups', 'work_date=?', (iso,)),
+                        _max_sort_order(db, 'overhead_labor_groups', 'work_date=%s', (iso,)),
                         session.get('user_id'),
                     ))
-                    gid = cur_g.lastrowid
+                    gid = cur_g.fetchone()['id']
                     groups_created += 1
                 else:
                     gid = grp['id']
@@ -16215,7 +16129,7 @@ def api_overhead_templates_generate():
                 # additional ones. Matching = same position + in/out within this group.
                 existing = db.execute(
                     f"""SELECT COUNT(*) FROM overhead_labor_requests
-                        WHERE group_id=? AND {pos_pred} AND in_time=? AND out_time=?""",
+                        WHERE group_id=%s AND {pos_pred} AND in_time=%s AND out_time=%s""",
                     [gid] + pos_param + [t['in_time'] or '', t['out_time'] or ''],
                 ).fetchone()[0] or 0
                 qty = max(1, int(t['quantity'] or 1))
@@ -16223,7 +16137,7 @@ def api_overhead_templates_generate():
                 if to_insert == 0:
                     skipped += 1
                 else:
-                    next_sort = _max_sort_order(db, 'overhead_labor_requests', 'group_id=?', (gid,))
+                    next_sort = _max_sort_order(db, 'overhead_labor_requests', 'group_id=%s', (gid,))
                     for i in range(to_insert):
                         _t_dict = dict(t)
                         db.execute("""
@@ -16232,7 +16146,7 @@ def api_overhead_templates_generate():
                                  in_time, out_time,
                                  break_start, break_end, break2_start, break2_end,
                                  requested_name, sort_order, created_by)
-                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         """, (
                             gid, _t_dict['id'], iso, _t_dict['position_id'],
                             _t_dict.get('in_time') or '', _t_dict.get('out_time') or '',
@@ -16247,7 +16161,7 @@ def api_overhead_templates_generate():
         # Bump last_generated_through if we extended coverage
         if last_generated is None or dt > last_generated:
             db.execute(
-                'UPDATE overhead_labor_templates SET last_generated_through=? WHERE id=?',
+                'UPDATE overhead_labor_templates SET last_generated_through=%s WHERE id=%s',
                 (dt.isoformat(), t['id'])
             )
 
@@ -16360,9 +16274,9 @@ def add_pay_rate_level():
     max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM pay_rate_levels').fetchone()[0]
     cur = db.execute(
         'INSERT INTO pay_rate_levels (name, hourly_rate, include_in_estimate, sort_order) '
-        'VALUES (?,?,?,?)',
+        'VALUES (%s,%s,%s,%s) RETURNING id',
         (name, rate, include_est, max_order + 10))
-    lid = cur.lastrowid
+    lid = cur.fetchone()['id']
     log_audit_change(db, 'PAY_LEVEL_ADD', 'pay_rate_level', lid,
                      detail=f'{name} ${rate}/hr', table='pay_rate_levels')
     db.commit(); db.close()
@@ -16381,7 +16295,7 @@ def edit_pay_rate_level(lid):
         return jsonify({'success': False, 'error': 'Name is required.'}), 400
     db = get_db()
     before = _snapshot_row(db, 'pay_rate_levels', lid)
-    db.execute('UPDATE pay_rate_levels SET name=?, hourly_rate=? WHERE id=?', (name, rate, lid))
+    db.execute('UPDATE pay_rate_levels SET name=%s, hourly_rate=%s WHERE id=%s', (name, rate, lid))
     after = _snapshot_row(db, 'pay_rate_levels', lid)
     log_audit(db, 'PAY_LEVEL_EDIT', 'pay_rate_level', lid, detail=f'{name} ${rate}/hr',
               before=before, after=after)
@@ -16395,7 +16309,7 @@ def edit_pay_rate_level(lid):
 def delete_pay_rate_level(lid):
     db = get_db()
     before = _snapshot_row(db, 'pay_rate_levels', lid)
-    db.execute('DELETE FROM pay_rate_levels WHERE id=?', (lid,))
+    db.execute('DELETE FROM pay_rate_levels WHERE id=%s', (lid,))
     log_audit(db, 'PAY_LEVEL_DELETE', 'pay_rate_level', lid, before=before)
     db.commit(); db.close()
     syslog_logger.info(f"PAY_LEVEL_DELETE id={lid} by={session.get('username')}")
@@ -16412,7 +16326,7 @@ def toggle_pay_rate_level_estimate(lid):
     include_est = 1 if data.get('include_in_estimate') else 0
     db = get_db()
     before = _snapshot_row(db, 'pay_rate_levels', lid)
-    db.execute('UPDATE pay_rate_levels SET include_in_estimate=? WHERE id=?', (include_est, lid))
+    db.execute('UPDATE pay_rate_levels SET include_in_estimate=%s WHERE id=%s', (include_est, lid))
     after = _snapshot_row(db, 'pay_rate_levels', lid)
     log_audit(db, 'PAY_LEVEL_EDIT', 'pay_rate_level', lid,
               detail=f"include_in_estimate={include_est}", before=before, after=after)
@@ -16461,15 +16375,15 @@ def add_crew_member():
     db = get_db()
     max_order = db.execute('SELECT MAX(sort_order) FROM crew_members').fetchone()[0] or 0
     cur = db.execute(
-        'INSERT INTO crew_members (name, rate_level_id, sort_order) VALUES (?, ?, ?)',
+        'INSERT INTO crew_members (name, rate_level_id, sort_order) VALUES (%s, %s, %s) RETURNING id',
         (name, rate_level_id, max_order + 10)
     )
-    mid = cur.lastrowid
+    mid = cur.fetchone()['id']
     log_audit_change(db, 'CREW_MEMBER_ADD', 'crew_member', mid, detail=name,
                      table='crew_members')
     db.commit()
     level_row = db.execute(
-        'SELECT name, hourly_rate FROM pay_rate_levels WHERE id=?', (rate_level_id,)
+        'SELECT name, hourly_rate FROM pay_rate_levels WHERE id=%s', (rate_level_id,)
     ).fetchone() if rate_level_id else None
     db.close()
     syslog_logger.info(f"TECHNICIAN_ADD id={mid} name={name!r} by={session.get('username')}")
@@ -16491,13 +16405,13 @@ def edit_crew_member(mid):
     db = get_db()
     rate_level_id = data.get('rate_level_id') or None
     before = _snapshot_row(db, 'crew_members', mid)
-    db.execute('UPDATE crew_members SET name=?, rate_level_id=? WHERE id=?', (name, rate_level_id, mid))
+    db.execute('UPDATE crew_members SET name=%s, rate_level_id=%s WHERE id=%s', (name, rate_level_id, mid))
     after = _snapshot_row(db, 'crew_members', mid)
     log_audit(db, 'CREW_MEMBER_EDIT', 'crew_member', mid, detail=name,
               before=before, after=after)
     db.commit()
     level_row = db.execute(
-        'SELECT name, hourly_rate FROM pay_rate_levels WHERE id=?', (rate_level_id,)
+        'SELECT name, hourly_rate FROM pay_rate_levels WHERE id=%s', (rate_level_id,)
     ).fetchone() if rate_level_id else None
     db.close()
     syslog_logger.info(f"TECHNICIAN_EDIT id={mid} name={name!r} by={session.get('username')}")
@@ -16513,7 +16427,7 @@ def edit_crew_member(mid):
 def delete_crew_member(mid):
     db = get_db()
     before = _snapshot_row(db, 'crew_members', mid)
-    db.execute('DELETE FROM crew_members WHERE id=?', (mid,))
+    db.execute('DELETE FROM crew_members WHERE id=%s', (mid,))
     log_audit(db, 'CREW_MEMBER_DELETE', 'crew_member', mid, before=before)
     db.commit()
     db.close()
@@ -16528,7 +16442,7 @@ def reorder_crew_members():
     member_ids = data.get('member_ids', [])
     db = get_db()
     for i, mid in enumerate(member_ids):
-        db.execute('UPDATE crew_members SET sort_order=? WHERE id=?', (i * 10, mid))
+        db.execute('UPDATE crew_members SET sort_order=%s WHERE id=%s', (i * 10, mid))
     db.commit()
     db.close()
     return jsonify({'success': True})
@@ -16560,7 +16474,7 @@ def toggle_crew_qualification():
     db = get_db()
     # Any position can be marked in-training (status 1) now — no coercion.
     existing = db.execute(
-        'SELECT COALESCE(status, 2) AS status FROM crew_qualifications WHERE crew_member_id=? AND position_id=?',
+        'SELECT COALESCE(status, 2) AS status FROM crew_qualifications WHERE crew_member_id=%s AND position_id=%s',
         (crew_member_id, position_id)
     ).fetchone()
     if not explicit:
@@ -16568,17 +16482,17 @@ def toggle_crew_qualification():
         status = 0 if existing else 2
     if status == 0:
         db.execute(
-            'DELETE FROM crew_qualifications WHERE crew_member_id=? AND position_id=?',
+            'DELETE FROM crew_qualifications WHERE crew_member_id=%s AND position_id=%s',
             (crew_member_id, position_id)
         )
     elif existing:
         db.execute(
-            'UPDATE crew_qualifications SET status=? WHERE crew_member_id=? AND position_id=?',
+            'UPDATE crew_qualifications SET status=%s WHERE crew_member_id=%s AND position_id=%s',
             (status, crew_member_id, position_id)
         )
     else:
         db.execute(
-            'INSERT INTO crew_qualifications (crew_member_id, position_id, status) VALUES (?, ?, ?)',
+            'INSERT INTO crew_qualifications (crew_member_id, position_id, status) VALUES (%s, %s, %s)',
             (crew_member_id, position_id, status)
         )
     if status == 0:
@@ -16603,11 +16517,11 @@ def save_crew_training_notes(mid):
     data = request.get_json(force=True) or {}
     notes = (data.get('training_notes') or '').strip()
     db = get_db()
-    exists = db.execute('SELECT 1 FROM crew_members WHERE id=?', (mid,)).fetchone()
+    exists = db.execute('SELECT 1 FROM crew_members WHERE id=%s', (mid,)).fetchone()
     if not exists:
         db.close()
         return jsonify({'success': False, 'error': 'Crew member not found.'}), 404
-    db.execute('UPDATE crew_members SET training_notes=? WHERE id=?', (notes, mid))
+    db.execute('UPDATE crew_members SET training_notes=%s WHERE id=%s', (notes, mid))
     log_audit(db, 'CREW_TRAINING_NOTES_EDIT', 'crew_member', mid,
               detail=f'len={len(notes)}')
     db.commit()
@@ -16629,10 +16543,10 @@ def add_labor_billable_item():
     db = get_db()
     max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM labor_billable_items').fetchone()[0]
     cur = db.execute(
-        'INSERT INTO labor_billable_items (name, cost_per_crew, sort_order) VALUES (?,?,?)',
+        'INSERT INTO labor_billable_items (name, cost_per_crew, sort_order) VALUES (%s,%s,%s) RETURNING id',
         (name, cost, max_order + 10)
     )
-    bid = cur.lastrowid
+    bid = cur.fetchone()['id']
     log_audit_change(db, 'LABOR_BILLABLE_ADD', 'labor_billable_item', bid,
                      detail=f'{name} ${cost}/crew', table='labor_billable_items')
     db.commit(); db.close()
@@ -16650,7 +16564,7 @@ def edit_labor_billable_item(bid):
         return jsonify({'success': False, 'error': 'Name is required.'}), 400
     db = get_db()
     before = _snapshot_row(db, 'labor_billable_items', bid)
-    db.execute('UPDATE labor_billable_items SET name=?, cost_per_crew=? WHERE id=?',
+    db.execute('UPDATE labor_billable_items SET name=%s, cost_per_crew=%s WHERE id=%s',
                (name, cost, bid))
     after = _snapshot_row(db, 'labor_billable_items', bid)
     log_audit(db, 'LABOR_BILLABLE_EDIT', 'labor_billable_item', bid,
@@ -16665,7 +16579,7 @@ def edit_labor_billable_item(bid):
 def delete_labor_billable_item(bid):
     db = get_db()
     before = _snapshot_row(db, 'labor_billable_items', bid)
-    db.execute('DELETE FROM labor_billable_items WHERE id=?', (bid,))
+    db.execute('DELETE FROM labor_billable_items WHERE id=%s', (bid,))
     log_audit(db, 'LABOR_BILLABLE_DELETE', 'labor_billable_item', bid, before=before)
     db.commit(); db.close()
     syslog_logger.info(f"LABOR_BILLABLE_DELETE id={bid} by={session.get('username')}")
@@ -16693,9 +16607,9 @@ def warehouse_location_add():
     db = get_db()
     try:
         max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM warehouse_locations').fetchone()[0]
-        db.execute('INSERT INTO warehouse_locations (name, sort_order) VALUES (?,?)', (name, max_order + 1))
+        db.execute('INSERT INTO warehouse_locations (name, sort_order) VALUES (%s,%s)', (name, max_order + 1))
         db.commit()
-        row = db.execute('SELECT * FROM warehouse_locations WHERE name=?', (name,)).fetchone()
+        row = db.execute('SELECT * FROM warehouse_locations WHERE name=%s', (name,)).fetchone()
         log_audit_change(db, 'WAREHOUSE_LOC_ADD', 'warehouse_location', row['id'],
                          detail=name, table='warehouse_locations')
         db.commit()
@@ -16718,7 +16632,7 @@ def warehouse_location_edit(loc_id):
     db = get_db()
     try:
         before = _snapshot_row(db, 'warehouse_locations', loc_id)
-        db.execute('UPDATE warehouse_locations SET name=? WHERE id=?', (name, loc_id))
+        db.execute('UPDATE warehouse_locations SET name=%s WHERE id=%s', (name, loc_id))
         db.commit()
         after = _snapshot_row(db, 'warehouse_locations', loc_id)
         log_audit(db, 'WAREHOUSE_LOC_EDIT', 'warehouse_location', loc_id,
@@ -16736,8 +16650,8 @@ def warehouse_location_edit(loc_id):
 def warehouse_location_delete(loc_id):
     db = get_db()
     before = _snapshot_row(db, 'warehouse_locations', loc_id)
-    row = db.execute('SELECT name FROM warehouse_locations WHERE id=?', (loc_id,)).fetchone()
-    db.execute('DELETE FROM warehouse_locations WHERE id=?', (loc_id,))
+    row = db.execute('SELECT name FROM warehouse_locations WHERE id=%s', (loc_id,)).fetchone()
+    db.execute('DELETE FROM warehouse_locations WHERE id=%s', (loc_id,))
     db.commit()
     log_audit(db, 'WAREHOUSE_LOC_DELETE', 'warehouse_location', loc_id,
               detail=row['name'] if row else str(loc_id),
@@ -16767,9 +16681,9 @@ def asset_category_add():
         return jsonify({'error': 'Name required'}), 400
     db = get_db()
     max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM asset_categories').fetchone()[0]
-    db.execute('INSERT INTO asset_categories (name, sort_order) VALUES (?,?)', (name, max_order + 1))
+    _new_id = db.execute('INSERT INTO asset_categories (name, sort_order) VALUES (%s,%s) RETURNING id', (name, max_order + 1)).fetchone()['id']
     db.commit()
-    row = db.execute('SELECT * FROM asset_categories WHERE name=? ORDER BY id DESC LIMIT 1', (name,)).fetchone()
+    row = db.execute('SELECT * FROM asset_categories WHERE id=%s', (_new_id,)).fetchone()
     log_audit_change(db, 'ASSET_CATEGORY_ADD', 'asset_category', row['id'],
                      detail=name, table='asset_categories')
     db.commit()
@@ -16788,7 +16702,7 @@ def asset_category_edit(cat_id):
         return jsonify({'error': 'Name required'}), 400
     db = get_db()
     before = _snapshot_row(db, 'asset_categories', cat_id)
-    db.execute('UPDATE asset_categories SET name=? WHERE id=?', (name, cat_id))
+    db.execute('UPDATE asset_categories SET name=%s WHERE id=%s', (name, cat_id))
     db.commit()
     after = _snapshot_row(db, 'asset_categories', cat_id)
     log_audit(db, 'ASSET_CATEGORY_EDIT', 'asset_category', cat_id,
@@ -16804,14 +16718,14 @@ def asset_category_delete(cat_id):
     db = get_db()
     # Block deletion if any types (including retired) exist — preserves history
     type_count = db.execute(
-        'SELECT COUNT(*) FROM asset_types WHERE category_id=?', (cat_id,)
+        'SELECT COUNT(*) FROM asset_types WHERE category_id=%s', (cat_id,)
     ).fetchone()[0]
     if type_count > 0:
         db.close()
         return jsonify({'error': f'Cannot delete: this category still has {type_count} item type(s). Retire all types first.'}), 400
     before = _snapshot_row(db, 'asset_categories', cat_id)
-    row = db.execute('SELECT name FROM asset_categories WHERE id=?', (cat_id,)).fetchone()
-    db.execute('DELETE FROM asset_categories WHERE id=?', (cat_id,))
+    row = db.execute('SELECT name FROM asset_categories WHERE id=%s', (cat_id,)).fetchone()
+    db.execute('DELETE FROM asset_categories WHERE id=%s', (cat_id,))
     db.commit()
     log_audit(db, 'ASSET_CATEGORY_DELETE', 'asset_category', cat_id,
               detail=row['name'] if row else str(cat_id),
@@ -16911,15 +16825,15 @@ def asset_type_add():
     if not name or not category_id:
         return jsonify({'error': 'Name and category required'}), 400
     db = get_db()
-    max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM asset_types WHERE category_id=?',
+    max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM asset_types WHERE category_id=%s',
                            (category_id,)).fetchone()[0]
-    db.execute("""
+    _new_id = db.execute("""
         INSERT INTO asset_types
           (category_id, parent_type_id, name, manufacturer, model,
            storage_location, rental_cost, weekly_rate, reserve_count, is_consumable, track_quantity,
            supplier_name, supplier_contact, is_system, is_package, hide_from_pm,
            allow_unit_selection, sort_order)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (
         category_id,
         data.get('parent_type_id') or None,
@@ -16939,9 +16853,9 @@ def asset_type_add():
         1 if data.get('hide_from_pm') else 0,
         1 if data.get('allow_unit_selection') else 0,
         max_order + 1,
-    ))
+    )).fetchone()['id']
     db.commit()
-    row = db.execute('SELECT * FROM asset_types ORDER BY id DESC LIMIT 1').fetchone()
+    row = db.execute('SELECT * FROM asset_types WHERE id=%s', (_new_id,)).fetchone()
     log_audit(db, 'ASSET_TYPE_ADD', 'asset_type', row['id'], detail=name)
     db.commit()
     syslog_logger.info(f"ASSET_TYPE_ADD name={name} category_id={category_id} by={session.get('username')}")
@@ -16961,12 +16875,12 @@ def asset_type_edit(type_id):
     db = get_db()
     db.execute("""
         UPDATE asset_types SET
-          name=?, manufacturer=?, model=?, storage_location=?,
-          rental_cost=?, weekly_rate=?, reserve_count=?, is_consumable=?, track_quantity=?,
-          supplier_name=?, supplier_contact=?,
-          category_id=?, parent_type_id=?, is_system=?, is_package=?, hide_from_pm=?,
-          allow_unit_selection=?
-        WHERE id=?
+          name=%s, manufacturer=%s, model=%s, storage_location=%s,
+          rental_cost=%s, weekly_rate=%s, reserve_count=%s, is_consumable=%s, track_quantity=%s,
+          supplier_name=%s, supplier_contact=%s,
+          category_id=%s, parent_type_id=%s, is_system=%s, is_package=%s, hide_from_pm=%s,
+          allow_unit_selection=%s
+        WHERE id=%s
     """, (
         name,
         (data.get('manufacturer') or '').strip(),
@@ -17023,7 +16937,7 @@ def bulk_hide_from_pm():
             continue
         flag = 1 if u.get('hide_from_pm') else 0
         cur = db.execute(
-            'UPDATE asset_types SET hide_from_pm=? WHERE id=?',
+            'UPDATE asset_types SET hide_from_pm=%s WHERE id=%s',
             (flag, tid)
         )
         if cur.rowcount:
@@ -17044,13 +16958,13 @@ def bulk_hide_from_pm():
 def asset_type_delete(type_id):
     """Retire an asset type (soft delete) — history is preserved."""
     db = get_db()
-    row = db.execute('SELECT name FROM asset_types WHERE id=?', (type_id,)).fetchone()
+    row = db.execute('SELECT name FROM asset_types WHERE id=%s', (type_id,)).fetchone()
     db.execute("""
-        UPDATE asset_types SET is_retired=1, retired_at=CURRENT_TIMESTAMP WHERE id=?
+        UPDATE asset_types SET is_retired=1, retired_at=CURRENT_TIMESTAMP WHERE id=%s
     """, (type_id,))
     # Retire all active items under this type too
     db.execute("""
-        UPDATE asset_items SET status='retired' WHERE asset_type_id=? AND status='available'
+        UPDATE asset_items SET status='retired' WHERE asset_type_id=%s AND status='available'
     """, (type_id,))
     db.commit()
     log_audit(db, 'ASSET_TYPE_RETIRE', 'asset_type', type_id,
@@ -17074,15 +16988,15 @@ def asset_type_photo_upload(type_id):
         try:
             s3_key = f"asset-photos/{type_id}"
             s3_storage.upload_file(s3_key, data, mime)
-            db.execute('UPDATE asset_types SET photo=NULL, photo_s3_key=?, photo_mime=? WHERE id=?',
+            db.execute('UPDATE asset_types SET photo=NULL, photo_s3_key=%s, photo_mime=%s WHERE id=%s',
                        (s3_key, mime, type_id))
         except Exception as e:
             app.logger.warning(f"S3 upload failed for asset photo type_id={type_id}, falling back to DB: {e}")
             syslog_logger.warning(f"S3_UPLOAD_FAILED table=asset_types id={type_id} error={e}")
-            db.execute('UPDATE asset_types SET photo=?, photo_s3_key=NULL, photo_mime=? WHERE id=?',
+            db.execute('UPDATE asset_types SET photo=%s, photo_s3_key=NULL, photo_mime=%s WHERE id=%s',
                        (data, mime, type_id))
     else:
-        db.execute('UPDATE asset_types SET photo=?, photo_s3_key=NULL, photo_mime=? WHERE id=?',
+        db.execute('UPDATE asset_types SET photo=%s, photo_s3_key=NULL, photo_mime=%s WHERE id=%s',
                    (data, mime, type_id))
     db.commit()
     log_audit(db, 'ASSET_TYPE_PHOTO', 'asset_type', type_id)
@@ -17096,14 +17010,14 @@ def asset_type_photo_upload(type_id):
 @asset_manager_required
 def asset_type_photo_delete(type_id):
     db = get_db()
-    row = db.execute('SELECT photo_s3_key FROM asset_types WHERE id=?', (type_id,)).fetchone()
+    row = db.execute('SELECT photo_s3_key FROM asset_types WHERE id=%s', (type_id,)).fetchone()
     if row and row['photo_s3_key']:
         try:
             s3_storage.delete_file(row['photo_s3_key'])
         except Exception as e:
             app.logger.error(f"S3 delete failed for asset photo type_id={type_id}: {e}")
             syslog_logger.error(f"S3_DELETE_FAILED table=asset_types id={type_id} error={e}")
-    db.execute("UPDATE asset_types SET photo=NULL, photo_s3_key=NULL, photo_mime='' WHERE id=?", (type_id,))
+    db.execute("UPDATE asset_types SET photo=NULL, photo_s3_key=NULL, photo_mime='' WHERE id=%s", (type_id,))
     db.commit()
     db.close()
     return jsonify({'success': True})
@@ -17113,7 +17027,7 @@ def asset_type_photo_delete(type_id):
 @login_required
 def asset_type_photo(type_id):
     db = get_db()
-    row = db.execute('SELECT photo, photo_mime, photo_s3_key FROM asset_types WHERE id=?', (type_id,)).fetchone()
+    row = db.execute('SELECT photo, photo_mime, photo_s3_key FROM asset_types WHERE id=%s', (type_id,)).fetchone()
     db.close()
     if not row or (not row['photo_s3_key'] and not row['photo']):
         abort(404)
@@ -17142,7 +17056,7 @@ def asset_type_used_in(type_id):
         SELECT at.id, at.name, at.is_system, at.is_package
         FROM asset_type_system_members m
         JOIN asset_types at ON at.id = m.system_type_id
-        WHERE m.component_type_id = ?
+        WHERE m.component_type_id = %s
         ORDER BY at.name
     """, (type_id,)).fetchall()
     db.close()
@@ -17167,7 +17081,7 @@ def asset_type_members_list(type_id):
             FROM asset_type_system_members m
             JOIN asset_types at ON at.id = m.component_type_id
             JOIN asset_categories ac ON ac.id = at.category_id
-            WHERE m.system_type_id = ?
+            WHERE m.system_type_id = %s
             ORDER BY m.sort_order, at.name
         """, (type_id,)).fetchall()
     except Exception:
@@ -17180,7 +17094,7 @@ def asset_type_members_list(type_id):
             FROM asset_type_system_members m
             JOIN asset_types at ON at.id = m.component_type_id
             JOIN asset_categories ac ON ac.id = at.category_id
-            WHERE m.system_type_id = ?
+            WHERE m.system_type_id = %s
             ORDER BY m.sort_order, at.name
         """, (type_id,)).fetchall()
     db.close()
@@ -17205,7 +17119,7 @@ def asset_type_member_add(type_id):
     # inventory deduction to a SINGLE level of expansion (no nesting), which is
     # what _component_demand / _system_component_shortages assume.
     comp = db.execute(
-        'SELECT is_system, is_package FROM asset_types WHERE id=?', (component_id,)
+        'SELECT is_system, is_package FROM asset_types WHERE id=%s', (component_id,)
     ).fetchone()
     if not comp:
         db.close()
@@ -17215,8 +17129,9 @@ def asset_type_member_add(type_id):
         return jsonify({'error': 'A system/package cannot be added as a component of another system.'}), 400
     try:
         db.execute("""
-            INSERT OR IGNORE INTO asset_type_system_members (system_type_id, component_type_id, quantity)
-            VALUES (?, ?, ?)
+            INSERT INTO asset_type_system_members (system_type_id, component_type_id, quantity)
+            VALUES (%s, %s, %s)
+            ON CONFLICT DO NOTHING
         """, (type_id, component_id, quantity))
         db.commit()
     except Exception as e:
@@ -17235,7 +17150,7 @@ def asset_type_member_remove(type_id, component_id):
     db = get_db()
     db.execute("""
         DELETE FROM asset_type_system_members
-        WHERE system_type_id = ? AND component_type_id = ?
+        WHERE system_type_id = %s AND component_type_id = %s
     """, (type_id, component_id))
     db.commit()
     log_audit(db, 'ASSET_MEMBER_REMOVE', 'asset_type', type_id, detail=f'component={component_id}')
@@ -17257,8 +17172,8 @@ def asset_type_member_set_quantity(type_id, component_id):
         return jsonify({'error': 'Invalid quantity'}), 400
     db = get_db()
     cur = db.execute("""
-        UPDATE asset_type_system_members SET quantity=?
-        WHERE system_type_id=? AND component_type_id=?
+        UPDATE asset_type_system_members SET quantity=%s
+        WHERE system_type_id=%s AND component_type_id=%s
     """, (quantity, type_id, component_id))
     if not cur.rowcount:
         db.close()
@@ -17287,7 +17202,7 @@ def asset_items_list(type_id):
                am.id as maint_id
         FROM asset_items ai
         LEFT JOIN asset_maintenance am ON am.asset_item_id = ai.id AND am.status = 'in_progress'
-        WHERE ai.asset_type_id = ? {status_filter}
+        WHERE ai.asset_type_id = %s {status_filter}
         ORDER BY ai.status, ai.sort_order, ai.id
     """, (type_id,)).fetchall()
     db.close()
@@ -17301,15 +17216,15 @@ def asset_item_add(type_id):
     count = int(data.get('count') or 1)
     barcode = (data.get('barcode') or '').strip()
     db = get_db()
-    max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM asset_items WHERE asset_type_id=?',
+    max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM asset_items WHERE asset_type_id=%s',
                            (type_id,)).fetchone()[0]
     added_ids = []
     for i in range(count):
         bc = barcode if count == 1 else ''
-        db.execute('INSERT INTO asset_items (asset_type_id, barcode, status, sort_order) VALUES (?,?,?,?)',
-                   (type_id, bc, 'available', max_order + i + 1))
+        _new_id = db.execute('INSERT INTO asset_items (asset_type_id, barcode, status, sort_order) VALUES (%s,%s,%s,%s) RETURNING id',
+                   (type_id, bc, 'available', max_order + i + 1)).fetchone()['id']
         db.commit()
-        row = db.execute('SELECT * FROM asset_items ORDER BY id DESC LIMIT 1').fetchone()
+        row = db.execute('SELECT * FROM asset_items WHERE id=%s', (_new_id,)).fetchone()
         added_ids.append(row['id'])
     log_audit(db, 'ASSET_ITEM_ADD', 'asset_item', type_id, detail=f'count={count}')
     db.commit()
@@ -17335,10 +17250,10 @@ def asset_item_edit(item_id):
         condition = 'good'
     db.execute("""
         UPDATE asset_items SET
-          barcode=?, condition=?, year_purchased=?, purchase_value=?,
-          depreciation_years=?, warranty_expires=?,
-          depreciation_start_date=?, replacement_cost=?, is_container=?
-        WHERE id=?
+          barcode=%s, condition=%s, year_purchased=%s, purchase_value=%s,
+          depreciation_years=%s, warranty_expires=%s,
+          depreciation_start_date=%s, replacement_cost=%s, is_container=%s
+        WHERE id=%s
     """, (
         (data.get('barcode') or '').strip(),
         condition,
@@ -17367,7 +17282,7 @@ def asset_item_contents(item_id):
         SELECT ai.*, at.name as type_name
         FROM asset_items ai
         JOIN asset_types at ON at.id = ai.asset_type_id
-        WHERE ai.container_item_id = ?
+        WHERE ai.container_item_id = %s
         ORDER BY at.name, ai.barcode
     """, (item_id,)).fetchall()
     db.close()
@@ -17385,7 +17300,7 @@ def asset_item_set_container(item_id):
     if container_item_id and int(container_item_id) == item_id:
         db.close()
         return jsonify({'error': 'An item cannot contain itself'}), 400
-    db.execute('UPDATE asset_items SET container_item_id=? WHERE id=?', (container_item_id, item_id))
+    db.execute('UPDATE asset_items SET container_item_id=%s WHERE id=%s', (container_item_id, item_id))
     db.commit()
     log_audit(db, 'ASSET_ITEM_CONTAINER', 'asset_item', item_id,
               detail=f'container_item_id={container_item_id}')
@@ -17402,7 +17317,7 @@ def asset_item_logs_list(item_id):
         SELECT al.*, u.display_name as author_name
         FROM asset_logs al
         LEFT JOIN users u ON u.id = al.user_id
-        WHERE al.asset_item_id = ?
+        WHERE al.asset_item_id = %s
         ORDER BY al.log_date DESC, al.created_at DESC
     """, (item_id,)).fetchall()
     db.close()
@@ -17427,16 +17342,17 @@ def asset_item_log_add(item_id):
     elif not _re.match(r'^\d{4}-\d{2}-\d{2}$', log_date):
         return jsonify({'error': 'Invalid log_date format; use YYYY-MM-DD'}), 400
     db = get_db()
-    db.execute("""
+    new_log_id = db.execute("""
         INSERT INTO asset_logs (asset_item_id, user_id, log_date, log_type, body)
-        VALUES (?,?,?,?,?)
-    """, (item_id, session['user_id'], log_date, log_type, body))
+        VALUES (%s,%s,%s,%s,%s)
+        RETURNING id
+    """, (item_id, session['user_id'], log_date, log_type, body)).fetchone()['id']
     db.commit()
     row = db.execute("""
         SELECT al.*, u.display_name as author_name
         FROM asset_logs al LEFT JOIN users u ON u.id = al.user_id
-        WHERE al.id = last_insert_rowid()
-    """).fetchone()
+        WHERE al.id = %s
+    """, (new_log_id,)).fetchone()
     db.close()
     syslog_logger.info(f"ASSET_LOG_ADD item_id={item_id} log_type={log_type} by={session.get('username')}")
     return jsonify(dict(row)), 201
@@ -17446,7 +17362,7 @@ def asset_item_log_add(item_id):
 @asset_manager_required
 def asset_log_delete(log_id):
     db = get_db()
-    db.execute('DELETE FROM asset_logs WHERE id=?', (log_id,))
+    db.execute('DELETE FROM asset_logs WHERE id=%s', (log_id,))
     db.commit()
     db.close()
     syslog_logger.info(f"ASSET_LOG_DELETE log_id={log_id} by={session.get('username')}")
@@ -17458,7 +17374,7 @@ def asset_log_delete(log_id):
 def asset_item_delete(item_id):
     """Retire an asset item (soft delete) — history is preserved."""
     db = get_db()
-    db.execute("UPDATE asset_items SET status='retired' WHERE id=?", (item_id,))
+    db.execute("UPDATE asset_items SET status='retired' WHERE id=%s", (item_id,))
     db.commit()
     log_audit(db, 'ASSET_ITEM_RETIRE', 'asset_item', item_id)
     db.commit()
@@ -17475,13 +17391,13 @@ def asset_item_maintenance_start(item_id):
     notes = (data.get('notes') or '').strip()
     db = get_db()
     # Close any open maintenance records first
-    db.execute("UPDATE asset_maintenance SET status='resolved', resolved_at=CURRENT_TIMESTAMP WHERE asset_item_id=? AND status='in_progress'",
+    db.execute("UPDATE asset_maintenance SET status='resolved', resolved_at=CURRENT_TIMESTAMP WHERE asset_item_id=%s AND status='in_progress'",
                (item_id,))
     db.execute("""
         INSERT INTO asset_maintenance (asset_item_id, removed_by, reason, notes, status)
-        VALUES (?,?,?,?,'in_progress')
+        VALUES (%s,%s,%s,%s,'in_progress')
     """, (item_id, session['user_id'], reason, notes))
-    db.execute("UPDATE asset_items SET status='maintenance' WHERE id=?", (item_id,))
+    db.execute("UPDATE asset_items SET status='maintenance' WHERE id=%s", (item_id,))
     db.commit()
     log_audit(db, 'ASSET_MAINT_START', 'asset_item', item_id, detail=reason)
     db.commit()
@@ -17498,10 +17414,10 @@ def asset_item_maintenance_resolve(item_id):
     db = get_db()
     db.execute("""
         UPDATE asset_maintenance
-        SET status='resolved', resolved_at=CURRENT_TIMESTAMP, notes=COALESCE(NULLIF(?,''), notes)
-        WHERE asset_item_id=? AND status='in_progress'
+        SET status='resolved', resolved_at=CURRENT_TIMESTAMP, notes=COALESCE(NULLIF(%s,''), notes)
+        WHERE asset_item_id=%s AND status='in_progress'
     """, (notes, item_id))
-    db.execute("UPDATE asset_items SET status='available' WHERE id=?", (item_id,))
+    db.execute("UPDATE asset_items SET status='available' WHERE id=%s", (item_id,))
     db.commit()
     log_audit(db, 'ASSET_MAINT_RESOLVE', 'asset_item', item_id)
     db.commit()
@@ -17548,7 +17464,7 @@ def _component_demand(db, type_id, start_date=None, end_date=None):
     date_filter = ''
     date_params = []
     if start_date and end_date:
-        date_filter = ' AND (sa.rental_end >= ? AND sa.rental_start <= ?)'
+        date_filter = ' AND (sa.rental_end >= %s AND sa.rental_start <= %s)'
         date_params = [start_date, end_date]
 
     # DIRECT demand — lines that book this type directly.
@@ -17559,7 +17475,7 @@ def _component_demand(db, type_id, start_date=None, end_date=None):
                s.name AS show_name
         FROM show_assets sa
         JOIN shows s ON s.id = sa.show_id
-        WHERE sa.asset_type_id = ? AND COALESCE(s.is_test, 0) = 0{date_filter}
+        WHERE sa.asset_type_id = %s AND COALESCE(s.is_test, 0) = 0{date_filter}
         ORDER BY sa.rental_start
     """, [type_id] + date_params).fetchall()
 
@@ -17582,7 +17498,7 @@ def _component_demand(db, type_id, start_date=None, end_date=None):
         JOIN show_assets sa  ON sa.asset_type_id = m.system_type_id
         JOIN asset_types sys ON sys.id = m.system_type_id
         JOIN shows s         ON s.id = sa.show_id
-        WHERE m.component_type_id = ? AND COALESCE(s.is_test, 0) = 0{date_filter}
+        WHERE m.component_type_id = %s AND COALESCE(s.is_test, 0) = 0{date_filter}
         ORDER BY sa.rental_start
     """, [type_id] + date_params).fetchall()
     for r in indirect:
@@ -17605,7 +17521,7 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
                       type has allow_unit_selection (one entry per asset_item)
       booked_item_ids — set of item ids already pinned to an overlapping show
     """
-    type_row = db.execute('SELECT * FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
+    type_row = db.execute('SELECT * FROM asset_types WHERE id=%s', (asset_type_id,)).fetchone()
     if not type_row:
         return None
 
@@ -17614,12 +17530,12 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
         return {'unlimited': True, 'kit': True}
 
     total_items = db.execute(
-        "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=? AND status != 'retired'",
+        "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status != 'retired'",
         (asset_type_id,)
     ).fetchone()[0]
 
     in_maintenance = db.execute(
-        "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=? AND status='maintenance'",
+        "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status='maintenance'",
         (asset_type_id,)
     ).fetchone()[0]
 
@@ -17654,7 +17570,7 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
         item_rows = db.execute("""
             SELECT id, barcode, status
             FROM asset_items
-            WHERE asset_type_id=? AND status != 'retired'
+            WHERE asset_type_id=%s AND status != 'retired'
             ORDER BY sort_order, id
         """, (asset_type_id,)).fetchall()
         # Map item_id → list of overlapping show bookings, so the UI can
@@ -17725,7 +17641,7 @@ def _system_component_shortages(db, system_type_id, system_qty, start_date, end_
                at.name AS component_name
         FROM asset_type_system_members m
         JOIN asset_types at ON at.id = m.component_type_id
-        WHERE m.system_type_id = ?
+        WHERE m.system_type_id = %s
     """, (system_type_id,)).fetchall()
 
     shortages = []
@@ -17819,11 +17735,11 @@ def _find_overbooked_types(db):
             continue
 
         total = db.execute(
-            "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=? AND status != 'retired'",
+            "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status != 'retired'",
             (t['id'],)
         ).fetchone()[0]
         in_maint = db.execute(
-            "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=? AND status='maintenance'",
+            "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status='maintenance'",
             (t['id'],)
         ).fetchone()[0]
         reserve = t['reserve_count'] or 0
@@ -17954,14 +17870,14 @@ def assets_availability_bulk():
     # by_type numbers above, which already skip test shows via _component_demand).
     where  = ["COALESCE(s.is_test, 0) = 0"]
     if accessible_ids is not None and len(accessible_ids) > 0:
-        placeholders = ','.join('?' * len(accessible_ids))
+        placeholders = ','.join(['%s'] * len(accessible_ids))
         where.append(f's.id IN ({placeholders})')
         params.extend(accessible_ids)
     elif accessible_ids is not None and len(accessible_ids) == 0:
         db.close()
         return jsonify({'by_type': by_type, 'by_show': []})
-    if date_from: where.append("COALESCE(s.show_date,'9999-12-31') >= ?"); params.append(date_from)
-    if date_to:   where.append("COALESCE(s.show_date,'0001-01-01') <= ?"); params.append(date_to)
+    if date_from: where.append("COALESCE(s.show_date,'9999-12-31') >= %s"); params.append(date_from)
+    if date_to:   where.append("COALESCE(s.show_date,'0001-01-01') <= %s"); params.append(date_to)
     where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
     shows_raw = db.execute(f"""
         SELECT s.id, s.name, s.show_date FROM shows s {where_sql}
@@ -17976,7 +17892,7 @@ def assets_availability_bulk():
             FROM show_assets sa
             JOIN asset_types at ON at.id = sa.asset_type_id
             JOIN asset_categories ac ON ac.id = at.category_id
-            WHERE sa.show_id = ? AND sa.is_hidden = 0
+            WHERE sa.show_id = %s AND sa.is_hidden = 0
             ORDER BY ac.name, at.name
         """, (sr['id'],)).fetchall()
         if assets:
@@ -18066,12 +17982,12 @@ def _compute_asset_snapshot_hash(db, show_id):
         SELECT asset_type_id, quantity, rental_start, rental_end,
                locked_price, is_hidden
         FROM show_assets
-        WHERE show_id = ?
+        WHERE show_id = %s
     """, (show_id,)).fetchall()
     externals = db.execute("""
         SELECT description, cost, pdf_filename
         FROM show_external_rentals
-        WHERE show_id = ?
+        WHERE show_id = %s
     """, (show_id,)).fetchall()
     asset_tuples = sorted(
         (
@@ -18123,7 +18039,7 @@ def _reset_asset_approval(db, show_id, reason):
     """
     row = db.execute(
         'SELECT s.assets_approved, s.assets_approval_snapshot, s.name '
-        'FROM shows s WHERE s.id=?', (show_id,)
+        'FROM shows s WHERE s.id=%s', (show_id,)
     ).fetchone()
     if not row:
         return
@@ -18137,7 +18053,7 @@ def _reset_asset_approval(db, show_id, reason):
         return
     if matches and not was_approved:
         db.execute(
-            'UPDATE shows SET assets_approved=1 WHERE id=?', (show_id,),
+            'UPDATE shows SET assets_approved=1 WHERE id=%s', (show_id,),
         )
         log_audit(db, 'ASSET_APPROVAL_RESTORED', 'show', show_id, show_id=show_id,
                   detail=f'reason={reason}')
@@ -18145,7 +18061,7 @@ def _reset_asset_approval(db, show_id, reason):
     if not was_approved:
         return
     db.execute(
-        'UPDATE shows SET assets_approved=0 WHERE id=?', (show_id,),
+        'UPDATE shows SET assets_approved=0 WHERE id=%s', (show_id,),
     )
     log_audit(db, 'ASSET_APPROVAL_RESET', 'show', show_id, show_id=show_id,
               detail=f'reason={reason}')
@@ -18176,13 +18092,13 @@ def _show_rental_window(db, show_id):
     not extend past (rentals are tied to the show's advance dates).
     Returns (start, end) as datetime.date, either may be None (undated show)."""
     show = db.execute(
-        'SELECT show_date, load_in_date, load_out_date FROM shows WHERE id=?',
+        'SELECT show_date, load_in_date, load_out_date FROM shows WHERE id=%s',
         (show_id,)).fetchone()
     if not show:
         return None, None
     perfs = db.execute(
         'SELECT MIN(perf_date) AS p0, MAX(perf_date) AS p1 '
-        'FROM show_performances WHERE show_id=? AND perf_date IS NOT NULL',
+        'FROM show_performances WHERE show_id=%s AND perf_date IS NOT NULL',
         (show_id,)).fetchone()
     start = _as_date(show['load_in_date']) or _as_date(perfs['p0']) or _as_date(show['show_date'])
     end = _as_date(show['load_out_date']) or _as_date(perfs['p1']) or _as_date(show['show_date'])
@@ -18232,14 +18148,14 @@ def show_assets_list(show_id):
         JOIN asset_types at ON at.id = sa.asset_type_id
         JOIN asset_categories ac ON ac.id = at.category_id
         LEFT JOIN asset_items ai ON ai.id = sa.asset_item_id
-        WHERE sa.show_id = ?
-          AND (? = 1 OR sa.is_hidden = 0)
+        WHERE sa.show_id = %s
+          AND (%s = 1 OR sa.is_hidden = 0)
         ORDER BY ac.name, at.name, sa.created_at
     """, (show_id, 1 if user_is_admin else 0)).fetchall()
 
     # External rentals
     ext_rows = db.execute("""
-        SELECT * FROM show_external_rentals WHERE show_id=? ORDER BY sort_order, id
+        SELECT * FROM show_external_rentals WHERE show_id=%s ORDER BY sort_order, id
     """, (show_id,)).fetchall()
 
     # Approval state
@@ -18247,7 +18163,7 @@ def show_assets_list(show_id):
         SELECT s.assets_approved, s.assets_approved_at,
                u.display_name AS approver_name, u.username AS approver_username
         FROM shows s LEFT JOIN users u ON u.id = s.assets_approved_by
-        WHERE s.id = ?
+        WHERE s.id = %s
     """, (show_id,)).fetchone()
     approval = {
         'approved': bool(appr['assets_approved']) if appr else False,
@@ -18308,9 +18224,9 @@ def show_asset_add(show_id):
     db = get_db()
 
     # Get show dates for rental period defaults
-    show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
+    show = db.execute('SELECT * FROM shows WHERE id=%s', (show_id,)).fetchone()
     perfs = db.execute(
-        'SELECT perf_date FROM show_performances WHERE show_id=? ORDER BY perf_date', (show_id,)
+        'SELECT perf_date FROM show_performances WHERE show_id=%s ORDER BY perf_date', (show_id,)
     ).fetchall()
     # Prefer load-in/out dates over first/last performance dates
     default_start = show['load_in_date'] or (perfs[0]['perf_date'] if perfs else show['show_date'])
@@ -18324,7 +18240,7 @@ def show_asset_add(show_id):
         db.close()
         return jsonify({'error': date_err}), 400
 
-    type_row = db.execute('SELECT rental_cost, weekly_rate, hide_from_pm, allow_unit_selection, is_system, is_package, is_consumable, name FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
+    type_row = db.execute('SELECT rental_cost, weekly_rate, hide_from_pm, allow_unit_selection, is_system, is_package, is_consumable, name FROM asset_types WHERE id=%s', (asset_type_id,)).fetchone()
 
     # If a specific unit was requested, validate it belongs to this type, is
     # bookable, and isn't already pinned to an overlapping show. Specific-unit
@@ -18334,7 +18250,7 @@ def show_asset_add(show_id):
             db.close()
             return jsonify({'error': 'This asset type does not allow specific unit selection.'}), 400
         item_row = db.execute(
-            'SELECT id, asset_type_id, status, barcode FROM asset_items WHERE id=?',
+            'SELECT id, asset_type_id, status, barcode FROM asset_items WHERE id=%s',
             (asset_item_id,)
         ).fetchone()
         if not item_row or item_row['asset_type_id'] != asset_type_id:
@@ -18350,8 +18266,8 @@ def show_asset_add(show_id):
             SELECT sa.id, s.name as show_name, sa.rental_start, sa.rental_end
             FROM show_assets sa
             JOIN shows s ON s.id = sa.show_id
-            WHERE sa.asset_item_id=?
-              AND sa.rental_end >= ? AND sa.rental_start <= ?
+            WHERE sa.asset_item_id=%s
+              AND sa.rental_end >= %s AND sa.rental_start <= %s
         """, (asset_item_id, rental_start, rental_end)).fetchone()
         if conflict:
             unit_label = item_row['barcode'] or f'#{asset_item_id}'
@@ -18396,7 +18312,7 @@ def show_asset_add(show_id):
         remaining = pre_avail.get('available')
         if remaining is not None and remaining - quantity < 0:
             type_name = db.execute(
-                'SELECT name FROM asset_types WHERE id=?', (asset_type_id,)
+                'SELECT name FROM asset_types WHERE id=%s', (asset_type_id,)
             ).fetchone()
             type_name = type_name['name'] if type_name else f'Type #{asset_type_id}'
             db.close()
@@ -18427,16 +18343,16 @@ def show_asset_add(show_id):
                 'shortages': shortages,
             }), 409
 
-    db.execute("""
+    _new_id = db.execute("""
         INSERT INTO show_assets
           (show_id, asset_type_id, asset_item_id, quantity, rental_start, rental_end,
            locked_price, original_locked_price, is_hidden, notes, added_by)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (show_id, asset_type_id, asset_item_id, quantity, rental_start, rental_end,
           locked_price, locked_price, is_hidden,
-          (data.get('notes') or '').strip(), session['user_id']))
+          (data.get('notes') or '').strip(), session['user_id'])).fetchone()['id']
     db.commit()
-    row = db.execute('SELECT * FROM show_assets ORDER BY id DESC LIMIT 1').fetchone()
+    row = db.execute('SELECT * FROM show_assets WHERE id=%s', (_new_id,)).fetchone()
 
     # Post-commit verification. The pre-check is best-effort; two simultaneous
     # writers (from different sessions) can both pass it and both insert. After
@@ -18446,9 +18362,9 @@ def show_asset_add(show_id):
     if (post_avail and not post_avail.get('unlimited')
             and post_avail.get('available') is not None
             and post_avail['available'] < 0):
-        db.execute('DELETE FROM show_assets WHERE id=?', (row['id'],))
+        db.execute('DELETE FROM show_assets WHERE id=%s', (row['id'],))
         db.commit()
-        type_name_row = db.execute('SELECT name FROM asset_types WHERE id=?', (asset_type_id,)).fetchone()
+        type_name_row = db.execute('SELECT name FROM asset_types WHERE id=%s', (asset_type_id,)).fetchone()
         type_name = type_name_row['name'] if type_name_row else f'Type #{asset_type_id}'
         # The negative count INCLUDES the row we just removed, so add it back
         # for an accurate "what's still available" message.
@@ -18473,7 +18389,7 @@ def show_asset_add(show_id):
             back_out_system_qty=quantity
         )
         if post_shortages:
-            db.execute('DELETE FROM show_assets WHERE id=?', (row['id'],))
+            db.execute('DELETE FROM show_assets WHERE id=%s', (row['id'],))
             db.commit()
             sys_name = type_row['name'] or f'System #{asset_type_id}'
             syslog_logger.warning(
@@ -18506,7 +18422,7 @@ def show_asset_edit(show_id, sa_id):
     data = request.get_json() or {}
     db = get_db()
     existing = db.execute(
-        'SELECT * FROM show_assets WHERE id=? AND show_id=?',
+        'SELECT * FROM show_assets WHERE id=%s AND show_id=%s',
         (sa_id, show_id),
     ).fetchone()
     if not existing:
@@ -18552,7 +18468,7 @@ def show_asset_edit(show_id, sa_id):
     if window_changed:
         rate_row = db.execute(
             'SELECT rental_cost, weekly_rate, is_consumable '
-            'FROM asset_types WHERE id=?', (existing['asset_type_id'],)).fetchone()
+            'FROM asset_types WHERE id=%s', (existing['asset_type_id'],)).fetchone()
         if rate_row:
             new_price = _compute_locked_price(
                 rate_row['rental_cost'], rate_row['weekly_rate'],
@@ -18570,12 +18486,12 @@ def show_asset_edit(show_id, sa_id):
             SELECT sa.id, s.name as show_name, sa.rental_start, sa.rental_end
             FROM show_assets sa
             JOIN shows s ON s.id = sa.show_id
-            WHERE sa.asset_item_id=? AND sa.id != ?
-              AND sa.rental_end >= ? AND sa.rental_start <= ?
+            WHERE sa.asset_item_id=%s AND sa.id != %s
+              AND sa.rental_end >= %s AND sa.rental_start <= %s
         """, (existing['asset_item_id'], sa_id, rental_start, rental_end)).fetchone()
         if conflict:
             unit_label = db.execute(
-                'SELECT barcode FROM asset_items WHERE id=?', (existing['asset_item_id'],)
+                'SELECT barcode FROM asset_items WHERE id=%s', (existing['asset_item_id'],)
             ).fetchone()
             unit_label = (unit_label['barcode'] if unit_label and unit_label['barcode']
                           else f"#{existing['asset_item_id']}")
@@ -18603,7 +18519,7 @@ def show_asset_edit(show_id, sa_id):
             remaining_excl_self = remaining + (existing['quantity'] if own_overlaps else 0)
             if remaining_excl_self - quantity < 0:
                 type_name_row = db.execute(
-                    'SELECT name FROM asset_types WHERE id=?', (existing['asset_type_id'],)
+                    'SELECT name FROM asset_types WHERE id=%s', (existing['asset_type_id'],)
                 ).fetchone()
                 type_name = type_name_row['name'] if type_name_row else f"Type #{existing['asset_type_id']}"
                 db.close()
@@ -18620,7 +18536,7 @@ def show_asset_edit(show_id, sa_id):
     # overlapped, so resizing isn't counted against itself — mirrors the
     # direct-asset self-backout above.
     edit_type = db.execute(
-        'SELECT is_system, is_package, name FROM asset_types WHERE id=?',
+        'SELECT is_system, is_package, name FROM asset_types WHERE id=%s',
         (existing['asset_type_id'],)
     ).fetchone()
     if edit_type and (edit_type['is_system'] or edit_type['is_package']):
@@ -18648,9 +18564,9 @@ def show_asset_edit(show_id, sa_id):
             }), 409
 
     db.execute("""
-        UPDATE show_assets SET quantity=?, rental_start=?, rental_end=?,
-               is_hidden=?, notes=?, locked_price=?, original_locked_price=?
-        WHERE id=? AND show_id=?
+        UPDATE show_assets SET quantity=%s, rental_start=%s, rental_end=%s,
+               is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s
+        WHERE id=%s AND show_id=%s
     """, (quantity, rental_start, rental_end, is_hidden, notes,
           locked_price, original_locked_price, sa_id, show_id))
     db.commit()
@@ -18663,16 +18579,16 @@ def show_asset_edit(show_id, sa_id):
             and post_avail.get('available') is not None
             and post_avail['available'] < 0):
         db.execute("""
-            UPDATE show_assets SET quantity=?, rental_start=?, rental_end=?,
-                   is_hidden=?, notes=?, locked_price=?, original_locked_price=?
-            WHERE id=? AND show_id=?
+            UPDATE show_assets SET quantity=%s, rental_start=%s, rental_end=%s,
+                   is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s
+            WHERE id=%s AND show_id=%s
         """, (existing['quantity'], existing['rental_start'], existing['rental_end'],
               existing['is_hidden'], existing['notes'],
               existing['locked_price'], existing['original_locked_price'],
               sa_id, show_id))
         db.commit()
         type_name_row = db.execute(
-            'SELECT name FROM asset_types WHERE id=?', (existing['asset_type_id'],)
+            'SELECT name FROM asset_types WHERE id=%s', (existing['asset_type_id'],)
         ).fetchone()
         type_name = type_name_row['name'] if type_name_row else f"Type #{existing['asset_type_id']}"
         # Compute headroom against the now-restored state.
@@ -18697,9 +18613,9 @@ def show_asset_edit(show_id, sa_id):
         )
         if post_shortages:
             db.execute("""
-                UPDATE show_assets SET quantity=?, rental_start=?, rental_end=?,
-                       is_hidden=?, notes=?, locked_price=?, original_locked_price=?
-                WHERE id=? AND show_id=?
+                UPDATE show_assets SET quantity=%s, rental_start=%s, rental_end=%s,
+                       is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s
+                WHERE id=%s AND show_id=%s
             """, (existing['quantity'], existing['rental_start'], existing['rental_end'],
                   existing['is_hidden'], existing['notes'],
                   existing['locked_price'], existing['original_locked_price'],
@@ -18738,11 +18654,11 @@ def show_asset_edit(show_id, sa_id):
 @show_advance_editor_required
 def show_asset_remove(show_id, sa_id):
     db = get_db()
-    row = db.execute('SELECT * FROM show_assets WHERE id=? AND show_id=?', (sa_id, show_id)).fetchone()
+    row = db.execute('SELECT * FROM show_assets WHERE id=%s AND show_id=%s', (sa_id, show_id)).fetchone()
     if not row:
         db.close()
         return jsonify({'error': 'Not found'}), 404
-    db.execute('DELETE FROM show_assets WHERE id=?', (sa_id,))
+    db.execute('DELETE FROM show_assets WHERE id=%s', (sa_id,))
     db.commit()
     log_audit(db, 'ASSET_REMOVED_FROM_SHOW', 'show_asset', sa_id, show_id=show_id,
               detail=f'type_id={row["asset_type_id"]}')
@@ -18761,7 +18677,7 @@ def show_asset_reset_price(show_id, sa_id):
     are intentionally NOT applied — they only affect new rentals."""
     db = get_db()
     row = db.execute(
-        'SELECT locked_price, original_locked_price FROM show_assets WHERE id=? AND show_id=?',
+        'SELECT locked_price, original_locked_price FROM show_assets WHERE id=%s AND show_id=%s',
         (sa_id, show_id)
     ).fetchone()
     if not row:
@@ -18776,7 +18692,7 @@ def show_asset_reset_price(show_id, sa_id):
     if abs(new_price - old_price) < 0.005:
         db.close()
         return jsonify({'success': True, 'old_price': old_price, 'new_price': new_price, 'changed': False})
-    db.execute('UPDATE show_assets SET locked_price=? WHERE id=?', (new_price, sa_id))
+    db.execute('UPDATE show_assets SET locked_price=%s WHERE id=%s', (new_price, sa_id))
     db.commit()
     log_audit(db, 'ASSET_PRICE_RESET', 'show_asset', sa_id, show_id=show_id,
               detail=f'old={old_price:.2f} new={new_price:.2f} (restored to original)')
@@ -18790,12 +18706,12 @@ def show_asset_reset_price(show_id, sa_id):
 @show_advance_editor_required
 def show_asset_toggle_hidden(show_id, sa_id):
     db = get_db()
-    row = db.execute('SELECT is_hidden FROM show_assets WHERE id=? AND show_id=?', (sa_id, show_id)).fetchone()
+    row = db.execute('SELECT is_hidden FROM show_assets WHERE id=%s AND show_id=%s', (sa_id, show_id)).fetchone()
     if not row:
         db.close()
         return jsonify({'error': 'Not found'}), 404
     new_val = 0 if row['is_hidden'] else 1
-    db.execute('UPDATE show_assets SET is_hidden=? WHERE id=?', (new_val, sa_id))
+    db.execute('UPDATE show_assets SET is_hidden=%s WHERE id=%s', (new_val, sa_id))
     db.commit()
     log_audit(db, 'ASSET_HIDE_TOGGLE', 'show_asset', sa_id, show_id=show_id,
               detail=f'hidden={new_val}')
@@ -18824,14 +18740,14 @@ def external_rental_add(show_id):
     if f:
         pdf_bytes = f.read()
         pdf_filename = secure_filename(f.filename)
-    max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM show_external_rentals WHERE show_id=?',
+    max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM show_external_rentals WHERE show_id=%s',
                            (show_id,)).fetchone()[0]
-    db.execute("""
+    _new_id = db.execute("""
         INSERT INTO show_external_rentals (show_id, description, cost, pdf_data, pdf_filename, sort_order)
-        VALUES (?,?,?,?,?,?)
-    """, (show_id, description, cost, None, pdf_filename, max_order + 1))
+        VALUES (%s,%s,%s,%s,%s,%s) RETURNING id
+    """, (show_id, description, cost, None, pdf_filename, max_order + 1)).fetchone()['id']
     db.commit()
-    row = db.execute('SELECT * FROM show_external_rentals ORDER BY id DESC LIMIT 1').fetchone()
+    row = db.execute('SELECT * FROM show_external_rentals WHERE id=%s', (_new_id,)).fetchone()
     er_id = row['id']
     # Upload PDF to S3 if provided
     if pdf_bytes:
@@ -18839,15 +18755,15 @@ def external_rental_add(show_id):
             try:
                 s3_key = f"external-rentals/{er_id}/{pdf_filename}"
                 s3_storage.upload_file(s3_key, pdf_bytes, 'application/pdf')
-                db.execute('UPDATE show_external_rentals SET s3_key=? WHERE id=?', (s3_key, er_id))
+                db.execute('UPDATE show_external_rentals SET s3_key=%s WHERE id=%s', (s3_key, er_id))
             except Exception as e:
                 app.logger.warning(f"S3 upload failed for external rental {er_id}, falling back to DB: {e}")
                 syslog_logger.warning(f"S3_UPLOAD_FAILED table=show_external_rentals id={er_id} show_id={show_id} error={e}")
-                db.execute('UPDATE show_external_rentals SET pdf_data=? WHERE id=?', (pdf_bytes, er_id))
+                db.execute('UPDATE show_external_rentals SET pdf_data=%s WHERE id=%s', (pdf_bytes, er_id))
         else:
-            db.execute('UPDATE show_external_rentals SET pdf_data=? WHERE id=?', (pdf_bytes, er_id))
+            db.execute('UPDATE show_external_rentals SET pdf_data=%s WHERE id=%s', (pdf_bytes, er_id))
         db.commit()
-        row = db.execute('SELECT * FROM show_external_rentals WHERE id=?', (er_id,)).fetchone()
+        row = db.execute('SELECT * FROM show_external_rentals WHERE id=%s', (er_id,)).fetchone()
     log_audit(db, 'EXTERNAL_RENTAL_ADD', 'show_external_rental', er_id, show_id=show_id,
               detail=description)
     _reset_asset_approval(db, show_id, 'external_rental_added')
@@ -18865,7 +18781,7 @@ def external_rental_update(show_id, er_id):
     replace the attached PDF. Sent as multipart/form-data so a new PDF can be
     uploaded; if no file is attached the existing PDF is preserved."""
     db = get_db()
-    row = db.execute('SELECT * FROM show_external_rentals WHERE id=? AND show_id=?',
+    row = db.execute('SELECT * FROM show_external_rentals WHERE id=%s AND show_id=%s',
                      (er_id, show_id)).fetchone()
     if not row:
         db.close()
@@ -18882,7 +18798,7 @@ def external_rental_update(show_id, er_id):
         return jsonify({'error': 'Invalid cost'}), 400
 
     db.execute(
-        'UPDATE show_external_rentals SET description=?, cost=? WHERE id=?',
+        'UPDATE show_external_rentals SET description=%s, cost=%s WHERE id=%s',
         (description, cost, er_id),
     )
 
@@ -18901,18 +18817,18 @@ def external_rental_update(show_id, er_id):
                 s3_key = f"external-rentals/{er_id}/{new_filename}"
                 s3_storage.upload_file(s3_key, new_bytes, 'application/pdf')
                 db.execute(
-                    'UPDATE show_external_rentals SET s3_key=?, pdf_filename=?, pdf_data=NULL WHERE id=?',
+                    'UPDATE show_external_rentals SET s3_key=%s, pdf_filename=%s, pdf_data=NULL WHERE id=%s',
                     (s3_key, new_filename, er_id),
                 )
             except Exception as e:
                 app.logger.warning(f"S3 upload failed for external rental {er_id}, falling back to DB: {e}")
                 db.execute(
-                    'UPDATE show_external_rentals SET pdf_data=?, pdf_filename=?, s3_key=NULL WHERE id=?',
+                    'UPDATE show_external_rentals SET pdf_data=%s, pdf_filename=%s, s3_key=NULL WHERE id=%s',
                     (new_bytes, new_filename, er_id),
                 )
         else:
             db.execute(
-                'UPDATE show_external_rentals SET pdf_data=?, pdf_filename=?, s3_key=NULL WHERE id=?',
+                'UPDATE show_external_rentals SET pdf_data=%s, pdf_filename=%s, s3_key=NULL WHERE id=%s',
                 (new_bytes, new_filename, er_id),
             )
 
@@ -18920,7 +18836,7 @@ def external_rental_update(show_id, er_id):
               detail=description)
     _reset_asset_approval(db, show_id, 'external_rental_updated')
     db.commit()
-    updated = db.execute('SELECT * FROM show_external_rentals WHERE id=?', (er_id,)).fetchone()
+    updated = db.execute('SELECT * FROM show_external_rentals WHERE id=%s', (er_id,)).fetchone()
     result = {k: v for k, v in dict(updated).items() if k not in ('pdf_data', 's3_key')}
     db.close()
     syslog_logger.info(
@@ -18934,7 +18850,7 @@ def external_rental_update(show_id, er_id):
 @show_advance_editor_required
 def external_rental_delete(show_id, er_id):
     db = get_db()
-    row = db.execute('SELECT s3_key FROM show_external_rentals WHERE id=? AND show_id=?',
+    row = db.execute('SELECT s3_key FROM show_external_rentals WHERE id=%s AND show_id=%s',
                      (er_id, show_id)).fetchone()
     if row and row['s3_key']:
         try:
@@ -18942,7 +18858,7 @@ def external_rental_delete(show_id, er_id):
         except Exception as e:
             app.logger.error(f"S3 delete failed for external rental {er_id}: {e}")
             syslog_logger.error(f"S3_DELETE_FAILED table=show_external_rentals id={er_id} show_id={show_id} error={e}")
-    db.execute('DELETE FROM show_external_rentals WHERE id=? AND show_id=?', (er_id, show_id))
+    db.execute('DELETE FROM show_external_rentals WHERE id=%s AND show_id=%s', (er_id, show_id))
     db.commit()
     log_audit(db, 'EXTERNAL_RENTAL_DELETE', 'show_external_rental', er_id, show_id=show_id)
     _reset_asset_approval(db, show_id, 'external_rental_removed')
@@ -18958,7 +18874,7 @@ def external_rental_pdf(show_id, er_id):
     if not can_access_show(session['user_id'], show_id):
         abort(403)
     db = get_db()
-    row = db.execute('SELECT * FROM show_external_rentals WHERE id=? AND show_id=?',
+    row = db.execute('SELECT * FROM show_external_rentals WHERE id=%s AND show_id=%s',
                      (er_id, show_id)).fetchone()
     db.close()
     if not row or (not row['s3_key'] and not row['pdf_data']):
@@ -19046,13 +18962,13 @@ def asset_approvals():
             FROM show_assets sa
             JOIN asset_types at ON at.id = sa.asset_type_id
             JOIN asset_categories ac ON ac.id = at.category_id
-            WHERE sa.show_id = ? AND sa.is_hidden = 0
+            WHERE sa.show_id = %s AND sa.is_hidden = 0
             ORDER BY ac.name, at.name, sa.created_at
         """, (s['id'],)).fetchall()
         ext = db.execute("""
             SELECT id, description, cost, pdf_filename,
                    (pdf_data IS NOT NULL OR s3_key IS NOT NULL) AS has_pdf
-            FROM show_external_rentals WHERE show_id=? ORDER BY sort_order, id
+            FROM show_external_rentals WHERE show_id=%s ORDER BY sort_order, id
         """, (s['id'],)).fetchall()
         s['assets']           = [_normalize_row_dates(dict(r)) for r in assets]
         s['external_rentals'] = [dict(r) for r in ext]
@@ -19143,23 +19059,23 @@ def asset_approvals_pending_count():
 @asset_manager_required
 def show_assets_approve(show_id):
     db = get_db()
-    row = db.execute('SELECT assets_approved, name FROM shows WHERE id=?', (show_id,)).fetchone()
+    row = db.execute('SELECT assets_approved, name FROM shows WHERE id=%s', (show_id,)).fetchone()
     if not row:
         db.close()
         return jsonify({'error': 'Show not found'}), 404
     snapshot = _compute_asset_snapshot_hash(db, show_id)
     db.execute("""
-        UPDATE shows SET assets_approved=1, assets_approved_by=?,
+        UPDATE shows SET assets_approved=1, assets_approved_by=%s,
                assets_approved_at=CURRENT_TIMESTAMP,
-               assets_approval_snapshot=?
-         WHERE id=?
+               assets_approval_snapshot=%s
+         WHERE id=%s
     """, (session['user_id'], snapshot, show_id))
     log_audit(db, 'ASSET_APPROVAL_GRANTED', 'show', show_id, show_id=show_id)
     db.commit()
-    me = db.execute('SELECT display_name, username FROM users WHERE id=?',
+    me = db.execute('SELECT display_name, username FROM users WHERE id=%s',
                     (session['user_id'],)).fetchone()
     approver_name = (me['display_name'] if me else '') or (me['username'] if me else '')
-    approved_at = db.execute('SELECT assets_approved_at FROM shows WHERE id=?',
+    approved_at = db.execute('SELECT assets_approved_at FROM shows WHERE id=%s',
                              (show_id,)).fetchone()['assets_approved_at']
     show_name = row['name'] or f'Show #{show_id}'
     try:
@@ -19189,14 +19105,14 @@ def show_assets_approve(show_id):
 @asset_manager_required
 def show_assets_unapprove(show_id):
     db = get_db()
-    row = db.execute('SELECT assets_approved FROM shows WHERE id=?', (show_id,)).fetchone()
+    row = db.execute('SELECT assets_approved FROM shows WHERE id=%s', (show_id,)).fetchone()
     if not row:
         db.close()
         return jsonify({'error': 'Show not found'}), 404
     db.execute("""
         UPDATE shows SET assets_approved=0, assets_approved_by=NULL,
                assets_approved_at=NULL, assets_approval_snapshot=NULL
-         WHERE id=?
+         WHERE id=%s
     """, (show_id,))
     log_audit(db, 'ASSET_APPROVAL_REVOKED', 'show', show_id, show_id=show_id)
     db.commit()
@@ -19217,13 +19133,13 @@ def show_asset_price_override(show_id, sa_id):
     except (TypeError, ValueError):
         return jsonify({'error': 'locked_price required'}), 400
     db = get_db()
-    row = db.execute('SELECT locked_price FROM show_assets WHERE id=? AND show_id=?',
+    row = db.execute('SELECT locked_price FROM show_assets WHERE id=%s AND show_id=%s',
                      (sa_id, show_id)).fetchone()
     if not row:
         db.close()
         return jsonify({'error': 'Not found'}), 404
     old_price = float(row['locked_price'] or 0)
-    db.execute('UPDATE show_assets SET locked_price=? WHERE id=?',
+    db.execute('UPDATE show_assets SET locked_price=%s WHERE id=%s',
                (new_price, sa_id))
     log_audit(db, 'ASSET_PRICE_OVERRIDE', 'show_asset', sa_id, show_id=show_id,
               detail=f'old={old_price:.2f} new={new_price:.2f}')
@@ -19459,9 +19375,8 @@ def _dbt_snapshot(db, table, row_id):
 
 
 def _dbt_jsonable(row_dict):
-    """PostgreSQL hands back date/datetime objects (SQLite returns ISO text)
-    and memoryview for blobs — normalize so the JSON the UI sees is identical
-    on both backends."""
+    """PostgreSQL hands back date/datetime/Decimal objects and memoryview for
+    blobs — normalize them to JSON-safe values for the UI."""
     out = {}
     for k, v in row_dict.items():
         if isinstance(v, datetime):
@@ -19483,7 +19398,7 @@ def _dbt_parent_cycle(db, type_id, new_parent_id):
         if cur == type_id:
             return True
         seen.add(cur)
-        r = db.execute('SELECT parent_type_id FROM asset_types WHERE id=?', (cur,)).fetchone()
+        r = db.execute('SELECT parent_type_id FROM asset_types WHERE id=%s', (cur,)).fetchone()
         cur = r['parent_type_id'] if r else None
     return False
 
@@ -19547,7 +19462,7 @@ def _dbt_coerce(db, col, kind, val, row_id=None):
         return v
     if kind == 'fk_category':
         cid = _as_int(val, f'{col} must be an asset_categories id')
-        if not db.execute('SELECT 1 FROM asset_categories WHERE id=?', (cid,)).fetchone():
+        if not db.execute('SELECT 1 FROM asset_categories WHERE id=%s', (cid,)).fetchone():
             raise ValueError(f'asset_categories id {cid} does not exist')
         return cid
     if kind in ('fk_type', 'fk_type_null', 'fk_parent_null'):
@@ -19556,7 +19471,7 @@ def _dbt_coerce(db, col, kind, val, row_id=None):
                 raise ValueError(f'{col} is required')
             return None
         tid = _as_int(val, f'{col} must be an asset_types id')
-        if not db.execute('SELECT 1 FROM asset_types WHERE id=?', (tid,)).fetchone():
+        if not db.execute('SELECT 1 FROM asset_types WHERE id=%s', (tid,)).fetchone():
             raise ValueError(f'asset_types id {tid} does not exist')
         if kind == 'fk_parent_null':
             if tid == row_id:
@@ -19568,7 +19483,7 @@ def _dbt_coerce(db, col, kind, val, row_id=None):
         if val in (None, '', 'null'):
             return None
         iid = _as_int(val, f'{col} must be an asset_items id')
-        if not db.execute('SELECT 1 FROM asset_items WHERE id=?', (iid,)).fetchone():
+        if not db.execute('SELECT 1 FROM asset_items WHERE id=%s', (iid,)).fetchone():
             raise ValueError(f'asset_items id {iid} does not exist')
         return iid
     raise ValueError(f'unsupported edit kind for {col}')
@@ -19583,7 +19498,7 @@ def _dbt_cross_check(db, table, row_id, before, clean):
             raise ValueError('quantity must be at least 1')
         item_id = merged.get('asset_item_id')
         if item_id:
-            item = db.execute('SELECT asset_type_id FROM asset_items WHERE id=?',
+            item = db.execute('SELECT asset_type_id FROM asset_items WHERE id=%s',
                               (item_id,)).fetchone()
             if item and item['asset_type_id'] != merged.get('asset_type_id'):
                 raise ValueError(
@@ -19641,10 +19556,10 @@ def asset_dbt_rows(table):
 
     where, params = '', []
     if q:
-        clauses = [f'LOWER({c}) LIKE ?' for c in cfg['search']]
+        clauses = [f'LOWER({c}) LIKE %s' for c in cfg['search']]
         params.extend([f'%{q.lower()}%'] * len(clauses))
         if q.isdigit() and cfg.get('id_col'):
-            clauses.append(f"{cfg['id_col']} = ?")
+            clauses.append(f"{cfg['id_col']} = %s")
             params.append(int(q))
         where = 'WHERE (' + ' OR '.join(clauses) + ')'
 
@@ -19695,8 +19610,8 @@ def asset_dbt_update(table, row_id):
             clean['retired_at'] = None
 
     cols = list(clean.keys())
-    set_clause = ', '.join(f'{c}=?' for c in cols)
-    db.execute(f'UPDATE {table} SET {set_clause} WHERE id=?',
+    set_clause = ', '.join(f'{c}=%s' for c in cols)
+    db.execute(f'UPDATE {table} SET {set_clause} WHERE id=%s',
                tuple(clean[c] for c in cols) + (row_id,))
     db.commit()
     after = _dbt_snapshot(db, table, row_id)
@@ -19736,13 +19651,13 @@ def asset_dbt_delete(table, row_id):
 
     blockers, forceable = [], []
     if table == 'asset_categories':
-        n = _count('SELECT COUNT(*) FROM asset_types WHERE category_id=?', (row_id,))
+        n = _count('SELECT COUNT(*) FROM asset_types WHERE category_id=%s', (row_id,))
         if n:
             blockers.append(f'{n} asset type(s) still in this category — move or delete them first')
     elif table == 'asset_types':
-        n_shows = _count('SELECT COUNT(*) FROM show_assets WHERE asset_type_id=?', (row_id,))
-        n_children = _count('SELECT COUNT(*) FROM asset_types WHERE parent_type_id=?', (row_id,))
-        n_items = _count('SELECT COUNT(*) FROM asset_items WHERE asset_type_id=?', (row_id,))
+        n_shows = _count('SELECT COUNT(*) FROM show_assets WHERE asset_type_id=%s', (row_id,))
+        n_children = _count('SELECT COUNT(*) FROM asset_types WHERE parent_type_id=%s', (row_id,))
+        n_items = _count('SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s', (row_id,))
         if n_shows:
             blockers.append(f'{n_shows} show line(s) reference this type — merge it into another '
                             'type or retire it instead; deleting would erase show rental history')
@@ -19752,10 +19667,10 @@ def asset_dbt_delete(table, row_id):
         if n_items:
             forceable.append(f'{n_items} unit(s) and their logs / maintenance records will be deleted')
     elif table == 'asset_items':
-        n_pins = _count('SELECT COUNT(*) FROM show_assets WHERE asset_item_id=?', (row_id,))
-        n_logs = _count('SELECT COUNT(*) FROM asset_logs WHERE asset_item_id=?', (row_id,))
-        n_maint = _count('SELECT COUNT(*) FROM asset_maintenance WHERE asset_item_id=?', (row_id,))
-        n_contained = _count('SELECT COUNT(*) FROM asset_items WHERE container_item_id=?', (row_id,))
+        n_pins = _count('SELECT COUNT(*) FROM show_assets WHERE asset_item_id=%s', (row_id,))
+        n_logs = _count('SELECT COUNT(*) FROM asset_logs WHERE asset_item_id=%s', (row_id,))
+        n_maint = _count('SELECT COUNT(*) FROM asset_maintenance WHERE asset_item_id=%s', (row_id,))
+        n_contained = _count('SELECT COUNT(*) FROM asset_items WHERE container_item_id=%s', (row_id,))
         if n_pins:
             forceable.append(f'{n_pins} show line(s) are pinned to this unit — the pin will be '
                              'cleared (the line itself stays)')
@@ -19773,27 +19688,27 @@ def asset_dbt_delete(table, row_id):
 
     show_id = before.get('show_id') if table == 'show_assets' else None
     if table == 'asset_categories':
-        db.execute('UPDATE form_sections SET asset_category_id=NULL WHERE asset_category_id=?', (row_id,))
+        db.execute('UPDATE form_sections SET asset_category_id=NULL WHERE asset_category_id=%s', (row_id,))
     elif table == 'asset_types':
         db.execute('UPDATE show_assets SET asset_item_id=NULL WHERE asset_item_id IN '
-                   '(SELECT id FROM asset_items WHERE asset_type_id=?)', (row_id,))
+                   '(SELECT id FROM asset_items WHERE asset_type_id=%s)', (row_id,))
         db.execute('DELETE FROM asset_logs WHERE asset_item_id IN '
-                   '(SELECT id FROM asset_items WHERE asset_type_id=?)', (row_id,))
+                   '(SELECT id FROM asset_items WHERE asset_type_id=%s)', (row_id,))
         db.execute('DELETE FROM asset_maintenance WHERE asset_item_id IN '
-                   '(SELECT id FROM asset_items WHERE asset_type_id=?)', (row_id,))
+                   '(SELECT id FROM asset_items WHERE asset_type_id=%s)', (row_id,))
         db.execute('UPDATE asset_items SET container_item_id=NULL WHERE container_item_id IN '
-                   '(SELECT id FROM asset_items WHERE asset_type_id=?)', (row_id,))
-        db.execute('DELETE FROM asset_items WHERE asset_type_id=?', (row_id,))
-        db.execute('UPDATE asset_items SET system_type_id=NULL WHERE system_type_id=?', (row_id,))
-        db.execute('DELETE FROM asset_type_system_members WHERE system_type_id=? OR component_type_id=?',
+                   '(SELECT id FROM asset_items WHERE asset_type_id=%s)', (row_id,))
+        db.execute('DELETE FROM asset_items WHERE asset_type_id=%s', (row_id,))
+        db.execute('UPDATE asset_items SET system_type_id=NULL WHERE system_type_id=%s', (row_id,))
+        db.execute('DELETE FROM asset_type_system_members WHERE system_type_id=%s OR component_type_id=%s',
                    (row_id, row_id))
     elif table == 'asset_items':
-        db.execute('UPDATE show_assets SET asset_item_id=NULL WHERE asset_item_id=?', (row_id,))
-        db.execute('UPDATE asset_items SET container_item_id=NULL WHERE container_item_id=?', (row_id,))
-        db.execute('DELETE FROM asset_logs WHERE asset_item_id=?', (row_id,))
-        db.execute('DELETE FROM asset_maintenance WHERE asset_item_id=?', (row_id,))
+        db.execute('UPDATE show_assets SET asset_item_id=NULL WHERE asset_item_id=%s', (row_id,))
+        db.execute('UPDATE asset_items SET container_item_id=NULL WHERE container_item_id=%s', (row_id,))
+        db.execute('DELETE FROM asset_logs WHERE asset_item_id=%s', (row_id,))
+        db.execute('DELETE FROM asset_maintenance WHERE asset_item_id=%s', (row_id,))
 
-    db.execute(f'DELETE FROM {table} WHERE id=?', (row_id,))
+    db.execute(f'DELETE FROM {table} WHERE id=%s', (row_id,))
     db.commit()
     label = before.get('name') or before.get('barcode') or str(row_id)
     log_audit(db, f"{cfg['entity'].upper()}_DELETE", cfg['entity'], row_id,
@@ -19826,7 +19741,7 @@ def asset_dbt_reassign_children(type_id):
             return jsonify({'error': 'new_parent_id must be an asset_types id or null'}), 400
 
     db = get_db()
-    src = db.execute('SELECT id, name FROM asset_types WHERE id=?', (type_id,)).fetchone()
+    src = db.execute('SELECT id, name FROM asset_types WHERE id=%s', (type_id,)).fetchone()
     if not src:
         db.close()
         return jsonify({'error': 'Type not found'}), 404
@@ -19834,7 +19749,7 @@ def asset_dbt_reassign_children(type_id):
         if new_parent_id == type_id:
             db.close()
             return jsonify({'error': 'New parent cannot be the same type'}), 400
-        parent = db.execute('SELECT id, name, parent_type_id, is_retired FROM asset_types WHERE id=?',
+        parent = db.execute('SELECT id, name, parent_type_id, is_retired FROM asset_types WHERE id=%s',
                             (new_parent_id,)).fetchone()
         if not parent:
             db.close()
@@ -19846,7 +19761,7 @@ def asset_dbt_reassign_children(type_id):
             db.close()
             return jsonify({'error': 'New parent is retired — children would stay unreachable'}), 400
 
-    cur = db.execute('UPDATE asset_types SET parent_type_id=? WHERE parent_type_id=?',
+    cur = db.execute('UPDATE asset_types SET parent_type_id=%s WHERE parent_type_id=%s',
                      (new_parent_id, type_id))
     moved = cur.rowcount
     db.commit()
@@ -19881,7 +19796,7 @@ def asset_dbt_merge_type(src_id):
     if not src or not tgt:
         db.close()
         return jsonify({'error': 'Source or target type not found'}), 404
-    n_children = db.execute('SELECT COUNT(*) FROM asset_types WHERE parent_type_id=?',
+    n_children = db.execute('SELECT COUNT(*) FROM asset_types WHERE parent_type_id=%s',
                             (src_id,)).fetchone()[0]
     if n_children:
         db.close()
@@ -19889,12 +19804,12 @@ def asset_dbt_merge_type(src_id):
                                  'use "Move children" first'}), 409
 
     show_ids = [r['show_id'] for r in db.execute(
-        'SELECT DISTINCT show_id FROM show_assets WHERE asset_type_id=?', (src_id,)).fetchall()]
-    moved_items = db.execute('UPDATE asset_items SET asset_type_id=? WHERE asset_type_id=?',
+        'SELECT DISTINCT show_id FROM show_assets WHERE asset_type_id=%s', (src_id,)).fetchall()]
+    moved_items = db.execute('UPDATE asset_items SET asset_type_id=%s WHERE asset_type_id=%s',
                              (target_id, src_id)).rowcount
-    moved_lines = db.execute('UPDATE show_assets SET asset_type_id=? WHERE asset_type_id=?',
+    moved_lines = db.execute('UPDATE show_assets SET asset_type_id=%s WHERE asset_type_id=%s',
                              (target_id, src_id)).rowcount
-    db.execute('UPDATE asset_items SET system_type_id=? WHERE system_type_id=?',
+    db.execute('UPDATE asset_items SET system_type_id=%s WHERE system_type_id=%s',
                (target_id, src_id))
     # Fold membership pairs, dropping rows that would duplicate an existing
     # pair or link the target to itself
@@ -19902,18 +19817,18 @@ def asset_dbt_merge_type(src_id):
                         ('component_type_id', 'system_type_id')):
         rows = db.execute(
             f'SELECT system_type_id, component_type_id, sort_order, quantity '
-            f'FROM asset_type_system_members WHERE {side}=?', (src_id,)).fetchall()
+            f'FROM asset_type_system_members WHERE {side}=%s', (src_id,)).fetchall()
         for m in rows:
             other_id = m[other]
             dup = (other_id == target_id) or db.execute(
-                f'SELECT 1 FROM asset_type_system_members WHERE {side}=? AND {other}=?',
+                f'SELECT 1 FROM asset_type_system_members WHERE {side}=%s AND {other}=%s',
                 (target_id, other_id)).fetchone()
-            db.execute(f'DELETE FROM asset_type_system_members WHERE {side}=? AND {other}=?',
+            db.execute(f'DELETE FROM asset_type_system_members WHERE {side}=%s AND {other}=%s',
                        (src_id, other_id))
             if not dup:
                 db.execute(f'INSERT INTO asset_type_system_members ({side}, {other}, sort_order, quantity) '
-                           f'VALUES (?,?,?,?)', (target_id, other_id, m['sort_order'], m['quantity']))
-    db.execute('DELETE FROM asset_types WHERE id=?', (src_id,))
+                           f'VALUES (%s,%s,%s,%s)', (target_id, other_id, m['sort_order'], m['quantity']))
+    db.execute('DELETE FROM asset_types WHERE id=%s', (src_id,))
     db.commit()
     log_audit(db, 'ASSET_TYPE_MERGE', 'asset_type', src_id, before=src,
               detail=f'DB tools: merged "{src.get("name")}" into '
@@ -20152,7 +20067,7 @@ def _make_watermark_pdf(text):
             f"<div class=\"wm\">{safe}</div>"
             "</body></html>"
         )
-        return WP_HTML(string=html).write_pdf()
+        return WP_HTML(string=html).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.warning(f'Watermark generation failed: {e}')
         return None
@@ -20202,7 +20117,7 @@ def _merge_pdfs(base_pdf_bytes, extra_pdfs, extras_watermark=None):
 def _fetch_external_rental_pdfs(db, show_id):
     """Return list of PDF byte-strings for all external rentals that have attached PDFs."""
     rows = db.execute(
-        'SELECT id, s3_key, pdf_data, pdf_filename FROM show_external_rentals WHERE show_id=? ORDER BY sort_order',
+        'SELECT id, s3_key, pdf_data, pdf_filename FROM show_external_rentals WHERE show_id=%s ORDER BY sort_order',
         (show_id,)
     ).fetchall()
     result = []
@@ -20240,13 +20155,13 @@ def _fetch_show_assets_and_externals(db, show_id):
         FROM show_assets sa
         JOIN asset_types at ON at.id = sa.asset_type_id
         JOIN asset_categories ac ON ac.id = at.category_id
-        WHERE sa.show_id = ? AND sa.is_hidden = 0
+        WHERE sa.show_id = %s AND sa.is_hidden = 0
         ORDER BY ac.sort_order, at.name
     """, (show_id,)).fetchall()
     external_rentals = db.execute("""
         SELECT description, cost, pdf_filename
         FROM show_external_rentals
-        WHERE show_id = ?
+        WHERE show_id = %s
         ORDER BY sort_order
     """, (show_id,)).fetchall()
     assets_list = [dict(a) for a in assets]
@@ -20259,7 +20174,7 @@ def _fetch_show_assets_and_externals(db, show_id):
 def _show_performance_company(db, show_id):
     """The show's performance-company value from the advance sheet (or '')."""
     row = db.execute(
-        "SELECT field_value FROM advance_data WHERE show_id=? AND field_key='performance_company'",
+        "SELECT field_value FROM advance_data WHERE show_id=%s AND field_key='performance_company'",
         (show_id,)).fetchone()
     return row['field_value'] if row else ''
 
@@ -20272,7 +20187,7 @@ def show_asset_invoice(show_id):
         abort(403)
     db = get_db()
     try:
-        show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
+        show = db.execute('SELECT * FROM shows WHERE id=%s', (show_id,)).fetchone()
         if not show:
             abort(404)
 
@@ -20298,7 +20213,7 @@ def show_asset_invoice(show_id):
 
         try:
             from weasyprint import HTML as WP_HTML
-            pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+            pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf(font_config=_wp_font_config())
         except Exception as e:
             app.logger.error(f'WeasyPrint invoice error: {e}')
             return f'PDF generation failed: {e}', 500
@@ -20327,7 +20242,7 @@ def show_labor_estimate(show_id):
         abort(403)
     db = get_db()
     try:
-        show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
+        show = db.execute('SELECT * FROM shows WHERE id=%s', (show_id,)).fetchone()
         if not show:
             abort(404)
         labor_lines, labor_total = _calc_labor_cost_for_show(db, show_id)
@@ -20349,7 +20264,7 @@ def show_labor_estimate(show_id):
     )
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f'WeasyPrint labor-estimate error: {e}')
         return f'PDF generation failed: {e}', 500
@@ -20372,7 +20287,7 @@ def show_pre_show_estimate(show_id):
         abort(403)
     db = get_db()
     try:
-        show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
+        show = db.execute('SELECT * FROM shows WHERE id=%s', (show_id,)).fetchone()
         if not show:
             abort(404)
         assets_list, ext_list, assets_subtotal, external_subtotal = \
@@ -20406,7 +20321,7 @@ def show_pre_show_estimate(show_id):
     )
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f'WeasyPrint pre-show-estimate error: {e}')
         return f'PDF generation failed: {e}', 500
@@ -20432,7 +20347,7 @@ def show_post_invoice(show_id):
         abort(403)
     db = get_db()
     try:
-        show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
+        show = db.execute('SELECT * FROM shows WHERE id=%s', (show_id,)).fetchone()
         if not show:
             abort(404)
 
@@ -20473,7 +20388,7 @@ def show_post_invoice(show_id):
 
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f'WeasyPrint post-invoice error: {e}')
         return f'PDF generation failed: {e}', 500
@@ -20578,7 +20493,7 @@ def combined_invoice_pdf():
             abort(403)
 
     db = get_db()
-    placeholders = ','.join('?' * len(ids))
+    placeholders = ','.join(['%s'] * len(ids))
     rows = db.execute(f'SELECT * FROM shows WHERE id IN ({placeholders})',
                       tuple(ids)).fetchall()
     by_id = {r['id']: dict(r) for r in rows}
@@ -20599,7 +20514,7 @@ def combined_invoice_pdf():
 
         perf = db.execute(
             'SELECT MIN(perf_date) AS first_perf, MAX(perf_date) AS last_perf '
-            'FROM show_performances WHERE show_id=? AND perf_date IS NOT NULL',
+            'FROM show_performances WHERE show_id=%s AND perf_date IS NOT NULL',
             (sid,)).fetchone()
         eff_first = _as_date(show.get('show_date')) or _as_date(perf['first_perf'])
         eff_last = _as_date(perf['last_perf'])
@@ -20674,7 +20589,7 @@ def combined_invoice_pdf():
 
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f'WeasyPrint combined-invoice error: {e}')
         return f'PDF generation failed: {e}', 500
@@ -20947,13 +20862,13 @@ def _register_route():
             error = 'Username: 3-32 characters, letters/numbers/._- only.'
         else:
             db = get_db()
-            existing = db.execute('SELECT id FROM users WHERE username=?', (username,)).fetchone()
+            existing = db.execute('SELECT id FROM users WHERE username=%s', (username,)).fetchone()
             if existing:
                 error = 'That username or email is not available.'
                 db.close()
             else:
                 existing_pending = db.execute(
-                    'SELECT id FROM user_pending_registration WHERE username=?', (username,)).fetchone()
+                    'SELECT id FROM user_pending_registration WHERE username=%s', (username,)).fetchone()
                 if existing_pending:
                     error = 'That username or email is not available.'
                     db.close()
@@ -20965,7 +20880,7 @@ def _register_route():
                         db.execute("""
                             INSERT INTO user_pending_registration
                               (username, display_name, email, password_hash, confirm_token, token_expires)
-                            VALUES (?,?,?,?,?,?)
+                            VALUES (%s,%s,%s,%s,%s,%s)
                         """, (username, display_name, email, pw_hash, token, expires.isoformat()))
                         db.commit()
                         confirm_url = url_for('confirm_email', token=token, _external=True)
@@ -21028,18 +20943,18 @@ else:
 def confirm_email(token):
     db = get_db()
     reg = db.execute(
-        'SELECT * FROM user_pending_registration WHERE confirm_token=?', (token,)
+        'SELECT * FROM user_pending_registration WHERE confirm_token=%s', (token,)
     ).fetchone()
     if not reg:
         db.close()
         return render_template('register.html', error='Invalid or expired confirmation link.', user=None)
     token_expires = _as_dt(reg['token_expires'])
     if not token_expires or token_expires < datetime.utcnow():
-        db.execute('DELETE FROM user_pending_registration WHERE id=?', (reg['id'],))
+        db.execute('DELETE FROM user_pending_registration WHERE id=%s', (reg['id'],))
         db.commit()
         db.close()
         return render_template('register.html', error='Confirmation link expired. Please register again.', user=None)
-    db.execute('UPDATE user_pending_registration SET email_confirmed=1 WHERE id=?', (reg['id'],))
+    db.execute('UPDATE user_pending_registration SET email_confirmed=1 WHERE id=%s', (reg['id'],))
     db.commit()
     syslog_logger.info(f'EMAIL_CONFIRMED username={reg["username"]}')
     db.close()
@@ -21067,19 +20982,19 @@ def approve_registration(reg_id):
     data = request.get_json(force=True) or {}
     role = data.get('role', 'user')
     db = get_db()
-    reg = db.execute('SELECT * FROM user_pending_registration WHERE id=?', (reg_id,)).fetchone()
+    reg = db.execute('SELECT * FROM user_pending_registration WHERE id=%s', (reg_id,)).fetchone()
     if not reg:
         db.close()
         return jsonify({'error': 'Not found'}), 404
     try:
         db.execute("""
             INSERT INTO users (username, display_name, email, password_hash, role, email_confirmed)
-            VALUES (?,?,?,?,?,1)
+            VALUES (%s,%s,%s,%s,%s,1)
         """, (reg['username'], reg['display_name'] or reg['username'],
               reg['email'], reg['password_hash'], role))
         db.commit()
-        uid = db.execute('SELECT id FROM users WHERE username=?', (reg['username'],)).fetchone()['id']
-        db.execute('DELETE FROM user_pending_registration WHERE id=?', (reg_id,))
+        uid = db.execute('SELECT id FROM users WHERE username=%s', (reg['username'],)).fetchone()['id']
+        db.execute('DELETE FROM user_pending_registration WHERE id=%s', (reg_id,))
         db.commit()
         log_audit(db, 'USER_APPROVED', 'user', uid,
                   detail=f'username={reg["username"]} role={role} approved_by={session.get("username")}')
@@ -21106,9 +21021,9 @@ def approve_registration(reg_id):
 @admin_required
 def deny_registration(reg_id):
     db = get_db()
-    reg = db.execute('SELECT * FROM user_pending_registration WHERE id=?', (reg_id,)).fetchone()
+    reg = db.execute('SELECT * FROM user_pending_registration WHERE id=%s', (reg_id,)).fetchone()
     if reg:
-        db.execute('DELETE FROM user_pending_registration WHERE id=?', (reg_id,))
+        db.execute('DELETE FROM user_pending_registration WHERE id=%s', (reg_id,))
         db.commit()
         _send_simple_email_async(
             reg['email'],
@@ -21135,18 +21050,18 @@ def _forgot_password_route():
         else:
             db = get_db()
             user = db.execute(
-                'SELECT * FROM users WHERE username=? OR email=?', (identifier, identifier)
+                'SELECT * FROM users WHERE username=%s OR email=%s', (identifier, identifier)
             ).fetchone()
             # Always show success even if user not found (security best practice)
             if user and user.get('email'):
                 token = secrets.token_urlsafe(48)
                 expires = datetime.utcnow() + timedelta(hours=2)
                 # Invalidate old tokens
-                db.execute('UPDATE password_reset_tokens SET used=1 WHERE user_id=? AND used=0',
+                db.execute('UPDATE password_reset_tokens SET used=1 WHERE user_id=%s AND used=0',
                            (user['id'],))
                 db.execute("""
                     INSERT INTO password_reset_tokens (user_id, token, expires_at)
-                    VALUES (?,?,?)
+                    VALUES (%s,%s,%s)
                 """, (user['id'], token, expires.isoformat()))
                 db.commit()
                 reset_url = url_for('reset_password', token=token, _external=True)
@@ -21181,7 +21096,7 @@ def reset_password(token):
         return redirect(url_for('dashboard'))
     db = get_db()
     rec = db.execute(
-        'SELECT * FROM password_reset_tokens WHERE token=? AND used=0', (token,)
+        'SELECT * FROM password_reset_tokens WHERE token=%s AND used=0', (token,)
     ).fetchone()
     expires = _as_dt(rec['expires_at']) if rec else None
     if not rec or not expires or expires < datetime.utcnow():
@@ -21199,11 +21114,11 @@ def reset_password(token):
         else:
             pw_hash = generate_password_hash(password)
             # A completed reset also satisfies any pending forced-change flag.
-            db.execute('UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?',
+            db.execute('UPDATE users SET password_hash=%s, must_change_password=0 WHERE id=%s',
                        (pw_hash, rec['user_id']))
-            db.execute('UPDATE password_reset_tokens SET used=1 WHERE token=?', (token,))
+            db.execute('UPDATE password_reset_tokens SET used=1 WHERE token=%s', (token,))
             db.commit()
-            user_row = db.execute('SELECT username FROM users WHERE id=?', (rec['user_id'],)).fetchone()
+            user_row = db.execute('SELECT username FROM users WHERE id=%s', (rec['user_id'],)).fetchone()
             log_audit(db, 'PASSWORD_RESET_COMPLETE', 'user', rec['user_id'])
             db.commit()
             syslog_logger.info(f'PASSWORD_RESET_COMPLETE user={user_row["username"] if user_row else rec["user_id"]}')
@@ -21224,11 +21139,11 @@ def get_active_messages(user_id=None, msg_type=None):
         SELECT m.*,
                CASE WHEN d.user_id IS NOT NULL THEN 1 ELSE 0 END as dismissed
         FROM site_messages m
-        LEFT JOIN site_message_dismissals d ON d.message_id = m.id AND d.user_id = ?
+        LEFT JOIN site_message_dismissals d ON d.message_id = m.id AND d.user_id = %s
         WHERE m.is_active = 1
-          AND (m.expires_at IS NULL OR m.expires_at > ?)
-          AND (m.scheduled_for IS NULL OR m.scheduled_for <= ?)
-          AND (? IS NULL OR m.msg_type = ?)
+          AND (m.expires_at IS NULL OR m.expires_at > %s)
+          AND (m.scheduled_for IS NULL OR m.scheduled_for <= %s)
+          AND (%s IS NULL OR m.msg_type = %s)
         ORDER BY m.created_at DESC
     """, (user_id or 0, now, now, msg_type, msg_type)).fetchall()
     db.close()
@@ -21250,7 +21165,7 @@ def get_messages_api():
         try:
             for m in result:
                 db.execute(
-                    'INSERT OR IGNORE INTO site_message_views (message_id, user_id) VALUES (?,?)',
+                    'INSERT INTO site_message_views (message_id, user_id) VALUES (%s,%s) ON CONFLICT DO NOTHING',
                     (m['id'], session['user_id']))
             db.commit()
         except Exception:
@@ -21263,7 +21178,7 @@ def get_messages_api():
 @login_required
 def dismiss_message(msg_id):
     db = get_db()
-    msg = db.execute('SELECT * FROM site_messages WHERE id=?', (msg_id,)).fetchone()
+    msg = db.execute('SELECT * FROM site_messages WHERE id=%s', (msg_id,)).fetchone()
     if not msg:
         db.close()
         return jsonify({'error': 'Not found'}), 404
@@ -21271,7 +21186,7 @@ def dismiss_message(msg_id):
         db.close()
         return jsonify({'error': 'Only admins can dismiss this message'}), 403
     try:
-        db.execute('INSERT OR IGNORE INTO site_message_dismissals (message_id, user_id) VALUES (?,?)',
+        db.execute('INSERT INTO site_message_dismissals (message_id, user_id) VALUES (%s,%s) ON CONFLICT DO NOTHING',
                    (msg_id, session['user_id']))
         db.commit()
     except Exception:
@@ -21303,7 +21218,7 @@ def messages_list():
 def message_receipts(msg_id):
     """Who has seen / dismissed a given message (admin read-receipt report)."""
     db = get_db()
-    msg = db.execute('SELECT id, title FROM site_messages WHERE id=?', (msg_id,)).fetchone()
+    msg = db.execute('SELECT id, title FROM site_messages WHERE id=%s', (msg_id,)).fetchone()
     if not msg:
         db.close()
         return jsonify({'error': 'Not found'}), 404
@@ -21311,14 +21226,14 @@ def message_receipts(msg_id):
         SELECT v.user_id, u.display_name, u.username, v.seen_at
         FROM site_message_views v
         LEFT JOIN users u ON u.id = v.user_id
-        WHERE v.message_id = ?
+        WHERE v.message_id = %s
         ORDER BY v.seen_at DESC
     """, (msg_id,)).fetchall()
     dismissed = db.execute("""
         SELECT d.user_id, u.display_name, u.username, d.dismissed_at
         FROM site_message_dismissals d
         LEFT JOIN users u ON u.id = d.user_id
-        WHERE d.message_id = ?
+        WHERE d.message_id = %s
         ORDER BY d.dismissed_at DESC
     """, (msg_id,)).fetchall()
     db.close()
@@ -21338,11 +21253,11 @@ def message_create():
     if not title:
         return jsonify({'error': 'Title required'}), 400
     db = get_db()
-    db.execute("""
+    _new_id = db.execute("""
         INSERT INTO site_messages
           (title, body_html, msg_type, dismissible_by, expires_at, scheduled_for,
            is_active, show_on_login, created_by)
-        VALUES (?,?,?,?,?,?,?,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (
         title, body_html,
         data.get('msg_type', 'motd'),
@@ -21352,9 +21267,9 @@ def message_create():
         1 if data.get('is_active', True) else 0,
         1 if data.get('show_on_login') else 0,
         session['user_id'],
-    ))
+    )).fetchone()['id']
     db.commit()
-    row = db.execute('SELECT * FROM site_messages ORDER BY id DESC LIMIT 1').fetchone()
+    row = db.execute('SELECT * FROM site_messages WHERE id=%s', (_new_id,)).fetchone()
     log_audit(db, 'MESSAGE_CREATE', 'site_message', row['id'], detail=title)
     db.commit()
     syslog_logger.info(f'MESSAGE_CREATE title="{title}" type={data.get("msg_type","motd")} by={session.get("username")}')
@@ -21370,9 +21285,9 @@ def message_edit(msg_id):
     db = get_db()
     db.execute("""
         UPDATE site_messages SET
-          title=?, body_html=?, msg_type=?, dismissible_by=?,
-          expires_at=?, scheduled_for=?, is_active=?, show_on_login=?
-        WHERE id=?
+          title=%s, body_html=%s, msg_type=%s, dismissible_by=%s,
+          expires_at=%s, scheduled_for=%s, is_active=%s, show_on_login=%s
+        WHERE id=%s
     """, (
         (data.get('title') or '').strip(),
         _sanitize_html((data.get('body_html') or '').strip()),
@@ -21395,7 +21310,7 @@ def message_edit(msg_id):
 @admin_required
 def message_delete(msg_id):
     db = get_db()
-    db.execute('DELETE FROM site_messages WHERE id=?', (msg_id,))
+    db.execute('DELETE FROM site_messages WHERE id=%s', (msg_id,))
     db.commit()
     log_audit(db, 'MESSAGE_DELETE', 'site_message', msg_id)
     db.commit()
@@ -21408,7 +21323,7 @@ def message_delete(msg_id):
 def message_dismiss_all(msg_id):
     """Admin globally deactivates (removes) a message for everyone."""
     db = get_db()
-    db.execute('UPDATE site_messages SET is_active=0 WHERE id=?', (msg_id,))
+    db.execute('UPDATE site_messages SET is_active=0 WHERE id=%s', (msg_id,))
     db.commit()
     log_audit(db, 'MESSAGE_DISMISS_ALL', 'site_message', msg_id)
     db.commit()
@@ -21424,11 +21339,14 @@ def _get_ai_slot_limit():
 def _count_active_ai_sessions():
     """Count running AI sessions, pruning stale ones (>5 min) first."""
     db = get_db()
-    cutoff = (datetime.utcnow() - timedelta(minutes=5)).isoformat()
+    # started_at is stamped by the DB clock (DEFAULT CURRENT_TIMESTAMP, the
+    # PostgreSQL server's local time), so the cutoff must use the DB clock too
+    # — a Python utcnow() cutoff timed out every session instantly on a
+    # non-UTC server, silently disabling the ai_max_sessions limit.
     db.execute("""
         UPDATE ai_sessions SET status='timeout', ended_at=CURRENT_TIMESTAMP
-        WHERE status='running' AND started_at < ?
-    """, (cutoff,))
+        WHERE status='running' AND started_at < NOW() - INTERVAL '5 minutes'
+    """)
     db.commit()
     count = db.execute("SELECT COUNT(*) FROM ai_sessions WHERE status='running'").fetchone()[0]
     db.close()
@@ -21442,12 +21360,12 @@ def _claim_ai_session(show_id):
     if count >= limit:
         db.close()
         return None, f'All {limit} AI processing slots are busy. Please try again in a moment.'
-    db.execute("""
+    _new_id = db.execute("""
         INSERT INTO ai_sessions (user_id, show_id, status)
-        VALUES (?,?,'running')
-    """, (session.get('user_id'), show_id))
+        VALUES (%s,%s,'running') RETURNING id
+    """, (session.get('user_id'), show_id)).fetchone()['id']
     db.commit()
-    sid = db.execute('SELECT id FROM ai_sessions ORDER BY id DESC LIMIT 1').fetchone()['id']
+    sid = _new_id
     db.close()
     return sid, None
 
@@ -21456,7 +21374,7 @@ def _release_ai_session(session_id):
         return
     db = get_db()
     db.execute("""
-        UPDATE ai_sessions SET status='done', ended_at=CURRENT_TIMESTAMP WHERE id=?
+        UPDATE ai_sessions SET status='done', ended_at=CURRENT_TIMESTAMP WHERE id=%s
     """, (session_id,))
     db.commit()
     db.close()
@@ -21490,15 +21408,15 @@ def _build_shows_calendar_days(db, accessible, date_from, date_to):
     params = []
     where_parts = ["s.status != 'archived'"]
     if date_from:
-        where_parts.append("COALESCE(s.show_date, s.load_in_date, s.load_out_date) >= ?")
+        where_parts.append("COALESCE(s.show_date, s.load_in_date, s.load_out_date) >= %s")
         params.append(date_from)
     if date_to:
-        where_parts.append("COALESCE(s.show_date, s.load_in_date, s.load_out_date) <= ?")
+        where_parts.append("COALESCE(s.show_date, s.load_in_date, s.load_out_date) <= %s")
         params.append(date_to)
     if accessible is not None:
         if not accessible:
             return []
-        placeholders = ','.join('?' * len(accessible))
+        placeholders = ','.join(['%s'] * len(accessible))
         where_parts.append(f's.id IN ({placeholders})')
         params.extend(accessible)
     where_sql = 'WHERE ' + ' AND '.join(where_parts)
@@ -21559,7 +21477,7 @@ def _dashboard_data_access_ok():
     db = get_db()
     try:
         row = db.execute(
-            'SELECT 1 FROM asset_dashboards WHERE public_slug = ? AND is_public = 1',
+            'SELECT 1 FROM asset_dashboards WHERE public_slug = %s AND is_public = 1',
             (slug,)).fetchone()
     finally:
         db.close()
@@ -21600,7 +21518,7 @@ def api_dashboard_skills_summary():
             FROM job_positions jp
             LEFT JOIN crew_qualifications cq ON cq.position_id = jp.id
                  AND COALESCE(cq.status, 2) = 2
-            WHERE jp.category_id = ?
+            WHERE jp.category_id = %s
             GROUP BY jp.id
             ORDER BY jp.sort_order, jp.id
         """, (cat['id'],)).fetchall()
@@ -21651,7 +21569,7 @@ def api_dashboard_asset_calendar():
     db = get_db()
     row = db.execute(
         'SELECT at.*, ac.name AS category_name FROM asset_types at '
-        'JOIN asset_categories ac ON ac.id = at.category_id WHERE at.id = ?',
+        'JOIN asset_categories ac ON ac.id = at.category_id WHERE at.id = %s',
         (type_id,)
     ).fetchone()
     if not row:
@@ -21664,11 +21582,11 @@ def api_dashboard_asset_calendar():
 
     if not unlimited:
         total = db.execute(
-            "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=? AND status!='retired'",
+            "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status!='retired'",
             (type_id,)
         ).fetchone()[0]
         in_maint = db.execute(
-            "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=? AND status='maintenance'",
+            "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status='maintenance'",
             (type_id,)
         ).fetchone()[0]
         reserve = row['reserve_count'] or 0
@@ -21816,8 +21734,8 @@ def dashboards_list():
         SELECT d.*, u.display_name as owner_name
         FROM asset_dashboards d
         JOIN users u ON u.id = d.user_id
-        WHERE d.user_id = ? OR d.is_public = 1
-        ORDER BY d.user_id = ? DESC, d.name
+        WHERE d.user_id = %s OR d.is_public = 1
+        ORDER BY d.user_id = %s DESC, d.name
     """, (session['user_id'], session['user_id'])).fetchall()
     db.close()
     dashboards = []
@@ -21837,16 +21755,16 @@ def dashboard_create():
     name = (data.get('name') or 'My Dashboard').strip()
     slug = secrets.token_urlsafe(12) if data.get('is_public') else None
     db = get_db()
-    db.execute("""
+    _new_id = db.execute("""
         INSERT INTO asset_dashboards (user_id, name, is_public, public_slug, layout, config_json)
-        VALUES (?,?,?,?,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s) RETURNING id
     """, (session['user_id'], name,
           1 if data.get('is_public') else 0,
           slug,
           data.get('layout', 'combined'),
-          json.dumps(data.get('config', {}))))
+          json.dumps(data.get('config', {})))).fetchone()['id']
     db.commit()
-    row = db.execute('SELECT * FROM asset_dashboards ORDER BY id DESC LIMIT 1').fetchone()
+    row = db.execute('SELECT * FROM asset_dashboards WHERE id=%s', (_new_id,)).fetchone()
     db.close()
     return jsonify(dict(row)), 201
 
@@ -21855,7 +21773,7 @@ def dashboard_create():
 @login_required
 def dashboard_view(dash_id):
     db = get_db()
-    d = db.execute('SELECT * FROM asset_dashboards WHERE id=?', (dash_id,)).fetchone()
+    d = db.execute('SELECT * FROM asset_dashboards WHERE id=%s', (dash_id,)).fetchone()
     if not d:
         db.close()
         abort(404)
@@ -21884,7 +21802,7 @@ def dashboard_view(dash_id):
 @login_required
 def dashboard_edit(dash_id):
     db = get_db()
-    d = db.execute('SELECT * FROM asset_dashboards WHERE id=?', (dash_id,)).fetchone()
+    d = db.execute('SELECT * FROM asset_dashboards WHERE id=%s', (dash_id,)).fetchone()
     if not d or d['user_id'] != session['user_id']:
         db.close()
         abort(403)
@@ -21893,9 +21811,9 @@ def dashboard_edit(dash_id):
     if data.get('is_public') and not slug:
         slug = secrets.token_urlsafe(12)
     db.execute("""
-        UPDATE asset_dashboards SET name=?, is_public=?, public_slug=?,
-               layout=?, config_json=?, updated_at=CURRENT_TIMESTAMP
-        WHERE id=?
+        UPDATE asset_dashboards SET name=%s, is_public=%s, public_slug=%s,
+               layout=%s, config_json=%s, updated_at=CURRENT_TIMESTAMP
+        WHERE id=%s
     """, (
         (data.get('name') or 'My Dashboard').strip(),
         1 if data.get('is_public') else 0,
@@ -21913,11 +21831,11 @@ def dashboard_edit(dash_id):
 @login_required
 def dashboard_delete(dash_id):
     db = get_db()
-    d = db.execute('SELECT user_id FROM asset_dashboards WHERE id=?', (dash_id,)).fetchone()
+    d = db.execute('SELECT user_id FROM asset_dashboards WHERE id=%s', (dash_id,)).fetchone()
     if not d or (d['user_id'] != session['user_id'] and session.get('user_role') != 'admin'):
         db.close()
         abort(403)
-    db.execute('DELETE FROM asset_dashboards WHERE id=?', (dash_id,))
+    db.execute('DELETE FROM asset_dashboards WHERE id=%s', (dash_id,))
     db.commit()
     db.close()
     return jsonify({'success': True})
@@ -21927,7 +21845,7 @@ def dashboard_delete(dash_id):
 @admin_required
 def api_admin_dashboard_make_private(dash_id):
     db = get_db()
-    db.execute('UPDATE asset_dashboards SET is_public=0, public_slug=NULL WHERE id=?', (dash_id,))
+    db.execute('UPDATE asset_dashboards SET is_public=0, public_slug=NULL WHERE id=%s', (dash_id,))
     db.commit()
     db.close()
     syslog_logger.info(f"DASHBOARD_MADE_PRIVATE id={dash_id} by={session.get('username')}")
@@ -21961,7 +21879,7 @@ def public_dashboard(slug):
     """Public dashboard — no login required."""
     db = get_db()
     d = db.execute(
-        'SELECT * FROM asset_dashboards WHERE public_slug=? AND is_public=1', (slug,)
+        'SELECT * FROM asset_dashboards WHERE public_slug=%s AND is_public=1', (slug,)
     ).fetchone()
     if not d:
         db.close()
@@ -22034,28 +21952,28 @@ def asset_reports_data():
         where.append("""
             s.id IN (
                 SELECT show_id FROM advance_data
-                WHERE field_key='performance_company' AND field_value=?
+                WHERE field_key='performance_company' AND field_value=%s
             )
         """)
         params.append(company)
 
     if venue:
-        where.append("s.venue = ?")
+        where.append("s.venue = %s")
         params.append(venue)
 
     if asset_type_id:
-        where.append("sa.asset_type_id = ?")
+        where.append("sa.asset_type_id = %s")
         params.append(int(asset_type_id))
 
     if asset_category_id:
-        where.append("at.category_id = ?")
+        where.append("at.category_id = %s")
         params.append(int(asset_category_id))
 
     if date_from:
-        where.append("COALESCE(s.show_date, '9999-12-31') >= ?")
+        where.append("COALESCE(s.show_date, '9999-12-31') >= %s")
         params.append(date_from)
     if date_to:
-        where.append("COALESCE(s.show_date, '0001-01-01') <= ?")
+        where.append("COALESCE(s.show_date, '0001-01-01') <= %s")
         params.append(date_to)
 
     where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
@@ -22147,7 +22065,6 @@ prism_module.register(
     admin_required=admin_required,
     log_audit=log_audit,
     db_adapter=db_adapter,
-    DATABASE=DATABASE,
     syslog_logger=syslog_logger,
 )
 
@@ -22173,6 +22090,7 @@ security_module.register(
     get_logo_for_venue=_get_logo_for_venue,
     safe_content_disposition=_safe_content_disposition,
     show_span_dates=_show_span_dates,
+    pdf_font_config=_wp_font_config,
 )
 
 
@@ -22190,7 +22108,6 @@ snapshot_module.register(
     admin_required=admin_required,
     log_audit=log_audit,
     db_adapter=db_adapter,
-    DATABASE=DATABASE,
     BACKUP_DIR=BACKUP_DIR,
     syslog_logger=syslog_logger,
 )
@@ -22199,7 +22116,7 @@ snapshot_module.register(
 # ─── Run ──────────────────────────────────────────────────────────────────────
 
 # Initialize syslog at import time (for Gunicorn)
-if os.path.exists(DATABASE):
+if db_adapter.is_configured():
     reload_syslog_handler()
     # Ensure backup dirs exist (fixes PermissionError if dirs were missing)
     try:
@@ -22208,11 +22125,13 @@ if os.path.exists(DATABASE):
         pass
     # Auto-run DB migrations on startup (idempotent — safe to run every time)
     try:
-        from init_db import migrate_db, migrate_db_postgres
-        migrate_db()
+        from init_db import migrate_db_postgres
         migrate_db_postgres()
     except Exception as _mig_err:
         print(f"[startup] Migration warning: {_mig_err}")
+else:
+    print(f"[startup] PostgreSQL is not configured — create {db_adapter.CONFIG_PATH} "
+          f"(see db_config.ini.example), then run: python3 init_db.py", file=sys.stderr)
 
 # Loud preflight checks for runtime dependencies that aren't import-required
 # but break specific features when missing. PyMuPDF is the new addition for
@@ -22248,8 +22167,8 @@ if not (os.environ.get('WERKZEUG_RUN_MAIN') == 'false'):
         start_cluster_heartbeat()
 
 if __name__ == '__main__':
-    if not os.path.exists(DATABASE):
-        print("Database not found. Run: python init_db.py")
+    if not db_adapter.is_configured():
+        print("PostgreSQL not configured. Create db_config.ini, then run: python init_db.py")
         run_port = 5400
     else:
         try:
