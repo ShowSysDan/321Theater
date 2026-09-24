@@ -10,22 +10,19 @@ APP_NAME="321theater"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 ENV_FILE="${APP_DIR}/.env"
 
-# Read port from database (falls back to 5400 if DB not yet created or setting absent)
+# Read app_port from app_settings in PostgreSQL (falls back to 5400 if the DB
+# isn't reachable yet or the setting is absent)
 _read_port() {
-    python3 -c "
-import sqlite3, os
-db = os.path.join('${APP_DIR}', 'advance.db')
-if os.path.exists(db):
-    try:
-        c = sqlite3.connect(db)
-        r = c.execute(\"SELECT value FROM app_settings WHERE key='app_port'\").fetchone()
-        c.close()
-        print(r[0] if r else '5400')
-    except Exception:
-        print('5400')
-else:
+    (cd "${APP_DIR}" && "${VENV}/bin/python" -c "
+import db_adapter
+try:
+    db = db_adapter.connect()
+    r = db.execute(\"SELECT value FROM app_settings WHERE key='app_port'\").fetchone()
+    db.close()
+    print(r['value'] if r and r['value'] else '5400')
+except Exception:
     print('5400')
-" 2>/dev/null || echo "5400"
+" 2>/dev/null) || echo "5400"
 }
 PORT=5400  # will be updated after DB is ready
 
@@ -102,17 +99,14 @@ chmod -R 755 "${APP_DIR}/backups"
 info "Backup dirs ready: ${APP_DIR}/backups/{hourly,daily}"
 
 # ── Database ──────────────────────────────────────────────────────────────────
-step "Initializing database..."
-DB="${APP_DIR}/advance.db"
-if [ -f "$DB" ]; then
-    info "Existing database found — running migration (data preserved)..."
-    "$PYTHON" "${APP_DIR}/init_db.py" --migrate
-    info "Migration complete."
-else
-    info "No database found — creating fresh installation..."
-    "$PYTHON" "${APP_DIR}/init_db.py"
-    info "Database initialized with default admin account."
+step "Initializing PostgreSQL database..."
+if [ ! -f "${APP_DIR}/db_config.ini" ]; then
+    error "db_config.ini not found. Copy db_config.ini.example to ${APP_DIR}/db_config.ini, fill in the PostgreSQL credentials, and re-run."
 fi
+# Idempotent: creates schemas/tables if missing, applies column migrations,
+# and seeds defaults only into empty tables (fresh installs).
+"$PYTHON" "${APP_DIR}/init_db.py" || error "Database initialization failed (see output above)."
+info "Database ready."
 
 # Read the configured port from the database now that it exists
 PORT=$(_read_port)
@@ -132,7 +126,8 @@ if [ "$(id -u)" -eq 0 ]; then
 
     # Ensure all app files are owned by the service user
     chown -R "${RUN_USER}:${RUN_USER}" "${APP_DIR}/backups" 2>/dev/null || true
-    chown "${RUN_USER}:${RUN_USER}" "${APP_DIR}/advance.db" 2>/dev/null || true
+    chown "${RUN_USER}:${RUN_USER}" "${APP_DIR}/db_config.ini" 2>/dev/null || true
+    chmod 600 "${APP_DIR}/db_config.ini" 2>/dev/null || true
     chown "${RUN_USER}:${RUN_USER}" "${APP_DIR}" 2>/dev/null || true
 
     # Generate SECRET_KEY if not already present

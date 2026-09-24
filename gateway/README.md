@@ -120,8 +120,8 @@ match after someone edited an env file."
 2. Visitor enters their email. The gateway POSTs it (plus the client IP) to
    `POST /internal/gateway/otp/request` on the app server, authenticated with
    the `X-Gateway-Secret` header. The app server:
-   - fails closed if it detects it's on a stale SQLite fallback instead of
-     PostgreSQL;
+   - fails closed (generic reply, nothing sent) if PostgreSQL is
+     unreachable;
    - enforces DB-backed rate limits (3 codes/email, 10/IP per 15 min);
    - looks up `users` for a row with that email (case-insensitive, non-blank,
      not locked) — *any* active account qualifies, employee or not;

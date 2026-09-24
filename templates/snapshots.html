@@ -19,14 +19,6 @@
   <a href="{{ url_for('settings') }}" class="btn btn-secondary">← Settings</a>
 </div>
 
-{% if stale_fallback %}
-<div class="form-section" style="margin-bottom:1.25rem;border-color:var(--red)">
-  <div class="form-section-body" style="color:var(--red)">
-    ⚠ The configured backend is PostgreSQL but this connection fell back to the SQLite bootstrap —
-    “live” data shown here is stale, and restore is disabled. Fix the PostgreSQL connection first.
-  </div>
-</div>
-{% endif %}
 
 {# ── Snapshot list ─────────────────────────────────────────────────────────── #}
 <div class="form-section" style="margin-bottom:1.5rem">
@@ -57,7 +49,7 @@
           <button class="btn btn-primary btn-sm" onclick="openSnapshot('{{ s.kind }}','{{ s.name }}')">Inspect</button>
           {% else %}
           <span style="color:var(--red);font-size:.78rem"
-                title="This file does not start with {{ 'gzip' if s.backend == 'postgres' else 'SQLite' }} data — it was corrupted when it was written and cannot be inspected or restored from.">⚠ corrupt</span>
+                title="This file does not start with gzip data — it was corrupted when it was written and cannot be inspected or restored from.">⚠ corrupt</span>
           {% endif %}
         </td>
       </tr>

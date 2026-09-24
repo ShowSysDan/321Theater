@@ -46,8 +46,8 @@ the /prism page surfaces these for troubleshooting.
 BACKGROUND-JOB SAFETY (see CLAUDE.md)
 -------------------------------------
 The scheduled job is leader-gated and — like the scheduled-email job —
-refuses to act when the configured backend is PostgreSQL but the active
-connection silently fell back to the SQLite bootstrap (stale settings).
+skips the run (logged) when PostgreSQL is unreachable; there is no fallback
+database to read stale settings from.
 """
 
 import hashlib
@@ -131,7 +131,7 @@ def get_prism_settings(db):
     The LIKE pattern is bound as a parameter — a literal % in SQL would be
     eaten by psycopg2's placeholder interpolation on PostgreSQL."""
     rows = db.execute(
-        'SELECT key, value FROM app_settings WHERE key LIKE ?', ('prism_%',)
+        'SELECT key, value FROM app_settings WHERE key LIKE %s', ('prism_%',)
     ).fetchall()
     found = {r['key']: r['value'] for r in rows}
     return {k: (found.get(k) if found.get(k) not in (None, '') else v)
@@ -142,7 +142,7 @@ def get_prism_settings(db):
 
 
 def _save_setting(db, key, value):
-    db.execute('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)',
+    db.execute('INSERT INTO app_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                (key, str(value)))
 
 
@@ -308,11 +308,13 @@ def environment_check(settings, *, db=None):
         else 'not set — generate one in Prism → Settings → Developer '
              '(scopes: read-events, read-venues)')
 
-    configured = _d['db_adapter'].read_db_settings(_d['DATABASE']).get('db_type', 'sqlite')
-    active = getattr(db, 'db_type', None) if db is not None else None
-    db_ok = (configured != 'postgres') or (active == 'postgres') or (db is None)
-    add('Database', db_ok,
-        f'configured={configured}' + (f', active={active}' if active else ''))
+    db_ok, db_detail = True, 'PostgreSQL'
+    if db is not None:
+        try:
+            db.execute('SELECT 1').fetchone()
+        except Exception as e:
+            db_ok, db_detail = False, f'PostgreSQL query failed: {e}'
+    add('Database', db_ok, db_detail)
 
     return checks
 
@@ -345,22 +347,22 @@ def _refresh_venues(db, settings, dbg):
             stages = [{'name': _norm_str(s.get('name'))[:200],
                        'capacity': s.get('capacity')}
                       for s in (v.get('stages') or []) if s.get('name')]
-            row = db.execute('SELECT id FROM prism_venues WHERE prism_venue_id=?',
+            row = db.execute('SELECT id FROM prism_venues WHERE prism_venue_id=%s',
                              (vid,)).fetchone()
             if row is None:
                 db.execute("""
                     INSERT INTO prism_venues
                       (prism_venue_id, name, city, state, capacity, is_active,
                        stages_json, raw_json, last_synced_at)
-                    VALUES (?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s, CURRENT_TIMESTAMP)
                 """, (vid, name, city, state, capacity, 0 if inactive else 1,
                       json.dumps(stages), json.dumps(v)))
             else:
                 db.execute("""
-                    UPDATE prism_venues SET name=?, city=?, state=?, capacity=?,
-                       is_active=?, stages_json=?, raw_json=?,
+                    UPDATE prism_venues SET name=%s, city=%s, state=%s, capacity=%s,
+                       is_active=%s, stages_json=%s, raw_json=%s,
                        last_synced_at=CURRENT_TIMESTAMP
-                    WHERE id=?
+                    WHERE id=%s
                 """, (name, city, state, capacity, 0 if inactive else 1,
                       json.dumps(stages), json.dumps(v), row['id']))
             n += 1
@@ -432,17 +434,6 @@ def run_prism_sync(trigger='manual', triggered_by=''):
             # failure here (DB hiccup etc.) comes back as a summary error and
             # never escapes as an exception — this function's contract.
             try:
-                # Same stale-bootstrap guard as the scheduled-email job: if
-                # we're configured for PostgreSQL but silently fell back to
-                # SQLite, every setting we read here (token!) is stale —
-                # refuse to act.
-                configured = _d['db_adapter'].read_db_settings(_d['DATABASE']).get('db_type', 'sqlite')
-                if configured == 'postgres' and getattr(db, 'db_type', None) != 'postgres':
-                    summary['error'] = ('Refusing to sync: configured for postgres but the '
-                                        'active connection is SQLite (stale bootstrap).')
-                    _log(f"Prism sync REFUSED — {summary['error']}", error=True)
-                    return summary
-
                 settings = get_prism_settings(db)
                 if settings['prism_enabled'] != '1':
                     summary['error'] = 'Prism module is disabled in settings.'
@@ -462,8 +453,8 @@ def run_prism_sync(trigger='manual', triggered_by=''):
                     node_timeout = 120
                 stale_cutoff = (datetime.now() - timedelta(seconds=node_timeout * 3 + 60))
                 db.execute("UPDATE prism_sync_log SET status='error', "
-                           "error_text=?, finished_at=CURRENT_TIMESTAMP "
-                           "WHERE status='running' AND started_at < ?",
+                           "error_text=%s, finished_at=CURRENT_TIMESTAMP "
+                           "WHERE status='running' AND started_at < %s",
                            ('Marked stale — sync never finished (worker died?)',
                             stale_cutoff.strftime('%Y-%m-%d %H:%M:%S')))
                 running = db.execute(
@@ -486,9 +477,9 @@ def run_prism_sync(trigger='manual', triggered_by=''):
 
                 cur = db.execute(
                     "INSERT INTO prism_sync_log (trigger_type, triggered_by, "
-                    "window_start, window_end, status) VALUES (?, ?, ?, ?, 'running')",
+                    "window_start, window_end, status) VALUES (%s, %s, %s, %s, 'running') RETURNING id",
                     (trigger, triggered_by, win_start.isoformat(), win_end.isoformat()))
-                log_id = summary['log_id'] = cur.lastrowid
+                log_id = summary['log_id'] = cur.fetchone()['id']
                 db.commit()
             except Exception as e:
                 summary['error'] = f'Sync preflight failed: {e}'
@@ -552,8 +543,8 @@ def run_prism_sync(trigger='manual', triggered_by=''):
 
                 db.execute(
                     "UPDATE prism_sync_log SET status='ok', finished_at=CURRENT_TIMESTAMP, "
-                    "events_fetched=?, events_new=?, events_updated=?, events_unchanged=?, "
-                    "debug_log=? WHERE id=?",
+                    "events_fetched=%s, events_new=%s, events_updated=%s, events_unchanged=%s, "
+                    "debug_log=%s WHERE id=%s",
                     (summary['fetched'], summary['new'], summary['updated'],
                      summary['unchanged'],
                      '\n'.join(log_lines)[:_DEBUG_LOG_MAX_CHARS], log_id))
@@ -570,7 +561,7 @@ def run_prism_sync(trigger='manual', triggered_by=''):
                 db.rollback()
                 db.execute(
                     "UPDATE prism_sync_log SET status='error', finished_at=CURRENT_TIMESTAMP, "
-                    "error_text=?, debug_log=? WHERE id=?",
+                    "error_text=%s, debug_log=%s WHERE id=%s",
                     (str(e)[:2000], '\n'.join(log_lines)[:_DEBUG_LOG_MAX_CHARS], log_id))
                 db.commit()
                 _log(f'Prism sync FAILED ({trigger}): {e}', error=True)
@@ -580,7 +571,7 @@ def run_prism_sync(trigger='manual', triggered_by=''):
                 db.rollback()
                 db.execute(
                     "UPDATE prism_sync_log SET status='error', finished_at=CURRENT_TIMESTAMP, "
-                    "error_text=?, debug_log=? WHERE id=?",
+                    "error_text=%s, debug_log=%s WHERE id=%s",
                     (str(e)[:2000], '\n'.join(log_lines)[:_DEBUG_LOG_MAX_CHARS], log_id))
                 db.commit()
                 _log(f'Prism sync CRASHED ({trigger}): {e}', error=True)
@@ -614,7 +605,7 @@ def _upsert_event(db, ev, summary, dbg, hidden=frozenset()):
 
     row = db.execute(
         'SELECT id, content_hash, import_state, imported_show_id, event_status '
-        'FROM prism_events WHERE prism_event_id=?',
+        'FROM prism_events WHERE prism_event_id=%s',
         (pid,)).fetchone()
 
     if row is None:
@@ -627,7 +618,7 @@ def _upsert_event(db, ev, summary, dbg, hidden=frozenset()):
                last_date, venue_name, stage_names, tour_name, number_of_shows,
                is_rental, dates_json, raw_json, content_hash, prism_last_updated,
                import_state, first_seen_at, last_synced_at, last_changed_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, %s,
                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         """, (pid, name, status_str, status_code, first_date, last_date,
               venue_name, stage_names, tour_name, n_shows, is_rental,
@@ -643,12 +634,12 @@ def _upsert_event(db, ev, summary, dbg, hidden=frozenset()):
     elif row['content_hash'] != h:
         db.execute("""
             UPDATE prism_events SET
-               name=?, event_status=?, event_status_code=?, first_date=?,
-               last_date=?, venue_name=?, stage_names=?, tour_name=?,
-               number_of_shows=?, is_rental=?, dates_json=?, raw_json=?,
-               content_hash=?, prism_last_updated=?,
+               name=%s, event_status=%s, event_status_code=%s, first_date=%s,
+               last_date=%s, venue_name=%s, stage_names=%s, tour_name=%s,
+               number_of_shows=%s, is_rental=%s, dates_json=%s, raw_json=%s,
+               content_hash=%s, prism_last_updated=%s,
                last_synced_at=CURRENT_TIMESTAMP, last_changed_at=CURRENT_TIMESTAMP
-            WHERE id=?
+            WHERE id=%s
         """, (name, status_str, status_code, first_date, last_date, venue_name,
               stage_names, tour_name, n_shows, is_rental, dates_json, raw_json,
               h, last_updated, row['id']))
@@ -659,15 +650,15 @@ def _upsert_event(db, ev, summary, dbg, hidden=frozenset()):
         # the sync ever writes to a main-app table.
         if row['import_state'] == 'imported' and row['imported_show_id'] \
                 and status_str and status_str != row['event_status']:
-            db.execute('UPDATE shows SET prism_status=? WHERE id=?',
+            db.execute('UPDATE shows SET prism_status=%s WHERE id=%s',
                        (status_str, row['imported_show_id']))
             summary['status_synced'] += 1
             dbg(f'  ↳ status {row["event_status"] or "?"} → {status_str} '
                 f'flowed to show {row["imported_show_id"]}')
     else:
         db.execute("""
-            UPDATE prism_events SET raw_json=?, prism_last_updated=?,
-               last_synced_at=CURRENT_TIMESTAMP WHERE id=?
+            UPDATE prism_events SET raw_json=%s, prism_last_updated=%s,
+               last_synced_at=CURRENT_TIMESTAMP WHERE id=%s
         """, (raw_json, last_updated, row['id']))
         summary['unchanged'] += 1
 
@@ -676,18 +667,17 @@ def run_prism_auto_sync():
     """
     APScheduler job (registered in app.py's start_scheduler). Fires hourly;
     does work only during the configured hour, only on the cluster leader,
-    only when the module + auto-sync are enabled, and never on a stale
-    SQLite fallback (run_prism_sync re-checks that last one too).
+    only when the module + auto-sync are enabled, and never when PostgreSQL
+    is unreachable (skipped, logged).
     """
     if not _d['am_i_leader']():
         return
-    db = _d['get_db']()
     try:
-        configured = _d['db_adapter'].read_db_settings(_d['DATABASE']).get('db_type', 'sqlite')
-        if configured == 'postgres' and getattr(db, 'db_type', None) != 'postgres':
-            _log('Prism auto-sync: configured for postgres but active connection '
-                 'is SQLite (stale bootstrap) — skipping this run.', error=True)
-            return
+        db = _d['get_db']()
+    except Exception as e:
+        _log(f'Prism auto-sync: PostgreSQL unreachable — skipping this run: {e}', error=True)
+        return
+    try:
         settings = get_prism_settings(db)
     finally:
         db.close()
@@ -708,7 +698,7 @@ def run_prism_auto_sync():
         today_start = date.today().strftime('%Y-%m-%d 00:00:00')
         done = db.execute(
             "SELECT COUNT(*) AS n FROM prism_sync_log "
-            "WHERE status='ok' AND trigger_type='scheduled' AND started_at >= ?",
+            "WHERE status='ok' AND trigger_type='scheduled' AND started_at >= %s",
             (today_start,)).fetchone()
         if done and done['n']:
             return
@@ -729,7 +719,7 @@ def _auto_import(db, summary, dbg, today):
     """
     rows = db.execute(
         "SELECT id FROM prism_events WHERE import_state='new' "
-        "AND first_date >= ? ORDER BY first_date LIMIT 200",
+        "AND first_date >= %s ORDER BY first_date LIMIT 200",
         (today.isoformat(),)).fetchall()
     if not rows:
         return
@@ -783,7 +773,7 @@ def import_staged_events(db, ids, user_id, username, auto=False):
     """
     results = []
     for eid in ids:
-        row = db.execute('SELECT * FROM prism_events WHERE id=?', (eid,)).fetchone()
+        row = db.execute('SELECT * FROM prism_events WHERE id=%s', (eid,)).fetchone()
         if row is None:
             results.append({'id': eid, 'ok': False, 'msg': 'staged event not found'})
             continue
@@ -808,16 +798,16 @@ def import_staged_events(db, ids, user_id, username, auto=False):
         # first date, so a manually-created show isn't doubled).
         if first_date:
             dup = db.execute(
-                "SELECT id FROM shows WHERE LOWER(name)=LOWER(?) AND ("
-                " show_date=? OR id IN (SELECT show_id FROM show_performances"
-                "  WHERE perf_date=?))",
+                "SELECT id FROM shows WHERE LOWER(name)=LOWER(%s) AND ("
+                " show_date=%s OR id IN (SELECT show_id FROM show_performances"
+                "  WHERE perf_date=%s))",
                 (row['name'], first_date, first_date)).fetchone()
             if dup:
                 msg = (f'{label}: a show with this name and date already '
                        f'exists (show {dup["id"]}) — skipped')
                 if auto:
                     db.execute("UPDATE prism_events SET import_state='ignored' "
-                               "WHERE id=?", (eid,))
+                               "WHERE id=%s", (eid,))
                     msg += ' and auto-ignored (Restore to New to retry)'
                 results.append({'id': eid, 'ok': False, 'msg': msg})
                 continue
@@ -825,31 +815,31 @@ def import_staged_events(db, ids, user_id, username, auto=False):
         venue = _venue_for_event(db, row)
         cur = db.execute(
             "INSERT INTO shows (name, show_date, show_time, venue, prism_status, "
-            "created_by) VALUES (?, ?, ?, ?, ?, ?)",
+            "created_by) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
             (row['name'], first_date, first_time, venue,
              row['event_status'] or None, user_id))
-        show_id = cur.lastrowid
+        show_id = cur.fetchone()['id']
 
         for key, val in [('show_name', row['name']), ('show_date', first_date or ''),
                          ('show_time', first_time), ('venue', venue)]:
             if val:
                 db.execute(
-                    'INSERT OR REPLACE INTO advance_data (show_id, field_key, field_value) '
-                    'VALUES (?, ?, ?)', (show_id, key, val))
+                    'INSERT INTO advance_data (show_id, field_key, field_value) '
+                    'VALUES (%s, %s, %s) ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value', (show_id, key, val))
 
         if perfs:
             for i, (pd, pt) in enumerate(perfs):
                 db.execute(
                     'INSERT INTO show_performances (show_id, perf_date, perf_time, sort_order) '
-                    'VALUES (?, ?, ?, ?)', (show_id, pd, pt, i))
+                    'VALUES (%s, %s, %s, %s)', (show_id, pd, pt, i))
         elif first_date:
             db.execute(
                 'INSERT INTO show_performances (show_id, perf_date, perf_time, sort_order) '
-                'VALUES (?, ?, ?, 0)', (show_id, first_date, first_time))
+                'VALUES (%s, %s, %s, 0)', (show_id, first_date, first_time))
 
         db.execute("""
-            UPDATE prism_events SET import_state='imported', imported_show_id=?,
-                   imported_at=CURRENT_TIMESTAMP, imported_by=? WHERE id=?
+            UPDATE prism_events SET import_state='imported', imported_show_id=%s,
+                   imported_at=CURRENT_TIMESTAMP, imported_by=%s WHERE id=%s
         """, (show_id, user_id, eid))
 
         _d['log_audit'](db, 'SHOW_CREATE', 'show', show_id, show_id=show_id,
@@ -1165,7 +1155,7 @@ def _venue_visibility_view():
                 if all(t.lower() in seen for t in tokens) and \
                         any(t.lower() in newly_hidden for t in tokens):
                     db.execute("UPDATE prism_events SET import_state='ignored' "
-                               "WHERE id=?", (r['id'],))
+                               "WHERE id=%s", (r['id'],))
                     ignored_now += 1
 
         _save_setting(db, 'prism_hidden_stages', json.dumps(clean))
@@ -1190,8 +1180,8 @@ def _set_state_view():
         n = 0
         for eid in ids:
             cur = db.execute(
-                "UPDATE prism_events SET import_state=? "
-                "WHERE id=? AND import_state != 'imported'", (state, eid))
+                "UPDATE prism_events SET import_state=%s "
+                "WHERE id=%s AND import_state != 'imported'", (state, eid))
             n += cur.rowcount or 0
         db.commit()
         return jsonify({'ok': True, 'updated': n})
@@ -1224,7 +1214,7 @@ def _raw_view(eid):
     db = _d['get_db']()
     try:
         row = db.execute(
-            'SELECT prism_event_id, name, raw_json FROM prism_events WHERE id=?',
+            'SELECT prism_event_id, name, raw_json FROM prism_events WHERE id=%s',
             (eid,)).fetchone()
     finally:
         db.close()
@@ -1244,7 +1234,7 @@ def register(app, **deps):
     """
     Wire the module into the Flask app. `deps` must provide:
       get_db, get_current_user, am_i_leader, admin_required, log_audit,
-      db_adapter, DATABASE — and optionally syslog_logger.
+      db_adapter — and optionally syslog_logger.
     Called once from app.py; everything else in this file is self-contained.
     """
     _d.update(deps, app=app)

@@ -17,61 +17,83 @@ Full rules live in README.md → "Version Numbering". Do not skip this — the
 version shows in every page's sidebar footer and is how the user verifies a
 deploy actually took.
 
-## Database: ALWAYS PostgreSQL (do not "fuss about SQLite")
+## Database: PostgreSQL-native, PostgreSQL ONLY (3.0.0+)
 
-**Production runs on PostgreSQL, always.** Treat PostgreSQL as the one source
-of truth for all data *and* `app_settings`.
+**There is no SQLite anywhere.** The SQLite backend, the `advance.db`
+bootstrap, `db_type`, the SQL-dialect translation layer and the silent
+fallback connection were all removed in 3.0.0. Don't reintroduce any of them,
+and don't write "portable" SQLite/PG code or `if backend == …` branches.
 
-The SQLite file (`advance.db`) is **only a bootstrap**. It exists so the app can
-discover two things before any real connection is opened:
-- `db_type` (stored in the SQLite `app_settings` table — set to `postgres`), and
-- PostgreSQL credentials, read from `db_config.ini` (gitignored) next to it.
+- **Config:** `db_config.ini` `[postgresql]` in the app dir (gitignored), or
+  the path in `THEATER_DB_CONFIG`. `db_adapter.read_db_settings()` parses it
+  (cached 30 s). That file is the ONLY bootstrap: `app_settings` and all
+  data live in PostgreSQL.
+- **No fallback, fail loud:** `db_adapter.connect()` / `get_db()` RAISE
+  `db_adapter.DatabaseUnavailable` when PG is unconfigured or unreachable.
+  Requests get a 503 (app-level errorhandler; JSON for API/XHR). Background
+  jobs catch it and skip the run with an ERROR log (see
+  `run_scheduled_pdf_emails`, `run_no_labor_alerts`, prism auto-sync). The
+  gateway OTP API fails closed via `_gateway_db()`. `get_app_setting()`
+  returns the caller's default on an outage (logged), so a job can never act
+  on stale settings; it only sees defaults and then fails at `get_db()`.
+  History: the old silent SQLite fallback made the scheduled-email job read
+  `advance_email_enabled='0'` from the bootstrap and send nothing. That class
+  of bug is now impossible. Keep it that way: **never catch
+  DatabaseUnavailable and carry on with made-up data.**
+- `get_db()` opens a fresh psycopg2 connection per call (search_path set via
+  startup `options`), so it's safe from background threads. Always `close()`.
 
-Everything else — shows, schedules, settings saved in the UI (SMTP config,
-auto-email flags, etc.) — is written to and read from **PostgreSQL**. The SQLite
-bootstrap does **not** contain those rows, so reading app settings from SQLite
-returns stale/default values (e.g. `advance_email_enabled` → `'0'`).
+### Writing SQL (native psycopg2, sent VERBATIM)
+`db_adapter.DBConnection.execute()` hands SQL straight to psycopg2 (DictCursor
+rows: `row['col']`, `row[0]`, `.get()`, `dict(row)`). No rewriting happens, so:
+- Placeholders are `%s` (never `?`). IN-lists: `','.join(['%s'] * len(ids))`
+  (NOT `'%s' * n`, which `join` splits into characters).
+- Upserts: `INSERT … ON CONFLICT (cols) DO UPDATE SET c = EXCLUDED.c` or
+  `ON CONFLICT DO NOTHING`. The conflict target must match a real unique
+  index/PK.
+- New ids: `INSERT … RETURNING id` then `cur.fetchone()['id']`. There is no
+  `lastrowid` and no hidden `lastval()` call.
+- Time math: `NOW() - INTERVAL '60 seconds'`. String literals are
+  single-quoted: `status="active"` is a COLUMN reference in PG (that bug 500'd
+  the public show PDFs until 3.0.0). Case-insensitive match: `ILIKE`.
+- **Literal `%` in SQL that also has params must be `%%`**, or better, bind
+  the pattern (`LIKE %s` with `'prefix_%'`). With no params the adapter passes
+  `None`, so param-less literals like `LIKE 'syslog_%'` are fine.
+- A `?` in SQL text is now just a `?` (it used to be blindly rewritten), but
+  bind user-facing text as a parameter anyway.
+- PG returns `date`/`datetime`/`Decimal` objects. Coerce with `_as_date()` /
+  `_as_dt()` (app.py) before date math, and `json.dumps` row snapshots with
+  `default=str` (a bare dumps raises and, inside never-raise helpers like
+  `log_audit`, the row silently vanishes; this dropped every
+  snapshot-bearing EDIT/DELETE audit entry on PG until 2.18.0).
+- `DATE` columns can't be compared to `''` or `LIKE`d without a cast
+  (`CAST(show_date AS TEXT) ILIKE %s`).
+- Errors: any exception rolls the transaction back before re-raising (PG
+  aborts the whole transaction on error). UniqueViolation →
+  `db_adapter.DBIntegrityError`; other integrity errors are psycopg2's own.
 
-### The trap to watch for
-`db_adapter.connect()` **silently falls back to a SQLite connection** if the
-PostgreSQL connect fails for any reason. On this always-PG deployment that means
-code can silently start reading STALE bootstrap data instead of erroring. This
-already caused a real bug: the scheduled-email background job would fall back to
-SQLite, see `advance_email_enabled='0'`, and send nothing — while the Settings
-"Next scheduled send" preview (running in a request while PG was reachable)
-showed a correct plan. The fallback now logs at ERROR, and the email scheduler
-explicitly refuses to act when `db.db_type != 'postgres'`. Keep that pattern:
-**background jobs must verify they're actually on PostgreSQL before acting on
-settings, rather than trusting a silent SQLite fallback.**
+### Schema (init_db.py)
+- `PG_SCHEMA` (CREATE TABLE/INDEX IF NOT EXISTS) + `_apply_column_migrations`
+  (ADD COLUMN IF NOT EXISTS …) are the whole schema. `migrate_db_postgres()`
+  runs both on every startup. `python3 init_db.py` also seeds a FRESH
+  install: seeds only go into EMPTY tables, and admin/admin123 only when
+  `users` is empty (shared cross-app directory). Never make startup seed.
+- New table → add to `PG_SCHEMA` (and `SHARED_TABLES` if it belongs in the
+  shared schema). New column on an existing table → add it to the
+  CREATE TABLE *and* an `ADD COLUMN IF NOT EXISTS` line, so fresh installs
+  and upgrades converge (a fresh install and an upgraded DB were verified
+  column-for-column identical in 3.0.0; keep it so).
+- **`PG_SCHEMA` is split on `;` with no real parser.** Keep every statement
+  self-contained and never put a `;` inside a string literal. Full-line `--`
+  comments are stripped before the split (2.42.0). A `;` in 2.38.0's
+  venue_colors comment once glued comment-tail onto the CREATE TABLE, so the
+  table was never created ("Failed to load venue list").
 
-### SQL portability
-`db_adapter.py` adapts SQLite-style SQL for PostgreSQL automatically: `?`
-placeholders → `%s`, `INSERT OR REPLACE/IGNORE` → `ON CONFLICT …`, and
-`datetime('now', …)` → `NOW() ± INTERVAL`. New `INSERT OR REPLACE` targets need
-their conflict columns added to `_CONFLICT_COLS`. PostgreSQL returns `date`/
-`datetime` objects where SQLite returns ISO strings — coerce with `_as_date()`
-(app.py) before doing date math, and `json.dumps` row snapshots with
-`default=str` (a bare dumps raises on PG and, inside never-raise helpers like
-`log_audit`, the row silently vanishes — this dropped every snapshot-bearing
-EDIT/DELETE audit entry on PG until 2.18.0).
-
-Traps that only bite on PostgreSQL (each has caused a real 500):
-- **Literal `%` in SQL** (e.g. `LIKE 'prefix_%'`): bind the pattern as a
-  parameter instead. db_adapter now passes `None` to psycopg2 when there are
-  no params (so param-less literals work), but a query that mixes a literal
-  `%` WITH bound params will still break — psycopg2 interprets `%` as a
-  placeholder marker.
-- **Literal `?` anywhere in SQL text** — including inside quoted string
-  literals and prose ("worker died?") — is rewritten to `%s` by db_adapter's
-  blind `replace('?', '%s')`. Bind any text containing `?` as a parameter.
-- **`PG_SCHEMA` in init_db.py is split on `;` with no real parser** — keep
-  every statement self-contained and never put a `;` inside a string literal.
-  Full-line `--` comments are stripped before the split (2.42.0), so comment
-  semicolons no longer break — but they used to: a `;` in 2.38.0's
-  venue_colors comment glued comment-tail onto the CREATE TABLE, so the table
-  was never created on PG ("Failed to load venue list"). SQLite's
-  `executescript` parses properly, so such mistakes pass SQLite testing and
-  only fail on PG init/migrate.
+### Verifying SQL changes
+There's no SQLite to test against: test against a real PostgreSQL (the 3.0.0
+work used a local PG 16). A cheap static check that catches syntax, unknown
+tables/columns and bad ON CONFLICT targets is to `PREPARE` each statement
+(with `%s` → `$n`) against a migrated schema.
 
 ## Cross-app user flags (`is_app_user` / `is_app_admin`) — NEVER used in this app
 Two columns on the (shared-schema) `users` table — `is_app_user` and
@@ -219,8 +241,7 @@ apps. For a 321Theater access change, use this app's own flags instead
   100 ms) into `perf_slow_queries`. Admin UI: `/admin/performance`.
 - The upsert merges (counters add, min/max/slowest compare) so concurrent
   workers can flush the same row — don't replace it with INSERT OR REPLACE,
-  which would clobber. Flushes on a stale SQLite fallback drop the batch
-  (background-write rule). Retention is trimmed in `run_hourly_maintenance`.
+  which would clobber. A flush that can't reach PostgreSQL drops its batch. Retention is trimmed in `run_hourly_maintenance`.
 - Background-job queries (no request context) are intentionally not tracked.
   Keep the hook path allocation-free and never let it raise.
 
@@ -228,22 +249,21 @@ apps. For a 321Theater access change, use this app's own flags instead
 - `snapshot_module.py` + `templates/snapshots.html`, wired by one
   `snapshot_module.register(app, …)` call next to the Prism registration.
   Reads the hourly/daily backups written by `run_hourly_backup` /
-  `run_daily_backup` (plain `pg_dump` .sql.gz on PG, file copy .db on SQLite;
-  per-server local disk).
+  `run_daily_backup` (plain `pg_dump` .sql.gz, per-server local disk; legacy
+  SQLite-era .db files are ignored).
 - Dumps are parsed in **pure Python** (streaming COPY-block parser) — a
   snapshot is never loaded into the PostgreSQL server. Diff is keyed on the
-  table's primary key (parsed from the dump / PRAGMA); values are normalized
+  table's primary key (parsed from the dump); values are normalized
   to COPY text form before comparing.
 - Restore is preview → confirm → apply: apply re-derives the plan and
   compares its hash against the previewed one (409 on drift), runs in ONE
-  transaction, audit-logs every row with before-images, and on PG re-syncs
+  transaction, audit-logs every row with before-images, and re-syncs
   id sequences after inserts. Two modes: per-show rollback/resurrection
   (`shows` row + `SHOW_CHILD_TABLES`) and row cherry-pick from the diff view.
 - `RESTORE_BLOCKED` tables (users/sessions/tokens/audit/email_send_log/
   perf/cluster) are inspect-only — don't widen without being asked; restoring
   `email_send_log` would re-send advance emails, `audit_log` would falsify
-  history, `users` is the shared cross-app directory. Restore also refuses on
-  a stale SQLite fallback and on snapshot↔live backend mismatch.
+  history, `users` is the shared cross-app directory.
 
 ## Prism FM integration (SANDBOXED — keep it that way)
 Prism is the building's primary scheduling system. The integration lives in
@@ -266,8 +286,7 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
 - Dedup is by `prism_events.prism_event_id` (unique). Re-syncs upsert;
   `content_hash` drives the "changed since import" badge.
 - The scheduled job follows the background-job rules above: leader-gated AND
-  refuses to act when configured-postgres ≠ active backend (stale SQLite
-  fallback). Manual sync, settings, and import are admin-only routes.
+  skips the run (logged) when PostgreSQL is unreachable. Manual sync, settings, and import are admin-only routes.
 - Debugging: every sync writes a `prism_sync_log` row with a capped debug
   log; the `/prism` page shows env checks (node/SDK/token/DB), sync history,
   and a raw-payload viewer per staged event.

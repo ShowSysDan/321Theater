@@ -11,16 +11,16 @@ Usage:
 Options:
     --inventory PATH    Path to RentalInventory xlsx (default: RentalInventory*.xlsx in script dir)
     --items PATH        Path to Items xlsx (default: Item*.xlsx in script dir)
-    --db PATH           Path to advance.db (default: advance.db in script dir)
     --force             Skip duplicate-data guard (required if categories already exist)
     --dry-run           Print what would be imported without writing anything
+
+Writes to the PostgreSQL database in db_config.ini, in ONE transaction: any
+error rolls the whole import back.
 """
 
 import argparse
 import glob
 import os
-import shutil
-import sqlite3
 import sys
 from datetime import datetime, date
 
@@ -31,6 +31,8 @@ except ImportError:
     sys.exit(1)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+import db_adapter  # noqa: E402
 
 STATUS_MAP = {
     'IN':           'available',
@@ -106,27 +108,15 @@ def main():
     parser = argparse.ArgumentParser(description='Import rental inventory into ShowAdvance')
     parser.add_argument('--inventory', help='Path to RentalInventory xlsx')
     parser.add_argument('--items', help='Path to Items xlsx')
-    parser.add_argument('--db', help='Path to advance.db', default=os.path.join(SCRIPT_DIR, 'advance.db'))
     parser.add_argument('--force', action='store_true', help='Skip duplicate guard')
     parser.add_argument('--dry-run', action='store_true', help='Print actions without writing')
     args = parser.parse_args()
 
     inventory_path = args.inventory or find_file('RentalInventory*.xlsx', 'RentalInventory')
     items_path = args.items or find_file('Item*.xlsx', 'Items')
-    db_path = args.db
-
-    if not os.path.exists(db_path):
-        print(f"ERROR: Database not found at {db_path}")
-        print("Run 'python3 init_db.py' first to initialize the database.")
-        sys.exit(1)
-
     dry_run = args.dry_run
     if dry_run:
         print("DRY RUN — no changes will be written.\n")
-    else:
-        bak = db_path + '.bak'
-        shutil.copy2(db_path, bak)
-        print(f"Database backed up to: {bak}\n")
 
     print(f"Loading {os.path.basename(inventory_path)}...")
     inventory_rows = load_xlsx(inventory_path)
@@ -136,15 +126,12 @@ def main():
     item_rows = load_xlsx(items_path)
     print(f"  {len(item_rows)} item rows\n")
 
-    # Backup database before any writes
-    if not dry_run:
-        bak_path = db_path + '.bak'
-        shutil.copy2(db_path, bak_path)
-        print(f"Backup created: {bak_path}\n")
-
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA foreign_keys = ON')
+    try:
+        conn = db_adapter.connect()
+    except db_adapter.DatabaseUnavailable as e:
+        print(f"ERROR: {e}")
+        print("Create db_config.ini and run 'python3 init_db.py' first.")
+        sys.exit(1)
 
     # Duplicate guard
     existing_cats = conn.execute('SELECT COUNT(*) FROM asset_categories').fetchone()[0]
@@ -160,9 +147,8 @@ def main():
     category_map = {}  # name → id
     for i, name in enumerate(inv_types):
         if not dry_run:
-            conn.execute('INSERT INTO asset_categories (name, sort_order) VALUES (?,?)', (name, i))
-            conn.commit()
-            row = conn.execute('SELECT id FROM asset_categories WHERE name=?', (name,)).fetchone()
+            conn.execute('INSERT INTO asset_categories (name, sort_order) VALUES (%s,%s)', (name, i))
+            row = conn.execute('SELECT id FROM asset_categories WHERE name=%s', (name,)).fetchone()
             category_map[name] = row['id']
         else:
             category_map[name] = f'<cat:{name}>'
@@ -191,11 +177,10 @@ def main():
         if not dry_run:
             conn.execute("""
                 INSERT INTO asset_types (category_id, parent_type_id, name, sort_order)
-                VALUES (?,NULL,?,?)
+                VALUES (%s,NULL,%s,%s)
             """, (cat_id, category, so))
-            conn.commit()
             row = conn.execute(
-                'SELECT id FROM asset_types WHERE category_id=? AND name=? AND parent_type_id IS NULL',
+                'SELECT id FROM asset_types WHERE category_id=%s AND name=%s AND parent_type_id IS NULL',
                 (cat_id, category)
             ).fetchone()
             cat_pairs[(inv_type, category)] = row['id']
@@ -237,15 +222,14 @@ def main():
         rental_inv_id = _str(r.get('RentalInventoryId'))
 
         if not dry_run:
-            conn.execute("""
+            row = conn.execute("""
                 INSERT INTO asset_types
                   (category_id, parent_type_id, name, manufacturer, model,
                    rental_cost, weekly_rate, is_retired, is_consumable, is_system, sort_order)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                RETURNING id
             """, (cat_id, parent_type_id, name, manufacturer, model,
-                  rental_cost, weekly_rate, is_retired, is_consumable, is_system, so))
-            conn.commit()
-            row = conn.execute('SELECT id FROM asset_types ORDER BY id DESC LIMIT 1').fetchone()
+                  rental_cost, weekly_rate, is_retired, is_consumable, is_system, so)).fetchone()
             type_id = row['id']
         else:
             type_id = f'<type:{name}>'
@@ -308,15 +292,14 @@ def main():
         system_type_id = rental_inv_id_map.get(container_inv_id) if container_inv_id else None
 
         if not dry_run:
-            conn.execute("""
+            row = conn.execute("""
                 INSERT INTO asset_items
                   (asset_type_id, barcode, status, condition, year_purchased,
                    depreciation_start_date, replacement_cost, is_container, system_type_id, sort_order)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                RETURNING id
             """, (asset_type_id, barcode, status, condition, year_purchased,
-                  dep_start, replacement_cost, is_container, system_type_id, so))
-            conn.commit()
-            row = conn.execute('SELECT id FROM asset_items ORDER BY id DESC LIMIT 1').fetchone()
+                  dep_start, replacement_cost, is_container, system_type_id, so)).fetchone()
             new_id = row['id']
         else:
             new_id = f'<item:{barcode or source_item_id}>'
@@ -388,12 +371,10 @@ def main():
                 conn.execute("""
                     INSERT INTO asset_items
                       (asset_type_id, barcode, status, condition, sort_order)
-                    VALUES (?,?,?,?,?)
+                    VALUES (%s,%s,%s,%s,%s)
                 """, (asset_type_id, None, status, 'good', so))
             qty_added += 1
 
-        if not dry_run and needed > 0:
-            conn.commit()
 
         print(f"  {name}: +{needed} units (TotalQuantity={total_qty})")
 
@@ -419,10 +400,10 @@ def main():
     if not dry_run and member_pairs:
         for sys_id, comp_id in sorted(member_pairs, key=lambda x: (str(x[0]), str(x[1]))):
             conn.execute("""
-                INSERT OR IGNORE INTO asset_type_system_members (system_type_id, component_type_id)
-                VALUES (?,?)
+                INSERT INTO asset_type_system_members (system_type_id, component_type_id)
+                VALUES (%s,%s)
+                ON CONFLICT DO NOTHING
             """, (sys_id, comp_id))
-        conn.commit()
         print(f"  Inserted into asset_type_system_members")
 
     # ── 5. ITEMS PASS 2 — set container relationships ─────────────────────────
@@ -439,12 +420,10 @@ def main():
 
         if child_id and container_id and child_id != container_id:
             if not dry_run:
-                conn.execute('UPDATE asset_items SET container_item_id=? WHERE id=?',
+                conn.execute('UPDATE asset_items SET container_item_id=%s WHERE id=%s',
                              (container_id, child_id))
             container_links += 1
 
-    if not dry_run:
-        conn.commit()
 
     print(f"  {container_links} container assignments made")
 
@@ -467,6 +446,8 @@ def main():
         if len(warnings) > 20:
             print(f"  ... and {len(warnings)-20} more")
 
+    if not dry_run:
+        conn.commit()
     conn.close()
     print("\nDone. Start the app and navigate to Assets to review.")
 

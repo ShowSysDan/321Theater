@@ -140,6 +140,7 @@ A comprehensive security audit of the ShowAdvance codebase identified **28 uniqu
 - **Impact:** If PostgreSQL is configured but connection fails, the app silently falls back to SQLite, potentially reading/writing stale data with no warning.
 - **Fix:** Log a warning or fail hard rather than silently degrading.
 - **Status: FIXED** — Added warning log when falling back. Added schema name validation against safe identifier pattern.
+- **Status (3.0.0): ELIMINATED** — the SQLite backend and fallback were removed entirely; `db_adapter.connect()` now raises `DatabaseUnavailable` (requests → 503, jobs skip, gateway OTP fails closed).
 
 ---
 

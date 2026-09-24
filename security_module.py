@@ -94,7 +94,7 @@ def _require_show(show_id):
         abort(403)
     db = _d['get_db']()
     try:
-        show = db.execute('SELECT * FROM shows WHERE id=?', (show_id,)).fetchone()
+        show = db.execute('SELECT * FROM shows WHERE id=%s', (show_id,)).fetchone()
     finally:
         db.close()
     if not show:
@@ -116,7 +116,7 @@ def _clean_name(raw):
 
 def _fetch_names(db, show_id):
     return [r['name'] for r in db.execute(
-        'SELECT name FROM security_signin_names WHERE show_id=? '
+        'SELECT name FROM security_signin_names WHERE show_id=%s '
         'ORDER BY sort_order, id', (show_id,)).fetchall()]
 
 
@@ -238,11 +238,11 @@ def _names_save_view(show_id):
     db = _d['get_db']()
     try:
         before = _fetch_names(db, show_id)
-        db.execute('DELETE FROM security_signin_names WHERE show_id=?', (show_id,))
+        db.execute('DELETE FROM security_signin_names WHERE show_id=%s', (show_id,))
         for i, name in enumerate(names):
             db.execute(
                 'INSERT INTO security_signin_names (show_id, name, sort_order, created_by) '
-                'VALUES (?,?,?,?)',
+                'VALUES (%s,%s,%s,%s)',
                 (show_id, name, i, session.get('user_id')))
         if names != before:
             _d['log_audit'](db, 'SECURITY_SIGNIN_SAVE', 'security_signin', show_id,
