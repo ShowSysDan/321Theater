@@ -63,6 +63,7 @@ import nav_layout
 import prism_module  # sandboxed Prism FM integration — wired up near the bottom
 import security_module  # security sign-in sheets — wired up near the bottom
 import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
+import file_store  # S3 <-> PostgreSQL file redundancy + migration — wired up near the bottom
 
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, session, jsonify, make_response, abort, send_file,
@@ -747,7 +748,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.0.2'
+APP_VERSION = '3.1.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -2707,12 +2708,7 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
         try:
             s3_key = f"exports/{show_id}/{pdf_type}/v{pdf_version}.pdf"
             s3_storage.upload_file(s3_key, pdf_bytes, 'application/pdf')
-            _db_s3 = get_db()
-            try:
-                _db_s3.execute('UPDATE export_log SET s3_key=%s, pdf_data=NULL WHERE id=%s', (s3_key, pdf_log_id))
-                _db_s3.commit()
-            finally:
-                _db_s3.close()
+            _mark_export_in_s3(pdf_log_id, s3_key)
         except Exception as e:
             app.logger.error(f"S3 push failed for email PDF show={show_id} type={pdf_type}: {e}")
             syslog_logger.error(f"S3_PUSH_FAILED context=email_pdf show_id={show_id} type={pdf_type} error={e}")
@@ -5957,18 +5953,25 @@ def upload_attachment(show_id):
         VALUES (%s, %s, %s, %s, NULL, %s, %s, %s) RETURNING id
     """, (show_id, session['user_id'], filename, mime_type, len(data), field_key, description))
     aid = cur.fetchone()['id']
-    # Upload to S3; fall back to DB storage if S3 is unavailable
+    sha = file_store.sha256_hex(data)
+    # Upload to S3; fall back to DB storage if S3 is unavailable. With
+    # dual-write on (Settings → File Redundancy) the DB copy is kept too.
     if s3_storage.is_configured():
         try:
             s3_key = f"attachments/{show_id}/{aid}/{filename}"
             s3_storage.upload_file(s3_key, data, mime_type)
-            db.execute('UPDATE show_attachments SET s3_key=%s WHERE id=%s', (s3_key, aid))
+            if file_store.keep_db_copy():
+                db.execute('UPDATE show_attachments SET s3_key=%s, file_data=%s, content_sha256=%s WHERE id=%s',
+                           (s3_key, data, sha, aid))
+            else:
+                db.execute('UPDATE show_attachments SET s3_key=%s, content_sha256=%s WHERE id=%s',
+                           (s3_key, sha, aid))
         except Exception as e:
             app.logger.warning(f"S3 upload failed for attachment {aid}, falling back to DB: {e}")
             syslog_logger.warning(f"S3_UPLOAD_FAILED table=show_attachments id={aid} show_id={show_id} error={e}")
-            db.execute('UPDATE show_attachments SET file_data=%s WHERE id=%s', (data, aid))
+            db.execute('UPDATE show_attachments SET file_data=%s, content_sha256=%s WHERE id=%s', (data, sha, aid))
     else:
-        db.execute('UPDATE show_attachments SET file_data=%s WHERE id=%s', (data, aid))
+        db.execute('UPDATE show_attachments SET file_data=%s, content_sha256=%s WHERE id=%s', (data, sha, aid))
     log_audit(db, 'FILE_UPLOAD', 'attachment', aid, show_id=show_id, detail=filename)
     db.commit()
     row = db.execute("""
@@ -6006,19 +6009,15 @@ def download_attachment(show_id, aid):
     db.close()
     if not row:
         abort(404)
-    if row['s3_key']:
-        try:
-            data = s3_storage.download_file(row['s3_key'])
-        except Exception as e:
-            app.logger.error(f"S3 download failed for attachment {aid}: {e}")
-            abort(503)
-    elif row['file_data']:
-        data = bytes(row['file_data'])
-        # Archived DB-stored files are held gzip-compressed on disk.
-        if row['is_compressed']:
-            data = gzip.decompress(data)
-    else:
+    # S3 or DB copy per the admin's read preference, falling back to the
+    # other; archived DB copies (gzip) are decompressed transparently.
+    try:
+        data = file_store.read_bytes('attachments', row)
+    except file_store.FileMissing:
         abort(404)
+    except file_store.FileUnavailable as e:
+        app.logger.error(f"Download failed for attachment {aid}: {e}")
+        abort(503)
     resp = make_response(data)
     resp.headers['Content-Type'] = row['mime_type']
     resp.headers['Content-Disposition'] = _safe_content_disposition(row['filename'])
@@ -6400,10 +6399,9 @@ def _load_export_bytes(row):
     or None if they can't be retrieved. A miss is treated as a cache miss so
     the caller rebuilds rather than serving nothing."""
     try:
-        if row['s3_key']:
-            return s3_storage.download_file(row['s3_key'])
-        if row['pdf_data']:
-            return bytes(row['pdf_data'])
+        return file_store.read_bytes('exports', row)
+    except file_store.FileMissing:
+        pass
     except Exception as e:
         app.logger.warning(
             f"Could not load cached export bytes for export_log {row['id']}: {e}"
@@ -6442,16 +6440,33 @@ def _stash_export_bytes(log_id, pdf_bytes):
     spam) would find the just-created row with a matching hash but no
     retrievable bytes yet, and rebuild anyway. Stashing the blob synchronously
     means the reuse path always has something to serve; the S3 push nulls
-    pdf_data once the object is uploaded (same as the migration job)."""
+    pdf_data once the object is uploaded — unless dual-write is on, in which
+    case it stays as the database copy (_mark_export_in_s3)."""
     if not pdf_bytes or not log_id:
         return
     try:
         db = get_db()
-        db.execute('UPDATE export_log SET pdf_data=%s WHERE id=%s', (pdf_bytes, log_id))
+        db.execute('UPDATE export_log SET pdf_data=%s, content_sha256=%s WHERE id=%s',
+                   (pdf_bytes, file_store.sha256_hex(pdf_bytes), log_id))
         db.commit()
         db.close()
     except Exception as e:
         app.logger.error(f"Could not stash PDF bytes on export_log {log_id}: {e}")
+
+
+def _mark_export_in_s3(log_id, s3_key):
+    """Record a successful S3 push of an export_log PDF. The inline pdf_data
+    copy is cleared (the historical behavior) unless dual-write is on
+    (Settings → System → Database → File Redundancy), which keeps both."""
+    db = get_db()
+    try:
+        if file_store.keep_db_copy():
+            db.execute('UPDATE export_log SET s3_key=%s WHERE id=%s', (s3_key, log_id))
+        else:
+            db.execute('UPDATE export_log SET s3_key=%s, pdf_data=NULL WHERE id=%s', (s3_key, log_id))
+        db.commit()
+    finally:
+        db.close()
 
 
 def _advance_attachments_fingerprint(db, show_id):
@@ -6462,16 +6477,18 @@ def _advance_attachments_fingerprint(db, show_id):
     though attachments never appear in the rendered HTML."""
     try:
         rows = db.execute("""
-            SELECT id, filename, mime_type, field_key, s3_key, created_at,
-                   CASE WHEN file_data IS NOT NULL THEN LENGTH(file_data) ELSE 0 END AS blob_len
+            SELECT id, filename, mime_type, field_key, created_at, file_size
             FROM show_attachments WHERE show_id = %s AND deleted_at IS NULL ORDER BY id
         """, (show_id,)).fetchall()
     except Exception as e:
         app.logger.warning(f'Could not fingerprint advance attachments: {e}')
         return ''
+    # Storage-independent on purpose (3.1.0): WHERE a file's bytes live (S3,
+    # DB or both) must not change the fingerprint, or every S3 <-> DB copy
+    # would cut a new advance version with identical content.
     return '\n'.join(
         f"{r['id']}|{r['filename'] or ''}|{r['mime_type'] or ''}|"
-        f"{r['field_key'] or ''}|{r['s3_key'] or ''}|{r['created_at'] or ''}|{r['blob_len']}"
+        f"{r['field_key'] or ''}|{r['created_at'] or ''}|{r['file_size'] or 0}"
         for r in rows
     )
 
@@ -6673,13 +6690,12 @@ def _collect_advance_field_attachments(show_id, base_url):
     for r in list(field_rows) + list(general_rows):
         try:
             data = None
-            if r['s3_key']:
-                try:
-                    data = s3_storage.download_file(r['s3_key'])
-                except Exception as e:
-                    app.logger.warning(f"S3 fetch failed for attachment {r['id']}: {e}")
-            elif r['file_data']:
-                data = bytes(r['file_data'])
+            try:
+                data = file_store.read_bytes('attachments', r)
+            except file_store.FileMissing:
+                pass
+            except file_store.FileUnavailable as e:
+                app.logger.warning(f"Fetch failed for attachment {r['id']}: {e}")
             if not data:
                 continue
             pdf_bytes = _convert_attachment_to_pdf(
@@ -7164,10 +7180,7 @@ def export_advance(show_id):
                 try:
                     s3_storage.upload_file(_s3_key, _pdf, 'application/pdf')
                     with app.app_context():
-                        db2 = get_db()
-                        db2.execute('UPDATE export_log SET s3_key=%s, pdf_data=NULL WHERE id=%s', (_s3_key, _lid))
-                        db2.commit()
-                        db2.close()
+                        _mark_export_in_s3(_lid, _s3_key)
                 except Exception as e:
                     app.logger.error(f"S3 push failed for advance PDF log_id={_lid}: {e}")
                     syslog_logger.error(f"S3_PUSH_FAILED context=advance_export show_id={show_id} log_id={_lid} error={e}")
@@ -7211,10 +7224,7 @@ def export_schedule(show_id):
                 try:
                     s3_storage.upload_file(_s3_key, _pdf, 'application/pdf')
                     with app.app_context():
-                        db2 = get_db()
-                        db2.execute('UPDATE export_log SET s3_key=%s, pdf_data=NULL WHERE id=%s', (_s3_key, _lid))
-                        db2.commit()
-                        db2.close()
+                        _mark_export_in_s3(_lid, _s3_key)
                 except Exception as e:
                     app.logger.error(f"S3 push failed for schedule PDF log_id={_lid}: {e}")
                     syslog_logger.error(f"S3_PUSH_FAILED context=schedule_export show_id={show_id} log_id={_lid} error={e}")
@@ -7247,14 +7257,13 @@ def download_export_history(show_id, log_id):
     if not row or (not row['s3_key'] and not row['pdf_data']):
         abort(404)
     filename = f"{row['export_type'].capitalize()}_v{row['version']}.pdf"
-    if row['s3_key']:
-        try:
-            data = s3_storage.download_file(row['s3_key'])
-        except Exception as e:
-            app.logger.error(f"S3 download failed for export_log {log_id}: {e}")
-            abort(503)
-    else:
-        data = bytes(row['pdf_data'])
+    try:
+        data = file_store.read_bytes('exports', row)
+    except file_store.FileMissing:
+        abort(404)
+    except file_store.FileUnavailable as e:
+        app.logger.error(f"Download failed for export_log {log_id}: {e}")
+        abort(503)
     resp = make_response(data)
     resp.headers['Content-Type'] = 'application/pdf'
     resp.headers['Content-Disposition'] = _safe_content_disposition(filename)
@@ -8148,100 +8157,6 @@ def s3_settings_save():
         f"S3_SETTINGS_CHANGE source={source} endpoints={len(cleaned)} "
         f"bucket={bucket} by={session.get('username')}")
     return jsonify({'success': True})
-
-
-@app.route('/admin/migrate-files-to-s3', methods=['POST'])
-@admin_required
-def admin_migrate_files_to_s3():
-    """
-    One-time migration: move existing BLOB/BYTEA file data from the database
-    to SeaweedFS S3.  Safe to re-run — skips rows that already have an s3_key.
-    Returns a JSON summary of migrated / failed counts.
-    """
-    if not s3_storage.is_configured():
-        return jsonify({'success': False, 'error': 'S3 storage is not configured (db_config.ini or Settings → File Storage).'}), 400
-
-    migrated = 0
-    failed = 0
-    errors = []
-
-    db = get_db()
-    try:
-        # ── show_attachments ──────────────────────────────────────────────────
-        rows = db.execute(
-            "SELECT id, show_id, filename, mime_type, file_data FROM show_attachments "
-            "WHERE file_data IS NOT NULL AND s3_key IS NULL AND deleted_at IS NULL"
-        ).fetchall()
-        for row in rows:
-            try:
-                key = f"attachments/{row['show_id']}/{row['id']}/{row['filename']}"
-                s3_storage.upload_file(key, bytes(row['file_data']),
-                                       row['mime_type'] or 'application/octet-stream')
-                db.execute('UPDATE show_attachments SET s3_key=%s, file_data=NULL WHERE id=%s',
-                           (key, row['id']))
-                migrated += 1
-            except Exception as e:
-                failed += 1
-                errors.append(f"attachment id={row['id']}: {e}")
-        db.commit()
-
-        # ── export_log ────────────────────────────────────────────────────────
-        rows = db.execute(
-            "SELECT id, show_id, export_type, version, pdf_data FROM export_log "
-            "WHERE pdf_data IS NOT NULL AND s3_key IS NULL"
-        ).fetchall()
-        for row in rows:
-            try:
-                key = f"exports/{row['show_id']}/{row['export_type']}/v{row['version']}.pdf"
-                s3_storage.upload_file(key, bytes(row['pdf_data']), 'application/pdf')
-                db.execute('UPDATE export_log SET s3_key=%s, pdf_data=NULL WHERE id=%s',
-                           (key, row['id']))
-                migrated += 1
-            except Exception as e:
-                failed += 1
-                errors.append(f"export_log id={row['id']}: {e}")
-        db.commit()
-
-        # ── asset_types photos ────────────────────────────────────────────────
-        rows = db.execute(
-            "SELECT id, photo, photo_mime FROM asset_types "
-            "WHERE photo IS NOT NULL AND photo_s3_key IS NULL"
-        ).fetchall()
-        for row in rows:
-            try:
-                key = f"asset-photos/{row['id']}"
-                s3_storage.upload_file(key, bytes(row['photo']),
-                                       row['photo_mime'] or 'image/jpeg')
-                db.execute('UPDATE asset_types SET photo_s3_key=%s, photo=NULL WHERE id=%s',
-                           (key, row['id']))
-                migrated += 1
-            except Exception as e:
-                failed += 1
-                errors.append(f"asset_type id={row['id']}: {e}")
-        db.commit()
-
-        # ── show_external_rentals ─────────────────────────────────────────────
-        rows = db.execute(
-            "SELECT id, pdf_data, pdf_filename FROM show_external_rentals "
-            "WHERE pdf_data IS NOT NULL AND s3_key IS NULL"
-        ).fetchall()
-        for row in rows:
-            try:
-                fname = row['pdf_filename'] or 'rental.pdf'
-                key = f"external-rentals/{row['id']}/{fname}"
-                s3_storage.upload_file(key, bytes(row['pdf_data']), 'application/pdf')
-                db.execute('UPDATE show_external_rentals SET s3_key=%s, pdf_data=NULL WHERE id=%s',
-                           (key, row['id']))
-                migrated += 1
-            except Exception as e:
-                failed += 1
-                errors.append(f"external_rental id={row['id']}: {e}")
-        db.commit()
-
-    finally:
-        db.close()
-
-    return jsonify({'success': failed == 0, 'migrated': migrated, 'failed': failed, 'errors': errors})
 
 
 @app.route('/admin/audit')
@@ -9371,17 +9286,13 @@ def reorder_form_fields():
 # ─── PDF Form Templates (settings + filler) ───────────────────────────────────
 
 def _pdf_template_bytes(row):
-    """Resolve a pdf_templates row to raw PDF bytes (BLOB or S3)."""
-    if row.get('s3_key') if isinstance(row, dict) else row['s3_key']:
-        key = row['s3_key']
-        try:
-            return s3_storage.download_file(key)
-        except Exception as e:
-            app.logger.warning(f'pdf template s3 fetch failed for {key}: {e}')
-    raw = row['pdf_data']
-    if raw is None:
+    """Resolve a pdf_templates row to raw PDF bytes (BLOB or S3, per the
+    admin's read preference with fallback). b'' when nothing is retrievable."""
+    try:
+        return file_store.read_bytes('pdf_templates', row)
+    except file_store.FileReadError as e:
+        app.logger.warning(f'pdf template fetch failed for id={row.get("id")}: {e}')
         return b''
-    return bytes(raw)
 
 
 def _count_pdf_pages(pdf_bytes):
@@ -9451,11 +9362,21 @@ def upload_pdf_template():
     db = get_db()
     cur = db.execute(
         """INSERT INTO pdf_templates (name, description, pdf_data, fields_json,
-                                       page_count, created_by, updated_at)
-            VALUES (%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP) RETURNING id""",
-        (name, description, raw, '[]', page_count, session.get('user_id'))
+                                       page_count, created_by, updated_at, content_sha256)
+            VALUES (%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP,%s) RETURNING id""",
+        (name, description, raw, '[]', page_count, session.get('user_id'),
+         file_store.sha256_hex(raw))
     )
     tid = cur.fetchone()['id']
+    # Templates live in the database; with dual-write on they're mirrored to
+    # S3 as well. A failed mirror is harmless — the migration tool backfills.
+    if file_store.keep_db_copy() and s3_storage.is_configured():
+        try:
+            _tkey = f"pdf-templates/{tid}.pdf"
+            s3_storage.upload_file(_tkey, raw, 'application/pdf')
+            db.execute('UPDATE pdf_templates SET s3_key=%s WHERE id=%s', (_tkey, tid))
+        except Exception as e:
+            syslog_logger.warning(f"S3_UPLOAD_FAILED table=pdf_templates id={tid} error={e}")
     log_audit(db, 'PDF_TEMPLATE_CREATE', 'pdf_template', tid, detail=name)
     db.commit(); db.close()
     syslog_logger.info(
@@ -9592,6 +9513,11 @@ def delete_pdf_template(tid):
                      + '. Re-point or delete those fields first.'
         }), 400
     before = _snapshot_row(db, 'pdf_templates', tid)
+    if before and before.get('s3_key'):
+        try:
+            s3_storage.delete_file(before['s3_key'])
+        except Exception as e:
+            syslog_logger.error(f"S3_DELETE_FAILED table=pdf_templates id={tid} error={e}")
     log_audit(db, 'PDF_TEMPLATE_DELETE', 'pdf_template', tid,
               detail=before['name'] if before else str(tid), before=before)
     db.execute('DELETE FROM pdf_templates WHERE id=%s', (tid,))
@@ -10875,9 +10801,14 @@ def api_file_manager():
     db = get_db()
     files = []
 
+    def _stored_in(r):
+        # Where the bytes live — 'S3', 'DB' or 'S3+DB' (File Redundancy, 3.1.0).
+        return '+'.join(w for w, on in (('S3', r['in_s3']), ('DB', r['in_db'])) if on)
+
     for r in db.execute("""
         SELECT sa.id, sa.filename, sa.mime_type, sa.file_size, sa.created_at,
                sa.deleted_at,
+               (sa.s3_key IS NOT NULL) AS in_s3, (sa.file_data IS NOT NULL) AS in_db,
                s.id as show_id, COALESCE(s.name, 'Deleted Show') as show_name,
                u.display_name, u.username,
                du.display_name as deleter_display, du.username as deleter_username
@@ -10897,6 +10828,7 @@ def api_file_manager():
             'file_size':    r['file_size'] or 0,
             'created_at':   r['created_at'],
             'uploader':     r['display_name'] or r['username'] or 'Unknown',
+            'stored_in':    _stored_in(r),
             'archived':     archived,
             'archived_at':  r['deleted_at'],
             'archived_by':  (r['deleter_display'] or r['deleter_username'] or '') if archived else '',
@@ -10908,6 +10840,7 @@ def api_file_manager():
 
     for r in db.execute("""
         SELECT el.id, el.export_type, el.version, el.exported_at, el.s3_key,
+               (el.s3_key IS NOT NULL) AS in_s3, (el.pdf_data IS NOT NULL) AS in_db,
                COALESCE(NULLIF(el.filename,''), el.export_type || '_v' || CAST(el.version AS TEXT) || '.pdf') as filename,
                CASE WHEN el.pdf_data IS NOT NULL THEN LENGTH(el.pdf_data) ELSE 0 END as file_size,
                s.id as show_id, COALESCE(s.name, 'Deleted Show') as show_name,
@@ -10927,12 +10860,14 @@ def api_file_manager():
             'file_size':    r['file_size'] or 0,
             'created_at':   r['exported_at'],
             'uploader':     r['display_name'] or r['username'] or 'Unknown',
+            'stored_in':    _stored_in(r),
             'download_url': f"/shows/{r['show_id']}/export/history/{r['id']}/download" if r['show_id'] else None,
             'delete_url':   None,
         })
 
     for r in db.execute("""
         SELECT er.id, er.pdf_filename, er.s3_key, er.created_at,
+               (er.s3_key IS NOT NULL) AS in_s3, (er.pdf_data IS NOT NULL) AS in_db,
                CASE WHEN er.pdf_data IS NOT NULL THEN LENGTH(er.pdf_data) ELSE 0 END as file_size,
                s.id as show_id, COALESCE(s.name, 'Deleted Show') as show_name
         FROM show_external_rentals er
@@ -10949,6 +10884,7 @@ def api_file_manager():
             'file_size':    r['file_size'] or 0,
             'created_at':   r['created_at'],
             'uploader':     '—',
+            'stored_in':    _stored_in(r),
             'download_url': f"/shows/{r['show_id']}/external-rentals/{r['id']}/pdf" if r['show_id'] else None,
             'delete_url':   None,
         })
@@ -11906,60 +11842,50 @@ def public_shows():
 def public_advance_pdf(show_id):
     db = get_db()
     row = db.execute("""
-        SELECT s3_key, pdf_data FROM export_log
+        SELECT id, s3_key, pdf_data FROM export_log
         WHERE show_id=%s AND export_type='advance'
         ORDER BY exported_at DESC LIMIT 1
     """, (show_id,)).fetchone()
     show = db.execute("SELECT * FROM shows WHERE id=%s AND status='active'", (show_id,)).fetchone()
     db.close()
-    if not show:
+    if not show or not row:
         abort(404)
-    if row and row['s3_key']:
-        try:
-            data = s3_storage.download_file(row['s3_key'])
-        except Exception as e:
-            app.logger.error(f"S3 download failed for public advance PDF show_id={show_id}: {e}")
-            abort(503)
-        resp = make_response(data)
-        resp.headers['Content-Type'] = 'application/pdf'
-        resp.headers['Content-Disposition'] = f'inline; filename="Advance_{show_id}.pdf"'
-        return resp
-    if row and row['pdf_data']:
-        resp = make_response(bytes(row['pdf_data']))
-        resp.headers['Content-Type'] = 'application/pdf'
-        resp.headers['Content-Disposition'] = f'inline; filename="Advance_{show_id}.pdf"'
-        return resp
-    abort(404)
+    try:
+        data = file_store.read_bytes('exports', row)
+    except file_store.FileMissing:
+        abort(404)
+    except file_store.FileUnavailable as e:
+        app.logger.error(f"Download failed for public advance PDF show_id={show_id}: {e}")
+        abort(503)
+    resp = make_response(data)
+    resp.headers['Content-Type'] = 'application/pdf'
+    resp.headers['Content-Disposition'] = f'inline; filename="Advance_{show_id}.pdf"'
+    return resp
 
 
 @app.route('/public/shows/<int:show_id>/schedule')
 def public_schedule_pdf(show_id):
     db = get_db()
     row = db.execute("""
-        SELECT s3_key, pdf_data FROM export_log
+        SELECT id, s3_key, pdf_data FROM export_log
         WHERE show_id=%s AND export_type='schedule'
         ORDER BY exported_at DESC LIMIT 1
     """, (show_id,)).fetchone()
     show = db.execute("SELECT * FROM shows WHERE id=%s AND status='active'", (show_id,)).fetchone()
     db.close()
-    if not show:
+    if not show or not row:
         abort(404)
-    if row and row['s3_key']:
-        try:
-            data = s3_storage.download_file(row['s3_key'])
-        except Exception as e:
-            app.logger.error(f"S3 download failed for public schedule PDF show_id={show_id}: {e}")
-            abort(503)
-        resp = make_response(data)
-        resp.headers['Content-Type'] = 'application/pdf'
-        resp.headers['Content-Disposition'] = f'inline; filename="Schedule_{show_id}.pdf"'
-        return resp
-    if row and row['pdf_data']:
-        resp = make_response(bytes(row['pdf_data']))
-        resp.headers['Content-Type'] = 'application/pdf'
-        resp.headers['Content-Disposition'] = f'inline; filename="Schedule_{show_id}.pdf"'
-        return resp
-    abort(404)
+    try:
+        data = file_store.read_bytes('exports', row)
+    except file_store.FileMissing:
+        abort(404)
+    except file_store.FileUnavailable as e:
+        app.logger.error(f"Download failed for public schedule PDF show_id={show_id}: {e}")
+        abort(503)
+    resp = make_response(data)
+    resp.headers['Content-Type'] = 'application/pdf'
+    resp.headers['Content-Disposition'] = f'inline; filename="Schedule_{show_id}.pdf"'
+    return resp
 
 
 # ─── Field Key Availability Check ─────────────────────────────────────────────
@@ -16983,21 +16909,22 @@ def asset_type_photo_upload(type_id):
         return jsonify({'error': 'No file'}), 400
     mime = f.mimetype or 'image/jpeg'
     data = f.read()
+    sha = file_store.sha256_hex(data)
     db = get_db()
     if s3_storage.is_configured():
         try:
             s3_key = f"asset-photos/{type_id}"
             s3_storage.upload_file(s3_key, data, mime)
-            db.execute('UPDATE asset_types SET photo=NULL, photo_s3_key=%s, photo_mime=%s WHERE id=%s',
-                       (s3_key, mime, type_id))
+            db.execute('UPDATE asset_types SET photo=%s, photo_s3_key=%s, photo_mime=%s, content_sha256=%s WHERE id=%s',
+                       (data if file_store.keep_db_copy() else None, s3_key, mime, sha, type_id))
         except Exception as e:
             app.logger.warning(f"S3 upload failed for asset photo type_id={type_id}, falling back to DB: {e}")
             syslog_logger.warning(f"S3_UPLOAD_FAILED table=asset_types id={type_id} error={e}")
-            db.execute('UPDATE asset_types SET photo=%s, photo_s3_key=NULL, photo_mime=%s WHERE id=%s',
-                       (data, mime, type_id))
+            db.execute('UPDATE asset_types SET photo=%s, photo_s3_key=NULL, photo_mime=%s, content_sha256=%s WHERE id=%s',
+                       (data, mime, sha, type_id))
     else:
-        db.execute('UPDATE asset_types SET photo=%s, photo_s3_key=NULL, photo_mime=%s WHERE id=%s',
-                   (data, mime, type_id))
+        db.execute('UPDATE asset_types SET photo=%s, photo_s3_key=NULL, photo_mime=%s, content_sha256=%s WHERE id=%s',
+                   (data, mime, sha, type_id))
     db.commit()
     log_audit(db, 'ASSET_TYPE_PHOTO', 'asset_type', type_id)
     db.commit()
@@ -17017,7 +16944,7 @@ def asset_type_photo_delete(type_id):
         except Exception as e:
             app.logger.error(f"S3 delete failed for asset photo type_id={type_id}: {e}")
             syslog_logger.error(f"S3_DELETE_FAILED table=asset_types id={type_id} error={e}")
-    db.execute("UPDATE asset_types SET photo=NULL, photo_s3_key=NULL, photo_mime='' WHERE id=%s", (type_id,))
+    db.execute("UPDATE asset_types SET photo=NULL, photo_s3_key=NULL, photo_mime='', content_sha256=NULL WHERE id=%s", (type_id,))
     db.commit()
     db.close()
     return jsonify({'success': True})
@@ -17027,18 +16954,17 @@ def asset_type_photo_delete(type_id):
 @login_required
 def asset_type_photo(type_id):
     db = get_db()
-    row = db.execute('SELECT photo, photo_mime, photo_s3_key FROM asset_types WHERE id=%s', (type_id,)).fetchone()
+    row = db.execute('SELECT id, photo, photo_mime, photo_s3_key FROM asset_types WHERE id=%s', (type_id,)).fetchone()
     db.close()
-    if not row or (not row['photo_s3_key'] and not row['photo']):
+    if not row:
         abort(404)
-    if row['photo_s3_key']:
-        try:
-            data = s3_storage.download_file(row['photo_s3_key'])
-        except Exception as e:
-            app.logger.error(f"S3 download failed for asset photo type_id={type_id}: {e}")
-            abort(503)
-    else:
-        data = bytes(row['photo'])
+    try:
+        data = file_store.read_bytes('asset_photos', row)
+    except file_store.FileMissing:
+        abort(404)
+    except file_store.FileUnavailable as e:
+        app.logger.error(f"Download failed for asset photo type_id={type_id}: {e}")
+        abort(503)
     resp = make_response(data)
     resp.headers['Content-Type'] = row['photo_mime'] or 'image/jpeg'
     resp.headers['Cache-Control'] = 'max-age=86400'
@@ -18751,17 +18677,21 @@ def external_rental_add(show_id):
     er_id = row['id']
     # Upload PDF to S3 if provided
     if pdf_bytes:
+        sha = file_store.sha256_hex(pdf_bytes)
         if s3_storage.is_configured():
             try:
                 s3_key = f"external-rentals/{er_id}/{pdf_filename}"
                 s3_storage.upload_file(s3_key, pdf_bytes, 'application/pdf')
-                db.execute('UPDATE show_external_rentals SET s3_key=%s WHERE id=%s', (s3_key, er_id))
+                db.execute('UPDATE show_external_rentals SET s3_key=%s, pdf_data=%s, content_sha256=%s WHERE id=%s',
+                           (s3_key, pdf_bytes if file_store.keep_db_copy() else None, sha, er_id))
             except Exception as e:
                 app.logger.warning(f"S3 upload failed for external rental {er_id}, falling back to DB: {e}")
                 syslog_logger.warning(f"S3_UPLOAD_FAILED table=show_external_rentals id={er_id} show_id={show_id} error={e}")
-                db.execute('UPDATE show_external_rentals SET pdf_data=%s WHERE id=%s', (pdf_bytes, er_id))
+                db.execute('UPDATE show_external_rentals SET pdf_data=%s, content_sha256=%s WHERE id=%s',
+                           (pdf_bytes, sha, er_id))
         else:
-            db.execute('UPDATE show_external_rentals SET pdf_data=%s WHERE id=%s', (pdf_bytes, er_id))
+            db.execute('UPDATE show_external_rentals SET pdf_data=%s, content_sha256=%s WHERE id=%s',
+                       (pdf_bytes, sha, er_id))
         db.commit()
         row = db.execute('SELECT * FROM show_external_rentals WHERE id=%s', (er_id,)).fetchone()
     log_audit(db, 'EXTERNAL_RENTAL_ADD', 'show_external_rental', er_id, show_id=show_id,
@@ -18812,24 +18742,25 @@ def external_rental_update(show_id, er_id):
                 s3_storage.delete_file(old_s3_key)
             except Exception as e:
                 app.logger.warning(f"S3 delete failed for old external rental PDF {er_id}: {e}")
+        new_sha = file_store.sha256_hex(new_bytes)
         if s3_storage.is_configured():
             try:
                 s3_key = f"external-rentals/{er_id}/{new_filename}"
                 s3_storage.upload_file(s3_key, new_bytes, 'application/pdf')
                 db.execute(
-                    'UPDATE show_external_rentals SET s3_key=%s, pdf_filename=%s, pdf_data=NULL WHERE id=%s',
-                    (s3_key, new_filename, er_id),
+                    'UPDATE show_external_rentals SET s3_key=%s, pdf_filename=%s, pdf_data=%s, content_sha256=%s WHERE id=%s',
+                    (s3_key, new_filename, new_bytes if file_store.keep_db_copy() else None, new_sha, er_id),
                 )
             except Exception as e:
                 app.logger.warning(f"S3 upload failed for external rental {er_id}, falling back to DB: {e}")
                 db.execute(
-                    'UPDATE show_external_rentals SET pdf_data=%s, pdf_filename=%s, s3_key=NULL WHERE id=%s',
-                    (new_bytes, new_filename, er_id),
+                    'UPDATE show_external_rentals SET pdf_data=%s, pdf_filename=%s, s3_key=NULL, content_sha256=%s WHERE id=%s',
+                    (new_bytes, new_filename, new_sha, er_id),
                 )
         else:
             db.execute(
-                'UPDATE show_external_rentals SET pdf_data=%s, pdf_filename=%s, s3_key=NULL WHERE id=%s',
-                (new_bytes, new_filename, er_id),
+                'UPDATE show_external_rentals SET pdf_data=%s, pdf_filename=%s, s3_key=NULL, content_sha256=%s WHERE id=%s',
+                (new_bytes, new_filename, new_sha, er_id),
             )
 
     log_audit(db, 'EXTERNAL_RENTAL_UPDATE', 'show_external_rental', er_id, show_id=show_id,
@@ -18877,16 +18808,15 @@ def external_rental_pdf(show_id, er_id):
     row = db.execute('SELECT * FROM show_external_rentals WHERE id=%s AND show_id=%s',
                      (er_id, show_id)).fetchone()
     db.close()
-    if not row or (not row['s3_key'] and not row['pdf_data']):
+    if not row:
         abort(404)
-    if row['s3_key']:
-        try:
-            data = s3_storage.download_file(row['s3_key'])
-        except Exception as e:
-            app.logger.error(f"S3 download failed for external rental PDF {er_id}: {e}")
-            abort(503)
-    else:
-        data = bytes(row['pdf_data'])
+    try:
+        data = file_store.read_bytes('rentals', row)
+    except file_store.FileMissing:
+        abort(404)
+    except file_store.FileUnavailable as e:
+        app.logger.error(f"Download failed for external rental PDF {er_id}: {e}")
+        abort(503)
     resp = make_response(data)
     resp.headers['Content-Type'] = 'application/pdf'
     resp.headers['Content-Disposition'] = _safe_content_disposition(row['pdf_filename'] or 'rental.pdf')
@@ -20124,17 +20054,14 @@ def _fetch_external_rental_pdfs(db, show_id):
     for row in rows:
         if not row['pdf_filename']:
             continue  # no PDF was ever attached to this rental
-        if row['s3_key']:
-            try:
-                result.append(s3_storage.download_file(row['s3_key']))
-            except Exception as e:
-                app.logger.error(
-                    f'PDF merge: S3 download failed for external_rental id={row["id"]} '
-                    f'key={row["s3_key"]!r}: {e}'
-                )
-        elif row['pdf_data']:
-            result.append(bytes(row['pdf_data']))
-        else:
+        try:
+            result.append(file_store.read_bytes('rentals', row))
+        except file_store.FileUnavailable as e:
+            app.logger.error(
+                f'PDF merge: download failed for external_rental id={row["id"]} '
+                f'key={row["s3_key"]!r}: {e}'
+            )
+        except file_store.FileMissing:
             app.logger.warning(
                 f'PDF merge: external_rental id={row["id"]} has pdf_filename={row["pdf_filename"]!r} '
                 f'but no s3_key and no pdf_data — PDF was lost (run S3 migration or re-upload)'
@@ -22110,6 +22037,23 @@ snapshot_module.register(
     db_adapter=db_adapter,
     BACKUP_DIR=BACKUP_DIR,
     syslog_logger=syslog_logger,
+)
+
+
+# ─── File storage redundancy: S3 <-> PostgreSQL (file_store.py) ───────────────
+# Read preference + fallback for every file download (file_store.read_bytes),
+# the dual-write flag the upload/export paths above consult
+# (file_store.keep_db_copy), and the admin copy/verify migration tool at
+# Settings → System → Database → File Redundancy (/settings/file-storage/*).
+
+file_store.register(
+    app,
+    get_db=get_db,
+    get_app_setting=get_app_setting,
+    admin_required=admin_required,
+    log_audit=log_audit,
+    syslog_logger=syslog_logger,
+    instance_id=f'{socket.gethostname()}:{os.getpid()}',
 )
 
 

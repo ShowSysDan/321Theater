@@ -229,6 +229,36 @@ apps. For a 321Theater access change, use this app's own flags instead
 - Settings are cached 30 s; call `s3_storage.clear_settings_cache()` after
   writing S3 settings. The secret key is write-only in the UI (blank keeps).
 
+## File redundancy S3 <-> PostgreSQL (file_store.py, 3.1.0)
+- A stored file = a row in one of five tables, each with a bytes column AND
+  an S3 key column (`file_store.KINDS`: show_attachments.file_data/s3_key,
+  export_log.pdf_data/s3_key, asset_types.photo/photo_s3_key,
+  show_external_rentals.pdf_data/s3_key, pdf_templates.pdf_data/s3_key) plus
+  `content_sha256` (hash of the UNCOMPRESSED content). A row can have either
+  copy or both. Don't add a central file table without being asked; the
+  user chose the existing columns.
+- **Every read goes through `file_store.read_bytes(kind, row)`**. It follows
+  `file_read_preference` ('s3' default | 'db') and falls back to the other
+  copy (syslog FILE_READ_FALLBACK). It raises FileMissing (→ 404) or
+  FileUnavailable (→ 503). Never add a new `s3_storage.download_file()` /
+  `bytes(row['pdf_data'])` read path. The row must carry both columns (and
+  `id`; `is_compressed` for attachments that can be archived).
+- **Write paths**: after a successful S3 upload, clear the DB copy ONLY when
+  `file_store.keep_db_copy()` is False (dual-write off = pre-3.1.0 behavior).
+  Export pushes use `_mark_export_in_s3()`. Always stamp `content_sha256`.
+- Migration tool (`/settings/file-storage/*`, admin): COPY ONLY. It never
+  clears or deletes the source copy; don't add a "move" mode without being
+  asked (the old move-to-S3 route was removed on purpose). Runs are background
+  threads holding pg advisory lock `MIGRATION_LOCK_KEY` on their own
+  connection (one run cluster-wide; a dead worker frees it and the run reads
+  'interrupted'). Progress/errors live in `file_migration_runs` (restore-blocked
+  in snapshots). Duplicate-awareness = skip rows whose target exists +
+  SHA-256 checks + conditional UPDATEs (`… AND key IS NULL AND md5(blob)=…`).
+- Archived attachments are gzip in the DB: S3→DB stores them compressed
+  (`is_compressed=1`), DB→S3 uploads decompressed bytes.
+- `_advance_attachments_fingerprint()` must stay storage-independent (no
+  s3_key / blob length), or a copy would cut a new advance version.
+
 ## PDF paperwork theming (per-venue colors, 2.38.0)
 - `venue_colors` table (venue_name PK, mirrors `venue_logos`) +
   `_get_venue_pdf_colors(db, venue)` → palette dict (primary/secondary plus

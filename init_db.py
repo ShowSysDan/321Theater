@@ -577,7 +577,8 @@ CREATE TABLE IF NOT EXISTS export_log (
     filename TEXT DEFAULT '',
     pdf_data BYTEA,
     s3_key TEXT DEFAULT NULL,
-    content_hash TEXT DEFAULT NULL
+    content_hash TEXT DEFAULT NULL,
+    content_sha256 TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS form_sections (
@@ -646,6 +647,7 @@ CREATE TABLE IF NOT EXISTS pdf_templates (
     description TEXT DEFAULT '',
     pdf_data BYTEA,
     s3_key TEXT DEFAULT NULL,
+    content_sha256 TEXT DEFAULT NULL,
     fields_json TEXT DEFAULT '[]',
     page_count INTEGER DEFAULT 1,
     created_by INTEGER,
@@ -749,6 +751,7 @@ CREATE TABLE IF NOT EXISTS show_attachments (
     deleted_at    TIMESTAMP DEFAULT NULL,
     deleted_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
     is_compressed INTEGER DEFAULT 0,
+    content_sha256 TEXT DEFAULT NULL,
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -1161,6 +1164,7 @@ CREATE TABLE IF NOT EXISTS asset_types (
     photo            BYTEA,
     photo_mime       TEXT DEFAULT '',
     photo_s3_key     TEXT DEFAULT NULL,
+    content_sha256   TEXT DEFAULT NULL,
     storage_location TEXT DEFAULT '',
     rental_cost      DOUBLE PRECISION DEFAULT 0.0,
     weekly_rate      DOUBLE PRECISION DEFAULT 0.0,
@@ -1244,6 +1248,7 @@ CREATE TABLE IF NOT EXISTS show_external_rentals (
     pdf_data     BYTEA,
     pdf_filename TEXT DEFAULT '',
     s3_key       TEXT DEFAULT NULL,
+    content_sha256 TEXT DEFAULT NULL,
     sort_order   INTEGER DEFAULT 0,
     created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -1488,6 +1493,39 @@ CREATE TABLE IF NOT EXISTS perf_slow_queries (
     sql_text TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_perf_slow_queries_at ON perf_slow_queries(occurred_at);
+
+-- File storage migration runs (file_store.py, 3.1.0) -- one row per
+-- S3 <-> PostgreSQL copy / verify run started from Settings -> System ->
+-- Database -> File Redundancy. Progress lives here (not in worker memory) so
+-- any worker or instance can report it. Copy-only: a run never deletes the
+-- source copy.
+
+CREATE TABLE IF NOT EXISTS file_migration_runs (
+    id SERIAL PRIMARY KEY,
+    direction TEXT NOT NULL,
+    kinds TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'running',
+    started_by INTEGER,
+    started_by_name TEXT DEFAULT '',
+    instance TEXT DEFAULT '',
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    finished_at TIMESTAMP DEFAULT NULL,
+    total INTEGER DEFAULT 0,
+    processed INTEGER DEFAULT 0,
+    copied INTEGER DEFAULT 0,
+    skipped INTEGER DEFAULT 0,
+    verified INTEGER DEFAULT 0,
+    mismatched INTEGER DEFAULT 0,
+    failed INTEGER DEFAULT 0,
+    bytes_copied BIGINT DEFAULT 0,
+    current_item TEXT DEFAULT '',
+    cancel_requested INTEGER DEFAULT 0,
+    per_kind_json TEXT DEFAULT '{}',
+    errors_json TEXT DEFAULT '[]',
+    message TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_file_migration_runs_started ON file_migration_runs(started_at);
 """
 
 
@@ -1658,6 +1696,13 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS is_system INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS is_package INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS photo_s3_key TEXT DEFAULT NULL',
+        # 3.1.0 file redundancy: SHA-256 of each stored file's (uncompressed)
+        # content, so S3 <-> DB copies can be verified and re-runs skip dups.
+        f'ALTER TABLE "{app_schema}".show_attachments ADD COLUMN IF NOT EXISTS content_sha256 TEXT DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".export_log ADD COLUMN IF NOT EXISTS content_sha256 TEXT DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS content_sha256 TEXT DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".show_external_rentals ADD COLUMN IF NOT EXISTS content_sha256 TEXT DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".pdf_templates ADD COLUMN IF NOT EXISTS content_sha256 TEXT DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS hide_from_pm INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS allow_unit_selection INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".asset_type_system_members ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1',
