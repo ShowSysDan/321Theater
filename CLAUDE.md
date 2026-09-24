@@ -52,7 +52,21 @@ rows: `row['col']`, `row[0]`, `.get()`, `dict(row)`). No rewriting happens, so:
   `ON CONFLICT DO NOTHING`. The conflict target must match a real unique
   index/PK.
 - New ids: `INSERT … RETURNING id` then `cur.fetchone()['id']`. There is no
-  `lastrowid` and no hidden `lastval()` call.
+  `lastrowid` and no hidden `lastval()` call. NEVER re-find a new row with
+  `SELECT … ORDER BY id DESC LIMIT 1` — with 4×4 workers it can return another
+  request's row (eight such lookups were fixed in 3.0.1).
+- **Types:** never use `REAL` — in PostgreSQL it's 32-bit float4 (~7 digits;
+  SQLite's REAL was 64-bit). Money/rates/hours are `DOUBLE PRECISION` (what
+  the Python float math expects; `NUMERIC` would hand back `Decimal` and break
+  float arithmetic + JSON). Booleans stay `INTEGER` 0/1 (compare `= 1`).
+- **Clocks:** `CURRENT_TIMESTAMP`/`NOW()` are the PG server's *local* time
+  (SQLite's were UTC). A column must be written and compared on the SAME
+  clock: DB-defaulted timestamps → compare with `NOW() - INTERVAL …`;
+  columns you stamp from Python → compare with the same Python clock.
+- **Precision:** PG timestamps carry microseconds and `jsonify()` renders a
+  datetime as a whole-second HTTP date — any timestamp used as a round-trip
+  cursor must be sent as `isoformat()` (see `_sync_cursor()`), or `> since`
+  keeps re-matching the last row.
 - Time math: `NOW() - INTERVAL '60 seconds'`. String literals are
   single-quoted: `status="active"` is a COLUMN reference in PG (that bug 500'd
   the public show PDFs until 3.0.0). Case-insensitive match: `ILIKE`.
@@ -78,6 +92,17 @@ rows: `row['col']`, `row[0]`, `.get()`, `dict(row)`). No rewriting happens, so:
   runs both on every startup. `python3 init_db.py` also seeds a FRESH
   install: seeds only go into EMPTY tables, and admin/admin123 only when
   `users` is empty (shared cross-app directory). Never make startup seed.
+- **Startup migrations run in every worker on every start.** They're
+  serialized by an advisory lock and must stay LOCK-FREE when there's nothing
+  to do: `_already_applied()` skips any ADD COLUMN / DROP NOT NULL / CREATE
+  INDEX / CREATE TABLE the catalog already shows, because PG takes the table
+  lock before honouring `IF NOT EXISTS` (that deadlocked live requests and
+  locked the cross-app `shared.users` on every restart until 3.0.1). New
+  migration statements must be one of those recognised forms, or be a
+  data backfill that only touches rows it changes, wrapped via `_backfill()`
+  (savepoint). One-time backfills must be gated on "table just created" —
+  the old every-start billable-items backfill silently re-enabled charges
+  PMs had removed.
 - New table → add to `PG_SCHEMA` (and `SHARED_TABLES` if it belongs in the
   shared schema). New column on an existing table → add it to the
   CREATE TABLE *and* an `ADD COLUMN IF NOT EXISTS` line, so fresh installs
@@ -94,6 +119,14 @@ There's no SQLite to test against: test against a real PostgreSQL (the 3.0.0
 work used a local PG 16). A cheap static check that catches syntax, unknown
 tables/columns and bad ON CONFLICT targets is to `PREPARE` each statement
 (with `%s` → `$n`) against a migrated schema.
+
+## PDF rendering (WeasyPrint) — always pass the shared font config
+Every `HTML(...).write_pdf(...)` must pass `font_config=_wp_font_config()`
+(security_module gets it as the `pdf_font_config` dep). Without it WeasyPrint
+builds a new FontConfiguration per render and leaks ~250 KB of native memory
+per PDF (found by the 3.0.1 soak). It's per-THREAD on purpose (Pango font
+maps aren't shared across threads). Reuse is only safe because no PDF
+template uses `@font-face` — if one ever does, revisit this.
 
 ## Cross-app user flags (`is_app_user` / `is_app_admin`) — NEVER used in this app
 Two columns on the (shared-schema) `users` table — `is_app_user` and

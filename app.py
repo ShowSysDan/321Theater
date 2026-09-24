@@ -747,7 +747,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.0.0'
+APP_VERSION = '3.0.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -3544,6 +3544,38 @@ def _sync_show_primary_date(db, show_id):
         """, (show_id,))
 
 
+def _sync_cursor(v):
+    """advance_data.updated_at → the opaque `since` cursor the browser echoes
+    back. Must keep microseconds: jsonify() renders datetimes as HTTP dates
+    (whole seconds), so `updated_at > since` re-delivered the latest edit on
+    every 2 s poll until someone saved again (SQLite's second-precision
+    CURRENT_TIMESTAMP hid this)."""
+    if isinstance(v, datetime):
+        return v.isoformat(sep=' ')
+    return v or ''
+
+
+_wp_local = threading.local()
+
+
+def _wp_font_config():
+    """Per-thread reusable WeasyPrint FontConfiguration.
+
+    write_pdf() with no font_config builds a brand-new FontConfiguration
+    (a native fontconfig config + Pango font map) on EVERY render, and that
+    native memory is never returned: measured ~250 KB leaked per PDF, which
+    was essentially all of a worker's steady RSS growth under load. Reusing
+    one per thread keeps it bounded (≤ workers × threads instances) without
+    sharing a Pango font map across threads. Safe to reuse because no PDF
+    template loads @font-face fonts (system fonts only) — if one ever does,
+    those faces would accumulate in the shared config."""
+    fc = getattr(_wp_local, 'font_config', None)
+    if fc is None:
+        from weasyprint.text.fonts import FontConfiguration
+        fc = _wp_local.font_config = FontConfiguration()
+    return fc
+
+
 def get_show_or_404(show_id):
     db = get_db()
     show = db.execute('SELECT * FROM shows WHERE id = %s', (show_id,)).fetchone()
@@ -5281,7 +5313,7 @@ def save_advance(show_id):
     ts_row = db.execute(
         "SELECT MAX(updated_at) FROM advance_data WHERE show_id = %s", (show_id,)
     ).fetchone()
-    new_since = ts_row[0] if ts_row and ts_row[0] else ''
+    new_since = _sync_cursor(ts_row[0] if ts_row else None)
 
     db.commit()
     db.close()
@@ -6240,7 +6272,7 @@ def sync_advance(show_id):
     ts_row = db.execute(
         "SELECT MAX(updated_at) FROM advance_data WHERE show_id = %s", (show_id,)
     ).fetchone()
-    new_since = ts_row[0] if ts_row and ts_row[0] else since
+    new_since = _sync_cursor(ts_row[0] if ts_row and ts_row[0] else since)
 
     # Update presence (including which field is focused) and get other active users
     _upsert_active_session(db, session['user_id'], show_id, tab, focused_field)
@@ -6566,7 +6598,7 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
     # Generate PDF bytes (S3 push is handled by the caller)
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f"PDF_GENERATION_FAILED show_id={show_id} type=advance error={e}")
         pdf_bytes = None
@@ -6842,7 +6874,7 @@ def _render_omitted_files_index_pdf(omitted, base_url):
             </table>
         </body></html>"""
         from weasyprint import HTML as WP_HTML
-        return WP_HTML(string=html, base_url=base_url).write_pdf()
+        return WP_HTML(string=html, base_url=base_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.warning(f"Omitted-files index render failed: {e}")
         return None
@@ -6928,7 +6960,7 @@ def _render_attachment_wrapper_pdf(data, mime, filename, section_label,
         </body></html>"""
 
         from weasyprint import HTML as WP_HTML
-        return WP_HTML(string=html, base_url=base_url).write_pdf()
+        return WP_HTML(string=html, base_url=base_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.warning(f"Wrapper PDF render failed for {filename}: {e}")
         return None
@@ -7097,7 +7129,7 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
     # Generate PDF bytes (S3 push is handled by the caller)
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f"PDF_GENERATION_FAILED show_id={show_id} type=schedule error={e}")
         pdf_bytes = None
@@ -7144,7 +7176,7 @@ def export_advance(show_id):
     # Fallback to HTML if weasyprint failed
     try:
         from weasyprint import HTML
-        pdf = HTML(string=html, base_url=request.url_root).write_pdf()
+        pdf = HTML(string=html, base_url=request.url_root).write_pdf(font_config=_wp_font_config())
         resp = make_response(pdf)
         resp.headers['Content-Type'] = 'application/pdf'
         resp.headers['Content-Disposition'] = _safe_content_disposition(filename)
@@ -7190,7 +7222,7 @@ def export_schedule(show_id):
         return resp
     try:
         from weasyprint import HTML
-        pdf = HTML(string=html, base_url=request.url_root).write_pdf()
+        pdf = HTML(string=html, base_url=request.url_root).write_pdf(font_config=_wp_font_config())
         resp = make_response(pdf)
         resp.headers['Content-Type'] = 'application/pdf'
         resp.headers['Content-Disposition'] = _safe_content_disposition(filename)
@@ -7393,7 +7425,7 @@ def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
     html = _render(new_v, datetime.now().strftime('%B %d, %Y at %I:%M %p'))
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f"PDF_GENERATION_FAILED show_id={show_id} type=postnotes error={e}")
         pdf_bytes = None
@@ -16649,9 +16681,9 @@ def asset_category_add():
         return jsonify({'error': 'Name required'}), 400
     db = get_db()
     max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM asset_categories').fetchone()[0]
-    db.execute('INSERT INTO asset_categories (name, sort_order) VALUES (%s,%s)', (name, max_order + 1))
+    _new_id = db.execute('INSERT INTO asset_categories (name, sort_order) VALUES (%s,%s) RETURNING id', (name, max_order + 1)).fetchone()['id']
     db.commit()
-    row = db.execute('SELECT * FROM asset_categories WHERE name=%s ORDER BY id DESC LIMIT 1', (name,)).fetchone()
+    row = db.execute('SELECT * FROM asset_categories WHERE id=%s', (_new_id,)).fetchone()
     log_audit_change(db, 'ASSET_CATEGORY_ADD', 'asset_category', row['id'],
                      detail=name, table='asset_categories')
     db.commit()
@@ -16795,13 +16827,13 @@ def asset_type_add():
     db = get_db()
     max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM asset_types WHERE category_id=%s',
                            (category_id,)).fetchone()[0]
-    db.execute("""
+    _new_id = db.execute("""
         INSERT INTO asset_types
           (category_id, parent_type_id, name, manufacturer, model,
            storage_location, rental_cost, weekly_rate, reserve_count, is_consumable, track_quantity,
            supplier_name, supplier_contact, is_system, is_package, hide_from_pm,
            allow_unit_selection, sort_order)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (
         category_id,
         data.get('parent_type_id') or None,
@@ -16821,9 +16853,9 @@ def asset_type_add():
         1 if data.get('hide_from_pm') else 0,
         1 if data.get('allow_unit_selection') else 0,
         max_order + 1,
-    ))
+    )).fetchone()['id']
     db.commit()
-    row = db.execute('SELECT * FROM asset_types ORDER BY id DESC LIMIT 1').fetchone()
+    row = db.execute('SELECT * FROM asset_types WHERE id=%s', (_new_id,)).fetchone()
     log_audit(db, 'ASSET_TYPE_ADD', 'asset_type', row['id'], detail=name)
     db.commit()
     syslog_logger.info(f"ASSET_TYPE_ADD name={name} category_id={category_id} by={session.get('username')}")
@@ -17189,10 +17221,10 @@ def asset_item_add(type_id):
     added_ids = []
     for i in range(count):
         bc = barcode if count == 1 else ''
-        db.execute('INSERT INTO asset_items (asset_type_id, barcode, status, sort_order) VALUES (%s,%s,%s,%s)',
-                   (type_id, bc, 'available', max_order + i + 1))
+        _new_id = db.execute('INSERT INTO asset_items (asset_type_id, barcode, status, sort_order) VALUES (%s,%s,%s,%s) RETURNING id',
+                   (type_id, bc, 'available', max_order + i + 1)).fetchone()['id']
         db.commit()
-        row = db.execute('SELECT * FROM asset_items ORDER BY id DESC LIMIT 1').fetchone()
+        row = db.execute('SELECT * FROM asset_items WHERE id=%s', (_new_id,)).fetchone()
         added_ids.append(row['id'])
     log_audit(db, 'ASSET_ITEM_ADD', 'asset_item', type_id, detail=f'count={count}')
     db.commit()
@@ -18311,16 +18343,16 @@ def show_asset_add(show_id):
                 'shortages': shortages,
             }), 409
 
-    db.execute("""
+    _new_id = db.execute("""
         INSERT INTO show_assets
           (show_id, asset_type_id, asset_item_id, quantity, rental_start, rental_end,
            locked_price, original_locked_price, is_hidden, notes, added_by)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (show_id, asset_type_id, asset_item_id, quantity, rental_start, rental_end,
           locked_price, locked_price, is_hidden,
-          (data.get('notes') or '').strip(), session['user_id']))
+          (data.get('notes') or '').strip(), session['user_id'])).fetchone()['id']
     db.commit()
-    row = db.execute('SELECT * FROM show_assets ORDER BY id DESC LIMIT 1').fetchone()
+    row = db.execute('SELECT * FROM show_assets WHERE id=%s', (_new_id,)).fetchone()
 
     # Post-commit verification. The pre-check is best-effort; two simultaneous
     # writers (from different sessions) can both pass it and both insert. After
@@ -18710,12 +18742,12 @@ def external_rental_add(show_id):
         pdf_filename = secure_filename(f.filename)
     max_order = db.execute('SELECT COALESCE(MAX(sort_order),0) FROM show_external_rentals WHERE show_id=%s',
                            (show_id,)).fetchone()[0]
-    db.execute("""
+    _new_id = db.execute("""
         INSERT INTO show_external_rentals (show_id, description, cost, pdf_data, pdf_filename, sort_order)
-        VALUES (%s,%s,%s,%s,%s,%s)
-    """, (show_id, description, cost, None, pdf_filename, max_order + 1))
+        VALUES (%s,%s,%s,%s,%s,%s) RETURNING id
+    """, (show_id, description, cost, None, pdf_filename, max_order + 1)).fetchone()['id']
     db.commit()
-    row = db.execute('SELECT * FROM show_external_rentals ORDER BY id DESC LIMIT 1').fetchone()
+    row = db.execute('SELECT * FROM show_external_rentals WHERE id=%s', (_new_id,)).fetchone()
     er_id = row['id']
     # Upload PDF to S3 if provided
     if pdf_bytes:
@@ -20035,7 +20067,7 @@ def _make_watermark_pdf(text):
             f"<div class=\"wm\">{safe}</div>"
             "</body></html>"
         )
-        return WP_HTML(string=html).write_pdf()
+        return WP_HTML(string=html).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.warning(f'Watermark generation failed: {e}')
         return None
@@ -20181,7 +20213,7 @@ def show_asset_invoice(show_id):
 
         try:
             from weasyprint import HTML as WP_HTML
-            pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+            pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf(font_config=_wp_font_config())
         except Exception as e:
             app.logger.error(f'WeasyPrint invoice error: {e}')
             return f'PDF generation failed: {e}', 500
@@ -20232,7 +20264,7 @@ def show_labor_estimate(show_id):
     )
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f'WeasyPrint labor-estimate error: {e}')
         return f'PDF generation failed: {e}', 500
@@ -20289,7 +20321,7 @@ def show_pre_show_estimate(show_id):
     )
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f'WeasyPrint pre-show-estimate error: {e}')
         return f'PDF generation failed: {e}', 500
@@ -20356,7 +20388,7 @@ def show_post_invoice(show_id):
 
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f'WeasyPrint post-invoice error: {e}')
         return f'PDF generation failed: {e}', 500
@@ -20557,7 +20589,7 @@ def combined_invoice_pdf():
 
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf(font_config=_wp_font_config())
     except Exception as e:
         app.logger.error(f'WeasyPrint combined-invoice error: {e}')
         return f'PDF generation failed: {e}', 500
@@ -21221,11 +21253,11 @@ def message_create():
     if not title:
         return jsonify({'error': 'Title required'}), 400
     db = get_db()
-    db.execute("""
+    _new_id = db.execute("""
         INSERT INTO site_messages
           (title, body_html, msg_type, dismissible_by, expires_at, scheduled_for,
            is_active, show_on_login, created_by)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (
         title, body_html,
         data.get('msg_type', 'motd'),
@@ -21235,9 +21267,9 @@ def message_create():
         1 if data.get('is_active', True) else 0,
         1 if data.get('show_on_login') else 0,
         session['user_id'],
-    ))
+    )).fetchone()['id']
     db.commit()
-    row = db.execute('SELECT * FROM site_messages ORDER BY id DESC LIMIT 1').fetchone()
+    row = db.execute('SELECT * FROM site_messages WHERE id=%s', (_new_id,)).fetchone()
     log_audit(db, 'MESSAGE_CREATE', 'site_message', row['id'], detail=title)
     db.commit()
     syslog_logger.info(f'MESSAGE_CREATE title="{title}" type={data.get("msg_type","motd")} by={session.get("username")}')
@@ -21307,11 +21339,14 @@ def _get_ai_slot_limit():
 def _count_active_ai_sessions():
     """Count running AI sessions, pruning stale ones (>5 min) first."""
     db = get_db()
-    cutoff = (datetime.utcnow() - timedelta(minutes=5)).isoformat()
+    # started_at is stamped by the DB clock (DEFAULT CURRENT_TIMESTAMP, the
+    # PostgreSQL server's local time), so the cutoff must use the DB clock too
+    # — a Python utcnow() cutoff timed out every session instantly on a
+    # non-UTC server, silently disabling the ai_max_sessions limit.
     db.execute("""
         UPDATE ai_sessions SET status='timeout', ended_at=CURRENT_TIMESTAMP
-        WHERE status='running' AND started_at < %s
-    """, (cutoff,))
+        WHERE status='running' AND started_at < NOW() - INTERVAL '5 minutes'
+    """)
     db.commit()
     count = db.execute("SELECT COUNT(*) FROM ai_sessions WHERE status='running'").fetchone()[0]
     db.close()
@@ -21325,12 +21360,12 @@ def _claim_ai_session(show_id):
     if count >= limit:
         db.close()
         return None, f'All {limit} AI processing slots are busy. Please try again in a moment.'
-    db.execute("""
+    _new_id = db.execute("""
         INSERT INTO ai_sessions (user_id, show_id, status)
-        VALUES (%s,%s,'running')
-    """, (session.get('user_id'), show_id))
+        VALUES (%s,%s,'running') RETURNING id
+    """, (session.get('user_id'), show_id)).fetchone()['id']
     db.commit()
-    sid = db.execute('SELECT id FROM ai_sessions ORDER BY id DESC LIMIT 1').fetchone()['id']
+    sid = _new_id
     db.close()
     return sid, None
 
@@ -21720,16 +21755,16 @@ def dashboard_create():
     name = (data.get('name') or 'My Dashboard').strip()
     slug = secrets.token_urlsafe(12) if data.get('is_public') else None
     db = get_db()
-    db.execute("""
+    _new_id = db.execute("""
         INSERT INTO asset_dashboards (user_id, name, is_public, public_slug, layout, config_json)
-        VALUES (%s,%s,%s,%s,%s,%s)
+        VALUES (%s,%s,%s,%s,%s,%s) RETURNING id
     """, (session['user_id'], name,
           1 if data.get('is_public') else 0,
           slug,
           data.get('layout', 'combined'),
-          json.dumps(data.get('config', {}))))
+          json.dumps(data.get('config', {})))).fetchone()['id']
     db.commit()
-    row = db.execute('SELECT * FROM asset_dashboards ORDER BY id DESC LIMIT 1').fetchone()
+    row = db.execute('SELECT * FROM asset_dashboards WHERE id=%s', (_new_id,)).fetchone()
     db.close()
     return jsonify(dict(row)), 201
 
@@ -22055,6 +22090,7 @@ security_module.register(
     get_logo_for_venue=_get_logo_for_venue,
     safe_content_disposition=_safe_content_disposition,
     show_span_dates=_show_span_dates,
+    pdf_font_config=_wp_font_config,
 )
 
 

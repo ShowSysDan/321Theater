@@ -825,7 +825,7 @@ CREATE TABLE IF NOT EXISTS position_categories (
 CREATE TABLE IF NOT EXISTS pay_rate_levels (
     id                 SERIAL PRIMARY KEY,
     name               TEXT NOT NULL,
-    hourly_rate        REAL DEFAULT 0.0,
+    hourly_rate        DOUBLE PRECISION DEFAULT 0.0,
     include_in_estimate INTEGER DEFAULT 1,
     sort_order         INTEGER DEFAULT 0,
     created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -835,7 +835,7 @@ CREATE TABLE IF NOT EXISTS job_positions (
     id            SERIAL PRIMARY KEY,
     category_id   INTEGER REFERENCES position_categories(id) ON DELETE SET NULL,
     name          TEXT NOT NULL,
-    override_rate REAL DEFAULT NULL,
+    override_rate DOUBLE PRECISION DEFAULT NULL,
     sort_order    INTEGER DEFAULT 0,
     is_training   INTEGER DEFAULT 0
 );
@@ -878,7 +878,7 @@ CREATE TABLE IF NOT EXISTS crew_qualifications (
 CREATE TABLE IF NOT EXISTS labor_billable_items (
     id            SERIAL PRIMARY KEY,
     name          TEXT NOT NULL,
-    cost_per_crew REAL DEFAULT 0.0,
+    cost_per_crew DOUBLE PRECISION DEFAULT 0.0,
     sort_order    INTEGER DEFAULT 0,
     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -914,10 +914,10 @@ CREATE TABLE IF NOT EXISTS post_show_labor (
     break_end          TEXT DEFAULT '',
     break2_start       TEXT DEFAULT '',
     break2_end         TEXT DEFAULT '',
-    pay_rate_snapshot  REAL DEFAULT NULL,
+    pay_rate_snapshot  DOUBLE PRECISION DEFAULT NULL,
     notes              TEXT DEFAULT '',
     is_added_hours     INTEGER DEFAULT 0,
-    manual_hours       REAL DEFAULT NULL,
+    manual_hours       DOUBLE PRECISION DEFAULT NULL,
     crew_member_id     INTEGER,
     sort_order         INTEGER DEFAULT 0,
     created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -989,7 +989,7 @@ CREATE TABLE IF NOT EXISTS overhead_labor_requests (
     scheduled_crew_member_id    INTEGER,
     scheduled_by                INTEGER REFERENCES users(id) ON DELETE SET NULL,
     scheduled_at                TIMESTAMP,
-    pay_rate_snapshot           REAL DEFAULT NULL,
+    pay_rate_snapshot           DOUBLE PRECISION DEFAULT NULL,
     pay_rate_level_id_snapshot  INTEGER DEFAULT NULL,
     actual_in_time              TEXT DEFAULT '',
     actual_out_time             TEXT DEFAULT '',
@@ -1162,8 +1162,8 @@ CREATE TABLE IF NOT EXISTS asset_types (
     photo_mime       TEXT DEFAULT '',
     photo_s3_key     TEXT DEFAULT NULL,
     storage_location TEXT DEFAULT '',
-    rental_cost      REAL DEFAULT 0.0,
-    weekly_rate      REAL DEFAULT 0.0,
+    rental_cost      DOUBLE PRECISION DEFAULT 0.0,
+    weekly_rate      DOUBLE PRECISION DEFAULT 0.0,
     reserve_count    INTEGER DEFAULT 0,
     is_consumable    INTEGER DEFAULT 0,
     is_system        INTEGER DEFAULT 0,
@@ -1187,11 +1187,11 @@ CREATE TABLE IF NOT EXISTS asset_items (
     status                  TEXT DEFAULT 'available',
     condition               TEXT DEFAULT 'good',
     year_purchased          INTEGER DEFAULT NULL,
-    purchase_value          REAL DEFAULT NULL,
+    purchase_value          DOUBLE PRECISION DEFAULT NULL,
     depreciation_years      INTEGER DEFAULT NULL,
     warranty_expires        DATE DEFAULT NULL,
     depreciation_start_date DATE DEFAULT NULL,
-    replacement_cost        REAL DEFAULT NULL,
+    replacement_cost        DOUBLE PRECISION DEFAULT NULL,
     is_container            INTEGER DEFAULT 0,
     container_item_id       INTEGER REFERENCES asset_items(id) ON DELETE SET NULL,
     system_type_id          INTEGER REFERENCES asset_types(id) ON DELETE SET NULL,
@@ -1228,8 +1228,8 @@ CREATE TABLE IF NOT EXISTS show_assets (
     quantity       INTEGER DEFAULT 1,
     rental_start   DATE,
     rental_end     DATE,
-    locked_price   REAL DEFAULT 0.0,
-    original_locked_price REAL DEFAULT NULL,
+    locked_price   DOUBLE PRECISION DEFAULT 0.0,
+    original_locked_price DOUBLE PRECISION DEFAULT NULL,
     is_hidden      INTEGER DEFAULT 0,
     notes          TEXT DEFAULT '',
     added_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -1240,7 +1240,7 @@ CREATE TABLE IF NOT EXISTS show_external_rentals (
     id           SERIAL PRIMARY KEY,
     show_id      INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
     description  TEXT NOT NULL DEFAULT '',
-    cost         REAL DEFAULT 0.0,
+    cost         DOUBLE PRECISION DEFAULT 0.0,
     pdf_data     BYTEA,
     pdf_filename TEXT DEFAULT '',
     s3_key       TEXT DEFAULT NULL,
@@ -1525,6 +1525,55 @@ def _table_for_stmt(stmt):
     return None
 
 
+# Startup migrations run in EVERY gunicorn worker on EVERY start. Two rules
+# keep that from hurting live traffic (both learned the hard way, 3.0.1):
+#   * They're serialized across workers/servers by a PostgreSQL advisory
+#     lock, so 4 workers never migrate concurrently.
+#   * Statements already reflected in the catalog are SKIPPED. PostgreSQL
+#     takes the table lock BEFORE honouring IF NOT EXISTS (AccessExclusive
+#     for ALTER TABLE, Share for CREATE INDEX), so a "no-op" migration batch
+#     used to lock ~40 hot tables — including the cross-app shared.users —
+#     and deadlocked request transactions (DeadlockDetected 500s on restart).
+_MIGRATE_LOCK_KEY = 321_000_001
+
+_ADD_COL_RE = re.compile(r'ALTER\s+TABLE\s+"?(\w+)"?\.(\w+)\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(\w+)', re.I)
+_DROP_NN_RE = re.compile(r'ALTER\s+TABLE\s+"?(\w+)"?\.(\w+)\s+ALTER\s+COLUMN\s+(\w+)\s+DROP\s+NOT\s+NULL', re.I)
+_MK_INDEX_RE = re.compile(r'CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+(\w+)\s+ON\s+(?:"?(\w+)"?\.)?(\w+)', re.I)
+_MK_TABLE_RE = re.compile(r'CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+(?:"?(\w+)"?\.)?(\w+)', re.I)
+
+
+def _catalog(cur, app_schema, shared_schema):
+    """Snapshot of what already exists: tables, columns (+nullability), indexes."""
+    sch = (app_schema, shared_schema)
+    cur.execute("SELECT table_schema, table_name FROM information_schema.tables "
+                "WHERE table_schema IN (%s, %s)", sch)
+    tables = {(a, b) for a, b in cur.fetchall()}
+    cur.execute("SELECT table_schema, table_name, column_name, is_nullable "
+                "FROM information_schema.columns WHERE table_schema IN (%s, %s)", sch)
+    cols = {(a, b, c): n for a, b, c, n in cur.fetchall()}
+    cur.execute("SELECT schemaname, indexname FROM pg_indexes WHERE schemaname IN (%s, %s)", sch)
+    indexes = {(a, b) for a, b in cur.fetchall()}
+    return {'tables': tables, 'cols': cols, 'indexes': indexes}
+
+
+def _already_applied(stmt, cat, default_schema):
+    """True when `stmt` is an idempotent DDL whose effect the catalog already
+    shows, so executing it would only take locks. Unknown statements → False."""
+    m = _ADD_COL_RE.search(stmt)
+    if m:
+        return (m.group(1), m.group(2), m.group(3)) in cat['cols']
+    m = _DROP_NN_RE.search(stmt)
+    if m:
+        return cat['cols'].get((m.group(1), m.group(2), m.group(3))) == 'YES'
+    m = _MK_INDEX_RE.search(stmt)
+    if m:
+        return ((m.group(2) or default_schema), m.group(1)) in cat['indexes']
+    m = _MK_TABLE_RE.search(stmt)
+    if m:
+        return ((m.group(1) or default_schema), m.group(2)) in cat['tables']
+    return False
+
+
 def _apply_pg_schema(conn, app_schema, shared_schema):
     """
     Execute every PG_SCHEMA statement, committing after each success and
@@ -1552,6 +1601,10 @@ def _apply_pg_schema(conn, app_schema, shared_schema):
         line for line in PG_SCHEMA.splitlines()
         if not line.lstrip().startswith('--'))
     pending = [s.strip() for s in sql_only.split(';') if s.strip()]
+    cat = _catalog(cur, app_schema, shared_schema)
+    conn.commit()
+    pending = [st for st in pending
+               if not _already_applied(st, cat, shared_schema if _table_for_stmt(st) in SHARED_TABLES else app_schema)]
     failures = []
     for _pass in range(8):
         failures = []
@@ -1576,7 +1629,7 @@ def _apply_pg_schema(conn, app_schema, shared_schema):
 
 
 
-def _apply_column_migrations(cur, app_schema, shared_schema):
+def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_is_new=None):
     """ALTER TABLE … ADD COLUMN IF NOT EXISTS (and friends) for columns added
     after a table first shipped. Fully idempotent. Returns the count applied."""
     app_alters = [
@@ -1601,7 +1654,7 @@ def _apply_column_migrations(cur, app_schema, shared_schema):
         f"ALTER TABLE \"{app_schema}\".asset_types ADD COLUMN IF NOT EXISTS supplier_contact TEXT DEFAULT ''",
         f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS is_retired INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS retired_at TIMESTAMP DEFAULT NULL',
-        f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS weekly_rate REAL DEFAULT 0.0',
+        f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS weekly_rate DOUBLE PRECISION DEFAULT 0.0',
         f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS is_system INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS is_package INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".asset_types ADD COLUMN IF NOT EXISTS photo_s3_key TEXT DEFAULT NULL',
@@ -1620,14 +1673,14 @@ def _apply_column_migrations(cur, app_schema, shared_schema):
         f'''CREATE TABLE IF NOT EXISTS "{app_schema}".pay_rate_levels (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
-            hourly_rate REAL DEFAULT 0.0,
+            hourly_rate DOUBLE PRECISION DEFAULT 0.0,
             include_in_estimate INTEGER DEFAULT 1,
             sort_order INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''',
         f'ALTER TABLE "{app_schema}".pay_rate_levels ADD COLUMN IF NOT EXISTS include_in_estimate INTEGER DEFAULT 1',
         f'ALTER TABLE "{app_schema}".crew_members ADD COLUMN IF NOT EXISTS rate_level_id INTEGER',
-        f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS override_rate REAL DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS override_rate DOUBLE PRECISION DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS venue TEXT DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS is_training INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".crew_qualifications ADD COLUMN IF NOT EXISTS status INTEGER DEFAULT 2',
@@ -1724,11 +1777,11 @@ def _apply_column_migrations(cur, app_schema, shared_schema):
         f'ALTER TABLE "{app_schema}".contacts ADD COLUMN IF NOT EXISTS report_recipient INTEGER DEFAULT 0',
         f"ALTER TABLE \"{app_schema}\".asset_items ADD COLUMN IF NOT EXISTS condition TEXT DEFAULT 'good'",
         f'ALTER TABLE "{app_schema}".asset_items ADD COLUMN IF NOT EXISTS year_purchased INTEGER DEFAULT NULL',
-        f'ALTER TABLE "{app_schema}".asset_items ADD COLUMN IF NOT EXISTS purchase_value REAL DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".asset_items ADD COLUMN IF NOT EXISTS purchase_value DOUBLE PRECISION DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".asset_items ADD COLUMN IF NOT EXISTS depreciation_years INTEGER DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".asset_items ADD COLUMN IF NOT EXISTS warranty_expires DATE DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".asset_items ADD COLUMN IF NOT EXISTS depreciation_start_date DATE DEFAULT NULL',
-        f'ALTER TABLE "{app_schema}".asset_items ADD COLUMN IF NOT EXISTS replacement_cost REAL DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".asset_items ADD COLUMN IF NOT EXISTS replacement_cost DOUBLE PRECISION DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".asset_items ADD COLUMN IF NOT EXISTS is_container INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".asset_items ADD COLUMN IF NOT EXISTS container_item_id INTEGER',
         f'ALTER TABLE "{app_schema}".asset_items ADD COLUMN IF NOT EXISTS system_type_id INTEGER',
@@ -1739,7 +1792,7 @@ def _apply_column_migrations(cur, app_schema, shared_schema):
         f'ALTER TABLE "{app_schema}".overhead_labor_groups ADD COLUMN IF NOT EXISTS project_id INTEGER',
         f'ALTER TABLE "{app_schema}".overhead_labor_groups ADD COLUMN IF NOT EXISTS created_by INTEGER',
         f'ALTER TABLE "{app_schema}".overhead_labor_requests ADD COLUMN IF NOT EXISTS template_id INTEGER',
-        f'ALTER TABLE "{app_schema}".overhead_labor_requests ADD COLUMN IF NOT EXISTS pay_rate_snapshot REAL DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".overhead_labor_requests ADD COLUMN IF NOT EXISTS pay_rate_snapshot DOUBLE PRECISION DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".overhead_labor_requests ADD COLUMN IF NOT EXISTS pay_rate_level_id_snapshot INTEGER DEFAULT NULL',
         f"ALTER TABLE \"{app_schema}\".overhead_labor_requests ADD COLUMN IF NOT EXISTS actual_in_time TEXT DEFAULT ''",
         f"ALTER TABLE \"{app_schema}\".overhead_labor_requests ADD COLUMN IF NOT EXISTS actual_out_time TEXT DEFAULT ''",
@@ -1753,7 +1806,7 @@ def _apply_column_migrations(cur, app_schema, shared_schema):
         f"ALTER TABLE \"{app_schema}\".overhead_projects ADD COLUMN IF NOT EXISTS color TEXT DEFAULT ''",
         f'ALTER TABLE "{app_schema}".overhead_projects ADD COLUMN IF NOT EXISTS archived INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".overhead_projects ADD COLUMN IF NOT EXISTS created_by INTEGER',
-        f'ALTER TABLE "{app_schema}".show_assets ADD COLUMN IF NOT EXISTS original_locked_price REAL DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".show_assets ADD COLUMN IF NOT EXISTS original_locked_price DOUBLE PRECISION DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS cast_count INTEGER DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS crew_count INTEGER DEFAULT NULL',
         # Attachment archive (soft delete) — 2.36.0
@@ -1763,7 +1816,7 @@ def _apply_column_migrations(cur, app_schema, shared_schema):
         f'CREATE INDEX IF NOT EXISTS idx_show_attachments_show ON "{app_schema}".show_attachments(show_id)',
         # Manually added billable hours (prep work etc.) — 2.44.0
         f'ALTER TABLE "{app_schema}".post_show_labor ADD COLUMN IF NOT EXISTS is_added_hours INTEGER DEFAULT 0',
-        f'ALTER TABLE "{app_schema}".post_show_labor ADD COLUMN IF NOT EXISTS manual_hours REAL DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".post_show_labor ADD COLUMN IF NOT EXISTS manual_hours DOUBLE PRECISION DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".post_show_labor ADD COLUMN IF NOT EXISTS crew_member_id INTEGER',
     ]
 
@@ -1795,61 +1848,100 @@ def _apply_column_migrations(cur, app_schema, shared_schema):
         f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS is_locked INTEGER DEFAULT 0',
     ]
 
+    if cat is None:
+        cat = _catalog(cur, app_schema, shared_schema)
+    if billable_is_new is None:
+        billable_is_new = (app_schema, 'show_labor_billable_items') not in cat['tables']
     n = 0
     for sql in app_alters + shared_alters:
+        if 'INSERT INTO' in sql and 'show_labor_billable_items' in sql:
+            # One-time backfill for when the per-show selection table is first
+            # created. Re-running it on every start re-enabled every billable
+            # item on every show, undoing PMs' deliberate unchecks (a removed
+            # parking charge reappeared on the invoice after each restart).
+            if not billable_is_new:
+                continue
+        elif _already_applied(sql, cat, app_schema):
+            continue
         cur.execute(sql)
+        if _MK_TABLE_RE.search(sql):
+            m = _MK_TABLE_RE.search(sql)
+            cat['tables'].add((m.group(1) or app_schema, m.group(2)))
         n += 1
 
-    # Backfill original_locked_price from the current locked_price for any
-    # legacy show_assets rows that pre-date this column.
-    try:
-        cur.execute(f"""
-            UPDATE "{app_schema}".show_assets
-               SET original_locked_price = locked_price
-             WHERE original_locked_price IS NULL
-        """)
-    except Exception as e:
-        print(f"[migrate_pg] original_locked_price backfill warning: {e}")
+    # Data backfills. Each runs in its own SAVEPOINT so one failure can't
+    # silently abort the rest of the migration transaction, and each only
+    # touches rows it actually changes (no whole-table row locks per start).
+    def _backfill(label, sql, params=None):
+        cur.execute('SAVEPOINT _bf')
+        try:
+            cur.execute(sql, params)
+            cur.execute('RELEASE SAVEPOINT _bf')
+        except Exception as e:
+            cur.execute('ROLLBACK TO SAVEPOINT _bf')
+            print(f"[migrate_pg] {label} backfill warning: {e}")
 
-    # Dedupe contacts that may have been duplicated by the pre-index
-    # user→contact backfill race, then create the partial unique index
-    # so future inserts can't double up.
-    try:
-        cur.execute(f"""
+    # original_locked_price for legacy show_assets rows that pre-date the
+    # column (new rows always set it, so this is a no-op on current data).
+    _backfill('original_locked_price', f"""
+        UPDATE "{app_schema}".show_assets
+           SET original_locked_price = locked_price
+         WHERE original_locked_price IS NULL AND locked_price IS NOT NULL
+    """)
+
+    # Dedupe contacts duplicated by the pre-index user→contact backfill race,
+    # then create the partial unique index so future inserts can't double up.
+    # Once the index exists duplicates are impossible, so skip both.
+    if (app_schema, 'idx_contacts_user_unique') not in cat['indexes']:
+        _backfill('contacts user_id dedupe/index', f"""
             UPDATE "{app_schema}".contacts SET user_id = NULL
              WHERE user_id IS NOT NULL
                AND id NOT IN (
                    SELECT MIN(id) FROM "{app_schema}".contacts
                     WHERE user_id IS NOT NULL
                     GROUP BY user_id
-               )
-        """)
-        cur.execute(f"""
+               );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_user_unique
                 ON "{app_schema}".contacts(user_id) WHERE user_id IS NOT NULL
         """)
-    except Exception as e:
-        print(f"[migrate_pg] contacts user_id dedupe/index warning: {e}")
 
-    # Backfill shows.cast_count / shows.crew_count from any existing
-    # post_show_notes rows. Postgres-friendly numeric guard via regex.
+    # shows.cast_count / crew_count from post_show_notes — only for shows that
+    # actually HAVE a numeric note (the old form rewrote every NULL-count show
+    # to NULL on every start, row-locking most of `shows`).
     for col in ('cast_count', 'crew_count'):
-        try:
-            cur.execute(f"""
-                UPDATE "{app_schema}".shows AS s
-                   SET {col} = (
-                     SELECT CAST(p.field_value AS INTEGER)
-                     FROM "{app_schema}".post_show_notes p
-                     WHERE p.show_id = s.id
-                       AND p.field_key = %s
-                       AND p.field_value ~ '^[0-9]+$'
-                   )
-                 WHERE s.{col} IS NULL
-            """, (col,))
-        except Exception as e:
-            print(f"[migrate_pg] {col} backfill warning: {e}")
+        _backfill(col, f"""
+            UPDATE "{app_schema}".shows AS s
+               SET {col} = CAST(p.field_value AS INTEGER)
+              FROM "{app_schema}".post_show_notes p
+             WHERE p.show_id = s.id
+               AND p.field_key = %s
+               AND p.field_value ~ '^[0-9]+$'
+               AND s.{col} IS NULL
+        """, (col,))
 
     return n
+
+
+def _widen_real_columns(cur, app_schema, shared_schema):
+    """Convert any remaining REAL (float4) columns to DOUBLE PRECISION.
+
+    SQLite's REAL is a 64-bit double, but PostgreSQL's REAL is a 32-bit
+    float (~7 significant digits): money/rate columns carried over from the
+    SQLite schema could not hold cents above ~$262k and SQL-side sums
+    drifted (1000 × 0.10 → 99.99905). Converting via ::text keeps the value
+    the user typed (float4 prints its shortest round-trip form, e.g. '0.1',
+    so we don't bake in float4 noise like 0.10000000149). Only touches
+    columns still typed `real`, so it is a no-op after the first run and
+    never rewrites a table on ordinary startups."""
+    cur.execute(
+        "SELECT table_schema, table_name, column_name FROM information_schema.columns "
+        "WHERE table_schema IN (%s, %s) AND data_type = 'real' ORDER BY 1, 2, 3",
+        (app_schema, shared_schema))
+    cols = cur.fetchall()
+    for sch, tbl, col in cols:
+        cur.execute(f'ALTER TABLE "{sch}"."{tbl}" ALTER COLUMN "{col}" '
+                    f'TYPE DOUBLE PRECISION USING "{col}"::text::double precision')
+    return len(cols)
 
 
 def _prepare_schemas(conn, app_schema, shared_schema, verbose=True):
@@ -1886,17 +1978,34 @@ def _prepare_schemas(conn, app_schema, shared_schema, verbose=True):
 
 def _migrate(conn, app_schema, shared_schema, log_prefix):
     """Tables (PG_SCHEMA) then column migrations, committed. Returns True
-    when every statement applied."""
-    leftover = _apply_pg_schema(conn, app_schema, shared_schema)
-    for stmt, err in leftover:
-        first_line = stmt.splitlines()[0][:90]
-        print(f"{log_prefix} statement still failing: {first_line}… → {err}")
+    when every statement applied. Serialized across all workers/servers by a
+    session-level advisory lock (see _MIGRATE_LOCK_KEY)."""
     cur = conn.cursor()
+    cur.execute('SELECT pg_advisory_lock(%s)', (_MIGRATE_LOCK_KEY,))
+    conn.commit()
     try:
-        n = _apply_column_migrations(cur, app_schema, shared_schema)
+        cur.execute("SELECT to_regclass(%s) IS NULL",
+                    (f'"{app_schema}".show_labor_billable_items',))
+        billable_is_new = cur.fetchone()[0]
         conn.commit()
-        print(f"{log_prefix} Applied {n} column migrations OK")
+        leftover = _apply_pg_schema(conn, app_schema, shared_schema)
+        for stmt, err in leftover:
+            first_line = stmt.splitlines()[0][:90]
+            print(f"{log_prefix} statement still failing: {first_line}… → {err}")
+        n = _apply_column_migrations(cur, app_schema, shared_schema,
+                                     billable_is_new=billable_is_new)
+        widened = _widen_real_columns(cur, app_schema, shared_schema)
+        conn.commit()
+        print(f"{log_prefix} Applied {n} pending column migration(s)")
+        if widened:
+            print(f"{log_prefix} Widened {widened} REAL (float4) column(s) to DOUBLE PRECISION")
     finally:
+        try:
+            conn.rollback()
+            cur.execute('SELECT pg_advisory_unlock(%s)', (_MIGRATE_LOCK_KEY,))
+            conn.commit()
+        except Exception:
+            pass   # closing the connection releases the lock anyway
         cur.close()
     return not leftover
 

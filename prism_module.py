@@ -477,8 +477,15 @@ def run_prism_sync(trigger='manual', triggered_by=''):
 
                 cur = db.execute(
                     "INSERT INTO prism_sync_log (trigger_type, triggered_by, "
-                    "window_start, window_end, status) VALUES (%s, %s, %s, %s, 'running') RETURNING id",
-                    (trigger, triggered_by, win_start.isoformat(), win_end.isoformat()))
+                    "window_start, window_end, status, started_at) "
+                    "VALUES (%s, %s, %s, %s, 'running', %s) RETURNING id",
+                    # started_at stamped from the APP clock (not the column's
+                    # DB-clock default): the stale-run cutoff and the daily
+                    # "already synced today" check both compare it against
+                    # datetime.now()/date.today(), so both sides must share a
+                    # clock even if the PG server's timezone differs.
+                    (trigger, triggered_by, win_start.isoformat(), win_end.isoformat(),
+                     datetime.now()))
                 log_id = summary['log_id'] = cur.fetchone()['id']
                 db.commit()
             except Exception as e:

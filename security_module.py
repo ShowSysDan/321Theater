@@ -319,7 +319,9 @@ def _pdf_view(show_id):
     )
     try:
         from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf()
+        _fc = _d.get('pdf_font_config')
+        pdf_bytes = WP_HTML(string=html_str, base_url=request.host_url).write_pdf(
+            font_config=_fc() if _fc else None)
     except Exception as e:
         _d['app'].logger.error(
             f'WeasyPrint security-signin error show_id={show_id}: {e}')
