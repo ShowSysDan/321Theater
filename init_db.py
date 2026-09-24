@@ -1934,14 +1934,30 @@ def _widen_real_columns(cur, app_schema, shared_schema):
     columns still typed `real`, so it is a no-op after the first run and
     never rewrites a table on ordinary startups."""
     cur.execute(
-        "SELECT table_schema, table_name, column_name FROM information_schema.columns "
-        "WHERE table_schema IN (%s, %s) AND data_type = 'real' ORDER BY 1, 2, 3",
+        "SELECT c.table_schema, c.table_name, c.column_name FROM information_schema.columns c "
+        "JOIN information_schema.tables t ON t.table_schema = c.table_schema "
+        " AND t.table_name = c.table_name AND t.table_type = 'BASE TABLE' "
+        "WHERE c.table_schema IN (%s, %s) AND c.data_type = 'real' ORDER BY 1, 2, 3",
         (app_schema, shared_schema))
     cols = cur.fetchall()
+    done = 0
     for sch, tbl, col in cols:
-        cur.execute(f'ALTER TABLE "{sch}"."{tbl}" ALTER COLUMN "{col}" '
-                    f'TYPE DOUBLE PRECISION USING "{col}"::text::double precision')
-    return len(cols)
+        # One savepoint per column + a short lock_timeout: if a column can't be
+        # converted right now (a view someone created depends on it, or a long
+        # transaction holds its table), skip it with a log line and retry on
+        # the next restart — never hang worker boot or roll back the rest.
+        cur.execute('SAVEPOINT _widen')
+        try:
+            cur.execute("SET LOCAL lock_timeout = '5s'")
+            cur.execute(f'ALTER TABLE "{sch}"."{tbl}" ALTER COLUMN "{col}" '
+                        f'TYPE DOUBLE PRECISION USING "{col}"::text::double precision')
+            cur.execute('RELEASE SAVEPOINT _widen')
+            done += 1
+        except Exception as e:
+            cur.execute('ROLLBACK TO SAVEPOINT _widen')
+            print(f"[migrate_pg] could not widen {sch}.{tbl}.{col} to DOUBLE PRECISION "
+                  f"(will retry next start; it stays REAL meanwhile): {str(e).splitlines()[0]}")
+    return done
 
 
 def _prepare_schemas(conn, app_schema, shared_schema, verbose=True):
