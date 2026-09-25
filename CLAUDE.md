@@ -312,6 +312,13 @@ apps. For a 321Theater access change, use this app's own flags instead
   `/api/messages` via `_VIEWER_ALLOWED_ENDPOINTS`.
 - Message `scheduled_for` / `expires_at` are local wall-clock (datetime-local
   input) → compare with `datetime.now()`, never `utcnow()`.
+- **Sign-in page messages** (3.2.1): `site_messages.show_on_login = 1` AND
+  `audience IS NULL` → rendered on login.html via `_login_page_messages()`
+  (all login renders go through `_render_login()`). Pre-auth there is no
+  group, so a targeted message must NEVER appear there; the create/edit routes
+  and `_maint_banner_upsert()` force the flag to 0 unless audience is NULL.
+  An outage returns no messages (display-only) so the sign-in page never
+  503s; don't extend that catch to anything that acts on data.
 - Sends are synchronous admin actions (no leader gate), BCC'd in batches of
   `_MAINT_EMAIL_BATCH`, recipients from `_audience_emails()` (skips locked /
   pending / unconfirmed) + validated extras. The DB connection is closed

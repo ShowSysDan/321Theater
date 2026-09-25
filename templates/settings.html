@@ -5034,7 +5034,7 @@ async function loadMessages() {
     return `
     <tr id="msg-row-${m.id}">
       <td><span class="role-badge">${typeMap[m.msg_type]||m.msg_type}</span></td>
-      <td><strong>${_escHtml(m.title)}</strong>${_audienceIsAll(m.audience) ? '' : `<div class="text-dim text-sm">For: ${_escHtml(_audienceLabel(m.audience))}</div>`}</td>
+      <td><strong>${_escHtml(m.title)}</strong>${_audienceIsAll(m.audience) ? '' : `<div class="text-dim text-sm">For: ${_escHtml(_audienceLabel(m.audience))}</div>`}${m.show_on_login ? '<div class="text-dim text-sm">Also on the sign-in page</div>' : ''}</td>
       <td>${statusHtml}</td>
       <td>
         <button class="btn btn-xs btn-ghost" onclick="showReceipts(${m.id})"
@@ -5057,7 +5057,8 @@ async function loadMessages() {
 
 async function openMsgModal(data) {
   _editingMsgId = data?.id || null;
-  await _renderAudiencePicker('msg-m-aud', data?.audience || null, false);
+  await _renderAudiencePicker('msg-m-aud', data?.audience || null, false,
+                              () => _syncLoginOption('msg-m-aud', 'msg-m-login', 'msg-m-login-wrap'));
   document.getElementById('msg-modal-title').textContent = _editingMsgId ? 'Edit Message' : 'New Message';
   document.getElementById('msg-m-title').value      = data?.title || '';
   document.getElementById('msg-m-body').value       = data?.body_html || '';
@@ -5066,7 +5067,8 @@ async function openMsgModal(data) {
   document.getElementById('msg-m-scheduled').value  = data?.scheduled_for ? data.scheduled_for.slice(0,16) : '';
   document.getElementById('msg-m-expires').value    = data?.expires_at ? data.expires_at.slice(0,16) : '';
   document.getElementById('msg-m-active').checked   = data ? data.is_active : true;
-  document.getElementById('msg-m-login').checked    = data?.show_on_login || false;
+  document.getElementById('msg-m-login').checked    = !!data?.show_on_login;
+  _syncLoginOption('msg-m-aud', 'msg-m-login', 'msg-m-login-wrap');
   document.getElementById('msg-modal').style.display = 'flex';
 }
 
@@ -5081,7 +5083,7 @@ async function saveMsg() {
     scheduled_for:  document.getElementById('msg-m-scheduled').value || null,
     expires_at:     document.getElementById('msg-m-expires').value || null,
     is_active:      document.getElementById('msg-m-active').checked,
-    show_on_login:  document.getElementById('msg-m-login').checked,
+    show_on_login:  document.getElementById('msg-m-login').checked && !document.getElementById('msg-m-login').disabled,
     audience:       _getAudience('msg-m-aud'),
   };
   if (!payload.title) { alert('Title required'); return; }
@@ -5473,6 +5475,22 @@ async function _renderAudiencePicker(containerId, selected, withEmail, onChange)
   sync();
 }
 
+// "Show on the sign-in page" only applies to messages for All users (there's
+// no signed-in group to match yet), so it's disabled otherwise.
+function _syncLoginOption(audId, boxId, wrapId) {
+  const box = document.getElementById(boxId);
+  if (!box) return;
+  const all = document.querySelector(`#${audId} [data-aud-all]`);
+  const ok = !!(all && all.checked);
+  box.disabled = !ok;
+  if (!ok) box.checked = false;
+  const wrap = document.getElementById(wrapId);
+  if (wrap) {
+    wrap.style.opacity = ok ? '' : '.5';
+    wrap.title = ok ? '' : 'Only messages for All users can appear on the sign-in page';
+  }
+}
+
 function _getAudience(containerId) {
   return [...document.querySelectorAll(`#${containerId} [data-aud]`)]
     .filter(i => i.checked).map(i => i.dataset.aud);
@@ -5517,7 +5535,7 @@ async function loadMaintNotices() {
     if (n.status === 'completed') status = `<span style="color:#22C55E">✓ Complete</span><div class="text-dim text-sm">${_fmtStamp(n.completed_at)}</div>`;
     else if (n.status === 'posted') status = '<span style="color:#FBBF24">Posted</span>';
     else status = '<span style="color:var(--text-dim)">Draft</span>';
-    if (n.banner_active) status += '<div class="text-sm" style="color:#FBBF24">▣ Banner live</div>';
+    if (n.banner_active) status += `<div class="text-sm" style="color:#FBBF24">▣ Banner live${n.banner_show_on_login ? ' + sign-in page' : ''}</div>`;
     if (n.completion_banner_active) status += '<div class="text-sm" style="color:#22C55E">▣ "Complete" banner live</div>';
     const hp = on => on ? ' <span title="Sent as high priority" style="color:#EF4444;font-weight:700">!</span>' : '';
     const emailLine = (label, at, count, err, prio) => {
@@ -5573,6 +5591,7 @@ async function openMaintModal(id) {
   document.getElementById('maint-m-priority').checked = n ? !!n.high_priority : true;
   document.getElementById('maint-m-banner').checked = n ? !!n.banner_active : true;
   document.getElementById('maint-m-dismiss').checked = n ? (n.banner_dismissible_by ? n.banner_dismissible_by === 'user' : true) : true;
+  document.getElementById('maint-m-login').checked = !!(n && n.banner_show_on_login);
   const send = document.getElementById('maint-m-send');
   send.checked = !n;
   document.getElementById('maint-m-send-label').textContent = n?.notice_sent_at
@@ -5581,7 +5600,10 @@ async function openMaintModal(id) {
   document.getElementById('maint-m-delivery').style.display = done ? 'none' : '';
   document.getElementById('maint-m-done-note').style.display = done ? '' : 'none';
   send.disabled = done;
-  await _renderAudiencePicker('maint-m-aud', n?.audience || null, true, _maintEstimate);
+  await _renderAudiencePicker('maint-m-aud', n?.audience || null, true, () => {
+    _maintEstimate();
+    _syncLoginOption('maint-m-aud', 'maint-m-login', 'maint-m-login-wrap');
+  });
   _maintEstimate();
   document.getElementById('maint-modal').style.display = 'flex';
   document.getElementById('maint-m-title').focus();
@@ -5613,6 +5635,7 @@ async function saveMaint() {
     high_priority:      document.getElementById('maint-m-priority').checked,
     post_banner:        !done && document.getElementById('maint-m-banner').checked,
     banner_dismissible: document.getElementById('maint-m-dismiss').checked,
+    banner_on_login:    document.getElementById('maint-m-login').checked && !document.getElementById('maint-m-login').disabled,
     send_email:         !done && document.getElementById('maint-m-send').checked,
   };
   if (!payload.title) { alert('Title required'); return; }
@@ -5646,10 +5669,18 @@ async function saveMaint() {
   }
 }
 
+let _completeNoticeOnLogin = false;
+
 function _maintCompleteEstimate() {
   const est = _audienceEmailEstimate('maint-c-aud', 'maint-c-extra');
   const el = document.getElementById('maint-c-estimate');
   if (el) el.textContent = `Email goes to about ${est.total} ${est.total === 1 ? 'person' : 'people'}.`;
+  // The complete banner inherits the notice's sign-in-page flag, which the
+  // server only honours for All-users banners.
+  const all = document.querySelector('#maint-c-aud [data-aud-all]');
+  const note = document.getElementById('maint-c-banner-login');
+  if (note) note.textContent = (_completeNoticeOnLogin && all && all.checked)
+    ? ' (also on the sign-in page, like the notice)' : '';
 }
 
 async function openMaintComplete(id) {
@@ -5669,6 +5700,7 @@ async function openMaintComplete(id) {
   takeDown.style.display = n.banner_active ? '' : 'none';
   document.getElementById('maint-c-remove').checked = true;
   document.getElementById('maint-c-banner').checked = false;
+  _completeNoticeOnLogin = !!n.banner_show_on_login;
   document.getElementById('maint-c-go').textContent = resend ? 'Resend' : 'Mark Complete';
   const aud = resend && n.completion_audience?.length ? n.completion_audience : n.audience;
   await _renderAudiencePicker('maint-c-aud', aud, true, _maintCompleteEstimate);
@@ -5782,9 +5814,13 @@ function escHtml(s) {
         <label class="field-label">SHOW TO</label>
         <div id="msg-m-aud" style="display:flex;flex-wrap:wrap;gap:6px 16px"></div>
       </div>
-      <div class="field-group" style="display:flex;gap:16px;align-items:center">
+      <div class="field-group" style="display:flex;flex-direction:row;flex-wrap:wrap;gap:8px 16px;align-items:center">
         <label class="checkbox-label"><input type="checkbox" id="msg-m-active" checked> Active</label>
-        <label class="checkbox-label"><input type="checkbox" id="msg-m-login"> Show on login</label>
+        <label class="checkbox-label" id="msg-m-login-wrap"><input type="checkbox" id="msg-m-login"> Also show on the sign-in page</label>
+      </div>
+      <div id="msg-m-login-hint" class="text-dim text-sm" style="margin-top:-8px">
+        Shown on the login screen before anyone signs in (and as a normal banner after).
+        Only messages shown to <strong>All users</strong> can appear there.
       </div>
     </div>
     <div class="modal-footer">
@@ -5863,6 +5899,7 @@ function escHtml(s) {
         <label class="field-label" style="margin:0">DELIVERY</label>
         <label class="checkbox-label"><input type="checkbox" id="maint-m-banner" checked> Post as a banner (MOTD) for the selected groups until the work is marked complete</label>
         <label class="checkbox-label" style="margin-left:20px"><input type="checkbox" id="maint-m-dismiss" checked> Users can dismiss the banner</label>
+        <label class="checkbox-label" style="margin-left:20px" id="maint-m-login-wrap"><input type="checkbox" id="maint-m-login"> Also show it on the sign-in page (All users only)</label>
         <label class="checkbox-label"><input type="checkbox" id="maint-m-send" onchange="_maintEstimate()"> <span id="maint-m-send-label">Email this notice when I save</span></label>
         <label class="checkbox-label"><input type="checkbox" id="maint-m-priority" checked> Send as <strong style="color:#EF4444">high priority</strong> (flagged Important in Outlook / Mail)</label>
         <div class="field-group" style="margin:4px 0 0">
@@ -5908,7 +5945,7 @@ function escHtml(s) {
         <label class="checkbox-label"><input type="checkbox" id="maint-c-send" checked> Email the work-completed notice</label>
         <label class="checkbox-label"><input type="checkbox" id="maint-c-priority" checked> Send as <strong style="color:#EF4444">high priority</strong></label>
         <label class="checkbox-label" id="maint-c-remove-wrap"><input type="checkbox" id="maint-c-remove" checked> Take down the maintenance banner</label>
-        <label class="checkbox-label"><input type="checkbox" id="maint-c-banner"> Post a "maintenance complete" banner for 24 hours</label>
+        <label class="checkbox-label"><input type="checkbox" id="maint-c-banner"> Post a "maintenance complete" banner for 24 hours<span id="maint-c-banner-login"></span></label>
       </div>
     </div>
     <div class="modal-footer">

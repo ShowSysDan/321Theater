@@ -748,7 +748,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.2.0'
+APP_VERSION = '3.2.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -4185,6 +4185,40 @@ _DUMMY_PW_HASH = (
 )
 
 
+def _login_page_messages():
+    """Site messages flagged 'Show on login', for the sign-in page itself.
+
+    Nobody is signed in yet, so there is no audience group to match: only
+    messages shown to everyone (audience NULL) qualify — a message aimed at
+    Admins or Staff never appears before sign-in. Same local-clock window as
+    get_active_messages(). A PostgreSQL outage shows no messages rather than
+    503ing the sign-in page; the sign-in POST still fails loud on its own
+    get_db(), so nothing acts on missing data."""
+    try:
+        db = get_db()
+    except db_adapter.DatabaseUnavailable:
+        return []
+    try:
+        now = datetime.now()
+        rows = db.execute("""
+            SELECT id, title, body_html, msg_type
+              FROM site_messages
+             WHERE is_active = 1 AND show_on_login = 1 AND audience IS NULL
+               AND (expires_at IS NULL OR expires_at > %s)
+               AND (scheduled_for IS NULL OR scheduled_for <= %s)
+             ORDER BY created_at DESC
+             LIMIT 5
+        """, (now, now)).fetchall()
+    finally:
+        db.close()
+    return [dict(r) for r in rows]
+
+
+def _render_login():
+    return render_template('login.html', next=request.args.get('next', ''),
+                           login_messages=_login_page_messages())
+
+
 def _login_route():
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
@@ -4207,7 +4241,7 @@ def _login_route():
                 syslog_logger.info(
                     f"LOGIN_BLOCKED_LOCKED user={username} ip={request.remote_addr}")
                 flash('This account has been locked. Contact an administrator.', 'error')
-                return render_template('login.html', next=request.args.get('next', ''))
+                return _render_login()
             # Update last_login + how they connected (internal vs VPS gateway)
             _cpath = _connection_path()
             try:
@@ -4261,7 +4295,7 @@ def _login_route():
         db.close()
         flash('Invalid username or password.', 'error')
 
-    return render_template('login.html', next=request.args.get('next', ''))
+    return _render_login()
 
 
 if _limiter_available and limiter:
@@ -21288,6 +21322,10 @@ def message_create():
     audience, aud_err = _message_audience_from(data)
     if aud_err:
         return jsonify({'error': aud_err}), 400
+    # The sign-in page has no audience to match, so only an everyone-message
+    # can be shown there (see _login_page_messages); don't store a flag that
+    # would silently never apply.
+    show_on_login = 1 if (data.get('show_on_login') and audience is None) else 0
     db = get_db()
     _new_id = db.execute("""
         INSERT INTO site_messages
@@ -21301,7 +21339,7 @@ def message_create():
         data.get('expires_at') or None,
         data.get('scheduled_for') or None,
         1 if data.get('is_active', True) else 0,
-        1 if data.get('show_on_login') else 0,
+        show_on_login,
         session['user_id'],
         audience,
     )).fetchone()['id']
@@ -21322,6 +21360,7 @@ def message_edit(msg_id):
     audience, aud_err = _message_audience_from(data)
     if aud_err:
         return jsonify({'error': aud_err}), 400
+    show_on_login = 1 if (data.get('show_on_login') and audience is None) else 0
     db = get_db()
     db.execute("""
         UPDATE site_messages SET
@@ -21337,7 +21376,7 @@ def message_edit(msg_id):
         data.get('expires_at') or None,
         data.get('scheduled_for') or None,
         1 if data.get('is_active', True) else 0,
-        1 if data.get('show_on_login') else 0,
+        show_on_login,
         audience,
         msg_id,
     ))
@@ -21567,33 +21606,40 @@ def _maint_send(subject, recipients, body_text, body_html, high_priority, purpos
 
 
 def _maint_banner_upsert(db, message_id, *, title, body_html, msg_type,
-                         audience, dismissible, expires_at=None):
+                         audience, dismissible, expires_at=None,
+                         show_on_login=False):
     """Create or re-activate/update the banner row for a notice. Returns the
     banner id (a new one when the old row was deleted from Site-Wide
-    Messages in the meantime)."""
+    Messages in the meantime). `audience` is the site_messages value (NULL =
+    everyone); show_on_login only sticks for everyone-banners."""
+    on_login = 1 if (show_on_login and audience is None) else 0
     if message_id:
         cur = db.execute("""
             UPDATE site_messages
                SET title=%s, body_html=%s, msg_type=%s, audience=%s,
-                   dismissible_by=%s, expires_at=%s, is_active=1
+                   dismissible_by=%s, expires_at=%s, show_on_login=%s,
+                   is_active=1
              WHERE id=%s
         """, (title, body_html, msg_type, audience,
-              'user' if dismissible else 'admin', expires_at, message_id))
+              'user' if dismissible else 'admin', expires_at, on_login,
+              message_id))
         if getattr(cur, 'rowcount', 0) == 1:
             return message_id
     return db.execute("""
         INSERT INTO site_messages
           (title, body_html, msg_type, dismissible_by, expires_at,
            is_active, show_on_login, created_by, audience)
-        VALUES (%s,%s,%s,%s,%s,1,0,%s,%s) RETURNING id
+        VALUES (%s,%s,%s,%s,%s,1,%s,%s,%s) RETURNING id
     """, (title, body_html, msg_type, 'user' if dismissible else 'admin',
-          expires_at, session.get('user_id'), audience)).fetchone()['id']
+          expires_at, on_login, session.get('user_id'),
+          audience)).fetchone()['id']
 
 
 _MAINT_LIST_SQL = """
     SELECT n.*, u.display_name AS author,
            CASE WHEN m.is_active = 1 THEN 1 ELSE 0 END AS banner_active,
            m.dismissible_by AS banner_dismissible_by,
+           COALESCE(m.show_on_login, 0) AS banner_show_on_login,
            CASE WHEN cm.is_active = 1
                  AND (cm.expires_at IS NULL OR cm.expires_at > %s)
                 THEN 1 ELSE 0 END AS completion_banner_active
@@ -21660,7 +21706,8 @@ def maintenance_notice_save(notice_id=None):
 
     Payload: title, body_html, window_start, window_end (datetime-local),
     audience (group keys), extra_recipients (text), email_subject,
-    high_priority, post_banner, banner_dismissible, send_email."""
+    high_priority, post_banner, banner_dismissible, banner_on_login,
+    send_email."""
     data = request.get_json(force=True) or {}
     title = (data.get('title') or '').strip()
     if not title:
@@ -21726,7 +21773,8 @@ def maintenance_notice_save(notice_id=None):
                 db, message_id, title=title,
                 body_html=_maint_banner_html(_maint_window_text(w_start, w_end), body_html),
                 msg_type='maintenance', audience=_banner_audience_value(audience),
-                dismissible=data.get('banner_dismissible', True))
+                dismissible=data.get('banner_dismissible', True),
+                show_on_login=bool(data.get('banner_on_login')))
             db.execute('UPDATE maintenance_notices SET message_id=%s WHERE id=%s',
                        (message_id, notice_id))
         elif message_id:
@@ -21803,6 +21851,13 @@ def maintenance_notice_complete(notice_id):
         db.close()
         return jsonify({'error': 'Not found'}), 404
     first_time = not n['completed_at']
+    # The "complete" banner goes wherever the notice's banner went — including
+    # the sign-in page (still only for everyone-banners).
+    notice_on_login = False
+    if n['message_id']:
+        mrow = db.execute('SELECT show_on_login FROM site_messages WHERE id=%s',
+                          (n['message_id'],)).fetchone()
+        notice_on_login = bool(mrow and mrow['show_on_login'])
     db.execute("""
         UPDATE maintenance_notices
            SET completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
@@ -21822,7 +21877,8 @@ def maintenance_notice_complete(notice_id):
             title=f'Maintenance complete: {n["title"]}',
             body_html=_maint_body_html(body_html), msg_type='motd',
             audience=_banner_audience_value(audience), dismissible=True,
-            expires_at=datetime.now() + timedelta(hours=24))
+            expires_at=datetime.now() + timedelta(hours=24),
+            show_on_login=notice_on_login)
         db.execute('UPDATE maintenance_notices SET completion_message_id=%s WHERE id=%s',
                    (cm_id, notice_id))
     db.commit()
