@@ -358,6 +358,19 @@ apps. For a 321Theater access change, use this app's own flags instead
   must be accepted there (`purpose` was missing until 3.2.0 and turned every
   failed send with a purpose into a TypeError).
 
+## Audit-log Undo — explicit list only (3.3.1)
+- `audit_undo()` reverses only actions in `_UNDO_ACTIONS` (action → (entity_type,
+  kind)). Never go back to guessing the kind from the action suffix: that made
+  ASSET_MEMBER_ADD (logged against the PARENT system type) delete the system
+  and ASSET_ITEM_ADD (TYPE id logged as the item id) delete an unrelated item.
+  To add an action: its entity_id must be the row it created/changed in
+  `UNDO_TABLE_MAP[entity_type]`, and for update/delete `before=` must be
+  `_snapshot_row()` of that row.
+- Create-undo is refused while any FK row references the target
+  (`_undo_blocking_refs`, catalog-driven; only `_UNDO_INCIDENTAL_REFS` are
+  ignored). `_snapshot_row()` omits BYTEA columns; restores write only real
+  non-BYTEA columns. Syslog: AUDIT_UNDO / AUDIT_UNDO_REFUSED / AUDIT_UNDO_FAILED.
+
 ## Per-page performance stats (admin Settings → Performance)
 - `db_adapter.query_timer_hook` stopwatches every `execute()`/`executemany()`;
   app.py's collector (`_perf_record_query` / `_perf_finish_request` /

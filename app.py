@@ -748,7 +748,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.3.0'
+APP_VERSION = '3.3.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -2168,7 +2168,15 @@ def _run_db_backup(kind, ts_fmt, keep):
     ext = '.sql.gz'
     dest = os.path.join(dest_dir, f'advance_{ts}{ext}')
     t0 = time.monotonic()
-    size = _run_pg_dump(dest, db_adapter.read_db_settings())
+    try:
+        size = _run_pg_dump(dest, db_adapter.read_db_settings())
+    except Exception as e:
+        # The scheduled jobs' exceptions only reach APScheduler's own logger,
+        # so a failing backup (pg_dump error, timeout, full disk) was silent
+        # in syslog.
+        syslog_logger.error(f'BACKUP_FAILED type={kind} file={dest} '
+                            f'elapsed={time.monotonic() - t0:.1f}s error={str(e)[:500]}')
+        raise
     syslog_logger.info(f'BACKUP_CREATED type={kind} file={dest} '
                        f'bytes={size} elapsed={time.monotonic() - t0:.1f}s')
     files = sorted(
@@ -2207,9 +2215,10 @@ def _run_once_per_host(tag, fn):
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         f.close()
-        return  # another worker on this host already holds it this cycle
+        return False  # another worker on this host already holds it this cycle
     try:
         fn()
+        return True
     finally:
         try:
             fcntl.flock(f, fcntl.LOCK_UN)
@@ -2220,9 +2229,10 @@ def _run_once_per_host(tag, fn):
 def run_hourly_backup():
     # Per-worker job (not leader-gated — backups are per-server-redundant by
     # design) but a host-lock keeps all 4 workers of one host from each
-    # holding a full pg_dump in RAM simultaneously and overwriting one file.
-    _run_once_per_host('backup_hourly',
-                       lambda: _run_db_backup('hourly', '%Y%m%d_%H%M', keep=24))
+    # running a full pg_dump simultaneously and overwriting one file.
+    # Returns False when another worker already holds the lock.
+    return _run_once_per_host('backup_hourly',
+                              lambda: _run_db_backup('hourly', '%Y%m%d_%H%M', keep=24))
 
 
 def run_daily_backup():
@@ -4153,28 +4163,89 @@ UNDO_TABLE_MAP = {
     'overhead_labor_template':'overhead_labor_templates',
 }
 
-# Action suffixes we know how to reverse. Maps suffix → operation kind.
-_UNDO_VERB = {
-    # Creates — reverse with DELETE FROM <table> WHERE id = entity_id
-    'ADD':     'create',
-    'CREATE':  'create',
-    'POST':    'create',
-    'UPLOAD':  'create',
-    # Updates — reverse by UPDATE …SET (cols from before_json) WHERE id = entity_id
-    'EDIT':    'update',
-    'UPDATE':  'update',
-    'RENAME':  'update',
-    # Deletes — reverse by INSERT (cols from before_json) INTO <table>
-    'DELETE':  'delete',
-    'REMOVE':  'delete',
-    'RETIRE':  'delete',
+# Audit actions the Undo button can reverse: action → (entity_type, kind).
+#   create — DELETE the row whose id == entity_id (refused while any other
+#            row still references it, see _undo_blocking_refs)
+#   update — restore the row's columns from before_json
+#   delete — re-INSERT before_json with its original id
+# Explicit on purpose (3.3.1). The old rule guessed the kind from the action's
+# last word, which made ASSET_MEMBER_ADD (logged against the PARENT system
+# type) undo as "DELETE the system type" and ASSET_ITEM_ADD (logged with the
+# TYPE id as the entity id) delete an unrelated asset item; RETIRE (a soft
+# is_retired flag, not a delete) could never re-insert. Before adding an
+# action here, check its log_audit call: entity_id must be the row it
+# created/changed in UNDO_TABLE_MAP[entity_type], and for update/delete its
+# before= must be _snapshot_row() of that row.
+_UNDO_ACTIONS = {
+    'CONTACT_ADD':              ('contact', 'create'),
+    'CONTACT_EDIT':             ('contact', 'update'),
+    'CONTACT_DELETE':           ('contact', 'delete'),
+    'FIELD_ADD':                ('form_field', 'create'),
+    'FIELD_EDIT':               ('form_field', 'update'),
+    'FIELD_DELETE':             ('form_field', 'delete'),
+    'SECTION_ADD':              ('form_section', 'create'),
+    'SECTION_EDIT':             ('form_section', 'update'),
+    'SECTION_DELETE':           ('form_section', 'delete'),
+    'TEMPLATE_ADD':             ('schedule_template', 'create'),
+    'LABOR_PRESET_ADD':         ('labor_preset', 'create'),
+    'ARTS_GROUP_ADD':           ('arts_group', 'create'),
+    'ARTS_GROUP_EDIT':          ('arts_group', 'update'),
+    'ARTS_GROUP_DELETE':        ('arts_group', 'delete'),
+    'ARTS_GROUP_CONTACT_ADD':   ('arts_group_contact', 'create'),
+    'ARTS_GROUP_CONTACT_EDIT':  ('arts_group_contact', 'update'),
+    'ARTS_GROUP_CONTACT_DELETE': ('arts_group_contact', 'delete'),
+    'POSITION_CATEGORY_ADD':    ('position_category', 'create'),
+    'POSITION_CATEGORY_EDIT':   ('position_category', 'update'),
+    'POSITION_CATEGORY_DELETE': ('position_category', 'delete'),
+    'JOB_POSITION_ADD':         ('job_position', 'create'),
+    'JOB_POSITION_EDIT':        ('job_position', 'update'),
+    'JOB_POSITION_DELETE':      ('job_position', 'delete'),
+    'LABOR_REQUEST_ADD':        ('labor_request', 'create'),
+    'PAY_LEVEL_ADD':            ('pay_rate_level', 'create'),
+    'PAY_LEVEL_EDIT':           ('pay_rate_level', 'update'),
+    'PAY_LEVEL_DELETE':         ('pay_rate_level', 'delete'),
+    'CREW_MEMBER_ADD':          ('crew_member', 'create'),
+    'CREW_MEMBER_EDIT':         ('crew_member', 'update'),
+    'CREW_MEMBER_DELETE':       ('crew_member', 'delete'),
+    'WAREHOUSE_LOC_ADD':        ('warehouse_location', 'create'),
+    'WAREHOUSE_LOC_EDIT':       ('warehouse_location', 'update'),
+    'WAREHOUSE_LOC_DELETE':     ('warehouse_location', 'delete'),
+    'ASSET_CATEGORY_ADD':       ('asset_category', 'create'),
+    'ASSET_CATEGORY_EDIT':      ('asset_category', 'update'),
+    'ASSET_CATEGORY_DELETE':    ('asset_category', 'delete'),
+    'ASSET_TYPE_ADD':           ('asset_type', 'create'),
+    'EXTERNAL_RENTAL_ADD':      ('show_external_rental', 'create'),
+    'MESSAGE_CREATE':           ('site_message', 'create'),
+    'OVERHEAD_PROJECT_ADD':     ('overhead_project', 'create'),
+    'OVERHEAD_GROUP_ADD':       ('overhead_labor_group', 'create'),
+    'OVERHEAD_REQUEST_ADD':     ('overhead_labor_request', 'create'),
+    'OVERHEAD_TEMPLATE_ADD':    ('overhead_labor_template', 'create'),
 }
+
+# Child rows that don't count as "still in use" when undoing a create:
+# per-user read receipts of a site message, which deleting it discards anyway.
+_UNDO_INCIDENTAL_REFS = frozenset(('site_message_views', 'site_message_dismissals'))
+
+_SNAPSHOT_COLS = {}
 
 
 def _snapshot_row(db, table, row_id):
-    """Return a dict of all columns for a single row, or None if not found."""
+    """Return a dict of the row's columns, or None if not found.
+
+    BYTEA columns (asset photos, rental/template PDFs) are left out: they
+    would land in the audit JSON as "<memory at 0x…>" — and an undo would
+    then write that string back as the file."""
     try:
-        row = db.execute(f'SELECT * FROM {table} WHERE id = %s', (row_id,)).fetchone()
+        cols = _SNAPSHOT_COLS.get(table)
+        if cols is None:
+            names = db.execute(
+                "SELECT attname FROM pg_attribute WHERE attrelid = to_regclass(%s) "
+                "AND attnum > 0 AND NOT attisdropped AND atttypid <> 'bytea'::regtype "
+                "ORDER BY attnum", (table,)).fetchall()
+            if not names:
+                return None
+            cols = _SNAPSHOT_COLS[table] = ', '.join(f'"{r["attname"]}"' for r in names)
+        row = db.execute(f'SELECT {cols} FROM {table} WHERE id = %s', (row_id,)).fetchone()
         return dict(row) if row else None
     except Exception:
         return None
@@ -4196,13 +4267,39 @@ def log_audit_change(db, action, entity_type, entity_id, *, show_id=None, detail
               before=before, after=after, detail=detail)
 
 
-def _classify_undo_action(action):
-    """Return one of 'create' / 'update' / 'delete' / None for an audit action."""
-    if not action:
+def _classify_undo_action(action, entity_type=None):
+    """'create' / 'update' / 'delete' for a reviewed action (see
+    _UNDO_ACTIONS), else None. entity_type must match what the action is
+    logged against, when given."""
+    spec = _UNDO_ACTIONS.get(action or '')
+    if not spec or (entity_type is not None and spec[0] != entity_type):
         return None
-    # Last word-chunk after the final underscore drives the verb (ASSET_ITEM_ADD -> ADD)
-    suffix = action.rsplit('_', 1)[-1].upper()
-    return _UNDO_VERB.get(suffix)
+    return spec[1]
+
+
+def _undo_blocking_refs(db, table, row_id):
+    """[(child_table, row_count)] of rows elsewhere that point at table.id =
+    row_id through a foreign key. Undoing a create DELETEs the row, and the
+    FKs would then cascade (e.g. an asset category takes every asset type in
+    it, and their items and show bookings) or blank the references (a job
+    position vanishing from labor requests) — so a row that's in use is
+    never deleted by Undo."""
+    refs = db.execute("""
+        SELECT c.conrelid::regclass::text AS child, a.attname AS col
+        FROM pg_constraint c
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+        WHERE c.contype = 'f' AND c.confrelid = to_regclass(%s)
+          AND cardinality(c.conkey) = 1
+    """, (table,)).fetchall()
+    found = []
+    for r in refs:
+        if r['child'].split('.')[-1].strip('"') in _UNDO_INCIDENTAL_REFS:
+            continue
+        n = db.execute(f'SELECT COUNT(*) AS n FROM {r["child"]} WHERE "{r["col"]}" = %s',
+                       (row_id,)).fetchone()['n']
+        if n:
+            found.append((r['child'], n))
+    return found
 
 
 def _can_undo_audit_row(row):
@@ -4211,7 +4308,7 @@ def _can_undo_audit_row(row):
         return False, 'Audit row not found'
     if row['entity_type'] not in UNDO_TABLE_MAP:
         return False, f"Entity type '{row['entity_type']}' is not undoable"
-    kind = _classify_undo_action(row['action'])
+    kind = _classify_undo_action(row['action'], row['entity_type'])
     if kind is None:
         return False, f"Action '{row['action']}' has no known reverse"
     if kind == 'create' and not row['entity_id']:
@@ -8514,21 +8611,36 @@ def audit_undo(log_id):
         db.close()
         return jsonify({'error': 'Audit entry not found'}), 404
 
+    def _refuse(status, reason):
+        db.close()
+        syslog_logger.info(
+            f"AUDIT_UNDO_REFUSED log_id={log_id} action={row['action']} "
+            f"entity={row['entity_type']}#{row['entity_id']} reason={reason!r} "
+            f"by={session.get('username')}")
+        return jsonify({'error': reason}), status
+
     ok, kind_or_reason = _can_undo_audit_row(row)
     if not ok:
-        db.close()
-        return jsonify({'error': kind_or_reason}), 400
+        return _refuse(400, kind_or_reason)
 
     kind = kind_or_reason  # 'create' | 'update' | 'delete'
     table = UNDO_TABLE_MAP[row['entity_type']]
     entity_id = row['entity_id']
     before = json.loads(row['before_json']) if row['before_json'] else None
-    after  = json.loads(row['after_json'])  if row['after_json']  else None
+    label = f"{row['entity_type'].replace('_', ' ')} #{entity_id}"
 
     try:
         if kind == 'create':
             # Snapshot the current row before deletion (so the undo is itself undoable)
             before_undo = _snapshot_row(db, table, entity_id)
+            if before_undo is None:
+                return _refuse(409, f'{label} no longer exists — nothing to undo')
+            in_use = _undo_blocking_refs(db, table, entity_id)
+            if in_use:
+                used = ', '.join(f'{n} in {t}' for t, n in in_use)
+                return _refuse(409, f"Can't undo: {label} is in use ({used}). Deleting it "
+                                    f"would also delete or unlink those records — remove "
+                                    f"them first.")
             db.execute(f'DELETE FROM {table} WHERE id = %s', (entity_id,))
             undo_before, undo_after = before_undo, None
 
@@ -8536,26 +8648,34 @@ def audit_undo(log_id):
             # Capture current row, then restore columns from before_json
             before_undo = _snapshot_row(db, table, entity_id)
             if before_undo is None:
-                db.close()
-                return jsonify({'error': f'{row["entity_type"]} #{entity_id} no longer exists'}), 409
-            # Only restore columns that exist in both before_json and the current row
+                return _refuse(409, f'{label} no longer exists')
+            # Only restore columns that exist in both before_json and the
+            # current row (a snapshot never includes BYTEA file columns).
             cols = [c for c in before.keys() if c in before_undo and c != 'id']
             if not cols:
-                db.close()
-                return jsonify({'error': 'No matching columns to restore'}), 400
-            set_clause = ', '.join(f'{c} = %s' for c in cols)
+                return _refuse(400, 'No matching columns to restore')
+            set_clause = ', '.join(f'"{c}" = %s' for c in cols)
             values = [before[c] for c in cols] + [entity_id]
             db.execute(f'UPDATE {table} SET {set_clause} WHERE id = %s', values)
             undo_before, undo_after = before_undo, before
 
         elif kind == 'delete':
-            # Re-insert the deleted row from before_json, preserving its id
-            cols = list(before.keys())
+            # Re-insert the deleted row from before_json, preserving its id.
+            # Only real, non-BYTEA columns: older audit rows can carry a file
+            # column as the string "<memory at 0x…>", which must never be
+            # written back as the file.
+            if _snapshot_row(db, table, entity_id) is not None:
+                return _refuse(409, f'{label} already exists again')
+            live = {r['attname'] for r in db.execute(
+                "SELECT attname FROM pg_attribute WHERE attrelid = to_regclass(%s) "
+                "AND attnum > 0 AND NOT attisdropped AND atttypid <> 'bytea'::regtype",
+                (table,)).fetchall()}
+            cols = [c for c in before.keys() if c in live]
             placeholders = ', '.join('%s' for _ in cols)
-            col_list = ', '.join(cols)
+            col_list = ', '.join(f'"{c}"' for c in cols)
             values = [before[c] for c in cols]
             db.execute(f'INSERT INTO {table} ({col_list}) VALUES ({placeholders})', values)
-            undo_before, undo_after = None, before
+            undo_before, undo_after = None, {c: before[c] for c in cols}
 
         else:
             db.close()
@@ -8575,8 +8695,10 @@ def audit_undo(log_id):
             row['entity_type'],
             entity_id,
             row['show_id'],
-            json.dumps(undo_before) if undo_before is not None else None,
-            json.dumps(undo_after)  if undo_after  is not None else None,
+            # default=str: row snapshots carry datetime/date/Decimal values;
+            # without it every create/update undo raised here and rolled back.
+            json.dumps(undo_before, default=str) if undo_before is not None else None,
+            json.dumps(undo_after, default=str)  if undo_after  is not None else None,
             request.remote_addr,
             f'Undid audit #{log_id} ({row["action"]})',
         ))
@@ -8593,6 +8715,10 @@ def audit_undo(log_id):
 
         db.commit()
         db.close()
+        syslog_logger.info(
+            f"AUDIT_UNDO log_id={log_id} action={row['action']} kind={kind} "
+            f"entity={row['entity_type']}#{entity_id} undo_log_id={new_log_id} "
+            f"by={session.get('username')}")
         return jsonify({'success': True, 'undo_log_id': new_log_id})
 
     except Exception as e:
@@ -10633,7 +10759,11 @@ def backup_status():
 @admin_required
 def manual_backup():
     try:
-        run_hourly_backup()
+        if not run_hourly_backup():
+            # Another worker on this server is mid-backup (the host lock):
+            # nothing was written, so don't claim success.
+            return jsonify({'success': False, 'error': 'A backup is already running on '
+                            'this server. Try again in a minute.'}), 409
         return jsonify({'success': True, 'message': 'Backup created successfully.'})
     except Exception as e:
         app.logger.error(f'Backup failed: {e}')

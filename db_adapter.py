@@ -277,6 +277,8 @@ class DBConnection:
                 # fresh one (raises DatabaseUnavailable if PG is really down)
                 # and run the statement once more.
                 self._first_stmt_retry = False
+                _log.warning('DB_POOL_RECONNECT an idle pooled connection had died '
+                             '(PostgreSQL restart / idle kill); replaced it and retried')
                 self._conn = self._pool.fresh_connection()
                 cur = self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
                 try:
