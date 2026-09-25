@@ -3100,7 +3100,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
         if (d.conflict) {
           // Show conflict modal instead of proceeding
           document.getElementById('conflict-newer-user').textContent = d.newer_saved_by || 'Unknown';
-          document.getElementById('conflict-newer-time').textContent = d.newer_saved_at ? new Date(d.newer_saved_at + (d.newer_saved_at.includes('T') ? '' : 'Z')).toLocaleString() : '';
+          document.getElementById('conflict-newer-time').textContent = parseServerTime(d.newer_saved_at)?.toLocaleString() || '';
           document.getElementById('conflict-old-json').textContent = JSON.stringify(d.restoring_snapshot, null, 2);
           document.getElementById('conflict-new-json').textContent = JSON.stringify(d.current_snapshot, null, 2);
           document.getElementById('conflict-modal').style.display = '';
@@ -4680,7 +4680,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
   /* ── Day-level actions ───────────────────────────────── */
 
   async function addLaborDay() {
-    const today = new Date().toISOString().slice(0,10);
+    const today = localTodayIso();
     const date = prompt('Work date for the new day (YYYY-MM-DD):', today);
     if (date === null) return;
     const trimmed = (date || '').trim();

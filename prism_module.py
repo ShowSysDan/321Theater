@@ -475,6 +475,12 @@ def run_prism_sync(trigger='manual', triggered_by=''):
                             str(settings.get('prism_event_statuses') or '2').split(',')
                             if s.strip().isdigit()]
 
+                # Every event this run touches gets last_synced_at = this
+                # same app-clock instant, so the "missing in Prism" badge
+                # (last_synced_at < the last good run's started_at) compares
+                # one clock with itself. It used to compare the DB clock with
+                # the app clock and misfired whenever their zones differed.
+                run_started = summary['synced_at'] = datetime.now()
                 cur = db.execute(
                     "INSERT INTO prism_sync_log (trigger_type, triggered_by, "
                     "window_start, window_end, status, started_at) "
@@ -485,7 +491,7 @@ def run_prism_sync(trigger='manual', triggered_by=''):
                     # datetime.now()/date.today(), so both sides must share a
                     # clock even if the PG server's timezone differs.
                     (trigger, triggered_by, win_start.isoformat(), win_end.isoformat(),
-                     datetime.now()))
+                     run_started))
                 log_id = summary['log_id'] = cur.fetchone()['id']
                 db.commit()
             except Exception as e:
@@ -609,6 +615,8 @@ def _upsert_event(db, ev, summary, dbg, hidden=frozenset()):
     raw_json = json.dumps(ev)
     last_updated = _norm_str(ev.get('event_last_updated'))
     h = _content_hash(ev)
+    # The run's app-clock start (see the sync preflight), not CURRENT_TIMESTAMP.
+    synced_at = summary.get('synced_at') or datetime.now()
 
     row = db.execute(
         'SELECT id, content_hash, import_state, imported_show_id, event_status '
@@ -626,10 +634,10 @@ def _upsert_event(db, ev, summary, dbg, hidden=frozenset()):
                is_rental, dates_json, raw_json, content_hash, prism_last_updated,
                import_state, first_seen_at, last_synced_at, last_changed_at)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, %s,
-                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    CURRENT_TIMESTAMP, %s, CURRENT_TIMESTAMP)
         """, (pid, name, status_str, status_code, first_date, last_date,
               venue_name, stage_names, tour_name, n_shows, is_rental,
-              dates_json, raw_json, h, last_updated, initial_state))
+              dates_json, raw_json, h, last_updated, initial_state, synced_at))
         summary['new'] += 1
         if auto_ignore:
             summary['auto_ignored'] = summary.get('auto_ignored', 0) + 1
@@ -645,11 +653,11 @@ def _upsert_event(db, ev, summary, dbg, hidden=frozenset()):
                last_date=%s, venue_name=%s, stage_names=%s, tour_name=%s,
                number_of_shows=%s, is_rental=%s, dates_json=%s, raw_json=%s,
                content_hash=%s, prism_last_updated=%s,
-               last_synced_at=CURRENT_TIMESTAMP, last_changed_at=CURRENT_TIMESTAMP
+               last_synced_at=%s, last_changed_at=CURRENT_TIMESTAMP
             WHERE id=%s
         """, (name, status_str, status_code, first_date, last_date, venue_name,
               stage_names, tour_name, n_shows, is_rental, dates_json, raw_json,
-              h, last_updated, row['id']))
+              h, last_updated, synced_at, row['id']))
         summary['updated'] += 1
         dbg(f'UPDATED #{pid} "{name}" (state={row["import_state"]})')
         # Sanctioned write-through: keep the linked show's Prism status tag
@@ -665,8 +673,8 @@ def _upsert_event(db, ev, summary, dbg, hidden=frozenset()):
     else:
         db.execute("""
             UPDATE prism_events SET raw_json=%s, prism_last_updated=%s,
-               last_synced_at=CURRENT_TIMESTAMP WHERE id=%s
-        """, (raw_json, last_updated, row['id']))
+               last_synced_at=%s WHERE id=%s
+        """, (raw_json, last_updated, synced_at, row['id']))
         summary['unchanged'] += 1
 
 

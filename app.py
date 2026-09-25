@@ -748,7 +748,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.3.2'
+APP_VERSION = '3.3.3'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -2037,6 +2037,20 @@ def _normalize_row_dates(d):
         elif isinstance(v, date):
             d[k] = v.isoformat()
     return d
+
+def _ts_out(v):
+    """A timestamp for browser JS: ISO 8601 WITH its UTC offset, whole
+    seconds (e.g. 2026-09-25T09:00:00-04:00). Select the column as
+    `col::timestamptz`: CURRENT_TIMESTAMP stores the PG server's LOCAL wall
+    clock in our naive TIMESTAMP columns, and the cast has PostgreSQL
+    interpret it in its own session time zone — the zone it was written in —
+    so the instant is right whatever zone the database server runs in. The
+    JS side parses it with parseServerTime() (app.js); before 3.3.3 it
+    assumed UTC and showed these times 4–5 h off on a US-Eastern server."""
+    if isinstance(v, datetime):
+        return v.isoformat(timespec='seconds')
+    return v
+
 
 def _iso_dates_deep(v):
     """_normalize_row_dates for nested JSON payloads (lists/dicts of rows):
@@ -5803,7 +5817,7 @@ def restore_history(show_id, hist_id):
     force = request.args.get('force') == '1'
     if not force:
         newer = db.execute("""
-            SELECT fh.id, fh.saved_at, u.username, u.display_name, fh.snapshot_json
+            SELECT fh.id, fh.saved_at::timestamptz AS saved_at, u.username, u.display_name, fh.snapshot_json
             FROM form_history fh
             LEFT JOIN users u ON fh.saved_by = u.id
             WHERE fh.show_id=%s AND fh.form_type=%s AND fh.id > %s
@@ -5813,7 +5827,7 @@ def restore_history(show_id, hist_id):
             db.close()
             return jsonify({
                 'conflict':          True,
-                'newer_saved_at':    newer['saved_at'],
+                'newer_saved_at':    _ts_out(newer['saved_at']),
                 'newer_saved_by':    newer['display_name'] or newer['username'] or 'Unknown',
                 'restoring_snapshot': snapshot,
                 'current_snapshot':  json.loads(newer['snapshot_json']),
@@ -5877,7 +5891,8 @@ def get_comments(show_id):
     is_admin = session.get('user_role') == 'admin'
     db = get_db()
     rows = db.execute("""
-        SELECT sc.id, sc.body, sc.created_at, sc.edited_at, sc.deleted_at,
+        SELECT sc.id, sc.body, sc.created_at::timestamptz AS created_at,
+               sc.edited_at::timestamptz AS edited_at, sc.deleted_at::timestamptz AS deleted_at,
                u.display_name, u.username, u.id as uid,
                du.display_name as deleted_by_name, du.username as deleted_by_username
         FROM show_comments sc
@@ -5893,9 +5908,9 @@ def get_comments(show_id):
         entry = {
             'id':          r['id'],
             'body':        r['body'],
-            'created_at':  r['created_at'],
-            'edited_at':   r['edited_at'],
-            'deleted_at':  r['deleted_at'],
+            'created_at':  _ts_out(r['created_at']),
+            'edited_at':   _ts_out(r['edited_at']),
+            'deleted_at':  _ts_out(r['deleted_at']),
             'author':      author,
             'author_id':   r['uid'],
             'initials':    ''.join(w[0].upper() for w in author.split()[:2]),
@@ -6496,7 +6511,7 @@ def sync_advance(show_id):
     #    schedule/postnotes compares against the page-load state;
     #  - the attachments fingerprint (see _ATTACHMENTS_REV_COLS).
     state = db.execute("""
-        SELECT s.last_saved_by, s.last_saved_at,
+        SELECT s.last_saved_by, s.last_saved_at::timestamptz AS last_saved_at,
                (SELECT MAX(updated_at) FROM advance_data WHERE show_id = s.id) AS max_updated,
                (SELECT json_object_agg(ad.field_key, ad.field_value)
                 FROM advance_data ad
@@ -6525,7 +6540,7 @@ def sync_advance(show_id):
         'fields':        state['changed'] or {},
         'active_users':  others,
         'last_saved_by': state['last_saved_by'],
-        'last_saved_at': state['last_saved_at'],
+        'last_saved_at': _ts_out(state['last_saved_at']),
         'attachments_rev': _attachments_rev_from(state),
     })
 
@@ -6573,7 +6588,8 @@ def show_heartbeat(show_id):
     # user's — so a show merely *last touched* by someone else before the user
     # arrived no longer triggers a false alarm on every tab switch.
     show = db.execute(
-        'SELECT s.last_saved_by, s.last_saved_at, ' + _ATTACHMENTS_REV_COLS +
+        'SELECT s.last_saved_by, s.last_saved_at::timestamptz AS last_saved_at, ' +
+        _ATTACHMENTS_REV_COLS +
         ' FROM shows s WHERE s.id = %s', (show_id,)).fetchone()
     if not show:
         db.close()   # deleted show: the upsert would 500 on the FK
@@ -6588,7 +6604,7 @@ def show_heartbeat(show_id):
     return jsonify({
         'active_users':  others,
         'last_saved_by': show['last_saved_by'],
-        'last_saved_at': show['last_saved_at'],
+        'last_saved_at': _ts_out(show['last_saved_at']),
         'attachments_rev': _attachments_rev_from(show),
     })
 
@@ -8209,7 +8225,7 @@ def merge_shows_preview(keeper_id):
         'fill_count': sum(1 for f in fields if f['will_fill']),
     }
     db.close()
-    return jsonify(out)
+    return jsonify(_iso_dates_deep(out))   # ISO show dates in the preview
 
 
 @app.route('/shows/<int:keeper_id>/merge', methods=['POST'])
@@ -10940,10 +10956,10 @@ def api_notifications():
     db = get_db()
     rows = db.execute(
         """SELECT id, kind, title, body, link_url, show_id, field_key,
-                  created_at, read_at
+                  created_at::timestamptz AS created_at, read_at::timestamptz AS read_at
              FROM notifications
             WHERE user_id=%s
-            ORDER BY created_at DESC
+            ORDER BY notifications.created_at DESC
             LIMIT 100""",
         (uid,)
     ).fetchall()
@@ -10955,12 +10971,9 @@ def api_notifications():
     out = []
     for r in rows:
         d = dict(r)
-        # Coerce datetime fields to ISO strings for the client.
+        # ISO strings with their UTC offset for the client (see _ts_out).
         for k in ('created_at', 'read_at'):
-            v = d.get(k)
-            if v is not None and not isinstance(v, str):
-                try: d[k] = v.isoformat()
-                except Exception: d[k] = str(v)
+            d[k] = _ts_out(d.get(k))
         out.append(d)
     return jsonify({'notifications': out, 'unread': int(unread or 0)})
 
@@ -11019,7 +11032,7 @@ def api_shows():
         "SELECT id, name, show_date, status FROM shows ORDER BY show_date DESC NULLS LAST"
     ).fetchall()
     db.close()
-    return jsonify([dict(s) for s in shows])
+    return jsonify([_normalize_row_dates(dict(s)) for s in shows])   # ISO show_date
 
 
 # ─── API Time ─────────────────────────────────────────────────────────────────
@@ -12430,7 +12443,7 @@ def email_outbox_log_list():
         limit = 200
     db = get_db()
     sql = """
-        SELECT l.id, l.sent_at, l.recipient, l.subject, l.purpose,
+        SELECT l.id, l.sent_at::timestamptz AS sent_at, l.recipient, l.subject, l.purpose,
                l.success, l.error_message,
                u.username AS triggered_by_name,
                u.display_name AS triggered_by_display
@@ -12454,7 +12467,7 @@ def email_outbox_log_list():
     """).fetchone()
     db.close()
     return jsonify({
-        'rows': [dict(r) for r in rows],
+        'rows': [dict(r, sent_at=_ts_out(r['sent_at'])) for r in rows],
         'total':     int(counts['total'] or 0),
         'successes': int(counts['successes'] or 0),
         'failures':  int(counts['failures'] or 0),
@@ -13846,7 +13859,9 @@ def show_labor_cost(show_id):
     db = get_db()
     lines, total = _calc_labor_cost_for_show(db, show_id)
     db.close()
-    return jsonify({'lines': lines, 'total': total})
+    # ISO dates for the Staffing tab table (the engine keeps date objects for
+    # the PDFs; jsonify would show "Tue, 01 Dec 2026 00:00:00 GMT").
+    return jsonify({'lines': _iso_dates_deep(lines), 'total': total})
 
 
 @app.route('/shows/<int:show_id>/billable-items', methods=['GET'])
@@ -14171,7 +14186,7 @@ def get_post_show_labor_cost(show_id):
     db = get_db()
     lines, total = _calc_post_show_labor_cost(db, show_id)
     db.close()
-    return jsonify({'lines': lines, 'total': total})
+    return jsonify({'lines': _iso_dates_deep(lines), 'total': total})
 
 
 _PSL_INIT_KEY = '_post_show_labor_initialized'
@@ -17539,7 +17554,7 @@ def asset_item_logs_list(item_id):
         ORDER BY al.log_date DESC, al.created_at DESC
     """, (item_id,)).fetchall()
     db.close()
-    return jsonify([dict(r) for r in rows])
+    return jsonify([_normalize_row_dates(dict(r)) for r in rows])   # ISO log_date / created_at
 
 
 @app.route('/settings/asset-items/<int:item_id>/logs', methods=['POST'])
@@ -17573,7 +17588,7 @@ def asset_item_log_add(item_id):
     """, (new_log_id,)).fetchone()
     db.close()
     syslog_logger.info(f"ASSET_LOG_ADD item_id={item_id} log_type={log_type} by={session.get('username')}")
-    return jsonify(dict(row)), 201
+    return jsonify(_normalize_row_dates(dict(row))), 201
 
 
 @app.route('/settings/asset-logs/<int:log_id>', methods=['DELETE'])
@@ -22937,13 +22952,14 @@ def asset_reports_data():
         JOIN asset_categories ac ON ac.id = at.category_id
         JOIN shows s ON s.id = sa.show_id
         {where_sql}
-        ORDER BY s.show_date DESC, ac.name, at.name
+        ORDER BY s.show_date DESC NULLS LAST, ac.name, at.name
     """, params).fetchall()
 
     total_revenue = sum(r['line_total'] or 0 for r in rows)
     db.close()
     return jsonify({
-        'rows': [dict(r) for r in rows],
+        # ISO dates for the table and the CSV export (was HTTP-date text).
+        'rows': [_normalize_row_dates(dict(r)) for r in rows],
         'total_revenue': total_revenue,
         'count': len(rows),
     })

@@ -402,9 +402,9 @@ function buildWidgetEl(idx, wtype) {
       fromDefault = new Date(y, m, 1).toISOString().slice(0,10);
       toDefault   = new Date(y, m + 1, 0).toISOString().slice(0,10);
     } else {
-      fromDefault = now.toISOString().slice(0,10);
+      fromDefault = localIsoDate(now);
       const end = new Date(); end.setDate(end.getDate() + 90);
-      toDefault = end.toISOString().slice(0,10);
+      toDefault = localIsoDate(end);
     }
     const dateRow = document.createElement('div');
     dateRow.className = 'widget-date-row';
@@ -873,7 +873,7 @@ function renderAssetCalendarMonth(data, year, month, idx) {
   const DOW = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const firstDow = (new Date(year, month, 1).getDay() + 6) % 7; // Mon=0
-  const todayStr = new Date().toISOString().slice(0,10);
+  const todayStr = localTodayIso();
   const total = data.total || 0;
 
   const subtitle = data.unlimited
@@ -1165,7 +1165,7 @@ function tlScrollDateLeft(section, dateStr) {
 function tlToday(idx) {
   const section = tlSection(idx);
   if (!section || !section._tlData || section._tlBusy) return;
-  const todayStr = new Date().toISOString().slice(0,10);
+  const todayStr = localTodayIso();
   if (todayStr >= section._tlData.from && todayStr <= section._tlData.to) {
     tlScrollDateLeft(section, todayStr);
     return;
@@ -1207,7 +1207,7 @@ function drawTimeline(idx) {
   };
   const xFor = i => i * dayWidth;
 
-  const todayStr = new Date().toISOString().slice(0,10);
+  const todayStr = localTodayIso();
   const todayInRange = todayStr >= data.from && todayStr <= data.to;
   const todayX = todayInRange ? xFor(dayIndex(todayStr)) + dayWidth / 2 : null;
 

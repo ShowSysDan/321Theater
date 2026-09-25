@@ -481,7 +481,7 @@ function presetRange(days) {
   // server includes archived shows whenever the window starts in the past.
   const today = new Date();
   const other = new Date(today); other.setDate(today.getDate() + days);
-  const fmt = d => d.toISOString().slice(0,10);
+  const fmt = d => localIsoDate(d);
   document.getElementById('range-start').value = fmt(days < 0 ? other : today);
   document.getElementById('range-end').value   = fmt(days < 0 ? today : other);
   applyRange();

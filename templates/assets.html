@@ -1473,7 +1473,7 @@ function renderAvailCalendar() {
   const reserve = _availData.reserve_count || 0;
   const usable = Math.max(0, total - inMaint - reserve);
   const unlimited = !!_availData.unlimited;
-  const today = new Date().toISOString().slice(0,10);
+  const today = localTodayIso();
 
   function bookedOn(dateStr) {
     return shows.filter(s => s.rental_start && s.rental_end && s.rental_start <= dateStr && s.rental_end >= dateStr);
@@ -1738,7 +1738,7 @@ window.selectItem = async function(itemId) {
             <option value="service">Service</option>
             <option value="usage">Usage</option>
           </select>
-          <input type="date" id="log-date-inp" class="field-input" style="width:140px;padding:5px 6px" value="${new Date().toISOString().slice(0,10)}">
+          <input type="date" id="log-date-inp" class="field-input" style="width:140px;padding:5px 6px" value="${localTodayIso()}">
           <input type="text" id="log-body-inp" class="field-input" placeholder="Entry…" style="flex:1;padding:5px 6px">
           <button class="btn btn-primary btn-sm" onclick="addLogEntry()">+</button>
         </div>
@@ -1846,7 +1846,7 @@ async function loadLogEntries(itemId) {
     </div>
   `).join('');
   const dateInp = document.getElementById('log-date-inp');
-  if (dateInp && !dateInp.value) dateInp.value = new Date().toISOString().slice(0,10);
+  if (dateInp && !dateInp.value) dateInp.value = localTodayIso();
 }
 
 window.addLogEntry = async function() {
@@ -1857,7 +1857,7 @@ window.addLogEntry = async function() {
     method:'POST', headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
     body: JSON.stringify({
       log_type: document.getElementById('log-type-sel').value,
-      log_date: document.getElementById('log-date-inp').value || new Date().toISOString().slice(0,10),
+      log_date: document.getElementById('log-date-inp').value || localTodayIso(),
       body,
     })
   });

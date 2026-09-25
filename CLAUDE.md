@@ -86,6 +86,16 @@ rows: `row['col']`, `row[0]`, `.get()`, `dict(row)`). No rewriting happens, so:
   (SQLite's were UTC). A column must be written and compared on the SAME
   clock: DB-defaulted timestamps → compare with `NOW() - INTERVAL …`;
   columns you stamp from Python → compare with the same Python clock.
+- **Sending timestamps to browser JS (3.3.3):** select the column as
+  `col::timestamptz` (PG interprets the naive DB-clock value in its session
+  zone) and serialize with `_ts_out()` → ISO with offset; parse in JS with
+  `parseServerTime()` (app.js). Never append 'Z' to a server time in JS and
+  never feed a jsonify'd naive datetime (its "GMT" label is false) to
+  `new Date()`. Plain dates: send ISO (`_normalize_row_dates` /
+  `_iso_dates_deep`). "Today" in JS = `localTodayIso()` / `localIsoDate(d)`
+  (base.html head), never `new Date().toISOString().slice(0,10)` (UTC).
+  Python-clock columns (cluster_instances, prism_sync_log.started_at,
+  prism_events.last_synced_at) are compared only with the same Python clock.
 - **Precision:** PG timestamps carry microseconds and `jsonify()` renders a
   datetime as a whole-second HTTP date — any timestamp used as a round-trip
   cursor must be sent as `isoformat()` (see `_sync_cursor()`), or `> since`
