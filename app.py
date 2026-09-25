@@ -748,7 +748,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.2.1'
+APP_VERSION = '3.2.2'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -12633,13 +12633,22 @@ def _ai_extract_impl(show_id):
     if attachment_id:
         db = get_db()
         row = db.execute(
-            'SELECT file_data, mime_type, filename FROM show_attachments WHERE id=%s AND show_id=%s',
+            'SELECT id, file_data, s3_key, is_compressed, mime_type, filename '
+            'FROM show_attachments WHERE id=%s AND show_id=%s AND deleted_at IS NULL',
             (attachment_id, show_id)
         ).fetchone()
         db.close()
         if not row:
             return jsonify({'success': False, 'error': 'Attachment not found.'}), 404
-        file_bytes = bytes(row['file_data'])
+        # Same reader as downloads: S3 or DB copy per the read preference,
+        # falling back to the other (an S3-only file used to 500 here).
+        try:
+            file_bytes = file_store.read_bytes('attachments', row)
+        except file_store.FileMissing:
+            return jsonify({'success': False, 'error': 'Attachment has no stored file.'}), 404
+        except file_store.FileUnavailable as e:
+            app.logger.error(f"AI extract: read failed for attachment {attachment_id}: {e}")
+            return jsonify({'success': False, 'error': 'File storage is unavailable right now. Try again shortly.'}), 503
         mime = row['mime_type']
         fname = row['filename']
     elif uploaded_file and uploaded_file.filename:
