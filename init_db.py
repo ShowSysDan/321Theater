@@ -1323,7 +1323,8 @@ CREATE TABLE IF NOT EXISTS site_messages (
     expires_at      TIMESTAMP,
     scheduled_for   TIMESTAMP,
     created_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    audience        TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS site_message_dismissals (
@@ -1339,6 +1340,43 @@ CREATE TABLE IF NOT EXISTS site_message_views (
     seen_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (message_id, user_id)
 );
+
+-- Maintenance notices (3.2.0): an announcement that can be emailed (optionally
+-- high priority) to audience groups and posted as a site_messages banner, then
+-- closed out with a work-completed email. audience = JSON list of group keys
+-- (admin, staff, user, viewer). message_id / completion_message_id point at
+-- the banners this notice posted; the banner rows live in the shared schema.
+CREATE TABLE IF NOT EXISTS maintenance_notices (
+    id                          SERIAL PRIMARY KEY,
+    title                       TEXT NOT NULL DEFAULT '',
+    body_html                   TEXT NOT NULL DEFAULT '',
+    window_start                TIMESTAMP,
+    window_end                  TIMESTAMP,
+    audience                    TEXT NOT NULL DEFAULT '[]',
+    extra_recipients            TEXT NOT NULL DEFAULT '',
+    email_subject               TEXT NOT NULL DEFAULT '',
+    high_priority               INTEGER DEFAULT 1,
+    message_id                  INTEGER REFERENCES site_messages(id) ON DELETE SET NULL,
+    notice_sent_at              TIMESTAMP,
+    notice_sent_by              INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    notice_sent_count           INTEGER DEFAULT 0,
+    notice_send_error           TEXT NOT NULL DEFAULT '',
+    completed_at                TIMESTAMP,
+    completed_by                INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    completion_subject          TEXT NOT NULL DEFAULT '',
+    completion_body_html        TEXT NOT NULL DEFAULT '',
+    completion_audience         TEXT NOT NULL DEFAULT '[]',
+    completion_extra_recipients TEXT NOT NULL DEFAULT '',
+    completion_high_priority    INTEGER DEFAULT 1,
+    completion_message_id       INTEGER REFERENCES site_messages(id) ON DELETE SET NULL,
+    completion_sent_at          TIMESTAMP,
+    completion_sent_count       INTEGER DEFAULT 0,
+    completion_send_error       TEXT NOT NULL DEFAULT '',
+    created_by                  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_maintenance_notices_created ON maintenance_notices(created_at);
 
 -- ── Asset Dashboard ───────────────────────────────────────────────────────────
 
@@ -1891,6 +1929,9 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS is_app_admin INTEGER DEFAULT 0',
         # Account lock — blocks login without deleting the account or its data.
         f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS is_locked INTEGER DEFAULT 0',
+        # Site-message audience groups (3.2.0): JSON list of group keys, NULL =
+        # everyone. Apps that don't know the column keep showing every message.
+        f'ALTER TABLE "{shared_schema}".site_messages ADD COLUMN IF NOT EXISTS audience TEXT DEFAULT NULL',
     ]
 
     if cat is None:

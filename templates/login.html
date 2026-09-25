@@ -33,6 +33,15 @@
       <p>Advance to stage in 3-2-1</p>
     </div>
 
+    {# Site messages flagged "Show on login" (everyone-messages only — see
+       _login_page_messages in app.py). body_html is sanitized at save. #}
+    {% for m in login_messages or [] %}
+      <div class="flash flash-{{ {'maintenance': 'warning', 'alert': 'error'}.get(m.msg_type, 'info') }} login-notice" style="display:block">
+        <strong>{{ m.title }}</strong>
+        {% if m.body_html %}<div style="margin-top:4px;font-size:12px">{{ m.body_html|safe }}</div>{% endif %}
+      </div>
+    {% endfor %}
+
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         {% for cat, msg in messages %}

@@ -748,7 +748,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.1.0'
+APP_VERSION = '3.2.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1902,6 +1902,10 @@ _VIEWER_ALLOWED_ENDPOINTS = frozenset({
     # My Account page — the UI for change_own_password (viewers can't reach
     # Settings → My Account, which the gate blocks like the rest of Settings)
     'viewer_account',
+    # Site-message banners (read + dismiss). base.html loads them on every
+    # page; before 3.2.0 the gate 403'd this, so viewers never saw a banner.
+    # get_active_messages() still filters by audience (Doc Viewers group).
+    'get_messages_api', 'dismiss_message',
 })
 
 
@@ -2216,12 +2220,15 @@ def _get_smtp_settings():
 
 def _log_email_error(recipients, subject, error, *,
                      pdf_type=None, show_id=None,
-                     triggered_by=None, smtp_code=None):
+                     triggered_by=None, smtp_code=None, purpose=None):
     """Record one row per failed recipient in email_send_errors.
 
     `recipients` may be a list, a single string, or None (treated as one
     'unknown' row so the failure isn't lost). Never raises — best-effort
-    logging only."""
+    logging only. `purpose` is accepted because callers pass their whole
+    error_context here (it used to be missing, so any send whose context
+    carried 'purpose' raised TypeError on failure instead of reporting it);
+    it fills the pdf_type column when no pdf_type was given."""
     if recipients is None:
         recipients = ['(unknown)']
     elif isinstance(recipients, str):
@@ -2238,9 +2245,9 @@ def _log_email_error(recipients, subject, error, *,
             triggered_by = session.get('username')
         except RuntimeError:
             triggered_by = None
-    by_str   = (triggered_by or 'system')[:100]
+    by_str   = str(triggered_by or 'system')[:100]
     subj_str = (subject or '')[:200]
-    pdf_str  = (pdf_type or '')[:50]
+    pdf_str  = (pdf_type or purpose or '')[:50]
     try:
         db = get_db()
         for r in recipients:
@@ -2261,7 +2268,8 @@ def _log_email_error(recipients, subject, error, *,
 
 
 def _build_mime_message(subject, from_addr, recipients, body_text=None,
-                        body_html=None, attachments=None, use_bcc=True):
+                        body_html=None, attachments=None, use_bcc=True,
+                        high_priority=False):
     """
     Build a MIME email message.
 
@@ -2275,6 +2283,10 @@ def _build_mime_message(subject, from_addr, recipients, body_text=None,
         use_bcc (bool): When True (default), recipients are NOT listed in the
             visible To: header — delivery is via the SMTP envelope only so
             recipients can't see each other. To: shows the from address.
+        high_priority (bool): Flag the message as high importance. Sets the
+            three headers clients actually read: X-Priority (Apple Mail,
+            Thunderbird, most webmail), Importance (Outlook / Exchange) and
+            X-MSMail-Priority (older Outlook).
 
     Returns:
         email.mime.multipart.MIMEMultipart
@@ -2297,6 +2309,10 @@ def _build_mime_message(subject, from_addr, recipients, body_text=None,
     else:
         msg['To'] = _clean_header(', '.join(recipients))
     msg['Subject'] = _clean_header(subject)
+    if high_priority:
+        msg['X-Priority'] = '1 (Highest)'
+        msg['X-MSMail-Priority'] = 'High'
+        msg['Importance'] = 'High'
 
     if body_text and body_html:
         alt = MIMEMultipart('alternative')
@@ -2322,7 +2338,8 @@ def _build_mime_message(subject, from_addr, recipients, body_text=None,
 
 
 def _send_email_smtp(subject, recipients, body_text=None, body_html=None,
-                     attachments=None, from_address=None, error_context=None):
+                     attachments=None, from_address=None, error_context=None,
+                     high_priority=False):
     """Send email via configured SMTP relay. Returns (success, message).
 
     `error_context` is an optional dict of {pdf_type, show_id, triggered_by}
@@ -2338,7 +2355,8 @@ def _send_email_smtp(subject, recipients, body_text=None, body_html=None,
 
     from_addr = from_address or smtp_cfg.get('smtp_from') or smtp_cfg.get('smtp_user', '')
     msg = _build_mime_message(subject, from_addr, recipients, body_text,
-                              body_html, attachments)
+                              body_html, attachments,
+                              high_priority=high_priority)
 
     server = None
     try:
@@ -2387,7 +2405,8 @@ def _send_email_smtp(subject, recipients, body_text=None, body_html=None,
 
 
 def _send_email_direct(subject, recipients, body_text=None, body_html=None,
-                       attachments=None, from_address=None, error_context=None):
+                       attachments=None, from_address=None, error_context=None,
+                       high_priority=False):
     """Send email directly via MX lookup (no relay). Returns (success, message).
 
     Recipients are grouped by domain. The per-domain SMTP transactions
@@ -2412,7 +2431,8 @@ def _send_email_direct(subject, recipients, body_text=None, body_html=None,
         from_addr_header = from_addr
 
     msg = _build_mime_message(subject, from_addr_header, recipients, body_text,
-                              body_html, attachments)
+                              body_html, attachments,
+                              high_priority=high_priority)
     msg_str = msg.as_string()
 
     # Group recipients by domain
@@ -2539,7 +2559,8 @@ def _log_outbox_send(recipients, subject, success, error_message, error_context)
 
 
 def _send_email(subject, recipients, body_text=None, body_html=None,
-                attachments=None, from_address=None, error_context=None):
+                attachments=None, from_address=None, error_context=None,
+                high_priority=False):
     """
     General-purpose email sender. Dispatches to SMTP relay or direct MX
     based on the email_provider setting.
@@ -2554,6 +2575,8 @@ def _send_email(subject, recipients, body_text=None, body_html=None,
         error_context (dict|None): {pdf_type, show_id, triggered_by, purpose}
             stamped onto any rows the helpers write into email_send_errors
             and email_outbox_log.
+        high_priority (bool): Send flagged as high importance (see
+            _build_mime_message).
 
     Returns:
         (bool, str): (success, message)
@@ -2562,11 +2585,13 @@ def _send_email(subject, recipients, body_text=None, body_html=None,
     if provider == 'direct':
         ok, msg = _send_email_direct(subject, recipients, body_text, body_html,
                                      attachments, from_address,
-                                     error_context=error_context)
+                                     error_context=error_context,
+                                     high_priority=high_priority)
     else:
         ok, msg = _send_email_smtp(subject, recipients, body_text, body_html,
                                    attachments, from_address,
-                                   error_context=error_context)
+                                   error_context=error_context,
+                                   high_priority=high_priority)
     _log_outbox_send(recipients, subject, ok, msg, error_context)
     return ok, msg
 
@@ -4160,6 +4185,40 @@ _DUMMY_PW_HASH = (
 )
 
 
+def _login_page_messages():
+    """Site messages flagged 'Show on login', for the sign-in page itself.
+
+    Nobody is signed in yet, so there is no audience group to match: only
+    messages shown to everyone (audience NULL) qualify — a message aimed at
+    Admins or Staff never appears before sign-in. Same local-clock window as
+    get_active_messages(). A PostgreSQL outage shows no messages rather than
+    503ing the sign-in page; the sign-in POST still fails loud on its own
+    get_db(), so nothing acts on missing data."""
+    try:
+        db = get_db()
+    except db_adapter.DatabaseUnavailable:
+        return []
+    try:
+        now = datetime.now()
+        rows = db.execute("""
+            SELECT id, title, body_html, msg_type
+              FROM site_messages
+             WHERE is_active = 1 AND show_on_login = 1 AND audience IS NULL
+               AND (expires_at IS NULL OR expires_at > %s)
+               AND (scheduled_for IS NULL OR scheduled_for <= %s)
+             ORDER BY created_at DESC
+             LIMIT 5
+        """, (now, now)).fetchall()
+    finally:
+        db.close()
+    return [dict(r) for r in rows]
+
+
+def _render_login():
+    return render_template('login.html', next=request.args.get('next', ''),
+                           login_messages=_login_page_messages())
+
+
 def _login_route():
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
@@ -4182,7 +4241,7 @@ def _login_route():
                 syslog_logger.info(
                     f"LOGIN_BLOCKED_LOCKED user={username} ip={request.remote_addr}")
                 flash('This account has been locked. Contact an administrator.', 'error')
-                return render_template('login.html', next=request.args.get('next', ''))
+                return _render_login()
             # Update last_login + how they connected (internal vs VPS gateway)
             _cpath = _connection_path()
             try:
@@ -4236,7 +4295,7 @@ def _login_route():
         db.close()
         flash('Invalid username or password.', 'error')
 
-    return render_template('login.html', next=request.args.get('next', ''))
+    return _render_login()
 
 
 if _limiter_available and limiter:
@@ -21058,10 +21117,66 @@ def reset_password(token):
 
 # ─── Site-Wide Messaging ───────────────────────────────────────────────────────
 
-def get_active_messages(user_id=None, msg_type=None):
-    """Return active, non-dismissed, non-expired messages."""
+# Audience groups shared by site-message banners and maintenance notices.
+# Document viewers are their own group even though their role column is
+# normally 'user' — the viewer flag, not the role, is what makes them one.
+AUDIENCE_GROUPS = (
+    ('admin',  'Admins'),
+    ('staff',  'Staff'),
+    ('user',   'Users'),
+    ('viewer', 'Doc Viewers'),
+)
+_AUDIENCE_KEYS = tuple(k for k, _ in AUDIENCE_GROUPS)
+
+
+def _audience_group_of(role, is_document_viewer):
+    """The single audience group an account belongs to."""
+    if is_document_viewer:
+        return 'viewer'
+    return role if role in ('admin', 'staff') else 'user'
+
+
+def _clean_audience(value):
+    """Known group keys from a list or its JSON text, in canonical order.
+    Anything unparseable yields [] (callers treat [] on a stored banner as
+    'everyone' — fail open, like the contacts venue_filter)."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value) if value.strip() else []
+        except ValueError:
+            value = []
+    if not isinstance(value, (list, tuple)):
+        return []
+    picked = {str(v).strip().lower() for v in value}
+    return [k for k in _AUDIENCE_KEYS if k in picked]
+
+
+def _banner_audience_value(groups):
+    """site_messages.audience for a group pick. NULL means everyone (and is
+    all that apps predating the column understand), so all four groups are
+    stored as NULL rather than as a list."""
+    groups = _clean_audience(groups)
+    if not groups or len(groups) == len(_AUDIENCE_KEYS):
+        return None
+    return json.dumps(groups)
+
+
+def _session_audience_group():
+    return _audience_group_of(session.get('user_role'),
+                              session.get('is_document_viewer'))
+
+
+def get_active_messages(user_id=None, msg_type=None, group=None):
+    """Return active, non-dismissed, non-expired messages for one user.
+
+    scheduled_for / expires_at are wall-clock times typed into a
+    datetime-local input, so they're compared with the app server's local
+    clock. (They used to be compared with UTC, which shifted every scheduled
+    start and expiry by the UTC offset — 4–5 hours early in Orlando.)
+    `group` (see _audience_group_of) hides messages aimed at other audience
+    groups; a NULL / unreadable audience means everyone."""
     db = get_db()
-    now = datetime.utcnow().isoformat()
+    now = datetime.now()
     rows = db.execute("""
         SELECT m.*,
                CASE WHEN d.user_id IS NOT NULL THEN 1 ELSE 0 END as dismissed
@@ -21074,14 +21189,34 @@ def get_active_messages(user_id=None, msg_type=None):
         ORDER BY m.created_at DESC
     """, (user_id or 0, now, now, msg_type, msg_type)).fetchall()
     db.close()
-    return [dict(r) for r in rows if not r['dismissed'] or r['dismissible_by'] == 'admin']
+    out = []
+    for r in rows:
+        if r['dismissed'] and r['dismissible_by'] != 'admin':
+            continue
+        aud = _clean_audience(r['audience'])
+        if aud and group not in aud:
+            continue
+        out.append(dict(r))
+    return out
+
+
+def _message_audience_from(data):
+    """(value, error) for site_messages.audience from a request payload. A
+    payload without the key (an older client) targets everyone."""
+    if data.get('audience') is None:
+        return None, None
+    groups = _clean_audience(data.get('audience'))
+    if not groups:
+        return None, 'Pick at least one audience group.'
+    return _banner_audience_value(groups), None
 
 
 @app.route('/api/messages')
 @login_required
 def get_messages_api():
     msg_type = request.args.get('type')
-    msgs = get_active_messages(session['user_id'], msg_type)
+    msgs = get_active_messages(session['user_id'], msg_type,
+                               group=_session_audience_group())
     # Filter out already dismissed for users
     result = [m for m in msgs if not m['dismissed']]
     # Record that this user has now seen each delivered message (first-seen wins;
@@ -21137,7 +21272,12 @@ def messages_list():
         ORDER BY m.created_at DESC
     """).fetchall()
     db.close()
-    return jsonify([_normalize_row_dates(dict(r)) for r in rows])
+    out = []
+    for r in rows:
+        d = _normalize_row_dates(dict(r))
+        d['audience'] = _clean_audience(r['audience']) or list(_AUDIENCE_KEYS)
+        out.append(d)
+    return jsonify(out)
 
 
 @app.route('/settings/messages/<int:msg_id>/receipts', methods=['GET'])
@@ -21179,12 +21319,19 @@ def message_create():
     body_html = _sanitize_html((data.get('body_html') or '').strip())
     if not title:
         return jsonify({'error': 'Title required'}), 400
+    audience, aud_err = _message_audience_from(data)
+    if aud_err:
+        return jsonify({'error': aud_err}), 400
+    # The sign-in page has no audience to match, so only an everyone-message
+    # can be shown there (see _login_page_messages); don't store a flag that
+    # would silently never apply.
+    show_on_login = 1 if (data.get('show_on_login') and audience is None) else 0
     db = get_db()
     _new_id = db.execute("""
         INSERT INTO site_messages
           (title, body_html, msg_type, dismissible_by, expires_at, scheduled_for,
-           is_active, show_on_login, created_by)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+           is_active, show_on_login, created_by, audience)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (
         title, body_html,
         data.get('msg_type', 'motd'),
@@ -21192,8 +21339,9 @@ def message_create():
         data.get('expires_at') or None,
         data.get('scheduled_for') or None,
         1 if data.get('is_active', True) else 0,
-        1 if data.get('show_on_login') else 0,
+        show_on_login,
         session['user_id'],
+        audience,
     )).fetchone()['id']
     db.commit()
     row = db.execute('SELECT * FROM site_messages WHERE id=%s', (_new_id,)).fetchone()
@@ -21209,11 +21357,16 @@ def message_create():
 @admin_required
 def message_edit(msg_id):
     data = request.get_json(force=True) or {}
+    audience, aud_err = _message_audience_from(data)
+    if aud_err:
+        return jsonify({'error': aud_err}), 400
+    show_on_login = 1 if (data.get('show_on_login') and audience is None) else 0
     db = get_db()
     db.execute("""
         UPDATE site_messages SET
           title=%s, body_html=%s, msg_type=%s, dismissible_by=%s,
-          expires_at=%s, scheduled_for=%s, is_active=%s, show_on_login=%s
+          expires_at=%s, scheduled_for=%s, is_active=%s, show_on_login=%s,
+          audience=%s
         WHERE id=%s
     """, (
         (data.get('title') or '').strip(),
@@ -21223,7 +21376,8 @@ def message_edit(msg_id):
         data.get('expires_at') or None,
         data.get('scheduled_for') or None,
         1 if data.get('is_active', True) else 0,
-        1 if data.get('show_on_login') else 0,
+        show_on_login,
+        audience,
         msg_id,
     ))
     db.commit()
@@ -21254,6 +21408,541 @@ def message_dismiss_all(msg_id):
     db.commit()
     log_audit(db, 'MESSAGE_DISMISS_ALL', 'site_message', msg_id)
     db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+# ─── Maintenance Notices ───────────────────────────────────────────────────────
+#
+# Settings → System → Messages → Maintenance Notices. A notice is emailed
+# (optionally flagged high priority) to the chosen audience groups and/or
+# posted as a 'maintenance' site-message banner for the same groups, then
+# closed out with a work-completed email. Sends are admin-clicked request
+# actions, not background jobs (so no leader gate); every recipient is BCC'd.
+
+_MAINT_EMAIL_BATCH = 50   # recipients per message — well under relay per-message caps
+_EMAIL_ADDR_RE = re.compile(r'^[^@\s,;<>"]+@[^@\s,;<>"]+\.[^@\s,;<>"]+$')
+
+
+def _audience_member_rows(db):
+    """Accounts that can be reached through an audience group: not locked,
+    approved, email confirmed. Email may be blank (banner-only members)."""
+    return db.execute("""
+        SELECT id, role, is_document_viewer, COALESCE(email, '') AS email
+          FROM users
+         WHERE COALESCE(is_locked, 0) = 0
+           AND COALESCE(pending_approval, 0) = 0
+           AND COALESCE(email_confirmed, 1) = 1
+    """).fetchall()
+
+
+def _audience_emails(db, groups):
+    """De-duplicated addresses of every reachable account in `groups`."""
+    groups = set(_clean_audience(groups))
+    seen, out = set(), []
+    for r in _audience_member_rows(db):
+        if _audience_group_of(r['role'], r['is_document_viewer']) not in groups:
+            continue
+        addr = r['email'].strip()
+        if not _EMAIL_ADDR_RE.match(addr) or addr.lower() in seen:
+            continue
+        seen.add(addr.lower())
+        out.append(addr)
+    return out
+
+
+def _parse_extra_recipients(text):
+    """(valid, invalid) addresses from free text separated by commas,
+    semicolons or whitespace. Valid ones are de-duplicated."""
+    valid, invalid, seen = [], [], set()
+    for tok in re.split(r'[\s,;]+', text or ''):
+        tok = tok.strip().strip('<>')
+        if not tok:
+            continue
+        if not _EMAIL_ADDR_RE.match(tok):
+            invalid.append(tok)
+        elif tok.lower() not in seen:
+            seen.add(tok.lower())
+            valid.append(tok)
+    return valid, invalid
+
+
+def _maint_parse_dt(value):
+    """datetime-local input ('2026-09-27T22:00') → naive local datetime or
+    None when blank. Raises ValueError on anything unparseable."""
+    value = (value or '').strip() if isinstance(value, str) else value
+    if not value:
+        return None
+    return datetime.fromisoformat(str(value))
+
+
+def _fmt_maint_dt(dt, with_date=True):
+    h = dt.hour % 12 or 12
+    t = f"{h}:{dt.minute:02d} {'AM' if dt.hour < 12 else 'PM'}"
+    return f"{dt.strftime('%a, %b')} {dt.day}, {dt.year} {t}" if with_date else t
+
+
+def _maint_window_text(start, end):
+    """Human window, e.g. 'Sat, Sep 27, 2026 10:00 PM – 11:30 PM'."""
+    start, end = _as_dt(start), _as_dt(end)
+    if start and end:
+        return f'{_fmt_maint_dt(start)} – {_fmt_maint_dt(end, with_date=start.date() != end.date())}'
+    if start:
+        return f'Starting {_fmt_maint_dt(start)}'
+    if end:
+        return f'Until {_fmt_maint_dt(end)}'
+    return ''
+
+
+def _maint_body_html(stored):
+    """Render a stored (already sanitized) body. Plain text typed into the
+    textarea has no tags, so its line breaks become <br> (the sanitizer
+    escaped any '<', so 'no tag' is a reliable test)."""
+    stored = stored or ''
+    if '<' not in stored:
+        return stored.replace('\r\n', '\n').replace('\n', '<br>')
+    return stored
+
+
+def _html_to_text(fragment):
+    """Rough plain-text rendering of sanitized message HTML, for the
+    text/plain alternative of an HTML email."""
+    t = re.sub(r'(?i)<br\s*/?>', '\n', fragment or '')
+    t = re.sub(r'(?i)<li[^>]*>', '\n• ', t)
+    t = re.sub(r'(?i)</(p|div|h3|h4|ul|ol)>', '\n\n', t)
+    t = re.sub(r'(?i)<hr[^>]*>', '\n----\n', t)
+    t = re.sub(r'<[^>]+>', '', t)
+    t = _html_mod.unescape(t)
+    t = re.sub(r'[ \t]+\n', '\n', t)
+    return re.sub(r'\n{3,}', '\n\n', t).strip()
+
+
+def _maint_banner_html(title_window, body_html):
+    parts = []
+    if title_window:
+        parts.append(f'<strong>When:</strong> {_html_mod.escape(title_window)}')
+    body = _maint_body_html(body_html)
+    if body:
+        parts.append(body)
+    return '<br>'.join(parts)
+
+
+def _maint_email(kind, notice, message_html, sender):
+    """(body_text, body_html) for a maintenance notice ('notice') or a
+    work-completed ('complete') email. Inline styles only — mail clients
+    drop <style> blocks."""
+    complete = kind == 'complete'
+    accent = '#15803D' if complete else '#B45309'
+    label = 'MAINTENANCE COMPLETE' if complete else 'SCHEDULED MAINTENANCE'
+    title = notice['title'] or ''
+    window = _maint_window_text(notice['window_start'], notice['window_end'])
+    body = _maint_body_html(message_html)
+    base_url = (get_app_setting('public_base_url', '') or '').rstrip('/')
+    esc = _html_mod.escape
+
+    html_parts = [
+        '<div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#1f2937">',
+        f'<div style="background:{accent};color:#ffffff;padding:12px 20px;border-radius:6px 6px 0 0;'
+        f'font-size:13px;font-weight:bold;letter-spacing:1px">{label}</div>',
+        '<div style="border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 6px 6px">',
+        f'<h2 style="margin:0 0 10px;font-size:20px">{esc(title)}</h2>',
+    ]
+    if window:
+        html_parts.append(
+            f'<p style="margin:0 0 16px;font-size:14px"><strong>'
+            f'{"Maintenance window" if complete else "When"}:</strong> {esc(window)}</p>')
+    if body:
+        html_parts.append(f'<div style="font-size:14px;line-height:1.5">{body}</div>')
+    if complete and notice['body_html']:
+        html_parts.append(
+            '<div style="margin-top:20px;padding-top:12px;border-top:1px solid #e5e7eb;'
+            'font-size:12px;color:#6b7280"><div style="font-weight:bold;margin-bottom:4px">'
+            f'Original notice</div>{_maint_body_html(notice["body_html"])}</div>')
+    html_parts.append('</div>')
+    footer = f'Sent by {esc(sender)} via 3·2·1→Theater'
+    if base_url:
+        footer += f' · <a href="{esc(base_url)}" style="color:#6b7280">{esc(base_url)}</a>'
+    html_parts.append(f'<p style="font-size:11px;color:#6b7280;margin-top:12px">{footer}</p></div>')
+
+    text_parts = [label, '', title]
+    if window:
+        text_parts.append(f'{"Maintenance window" if complete else "When"}: {window}')
+    if body:
+        text_parts += ['', _html_to_text(body)]
+    if complete and notice['body_html']:
+        text_parts += ['', 'Original notice:', _html_to_text(_maint_body_html(notice['body_html']))]
+    text_parts += ['', '--', f'Sent by {sender} via 3·2·1→Theater' + (f' · {base_url}' if base_url else '')]
+    return '\n'.join(text_parts), ''.join(html_parts)
+
+
+def _maint_send(subject, recipients, body_text, body_html, high_priority, purpose):
+    """Send one email to every recipient, BCC'd in batches. Returns
+    {total, sent, failed, errors}. Per-address failures are also recorded by
+    _send_email in email_send_errors / email_outbox_log (purpose=`purpose`)."""
+    sent = failed = 0
+    errors = []
+    for i in range(0, len(recipients), _MAINT_EMAIL_BATCH):
+        batch = recipients[i:i + _MAINT_EMAIL_BATCH]
+        try:
+            ok, msg = _send_email(subject, batch, body_text=body_text,
+                                  body_html=body_html,
+                                  error_context={'purpose': purpose},
+                                  high_priority=high_priority)
+        except Exception as e:  # senders report failures; this is defence only
+            ok, msg = False, f'Send failed: {e}'
+        if ok:
+            # Direct-MX sends can be partial: "Sent to N recipient(s). Failures: …"
+            m = re.match(r'Sent to (\d+) recipient', msg or '')
+            n_ok = min(len(batch), int(m.group(1))) if m else len(batch)
+            sent += n_ok
+            failed += len(batch) - n_ok
+            if 'Failures:' in (msg or ''):
+                errors.append(msg)
+        else:
+            failed += len(batch)
+            errors.append(msg or 'Send failed')
+    return {'total': len(recipients), 'sent': sent, 'failed': failed,
+            'errors': errors[:10]}
+
+
+def _maint_banner_upsert(db, message_id, *, title, body_html, msg_type,
+                         audience, dismissible, expires_at=None,
+                         show_on_login=False):
+    """Create or re-activate/update the banner row for a notice. Returns the
+    banner id (a new one when the old row was deleted from Site-Wide
+    Messages in the meantime). `audience` is the site_messages value (NULL =
+    everyone); show_on_login only sticks for everyone-banners."""
+    on_login = 1 if (show_on_login and audience is None) else 0
+    if message_id:
+        cur = db.execute("""
+            UPDATE site_messages
+               SET title=%s, body_html=%s, msg_type=%s, audience=%s,
+                   dismissible_by=%s, expires_at=%s, show_on_login=%s,
+                   is_active=1
+             WHERE id=%s
+        """, (title, body_html, msg_type, audience,
+              'user' if dismissible else 'admin', expires_at, on_login,
+              message_id))
+        if getattr(cur, 'rowcount', 0) == 1:
+            return message_id
+    return db.execute("""
+        INSERT INTO site_messages
+          (title, body_html, msg_type, dismissible_by, expires_at,
+           is_active, show_on_login, created_by, audience)
+        VALUES (%s,%s,%s,%s,%s,1,%s,%s,%s) RETURNING id
+    """, (title, body_html, msg_type, 'user' if dismissible else 'admin',
+          expires_at, on_login, session.get('user_id'),
+          audience)).fetchone()['id']
+
+
+_MAINT_LIST_SQL = """
+    SELECT n.*, u.display_name AS author,
+           CASE WHEN m.is_active = 1 THEN 1 ELSE 0 END AS banner_active,
+           m.dismissible_by AS banner_dismissible_by,
+           COALESCE(m.show_on_login, 0) AS banner_show_on_login,
+           CASE WHEN cm.is_active = 1
+                 AND (cm.expires_at IS NULL OR cm.expires_at > %s)
+                THEN 1 ELSE 0 END AS completion_banner_active
+      FROM maintenance_notices n
+      LEFT JOIN site_messages m  ON m.id  = n.message_id
+      LEFT JOIN site_messages cm ON cm.id = n.completion_message_id
+      LEFT JOIN users u ON u.id = n.created_by
+"""
+
+
+def _maint_row_json(r):
+    d = _normalize_row_dates(dict(r))
+    d['audience'] = _clean_audience(r['audience'])
+    d['completion_audience'] = _clean_audience(r['completion_audience'])
+    d['window_text'] = _maint_window_text(r['window_start'], r['window_end'])
+    if r['completed_at']:
+        d['status'] = 'completed'
+    elif r['notice_sent_at'] or r['banner_active']:
+        d['status'] = 'posted'
+    else:
+        d['status'] = 'draft'
+    return d
+
+
+def _maint_fetch(db, notice_id):
+    return db.execute(_MAINT_LIST_SQL + ' WHERE n.id = %s',
+                      (datetime.now(), notice_id)).fetchone()
+
+
+@app.route('/settings/maintenance', methods=['GET'])
+@admin_required
+def maintenance_notices_list():
+    db = get_db()
+    rows = db.execute(_MAINT_LIST_SQL + ' ORDER BY n.created_at DESC, n.id DESC',
+                      (datetime.now(),)).fetchall()
+    db.close()
+    return jsonify([_maint_row_json(r) for r in rows])
+
+
+@app.route('/settings/maintenance/audience', methods=['GET'])
+@admin_required
+def maintenance_audience_counts():
+    """Per-group head counts for the audience pickers: `members` (who would
+    see a banner) and `emails` (who would get the email — has a usable
+    address; duplicates across groups are counted once at send time)."""
+    db = get_db()
+    rows = _audience_member_rows(db)
+    db.close()
+    counts = {k: {'members': 0, 'emails': 0} for k in _AUDIENCE_KEYS}
+    for r in rows:
+        g = _audience_group_of(r['role'], r['is_document_viewer'])
+        counts[g]['members'] += 1
+        if _EMAIL_ADDR_RE.match(r['email'].strip()):
+            counts[g]['emails'] += 1
+    return jsonify({'groups': [dict(key=k, label=label, **counts[k])
+                               for k, label in AUDIENCE_GROUPS]})
+
+
+@app.route('/settings/maintenance', methods=['POST'])
+@app.route('/settings/maintenance/<int:notice_id>', methods=['PUT'])
+@admin_required
+def maintenance_notice_save(notice_id=None):
+    """Create / edit a notice; optionally (re)post its banner and email it.
+
+    Payload: title, body_html, window_start, window_end (datetime-local),
+    audience (group keys), extra_recipients (text), email_subject,
+    high_priority, post_banner, banner_dismissible, banner_on_login,
+    send_email."""
+    data = request.get_json(force=True) or {}
+    title = (data.get('title') or '').strip()
+    if not title:
+        return jsonify({'error': 'Title required'}), 400
+    audience = _clean_audience(data.get('audience'))
+    if not audience:
+        return jsonify({'error': 'Pick at least one audience group.'}), 400
+    extra_text = (data.get('extra_recipients') or '').strip()
+    extra, bad = _parse_extra_recipients(extra_text)
+    if bad:
+        return jsonify({'error': 'Not a valid email address: ' + ', '.join(bad[:5])}), 400
+    try:
+        w_start = _maint_parse_dt(data.get('window_start'))
+        w_end = _maint_parse_dt(data.get('window_end'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid maintenance window date/time.'}), 400
+    if w_start and w_end and w_end < w_start:
+        return jsonify({'error': 'The window ends before it starts.'}), 400
+    body_html = _sanitize_html((data.get('body_html') or '').strip())
+    subject = (data.get('email_subject') or '').strip()[:200]
+    high_priority = 1 if data.get('high_priority') else 0
+    post_banner = bool(data.get('post_banner'))
+    send_email = bool(data.get('send_email'))
+
+    db = get_db()
+    if notice_id is not None:
+        before = db.execute('SELECT * FROM maintenance_notices WHERE id=%s',
+                            (notice_id,)).fetchone()
+        if not before:
+            db.close()
+            return jsonify({'error': 'Not found'}), 404
+        if before['completed_at'] and (send_email or post_banner):
+            db.close()
+            return jsonify({'error': 'This notice is already marked complete — '
+                                     'use Work Complete to resend the completion email.'}), 409
+        db.execute("""
+            UPDATE maintenance_notices
+               SET title=%s, body_html=%s, window_start=%s, window_end=%s,
+                   audience=%s, extra_recipients=%s, email_subject=%s,
+                   high_priority=%s, updated_at=CURRENT_TIMESTAMP
+             WHERE id=%s
+        """, (title, body_html, w_start, w_end, json.dumps(audience),
+              extra_text, subject, high_priority, notice_id))
+        action = 'MAINT_NOTICE_EDIT'
+    else:
+        before = None
+        notice_id = db.execute("""
+            INSERT INTO maintenance_notices
+              (title, body_html, window_start, window_end, audience,
+               extra_recipients, email_subject, high_priority, created_by)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+        """, (title, body_html, w_start, w_end, json.dumps(audience),
+              extra_text, subject, high_priority,
+              session.get('user_id'))).fetchone()['id']
+        action = 'MAINT_NOTICE_CREATE'
+
+    # Banner: post / refresh it, or take it down. Completed notices keep
+    # whatever Work Complete left (their banner was already handled there).
+    if not (before and before['completed_at']):
+        message_id = before['message_id'] if before else None
+        if post_banner:
+            message_id = _maint_banner_upsert(
+                db, message_id, title=title,
+                body_html=_maint_banner_html(_maint_window_text(w_start, w_end), body_html),
+                msg_type='maintenance', audience=_banner_audience_value(audience),
+                dismissible=data.get('banner_dismissible', True),
+                show_on_login=bool(data.get('banner_on_login')))
+            db.execute('UPDATE maintenance_notices SET message_id=%s WHERE id=%s',
+                       (message_id, notice_id))
+        elif message_id:
+            db.execute('UPDATE site_messages SET is_active=0 WHERE id=%s', (message_id,))
+    db.commit()
+    log_audit(db, action, 'maintenance_notice', notice_id, detail=title)
+    db.commit()
+    syslog_logger.info(f'{action} id={notice_id} title="{title}" banner={int(post_banner)} '
+                       f'by={session.get("username")}')
+
+    send = None
+    if send_email:
+        recipients = _audience_emails(db, audience)
+        seen = {a.lower() for a in recipients}
+        recipients += [a for a in extra if a.lower() not in seen]
+        row = _maint_fetch(db, notice_id)
+        db.close()   # don't hold a connection across SMTP round-trips
+        if not recipients:
+            send = {'total': 0, 'sent': 0, 'failed': 0,
+                    'errors': ['No recipients: nobody in the selected groups has an email address.']}
+        else:
+            sender = session.get('display_name') or session.get('username') or 'an administrator'
+            text, html_body = _maint_email('notice', row, row['body_html'], sender)
+            send = _maint_send(subject or f'Scheduled Maintenance: {title}', recipients,
+                               text, html_body, bool(high_priority), 'maintenance_notice')
+        db = get_db()
+        db.execute("""
+            UPDATE maintenance_notices
+               SET notice_sent_at=CURRENT_TIMESTAMP, notice_sent_by=%s,
+                   notice_sent_count=%s, notice_send_error=%s
+             WHERE id=%s
+        """, (session.get('user_id'), send['sent'],
+              '; '.join(send['errors'])[:1000], notice_id))
+        db.commit()
+        log_audit(db, 'MAINT_NOTICE_SEND', 'maintenance_notice', notice_id,
+                  detail=f'{title} — sent {send["sent"]}/{send["total"]}'
+                         f'{" (high priority)" if high_priority else ""}')
+        db.commit()
+        syslog_logger.info(f'MAINT_NOTICE_SEND id={notice_id} sent={send["sent"]} '
+                           f'failed={send["failed"]} high_priority={high_priority} '
+                           f'by={session.get("username")}')
+    row = _maint_fetch(db, notice_id)
+    db.close()
+    return jsonify({'success': True, 'notice': _maint_row_json(row), 'send': send}), \
+        (201 if action == 'MAINT_NOTICE_CREATE' else 200)
+
+
+@app.route('/settings/maintenance/<int:notice_id>/complete', methods=['POST'])
+@admin_required
+def maintenance_notice_complete(notice_id):
+    """Mark a notice's work complete: take its banner down, optionally post a
+    24-hour 'complete' banner, and email the work-completed notice. Calling
+    it again on a completed notice re-sends (completed_at is kept).
+
+    Payload: subject, body_html, audience, extra_recipients, high_priority,
+    send_email, remove_banner, post_banner."""
+    data = request.get_json(force=True) or {}
+    send_email = bool(data.get('send_email'))
+    post_banner = bool(data.get('post_banner'))
+    audience = _clean_audience(data.get('audience'))
+    if (send_email or post_banner) and not audience:
+        return jsonify({'error': 'Pick at least one audience group.'}), 400
+    extra_text = (data.get('extra_recipients') or '').strip()
+    extra, bad = _parse_extra_recipients(extra_text)
+    if bad:
+        return jsonify({'error': 'Not a valid email address: ' + ', '.join(bad[:5])}), 400
+    body_html = _sanitize_html((data.get('body_html') or '').strip())
+    subject = (data.get('subject') or '').strip()[:200]
+    high_priority = 1 if data.get('high_priority') else 0
+
+    db = get_db()
+    n = db.execute('SELECT * FROM maintenance_notices WHERE id=%s', (notice_id,)).fetchone()
+    if not n:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+    first_time = not n['completed_at']
+    # The "complete" banner goes wherever the notice's banner went — including
+    # the sign-in page (still only for everyone-banners).
+    notice_on_login = False
+    if n['message_id']:
+        mrow = db.execute('SELECT show_on_login FROM site_messages WHERE id=%s',
+                          (n['message_id'],)).fetchone()
+        notice_on_login = bool(mrow and mrow['show_on_login'])
+    db.execute("""
+        UPDATE maintenance_notices
+           SET completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+               completed_by = COALESCE(completed_by, %s),
+               completion_subject=%s, completion_body_html=%s,
+               completion_audience=%s, completion_extra_recipients=%s,
+               completion_high_priority=%s, updated_at=CURRENT_TIMESTAMP
+         WHERE id=%s
+    """, (session.get('user_id'), subject, body_html, json.dumps(audience),
+          extra_text, high_priority, notice_id))
+    if data.get('remove_banner', True) and n['message_id']:
+        db.execute('UPDATE site_messages SET is_active=0 WHERE id=%s', (n['message_id'],))
+    if post_banner:
+        # expires_at is compared with the local clock in get_active_messages.
+        cm_id = _maint_banner_upsert(
+            db, n['completion_message_id'],
+            title=f'Maintenance complete: {n["title"]}',
+            body_html=_maint_body_html(body_html), msg_type='motd',
+            audience=_banner_audience_value(audience), dismissible=True,
+            expires_at=datetime.now() + timedelta(hours=24),
+            show_on_login=notice_on_login)
+        db.execute('UPDATE maintenance_notices SET completion_message_id=%s WHERE id=%s',
+                   (cm_id, notice_id))
+    db.commit()
+    if first_time:
+        log_audit(db, 'MAINT_NOTICE_COMPLETE', 'maintenance_notice', notice_id, detail=n['title'])
+        db.commit()
+        syslog_logger.info(f'MAINT_NOTICE_COMPLETE id={notice_id} title="{n["title"]}" '
+                           f'by={session.get("username")}')
+
+    send = None
+    if send_email:
+        recipients = _audience_emails(db, audience)
+        seen = {a.lower() for a in recipients}
+        recipients += [a for a in extra if a.lower() not in seen]
+        db.close()
+        if not recipients:
+            send = {'total': 0, 'sent': 0, 'failed': 0,
+                    'errors': ['No recipients: nobody in the selected groups has an email address.']}
+        else:
+            sender = session.get('display_name') or session.get('username') or 'an administrator'
+            text, html_body = _maint_email('complete', n, body_html, sender)
+            send = _maint_send(subject or f'Maintenance Complete: {n["title"]}', recipients,
+                               text, html_body, bool(high_priority), 'maintenance_complete')
+        db = get_db()
+        db.execute("""
+            UPDATE maintenance_notices
+               SET completion_sent_at=CURRENT_TIMESTAMP,
+                   completion_sent_count=%s, completion_send_error=%s
+             WHERE id=%s
+        """, (send['sent'], '; '.join(send['errors'])[:1000], notice_id))
+        db.commit()
+        log_audit(db, 'MAINT_COMPLETE_SEND', 'maintenance_notice', notice_id,
+                  detail=f'{n["title"]} — sent {send["sent"]}/{send["total"]}'
+                         f'{" (high priority)" if high_priority else ""}')
+        db.commit()
+        syslog_logger.info(f'MAINT_COMPLETE_SEND id={notice_id} sent={send["sent"]} '
+                           f'failed={send["failed"]} high_priority={high_priority} '
+                           f'by={session.get("username")}')
+    row = _maint_fetch(db, notice_id)
+    db.close()
+    return jsonify({'success': True, 'notice': _maint_row_json(row), 'send': send})
+
+
+@app.route('/settings/maintenance/<int:notice_id>', methods=['DELETE'])
+@admin_required
+def maintenance_notice_delete(notice_id):
+    """Delete a notice and the banners it posted (email history stays in the
+    outbox log)."""
+    db = get_db()
+    n = db.execute('SELECT * FROM maintenance_notices WHERE id=%s', (notice_id,)).fetchone()
+    if not n:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+    db.execute('DELETE FROM maintenance_notices WHERE id=%s', (notice_id,))
+    banner_ids = [i for i in (n['message_id'], n['completion_message_id']) if i]
+    if banner_ids:
+        db.execute('DELETE FROM site_messages WHERE id IN (' +
+                   ','.join(['%s'] * len(banner_ids)) + ')', banner_ids)
+    db.commit()
+    log_audit(db, 'MAINT_NOTICE_DELETE', 'maintenance_notice', notice_id,
+              before=dict(n), detail=n['title'])
+    db.commit()
+    syslog_logger.info(f'MAINT_NOTICE_DELETE id={notice_id} title="{n["title"]}" '
+                       f'by={session.get("username")}')
     db.close()
     return jsonify({'success': True})
 
