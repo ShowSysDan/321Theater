@@ -24,10 +24,12 @@ import configparser
 import logging
 import os
 import re
+import threading
 import time
 
 import psycopg2
 import psycopg2.errors
+import psycopg2.extensions
 import psycopg2.extras
 
 _log = logging.getLogger('showadvance')
@@ -106,6 +108,7 @@ def read_db_settings(config_path=None):
                     'pg_app_schema':    (sec.get('app_schema', '') or legacy_schema
                                          or DEFAULT_APP_SCHEMA),
                     'pg_shared_schema': sec.get('shared_schema', '') or DEFAULT_SHARED_SCHEMA,
+                    'pg_pool_max_idle': sec.get('pool_max_idle', '') or str(_POOL_DEFAULT_MAX_IDLE),
                 }
         except Exception as e:
             _log.error(f'db_config.ini could not be parsed ({path}): {e}')
@@ -141,10 +144,11 @@ def schemas(settings=None):
             _validate_identifier(shared_schema, 'shared_schema'))
 
 
-def raw_connect(settings=None, search_path=True, connect_timeout=10):
+def raw_connect(settings=None, search_path=True, connect_timeout=10, **extra):
     """A plain psycopg2 connection (no wrapper). With search_path=True the
     session's search_path is set to "<app>", "<shared>" at connect time via
-    the startup `options` — no extra round-trip per connection."""
+    the startup `options` — no extra round-trip per connection. `extra` is
+    passed through to psycopg2.connect (the pool adds TCP keepalives)."""
     s = settings if settings is not None else read_db_settings()
     if not is_configured(s):
         raise DatabaseUnavailable(
@@ -157,11 +161,40 @@ def raw_connect(settings=None, search_path=True, connect_timeout=10):
         user=s.get('pg_user', ''),
         password=s.get('pg_password', ''),
         connect_timeout=connect_timeout,
+        **extra,
     )
     if search_path:
         app_schema, shared_schema = schemas(s)
         kwargs['options'] = f'-c search_path="{app_schema}","{shared_schema}"'
     return psycopg2.connect(**kwargs)
+
+
+class _ClosedConnection:
+    """Stands in for the psycopg2 connection after DBConnection.close(). With
+    pooling, the real connection may already be lent to another thread, so a
+    use-after-close must fail exactly like psycopg2's own closed connection
+    instead of silently running on someone else's transaction."""
+    closed = 1
+
+    def __getattr__(self, name):
+        raise psycopg2.InterfaceError('connection already closed')
+
+
+_CLOSED = _ClosedConnection()
+
+# Statements that leave state on the SESSION (outliving the transaction). A
+# connection that ran one is closed instead of going back to the pool, so the
+# next borrower can never inherit a lock or a changed setting. Only the first
+# few characters are matched — this runs on every execute().
+_SESSION_STATE_RE = re.compile(
+    r'\s*(?:SET|RESET|LISTEN|UNLISTEN|PREPARE|DECLARE|DISCARD|LOAD|'
+    r'CREATE\s+(?:GLOBAL\s+|LOCAL\s+)?TEMP)', re.IGNORECASE)
+
+
+def _leaves_session_state(sql):
+    # pg_advisory_lock / pg_try_advisory_lock are session-scoped (the _xact_
+    # variants are released by the rollback on return and don't match).
+    return 'advisory_lock' in sql or _SESSION_STATE_RE.match(sql) is not None
 
 
 class DBConnection:
@@ -173,15 +206,26 @@ class DBConnection:
       aborts the whole transaction on an error, so this keeps the connection
       usable for the caller's next statement.
     - UniqueViolation is re-raised as DBIntegrityError.
+    - close() hands a pooled connection back to the pool (rolled back first);
+      an unpooled one is really closed. Calling close() twice is harmless.
     """
 
-    def __init__(self, conn, schema=None):
+    def __init__(self, conn, schema=None, pool=None, reused=False):
         self._conn = conn
         self._schema = schema
+        self._pool = pool          # _ConnectionPool, or None = really close
+        self._reusable = pool is not None
+        # A connection that sat idle in the pool may have died (PostgreSQL
+        # restart, idle-kill). Its first statement gets one transparent
+        # reconnect — safe because nothing in that transaction can have
+        # committed. Cleared after the first statement succeeds.
+        self._first_stmt_retry = reused
 
     @property
     def raw(self):
-        """The underlying psycopg2 connection."""
+        """The underlying psycopg2 connection. The caller may change session
+        state through it, so this connection is never reused from the pool."""
+        self._reusable = False
         return self._conn
 
     def execute(self, sql, params=None):
@@ -200,16 +244,7 @@ class DBConnection:
         # psycopg2 only skips %-interpolation when vars is None; an empty
         # tuple/list still triggers it. Map "no params" to None so a literal %
         # in a param-less statement is sent as-is.
-        cur = self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        try:
-            cur.execute(sql, params if params else None)
-            return cur
-        except psycopg2.errors.UniqueViolation as e:
-            self._conn.rollback()
-            raise DBIntegrityError(str(e)) from e
-        except Exception:
-            self._conn.rollback()
-            raise
+        return self._run(lambda cur: cur.execute(sql, params if params else None), sql)
 
     def executemany(self, sql, params_list):
         if query_timer_hook is None:
@@ -224,16 +259,54 @@ class DBConnection:
                 pass
 
     def _executemany(self, sql, params_list):
+        return self._run(lambda cur: cur.executemany(sql, params_list), sql)
+
+    def _run(self, op, sql):
+        if self._reusable and _leaves_session_state(sql):
+            self._reusable = False
         cur = self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         try:
-            cur.executemany(sql, params_list)
-            return cur
+            op(cur)
         except psycopg2.errors.UniqueViolation as e:
-            self._conn.rollback()
+            self._first_stmt_retry = False
+            self._safe_rollback()
             raise DBIntegrityError(str(e)) from e
         except Exception:
-            self._conn.rollback()
+            if self._first_stmt_retry and self._conn.closed:
+                # The pooled connection was dead before we used it: swap in a
+                # fresh one (raises DatabaseUnavailable if PG is really down)
+                # and run the statement once more.
+                self._first_stmt_retry = False
+                _log.warning('DB_POOL_RECONNECT an idle pooled connection had died '
+                             '(PostgreSQL restart / idle kill); replaced it and retried')
+                self._conn = self._pool.fresh_connection()
+                cur = self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+                try:
+                    op(cur)
+                    return cur
+                except psycopg2.errors.UniqueViolation as e:
+                    self._safe_rollback()
+                    raise DBIntegrityError(str(e)) from e
+                except Exception:
+                    self._safe_rollback()
+                    raise
+            self._first_stmt_retry = False
+            self._safe_rollback()
             raise
+        self._first_stmt_retry = False
+        return cur
+
+    def _safe_rollback(self):
+        """Roll back after a failed statement. Re-raises nothing on a dead
+        connection, so the caller sees the ORIGINAL error rather than an
+        InterfaceError from the rollback."""
+        if self._conn.closed:
+            self._reusable = False
+            return
+        try:
+            self._conn.rollback()
+        except Exception:
+            self._reusable = False
 
     def commit(self):
         self._conn.commit()
@@ -242,8 +315,14 @@ class DBConnection:
         self._conn.rollback()
 
     def close(self):
+        conn, self._conn = self._conn, _CLOSED
+        if conn is _CLOSED:
+            return
+        if self._pool is not None and self._reusable:
+            self._pool.release(conn)
+            return
         try:
-            self._conn.close()
+            conn.close()
         except Exception:
             pass
 
@@ -254,10 +333,160 @@ class DBConnection:
         self.close()
 
 
+# ─── Connection pool ───────────────────────────────────────────────────────────
+# Opening a PostgreSQL connection costs a TCP (+TLS) handshake, SCRAM auth and a
+# server-side backend fork — ~10 ms measured, several times the cost of the
+# queries most requests run — and a brand-new backend runs its first queries
+# against cold catalog caches. A page view calls get_db() several times (the
+# session loader, get_app_setting(), helpers), so connect() keeps a small
+# per-PROCESS stack of idle connections and reuses them.
+#
+# Rules that keep a pooled connection indistinguishable from a fresh one:
+#   * release() rolls back any open transaction (a plain close() did the same
+#     implicitly), so no snapshot, lock or half-done write is ever handed on.
+#   * A connection that changed session state (session-level advisory lock,
+#     SET, LISTEN, temp table, or `.raw` access) is closed, not pooled.
+#   * A dead idle connection is replaced transparently on its first statement
+#     (DBConnection._run); connections idle longer than _POOL_IDLE_TTL are
+#     closed rather than reused.
+#   * Nothing ever waits on the pool: when it's empty a new connection is
+#     opened (exactly the old behavior), and when it's full the returned
+#     connection is closed. It only caps how many IDLE connections a process
+#     keeps: [postgresql] pool_max_idle in db_config.ini (default 4 per
+#     process, i.e. per Gunicorn worker; 0 = no pooling, the pre-3.3.0
+#     connect-per-call behavior).
+#   * Fork-safe: a child process never touches its parent's pooled sockets.
+
+_POOL_DEFAULT_MAX_IDLE = 4
+_POOL_IDLE_TTL = 300.0        # seconds an idle connection may wait for reuse
+_POOL_KEEPALIVE = dict(keepalives=1, keepalives_idle=60,
+                       keepalives_interval=10, keepalives_count=3)
+
+
+class _ConnectionPool:
+    def __init__(self, settings, max_idle):
+        self.settings = settings
+        self.key = _pool_key(settings)
+        self.max_idle = max_idle
+        self.pid = os.getpid()
+        self._idle = []            # [(psycopg2 connection, monotonic released_at)]
+        self._lock = threading.Lock()
+
+    def fresh_connection(self):
+        try:
+            return raw_connect(self.settings, **_POOL_KEEPALIVE)
+        except DatabaseUnavailable:
+            raise
+        except Exception as e:
+            _log.error(f'PostgreSQL connection FAILED: {e}')
+            raise DatabaseUnavailable(f'PostgreSQL connection failed: {e}') from e
+
+    def acquire(self):
+        """(connection, reused?) — an idle pooled connection when one is
+        available, else a brand-new one."""
+        now = time.monotonic()
+        conn, stale = None, []
+        with self._lock:
+            while self._idle and now - self._idle[0][1] > _POOL_IDLE_TTL:
+                stale.append(self._idle.pop(0)[0])      # oldest first
+            while self._idle:
+                c, _ = self._idle.pop()                 # LIFO: warmest backend
+                if not c.closed:
+                    conn = c
+                    break
+        for c in stale:
+            _close_quietly(c)
+        if conn is not None:
+            return conn, True
+        return self.fresh_connection(), False
+
+    def release(self, conn):
+        if os.getpid() != self.pid:
+            _orphaned.append(conn)     # borrowed before a fork: not ours to close
+            return
+        if conn.closed:
+            return
+        try:
+            status = conn.get_transaction_status()
+            if status == psycopg2.extensions.TRANSACTION_STATUS_UNKNOWN:
+                return _close_quietly(conn)
+            if status != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
+                conn.rollback()
+        except Exception:
+            return _close_quietly(conn)
+        with self._lock:
+            if len(self._idle) < self.max_idle:
+                self._idle.append((conn, time.monotonic()))
+                return
+        _close_quietly(conn)
+
+    def drain(self):
+        with self._lock:
+            idle, self._idle = self._idle, []
+        if os.getpid() == self.pid:
+            for c, _ in idle:
+                _close_quietly(c)
+        else:
+            _orphaned.extend(c for c, _ in idle)
+
+
+def _close_quietly(conn):
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _pool_key(s):
+    return tuple(s.get(k) for k in ('pg_host', 'pg_port', 'pg_dbname', 'pg_user',
+                                    'pg_password', 'pg_app_schema', 'pg_shared_schema'))
+
+
+_pool = None
+_pool_lock = threading.Lock()
+# Idle connections inherited across a fork. Never closed or garbage-collected
+# in the child: closing (or freeing) one sends a Terminate on the socket the
+# parent still uses.
+_orphaned = []
+
+
+def _get_pool(settings):
+    """The process-wide pool for the current db_config.ini settings, or None
+    when pooling is off. Rebuilt (old idle connections closed) after a fork
+    or when the connection settings change."""
+    global _pool
+    try:
+        max_idle = int(settings.get('pg_pool_max_idle', _POOL_DEFAULT_MAX_IDLE))
+    except (TypeError, ValueError):
+        max_idle = _POOL_DEFAULT_MAX_IDLE
+    p = _pool
+    if (p is not None and p.pid == os.getpid() and p.key == _pool_key(settings)
+            and p.max_idle == max_idle):
+        return p if max_idle > 0 else None
+    with _pool_lock:
+        p = _pool
+        if (p is None or p.pid != os.getpid() or p.key != _pool_key(settings)
+                or p.max_idle != max_idle):
+            if p is not None:
+                p.drain()
+            p = _pool = _ConnectionPool(settings, max_idle)
+    return p if max_idle > 0 else None
+
+
 def connect(settings=None):
     """Open a DBConnection to PostgreSQL. Raises DatabaseUnavailable when PG
-    is unconfigured or unreachable — there is no fallback database."""
+    is unconfigured or unreachable — there is no fallback database.
+
+    With the default settings (settings=None — every get_db()), the
+    connection comes from the per-process pool when one is idle; close()
+    returns it. Explicit settings always get a dedicated, unpooled
+    connection."""
     s = settings if settings is not None else read_db_settings()
+    if settings is None and is_configured(s):
+        pool = _get_pool(s)
+        if pool is not None:
+            conn, reused = pool.acquire()
+            return DBConnection(conn, schema=schemas(s)[0], pool=pool, reused=reused)
     try:
         conn = raw_connect(s)
     except DatabaseUnavailable:

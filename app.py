@@ -748,7 +748,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.2.2'
+APP_VERSION = '3.3.3'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -961,6 +961,34 @@ def get_db():
     """Return a PostgreSQL DBConnection. Raises db_adapter.DatabaseUnavailable
     when PostgreSQL is unconfigured or unreachable — there is no fallback."""
     return db_adapter.connect()
+
+
+_COLS_EXCEPT_CACHE = {}
+
+
+def _cols_except(db, table, omit, alias=''):
+    """A `SELECT *` column list for `table` WITHOUT the `omit` column(s) —
+    for list/metadata queries on the file tables (file_store.KINDS), whose
+    BYTEA column can hold a multi-MB file since 3.1.0 keeps database copies.
+    Built from the live catalog once per process (the schema only changes
+    at startup), so columns added later still flow through like `*` did."""
+    omit = (omit,) if isinstance(omit, str) else tuple(omit)
+    key = (table, omit, alias)
+    cols = _COLS_EXCEPT_CACHE.get(key)
+    if cols is None:
+        rows = db.execute(
+            'SELECT attname FROM pg_attribute WHERE attrelid = to_regclass(%s) '
+            'AND attnum > 0 AND NOT attisdropped ORDER BY attnum', (table,)).fetchall()
+        prefix = f'{alias}.' if alias else ''
+        names = [r['attname'] for r in rows if r['attname'] not in omit]
+        if not names:
+            raise RuntimeError(f'_cols_except: table {table!r} not found')
+        cols = _COLS_EXCEPT_CACHE[key] = ', '.join(f'{prefix}"{n}"' for n in names)
+    return cols
+
+
+# "Is there a stored copy?" flags that replace fetching the bytes themselves.
+_ASSET_HAS_PHOTO_SQL = '(at.photo IS NOT NULL OR at.photo_s3_key IS NOT NULL) AS has_photo'
 
 
 @app.errorhandler(db_adapter.DatabaseUnavailable)
@@ -2010,6 +2038,33 @@ def _normalize_row_dates(d):
             d[k] = v.isoformat()
     return d
 
+def _ts_out(v):
+    """A timestamp for browser JS: ISO 8601 WITH its UTC offset, whole
+    seconds (e.g. 2026-09-25T09:00:00-04:00). Select the column as
+    `col::timestamptz`: CURRENT_TIMESTAMP stores the PG server's LOCAL wall
+    clock in our naive TIMESTAMP columns, and the cast has PostgreSQL
+    interpret it in its own session time zone — the zone it was written in —
+    so the instant is right whatever zone the database server runs in. The
+    JS side parses it with parseServerTime() (app.js); before 3.3.3 it
+    assumed UTC and showed these times 4–5 h off on a US-Eastern server."""
+    if isinstance(v, datetime):
+        return v.isoformat(timespec='seconds')
+    return v
+
+
+def _iso_dates_deep(v):
+    """_normalize_row_dates for nested JSON payloads (lists/dicts of rows):
+    every date/datetime becomes an ISO string so the browser can compare and
+    display it (jsonify would send 'Mon, 05 Oct 2026 00:00:00 GMT')."""
+    if isinstance(v, dict):
+        return {k: _iso_dates_deep(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_iso_dates_deep(x) for x in v]
+    if isinstance(v, (datetime, date)):
+        return v.isoformat()
+    return v
+
+
 def get_form_fields_for_template():
     """Returns ordered list of sections, each with a .fields list."""
     db = get_db()
@@ -2080,24 +2135,35 @@ def _run_pg_dump(dest_path, settings):
     reader — the DB Snapshots inspector, an rsync, a second writer racing on
     the same minute stamp — can never see a torn/interleaved file. In-place
     writes produced real corrupt .sql.gz backups (valid gzip stream followed
-    by trailing garbage, or garbage at byte 0)."""
+    by trailing garbage, or garbage at byte 0).
+
+    pg_dump writes and gzips the file itself (-Z on the plain format = a
+    standard .sql.gz) rather than this worker holding the whole dump in RAM
+    and compressing it in Python: since 3.1.0 a dump can carry every
+    database-stored file (bytea is hex-encoded, ~2x its size), which made
+    each backup a multi-GB allocation inside a Gunicorn worker.
+    Returns the backup's size in bytes."""
     env = os.environ.copy()
     env['PGPASSWORD'] = settings.get('pg_password', '')
+    tmp_path = f'{dest_path}.{os.getpid()}.tmp'
     cmd = [
         'pg_dump',
         '-h', settings.get('pg_host', 'localhost'),
         '-p', str(settings.get('pg_port', '5432')),
         '-U', settings.get('pg_user', ''),
         '-d', settings.get('pg_dbname', '321theater'),
+        '-Z', '6', '-f', tmp_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, env=env, timeout=300)
-    if result.returncode != 0:
-        raise RuntimeError(f"pg_dump failed: {result.stderr.decode('utf-8', errors='replace')}")
-    tmp_path = f'{dest_path}.{os.getpid()}.tmp'
     try:
-        with gzip.open(tmp_path, 'wb') as f:
-            f.write(result.stdout)
+        # 45 min, not the old 5: a dump that includes database-stored files
+        # can legitimately run longer, and a timeout means NO backup at all.
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                env=env, timeout=2700)
+        if result.returncode != 0:
+            raise RuntimeError(f"pg_dump failed: {result.stderr.decode('utf-8', errors='replace')}")
+        size = os.path.getsize(tmp_path)
         os.replace(tmp_path, dest_path)
+        return size
     finally:
         if os.path.exists(tmp_path):
             try:
@@ -2115,8 +2181,18 @@ def _run_db_backup(kind, ts_fmt, keep):
     dest_dir = os.path.join(BACKUP_DIR, kind)
     ext = '.sql.gz'
     dest = os.path.join(dest_dir, f'advance_{ts}{ext}')
-    _run_pg_dump(dest, db_adapter.read_db_settings())
-    syslog_logger.info(f'BACKUP_CREATED type={kind} file={dest}')
+    t0 = time.monotonic()
+    try:
+        size = _run_pg_dump(dest, db_adapter.read_db_settings())
+    except Exception as e:
+        # The scheduled jobs' exceptions only reach APScheduler's own logger,
+        # so a failing backup (pg_dump error, timeout, full disk) was silent
+        # in syslog.
+        syslog_logger.error(f'BACKUP_FAILED type={kind} file={dest} '
+                            f'elapsed={time.monotonic() - t0:.1f}s error={str(e)[:500]}')
+        raise
+    syslog_logger.info(f'BACKUP_CREATED type={kind} file={dest} '
+                       f'bytes={size} elapsed={time.monotonic() - t0:.1f}s')
     files = sorted(
         [f for f in os.listdir(dest_dir) if f.endswith(ext)],
         reverse=True
@@ -2153,9 +2229,10 @@ def _run_once_per_host(tag, fn):
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         f.close()
-        return  # another worker on this host already holds it this cycle
+        return False  # another worker on this host already holds it this cycle
     try:
         fn()
+        return True
     finally:
         try:
             fcntl.flock(f, fcntl.LOCK_UN)
@@ -2166,9 +2243,10 @@ def _run_once_per_host(tag, fn):
 def run_hourly_backup():
     # Per-worker job (not leader-gated — backups are per-server-redundant by
     # design) but a host-lock keeps all 4 workers of one host from each
-    # holding a full pg_dump in RAM simultaneously and overwriting one file.
-    _run_once_per_host('backup_hourly',
-                       lambda: _run_db_backup('hourly', '%Y%m%d_%H%M', keep=24))
+    # running a full pg_dump simultaneously and overwriting one file.
+    # Returns False when another worker already holds the lock.
+    return _run_once_per_host('backup_hourly',
+                              lambda: _run_db_backup('hourly', '%Y%m%d_%H%M', keep=24))
 
 
 def run_daily_backup():
@@ -3395,8 +3473,22 @@ def start_scheduler():
 
 # ─── General Helpers ──────────────────────────────────────────────────────────
 
+_AUTO_ARCHIVE_EVERY_S = 60.0
+_auto_archive_at = 0.0
+
+
 def auto_archive_past_shows():
-    """Move shows whose last performance date has passed into 'archived' status."""
+    """Move shows whose last performance date has passed into 'archived' status.
+
+    Called from page GETs (Home, Settings → Shows, reports), which hover
+    prefetch also fires. The outcome only changes when the date rolls over
+    or a show's dates are edited, so each worker runs the UPDATE at most
+    once a minute rather than on every page view."""
+    global _auto_archive_at
+    now = time.monotonic()
+    if now - _auto_archive_at < _AUTO_ARCHIVE_EVERY_S:
+        return
+    _auto_archive_at = now
     db = get_db()
     today = date.today().isoformat()
     db.execute("""
@@ -3796,7 +3888,10 @@ def run_field_change_alerts():
     db = get_db()
     try:
         # Pick up pending rows where the latest edit is older than the quiet
-        # window.
+        # window. pending_updated_at is stamped with CURRENT_TIMESTAMP (the PG
+        # server's LOCAL clock), so the window is measured with NOW() in SQL —
+        # comparing it to Python's utcnow() was off by the UTC offset, which
+        # skipped the quiet window entirely on a US-Eastern server.
         rows = db.execute(
             """SELECT s.id AS state_id, s.show_id, s.field_key,
                       s.pending_value, s.pending_prev_value, s.pending_hash,
@@ -3807,7 +3902,9 @@ def run_field_change_alerts():
                  JOIN form_fields f ON f.field_key = s.field_key
             LEFT JOIN shows sh ON sh.id = s.show_id
                 WHERE s.pending_hash IS NOT NULL
-                  AND s.pending_updated_at IS NOT NULL"""
+                  AND s.pending_updated_at IS NOT NULL
+                  AND s.pending_updated_at <= NOW() - %s * INTERVAL '1 minute'""",
+            (_FIELD_ALERT_QUIET_MINUTES,)
         ).fetchall()
     except Exception as e:
         app.logger.warning(f'run_field_change_alerts query failed: {e}')
@@ -3818,31 +3915,10 @@ def run_field_change_alerts():
         db.close()
         return
 
-    now = datetime.utcnow()
     base_url = (get_app_setting('public_base_url', '') or '').rstrip('/')
 
     try:
       for r in rows:
-        # Parse the pending_updated_at timestamp into a datetime so we can
-        # compare against the quiet window (psycopg returns a datetime; coerce
-        # defensively in case of a legacy text value).
-        state_row = db.execute(
-            'SELECT pending_updated_at FROM field_alert_state WHERE id=%s',
-            (r['state_id'],)
-        ).fetchone()
-        if not state_row or not state_row['pending_updated_at']:
-            continue
-        pu = state_row['pending_updated_at']
-        try:
-            if isinstance(pu, str):
-                dt = datetime.fromisoformat(pu.replace('Z', '').replace('T', ' ').split('.')[0])
-            else:
-                dt = pu
-        except Exception:
-            continue
-        if (now - dt).total_seconds() < _FIELD_ALERT_QUIET_MINUTES * 60:
-            continue  # not quiet enough yet
-
         if r['pending_hash'] == r['last_alerted_hash']:
             # Defensive — cleared concurrently. Drop the pending state.
             db.execute(
@@ -4101,28 +4177,89 @@ UNDO_TABLE_MAP = {
     'overhead_labor_template':'overhead_labor_templates',
 }
 
-# Action suffixes we know how to reverse. Maps suffix → operation kind.
-_UNDO_VERB = {
-    # Creates — reverse with DELETE FROM <table> WHERE id = entity_id
-    'ADD':     'create',
-    'CREATE':  'create',
-    'POST':    'create',
-    'UPLOAD':  'create',
-    # Updates — reverse by UPDATE …SET (cols from before_json) WHERE id = entity_id
-    'EDIT':    'update',
-    'UPDATE':  'update',
-    'RENAME':  'update',
-    # Deletes — reverse by INSERT (cols from before_json) INTO <table>
-    'DELETE':  'delete',
-    'REMOVE':  'delete',
-    'RETIRE':  'delete',
+# Audit actions the Undo button can reverse: action → (entity_type, kind).
+#   create — DELETE the row whose id == entity_id (refused while any other
+#            row still references it, see _undo_blocking_refs)
+#   update — restore the row's columns from before_json
+#   delete — re-INSERT before_json with its original id
+# Explicit on purpose (3.3.1). The old rule guessed the kind from the action's
+# last word, which made ASSET_MEMBER_ADD (logged against the PARENT system
+# type) undo as "DELETE the system type" and ASSET_ITEM_ADD (logged with the
+# TYPE id as the entity id) delete an unrelated asset item; RETIRE (a soft
+# is_retired flag, not a delete) could never re-insert. Before adding an
+# action here, check its log_audit call: entity_id must be the row it
+# created/changed in UNDO_TABLE_MAP[entity_type], and for update/delete its
+# before= must be _snapshot_row() of that row.
+_UNDO_ACTIONS = {
+    'CONTACT_ADD':              ('contact', 'create'),
+    'CONTACT_EDIT':             ('contact', 'update'),
+    'CONTACT_DELETE':           ('contact', 'delete'),
+    'FIELD_ADD':                ('form_field', 'create'),
+    'FIELD_EDIT':               ('form_field', 'update'),
+    'FIELD_DELETE':             ('form_field', 'delete'),
+    'SECTION_ADD':              ('form_section', 'create'),
+    'SECTION_EDIT':             ('form_section', 'update'),
+    'SECTION_DELETE':           ('form_section', 'delete'),
+    'TEMPLATE_ADD':             ('schedule_template', 'create'),
+    'LABOR_PRESET_ADD':         ('labor_preset', 'create'),
+    'ARTS_GROUP_ADD':           ('arts_group', 'create'),
+    'ARTS_GROUP_EDIT':          ('arts_group', 'update'),
+    'ARTS_GROUP_DELETE':        ('arts_group', 'delete'),
+    'ARTS_GROUP_CONTACT_ADD':   ('arts_group_contact', 'create'),
+    'ARTS_GROUP_CONTACT_EDIT':  ('arts_group_contact', 'update'),
+    'ARTS_GROUP_CONTACT_DELETE': ('arts_group_contact', 'delete'),
+    'POSITION_CATEGORY_ADD':    ('position_category', 'create'),
+    'POSITION_CATEGORY_EDIT':   ('position_category', 'update'),
+    'POSITION_CATEGORY_DELETE': ('position_category', 'delete'),
+    'JOB_POSITION_ADD':         ('job_position', 'create'),
+    'JOB_POSITION_EDIT':        ('job_position', 'update'),
+    'JOB_POSITION_DELETE':      ('job_position', 'delete'),
+    'LABOR_REQUEST_ADD':        ('labor_request', 'create'),
+    'PAY_LEVEL_ADD':            ('pay_rate_level', 'create'),
+    'PAY_LEVEL_EDIT':           ('pay_rate_level', 'update'),
+    'PAY_LEVEL_DELETE':         ('pay_rate_level', 'delete'),
+    'CREW_MEMBER_ADD':          ('crew_member', 'create'),
+    'CREW_MEMBER_EDIT':         ('crew_member', 'update'),
+    'CREW_MEMBER_DELETE':       ('crew_member', 'delete'),
+    'WAREHOUSE_LOC_ADD':        ('warehouse_location', 'create'),
+    'WAREHOUSE_LOC_EDIT':       ('warehouse_location', 'update'),
+    'WAREHOUSE_LOC_DELETE':     ('warehouse_location', 'delete'),
+    'ASSET_CATEGORY_ADD':       ('asset_category', 'create'),
+    'ASSET_CATEGORY_EDIT':      ('asset_category', 'update'),
+    'ASSET_CATEGORY_DELETE':    ('asset_category', 'delete'),
+    'ASSET_TYPE_ADD':           ('asset_type', 'create'),
+    'EXTERNAL_RENTAL_ADD':      ('show_external_rental', 'create'),
+    'MESSAGE_CREATE':           ('site_message', 'create'),
+    'OVERHEAD_PROJECT_ADD':     ('overhead_project', 'create'),
+    'OVERHEAD_GROUP_ADD':       ('overhead_labor_group', 'create'),
+    'OVERHEAD_REQUEST_ADD':     ('overhead_labor_request', 'create'),
+    'OVERHEAD_TEMPLATE_ADD':    ('overhead_labor_template', 'create'),
 }
+
+# Child rows that don't count as "still in use" when undoing a create:
+# per-user read receipts of a site message, which deleting it discards anyway.
+_UNDO_INCIDENTAL_REFS = frozenset(('site_message_views', 'site_message_dismissals'))
+
+_SNAPSHOT_COLS = {}
 
 
 def _snapshot_row(db, table, row_id):
-    """Return a dict of all columns for a single row, or None if not found."""
+    """Return a dict of the row's columns, or None if not found.
+
+    BYTEA columns (asset photos, rental/template PDFs) are left out: they
+    would land in the audit JSON as "<memory at 0x…>" — and an undo would
+    then write that string back as the file."""
     try:
-        row = db.execute(f'SELECT * FROM {table} WHERE id = %s', (row_id,)).fetchone()
+        cols = _SNAPSHOT_COLS.get(table)
+        if cols is None:
+            names = db.execute(
+                "SELECT attname FROM pg_attribute WHERE attrelid = to_regclass(%s) "
+                "AND attnum > 0 AND NOT attisdropped AND atttypid <> 'bytea'::regtype "
+                "ORDER BY attnum", (table,)).fetchall()
+            if not names:
+                return None
+            cols = _SNAPSHOT_COLS[table] = ', '.join(f'"{r["attname"]}"' for r in names)
+        row = db.execute(f'SELECT {cols} FROM {table} WHERE id = %s', (row_id,)).fetchone()
         return dict(row) if row else None
     except Exception:
         return None
@@ -4144,13 +4281,39 @@ def log_audit_change(db, action, entity_type, entity_id, *, show_id=None, detail
               before=before, after=after, detail=detail)
 
 
-def _classify_undo_action(action):
-    """Return one of 'create' / 'update' / 'delete' / None for an audit action."""
-    if not action:
+def _classify_undo_action(action, entity_type=None):
+    """'create' / 'update' / 'delete' for a reviewed action (see
+    _UNDO_ACTIONS), else None. entity_type must match what the action is
+    logged against, when given."""
+    spec = _UNDO_ACTIONS.get(action or '')
+    if not spec or (entity_type is not None and spec[0] != entity_type):
         return None
-    # Last word-chunk after the final underscore drives the verb (ASSET_ITEM_ADD -> ADD)
-    suffix = action.rsplit('_', 1)[-1].upper()
-    return _UNDO_VERB.get(suffix)
+    return spec[1]
+
+
+def _undo_blocking_refs(db, table, row_id):
+    """[(child_table, row_count)] of rows elsewhere that point at table.id =
+    row_id through a foreign key. Undoing a create DELETEs the row, and the
+    FKs would then cascade (e.g. an asset category takes every asset type in
+    it, and their items and show bookings) or blank the references (a job
+    position vanishing from labor requests) — so a row that's in use is
+    never deleted by Undo."""
+    refs = db.execute("""
+        SELECT c.conrelid::regclass::text AS child, a.attname AS col
+        FROM pg_constraint c
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+        WHERE c.contype = 'f' AND c.confrelid = to_regclass(%s)
+          AND cardinality(c.conkey) = 1
+    """, (table,)).fetchall()
+    found = []
+    for r in refs:
+        if r['child'].split('.')[-1].strip('"') in _UNDO_INCIDENTAL_REFS:
+            continue
+        n = db.execute(f'SELECT COUNT(*) AS n FROM {r["child"]} WHERE "{r["col"]}" = %s',
+                       (row_id,)).fetchone()['n']
+        if n:
+            found.append((r['child'], n))
+    return found
 
 
 def _can_undo_audit_row(row):
@@ -4159,7 +4322,7 @@ def _can_undo_audit_row(row):
         return False, 'Audit row not found'
     if row['entity_type'] not in UNDO_TABLE_MAP:
         return False, f"Entity type '{row['entity_type']}' is not undoable"
-    kind = _classify_undo_action(row['action'])
+    kind = _classify_undo_action(row['action'], row['entity_type'])
     if kind is None:
         return False, f"Action '{row['action']}' has no known reverse"
     if kind == 'create' and not row['entity_id']:
@@ -5152,7 +5315,9 @@ def show_page(show_id):
 
     # Export log
     exports = db.execute("""
-        SELECT e.*, u.display_name as exporter
+        SELECT e.id, e.export_type, e.version, e.exported_at, e.filename,
+               (e.pdf_data IS NOT NULL OR e.s3_key IS NOT NULL) AS has_pdf,
+               u.display_name as exporter
         FROM export_log e LEFT JOIN users u ON e.exported_by = u.id
         WHERE e.show_id = %s
         ORDER BY e.exported_at DESC
@@ -5289,6 +5454,7 @@ def save_advance(show_id):
     # confuse the detector).
     submitted_keys = list(data.keys())
     prev_values = {}
+    stored = {}    # raw stored values (NULL stays None) for the write diff below
     if submitted_keys:
         placeholders = ','.join('%s' for _ in submitted_keys)
         for row in db.execute(
@@ -5297,59 +5463,62 @@ def save_advance(show_id):
             tuple([show_id] + submitted_keys)
         ).fetchall():
             prev_values[row['field_key']] = row['field_value'] or ''
+            stored[row['field_key']] = row['field_value']
 
-    for key, value in data.items():
+    # The client posts EVERY advance field on each (1.5 s debounced) save.
+    # Write only rows that are new or whose value changed, in ONE statement:
+    # one upsert per field was ~F round trips per save, and re-stamping
+    # updated_at on unchanged fields made every other open tab's next sync
+    # poll re-deliver the whole form.
+    posted = {key: (str(value) if value is not None else '') for key, value in data.items()}
+    to_write = {k: v for k, v in posted.items() if k not in stored or stored[k] != v}
+    if to_write:
         db.execute("""
             INSERT INTO advance_data (show_id, field_key, field_value, updated_at)
-            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+            SELECT %s, t.k, t.v, CURRENT_TIMESTAMP
+            FROM unnest(%s::text[], %s::text[]) AS t(k, v)
             ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value, updated_at = EXCLUDED.updated_at
-        """, (show_id, key, str(value) if value is not None else ''))
-        if key in arts_group_keys:
-            name = (str(value) if value is not None else '').strip()
-            if name:
-                try:
-                    max_order = db.execute(
-                        'SELECT MAX(sort_order) FROM arts_groups'
-                    ).fetchone()[0] or 0
-                    db.execute(
-                        'INSERT INTO arts_groups (name, sort_order) VALUES (%s, %s) ON CONFLICT DO NOTHING',
-                        (name, max_order + 10)
-                    )
-                except Exception as e:
-                    app.logger.warning(f'arts_groups upsert failed for {name!r}: {e}')
+        """, (show_id, list(to_write.keys()), list(to_write.values())))
+    new_groups = [v.strip() for k, v in to_write.items() if k in arts_group_keys and v.strip()]
+    if new_groups:
+        try:
+            max_order = db.execute('SELECT MAX(sort_order) FROM arts_groups').fetchone()[0] or 0
+            for name in new_groups:
+                cur = db.execute(
+                    'INSERT INTO arts_groups (name, sort_order) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                    (name, max_order + 10)
+                )
+                if cur.rowcount:
+                    max_order += 10   # each newly created group sorts after the last
+        except Exception as e:
+            app.logger.warning(f'arts_groups upsert failed for {new_groups!r}: {e}')
 
-    # Sync core show fields
+    # Sync core show fields + track last saved — one UPDATE of the shows row.
+    show_sets = []
     if 'show_name' in data and data['show_name']:
-        db.execute('UPDATE shows SET name=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
-                   (data['show_name'], show_id))
+        show_sets.append(('name', data['show_name']))
     if 'show_date' in data:
-        db.execute('UPDATE shows SET show_date=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
-                   (data['show_date'] or None, show_id))
+        show_sets.append(('show_date', data['show_date'] or None))
     if 'show_time' in data:
-        db.execute('UPDATE shows SET show_time=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
-                   (data['show_time'], show_id))
+        show_sets.append(('show_time', data['show_time']))
     if 'venue' in data:
-        db.execute('UPDATE shows SET venue=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
-                   (data['venue'], show_id))
+        show_sets.append(('venue', data['venue']))
     if 'load_in_date' in data:
         val = data['load_in_date'].strip() if data['load_in_date'] else None
-        db.execute('UPDATE shows SET load_in_date=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
-                   (val or None, show_id))
+        show_sets.append(('load_in_date', val or None))
     if 'load_in_time' in data:
-        db.execute('UPDATE shows SET load_in_time=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
-                   (data['load_in_time'].strip() if data['load_in_time'] else '', show_id))
+        show_sets.append(('load_in_time', data['load_in_time'].strip() if data['load_in_time'] else ''))
     if 'load_out_date' in data:
         val = data['load_out_date'].strip() if data['load_out_date'] else None
-        db.execute('UPDATE shows SET load_out_date=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
-                   (val or None, show_id))
+        show_sets.append(('load_out_date', val or None))
     if 'load_out_time' in data:
-        db.execute('UPDATE shows SET load_out_time=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s',
-                   (data['load_out_time'].strip() if data['load_out_time'] else '', show_id))
-
-    # Track last saved
-    db.execute("""
-        UPDATE shows SET last_saved_by=%s, last_saved_at=CURRENT_TIMESTAMP WHERE id=%s
-    """, (session['user_id'], show_id))
+        show_sets.append(('load_out_time', data['load_out_time'].strip() if data['load_out_time'] else ''))
+    set_sql = ''.join(f'{col}=%s, ' for col, _ in show_sets)
+    if show_sets:
+        set_sql += 'updated_at=CURRENT_TIMESTAMP, '
+    db.execute(
+        f'UPDATE shows SET {set_sql}last_saved_by=%s, last_saved_at=CURRENT_TIMESTAMP WHERE id=%s',
+        [v for _, v in show_sets] + [session['user_id'], show_id])
 
     # Stage field-change alerts (debounced — actual send happens in the
     # 10-min background job). Only fields that have alert_departments or
@@ -5648,7 +5817,7 @@ def restore_history(show_id, hist_id):
     force = request.args.get('force') == '1'
     if not force:
         newer = db.execute("""
-            SELECT fh.id, fh.saved_at, u.username, u.display_name, fh.snapshot_json
+            SELECT fh.id, fh.saved_at::timestamptz AS saved_at, u.username, u.display_name, fh.snapshot_json
             FROM form_history fh
             LEFT JOIN users u ON fh.saved_by = u.id
             WHERE fh.show_id=%s AND fh.form_type=%s AND fh.id > %s
@@ -5658,7 +5827,7 @@ def restore_history(show_id, hist_id):
             db.close()
             return jsonify({
                 'conflict':          True,
-                'newer_saved_at':    newer['saved_at'],
+                'newer_saved_at':    _ts_out(newer['saved_at']),
                 'newer_saved_by':    newer['display_name'] or newer['username'] or 'Unknown',
                 'restoring_snapshot': snapshot,
                 'current_snapshot':  json.loads(newer['snapshot_json']),
@@ -5722,7 +5891,8 @@ def get_comments(show_id):
     is_admin = session.get('user_role') == 'admin'
     db = get_db()
     rows = db.execute("""
-        SELECT sc.id, sc.body, sc.created_at, sc.edited_at, sc.deleted_at,
+        SELECT sc.id, sc.body, sc.created_at::timestamptz AS created_at,
+               sc.edited_at::timestamptz AS edited_at, sc.deleted_at::timestamptz AS deleted_at,
                u.display_name, u.username, u.id as uid,
                du.display_name as deleted_by_name, du.username as deleted_by_username
         FROM show_comments sc
@@ -5738,9 +5908,9 @@ def get_comments(show_id):
         entry = {
             'id':          r['id'],
             'body':        r['body'],
-            'created_at':  r['created_at'],
-            'edited_at':   r['edited_at'],
-            'deleted_at':  r['deleted_at'],
+            'created_at':  _ts_out(r['created_at']),
+            'edited_at':   _ts_out(r['edited_at']),
+            'deleted_at':  _ts_out(r['deleted_at']),
             'author':      author,
             'author_id':   r['uid'],
             'initials':    ''.join(w[0].upper() for w in author.split()[:2]),
@@ -6063,13 +6233,16 @@ def download_attachment(show_id, aid):
         abort(403)
     db = get_db()
     row = db.execute(
-        'SELECT * FROM show_attachments WHERE id=%s AND show_id=%s', (aid, show_id)
+        f"SELECT {_cols_except(db, 'show_attachments', 'file_data')}, "
+        f"{file_store.in_db_col('attachments')} "
+        'FROM show_attachments WHERE id=%s AND show_id=%s', (aid, show_id)
     ).fetchone()
     db.close()
     if not row:
         abort(404)
     # S3 or DB copy per the admin's read preference, falling back to the
-    # other; archived DB copies (gzip) are decompressed transparently.
+    # other; archived DB copies (gzip) are decompressed transparently. The
+    # DB copy is only fetched if it's the one served (in_db flag).
     try:
         data = file_store.read_bytes('attachments', row)
     except file_store.FileMissing:
@@ -6237,6 +6410,10 @@ def get_advance_reads(show_id):
 
 # ─── Real-time Sync ───────────────────────────────────────────────────────────
 
+_ACTIVE_PRUNE_EVERY_S = 30.0
+_active_prune_at = 0.0
+
+
 def _upsert_active_session(db, user_id, show_id, tab, focused_field=None):
     """Record that a user is actively on a show page and prune stale sessions.
 
@@ -6254,8 +6431,14 @@ def _upsert_active_session(db, user_id, show_id, tab, focused_field=None):
             focused_field=excluded.focused_field,
             last_seen=excluded.last_seen
     """, (user_id, show_id, tab, focused_field or None))
-    # Prune sessions idle > 60 s
-    db.execute("DELETE FROM active_sessions WHERE last_seen < (NOW() - INTERVAL '60 seconds')")
+    # Prune sessions idle > 60 s. Housekeeping only (every reader filters on
+    # last_seen itself), so each worker does it at most every 30 s instead of
+    # on every 2 s poll of every open tab.
+    global _active_prune_at
+    now = time.monotonic()
+    if now - _active_prune_at >= _ACTIVE_PRUNE_EVERY_S:
+        _active_prune_at = now
+        db.execute("DELETE FROM active_sessions WHERE last_seen < (NOW() - INTERVAL '60 seconds')")
 
 
 def _get_other_active_users(db, user_id, show_id):
@@ -6277,20 +6460,24 @@ def _get_other_active_users(db, user_id, show_id):
     } for r in rows]
 
 
-def _attachments_rev(db, show_id):
-    """Cheap fingerprint of a show's LIVE attachment set.
+# Cheap fingerprint of a show's LIVE attachment set ("attachments_rev").
+#
+# Rides on the sync/heartbeat polls so any open tab — including one served
+# by another 321Theater instance against the same PostgreSQL — refreshes
+# its file lists when someone uploads, archives, restores, or moves a file.
+# count:max(id) changes on every visible transition (archive and restore
+# both change the live count; upload/move change count or max id).
+# Selected as extra columns of each poll's single `FROM shows s` statement
+# (indexed by idx_show_attachments_show) instead of its own round trip.
+_ATTACHMENTS_REV_COLS = """
+    (SELECT COUNT(*) FROM show_attachments
+      WHERE show_id = s.id AND deleted_at IS NULL) AS att_count,
+    (SELECT COALESCE(MAX(id), 0) FROM show_attachments
+      WHERE show_id = s.id AND deleted_at IS NULL) AS att_max_id"""
 
-    Rides on the sync/heartbeat polls so any open tab — including one served
-    by another 321Theater instance against the same PostgreSQL — refreshes
-    its file lists when someone uploads, archives, restores, or moves a file.
-    count:max(id) changes on every visible transition (archive and restore
-    both change the live count; upload/move change count or max id).
-    """
-    r = db.execute(
-        'SELECT COUNT(*), COALESCE(MAX(id), 0) FROM show_attachments '
-        'WHERE show_id = %s AND deleted_at IS NULL', (show_id,)
-    ).fetchone()
-    return f"{r[0]}:{r[1]}"
+
+def _attachments_rev_from(row):
+    return f"{row['att_count']}:{row['att_max_id']}"
 
 
 @app.route('/shows/<int:show_id>/sync/advance')
@@ -6311,49 +6498,50 @@ def sync_advance(show_id):
 
     db = get_db()
 
-    # Fields changed since last poll (exclude the current user's own saves so
-    # we don't echo back what they just wrote)
-    if since:
-        changed_rows = db.execute("""
-            SELECT ad.field_key, ad.field_value
-            FROM advance_data ad
-            WHERE ad.show_id = %s
-              AND ad.updated_at > %s
-              AND (
-                SELECT last_saved_by FROM shows WHERE id = ad.show_id
-              ) != %s
-        """, (show_id, since, session['user_id'])).fetchall()
-    else:
-        changed_rows = []
-
-    # New "since" cursor = latest updated_at across the whole show's advance data
-    ts_row = db.execute(
-        "SELECT MAX(updated_at) FROM advance_data WHERE show_id = %s", (show_id,)
-    ).fetchone()
-    new_since = _sync_cursor(ts_row[0] if ts_row and ts_row[0] else since)
+    # Everything this poll reads comes from ONE statement (one snapshot):
+    #  - fields changed since the last poll, excluding the current user's own
+    #    saves so we don't echo back what they just wrote (NULL last_saved_by
+    #    = no tracked save yet → deliver; a plain != dropped every row then);
+    #  - the new "since" cursor = latest updated_at across the show's advance
+    #    data. Reading it in the same snapshot as the changed fields means a
+    #    save committing mid-poll can't move the cursor past an edit this
+    #    client never received (two separate statements allowed that);
+    #  - last-saved state, which lets the client seed its "another user
+    #    saved" baseline from the advance tab so switching to
+    #    schedule/postnotes compares against the page-load state;
+    #  - the attachments fingerprint (see _ATTACHMENTS_REV_COLS).
+    state = db.execute("""
+        SELECT s.last_saved_by, s.last_saved_at::timestamptz AS last_saved_at,
+               (SELECT MAX(updated_at) FROM advance_data WHERE show_id = s.id) AS max_updated,
+               (SELECT json_object_agg(ad.field_key, ad.field_value)
+                FROM advance_data ad
+                WHERE ad.show_id = s.id
+                  AND ad.updated_at > CAST(NULLIF(%s, '') AS TIMESTAMP)
+                  AND s.last_saved_by IS DISTINCT FROM %s) AS changed,
+               """ + _ATTACHMENTS_REV_COLS + """
+        FROM shows s WHERE s.id = %s
+    """, (since, session['user_id'], show_id)).fetchone()
+    if not state:
+        # Deleted show (e.g. a tab left open): the presence upsert below
+        # would 500 on the active_sessions foreign key.
+        db.close()
+        return jsonify({'success': False, 'error': 'Show not found.'}), 404
+    new_since = _sync_cursor(state['max_updated'] or since)
 
     # Update presence (including which field is focused) and get other active users
     _upsert_active_session(db, session['user_id'], show_id, tab, focused_field)
     others = _get_other_active_users(db, session['user_id'], show_id)
-
-    # Last-saved state — lets the client seed its "another user saved" baseline
-    # from the advance tab so switching to schedule/postnotes compares against
-    # the page-load state rather than "whoever saved last".
-    saved = db.execute('SELECT last_saved_by, last_saved_at FROM shows WHERE id=%s',
-                        (show_id,)).fetchone()
-
-    attachments_rev = _attachments_rev(db, show_id)
 
     db.commit()
     db.close()
 
     return jsonify({
         'since':         new_since,
-        'fields':        {r['field_key']: r['field_value'] for r in changed_rows},
+        'fields':        state['changed'] or {},
         'active_users':  others,
-        'last_saved_by': saved['last_saved_by'] if saved else None,
-        'last_saved_at': saved['last_saved_at'] if saved else None,
-        'attachments_rev': attachments_rev,
+        'last_saved_by': state['last_saved_by'],
+        'last_saved_at': _ts_out(state['last_saved_at']),
+        'attachments_rev': _attachments_rev_from(state),
     })
 
 
@@ -6394,27 +6582,30 @@ def show_heartbeat(show_id):
     focused_field = data.get('focused_field') or None
 
     db = get_db()
-    _upsert_active_session(db, session['user_id'], show_id, tab, focused_field)
-    others = _get_other_active_users(db, session['user_id'], show_id)
-
     # For schedule / postnotes: report who last saved the show and when. The
     # client keeps a baseline captured at page load and only shows the "another
     # user saved" banner when this pair changes to a save that isn't the current
     # user's — so a show merely *last touched* by someone else before the user
     # arrived no longer triggers a false alarm on every tab switch.
-    show = db.execute('SELECT last_saved_by, last_saved_at FROM shows WHERE id=%s',
-                      (show_id,)).fetchone()
+    show = db.execute(
+        'SELECT s.last_saved_by, s.last_saved_at::timestamptz AS last_saved_at, ' +
+        _ATTACHMENTS_REV_COLS +
+        ' FROM shows s WHERE s.id = %s', (show_id,)).fetchone()
+    if not show:
+        db.close()   # deleted show: the upsert would 500 on the FK
+        return jsonify({'success': False, 'error': 'Show not found.'}), 404
 
-    attachments_rev = _attachments_rev(db, show_id)
+    _upsert_active_session(db, session['user_id'], show_id, tab, focused_field)
+    others = _get_other_active_users(db, session['user_id'], show_id)
 
     db.commit()
     db.close()
 
     return jsonify({
         'active_users':  others,
-        'last_saved_by': show['last_saved_by'] if show else None,
-        'last_saved_at': show['last_saved_at'] if show else None,
-        'attachments_rev': attachments_rev,
+        'last_saved_by': show['last_saved_by'],
+        'last_saved_at': _ts_out(show['last_saved_at']),
+        'attachments_rev': _attachments_rev_from(show),
     })
 
 
@@ -6478,12 +6669,20 @@ def _find_reusable_export(db, show_id, export_type, content_hash):
     an older row (keeps version numbers monotonic and predictable)."""
     if not content_hash:
         return None, None
-    row = db.execute(
-        "SELECT * FROM export_log WHERE show_id=%s AND export_type=%s "
+    # Compare the hash first; only a match loads the full row, whose pdf_data
+    # can be a multi-MB blob (DB copies kept since 3.1.0) — every export click
+    # used to drag the previous version's bytes out just to discard them.
+    latest = db.execute(
+        "SELECT id, content_hash FROM export_log WHERE show_id=%s AND export_type=%s "
         "ORDER BY version DESC, id DESC LIMIT 1",
         (show_id, export_type)
     ).fetchone()
-    if not row or row['content_hash'] != content_hash:
+    if not latest or latest['content_hash'] != content_hash:
+        return None, None
+    row = db.execute(
+        f"SELECT {_cols_except(db, 'export_log', 'pdf_data')}, {file_store.in_db_col('exports')} "
+        'FROM export_log WHERE id=%s', (latest['id'],)).fetchone()
+    if not row:
         return None, None
     pdf_bytes = _load_export_bytes(row)
     if pdf_bytes is None:
@@ -6717,9 +6916,13 @@ def _collect_advance_field_attachments(show_id, base_url):
     Office / OpenDocument formats). Files we can't render are not dropped —
     they get listed on the trailing index page.
     """
+    # Metadata only (in_db flag, not the bytes): read_bytes() fetches each
+    # file as it's converted, so a show's attachments are never all held in
+    # memory at once and S3-served files never leave PostgreSQL at all.
     db = get_db()
-    field_rows = db.execute("""
-        SELECT sa.id, sa.filename, sa.mime_type, sa.file_data, sa.s3_key,
+    field_rows = db.execute(f"""
+        SELECT sa.id, sa.filename, sa.mime_type, sa.s3_key,
+               {file_store.in_db_col('attachments', 'sa')},
                sa.field_key, sa.description, sa.created_at,
                ff.label AS field_label, fs.label AS section_label,
                fs.sort_order AS section_order, ff.sort_order AS field_order
@@ -6732,8 +6935,8 @@ def _collect_advance_field_attachments(show_id, base_url):
           AND ff.field_type = 'file_upload'
         ORDER BY fs.sort_order, ff.sort_order, sa.created_at
     """, (show_id,)).fetchall()
-    general_rows = db.execute("""
-        SELECT id, filename, mime_type, file_data, s3_key,
+    general_rows = db.execute(f"""
+        SELECT id, filename, mime_type, s3_key, {file_store.in_db_col('attachments')},
                field_key, description, created_at,
                NULL AS field_label, NULL AS section_label
         FROM show_attachments
@@ -7310,10 +7513,11 @@ def download_export_history(show_id, log_id):
         abort(403)
     db = get_db()
     row = db.execute(
-        'SELECT * FROM export_log WHERE id=%s AND show_id=%s', (log_id, show_id)
+        f"SELECT {_cols_except(db, 'export_log', 'pdf_data')}, {file_store.in_db_col('exports')} "
+        'FROM export_log WHERE id=%s AND show_id=%s', (log_id, show_id)
     ).fetchone()
     db.close()
-    if not row or (not row['s3_key'] and not row['pdf_data']):
+    if not row or (not row['s3_key'] and not row['in_db']):
         abort(404)
     filename = f"{row['export_type'].capitalize()}_v{row['version']}.pdf"
     try:
@@ -8021,7 +8225,7 @@ def merge_shows_preview(keeper_id):
         'fill_count': sum(1 for f in fields if f['will_fill']),
     }
     db.close()
-    return jsonify(out)
+    return jsonify(_iso_dates_deep(out))   # ISO show dates in the preview
 
 
 @app.route('/shows/<int:keeper_id>/merge', methods=['POST'])
@@ -8423,21 +8627,36 @@ def audit_undo(log_id):
         db.close()
         return jsonify({'error': 'Audit entry not found'}), 404
 
+    def _refuse(status, reason):
+        db.close()
+        syslog_logger.info(
+            f"AUDIT_UNDO_REFUSED log_id={log_id} action={row['action']} "
+            f"entity={row['entity_type']}#{row['entity_id']} reason={reason!r} "
+            f"by={session.get('username')}")
+        return jsonify({'error': reason}), status
+
     ok, kind_or_reason = _can_undo_audit_row(row)
     if not ok:
-        db.close()
-        return jsonify({'error': kind_or_reason}), 400
+        return _refuse(400, kind_or_reason)
 
     kind = kind_or_reason  # 'create' | 'update' | 'delete'
     table = UNDO_TABLE_MAP[row['entity_type']]
     entity_id = row['entity_id']
     before = json.loads(row['before_json']) if row['before_json'] else None
-    after  = json.loads(row['after_json'])  if row['after_json']  else None
+    label = f"{row['entity_type'].replace('_', ' ')} #{entity_id}"
 
     try:
         if kind == 'create':
             # Snapshot the current row before deletion (so the undo is itself undoable)
             before_undo = _snapshot_row(db, table, entity_id)
+            if before_undo is None:
+                return _refuse(409, f'{label} no longer exists — nothing to undo')
+            in_use = _undo_blocking_refs(db, table, entity_id)
+            if in_use:
+                used = ', '.join(f'{n} in {t}' for t, n in in_use)
+                return _refuse(409, f"Can't undo: {label} is in use ({used}). Deleting it "
+                                    f"would also delete or unlink those records — remove "
+                                    f"them first.")
             db.execute(f'DELETE FROM {table} WHERE id = %s', (entity_id,))
             undo_before, undo_after = before_undo, None
 
@@ -8445,26 +8664,34 @@ def audit_undo(log_id):
             # Capture current row, then restore columns from before_json
             before_undo = _snapshot_row(db, table, entity_id)
             if before_undo is None:
-                db.close()
-                return jsonify({'error': f'{row["entity_type"]} #{entity_id} no longer exists'}), 409
-            # Only restore columns that exist in both before_json and the current row
+                return _refuse(409, f'{label} no longer exists')
+            # Only restore columns that exist in both before_json and the
+            # current row (a snapshot never includes BYTEA file columns).
             cols = [c for c in before.keys() if c in before_undo and c != 'id']
             if not cols:
-                db.close()
-                return jsonify({'error': 'No matching columns to restore'}), 400
-            set_clause = ', '.join(f'{c} = %s' for c in cols)
+                return _refuse(400, 'No matching columns to restore')
+            set_clause = ', '.join(f'"{c}" = %s' for c in cols)
             values = [before[c] for c in cols] + [entity_id]
             db.execute(f'UPDATE {table} SET {set_clause} WHERE id = %s', values)
             undo_before, undo_after = before_undo, before
 
         elif kind == 'delete':
-            # Re-insert the deleted row from before_json, preserving its id
-            cols = list(before.keys())
+            # Re-insert the deleted row from before_json, preserving its id.
+            # Only real, non-BYTEA columns: older audit rows can carry a file
+            # column as the string "<memory at 0x…>", which must never be
+            # written back as the file.
+            if _snapshot_row(db, table, entity_id) is not None:
+                return _refuse(409, f'{label} already exists again')
+            live = {r['attname'] for r in db.execute(
+                "SELECT attname FROM pg_attribute WHERE attrelid = to_regclass(%s) "
+                "AND attnum > 0 AND NOT attisdropped AND atttypid <> 'bytea'::regtype",
+                (table,)).fetchall()}
+            cols = [c for c in before.keys() if c in live]
             placeholders = ', '.join('%s' for _ in cols)
-            col_list = ', '.join(cols)
+            col_list = ', '.join(f'"{c}"' for c in cols)
             values = [before[c] for c in cols]
             db.execute(f'INSERT INTO {table} ({col_list}) VALUES ({placeholders})', values)
-            undo_before, undo_after = None, before
+            undo_before, undo_after = None, {c: before[c] for c in cols}
 
         else:
             db.close()
@@ -8484,8 +8711,10 @@ def audit_undo(log_id):
             row['entity_type'],
             entity_id,
             row['show_id'],
-            json.dumps(undo_before) if undo_before is not None else None,
-            json.dumps(undo_after)  if undo_after  is not None else None,
+            # default=str: row snapshots carry datetime/date/Decimal values;
+            # without it every create/update undo raised here and rolled back.
+            json.dumps(undo_before, default=str) if undo_before is not None else None,
+            json.dumps(undo_after, default=str)  if undo_after  is not None else None,
             request.remote_addr,
             f'Undid audit #{log_id} ({row["action"]})',
         ))
@@ -8502,6 +8731,10 @@ def audit_undo(log_id):
 
         db.commit()
         db.close()
+        syslog_logger.info(
+            f"AUDIT_UNDO log_id={log_id} action={row['action']} kind={kind} "
+            f"entity={row['entity_type']}#{entity_id} undo_log_id={new_log_id} "
+            f"by={session.get('username')}")
         return jsonify({'success': True, 'undo_log_id': new_log_id})
 
     except Exception as e:
@@ -9480,7 +9713,8 @@ def pdf_template_file(tid):
         abort(403)
     db = get_db()
     row = db.execute(
-        'SELECT pdf_data, s3_key, name FROM pdf_templates WHERE id=%s', (tid,)
+        f"SELECT id, s3_key, name, {file_store.in_db_col('pdf_templates')} "
+        'FROM pdf_templates WHERE id=%s', (tid,)
     ).fetchone()
     db.close()
     if not row:
@@ -9776,7 +10010,8 @@ def pdf_form_export(show_id, field_key):
         db.close()
         abort(404)
     tmpl = db.execute(
-        'SELECT id, name, pdf_data, s3_key, fields_json FROM pdf_templates WHERE id=%s',
+        f"SELECT id, name, s3_key, fields_json, {file_store.in_db_col('pdf_templates')} "
+        'FROM pdf_templates WHERE id=%s',
         (field['pdf_template_id'],)
     ).fetchone()
     if not tmpl:
@@ -10126,7 +10361,7 @@ def pdf_designer_page():
     recent_shows = db.execute(
         "SELECT id, name, show_date FROM shows "
         "WHERE status != 'archived' "
-        "ORDER BY show_date DESC, id DESC LIMIT 10"
+        "ORDER BY show_date DESC NULLS LAST, id DESC LIMIT 10"
     ).fetchall()
     db.close()
     return render_template('pdf_designer.html',
@@ -10540,7 +10775,11 @@ def backup_status():
 @admin_required
 def manual_backup():
     try:
-        run_hourly_backup()
+        if not run_hourly_backup():
+            # Another worker on this server is mid-backup (the host lock):
+            # nothing was written, so don't claim success.
+            return jsonify({'success': False, 'error': 'A backup is already running on '
+                            'this server. Try again in a minute.'}), 409
         return jsonify({'success': True, 'message': 'Backup created successfully.'})
     except Exception as e:
         app.logger.error(f'Backup failed: {e}')
@@ -10592,7 +10831,7 @@ def global_search():
                     FROM shows
                     WHERE name ILIKE %s OR venue ILIKE %s OR performance_company ILIKE %s
                        OR CAST(show_date AS TEXT) ILIKE %s
-                    ORDER BY show_date DESC LIMIT 6
+                    ORDER BY show_date DESC NULLS LAST LIMIT 6
                 """, (like, like, like, like)).fetchall()
             else:
                 placeholders = ','.join(['%s'] * len(accessible))
@@ -10602,7 +10841,7 @@ def global_search():
                     WHERE id IN ({placeholders})
                       AND (name ILIKE %s OR venue ILIKE %s OR performance_company ILIKE %s
                            OR CAST(show_date AS TEXT) ILIKE %s)
-                    ORDER BY show_date DESC LIMIT 6
+                    ORDER BY show_date DESC NULLS LAST LIMIT 6
                 """, (*accessible, like, like, like, like)).fetchall()
             for r in show_rows:
                 # PG returns date objects — joinable text only
@@ -10717,10 +10956,10 @@ def api_notifications():
     db = get_db()
     rows = db.execute(
         """SELECT id, kind, title, body, link_url, show_id, field_key,
-                  created_at, read_at
+                  created_at::timestamptz AS created_at, read_at::timestamptz AS read_at
              FROM notifications
             WHERE user_id=%s
-            ORDER BY created_at DESC
+            ORDER BY notifications.created_at DESC
             LIMIT 100""",
         (uid,)
     ).fetchall()
@@ -10732,12 +10971,9 @@ def api_notifications():
     out = []
     for r in rows:
         d = dict(r)
-        # Coerce datetime fields to ISO strings for the client.
+        # ISO strings with their UTC offset for the client (see _ts_out).
         for k in ('created_at', 'read_at'):
-            v = d.get(k)
-            if v is not None and not isinstance(v, str):
-                try: d[k] = v.isoformat()
-                except Exception: d[k] = str(v)
+            d[k] = _ts_out(d.get(k))
         out.append(d)
     return jsonify({'notifications': out, 'unread': int(unread or 0)})
 
@@ -10793,10 +11029,10 @@ def api_notifications_mark_all_read():
 def api_shows():
     db = get_db()
     shows = db.execute(
-        "SELECT id, name, show_date, status FROM shows ORDER BY show_date DESC"
+        "SELECT id, name, show_date, status FROM shows ORDER BY show_date DESC NULLS LAST"
     ).fetchall()
     db.close()
-    return jsonify([dict(s) for s in shows])
+    return jsonify([_normalize_row_dates(dict(s)) for s in shows])   # ISO show_date
 
 
 # ─── API Time ─────────────────────────────────────────────────────────────────
@@ -11900,8 +12136,8 @@ def public_shows():
 @app.route('/public/shows/<int:show_id>/advance')
 def public_advance_pdf(show_id):
     db = get_db()
-    row = db.execute("""
-        SELECT id, s3_key, pdf_data FROM export_log
+    row = db.execute(f"""
+        SELECT id, s3_key, {file_store.in_db_col('exports')} FROM export_log
         WHERE show_id=%s AND export_type='advance'
         ORDER BY exported_at DESC LIMIT 1
     """, (show_id,)).fetchone()
@@ -11925,8 +12161,8 @@ def public_advance_pdf(show_id):
 @app.route('/public/shows/<int:show_id>/schedule')
 def public_schedule_pdf(show_id):
     db = get_db()
-    row = db.execute("""
-        SELECT id, s3_key, pdf_data FROM export_log
+    row = db.execute(f"""
+        SELECT id, s3_key, {file_store.in_db_col('exports')} FROM export_log
         WHERE show_id=%s AND export_type='schedule'
         ORDER BY exported_at DESC LIMIT 1
     """, (show_id,)).fetchone()
@@ -12207,7 +12443,7 @@ def email_outbox_log_list():
         limit = 200
     db = get_db()
     sql = """
-        SELECT l.id, l.sent_at, l.recipient, l.subject, l.purpose,
+        SELECT l.id, l.sent_at::timestamptz AS sent_at, l.recipient, l.subject, l.purpose,
                l.success, l.error_message,
                u.username AS triggered_by_name,
                u.display_name AS triggered_by_display
@@ -12231,7 +12467,7 @@ def email_outbox_log_list():
     """).fetchone()
     db.close()
     return jsonify({
-        'rows': [dict(r) for r in rows],
+        'rows': [dict(r, sent_at=_ts_out(r['sent_at'])) for r in rows],
         'total':     int(counts['total'] or 0),
         'successes': int(counts['successes'] or 0),
         'failures':  int(counts['failures'] or 0),
@@ -12633,7 +12869,8 @@ def _ai_extract_impl(show_id):
     if attachment_id:
         db = get_db()
         row = db.execute(
-            'SELECT id, file_data, s3_key, is_compressed, mime_type, filename '
+            f"SELECT id, s3_key, is_compressed, mime_type, filename, "
+            f"{file_store.in_db_col('attachments')} "
             'FROM show_attachments WHERE id=%s AND show_id=%s AND deleted_at IS NULL',
             (attachment_id, show_id)
         ).fetchone()
@@ -13622,7 +13859,9 @@ def show_labor_cost(show_id):
     db = get_db()
     lines, total = _calc_labor_cost_for_show(db, show_id)
     db.close()
-    return jsonify({'lines': lines, 'total': total})
+    # ISO dates for the Staffing tab table (the engine keeps date objects for
+    # the PDFs; jsonify would show "Tue, 01 Dec 2026 00:00:00 GMT").
+    return jsonify({'lines': _iso_dates_deep(lines), 'total': total})
 
 
 @app.route('/shows/<int:show_id>/billable-items', methods=['GET'])
@@ -13947,7 +14186,7 @@ def get_post_show_labor_cost(show_id):
     db = get_db()
     lines, total = _calc_post_show_labor_cost(db, show_id)
     db.close()
-    return jsonify({'lines': lines, 'total': total})
+    return jsonify({'lines': _iso_dates_deep(lines), 'total': total})
 
 
 _PSL_INIT_KEY = '_post_show_labor_initialized'
@@ -14323,7 +14562,7 @@ def labor_scheduler_no_labor():
                        ON pf.show_id = s.id
                 {_pm_join_sql('ad')}
                 WHERE COALESCE(s.status, 'active') != 'archived'
-                  AND lr.id IS NULL
+                  AND lr.show_id IS NULL   -- the join column: lets PG anti-join on idx_labor_requests_show
             """
             params = []
             if accessible is not None:
@@ -14437,7 +14676,7 @@ def labor_overview():
         LEFT JOIN overhead_projects p ON p.id = g.project_id
         LEFT JOIN job_positions jp ON jp.id = r.position_id
         LEFT JOIN crew_members cm ON cm.id = r.scheduled_crew_member_id
-        WHERE COALESCE(r.work_date, g.work_date) BETWEEN %s AND %s
+        WHERE r.work_date BETWEEN %s AND %s   -- NOT NULL column: bare, so idx_oh_requests_date applies
         ORDER BY work_date, project_name, r.sort_order, r.id
     """, (week_start.isoformat(), week_end.isoformat())).fetchall()
 
@@ -14981,7 +15220,7 @@ def api_labor_scheduler_shows_without_labor():
         FROM shows s
         LEFT JOIN labor_requests lr ON lr.show_id = s.id
         WHERE COALESCE(s.status, 'active') != 'archived'
-          AND lr.id IS NULL
+          AND lr.show_id IS NULL   -- the join column: lets PG anti-join on idx_labor_requests_show
     """
     params = []
     if date_from and date_to:
@@ -16767,7 +17006,8 @@ def asset_types_api():
     if not (include_hidden and is_manager):
         where.append('COALESCE(at.hide_from_pm, 0) = 0')
     rows = db.execute(f"""
-        SELECT at.*, ac.name as category_name,
+        SELECT {_cols_except(db, 'asset_types', 'photo', 'at')}, {_ASSET_HAS_PHOTO_SQL},
+               ac.name as category_name,
                pt.name as parent_name
         FROM asset_types at
         JOIN asset_categories ac ON ac.id = at.category_id
@@ -16776,12 +17016,7 @@ def asset_types_api():
         ORDER BY ac.sort_order, ac.name, at.sort_order, at.name
     """).fetchall()
     db.close()
-    result = []
-    for r in rows:
-        d = dict(r)
-        d.pop('photo', None)  # Don't send blob over API
-        result.append(d)
-    return jsonify(result)
+    return jsonify([dict(r) for r in rows])
 
 
 @app.route('/settings/asset-types', methods=['GET'])
@@ -16791,7 +17026,8 @@ def asset_types_admin_list():
     show_retired = request.args.get('show_retired') == '1'
     where = '' if show_retired else 'WHERE at.is_retired = 0'
     rows = db.execute(f"""
-        SELECT at.*, ac.name as category_name,
+        SELECT {_cols_except(db, 'asset_types', 'photo', 'at')}, {_ASSET_HAS_PHOTO_SQL},
+               ac.name as category_name,
                pt.name as parent_name,
                (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id) as item_count,
                (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id AND ai.status = 'retired') as retired_item_count
@@ -16802,12 +17038,7 @@ def asset_types_admin_list():
         ORDER BY ac.sort_order, ac.name, at.sort_order, at.name
     """).fetchall()
     db.close()
-    result = []
-    for r in rows:
-        d = dict(r)
-        d.pop('photo', None)
-        result.append(d)
-    return jsonify(result)
+    return jsonify([dict(r) for r in rows])
 
 
 @app.route('/settings/asset-types', methods=['POST'])
@@ -17022,7 +17253,9 @@ def asset_type_photo_delete(type_id):
 @login_required
 def asset_type_photo(type_id):
     db = get_db()
-    row = db.execute('SELECT id, photo, photo_mime, photo_s3_key FROM asset_types WHERE id=%s', (type_id,)).fetchone()
+    row = db.execute(
+        f"SELECT id, photo_mime, photo_s3_key, {file_store.in_db_col('asset_photos')} "
+        'FROM asset_types WHERE id=%s', (type_id,)).fetchone()
     db.close()
     if not row:
         abort(404)
@@ -17200,7 +17433,10 @@ def asset_items_list(type_id):
         ORDER BY ai.status, ai.sort_order, ai.id
     """, (type_id,)).fetchall()
     db.close()
-    return jsonify([dict(r) for r in rows])
+    # ISO dates: psycopg2 returns date objects, which jsonify renders as HTTP
+    # dates that <input type="date"> rejects — the detail panel then saved
+    # the warranty / depreciation dates back as NULL.
+    return jsonify([_normalize_row_dates(dict(r)) for r in rows])
 
 
 @app.route('/settings/asset-types/<int:type_id>/items', methods=['POST'])
@@ -17246,7 +17482,8 @@ def asset_item_edit(item_id):
         UPDATE asset_items SET
           barcode=%s, condition=%s, year_purchased=%s, purchase_value=%s,
           depreciation_years=%s, warranty_expires=%s,
-          depreciation_start_date=%s, replacement_cost=%s, is_container=%s
+          depreciation_start_date=%s, replacement_cost=%s,
+          is_container=COALESCE(%s, is_container)
         WHERE id=%s
     """, (
         (data.get('barcode') or '').strip(),
@@ -17257,7 +17494,9 @@ def asset_item_edit(item_id):
         (data.get('warranty_expires') or '').strip() or None,
         (data.get('depreciation_start_date') or '').strip() or None,
         _float_or_none(data.get('replacement_cost')),
-        1 if data.get('is_container') else 0,
+        # Only when sent: the item detail panel doesn't send it, and saving
+        # there used to un-mark every container.
+        (1 if data.get('is_container') else 0) if 'is_container' in data else None,
         item_id,
     ))
     db.commit()
@@ -17315,7 +17554,7 @@ def asset_item_logs_list(item_id):
         ORDER BY al.log_date DESC, al.created_at DESC
     """, (item_id,)).fetchall()
     db.close()
-    return jsonify([dict(r) for r in rows])
+    return jsonify([_normalize_row_dates(dict(r)) for r in rows])   # ISO log_date / created_at
 
 
 @app.route('/settings/asset-items/<int:item_id>/logs', methods=['POST'])
@@ -17349,7 +17588,7 @@ def asset_item_log_add(item_id):
     """, (new_log_id,)).fetchone()
     db.close()
     syslog_logger.info(f"ASSET_LOG_ADD item_id={item_id} log_type={log_type} by={session.get('username')}")
-    return jsonify(dict(row)), 201
+    return jsonify(_normalize_row_dates(dict(row))), 201
 
 
 @app.route('/settings/asset-logs/<int:log_id>', methods=['DELETE'])
@@ -17443,9 +17682,8 @@ def _component_demand(db, type_id, start_date=None, end_date=None):
     ``[start_date, end_date]`` window filters to bookings whose rental range
     overlaps it.
 
-    NOTE (PostgreSQL): every placeholder is ``?`` (rewritten to ``%s`` by
-    db_adapter) and there is no literal ``%`` in the SQL — see CLAUDE.md.
     ``COALESCE(m.quantity, 1)`` keeps legacy rows (pre-migration) at 1.
+    The work is done by _component_demand_many (batched, 2 queries total).
 
     Test/demo shows (``shows.is_test``) are EXCLUDED from every demand row so
     they never consume real inventory — a test show's bookings must not reduce
@@ -17455,34 +17693,49 @@ def _component_demand(db, type_id, start_date=None, end_date=None):
     in agreement. ``COALESCE(s.is_test, 0)`` guards legacy rows where the column
     could be NULL.
     """
+    return _component_demand_many(db, [type_id], start_date, end_date).get(int(type_id), [])
+
+
+def _component_demand_many(db, type_ids, start_date=None, end_date=None):
+    """_component_demand for many types in TWO queries: {type_id: rows}, each
+    list shaped and ordered exactly as _component_demand returns it (direct
+    rows by rental_start, then indirect rows by rental_start). Types with no
+    demand map to []. Callers that loop over types (overbooking scan,
+    availability widgets, the Assets tab) use this instead of 2 queries per
+    type."""
+    ids = sorted({int(t) for t in type_ids if t is not None})
+    out = {t: [] for t in ids}
+    if not ids:
+        return out
     date_filter = ''
     date_params = []
     if start_date and end_date:
         date_filter = ' AND (sa.rental_end >= %s AND sa.rental_start <= %s)'
         date_params = [start_date, end_date]
 
-    # DIRECT demand — lines that book this type directly.
+    # DIRECT demand — lines that book these types directly.
     direct = db.execute(f"""
-        SELECT sa.id, sa.show_id, sa.quantity, sa.rental_start, sa.rental_end,
+        SELECT sa.asset_type_id AS _for_type,
+               sa.id, sa.show_id, sa.quantity, sa.rental_start, sa.rental_end,
                sa.is_hidden, sa.locked_price, sa.original_locked_price,
                sa.asset_item_id,
                s.name AS show_name
         FROM show_assets sa
         JOIN shows s ON s.id = sa.show_id
-        WHERE sa.asset_type_id = %s AND COALESCE(s.is_test, 0) = 0{date_filter}
-        ORDER BY sa.rental_start
-    """, [type_id] + date_params).fetchall()
-
-    rows = []
+        WHERE sa.asset_type_id = ANY(%s) AND COALESCE(s.is_test, 0) = 0{date_filter}
+        ORDER BY sa.rental_start, sa.id
+    """, [ids] + date_params).fetchall()
     for r in direct:
         d = dict(r)
+        t = d.pop('_for_type')
         d['via_system_id'] = None
         d['via_system_name'] = None
-        rows.append(d)
+        out[t].append(d)
 
-    # INDIRECT demand — lines that book a System/Package containing this type.
+    # INDIRECT demand — lines that book a System/Package containing these types.
     indirect = db.execute(f"""
-        SELECT sa.id, sa.show_id,
+        SELECT m.component_type_id AS _for_type,
+               sa.id, sa.show_id,
                sa.quantity * COALESCE(m.quantity, 1) AS quantity,
                sa.rental_start, sa.rental_end,
                sa.is_hidden, sa.locked_price, sa.original_locked_price,
@@ -17492,15 +17745,15 @@ def _component_demand(db, type_id, start_date=None, end_date=None):
         JOIN show_assets sa  ON sa.asset_type_id = m.system_type_id
         JOIN asset_types sys ON sys.id = m.system_type_id
         JOIN shows s         ON s.id = sa.show_id
-        WHERE m.component_type_id = %s AND COALESCE(s.is_test, 0) = 0{date_filter}
-        ORDER BY sa.rental_start
-    """, [type_id] + date_params).fetchall()
+        WHERE m.component_type_id = ANY(%s) AND COALESCE(s.is_test, 0) = 0{date_filter}
+        ORDER BY sa.rental_start, sa.id, sys.id
+    """, [ids] + date_params).fetchall()
     for r in indirect:
         d = dict(r)
+        t = d.pop('_for_type')
         d['asset_item_id'] = None  # indirect demand is generic, never unit-pinned
-        rows.append(d)
-
-    return rows
+        out[t].append(d)
+    return out
 
 
 def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
@@ -17514,97 +17767,133 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
       units         — per-unit availability when start/end given and the
                       type has allow_unit_selection (one entry per asset_item)
       booked_item_ids — set of item ids already pinned to an overlapping show
+    None when the type doesn't exist. One type of
+    _get_asset_availability_many, so single and batched callers can never
+    disagree.
     """
-    type_row = db.execute('SELECT * FROM asset_types WHERE id=%s', (asset_type_id,)).fetchone()
-    if not type_row:
+    if asset_type_id is None:
         return None
+    return _get_asset_availability_many(db, [asset_type_id], start_date, end_date).get(
+        int(asset_type_id))
 
-    # System/package types have no individually tracked units — treat as always available
-    if type_row['is_system'] or type_row['is_package']:
-        return {'unlimited': True, 'kit': True}
 
-    total_items = db.execute(
-        "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status != 'retired'",
-        (asset_type_id,)
-    ).fetchone()[0]
+def _get_asset_availability_many(db, type_ids, start_date=None, end_date=None):
+    """_get_asset_availability for many types over ONE date window, in at
+    most 5 queries whatever the number of types: {type_id: result} (types
+    that don't exist are left out). Replaces 4–6 queries per type in the
+    loops on the Asset Manager, the Assets tab, dashboard widgets and the
+    System/Package component check."""
+    ids = sorted({int(t) for t in type_ids if t is not None})
+    if not ids:
+        return {}
+    # Only the flags below, never asset_types.* (photo is a BYTEA).
+    type_rows = {r['id']: r for r in db.execute(
+        'SELECT id, is_system, is_package, is_consumable, track_quantity, reserve_count, '
+        'allow_unit_selection FROM asset_types WHERE id = ANY(%s)', (ids,)).fetchall()}
+    counts = {r['asset_type_id']: r for r in db.execute("""
+        SELECT asset_type_id,
+               COUNT(*) FILTER (WHERE status != 'retired')   AS total_items,
+               COUNT(*) FILTER (WHERE status = 'maintenance') AS in_maintenance
+        FROM asset_items WHERE asset_type_id = ANY(%s) GROUP BY asset_type_id
+    """, (ids,)).fetchall()}
 
-    in_maintenance = db.execute(
-        "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status='maintenance'",
-        (asset_type_id,)
-    ).fetchone()[0]
-
-    reserve_count = type_row['reserve_count'] or 0
-
-    # For consumables with unlimited stock
-    if type_row['is_consumable'] and not type_row['track_quantity']:
-        return {
-            'total_items': None,
-            'reserve_count': reserve_count,
-            'in_maintenance': 0,
-            'available': None,
-            'shows': [],
-            'unlimited': True,
-        }
-
-    # Demand on this type = direct show lines for the type PLUS indirect demand
-    # from any System/Package line that includes this type as a component (see
-    # _component_demand). Specific-unit bookings still occupy a direct row with
-    # quantity=1, so they're already counted in total_reserved; indirect rows
-    # are generic (asset_item_id is None) and only move the aggregate count, so
-    # the per-unit logic below ignores them.
-    shows = _component_demand(db, asset_type_id, start_date, end_date)
-
-    total_reserved = sum(r['quantity'] for r in shows)
-    available = total_items - in_maintenance - reserve_count - total_reserved
-
-    booked_item_ids = {r['asset_item_id'] for r in shows if r['asset_item_id']}
-
-    units = []
-    if type_row['allow_unit_selection'] and start_date and end_date:
-        item_rows = db.execute("""
-            SELECT id, barcode, status
+    # Types whose availability depends on bookings (not kits, not unlimited
+    # consumables).
+    tracked = [t for t, tr in type_rows.items()
+               if not (tr['is_system'] or tr['is_package'])
+               and not (tr['is_consumable'] and not tr['track_quantity'])]
+    demand = _component_demand_many(db, tracked, start_date, end_date) if tracked else {}
+    unit_types = [t for t in tracked if type_rows[t]['allow_unit_selection']]
+    items_by_type = {}
+    if unit_types and start_date and end_date:
+        for it in db.execute("""
+            SELECT asset_type_id, id, barcode, status
             FROM asset_items
-            WHERE asset_type_id=%s AND status != 'retired'
+            WHERE asset_type_id = ANY(%s) AND status != 'retired'
             ORDER BY sort_order, id
-        """, (asset_type_id,)).fetchall()
-        # Map item_id → list of overlapping show bookings, so the UI can
-        # explain why a unit is unavailable.
-        bookings_by_item = {}
-        for r in shows:
-            if r['asset_item_id']:
-                bookings_by_item.setdefault(r['asset_item_id'], []).append({
-                    'show_id': r['show_id'],
-                    'show_name': r['show_name'],
-                    'rental_start': r['rental_start'],
-                    'rental_end': r['rental_end'],
+        """, (unit_types,)).fetchall():
+            items_by_type.setdefault(it['asset_type_id'], []).append(it)
+
+    out = {}
+    for t, type_row in type_rows.items():
+        # System/package types have no individually tracked units — treat as always available
+        if type_row['is_system'] or type_row['is_package']:
+            out[t] = {'unlimited': True, 'kit': True}
+            continue
+
+        c = counts.get(t)
+        total_items = c['total_items'] if c else 0
+        in_maintenance = c['in_maintenance'] if c else 0
+        reserve_count = type_row['reserve_count'] or 0
+
+        # For consumables with unlimited stock
+        if type_row['is_consumable'] and not type_row['track_quantity']:
+            out[t] = {
+                'total_items': None,
+                'reserve_count': reserve_count,
+                'in_maintenance': 0,
+                'available': None,
+                'shows': [],
+                'unlimited': True,
+            }
+            continue
+
+        # Demand on this type = direct show lines for the type PLUS indirect demand
+        # from any System/Package line that includes this type as a component (see
+        # _component_demand). Specific-unit bookings still occupy a direct row with
+        # quantity=1, so they're already counted in total_reserved; indirect rows
+        # are generic (asset_item_id is None) and only move the aggregate count, so
+        # the per-unit logic below ignores them.
+        shows = demand.get(t, [])
+
+        total_reserved = sum(r['quantity'] for r in shows)
+        available = total_items - in_maintenance - reserve_count - total_reserved
+
+        booked_item_ids = {r['asset_item_id'] for r in shows if r['asset_item_id']}
+
+        units = []
+        if type_row['allow_unit_selection'] and start_date and end_date:
+            # Map item_id → list of overlapping show bookings, so the UI can
+            # explain why a unit is unavailable.
+            bookings_by_item = {}
+            for r in shows:
+                if r['asset_item_id']:
+                    bookings_by_item.setdefault(r['asset_item_id'], []).append({
+                        'show_id': r['show_id'],
+                        'show_name': r['show_name'],
+                        'rental_start': _iso_dates_deep(r['rental_start']),
+                        'rental_end': _iso_dates_deep(r['rental_end']),
+                    })
+            for it in items_by_type.get(t, []):
+                iid = it['id']
+                is_maint = it['status'] == 'maintenance'
+                bookings = bookings_by_item.get(iid, [])
+                units.append({
+                    'id': iid,
+                    'barcode': it['barcode'] or '',
+                    'status': it['status'],
+                    'in_maintenance': bool(is_maint),
+                    'booked': bool(bookings),
+                    'available': not (is_maint or bookings),
+                    'bookings': bookings,
                 })
-        for it in item_rows:
-            iid = it['id']
-            is_maint = it['status'] == 'maintenance'
-            bookings = bookings_by_item.get(iid, [])
-            units.append({
-                'id': iid,
-                'barcode': it['barcode'] or '',
-                'status': it['status'],
-                'in_maintenance': bool(is_maint),
-                'booked': bool(bookings),
-                'available': not (is_maint or bookings),
-                'bookings': bookings,
-            })
 
-    return {
-        'total_items': total_items,
-        'reserve_count': reserve_count,
-        'in_maintenance': in_maintenance,
-        'total_reserved': total_reserved,
-        'available': available,
-        'shows': [dict(r) for r in shows],
-        'unlimited': False,
-        'allow_unit_selection': bool(type_row['allow_unit_selection']),
-        'units': units,
-        'booked_item_ids': list(booked_item_ids),
-    }
-
+        out[t] = {
+            'total_items': total_items,
+            'reserve_count': reserve_count,
+            'in_maintenance': in_maintenance,
+            'total_reserved': total_reserved,
+            'available': available,
+            # ISO dates: the Assets-page calendar string-compares them against
+            # 'YYYY-MM-DD' (HTTP-date strings never matched, so no day ever
+            # showed as booked).
+            'shows': [_normalize_row_dates(dict(r)) for r in shows],
+            'unlimited': False,
+            'allow_unit_selection': bool(type_row['allow_unit_selection']),
+            'units': units,
+            'booked_item_ids': list(booked_item_ids),
+        }
+    return out
 
 def _system_component_shortages(db, system_type_id, system_qty, start_date, end_date,
                                 back_out_system_qty=0):
@@ -17638,10 +17927,12 @@ def _system_component_shortages(db, system_type_id, system_qty, start_date, end_
         WHERE m.system_type_id = %s
     """, (system_type_id,)).fetchall()
 
+    avail = _get_asset_availability_many(
+        db, [m['component_type_id'] for m in members], start_date, end_date)
     shortages = []
     for m in members:
         needed = m['member_qty'] * system_qty
-        av = _get_asset_availability(db, m['component_type_id'], start_date, end_date)
+        av = avail.get(m['component_type_id'])
         if not av or av.get('unlimited') or av.get('available') is None:
             continue
         effective = av['available'] + m['member_qty'] * back_out_system_qty
@@ -17721,21 +18012,26 @@ def _find_overbooked_types(db):
         LEFT JOIN asset_categories ac ON ac.id = at.category_id
     """).fetchall()
 
-    overbooked = []
-    for t in type_rows:
-        if t['is_system'] or t['is_package']:
-            continue
-        if t['is_consumable'] and not t['track_quantity']:
-            continue
+    trackable = [t for t in type_rows
+                 if not (t['is_system'] or t['is_package'])
+                 and not (t['is_consumable'] and not t['track_quantity'])]
+    # Batched: one grouped count + one direct and one indirect demand query
+    # for ALL types (this used to be 4 queries per type on every Asset
+    # Manager page load).
+    ids = [t['id'] for t in trackable]
+    counts = {r['asset_type_id']: r for r in db.execute("""
+        SELECT asset_type_id,
+               COUNT(*) FILTER (WHERE status != 'retired')   AS total,
+               COUNT(*) FILTER (WHERE status = 'maintenance') AS in_maint
+        FROM asset_items WHERE asset_type_id = ANY(%s) GROUP BY asset_type_id
+    """, (ids,)).fetchall()} if ids else {}
+    demand = _component_demand_many(db, ids)
 
-        total = db.execute(
-            "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status != 'retired'",
-            (t['id'],)
-        ).fetchone()[0]
-        in_maint = db.execute(
-            "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status='maintenance'",
-            (t['id'],)
-        ).fetchone()[0]
+    overbooked = []
+    for t in trackable:
+        c = counts.get(t['id'])
+        total = c['total'] if c else 0
+        in_maint = c['in_maint'] if c else 0
         reserve = t['reserve_count'] or 0
         usable = max(0, total - in_maint - reserve)
 
@@ -17743,7 +18039,7 @@ def _find_overbooked_types(db):
         # includes it as a component (see _component_demand). Keep only bookings
         # with a real date range.
         bookings = [
-            b for b in _component_demand(db, t['id'])
+            b for b in demand.get(t['id'], [])
             if b['rental_start'] and b['rental_end']
         ]
         if not bookings:
@@ -17813,7 +18109,7 @@ def asset_types_overbooked():
     db = get_db()
     result = _find_overbooked_types(db)
     db.close()
-    return jsonify({'overbooked': result})
+    return jsonify({'overbooked': _iso_dates_deep(result)})
 
 
 @app.route('/api/asset-types/<int:type_id>/availability')
@@ -17842,9 +18138,10 @@ def assets_availability_bulk():
     date_to   = request.args.get('to')
     db = get_db()
     type_ids = [r['id'] for r in db.execute('SELECT id FROM asset_types WHERE is_retired=0').fetchall()]
+    avail = _get_asset_availability_many(db, type_ids, date_from, date_to)
     by_type = {}
     for tid in type_ids:
-        info = _get_asset_availability(db, tid, date_from, date_to)
+        info = avail.get(tid)
         if info:
             by_type[tid] = {
                 'total':       info.get('total_items'),
@@ -17877,24 +18174,31 @@ def assets_availability_bulk():
         SELECT s.id, s.name, s.show_date FROM shows s {where_sql}
         ORDER BY s.show_date
     """, params).fetchall()
-    by_show = []
-    for sr in shows_raw:
-        assets = db.execute("""
-            SELECT sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end,
+    # Every listed show's lines in ONE query (was one query per show).
+    assets_by_show = {}
+    if shows_raw:
+        for a in db.execute("""
+            SELECT sa.show_id AS _show_id,
+                   sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end,
                    at.name as type_name, at.manufacturer,
                    ac.name as category_name
             FROM show_assets sa
             JOIN asset_types at ON at.id = sa.asset_type_id
             JOIN asset_categories ac ON ac.id = at.category_id
-            WHERE sa.show_id = %s AND sa.is_hidden = 0
-            ORDER BY ac.name, at.name
-        """, (sr['id'],)).fetchall()
+            WHERE sa.show_id = ANY(%s) AND sa.is_hidden = 0
+            ORDER BY ac.name, at.name, sa.id
+        """, ([sr['id'] for sr in shows_raw],)).fetchall():
+            d = dict(a)
+            assets_by_show.setdefault(d.pop('_show_id'), []).append(d)
+    by_show = []
+    for sr in shows_raw:
+        assets = assets_by_show.get(sr['id'], [])
         if assets:
             by_show.append({
                 'id':       sr['id'],
                 'name':     sr['name'],
                 'show_date': str(sr['show_date']) if sr['show_date'] else None,
-                'assets':   [{k: (str(v) if hasattr(v, 'isoformat') else v) for k, v in dict(a).items()} for a in assets],
+                'assets':   [{k: (str(v) if hasattr(v, 'isoformat') else v) for k, v in a.items()} for a in assets],
             })
     db.close()
     return jsonify({'by_type': by_type, 'by_show': by_show})
@@ -18085,18 +18389,27 @@ def _show_rental_window(db, show_id):
     default rental period for new asset lines AND the bounds a rental may
     not extend past (rentals are tied to the show's advance dates).
     Returns (start, end) as datetime.date, either may be None (undated show)."""
-    show = db.execute(
-        'SELECT show_date, load_in_date, load_out_date FROM shows WHERE id=%s',
-        (show_id,)).fetchone()
-    if not show:
-        return None, None
-    perfs = db.execute(
-        'SELECT MIN(perf_date) AS p0, MAX(perf_date) AS p1 '
-        'FROM show_performances WHERE show_id=%s AND perf_date IS NOT NULL',
-        (show_id,)).fetchone()
-    start = _as_date(show['load_in_date']) or _as_date(perfs['p0']) or _as_date(show['show_date'])
-    end = _as_date(show['load_out_date']) or _as_date(perfs['p1']) or _as_date(show['show_date'])
-    return start, end
+    return _show_rental_windows(db, [show_id]).get(int(show_id), (None, None))
+
+
+def _show_rental_windows(db, show_ids):
+    """_show_rental_window for many shows in one query: {show_id: (start, end)}."""
+    ids = sorted({int(i) for i in show_ids if i is not None})
+    if not ids:
+        return {}
+    rows = db.execute("""
+        SELECT s.id, s.show_date, s.load_in_date, s.load_out_date,
+               p.p0, p.p1
+        FROM shows s
+        LEFT JOIN (SELECT show_id, MIN(perf_date) AS p0, MAX(perf_date) AS p1
+                     FROM show_performances
+                    WHERE show_id = ANY(%s) AND perf_date IS NOT NULL
+                    GROUP BY show_id) p ON p.show_id = s.id
+        WHERE s.id = ANY(%s)
+    """, (ids, ids)).fetchall()
+    return {r['id']: (_as_date(r['load_in_date']) or _as_date(r['p0']) or _as_date(r['show_date']),
+                      _as_date(r['load_out_date']) or _as_date(r['p1']) or _as_date(r['show_date']))
+            for r in rows}
 
 
 def _clean_rental_dates(db, show_id, rental_start, rental_end):
@@ -18148,8 +18461,9 @@ def show_assets_list(show_id):
     """, (show_id, 1 if user_is_admin else 0)).fetchall()
 
     # External rentals
-    ext_rows = db.execute("""
-        SELECT * FROM show_external_rentals WHERE show_id=%s ORDER BY sort_order, id
+    ext_rows = db.execute(f"""
+        SELECT {_cols_except(db, 'show_external_rentals', ('pdf_data', 's3_key'))}
+        FROM show_external_rentals WHERE show_id=%s ORDER BY sort_order, id
     """, (show_id,)).fetchall()
 
     # Approval state
@@ -18166,20 +18480,22 @@ def show_assets_list(show_id):
     }
 
     # Attach per-line availability info so the UI can flag overbooked rows.
-    # Cached by (type_id, start, end) since multiple rows can share a window.
+    # One batched lookup per distinct rental window (lines usually share the
+    # show's window) instead of 4–6 queries per line.
+    by_window = {}
+    for r in rows:
+        by_window.setdefault((r['rental_start'], r['rental_end']), set()).add(r['asset_type_id'])
     avail_cache = {}
+    for (w_start, w_end), tids in by_window.items():
+        for tid, av in _get_asset_availability_many(db, tids, w_start, w_end).items():
+            avail_cache[(tid, w_start, w_end)] = av
     assets_out = []
     for r in rows:
         # Normalize date columns to ISO (PG hands back date objects, which
         # jsonify would render as "Fri, 24 Jul 2026 00:00:00 GMT" — useless
         # for display and for <input type="date"> editors).
         d = _normalize_row_dates(dict(r))
-        key = (r['asset_type_id'], r['rental_start'], r['rental_end'])
-        if key not in avail_cache:
-            avail_cache[key] = _get_asset_availability(
-                db, r['asset_type_id'], r['rental_start'], r['rental_end']
-            ) or {}
-        av = avail_cache[key]
+        av = avail_cache.get((r['asset_type_id'], r['rental_start'], r['rental_end'])) or {}
         d['_avail_available'] = av.get('available')
         d['_avail_unlimited'] = bool(av.get('unlimited'))
         d['_avail_overbooked'] = (
@@ -18193,7 +18509,7 @@ def show_assets_list(show_id):
     db.close()
     return jsonify({
         'assets': assets_out,
-        'external_rentals': [{k: v for k, v in dict(r).items() if k != 'pdf_data'} for r in ext_rows],
+        'external_rentals': [dict(r) for r in ext_rows],
         'approval': approval,
         # Allowed rental bounds for the date editors (show load-in → load-out).
         'rental_window': {'start': win_start.isoformat() if win_start else None,
@@ -18507,8 +18823,10 @@ def show_asset_edit(show_id, sa_id):
             own_overlaps = (
                 existing['rental_start'] and existing['rental_end']
                 and rental_start and rental_end
-                and existing['rental_end'] >= rental_start
-                and existing['rental_start'] <= rental_end
+                # _as_date both sides: the row holds PG date objects, the
+                # request's new window is ISO strings (date >= str raised).
+                and _as_date(existing['rental_end']) >= _as_date(rental_start)
+                and _as_date(existing['rental_start']) <= _as_date(rental_end)
             )
             remaining_excl_self = remaining + (existing['quantity'] if own_overlaps else 0)
             if remaining_excl_self - quantity < 0:
@@ -18537,8 +18855,8 @@ def show_asset_edit(show_id, sa_id):
         own_overlaps = (
             existing['rental_start'] and existing['rental_end']
             and rental_start and rental_end
-            and existing['rental_end'] >= rental_start
-            and existing['rental_start'] <= rental_end
+            and _as_date(existing['rental_end']) >= _as_date(rental_start)
+            and _as_date(existing['rental_start']) <= _as_date(rental_end)
         )
         shortages = _system_component_shortages(
             db, existing['asset_type_id'], quantity, rental_start, rental_end,
@@ -18761,7 +19079,9 @@ def external_rental_add(show_id):
             db.execute('UPDATE show_external_rentals SET pdf_data=%s, content_sha256=%s WHERE id=%s',
                        (pdf_bytes, sha, er_id))
         db.commit()
-        row = db.execute('SELECT * FROM show_external_rentals WHERE id=%s', (er_id,)).fetchone()
+        row = db.execute(
+            f"SELECT {_cols_except(db, 'show_external_rentals', ('pdf_data', 's3_key'))} "
+            "FROM show_external_rentals WHERE id=%s", (er_id,)).fetchone()
     log_audit(db, 'EXTERNAL_RENTAL_ADD', 'show_external_rental', er_id, show_id=show_id,
               detail=description)
     _reset_asset_approval(db, show_id, 'external_rental_added')
@@ -18779,7 +19099,7 @@ def external_rental_update(show_id, er_id):
     replace the attached PDF. Sent as multipart/form-data so a new PDF can be
     uploaded; if no file is attached the existing PDF is preserved."""
     db = get_db()
-    row = db.execute('SELECT * FROM show_external_rentals WHERE id=%s AND show_id=%s',
+    row = db.execute('SELECT id, s3_key FROM show_external_rentals WHERE id=%s AND show_id=%s',
                      (er_id, show_id)).fetchone()
     if not row:
         db.close()
@@ -18835,8 +19155,10 @@ def external_rental_update(show_id, er_id):
               detail=description)
     _reset_asset_approval(db, show_id, 'external_rental_updated')
     db.commit()
-    updated = db.execute('SELECT * FROM show_external_rentals WHERE id=%s', (er_id,)).fetchone()
-    result = {k: v for k, v in dict(updated).items() if k not in ('pdf_data', 's3_key')}
+    updated = db.execute(
+        f"SELECT {_cols_except(db, 'show_external_rentals', ('pdf_data', 's3_key'))} "
+        "FROM show_external_rentals WHERE id=%s", (er_id,)).fetchone()
+    result = dict(updated)
     db.close()
     syslog_logger.info(
         f"EXTERNAL_RENTAL_UPDATE show_id={show_id} er_id={er_id} desc={description!r} "
@@ -18873,8 +19195,9 @@ def external_rental_pdf(show_id, er_id):
     if not can_access_show(session['user_id'], show_id):
         abort(403)
     db = get_db()
-    row = db.execute('SELECT * FROM show_external_rentals WHERE id=%s AND show_id=%s',
-                     (er_id, show_id)).fetchone()
+    row = db.execute(
+        f"SELECT id, s3_key, pdf_filename, {file_store.in_db_col('rentals')} "
+        'FROM show_external_rentals WHERE id=%s AND show_id=%s', (er_id, show_id)).fetchone()
     db.close()
     if not row:
         abort(404)
@@ -18950,9 +19273,12 @@ def asset_approvals():
         s['_eff'] = _eff_date(s.get('effective_date'))
     shows = [s for s in shows if s['_eff'] and start <= s['_eff'] <= end]
 
-    # Aggregate per-show asset + external-rental totals, counts, and rows.
-    for s in shows:
-        assets = db.execute("""
+    # Aggregate per-show asset + external-rental totals, counts, and rows —
+    # every show in the window in 3 queries (was 4 queries per show).
+    show_ids = [s['id'] for s in shows]
+    assets_by_show, ext_by_show, windows = {}, {}, {}
+    if show_ids:
+        for r in db.execute("""
             SELECT sa.*, at.name AS type_name, at.manufacturer, at.model,
                    ac.name AS category_name,
                    at.rental_cost AS catalog_daily_rate,
@@ -18960,14 +19286,21 @@ def asset_approvals():
             FROM show_assets sa
             JOIN asset_types at ON at.id = sa.asset_type_id
             JOIN asset_categories ac ON ac.id = at.category_id
-            WHERE sa.show_id = %s AND sa.is_hidden = 0
-            ORDER BY ac.name, at.name, sa.created_at
-        """, (s['id'],)).fetchall()
-        ext = db.execute("""
-            SELECT id, description, cost, pdf_filename,
+            WHERE sa.show_id = ANY(%s) AND sa.is_hidden = 0
+            ORDER BY ac.name, at.name, sa.created_at, sa.id
+        """, (show_ids,)).fetchall():
+            assets_by_show.setdefault(r['show_id'], []).append(r)
+        for r in db.execute("""
+            SELECT show_id, id, description, cost, pdf_filename,
                    (pdf_data IS NOT NULL OR s3_key IS NOT NULL) AS has_pdf
-            FROM show_external_rentals WHERE show_id=%s ORDER BY sort_order, id
-        """, (s['id'],)).fetchall()
+            FROM show_external_rentals WHERE show_id = ANY(%s) ORDER BY sort_order, id
+        """, (show_ids,)).fetchall():
+            d = dict(r)
+            ext_by_show.setdefault(d.pop('show_id'), []).append(d)
+        windows = _show_rental_windows(db, show_ids)
+    for s in shows:
+        assets = assets_by_show.get(s['id'], [])
+        ext = ext_by_show.get(s['id'], [])
         s['assets']           = [_normalize_row_dates(dict(r)) for r in assets]
         s['external_rentals'] = [dict(r) for r in ext]
         s['assets_total']     = sum(float(r['locked_price'] or 0) * int(r['quantity'] or 1)
@@ -18979,7 +19312,7 @@ def asset_approvals():
         # distinct tint in the template so they read as historical.
         s['is_past'] = s.pop('_eff') < today
         # Allowed rental bounds for the per-line date editors + add modal.
-        win_start, win_end = _show_rental_window(db, s['id'])
+        win_start, win_end = windows.get(s['id'], (None, None))
         s['rental_win_start'] = win_start.isoformat() if win_start else ''
         s['rental_win_end']   = win_end.isoformat() if win_end else ''
 
@@ -19168,8 +19501,9 @@ def assets_admin():
 def assets_retired():
     db = get_db()
     # Retired types with their items and log counts
-    types = db.execute("""
-        SELECT at.*, ac.name as category_name,
+    types = db.execute(f"""
+        SELECT {_cols_except(db, 'asset_types', 'photo', 'at')}, {_ASSET_HAS_PHOTO_SQL},
+               ac.name as category_name,
                (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id) as total_items,
                (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id AND ai.status='retired') as retired_items
         FROM asset_types at
@@ -20115,7 +20449,9 @@ def _merge_pdfs(base_pdf_bytes, extra_pdfs, extras_watermark=None):
 def _fetch_external_rental_pdfs(db, show_id):
     """Return list of PDF byte-strings for all external rentals that have attached PDFs."""
     rows = db.execute(
-        'SELECT id, s3_key, pdf_data, pdf_filename FROM show_external_rentals WHERE show_id=%s ORDER BY sort_order',
+        f"SELECT id, s3_key, pdf_filename, {file_store.in_db_col('rentals')} "
+        "FROM show_external_rentals WHERE show_id=%s AND COALESCE(pdf_filename, '') <> '' "
+        'ORDER BY sort_order',
         (show_id,)
     ).fetchall()
     result = []
@@ -22193,8 +22529,8 @@ def api_dashboard_asset_calendar():
 
     db = get_db()
     row = db.execute(
-        'SELECT at.*, ac.name AS category_name FROM asset_types at '
-        'JOIN asset_categories ac ON ac.id = at.category_id WHERE at.id = %s',
+        f"SELECT {_cols_except(db, 'asset_types', 'photo', 'at')}, ac.name AS category_name "
+        'FROM asset_types at JOIN asset_categories ac ON ac.id = at.category_id WHERE at.id = %s',
         (type_id,)
     ).fetchone()
     if not row:
@@ -22407,8 +22743,8 @@ def dashboard_view(dash_id):
             db.close()
             abort(403)
     cats = db.execute('SELECT * FROM asset_categories ORDER BY sort_order, name').fetchall()
-    types = db.execute("""
-        SELECT at.*, ac.name as category_name
+    types = db.execute(f"""
+        SELECT {_cols_except(db, 'asset_types', 'photo', 'at')}, ac.name as category_name
         FROM asset_types at
         JOIN asset_categories ac ON ac.id = at.category_id
         ORDER BY ac.sort_order, at.sort_order, at.name
@@ -22418,7 +22754,7 @@ def dashboard_view(dash_id):
     return render_template('dashboard_view.html',
                            dash=dict(d),
                            categories=[dict(c) for c in cats],
-                           asset_types=[{k: v for k, v in dict(t).items() if k != 'photo'} for t in types],
+                           asset_types=[dict(t) for t in types],
                            config=config,
                            user=get_current_user())
 
@@ -22510,8 +22846,8 @@ def public_dashboard(slug):
         db.close()
         abort(404)
     cats = db.execute('SELECT * FROM asset_categories ORDER BY sort_order, name').fetchall()
-    types = db.execute("""
-        SELECT at.*, ac.name as category_name
+    types = db.execute(f"""
+        SELECT {_cols_except(db, 'asset_types', 'photo', 'at')}, ac.name as category_name
         FROM asset_types at
         JOIN asset_categories ac ON ac.id = at.category_id
         ORDER BY ac.sort_order, at.sort_order, at.name
@@ -22521,7 +22857,7 @@ def public_dashboard(slug):
     return render_template('dashboard_view.html',
                            dash=dict(d),
                            categories=[dict(c) for c in cats],
-                           asset_types=[{k: v for k, v in dict(t).items() if k != 'photo'} for t in types],
+                           asset_types=[dict(t) for t in types],
                            config=config,
                            public=True,
                            user=None)
@@ -22616,13 +22952,14 @@ def asset_reports_data():
         JOIN asset_categories ac ON ac.id = at.category_id
         JOIN shows s ON s.id = sa.show_id
         {where_sql}
-        ORDER BY s.show_date DESC, ac.name, at.name
+        ORDER BY s.show_date DESC NULLS LAST, ac.name, at.name
     """, params).fetchall()
 
     total_revenue = sum(r['line_total'] or 0 for r in rows)
     db.close()
     return jsonify({
-        'rows': [dict(r) for r in rows],
+        # ISO dates for the table and the CSV export (was HTTP-date text).
+        'rows': [_normalize_row_dates(dict(r)) for r in rows],
         'total_revenue': total_revenue,
         'count': len(rows),
     })

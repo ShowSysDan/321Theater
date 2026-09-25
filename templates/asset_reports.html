@@ -223,16 +223,16 @@ function exportCsv() {
   const blob = new Blob([csv], { type: 'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `asset_report_${new Date().toISOString().slice(0,10)}.csv`;
+  a.download = `asset_report_${localTodayIso()}.csv`;
   a.click();
 }
 
 // Default date range: past year
 window.addEventListener('DOMContentLoaded', () => {
   const now = new Date();
-  document.getElementById('filter-to').value = now.toISOString().slice(0,10);
+  document.getElementById('filter-to').value = localIsoDate(now);
   const past = new Date(); past.setFullYear(past.getFullYear() - 1);
-  document.getElementById('filter-from').value = past.toISOString().slice(0,10);
+  document.getElementById('filter-from').value = localIsoDate(past);
 });
 </script>
 {% endblock %}

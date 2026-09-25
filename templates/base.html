@@ -40,7 +40,16 @@
        /static, /api      not page navigations
      Add class="no-prefetch" to any future link that must never be prefetched
      (e.g. a GET that mutates state — though those should be POSTs anyway). #}
-  <script>window.__PAGE_RENDERED_AT = {{ page_rendered_at }};</script>
+  <script>window.__PAGE_RENDERED_AT = {{ page_rendered_at }};
+  // Today's date as YYYY-MM-DD in the BROWSER's time zone. Defined here (not
+  // app.js) because some pages' scripts run before app.js loads.
+  // new Date().toISOString().slice(0,10) is the UTC date, which after
+  // ~8 pm in Orlando is already tomorrow.
+  window.localIsoDate = function (d) {
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
+           String(d.getDate()).padStart(2, '0');
+  };
+  window.localTodayIso = function () { return localIsoDate(new Date()); };</script>
   <script type="speculationrules">
   {% raw %}{
     "prefetch": [{
@@ -49,7 +58,7 @@
         { "href_matches": "/*" },
         { "not": { "href_matches": [
           "/logout", "/login*", "/static/*", "/api/*",
-          "*/export/*", "*.pdf", "*/download", "*/download/*"
+          "*/export/*", "*/export", "*.pdf", "*/pdf", "*/download", "*/download/*"
         ] } },
         { "not": { "selector_matches": "[download], .no-prefetch" } }
       ] },

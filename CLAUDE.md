@@ -40,8 +40,31 @@ and don't write "portable" SQLite/PG code or `if backend == …` branches.
   `advance_email_enabled='0'` from the bootstrap and send nothing. That class
   of bug is now impossible. Keep it that way: **never catch
   DatabaseUnavailable and carry on with made-up data.**
-- `get_db()` opens a fresh psycopg2 connection per call (search_path set via
-  startup `options`), so it's safe from background threads. Always `close()`.
+- `get_db()` hands out a connection from a small **per-process pool**
+  (3.3.0, `db_adapter._ConnectionPool`; search_path set via startup
+  `options`), so it's safe from background threads. Always `close()` — that
+  RETURNS it (rolled back first, so an uncommitted write is discarded exactly
+  as a real close did). Opening a connection costs ~10 ms (TCP/TLS + SCRAM +
+  backend fork) and cold backends run their first queries slowly; before the
+  pool, connects were most of every page's time (show page: 10 connects,
+  ~100 of its ~160 ms). Pool rules — keep them:
+  - Nothing waits on the pool: empty → open a new connection; full → close
+    the returned one. `[postgresql] pool_max_idle` in db_config.ini caps
+    IDLE connections per process (default 4 → 16 per 4-worker server; 0 =
+    the old connect-per-call behavior). Mind PG's `max_connections`
+    (default 100) across servers + the sister apps sharing the DB.
+  - A connection that touched SESSION state (session-level advisory lock,
+    `SET`, `LISTEN`, temp table, `PREPARE`, or `.raw`) is closed, not pooled
+    (`_leaves_session_state()`) — e.g. file_store's migration lock. Don't
+    add session-state SQL expecting it to persist across `get_db()` calls.
+  - A dead idle connection (PG restart) is replaced transparently on its
+    FIRST statement only (safe: nothing in that transaction can have
+    committed); later failures surface as before. A still-down PG raises
+    DatabaseUnavailable from that reconnect, so outages still 503.
+  - After `close()` the wrapper refuses all use (InterfaceError) — the real
+    connection may already be lent to another thread.
+  - Explicit-settings `db_adapter.connect(settings)` and `raw_connect()`
+    (init_db migrations, tests) are never pooled.
 
 ### Writing SQL (native psycopg2, sent VERBATIM)
 `db_adapter.DBConnection.execute()` hands SQL straight to psycopg2 (DictCursor
@@ -63,6 +86,16 @@ rows: `row['col']`, `row[0]`, `.get()`, `dict(row)`). No rewriting happens, so:
   (SQLite's were UTC). A column must be written and compared on the SAME
   clock: DB-defaulted timestamps → compare with `NOW() - INTERVAL …`;
   columns you stamp from Python → compare with the same Python clock.
+- **Sending timestamps to browser JS (3.3.3):** select the column as
+  `col::timestamptz` (PG interprets the naive DB-clock value in its session
+  zone) and serialize with `_ts_out()` → ISO with offset; parse in JS with
+  `parseServerTime()` (app.js). Never append 'Z' to a server time in JS and
+  never feed a jsonify'd naive datetime (its "GMT" label is false) to
+  `new Date()`. Plain dates: send ISO (`_normalize_row_dates` /
+  `_iso_dates_deep`). "Today" in JS = `localTodayIso()` / `localIsoDate(d)`
+  (base.html head), never `new Date().toISOString().slice(0,10)` (UTC).
+  Python-clock columns (cluster_instances, prism_sync_log.started_at,
+  prism_events.last_synced_at) are compared only with the same Python clock.
 - **Precision:** PG timestamps carry microseconds and `jsonify()` renders a
   datetime as a whole-second HTTP date — any timestamp used as a round-trip
   cursor must be sent as `isoformat()` (see `_sync_cursor()`), or `> since`
@@ -148,8 +181,9 @@ apps. For a 321Theater access change, use this app's own flags instead
   **leader-gated** via `am_i_leader()` (cluster heartbeat in `cluster_instances`)
   so only one worker fires side-effecting jobs. Jobs with external side effects
   (email/SMS) must start with `if not am_i_leader(): return`.
-- `get_db()` is context-free (fresh connection per call) — safe to call from
-  background threads, not just request handlers.
+- `get_db()` is context-free (a pooled connection per call, never shared
+  while checked out) — safe to call from background threads, not just
+  request handlers.
 
 ## Scheduled auto-emails (advance / production schedule PDFs)
 - Job: `run_scheduled_pdf_emails()` — cron, top of every hour; does work at or
@@ -205,9 +239,10 @@ apps. For a 321Theater access change, use this app's own flags instead
   the migrate-to-S3 backfill — compressed bytes must never be uploaded as-is).
   The admin File Manager is the ONE surface that shows archived rows (sorted
   first — they're the designated first candidates when freeing space).
-- Freshness: `_attachments_rev(db, show_id)` (`count:max(id)` of live rows,
-  indexed by `idx_show_attachments_show`) rides on the 2 s advance sync and
-  15 s heartbeat responses; app.js `_checkAttachmentsRev()` reloads file
+- Freshness: `attachments_rev` (`count:max(id)` of live rows —
+  `_ATTACHMENTS_REV_COLS` selected inside each poll's one `FROM shows s`
+  statement, indexed by `idx_show_attachments_show`) rides on the 2 s advance
+  sync and 15 s heartbeat responses; app.js `_checkAttachmentsRev()` reloads file
   lists when it changes. This is also the cross-INSTANCE refresh path (all
   instances share one PostgreSQL) — keep it in both poll responses.
 - Syslog: FILE_ARCHIVE / FILE_RESTORE / FILE_PURGE (+ existing FILE_UPLOAD).
@@ -333,6 +368,29 @@ apps. For a 321Theater access change, use this app's own flags instead
   must be accepted there (`purpose` was missing until 3.2.0 and turned every
   failed send with a purpose into a TypeError).
 
+## Asset availability — batch it in loops (3.3.2)
+- `_get_asset_availability_many(db, type_ids, start, end)` and
+  `_component_demand_many(db, type_ids, start, end)` answer any number of
+  types in ≤5 / 2 queries; the single-type `_get_asset_availability` /
+  `_component_demand` are wrappers over them (keep it that way, so single
+  and batched can't drift). Anything that loops over types, lines or shows
+  must call the `_many` form (group by date window when windows differ)
+  and `_show_rental_windows()` for many shows. Test/demo shows stay
+  excluded inside the demand query.
+
+## Audit-log Undo — explicit list only (3.3.1)
+- `audit_undo()` reverses only actions in `_UNDO_ACTIONS` (action → (entity_type,
+  kind)). Never go back to guessing the kind from the action suffix: that made
+  ASSET_MEMBER_ADD (logged against the PARENT system type) delete the system
+  and ASSET_ITEM_ADD (TYPE id logged as the item id) delete an unrelated item.
+  To add an action: its entity_id must be the row it created/changed in
+  `UNDO_TABLE_MAP[entity_type]`, and for update/delete `before=` must be
+  `_snapshot_row()` of that row.
+- Create-undo is refused while any FK row references the target
+  (`_undo_blocking_refs`, catalog-driven; only `_UNDO_INCIDENTAL_REFS` are
+  ignored). `_snapshot_row()` omits BYTEA columns; restores write only real
+  non-BYTEA columns. Syslog: AUDIT_UNDO / AUDIT_UNDO_REFUSED / AUDIT_UNDO_FAILED.
+
 ## Per-page performance stats (admin Settings → Performance)
 - `db_adapter.query_timer_hook` stopwatches every `execute()`/`executemany()`;
   app.py's collector (`_perf_record_query` / `_perf_finish_request` /
@@ -423,8 +481,15 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
   heartbeat` every 15 s (presence + "someone saved" banner only).
 - **2 s is the floor, not a dial**: saves are debounced 1.5 s so faster
   polling can't deliver edits sooner, and every poll WRITES (presence upsert
-  + prune into `active_sessions`). Don't lower it; don't remove the
-  `_syncInFlight` overlap guard.
+  into `active_sessions`; the 60 s prune runs at most every 30 s per
+  worker). Don't lower it; don't remove the `_syncInFlight` overlap guard.
+- Each poll reads all its state in ONE `FROM shows s` statement (changed
+  fields as `json_object_agg`, the cursor's MAX(updated_at), last-saved,
+  attachments_rev) — one snapshot, so a save committing mid-poll can't move
+  the cursor past an edit the client never got. A deleted show → 404 (the
+  presence upsert would 500 on the FK). `save_advance` writes only fields
+  whose value changed (one `unnest` upsert), so `updated_at` — and thus what
+  other tabs receive — moves only for real edits; keep it that way.
 - Per-field presence: focusin/focusout in `bindAdvanceForm()` sets
   `_focusedField`, which rides on every poll into
   `active_sessions.focused_field` (one row per user per show — one focused

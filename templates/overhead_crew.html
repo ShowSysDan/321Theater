@@ -1239,7 +1239,7 @@
   /* ── Day / Sub-group / Request mutations ─────────────────────── */
 
   function addDayPrompt() {
-    const today = new Date().toISOString().slice(0,10);
+    const today = localTodayIso();
     const date = prompt('Work date for the new day (YYYY-MM-DD):', today);
     if (!date) return;
     openAddGroup(date.trim());

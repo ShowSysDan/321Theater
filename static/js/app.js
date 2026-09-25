@@ -82,6 +82,28 @@ function _initials(name) {
   return name.split(/\s+/).slice(0,2).map(w => w[0]).join('').toUpperCase();
 }
 
+/**
+ * Parse a timestamp the server sent into a Date (null if unusable).
+ * 3.3.3+: DB timestamps arrive as ISO 8601 WITH their UTC offset
+ * ("2026-09-25T09:00:00-04:00", see _ts_out in app.py), parsed as-is. Also
+ * accepts "…Z", RFC 1123 ("Fri, 25 Sep 2026 13:00:00 GMT") and, for older
+ * payloads, a bare "YYYY-MM-DD HH:MM:SS" — treated as UTC as before.
+ * Fractions are cut to milliseconds (some browsers reject 6 digits).
+ */
+function parseServerTime(v) {
+  if (!v) return null;
+  const raw = String(v).trim();
+  let d;
+  if (/GMT|UTC/.test(raw)) {
+    d = new Date(raw);
+  } else {
+    let iso = raw.replace(' ', 'T').replace(/(\.\d{3})\d+/, '$1');
+    if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(iso)) iso += 'Z';
+    d = new Date(iso);
+  }
+  return isNaN(d.getTime()) ? null : d;
+}
+
 /* ── Real-time Sync ─────────────────────────────────────────────── */
 
 /**
@@ -270,20 +292,12 @@ function _showOtherSavedBanner(savedAt) {
   const banner = document.createElement('div');
   banner.id = 'other-saved-banner';
   banner.className = 'other-saved-banner';
-  // Parse savedAt robustly. SQLite returns plain "YYYY-MM-DD HH:MM:SS" with
-  // no timezone, so we treat that as UTC by appending 'Z'. Postgres / Flask
-  // jsonify can return RFC-2822 ("Fri, 03 Jan 2026 18:42:15 GMT") or already
-  // ISO-with-zone strings — those parse natively and must NOT have a 'Z'
-  // tacked on. Anything that still fails to parse drops back to no time
-  // rather than showing "Invalid Date" in the banner.
+  // savedAt arrives with its UTC offset (3.3.3); an unparseable value
+  // drops back to no time rather than showing "Invalid Date".
   let time = '';
-  if (savedAt) {
-    const raw = String(savedAt).trim();
-    const looksTimezoned = /T|GMT|UTC|[+-]\d{2}:?\d{2}$|Z$/i.test(raw);
-    const d = new Date(looksTimezoned ? raw : raw + 'Z');
-    if (!isNaN(d.getTime())) {
-      time = d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-    }
+  const savedDate = parseServerTime(savedAt);
+  if (savedDate) {
+    time = savedDate.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
   }
   banner.innerHTML = `
     <span>⚠ Another user saved this form${time ? ' at ' + time : ''}. Reload to see their changes.</span>
@@ -2709,10 +2723,8 @@ function _escNotif(s) {
 
 function _formatNotifTime(iso) {
   if (!iso) return '';
-  let d;
-  try { d = new Date(iso.replace(' ', 'T') + (iso.endsWith('Z') ? '' : 'Z')); }
-  catch (e) { return ''; }
-  if (!d || isNaN(d.getTime())) return '';
+  const d = parseServerTime(iso);
+  if (!d) return '';
   const now = new Date();
   const diff = Math.floor((now - d) / 1000);
   if (diff < 60)   return 'just now';
@@ -2898,7 +2910,7 @@ async function openPdfFormFiller(fieldKey, label) {
     // values_json. `today` fields fall back to local today if unset.
     const values = data.submission.values || {};
     const advance = data.advance_values || {};
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = localTodayIso();
     for (const f of (data.template.fields || [])) {
       const hasStored = Object.prototype.hasOwnProperty.call(values, f.name)
                         && values[f.name] !== '' && values[f.name] !== null;
@@ -3209,12 +3221,16 @@ function renderComments(comments) {
     return;
   }
   const isAdmin = typeof IS_ADMIN !== 'undefined' && IS_ADMIN;
-  const items = [...visible, ...deleted].sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+  // Sort by the real instant: created_at used to arrive as an HTTP date, and
+  // a string compare of "Fri, 25 Sep…" vs "Mon, 21 Sep…" ordered comments by
+  // weekday name.
+  const _ct = c => (parseServerTime(c.created_at) || new Date(0)).getTime();
+  const items = [...visible, ...deleted].sort((a, b) => _ct(a) - _ct(b) || a.id - b.id);
   list.innerHTML = items.map(c => {
     const color = _userColor(c.author);
-    const dt = c.created_at
-      ? new Date((c.created_at.includes('T') ? c.created_at : c.created_at + 'Z'))
-          .toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})
+    const cd = parseServerTime(c.created_at);
+    const dt = cd
+      ? cd.toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})
       : '';
     const isDeleted = !!c.deleted_at;
     const bodyHtml = isDeleted
@@ -4440,7 +4456,7 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
   // Mirrors the href_matches exclusions in base.html's speculationrules block.
   const EXCLUDE = [
     /^\/logout$/, /^\/login/, /^\/static\//, /^\/api\//,
-    /\/export\//, /\.pdf$/, /\/download(\/|$)/,
+    /\/export(\/|$)/, /\.pdf$/, /\/pdf$/, /\/download(\/|$)/,
   ];
   const prefetched = new Set();
   let hoverTimer = null;

@@ -4871,8 +4871,8 @@ function _emailLogEsc(s) {
 
 function _emailLogFmtWhen(ts) {
   if (!ts) return '';
-  const d = new Date(String(ts).replace(' ', 'T') + (String(ts).endsWith('Z') ? '' : 'Z'));
-  if (isNaN(d.getTime())) return _emailLogEsc(ts);
+  const d = parseServerTime(ts);   // app.js: offset-aware (3.3.3)
+  if (!d) return _emailLogEsc(ts);
   return d.toLocaleString([], { year: 'numeric', month: 'short', day: '2-digit',
                                 hour: '2-digit', minute: '2-digit' });
 }
