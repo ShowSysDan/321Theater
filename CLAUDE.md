@@ -258,6 +258,11 @@ apps. For a 321Theater access change, use this app's own flags instead
   (`is_compressed=1`), DB→S3 uploads decompressed bytes.
 - `_advance_attachments_fingerprint()` must stay storage-independent (no
   s3_key / blob length), or a copy would cut a new advance version.
+- No user file may live on an app server's local disk (a second instance
+  couldn't reach it; audited 3.2.2, table in README → "Where stored data
+  lives"). Logos (`app_settings.logo_data`, `venue_logos.logo_data`) are
+  data-URL TEXT in PG only, not a file_store kind. Any new upload goes into
+  one of the KINDS tables (or PG), never to disk.
 
 ## PDF paperwork theming (per-venue colors, 2.38.0)
 - `venue_colors` table (venue_name PK, mirrors `venue_logos`) +
