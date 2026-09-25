@@ -358,6 +358,16 @@ apps. For a 321Theater access change, use this app's own flags instead
   must be accepted there (`purpose` was missing until 3.2.0 and turned every
   failed send with a purpose into a TypeError).
 
+## Asset availability — batch it in loops (3.3.2)
+- `_get_asset_availability_many(db, type_ids, start, end)` and
+  `_component_demand_many(db, type_ids, start, end)` answer any number of
+  types in ≤5 / 2 queries; the single-type `_get_asset_availability` /
+  `_component_demand` are wrappers over them (keep it that way, so single
+  and batched can't drift). Anything that loops over types, lines or shows
+  must call the `_many` form (group by date window when windows differ)
+  and `_show_rental_windows()` for many shows. Test/demo shows stay
+  excluded inside the demand query.
+
 ## Audit-log Undo — explicit list only (3.3.1)
 - `audit_undo()` reverses only actions in `_UNDO_ACTIONS` (action → (entity_type,
   kind)). Never go back to guessing the kind from the action suffix: that made

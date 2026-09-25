@@ -748,7 +748,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.3.1'
+APP_VERSION = '3.3.2'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -17667,9 +17667,8 @@ def _component_demand(db, type_id, start_date=None, end_date=None):
     ``[start_date, end_date]`` window filters to bookings whose rental range
     overlaps it.
 
-    NOTE (PostgreSQL): every placeholder is ``?`` (rewritten to ``%s`` by
-    db_adapter) and there is no literal ``%`` in the SQL — see CLAUDE.md.
     ``COALESCE(m.quantity, 1)`` keeps legacy rows (pre-migration) at 1.
+    The work is done by _component_demand_many (batched, 2 queries total).
 
     Test/demo shows (``shows.is_test``) are EXCLUDED from every demand row so
     they never consume real inventory — a test show's bookings must not reduce
@@ -17679,34 +17678,49 @@ def _component_demand(db, type_id, start_date=None, end_date=None):
     in agreement. ``COALESCE(s.is_test, 0)`` guards legacy rows where the column
     could be NULL.
     """
+    return _component_demand_many(db, [type_id], start_date, end_date).get(int(type_id), [])
+
+
+def _component_demand_many(db, type_ids, start_date=None, end_date=None):
+    """_component_demand for many types in TWO queries: {type_id: rows}, each
+    list shaped and ordered exactly as _component_demand returns it (direct
+    rows by rental_start, then indirect rows by rental_start). Types with no
+    demand map to []. Callers that loop over types (overbooking scan,
+    availability widgets, the Assets tab) use this instead of 2 queries per
+    type."""
+    ids = sorted({int(t) for t in type_ids if t is not None})
+    out = {t: [] for t in ids}
+    if not ids:
+        return out
     date_filter = ''
     date_params = []
     if start_date and end_date:
         date_filter = ' AND (sa.rental_end >= %s AND sa.rental_start <= %s)'
         date_params = [start_date, end_date]
 
-    # DIRECT demand — lines that book this type directly.
+    # DIRECT demand — lines that book these types directly.
     direct = db.execute(f"""
-        SELECT sa.id, sa.show_id, sa.quantity, sa.rental_start, sa.rental_end,
+        SELECT sa.asset_type_id AS _for_type,
+               sa.id, sa.show_id, sa.quantity, sa.rental_start, sa.rental_end,
                sa.is_hidden, sa.locked_price, sa.original_locked_price,
                sa.asset_item_id,
                s.name AS show_name
         FROM show_assets sa
         JOIN shows s ON s.id = sa.show_id
-        WHERE sa.asset_type_id = %s AND COALESCE(s.is_test, 0) = 0{date_filter}
-        ORDER BY sa.rental_start
-    """, [type_id] + date_params).fetchall()
-
-    rows = []
+        WHERE sa.asset_type_id = ANY(%s) AND COALESCE(s.is_test, 0) = 0{date_filter}
+        ORDER BY sa.rental_start, sa.id
+    """, [ids] + date_params).fetchall()
     for r in direct:
         d = dict(r)
+        t = d.pop('_for_type')
         d['via_system_id'] = None
         d['via_system_name'] = None
-        rows.append(d)
+        out[t].append(d)
 
-    # INDIRECT demand — lines that book a System/Package containing this type.
+    # INDIRECT demand — lines that book a System/Package containing these types.
     indirect = db.execute(f"""
-        SELECT sa.id, sa.show_id,
+        SELECT m.component_type_id AS _for_type,
+               sa.id, sa.show_id,
                sa.quantity * COALESCE(m.quantity, 1) AS quantity,
                sa.rental_start, sa.rental_end,
                sa.is_hidden, sa.locked_price, sa.original_locked_price,
@@ -17716,15 +17730,15 @@ def _component_demand(db, type_id, start_date=None, end_date=None):
         JOIN show_assets sa  ON sa.asset_type_id = m.system_type_id
         JOIN asset_types sys ON sys.id = m.system_type_id
         JOIN shows s         ON s.id = sa.show_id
-        WHERE m.component_type_id = %s AND COALESCE(s.is_test, 0) = 0{date_filter}
-        ORDER BY sa.rental_start
-    """, [type_id] + date_params).fetchall()
+        WHERE m.component_type_id = ANY(%s) AND COALESCE(s.is_test, 0) = 0{date_filter}
+        ORDER BY sa.rental_start, sa.id, sys.id
+    """, [ids] + date_params).fetchall()
     for r in indirect:
         d = dict(r)
+        t = d.pop('_for_type')
         d['asset_item_id'] = None  # indirect demand is generic, never unit-pinned
-        rows.append(d)
-
-    return rows
+        out[t].append(d)
+    return out
 
 
 def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
@@ -17738,104 +17752,133 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
       units         — per-unit availability when start/end given and the
                       type has allow_unit_selection (one entry per asset_item)
       booked_item_ids — set of item ids already pinned to an overlapping show
+    None when the type doesn't exist. One type of
+    _get_asset_availability_many, so single and batched callers can never
+    disagree.
     """
-    # Only the flags below — this runs in loops (every type on
-    # /api/assets/availability), and asset_types.photo is a BYTEA.
-    type_row = db.execute(
-        'SELECT is_system, is_package, is_consumable, track_quantity, reserve_count, '
-        'allow_unit_selection FROM asset_types WHERE id=%s', (asset_type_id,)).fetchone()
-    if not type_row:
+    if asset_type_id is None:
         return None
+    return _get_asset_availability_many(db, [asset_type_id], start_date, end_date).get(
+        int(asset_type_id))
 
-    # System/package types have no individually tracked units — treat as always available
-    if type_row['is_system'] or type_row['is_package']:
-        return {'unlimited': True, 'kit': True}
 
-    total_items = db.execute(
-        "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status != 'retired'",
-        (asset_type_id,)
-    ).fetchone()[0]
+def _get_asset_availability_many(db, type_ids, start_date=None, end_date=None):
+    """_get_asset_availability for many types over ONE date window, in at
+    most 5 queries whatever the number of types: {type_id: result} (types
+    that don't exist are left out). Replaces 4–6 queries per type in the
+    loops on the Asset Manager, the Assets tab, dashboard widgets and the
+    System/Package component check."""
+    ids = sorted({int(t) for t in type_ids if t is not None})
+    if not ids:
+        return {}
+    # Only the flags below, never asset_types.* (photo is a BYTEA).
+    type_rows = {r['id']: r for r in db.execute(
+        'SELECT id, is_system, is_package, is_consumable, track_quantity, reserve_count, '
+        'allow_unit_selection FROM asset_types WHERE id = ANY(%s)', (ids,)).fetchall()}
+    counts = {r['asset_type_id']: r for r in db.execute("""
+        SELECT asset_type_id,
+               COUNT(*) FILTER (WHERE status != 'retired')   AS total_items,
+               COUNT(*) FILTER (WHERE status = 'maintenance') AS in_maintenance
+        FROM asset_items WHERE asset_type_id = ANY(%s) GROUP BY asset_type_id
+    """, (ids,)).fetchall()}
 
-    in_maintenance = db.execute(
-        "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status='maintenance'",
-        (asset_type_id,)
-    ).fetchone()[0]
-
-    reserve_count = type_row['reserve_count'] or 0
-
-    # For consumables with unlimited stock
-    if type_row['is_consumable'] and not type_row['track_quantity']:
-        return {
-            'total_items': None,
-            'reserve_count': reserve_count,
-            'in_maintenance': 0,
-            'available': None,
-            'shows': [],
-            'unlimited': True,
-        }
-
-    # Demand on this type = direct show lines for the type PLUS indirect demand
-    # from any System/Package line that includes this type as a component (see
-    # _component_demand). Specific-unit bookings still occupy a direct row with
-    # quantity=1, so they're already counted in total_reserved; indirect rows
-    # are generic (asset_item_id is None) and only move the aggregate count, so
-    # the per-unit logic below ignores them.
-    shows = _component_demand(db, asset_type_id, start_date, end_date)
-
-    total_reserved = sum(r['quantity'] for r in shows)
-    available = total_items - in_maintenance - reserve_count - total_reserved
-
-    booked_item_ids = {r['asset_item_id'] for r in shows if r['asset_item_id']}
-
-    units = []
-    if type_row['allow_unit_selection'] and start_date and end_date:
-        item_rows = db.execute("""
-            SELECT id, barcode, status
+    # Types whose availability depends on bookings (not kits, not unlimited
+    # consumables).
+    tracked = [t for t, tr in type_rows.items()
+               if not (tr['is_system'] or tr['is_package'])
+               and not (tr['is_consumable'] and not tr['track_quantity'])]
+    demand = _component_demand_many(db, tracked, start_date, end_date) if tracked else {}
+    unit_types = [t for t in tracked if type_rows[t]['allow_unit_selection']]
+    items_by_type = {}
+    if unit_types and start_date and end_date:
+        for it in db.execute("""
+            SELECT asset_type_id, id, barcode, status
             FROM asset_items
-            WHERE asset_type_id=%s AND status != 'retired'
+            WHERE asset_type_id = ANY(%s) AND status != 'retired'
             ORDER BY sort_order, id
-        """, (asset_type_id,)).fetchall()
-        # Map item_id → list of overlapping show bookings, so the UI can
-        # explain why a unit is unavailable.
-        bookings_by_item = {}
-        for r in shows:
-            if r['asset_item_id']:
-                bookings_by_item.setdefault(r['asset_item_id'], []).append({
-                    'show_id': r['show_id'],
-                    'show_name': r['show_name'],
-                    'rental_start': _iso_dates_deep(r['rental_start']),
-                    'rental_end': _iso_dates_deep(r['rental_end']),
+        """, (unit_types,)).fetchall():
+            items_by_type.setdefault(it['asset_type_id'], []).append(it)
+
+    out = {}
+    for t, type_row in type_rows.items():
+        # System/package types have no individually tracked units — treat as always available
+        if type_row['is_system'] or type_row['is_package']:
+            out[t] = {'unlimited': True, 'kit': True}
+            continue
+
+        c = counts.get(t)
+        total_items = c['total_items'] if c else 0
+        in_maintenance = c['in_maintenance'] if c else 0
+        reserve_count = type_row['reserve_count'] or 0
+
+        # For consumables with unlimited stock
+        if type_row['is_consumable'] and not type_row['track_quantity']:
+            out[t] = {
+                'total_items': None,
+                'reserve_count': reserve_count,
+                'in_maintenance': 0,
+                'available': None,
+                'shows': [],
+                'unlimited': True,
+            }
+            continue
+
+        # Demand on this type = direct show lines for the type PLUS indirect demand
+        # from any System/Package line that includes this type as a component (see
+        # _component_demand). Specific-unit bookings still occupy a direct row with
+        # quantity=1, so they're already counted in total_reserved; indirect rows
+        # are generic (asset_item_id is None) and only move the aggregate count, so
+        # the per-unit logic below ignores them.
+        shows = demand.get(t, [])
+
+        total_reserved = sum(r['quantity'] for r in shows)
+        available = total_items - in_maintenance - reserve_count - total_reserved
+
+        booked_item_ids = {r['asset_item_id'] for r in shows if r['asset_item_id']}
+
+        units = []
+        if type_row['allow_unit_selection'] and start_date and end_date:
+            # Map item_id → list of overlapping show bookings, so the UI can
+            # explain why a unit is unavailable.
+            bookings_by_item = {}
+            for r in shows:
+                if r['asset_item_id']:
+                    bookings_by_item.setdefault(r['asset_item_id'], []).append({
+                        'show_id': r['show_id'],
+                        'show_name': r['show_name'],
+                        'rental_start': _iso_dates_deep(r['rental_start']),
+                        'rental_end': _iso_dates_deep(r['rental_end']),
+                    })
+            for it in items_by_type.get(t, []):
+                iid = it['id']
+                is_maint = it['status'] == 'maintenance'
+                bookings = bookings_by_item.get(iid, [])
+                units.append({
+                    'id': iid,
+                    'barcode': it['barcode'] or '',
+                    'status': it['status'],
+                    'in_maintenance': bool(is_maint),
+                    'booked': bool(bookings),
+                    'available': not (is_maint or bookings),
+                    'bookings': bookings,
                 })
-        for it in item_rows:
-            iid = it['id']
-            is_maint = it['status'] == 'maintenance'
-            bookings = bookings_by_item.get(iid, [])
-            units.append({
-                'id': iid,
-                'barcode': it['barcode'] or '',
-                'status': it['status'],
-                'in_maintenance': bool(is_maint),
-                'booked': bool(bookings),
-                'available': not (is_maint or bookings),
-                'bookings': bookings,
-            })
 
-    return {
-        'total_items': total_items,
-        'reserve_count': reserve_count,
-        'in_maintenance': in_maintenance,
-        'total_reserved': total_reserved,
-        'available': available,
-        # ISO dates: the Assets-page calendar string-compares them against
-        # 'YYYY-MM-DD' (HTTP-date strings never matched, so no day ever
-        # showed as booked).
-        'shows': [_normalize_row_dates(dict(r)) for r in shows],
-        'unlimited': False,
-        'allow_unit_selection': bool(type_row['allow_unit_selection']),
-        'units': units,
-        'booked_item_ids': list(booked_item_ids),
-    }
-
+        out[t] = {
+            'total_items': total_items,
+            'reserve_count': reserve_count,
+            'in_maintenance': in_maintenance,
+            'total_reserved': total_reserved,
+            'available': available,
+            # ISO dates: the Assets-page calendar string-compares them against
+            # 'YYYY-MM-DD' (HTTP-date strings never matched, so no day ever
+            # showed as booked).
+            'shows': [_normalize_row_dates(dict(r)) for r in shows],
+            'unlimited': False,
+            'allow_unit_selection': bool(type_row['allow_unit_selection']),
+            'units': units,
+            'booked_item_ids': list(booked_item_ids),
+        }
+    return out
 
 def _system_component_shortages(db, system_type_id, system_qty, start_date, end_date,
                                 back_out_system_qty=0):
@@ -17869,10 +17912,12 @@ def _system_component_shortages(db, system_type_id, system_qty, start_date, end_
         WHERE m.system_type_id = %s
     """, (system_type_id,)).fetchall()
 
+    avail = _get_asset_availability_many(
+        db, [m['component_type_id'] for m in members], start_date, end_date)
     shortages = []
     for m in members:
         needed = m['member_qty'] * system_qty
-        av = _get_asset_availability(db, m['component_type_id'], start_date, end_date)
+        av = avail.get(m['component_type_id'])
         if not av or av.get('unlimited') or av.get('available') is None:
             continue
         effective = av['available'] + m['member_qty'] * back_out_system_qty
@@ -17952,21 +17997,26 @@ def _find_overbooked_types(db):
         LEFT JOIN asset_categories ac ON ac.id = at.category_id
     """).fetchall()
 
-    overbooked = []
-    for t in type_rows:
-        if t['is_system'] or t['is_package']:
-            continue
-        if t['is_consumable'] and not t['track_quantity']:
-            continue
+    trackable = [t for t in type_rows
+                 if not (t['is_system'] or t['is_package'])
+                 and not (t['is_consumable'] and not t['track_quantity'])]
+    # Batched: one grouped count + one direct and one indirect demand query
+    # for ALL types (this used to be 4 queries per type on every Asset
+    # Manager page load).
+    ids = [t['id'] for t in trackable]
+    counts = {r['asset_type_id']: r for r in db.execute("""
+        SELECT asset_type_id,
+               COUNT(*) FILTER (WHERE status != 'retired')   AS total,
+               COUNT(*) FILTER (WHERE status = 'maintenance') AS in_maint
+        FROM asset_items WHERE asset_type_id = ANY(%s) GROUP BY asset_type_id
+    """, (ids,)).fetchall()} if ids else {}
+    demand = _component_demand_many(db, ids)
 
-        total = db.execute(
-            "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status != 'retired'",
-            (t['id'],)
-        ).fetchone()[0]
-        in_maint = db.execute(
-            "SELECT COUNT(*) FROM asset_items WHERE asset_type_id=%s AND status='maintenance'",
-            (t['id'],)
-        ).fetchone()[0]
+    overbooked = []
+    for t in trackable:
+        c = counts.get(t['id'])
+        total = c['total'] if c else 0
+        in_maint = c['in_maint'] if c else 0
         reserve = t['reserve_count'] or 0
         usable = max(0, total - in_maint - reserve)
 
@@ -17974,7 +18024,7 @@ def _find_overbooked_types(db):
         # includes it as a component (see _component_demand). Keep only bookings
         # with a real date range.
         bookings = [
-            b for b in _component_demand(db, t['id'])
+            b for b in demand.get(t['id'], [])
             if b['rental_start'] and b['rental_end']
         ]
         if not bookings:
@@ -18073,9 +18123,10 @@ def assets_availability_bulk():
     date_to   = request.args.get('to')
     db = get_db()
     type_ids = [r['id'] for r in db.execute('SELECT id FROM asset_types WHERE is_retired=0').fetchall()]
+    avail = _get_asset_availability_many(db, type_ids, date_from, date_to)
     by_type = {}
     for tid in type_ids:
-        info = _get_asset_availability(db, tid, date_from, date_to)
+        info = avail.get(tid)
         if info:
             by_type[tid] = {
                 'total':       info.get('total_items'),
@@ -18108,24 +18159,31 @@ def assets_availability_bulk():
         SELECT s.id, s.name, s.show_date FROM shows s {where_sql}
         ORDER BY s.show_date
     """, params).fetchall()
-    by_show = []
-    for sr in shows_raw:
-        assets = db.execute("""
-            SELECT sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end,
+    # Every listed show's lines in ONE query (was one query per show).
+    assets_by_show = {}
+    if shows_raw:
+        for a in db.execute("""
+            SELECT sa.show_id AS _show_id,
+                   sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end,
                    at.name as type_name, at.manufacturer,
                    ac.name as category_name
             FROM show_assets sa
             JOIN asset_types at ON at.id = sa.asset_type_id
             JOIN asset_categories ac ON ac.id = at.category_id
-            WHERE sa.show_id = %s AND sa.is_hidden = 0
-            ORDER BY ac.name, at.name
-        """, (sr['id'],)).fetchall()
+            WHERE sa.show_id = ANY(%s) AND sa.is_hidden = 0
+            ORDER BY ac.name, at.name, sa.id
+        """, ([sr['id'] for sr in shows_raw],)).fetchall():
+            d = dict(a)
+            assets_by_show.setdefault(d.pop('_show_id'), []).append(d)
+    by_show = []
+    for sr in shows_raw:
+        assets = assets_by_show.get(sr['id'], [])
         if assets:
             by_show.append({
                 'id':       sr['id'],
                 'name':     sr['name'],
                 'show_date': str(sr['show_date']) if sr['show_date'] else None,
-                'assets':   [{k: (str(v) if hasattr(v, 'isoformat') else v) for k, v in dict(a).items()} for a in assets],
+                'assets':   [{k: (str(v) if hasattr(v, 'isoformat') else v) for k, v in a.items()} for a in assets],
             })
     db.close()
     return jsonify({'by_type': by_type, 'by_show': by_show})
@@ -18316,18 +18374,27 @@ def _show_rental_window(db, show_id):
     default rental period for new asset lines AND the bounds a rental may
     not extend past (rentals are tied to the show's advance dates).
     Returns (start, end) as datetime.date, either may be None (undated show)."""
-    show = db.execute(
-        'SELECT show_date, load_in_date, load_out_date FROM shows WHERE id=%s',
-        (show_id,)).fetchone()
-    if not show:
-        return None, None
-    perfs = db.execute(
-        'SELECT MIN(perf_date) AS p0, MAX(perf_date) AS p1 '
-        'FROM show_performances WHERE show_id=%s AND perf_date IS NOT NULL',
-        (show_id,)).fetchone()
-    start = _as_date(show['load_in_date']) or _as_date(perfs['p0']) or _as_date(show['show_date'])
-    end = _as_date(show['load_out_date']) or _as_date(perfs['p1']) or _as_date(show['show_date'])
-    return start, end
+    return _show_rental_windows(db, [show_id]).get(int(show_id), (None, None))
+
+
+def _show_rental_windows(db, show_ids):
+    """_show_rental_window for many shows in one query: {show_id: (start, end)}."""
+    ids = sorted({int(i) for i in show_ids if i is not None})
+    if not ids:
+        return {}
+    rows = db.execute("""
+        SELECT s.id, s.show_date, s.load_in_date, s.load_out_date,
+               p.p0, p.p1
+        FROM shows s
+        LEFT JOIN (SELECT show_id, MIN(perf_date) AS p0, MAX(perf_date) AS p1
+                     FROM show_performances
+                    WHERE show_id = ANY(%s) AND perf_date IS NOT NULL
+                    GROUP BY show_id) p ON p.show_id = s.id
+        WHERE s.id = ANY(%s)
+    """, (ids, ids)).fetchall()
+    return {r['id']: (_as_date(r['load_in_date']) or _as_date(r['p0']) or _as_date(r['show_date']),
+                      _as_date(r['load_out_date']) or _as_date(r['p1']) or _as_date(r['show_date']))
+            for r in rows}
 
 
 def _clean_rental_dates(db, show_id, rental_start, rental_end):
@@ -18398,20 +18465,22 @@ def show_assets_list(show_id):
     }
 
     # Attach per-line availability info so the UI can flag overbooked rows.
-    # Cached by (type_id, start, end) since multiple rows can share a window.
+    # One batched lookup per distinct rental window (lines usually share the
+    # show's window) instead of 4–6 queries per line.
+    by_window = {}
+    for r in rows:
+        by_window.setdefault((r['rental_start'], r['rental_end']), set()).add(r['asset_type_id'])
     avail_cache = {}
+    for (w_start, w_end), tids in by_window.items():
+        for tid, av in _get_asset_availability_many(db, tids, w_start, w_end).items():
+            avail_cache[(tid, w_start, w_end)] = av
     assets_out = []
     for r in rows:
         # Normalize date columns to ISO (PG hands back date objects, which
         # jsonify would render as "Fri, 24 Jul 2026 00:00:00 GMT" — useless
         # for display and for <input type="date"> editors).
         d = _normalize_row_dates(dict(r))
-        key = (r['asset_type_id'], r['rental_start'], r['rental_end'])
-        if key not in avail_cache:
-            avail_cache[key] = _get_asset_availability(
-                db, r['asset_type_id'], r['rental_start'], r['rental_end']
-            ) or {}
-        av = avail_cache[key]
+        av = avail_cache.get((r['asset_type_id'], r['rental_start'], r['rental_end'])) or {}
         d['_avail_available'] = av.get('available')
         d['_avail_unlimited'] = bool(av.get('unlimited'))
         d['_avail_overbooked'] = (
@@ -19189,9 +19258,12 @@ def asset_approvals():
         s['_eff'] = _eff_date(s.get('effective_date'))
     shows = [s for s in shows if s['_eff'] and start <= s['_eff'] <= end]
 
-    # Aggregate per-show asset + external-rental totals, counts, and rows.
-    for s in shows:
-        assets = db.execute("""
+    # Aggregate per-show asset + external-rental totals, counts, and rows —
+    # every show in the window in 3 queries (was 4 queries per show).
+    show_ids = [s['id'] for s in shows]
+    assets_by_show, ext_by_show, windows = {}, {}, {}
+    if show_ids:
+        for r in db.execute("""
             SELECT sa.*, at.name AS type_name, at.manufacturer, at.model,
                    ac.name AS category_name,
                    at.rental_cost AS catalog_daily_rate,
@@ -19199,14 +19271,21 @@ def asset_approvals():
             FROM show_assets sa
             JOIN asset_types at ON at.id = sa.asset_type_id
             JOIN asset_categories ac ON ac.id = at.category_id
-            WHERE sa.show_id = %s AND sa.is_hidden = 0
-            ORDER BY ac.name, at.name, sa.created_at
-        """, (s['id'],)).fetchall()
-        ext = db.execute("""
-            SELECT id, description, cost, pdf_filename,
+            WHERE sa.show_id = ANY(%s) AND sa.is_hidden = 0
+            ORDER BY ac.name, at.name, sa.created_at, sa.id
+        """, (show_ids,)).fetchall():
+            assets_by_show.setdefault(r['show_id'], []).append(r)
+        for r in db.execute("""
+            SELECT show_id, id, description, cost, pdf_filename,
                    (pdf_data IS NOT NULL OR s3_key IS NOT NULL) AS has_pdf
-            FROM show_external_rentals WHERE show_id=%s ORDER BY sort_order, id
-        """, (s['id'],)).fetchall()
+            FROM show_external_rentals WHERE show_id = ANY(%s) ORDER BY sort_order, id
+        """, (show_ids,)).fetchall():
+            d = dict(r)
+            ext_by_show.setdefault(d.pop('show_id'), []).append(d)
+        windows = _show_rental_windows(db, show_ids)
+    for s in shows:
+        assets = assets_by_show.get(s['id'], [])
+        ext = ext_by_show.get(s['id'], [])
         s['assets']           = [_normalize_row_dates(dict(r)) for r in assets]
         s['external_rentals'] = [dict(r) for r in ext]
         s['assets_total']     = sum(float(r['locked_price'] or 0) * int(r['quantity'] or 1)
@@ -19218,7 +19297,7 @@ def asset_approvals():
         # distinct tint in the template so they read as historical.
         s['is_past'] = s.pop('_eff') < today
         # Allowed rental bounds for the per-line date editors + add modal.
-        win_start, win_end = _show_rental_window(db, s['id'])
+        win_start, win_end = windows.get(s['id'], (None, None))
         s['rental_win_start'] = win_start.isoformat() if win_start else ''
         s['rental_win_end']   = win_end.isoformat() if win_end else ''
 
