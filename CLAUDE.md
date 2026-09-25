@@ -295,6 +295,32 @@ apps. For a 321Theater access change, use this app's own flags instead
   (`…/security/sheet.pdf`) themes via `pdf_colors` like all paperwork.
   Syslog: SECURITY_SIGNIN_SAVE / SECURITY_SIGNIN_EXPORT.
 
+## Maintenance notices & message audiences (3.2.0)
+- Settings → System → Messages. `maintenance_notices` (app schema) owns the
+  notice; its banners are ordinary `site_messages` rows linked by
+  `message_id` (maintenance banner) / `completion_message_id` (24 h
+  "complete" banner), both ON DELETE SET NULL, so an admin deleting a banner
+  under Site-Wide Messages can't break the notice. Routes:
+  `/settings/maintenance[/<id>[/complete]]` + `/settings/maintenance/audience`
+  (per-group counts), all `@admin_required`.
+- **Audience groups** (`AUDIENCE_GROUPS` in app.py): admin / staff / user /
+  viewer. `_audience_group_of(role, is_document_viewer)` — the viewer FLAG
+  wins over the role. Never use `is_app_*` for this. `site_messages.audience`
+  is a JSON list, **NULL = everyone** (the shared table may be read by other
+  apps; all four groups are stored as NULL on purpose).
+  `get_active_messages()` filters by the session's group; doc viewers reach
+  `/api/messages` via `_VIEWER_ALLOWED_ENDPOINTS`.
+- Message `scheduled_for` / `expires_at` are local wall-clock (datetime-local
+  input) → compare with `datetime.now()`, never `utcnow()`.
+- Sends are synchronous admin actions (no leader gate), BCC'd in batches of
+  `_MAINT_EMAIL_BATCH`, recipients from `_audience_emails()` (skips locked /
+  pending / unconfirmed) + validated extras. The DB connection is closed
+  across the SMTP round-trips. `_send_email(..., high_priority=True)` sets
+  X-Priority / Importance / X-MSMail-Priority on both providers.
+- `error_context` keys are splatted into `_log_email_error()`, so any new key
+  must be accepted there (`purpose` was missing until 3.2.0 and turned every
+  failed send with a purpose into a TypeError).
+
 ## Per-page performance stats (admin Settings → Performance)
 - `db_adapter.query_timer_hook` stopwatches every `execute()`/`executemany()`;
   app.py's collector (`_perf_record_query` / `_perf_finish_request` /

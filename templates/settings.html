@@ -1128,6 +1128,30 @@
 <div id="stab-messages" class="stab-pane" style="display:none">
   <div class="form-section">
     <div class="form-section-header">
+      <span class="section-icon">◈</span> MAINTENANCE NOTICES
+      <button class="btn btn-sm btn-primary ml-auto" onclick="openMaintModal()">+ New Maintenance Notice</button>
+    </div>
+    <div class="form-section-body" style="padding-bottom:12px">
+      <p class="text-dim text-sm" style="margin:0">
+        Email a maintenance notice to the groups you pick (optionally flagged
+        <strong>high priority</strong>) and post it as a banner for the same groups.
+        When the work is done, <strong>Work Complete</strong> takes the banner down and
+        emails a work-completed notice. Recipients are always BCC'd; failed
+        deliveries show under Email → Email Send Errors.
+      </p>
+    </div>
+    <div class="form-section-body no-pad">
+      <table class="data-table" id="maint-table">
+        <thead><tr><th>TITLE</th><th>WINDOW</th><th>AUDIENCE</th><th>STATUS</th><th>EMAILS</th><th style="width:230px">ACTIONS</th></tr></thead>
+        <tbody id="maint-tbody">
+          <tr><td colspan="6" style="text-align:center;padding:20px;color:var(--text-dim)">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="form-section">
+    <div class="form-section-header">
       <span class="section-icon">◈</span> SITE-WIDE MESSAGES
       <button class="btn btn-sm btn-primary ml-auto" onclick="openMsgModal()">+ New Message</button>
     </div>
@@ -1135,7 +1159,7 @@
       <table class="data-table" id="msg-table">
         <thead><tr><th>TYPE</th><th>TITLE</th><th>STATUS</th><th>SEEN / DISMISSED</th><th>EXPIRES</th><th>CREATED</th><th style="width:120px">ACTIONS</th></tr></thead>
         <tbody id="msg-tbody">
-          <tr id="msg-loading"><td colspan="6" style="text-align:center;padding:20px;color:var(--text-dim)">Loading…</td></tr>
+          <tr id="msg-loading"><td colspan="7" style="text-align:center;padding:20px;color:var(--text-dim)">Loading…</td></tr>
         </tbody>
       </table>
     </div>
@@ -4993,7 +5017,9 @@ async function loadMessages() {
     return;
   }
   const typeMap = { motd:'MOTD', maintenance:'Maintenance', alert:'Alert' };
-  const now = new Date().toISOString();
+  // Show-from / expires are wall-clock times from a datetime-local input, so
+  // compare them with local time (the server does the same).
+  const now = _localIsoNow();
   tbody.innerHTML = rows.map(m => {
     let statusHtml;
     if (!m.is_active) {
@@ -5008,7 +5034,7 @@ async function loadMessages() {
     return `
     <tr id="msg-row-${m.id}">
       <td><span class="role-badge">${typeMap[m.msg_type]||m.msg_type}</span></td>
-      <td><strong>${m.title}</strong></td>
+      <td><strong>${_escHtml(m.title)}</strong>${_audienceIsAll(m.audience) ? '' : `<div class="text-dim text-sm">For: ${_escHtml(_audienceLabel(m.audience))}</div>`}</td>
       <td>${statusHtml}</td>
       <td>
         <button class="btn btn-xs btn-ghost" onclick="showReceipts(${m.id})"
@@ -5029,8 +5055,9 @@ async function loadMessages() {
   `; }).join('');
 }
 
-function openMsgModal(data) {
+async function openMsgModal(data) {
   _editingMsgId = data?.id || null;
+  await _renderAudiencePicker('msg-m-aud', data?.audience || null, false);
   document.getElementById('msg-modal-title').textContent = _editingMsgId ? 'Edit Message' : 'New Message';
   document.getElementById('msg-m-title').value      = data?.title || '';
   document.getElementById('msg-m-body').value       = data?.body_html || '';
@@ -5055,8 +5082,10 @@ async function saveMsg() {
     expires_at:     document.getElementById('msg-m-expires').value || null,
     is_active:      document.getElementById('msg-m-active').checked,
     show_on_login:  document.getElementById('msg-m-login').checked,
+    audience:       _getAudience('msg-m-aud'),
   };
   if (!payload.title) { alert('Title required'); return; }
+  if (!payload.audience.length) { alert('Pick at least one audience group.'); return; }
   const url    = _editingMsgId ? `/settings/messages/${_editingMsgId}` : '/settings/messages';
   const method = _editingMsgId ? 'PUT' : 'POST';
   const resp   = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
@@ -5221,7 +5250,7 @@ function switchSystemTab(name) {
   const el = document.getElementById('stab-' + name);
   if (el) el.style.display = 'block';
   history.replaceState({}, '', '#' + name);
-  if (name === 'messages') loadMessages();
+  if (name === 'messages') { loadMessages(); loadMaintNotices(); }
   if (name === 'update')   detectService();
   if (name === 'branding') loadVenueBranding();
   if (name === 'backups')  loadBackupStatus();
@@ -5378,6 +5407,328 @@ async function adminMakeDashboardPrivate(id, btn) {
   }
 }
 
+
+// ── Audience groups (shared by site messages + maintenance notices) ───────────
+// Groups + labels come from GET /settings/maintenance/audience (app.py
+// AUDIENCE_GROUPS is the single source of truth), refetched per modal open so
+// the head counts are current.
+let _audienceGroups = [];
+
+async function _loadAudienceGroups() {
+  try {
+    const r = await fetch('/settings/maintenance/audience');
+    if (r.ok) _audienceGroups = (await r.json()).groups || [];
+  } catch (e) { /* keep the last list */ }
+  // Counts unavailable → still offer the groups (without head counts) so a
+  // failed fetch can never leave the picker empty and block saving.
+  if (!_audienceGroups.length) {
+    _audienceGroups = [['admin','Admins'],['staff','Staff'],['user','Users'],['viewer','Doc Viewers']]
+      .map(([key, label]) => ({ key, label, members: null, emails: null }));
+  }
+  return _audienceGroups;
+}
+
+function _localIsoNow() {
+  const d = new Date();
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+}
+
+function _audienceIsAll(list) {
+  return !list || !list.length || list.length >= (_audienceGroups.length || 4);
+}
+
+function _audienceLabel(list) {
+  if (_audienceIsAll(list)) return 'All users';
+  const labels = { admin:'Admins', staff:'Staff', user:'Users', viewer:'Doc Viewers' };
+  _audienceGroups.forEach(g => { labels[g.key] = g.label; });
+  return list.map(k => labels[k] || k).join(', ');
+}
+
+// Renders an "All users" master checkbox + one checkbox per group into
+// #containerId. `selected` null/empty = everyone. withEmail shows the
+// per-group email head count (maintenance) instead of the member count.
+async function _renderAudiencePicker(containerId, selected, withEmail, onChange) {
+  const box = document.getElementById(containerId);
+  if (!box) return;
+  const groups = await _loadAudienceGroups();
+  const pick = new Set(selected && selected.length ? selected : groups.map(g => g.key));
+  box.innerHTML =
+    `<label class="checkbox-label" style="font-weight:600"><input type="checkbox" data-aud-all> All users</label>` +
+    groups.map(g => {
+      const n = withEmail ? g.emails : g.members;
+      const tip = g.members == null ? '' : (withEmail ? `${g.emails} with an email address (of ${g.members})` : `${g.members} account(s)`);
+      const count = n == null ? '' : ` <span class="text-dim text-sm">(${n})</span>`;
+      return `<label class="checkbox-label" title="${_escHtml(tip)}"><input type="checkbox" data-aud="${g.key}"${pick.has(g.key) ? ' checked' : ''}> ${_escHtml(g.label)}${count}</label>`;
+    }).join('');
+  const all = box.querySelector('[data-aud-all]');
+  const items = [...box.querySelectorAll('[data-aud]')];
+  const sync = () => {
+    const on = items.filter(i => i.checked).length;
+    all.checked = on === items.length;
+    all.indeterminate = on > 0 && on < items.length;
+    if (onChange) onChange();
+  };
+  all.addEventListener('change', () => { items.forEach(i => { i.checked = all.checked; }); sync(); });
+  items.forEach(i => i.addEventListener('change', sync));
+  sync();
+}
+
+function _getAudience(containerId) {
+  return [...document.querySelectorAll(`#${containerId} [data-aud]`)]
+    .filter(i => i.checked).map(i => i.dataset.aud);
+}
+
+// Rough "who gets this" line: per-group email counts (an account belongs to
+// exactly one group) + typed extra addresses. The server de-dupes at send.
+function _audienceEmailEstimate(containerId, extraId) {
+  const picked = new Set(_getAudience(containerId));
+  const fromGroups = _audienceGroups.filter(g => picked.has(g.key)).reduce((a, g) => a + (g.emails || 0), 0);
+  const extra = (document.getElementById(extraId)?.value || '').split(/[\s,;]+/).filter(t => t.includes('@')).length;
+  return { fromGroups, extra, total: fromGroups + extra };
+}
+
+// ── Maintenance Notices ───────────────────────────────────────────────────────
+let _maintRows = [];
+let _editingMaintId = null;
+let _completingMaintId = null;
+
+function _fmtStamp(s) { return s ? String(s).replace('T', ' ').slice(0, 16) : ''; }
+
+async function loadMaintNotices() {
+  const tbody = document.getElementById('maint-tbody');
+  if (!tbody) return;
+  let rows;
+  try {
+    const resp = await fetch('/settings/maintenance');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    rows = await resp.json();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--danger)">Failed to load maintenance notices.</td></tr>`;
+    return;
+  }
+  if (!_audienceGroups.length) await _loadAudienceGroups();
+  _maintRows = rows;
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-dim)">No maintenance notices yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(n => {
+    let status;
+    if (n.status === 'completed') status = `<span style="color:#22C55E">✓ Complete</span><div class="text-dim text-sm">${_fmtStamp(n.completed_at)}</div>`;
+    else if (n.status === 'posted') status = '<span style="color:#FBBF24">Posted</span>';
+    else status = '<span style="color:var(--text-dim)">Draft</span>';
+    if (n.banner_active) status += '<div class="text-sm" style="color:#FBBF24">▣ Banner live</div>';
+    if (n.completion_banner_active) status += '<div class="text-sm" style="color:#22C55E">▣ "Complete" banner live</div>';
+    const hp = on => on ? ' <span title="Sent as high priority" style="color:#EF4444;font-weight:700">!</span>' : '';
+    const emailLine = (label, at, count, err, prio) => {
+      if (!at) return '';
+      const errHtml = err ? ` <span title="${_escHtml(err)}" style="color:var(--danger);cursor:help">⚠</span>` : '';
+      return `<div class="text-sm">${label}: ${count} sent${hp(prio)}${errHtml}<span class="text-dim"> · ${_fmtStamp(at)}</span></div>`;
+    };
+    const emails = (emailLine('Notice', n.notice_sent_at, n.notice_sent_count, n.notice_send_error, n.high_priority) +
+                    emailLine('Complete', n.completion_sent_at, n.completion_sent_count, n.completion_send_error, n.completion_high_priority))
+                   || '<span class="text-dim">—</span>';
+    const completeBtn = n.status === 'completed'
+      ? `<button class="btn btn-xs btn-ghost" onclick="openMaintComplete(${n.id})" title="Resend the work-completed email">↻ Resend</button>`
+      : `<button class="btn btn-xs btn-primary" onclick="openMaintComplete(${n.id})" title="Mark the work complete and email everyone">✓ Work Complete</button>`;
+    return `
+    <tr id="maint-row-${n.id}">
+      <td><strong>${_escHtml(n.title)}</strong>${n.author ? `<div class="text-dim text-sm">by ${_escHtml(n.author)}</div>` : ''}</td>
+      <td class="text-sm">${n.window_text ? _escHtml(n.window_text) : '<span class="text-dim">—</span>'}</td>
+      <td><span class="dept-badge">${_escHtml(_audienceLabel(n.audience))}</span></td>
+      <td>${status}</td>
+      <td>${emails}</td>
+      <td>
+        <div class="action-btns" style="white-space:nowrap">
+          <button class="btn btn-xs btn-ghost" onclick="openMaintModal(${n.id})" title="Edit / re-send the notice">✎</button>
+          ${completeBtn}
+          <button class="btn btn-xs btn-danger-ghost" onclick="deleteMaint(${n.id})" title="Delete the notice and its banners">×</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function _maintEstimate() {
+  const est = _audienceEmailEstimate('maint-m-aud', 'maint-m-extra');
+  const el = document.getElementById('maint-m-estimate');
+  if (el) el.textContent = `Email goes to about ${est.total} ${est.total === 1 ? 'person' : 'people'}` +
+                           (est.extra ? ` (${est.fromGroups} from the groups + ${est.extra} extra)` : '') + '.';
+  const btn = document.getElementById('maint-m-save');
+  const send = document.getElementById('maint-m-send');
+  if (btn && send) btn.textContent = send.checked && !send.disabled ? 'Save & Send' : 'Save';
+}
+
+async function openMaintModal(id) {
+  const n = id ? _maintRows.find(r => r.id === id) : null;
+  _editingMaintId = n ? n.id : null;
+  const done = !!(n && n.status === 'completed');
+  document.getElementById('maint-modal-title').textContent = n ? 'Edit Maintenance Notice' : 'New Maintenance Notice';
+  document.getElementById('maint-m-title').value = n?.title || '';
+  document.getElementById('maint-m-start').value = n?.window_start ? n.window_start.slice(0, 16) : '';
+  document.getElementById('maint-m-end').value = n?.window_end ? n.window_end.slice(0, 16) : '';
+  document.getElementById('maint-m-body').value = n?.body_html || '';
+  document.getElementById('maint-m-extra').value = n?.extra_recipients || '';
+  document.getElementById('maint-m-subject').value = n?.email_subject || '';
+  document.getElementById('maint-m-priority').checked = n ? !!n.high_priority : true;
+  document.getElementById('maint-m-banner').checked = n ? !!n.banner_active : true;
+  document.getElementById('maint-m-dismiss').checked = n ? (n.banner_dismissible_by ? n.banner_dismissible_by === 'user' : true) : true;
+  const send = document.getElementById('maint-m-send');
+  send.checked = !n;
+  document.getElementById('maint-m-send-label').textContent = n?.notice_sent_at
+    ? `Email this notice again when I save (last sent ${_fmtStamp(n.notice_sent_at)} to ${n.notice_sent_count})`
+    : 'Email this notice when I save';
+  document.getElementById('maint-m-delivery').style.display = done ? 'none' : '';
+  document.getElementById('maint-m-done-note').style.display = done ? '' : 'none';
+  send.disabled = done;
+  await _renderAudiencePicker('maint-m-aud', n?.audience || null, true, _maintEstimate);
+  _maintEstimate();
+  document.getElementById('maint-modal').style.display = 'flex';
+  document.getElementById('maint-m-title').focus();
+}
+
+function closeMaintModal() { document.getElementById('maint-modal').style.display = 'none'; }
+
+function _maintSendReport(send, what) {
+  if (!send) return;
+  if (!send.failed && !send.errors.length) {
+    showSaveToast(`✓ ${what} emailed to ${send.sent} recipient${send.sent === 1 ? '' : 's'}`);
+    return;
+  }
+  alert(`${what}: ${send.sent} of ${send.total} sent, ${send.failed} failed.\n\n` +
+        (send.errors || []).join('\n') +
+        '\n\nDetails: Settings → Email → Email Send Errors.');
+}
+
+async function saveMaint() {
+  const done = document.getElementById('maint-m-send').disabled;
+  const payload = {
+    title:              document.getElementById('maint-m-title').value.trim(),
+    window_start:       document.getElementById('maint-m-start').value || null,
+    window_end:         document.getElementById('maint-m-end').value || null,
+    body_html:          document.getElementById('maint-m-body').value.trim(),
+    audience:           _getAudience('maint-m-aud'),
+    extra_recipients:   document.getElementById('maint-m-extra').value.trim(),
+    email_subject:      document.getElementById('maint-m-subject').value.trim(),
+    high_priority:      document.getElementById('maint-m-priority').checked,
+    post_banner:        !done && document.getElementById('maint-m-banner').checked,
+    banner_dismissible: document.getElementById('maint-m-dismiss').checked,
+    send_email:         !done && document.getElementById('maint-m-send').checked,
+  };
+  if (!payload.title) { alert('Title required'); return; }
+  if (!payload.audience.length) { alert('Pick at least one audience group.'); return; }
+  if (payload.send_email) {
+    const est = _audienceEmailEstimate('maint-m-aud', 'maint-m-extra');
+    if (!confirm(`Email this notice to about ${est.total} ${est.total === 1 ? 'person' : 'people'} (${_audienceLabel(payload.audience)})` +
+                 `${payload.high_priority ? ' as HIGH PRIORITY' : ''}?`)) return;
+  }
+  const btn = document.getElementById('maint-m-save');
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = payload.send_email ? 'Sending…' : 'Saving…';
+  try {
+    const url = _editingMaintId ? `/settings/maintenance/${_editingMaintId}` : '/settings/maintenance';
+    const resp = await fetch(url, { method: _editingMaintId ? 'PUT' : 'POST',
+                                    headers: {'Content-Type': 'application/json'},
+                                    body: JSON.stringify(payload) });
+    const d = await resp.json().catch(() => ({}));
+    if (!resp.ok) { alert(d.error || 'Error saving notice'); return; }
+    closeMaintModal();
+    loadMaintNotices();
+    loadMessages();   // the banner is a site message too
+    if (d.send) _maintSendReport(d.send, 'Maintenance notice');
+    else showSaveToast('✓ Maintenance notice saved');
+  } catch (e) {
+    alert('Error saving notice: ' + (e.message || e));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+function _maintCompleteEstimate() {
+  const est = _audienceEmailEstimate('maint-c-aud', 'maint-c-extra');
+  const el = document.getElementById('maint-c-estimate');
+  if (el) el.textContent = `Email goes to about ${est.total} ${est.total === 1 ? 'person' : 'people'}.`;
+}
+
+async function openMaintComplete(id) {
+  const n = _maintRows.find(r => r.id === id);
+  if (!n) return;
+  _completingMaintId = id;
+  const resend = n.status === 'completed';
+  document.getElementById('maint-c-title').textContent = (resend ? 'Resend Work-Completed Email — ' : 'Work Complete — ') + n.title;
+  document.getElementById('maint-c-subject').value = n.completion_subject || '';
+  document.getElementById('maint-c-subject').placeholder = 'Maintenance Complete: ' + n.title;
+  document.getElementById('maint-c-body').value = n.completion_body_html ||
+    'This maintenance work has been completed and everything is back in service. Thank you for your patience.';
+  document.getElementById('maint-c-extra').value = resend ? (n.completion_extra_recipients || '') : (n.extra_recipients || '');
+  document.getElementById('maint-c-priority').checked = resend ? !!n.completion_high_priority : !!n.high_priority;
+  document.getElementById('maint-c-send').checked = true;
+  const takeDown = document.getElementById('maint-c-remove-wrap');
+  takeDown.style.display = n.banner_active ? '' : 'none';
+  document.getElementById('maint-c-remove').checked = true;
+  document.getElementById('maint-c-banner').checked = false;
+  document.getElementById('maint-c-go').textContent = resend ? 'Resend' : 'Mark Complete';
+  const aud = resend && n.completion_audience?.length ? n.completion_audience : n.audience;
+  await _renderAudiencePicker('maint-c-aud', aud, true, _maintCompleteEstimate);
+  _maintCompleteEstimate();
+  document.getElementById('maint-complete-modal').style.display = 'flex';
+}
+
+function closeMaintComplete() { document.getElementById('maint-complete-modal').style.display = 'none'; }
+
+async function submitMaintComplete() {
+  const payload = {
+    subject:          document.getElementById('maint-c-subject').value.trim(),
+    body_html:        document.getElementById('maint-c-body').value.trim(),
+    audience:         _getAudience('maint-c-aud'),
+    extra_recipients: document.getElementById('maint-c-extra').value.trim(),
+    high_priority:    document.getElementById('maint-c-priority').checked,
+    send_email:       document.getElementById('maint-c-send').checked,
+    remove_banner:    document.getElementById('maint-c-remove').checked,
+    post_banner:      document.getElementById('maint-c-banner').checked,
+  };
+  if ((payload.send_email || payload.post_banner) && !payload.audience.length) {
+    alert('Pick at least one audience group.'); return;
+  }
+  if (payload.send_email) {
+    const est = _audienceEmailEstimate('maint-c-aud', 'maint-c-extra');
+    if (!confirm(`Email the work-completed notice to about ${est.total} ${est.total === 1 ? 'person' : 'people'}` +
+                 `${payload.high_priority ? ' as HIGH PRIORITY' : ''}?`)) return;
+  }
+  const btn = document.getElementById('maint-c-go');
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = payload.send_email ? 'Sending…' : 'Saving…';
+  try {
+    const resp = await fetch(`/settings/maintenance/${_completingMaintId}/complete`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+    const d = await resp.json().catch(() => ({}));
+    if (!resp.ok) { alert(d.error || 'Error completing notice'); return; }
+    closeMaintComplete();
+    loadMaintNotices();
+    loadMessages();
+    if (d.send) _maintSendReport(d.send, 'Work-completed notice');
+    else showSaveToast('✓ Marked complete');
+  } catch (e) {
+    alert('Error completing notice: ' + (e.message || e));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+async function deleteMaint(id) {
+  const n = _maintRows.find(r => r.id === id);
+  if (!confirm(`Delete "${n ? n.title : 'this notice'}" and any banner it posted? Sent emails can't be recalled.`)) return;
+  const resp = await fetch(`/settings/maintenance/${id}`, { method: 'DELETE' });
+  if (!resp.ok) { alert('Delete failed'); return; }
+  loadMaintNotices();
+  loadMessages();
+  showSaveToast('Maintenance notice deleted');
+}
+
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
@@ -5386,7 +5737,7 @@ function escHtml(s) {
 <!-- Message Modal -->
 {% if user.role == 'admin' %}
 <div id="msg-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeMsgModal()">
-  <div class="modal-box" style="width:540px">
+  <div class="modal-card" style="width:560px;max-width:95vw;max-height:90vh;overflow-y:auto">
     <div class="modal-header">
       <span class="modal-title" id="msg-modal-title">New Message</span>
       <button class="modal-close" onclick="closeMsgModal()">×</button>
@@ -5427,6 +5778,10 @@ function escHtml(s) {
           <input type="datetime-local" id="msg-m-expires" class="field-input">
         </div>
       </div>
+      <div class="field-group">
+        <label class="field-label">SHOW TO</label>
+        <div id="msg-m-aud" style="display:flex;flex-wrap:wrap;gap:6px 16px"></div>
+      </div>
       <div class="field-group" style="display:flex;gap:16px;align-items:center">
         <label class="checkbox-label"><input type="checkbox" id="msg-m-active" checked> Active</label>
         <label class="checkbox-label"><input type="checkbox" id="msg-m-login"> Show on login</label>
@@ -5441,7 +5796,7 @@ function escHtml(s) {
 
 <!-- Message Receipts Modal (who has seen / dismissed) -->
 <div id="msg-receipts-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeReceiptsModal()">
-  <div class="modal-box" style="width:560px">
+  <div class="modal-card" style="width:560px;max-width:95vw;max-height:90vh;overflow-y:auto">
     <div class="modal-header">
       <span class="modal-title" id="msg-receipts-title">Read Receipts</span>
       <button class="modal-close" onclick="closeReceiptsModal()">×</button>
@@ -5460,6 +5815,105 @@ function escHtml(s) {
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeReceiptsModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Maintenance Notice Modal -->
+<div id="maint-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeMaintModal()">
+  <div class="modal-card" style="width:640px;max-width:95vw;max-height:90vh;overflow-y:auto">
+    <div class="modal-header">
+      <span class="modal-title" id="maint-modal-title">New Maintenance Notice</span>
+      <button class="modal-close" onclick="closeMaintModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-group">
+        <label class="field-label">TITLE *</label>
+        <input type="text" id="maint-m-title" class="field-input" placeholder="e.g. Server upgrade — 3·2·1→Theater offline">
+      </div>
+      <div class="form-row cols-2">
+        <div class="field-group">
+          <label class="field-label">WINDOW START</label>
+          <input type="datetime-local" id="maint-m-start" class="field-input">
+        </div>
+        <div class="field-group">
+          <label class="field-label">WINDOW END</label>
+          <input type="datetime-local" id="maint-m-end" class="field-input">
+        </div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">DETAILS</label>
+        <textarea id="maint-m-body" class="field-input" rows="5" placeholder="What's happening, what's affected, what people should do…"></textarea>
+        <div class="text-dim text-sm" style="margin-top:4px">Plain text or basic HTML. Used in both the email and the banner.</div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">AUDIENCE</label>
+        <div id="maint-m-aud" style="display:flex;flex-wrap:wrap;gap:6px 16px"></div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">ADDITIONAL EMAIL RECIPIENTS (optional)</label>
+        <textarea id="maint-m-extra" class="field-input" rows="2" oninput="_maintEstimate()" placeholder="Outside addresses, separated by commas or new lines"></textarea>
+        <div id="maint-m-estimate" class="text-dim text-sm" style="margin-top:4px"></div>
+      </div>
+      <div id="maint-m-done-note" class="text-dim text-sm" style="display:none">
+        This notice is marked complete, so its banner and email options are closed.
+        Use <strong>↻ Resend</strong> in the list to send the work-completed email again.
+      </div>
+      <div id="maint-m-delivery" style="display:flex;flex-direction:column;gap:10px">
+        <label class="field-label" style="margin:0">DELIVERY</label>
+        <label class="checkbox-label"><input type="checkbox" id="maint-m-banner" checked> Post as a banner (MOTD) for the selected groups until the work is marked complete</label>
+        <label class="checkbox-label" style="margin-left:20px"><input type="checkbox" id="maint-m-dismiss" checked> Users can dismiss the banner</label>
+        <label class="checkbox-label"><input type="checkbox" id="maint-m-send" onchange="_maintEstimate()"> <span id="maint-m-send-label">Email this notice when I save</span></label>
+        <label class="checkbox-label"><input type="checkbox" id="maint-m-priority" checked> Send as <strong style="color:#EF4444">high priority</strong> (flagged Important in Outlook / Mail)</label>
+        <div class="field-group" style="margin:4px 0 0">
+          <label class="field-label">EMAIL SUBJECT (optional)</label>
+          <input type="text" id="maint-m-subject" class="field-input" placeholder="Scheduled Maintenance: &lt;title&gt;">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeMaintModal()">Cancel</button>
+      <button class="btn btn-primary" id="maint-m-save" onclick="saveMaint()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Maintenance Work-Complete Modal -->
+<div id="maint-complete-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeMaintComplete()">
+  <div class="modal-card" style="width:640px;max-width:95vw;max-height:90vh;overflow-y:auto">
+    <div class="modal-header">
+      <span class="modal-title" id="maint-c-title">Work Complete</span>
+      <button class="modal-close" onclick="closeMaintComplete()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-group">
+        <label class="field-label">EMAIL SUBJECT (optional)</label>
+        <input type="text" id="maint-c-subject" class="field-input">
+      </div>
+      <div class="field-group">
+        <label class="field-label">MESSAGE</label>
+        <textarea id="maint-c-body" class="field-input" rows="4"></textarea>
+        <div class="text-dim text-sm" style="margin-top:4px">The original notice's title, window and details are included below this message.</div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">AUDIENCE</label>
+        <div id="maint-c-aud" style="display:flex;flex-wrap:wrap;gap:6px 16px"></div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">ADDITIONAL EMAIL RECIPIENTS (optional)</label>
+        <textarea id="maint-c-extra" class="field-input" rows="2" oninput="_maintCompleteEstimate()" placeholder="Outside addresses, separated by commas or new lines"></textarea>
+        <div id="maint-c-estimate" class="text-dim text-sm" style="margin-top:4px"></div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <label class="checkbox-label"><input type="checkbox" id="maint-c-send" checked> Email the work-completed notice</label>
+        <label class="checkbox-label"><input type="checkbox" id="maint-c-priority" checked> Send as <strong style="color:#EF4444">high priority</strong></label>
+        <label class="checkbox-label" id="maint-c-remove-wrap"><input type="checkbox" id="maint-c-remove" checked> Take down the maintenance banner</label>
+        <label class="checkbox-label"><input type="checkbox" id="maint-c-banner"> Post a "maintenance complete" banner for 24 hours</label>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeMaintComplete()">Cancel</button>
+      <button class="btn btn-primary" id="maint-c-go" onclick="submitMaintComplete()">Mark Complete</button>
     </div>
   </div>
 </div>
