@@ -40,8 +40,31 @@ and don't write "portable" SQLite/PG code or `if backend == …` branches.
   `advance_email_enabled='0'` from the bootstrap and send nothing. That class
   of bug is now impossible. Keep it that way: **never catch
   DatabaseUnavailable and carry on with made-up data.**
-- `get_db()` opens a fresh psycopg2 connection per call (search_path set via
-  startup `options`), so it's safe from background threads. Always `close()`.
+- `get_db()` hands out a connection from a small **per-process pool**
+  (3.3.0, `db_adapter._ConnectionPool`; search_path set via startup
+  `options`), so it's safe from background threads. Always `close()` — that
+  RETURNS it (rolled back first, so an uncommitted write is discarded exactly
+  as a real close did). Opening a connection costs ~10 ms (TCP/TLS + SCRAM +
+  backend fork) and cold backends run their first queries slowly; before the
+  pool, connects were most of every page's time (show page: 10 connects,
+  ~100 of its ~160 ms). Pool rules — keep them:
+  - Nothing waits on the pool: empty → open a new connection; full → close
+    the returned one. `[postgresql] pool_max_idle` in db_config.ini caps
+    IDLE connections per process (default 4 → 16 per 4-worker server; 0 =
+    the old connect-per-call behavior). Mind PG's `max_connections`
+    (default 100) across servers + the sister apps sharing the DB.
+  - A connection that touched SESSION state (session-level advisory lock,
+    `SET`, `LISTEN`, temp table, `PREPARE`, or `.raw`) is closed, not pooled
+    (`_leaves_session_state()`) — e.g. file_store's migration lock. Don't
+    add session-state SQL expecting it to persist across `get_db()` calls.
+  - A dead idle connection (PG restart) is replaced transparently on its
+    FIRST statement only (safe: nothing in that transaction can have
+    committed); later failures surface as before. A still-down PG raises
+    DatabaseUnavailable from that reconnect, so outages still 503.
+  - After `close()` the wrapper refuses all use (InterfaceError) — the real
+    connection may already be lent to another thread.
+  - Explicit-settings `db_adapter.connect(settings)` and `raw_connect()`
+    (init_db migrations, tests) are never pooled.
 
 ### Writing SQL (native psycopg2, sent VERBATIM)
 `db_adapter.DBConnection.execute()` hands SQL straight to psycopg2 (DictCursor
@@ -148,8 +171,9 @@ apps. For a 321Theater access change, use this app's own flags instead
   **leader-gated** via `am_i_leader()` (cluster heartbeat in `cluster_instances`)
   so only one worker fires side-effecting jobs. Jobs with external side effects
   (email/SMS) must start with `if not am_i_leader(): return`.
-- `get_db()` is context-free (fresh connection per call) — safe to call from
-  background threads, not just request handlers.
+- `get_db()` is context-free (a pooled connection per call, never shared
+  while checked out) — safe to call from background threads, not just
+  request handlers.
 
 ## Scheduled auto-emails (advance / production schedule PDFs)
 - Job: `run_scheduled_pdf_emails()` — cron, top of every hour; does work at or
@@ -205,9 +229,10 @@ apps. For a 321Theater access change, use this app's own flags instead
   the migrate-to-S3 backfill — compressed bytes must never be uploaded as-is).
   The admin File Manager is the ONE surface that shows archived rows (sorted
   first — they're the designated first candidates when freeing space).
-- Freshness: `_attachments_rev(db, show_id)` (`count:max(id)` of live rows,
-  indexed by `idx_show_attachments_show`) rides on the 2 s advance sync and
-  15 s heartbeat responses; app.js `_checkAttachmentsRev()` reloads file
+- Freshness: `attachments_rev` (`count:max(id)` of live rows —
+  `_ATTACHMENTS_REV_COLS` selected inside each poll's one `FROM shows s`
+  statement, indexed by `idx_show_attachments_show`) rides on the 2 s advance
+  sync and 15 s heartbeat responses; app.js `_checkAttachmentsRev()` reloads file
   lists when it changes. This is also the cross-INSTANCE refresh path (all
   instances share one PostgreSQL) — keep it in both poll responses.
 - Syslog: FILE_ARCHIVE / FILE_RESTORE / FILE_PURGE (+ existing FILE_UPLOAD).
@@ -423,8 +448,15 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
   heartbeat` every 15 s (presence + "someone saved" banner only).
 - **2 s is the floor, not a dial**: saves are debounced 1.5 s so faster
   polling can't deliver edits sooner, and every poll WRITES (presence upsert
-  + prune into `active_sessions`). Don't lower it; don't remove the
-  `_syncInFlight` overlap guard.
+  into `active_sessions`; the 60 s prune runs at most every 30 s per
+  worker). Don't lower it; don't remove the `_syncInFlight` overlap guard.
+- Each poll reads all its state in ONE `FROM shows s` statement (changed
+  fields as `json_object_agg`, the cursor's MAX(updated_at), last-saved,
+  attachments_rev) — one snapshot, so a save committing mid-poll can't move
+  the cursor past an edit the client never got. A deleted show → 404 (the
+  presence upsert would 500 on the FK). `save_advance` writes only fields
+  whose value changed (one `unnest` upsert), so `updated_at` — and thus what
+  other tabs receive — moves only for real edits; keep it that way.
 - Per-field presence: focusin/focusout in `bindAdvanceForm()` sets
   `_focusedField`, which rides on every poll into
   `active_sessions.focused_field` (one row per user per show — one focused

@@ -2501,7 +2501,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
             <td>{{ e.exporter or '—' }}</td>
             <td class="text-dim">{{ (e.exported_at|string)[:16].replace('T',' ') }}</td>
             <td>
-              {% if e.pdf_data or e.s3_key %}
+              {% if e.has_pdf %}
               <a href="{{ url_for('download_export_history', show_id=show.id, log_id=e.id) }}"
                  class="btn btn-sm btn-primary export-redownload" title="Re-download this PDF version">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" style="vertical-align:middle;margin-right:4px"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Download

@@ -20,6 +20,9 @@ user           = showadvance
 password       = yourpassword
 app_schema     = theater321
 shared_schema  = shared
+# Idle connections each app worker keeps for reuse (connection pool, 3.3.0).
+# 0 = open a new connection every time (the pre-3.3.0 behavior).
+# pool_max_idle  = 4
 
 [seaweedfs]
 endpoint       = http://localhost:8333

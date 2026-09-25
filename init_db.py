@@ -518,6 +518,7 @@ CREATE TABLE IF NOT EXISTS schedule_rows (
     description TEXT DEFAULT '',
     notes TEXT DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS idx_schedule_rows_show ON schedule_rows(show_id);
 
 CREATE TABLE IF NOT EXISTS schedule_meta (
     id SERIAL PRIMARY KEY,
@@ -543,6 +544,7 @@ CREATE TABLE IF NOT EXISTS show_performances (
     sort_order INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_show_performances_show ON show_performances(show_id, perf_date);
 
 CREATE TABLE IF NOT EXISTS contacts (
     id SERIAL PRIMARY KEY,
@@ -580,6 +582,7 @@ CREATE TABLE IF NOT EXISTS export_log (
     content_hash TEXT DEFAULT NULL,
     content_sha256 TEXT DEFAULT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_export_log_show_type ON export_log(show_id, export_type, version);
 
 CREATE TABLE IF NOT EXISTS form_sections (
     id SERIAL PRIMARY KEY,
@@ -698,6 +701,7 @@ CREATE TABLE IF NOT EXISTS notifications (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     read_at TIMESTAMP DEFAULT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_notifications_show ON notifications(show_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
     ON notifications(user_id, read_at);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_created
@@ -711,6 +715,7 @@ CREATE TABLE IF NOT EXISTS form_history (
     saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     snapshot_json TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_form_history_show_type ON form_history(show_id, form_type);
 
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
@@ -736,6 +741,7 @@ CREATE TABLE IF NOT EXISTS show_comments (
     edited_at  TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_show_comments_show ON show_comments(show_id);
 
 CREATE TABLE IF NOT EXISTS show_attachments (
     id          SERIAL PRIMARY KEY,
@@ -861,6 +867,7 @@ CREATE TABLE IF NOT EXISTS labor_requests (
     sort_order                INTEGER DEFAULT 0,
     created_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_labor_requests_show ON labor_requests(show_id);
 
 CREATE TABLE IF NOT EXISTS crew_members (
     id             SERIAL PRIMARY KEY,
@@ -925,6 +932,8 @@ CREATE TABLE IF NOT EXISTS post_show_labor (
     sort_order         INTEGER DEFAULT 0,
     created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_post_show_labor_show ON post_show_labor(show_id);
+CREATE INDEX IF NOT EXISTS idx_post_show_labor_source ON post_show_labor(source_request_id);
 
 -- Per-day labor info for a show: the PM covering that day (when the show's
 -- main PM is out) and day-specific notes. Both surface on the Labor Overview,
@@ -971,6 +980,7 @@ CREATE TABLE IF NOT EXISTS overhead_labor_groups (
     created_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_oh_groups_project ON overhead_labor_groups(project_id, work_date);
 
 CREATE TABLE IF NOT EXISTS overhead_labor_requests (
     id                          SERIAL PRIMARY KEY,
@@ -1063,6 +1073,7 @@ CREATE TABLE IF NOT EXISTS comment_versions (
     edited_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
     edited_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_comment_versions_comment ON comment_versions(comment_id);
 
 CREATE TABLE IF NOT EXISTS email_send_log (
     id               SERIAL PRIMARY KEY,
@@ -1252,6 +1263,7 @@ CREATE TABLE IF NOT EXISTS show_external_rentals (
     sort_order   INTEGER DEFAULT 0,
     created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_show_external_rentals_show ON show_external_rentals(show_id);
 
 CREATE TABLE IF NOT EXISTS asset_type_system_members (
     system_type_id    INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,

@@ -35,7 +35,7 @@
     {% for t in retired_types %}
     <div class="retired-type-row" id="retired-type-{{ t.id }}">
       <div style="display:flex;align-items:center;gap:12px">
-        {% if t.photo %}
+        {% if t.has_photo %}
         <img src="/asset-types/{{ t.id }}/photo" style="width:40px;height:40px;border-radius:4px;object-fit:cover;opacity:.6" alt="">
         {% else %}
         <div style="width:40px;height:40px;border-radius:4px;background:var(--border);display:flex;align-items:center;justify-content:center;color:var(--text-dim);font-size:16px;opacity:.6">◈</div>

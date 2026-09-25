@@ -198,21 +198,53 @@ def _rget(row, col):
             return None
 
 
+_ABSENT = object()
+
+
+def in_db_col(kind, alias=''):
+    """SELECT-list fragment to use INSTEAD of a kind's BYTEA column when the
+    row is headed for read_bytes(): `in_db` says whether a database copy
+    exists without fetching it (octet_length() of a TOASTed value reads only
+    its header). read_bytes() then loads the bytes only if it actually serves
+    the database copy — with the default 's3' preference and dual-write on,
+    selecting the blob up front meant pulling every file out of PostgreSQL
+    and then downloading it from S3 anyway."""
+    p = f'{alias}.' if alias else ''
+    return f"(COALESCE(octet_length({p}{KINDS[kind]['blob']}), 0) > 0) AS in_db"
+
+
+def _load_db_copy_by_id(spec, rid):
+    """Lazy read of one row's database copy on its own connection (the
+    caller has usually closed its own by now). Decompressed bytes or None."""
+    db = _d['get_db']()
+    try:
+        return _load_db_copy(db, spec, rid)[1]
+    finally:
+        db.close()
+
+
 def read_bytes(kind, row):
     """Return the file bytes for a row of KINDS[kind], honouring the admin's
     read preference and falling back to the other copy when the preferred one
-    is missing or unreadable. The row must include the kind's bytes and key
-    columns (and is_compressed for attachments, when it can be archived).
+    is missing or unreadable. The row must include the kind's key column and
+    `id`, plus EITHER the bytes column (and is_compressed for attachments,
+    when it can be archived) OR the `in_db` flag from in_db_col() — then the
+    database copy is fetched only if it is the copy served.
 
     Raises FileMissing (no copy stored) or FileUnavailable (copies exist but
     every one failed)."""
     spec = KINDS[kind]
     key = _rget(row, spec['key'])
-    blob = _rget(row, spec['blob'])
+    try:
+        blob = row[spec['blob']]
+    except (KeyError, IndexError):
+        blob = _ABSENT
+    lazy = blob is _ABSENT
     sides = []
     if key:
         sides.append('s3')
-    if blob is not None and len(blob) > 0:
+    if (bool(_rget(row, 'in_db')) if lazy
+            else blob is not None and len(blob) > 0):
         sides.append('db')
     if not sides:
         raise FileMissing(f'{kind} id={_rget(row, "id")} has no stored copy')
@@ -223,6 +255,10 @@ def read_bytes(kind, row):
         try:
             if side == 's3':
                 data = s3_storage.download_file(key)
+            elif lazy:
+                data = _load_db_copy_by_id(spec, _rget(row, 'id'))
+                if not data:
+                    raise FileReadError('database copy was removed since the row was read')
             else:
                 data = bytes(blob)
                 if _rget(row, 'is_compressed'):

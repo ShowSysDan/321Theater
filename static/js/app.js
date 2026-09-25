@@ -4440,7 +4440,7 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
   // Mirrors the href_matches exclusions in base.html's speculationrules block.
   const EXCLUDE = [
     /^\/logout$/, /^\/login/, /^\/static\//, /^\/api\//,
-    /\/export\//, /\.pdf$/, /\/download(\/|$)/,
+    /\/export(\/|$)/, /\.pdf$/, /\/pdf$/, /\/download(\/|$)/,
   ];
   const prefetched = new Set();
   let hoverTimer = null;

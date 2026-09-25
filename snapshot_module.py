@@ -447,13 +447,23 @@ def _live_count(db, schema, table):
         return None
 
 
-def _read_live_table(db, schema, table):
+def _read_live_table(db, schema, table, where_show_id=None):
+    """Every live row of a table — or, in per-show mode, only that show's
+    rows. Pushing the show filter into SQL matters since 3.1.0: the child
+    tables include show_attachments / show_external_rentals, whose BYTEA
+    columns can hold every show's files."""
     cols = _live_columns(db, schema, table)
     if not cols:
         return None, None
     col_sql = ', '.join(_qi(c) for c in cols)
-    rows = db.execute(
-        f'SELECT {col_sql} FROM {_qtable(db, schema, table)}').fetchall()
+    show_col = 'id' if table == 'shows' else 'show_id'
+    if where_show_id is not None and show_col in cols:
+        rows = db.execute(
+            f'SELECT {col_sql} FROM {_qtable(db, schema, table)} WHERE {_qi(show_col)} = %s',
+            (where_show_id,)).fetchall()
+    else:
+        rows = db.execute(
+            f'SELECT {col_sql} FROM {_qtable(db, schema, table)}').fetchall()
     return cols, [[r[c] for c in cols] for r in (dict(row) for row in rows)]
 
 
@@ -614,7 +624,7 @@ def _plan_table(db, snap, schema, table, restore_keys=None, delete_keys=None,
     live_cols = _live_columns(db, schema, table)
     if not live_cols:
         return None, f'table {table} not present in live database'
-    _, live_rows = _read_live_table(db, schema, table)
+    _, live_rows = _read_live_table(db, schema, table, where_show_id)
     pk_cols = _pk_for(meta, [c for c in snap_cols if c in live_cols])
     if not pk_cols:
         return None, f'table {table} has no usable primary key'
