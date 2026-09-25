@@ -1004,6 +1004,20 @@
       <div id="s3-settings-body"><p class="text-dim" style="font-size:12px">Loading…</p></div>
     </div>
   </div>
+
+  <div class="form-section" style="margin-bottom:16px">
+    <div class="form-section-header"><span class="section-icon">◈</span> FILE REDUNDANCY (S3 ⇄ DATABASE)</div>
+    <div class="form-section-body" style="max-width:820px">
+      <p class="field-hint" style="margin-bottom:12px">
+        Every stored file (show attachments, exported PDF versions, asset photos, external rental
+        PDFs, PDF form templates) can live in S3, in the PostgreSQL database, or in <strong>both</strong>.
+        Copies keep their show association, file type and a SHA-256 of their contents. The migration
+        tool only ever <strong>copies</strong> — it never deletes the source — and re-runs skip files
+        already copied. Every step is written to the app syslog (<code>FILE_MIGRATE_*</code>).
+      </p>
+      <div id="file-redundancy-body"><p class="text-dim" style="font-size:12px">Loading…</p></div>
+    </div>
+  </div>
 </div>
 {% endif %}
 
@@ -3403,6 +3417,234 @@ if (document.getElementById('s3-settings-body')) {
   loadS3Settings();
 }
 
+/* ── File Redundancy (S3 ⇄ database copy / verify) ─────────────── */
+let _frPollTimer = null;
+
+function _frStatusBadge(st) {
+  const colors = { running: 'var(--accent)', completed: '#48BB78', cancelled: '#A0AEC0',
+                   interrupted: '#ED8936', failed: 'var(--danger)' };
+  return `<span style="font-size:10px;font-weight:700;letter-spacing:.04em;color:${colors[st] || 'inherit'}">${_venueLogoEsc((st || '').toUpperCase())}</span>`;
+}
+
+function _frCounts(r) {
+  const parts = [`${r.processed}/${r.total} processed`];
+  if (r.copied) parts.push(`${r.copied} copied (${_fmtBytes(r.bytes_copied || 0)})`);
+  if (r.skipped) parts.push(`${r.skipped} skipped — already there`);
+  if (r.verified) parts.push(`${r.verified} verified`);
+  if (r.mismatched) parts.push(`<span style="color:var(--danger)">${r.mismatched} mismatched</span>`);
+  if (r.failed) parts.push(`<span style="color:var(--danger)">${r.failed} failed</span>`);
+  return parts.join(' · ');
+}
+
+async function loadFileRedundancy() {
+  const host = document.getElementById('file-redundancy-body');
+  if (!host) return;
+  // Keep the admin's file-type selection across refreshes.
+  const prevKinds = Array.from(host.querySelectorAll('.fr-kind')).map(c => [c.value, c.checked]);
+  let d;
+  try {
+    d = await (await fetch('/settings/file-storage')).json();
+  } catch (e) {
+    host.innerHTML = '<p class="text-dim" style="font-size:12px;color:#F56565">Failed to load file redundancy status.</p>';
+    return;
+  }
+  const esc = _venueLogoEsc;
+  const checked = Object.fromEntries(prevKinds);
+  const tot = { total: 0, s3_only: 0, db_only: 0, both_copies: 0, db_bytes: 0 };
+  const kindRows = d.kinds.map(k => {
+    Object.keys(tot).forEach(f => tot[f] += (k[f] || 0));
+    const on = (k.key in checked) ? checked[k.key] : true;
+    return `<tr>
+      <td style="font-size:12px"><label class="checkbox-label" style="margin:0"><input type="checkbox" class="fr-kind" value="${esc(k.key)}" ${on ? 'checked' : ''}> ${esc(k.label)}</label></td>
+      <td style="font-size:12px;text-align:right">${k.total}</td>
+      <td style="font-size:12px;text-align:right">${k.s3_only}</td>
+      <td style="font-size:12px;text-align:right">${k.db_only}</td>
+      <td style="font-size:12px;text-align:right">${k.both_copies}</td>
+      <td style="font-size:12px;text-align:right" class="text-dim">${_fmtBytes(k.db_bytes)}</td>
+    </tr>`;
+  }).join('');
+  const running = d.running;
+  const s3Note = d.s3_configured ? '' :
+    '<p class="field-hint" style="color:var(--danger);margin:6px 0">S3 is not configured — the copy/verify tools need it.</p>';
+  host.innerHTML = `
+    <div class="field-group" style="margin-bottom:10px">
+      <label class="checkbox-label" style="display:block;margin:4px 0">
+        <input type="checkbox" id="fr-dual-write" ${d.dual_write ? 'checked' : ''}>
+        <strong>Save new files to both S3 and the database</strong>
+        <span class="text-dim">(uploads and generated PDFs keep a database copy after the S3 upload; off = today's S3-only behavior)</span>
+      </label>
+    </div>
+    <div class="field-group" style="margin-bottom:10px">
+      <label class="field-label">READ FILES FROM</label>
+      <label class="checkbox-label" style="display:block;margin:4px 0">
+        <input type="radio" name="fr-read-pref" value="s3" ${d.read_preference !== 'db' ? 'checked' : ''}>
+        <strong>S3 first</strong> <span class="text-dim">(the default — database copy used if S3 fails or is missing the file)</span>
+      </label>
+      <label class="checkbox-label" style="display:block;margin:4px 0">
+        <input type="radio" name="fr-read-pref" value="db" ${d.read_preference === 'db' ? 'checked' : ''}>
+        <strong>Database first</strong> <span class="text-dim">(S3 used if the file has no database copy)</span>
+      </label>
+    </div>
+    <div id="fr-msg" class="field-msg" style="display:none;margin-bottom:8px"></div>
+    <button class="btn btn-primary" onclick="saveFileRedundancy()">Save</button>
+
+    <div style="overflow-x:auto;margin-top:16px">
+      <table class="data-table">
+        <thead><tr><th>FILE TYPE</th><th style="text-align:right">FILES</th><th style="text-align:right">S3 ONLY</th>
+          <th style="text-align:right">DB ONLY</th><th style="text-align:right">BOTH</th><th style="text-align:right">DB SIZE</th></tr></thead>
+        <tbody>${kindRows}
+          <tr style="font-weight:600"><td style="font-size:12px">Total</td>
+            <td style="font-size:12px;text-align:right">${tot.total}</td><td style="font-size:12px;text-align:right">${tot.s3_only}</td>
+            <td style="font-size:12px;text-align:right">${tot.db_only}</td><td style="font-size:12px;text-align:right">${tot.both_copies}</td>
+            <td style="font-size:12px;text-align:right">${_fmtBytes(tot.db_bytes)}</td></tr>
+        </tbody>
+      </table>
+    </div>
+    ${s3Note}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+      <button class="btn btn-ghost" onclick="startFileMigration('s3_to_db')" ${running || !d.s3_configured ? 'disabled' : ''}>Copy S3 → Database</button>
+      <button class="btn btn-ghost" onclick="startFileMigration('db_to_s3')" ${running || !d.s3_configured ? 'disabled' : ''}>Copy Database → S3</button>
+      <button class="btn btn-ghost" onclick="startFileMigration('verify')" ${running || !d.s3_configured ? 'disabled' : ''}>Verify Both Copies</button>
+    </div>
+    <p class="field-hint" style="margin-top:6px;font-size:12px">Runs in the background on the server — you can leave this page. The checked file types above are included.</p>
+    <div id="fr-progress" style="margin-top:12px"></div>
+    <div id="fr-history" style="margin-top:12px"></div>
+    <div id="fr-run-detail" style="margin-top:8px"></div>`;
+  _frRenderProgress(running);
+  _frRenderHistory(d.runs || []);
+  clearTimeout(_frPollTimer);
+  if (running) _frPollTimer = setTimeout(() => _frPoll(running.id), 2000);
+}
+
+function _frRenderProgress(run) {
+  const el = document.getElementById('fr-progress');
+  if (!el) return;
+  if (!run) { el.innerHTML = ''; return; }
+  const pct = run.total ? Math.min(100, Math.round(run.processed * 100 / run.total)) : 0;
+  el.innerHTML = `
+    <div style="font-size:12px;font-weight:600;margin-bottom:4px">${_venueLogoEsc(run.direction_label)} — run #${run.id} ${_frStatusBadge(run.status)}</div>
+    <div style="height:8px;background:var(--border, rgba(128,128,128,.25));border-radius:4px;overflow:hidden">
+      <div style="height:100%;width:${pct}%;background:var(--accent);transition:width .4s"></div>
+    </div>
+    <div class="text-dim" style="font-size:11px;margin-top:4px">${pct}% · ${_frCounts(run)}</div>
+    ${run.current_item ? `<div class="text-dim" style="font-size:11px;overflow-wrap:anywhere">Now: ${_venueLogoEsc(run.current_item)}</div>` : ''}
+    ${run.status === 'running' ? `<button class="btn btn-xs btn-danger-ghost" style="margin-top:6px" onclick="cancelFileMigration(${run.id}, this)">Cancel run</button>` : ''}`;
+}
+
+function _frRenderHistory(runs) {
+  const el = document.getElementById('fr-history');
+  if (!el) return;
+  if (!runs.length) { el.innerHTML = '<p class="text-dim" style="font-size:12px">No migration runs yet.</p>'; return; }
+  el.innerHTML = `<div class="field-label" style="margin-bottom:4px">RECENT RUNS</div>
+    <div style="overflow-x:auto"><table class="data-table"><thead><tr><th>#</th><th>RUN</th><th>STATUS</th><th>RESULT</th><th>STARTED</th><th>BY</th><th></th></tr></thead><tbody>` +
+    runs.map(r => `<tr>
+      <td style="font-size:11px">${r.id}</td>
+      <td style="font-size:11px">${_venueLogoEsc(r.direction_label)}</td>
+      <td>${_frStatusBadge(r.status)}</td>
+      <td style="font-size:11px" class="text-dim">${_frCounts(r)}${r.message ? '<br>' + _venueLogoEsc(r.message) : ''}</td>
+      <td style="font-size:11px" class="text-dim">${fmtDate(r.started_at)}</td>
+      <td style="font-size:11px">${_venueLogoEsc(r.started_by_name || '')}</td>
+      <td>${r.error_count ? `<button class="btn btn-xs btn-ghost" onclick="showFileMigrationRun(${r.id})">${r.error_count} issue${r.error_count === 1 ? '' : 's'}</button>` : ''}</td>
+    </tr>`).join('') + '</tbody></table></div>';
+}
+
+async function _frPoll(runId) {
+  let r;
+  try {
+    r = await (await fetch(`/settings/file-storage/runs/${runId}`)).json();
+  } catch (e) {
+    _frPollTimer = setTimeout(() => _frPoll(runId), 5000);
+    return;
+  }
+  if (!document.getElementById('fr-progress')) return;
+  if (r.status === 'running') {
+    _frRenderProgress(r);
+    _frPollTimer = setTimeout(() => _frPoll(runId), 2000);
+  } else {
+    loadFileRedundancy();   // finished: refresh counts + history
+  }
+}
+
+function _frMsg(text, ok) {
+  const msg = document.getElementById('fr-msg');
+  if (!msg) return;
+  msg.style.display = 'block';
+  msg.textContent = text;
+  msg.style.color = ok ? 'var(--accent)' : 'var(--danger)';
+}
+
+async function saveFileRedundancy() {
+  const body = {
+    dual_write: !!document.getElementById('fr-dual-write')?.checked,
+    read_preference: document.querySelector('input[name="fr-read-pref"]:checked')?.value || 's3',
+  };
+  try {
+    const d = await (await fetch('/settings/file-storage', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    })).json();
+    if (d.success) {
+      _frMsg('✓ Saved — takes effect within 10 seconds on all instances', true);
+      showSaveToast('✓ File redundancy settings saved');
+    } else {
+      _frMsg(d.error || 'Save failed', false);
+    }
+  } catch (e) { _frMsg('Network error', false); }
+}
+
+async function startFileMigration(direction) {
+  const kinds = Array.from(document.querySelectorAll('.fr-kind:checked')).map(c => c.value);
+  if (!kinds.length) { alert('Check at least one file type.'); return; }
+  const what = {
+    s3_to_db: 'Copy every checked file that is only in S3 into the database? S3 copies are kept.',
+    db_to_s3: 'Copy every checked file that is only in the database into S3? Database copies are kept.',
+    verify:   'Re-read every checked file from both S3 and the database and compare SHA-256 checksums? Nothing is changed except recording missing checksums.',
+  }[direction];
+  if (!confirm(what)) return;
+  try {
+    const resp = await fetch('/settings/file-storage/migrate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({direction, kinds})
+    });
+    const d = await resp.json();
+    if (!d.success) { alert(d.error || 'Could not start the run.'); }
+  } catch (e) { alert('Network error'); }
+  loadFileRedundancy();
+}
+
+async function cancelFileMigration(runId, btn) {
+  if (!confirm('Cancel this run? Files already copied stay copied; re-running later picks up where it stopped.')) return;
+  btn.disabled = true;
+  await fetch(`/settings/file-storage/runs/${runId}/cancel`, {method: 'POST'});
+}
+
+async function showFileMigrationRun(runId) {
+  const el = document.getElementById('fr-run-detail');
+  if (!el) return;
+  el.innerHTML = '<p class="text-dim" style="font-size:12px">Loading…</p>';
+  try {
+    const r = await (await fetch(`/settings/file-storage/runs/${runId}`)).json();
+    const errs = r.errors || [];
+    el.innerHTML = `<div class="field-label" style="margin-bottom:4px">RUN #${r.id} ISSUES
+        <span class="text-dim">(first ${errs.length}; the full list is in syslog as FILE_MIGRATE_ITEM)</span>
+        <button class="btn btn-xs btn-ghost" onclick="document.getElementById('fr-run-detail').innerHTML=''">Close</button></div>
+      <div style="overflow-x:auto"><table class="data-table"><thead><tr><th>TYPE</th><th>ROW</th><th>SHOW</th><th>FILE</th><th>OUTCOME</th><th>DETAIL</th></tr></thead><tbody>` +
+      errs.map(e => `<tr>
+        <td style="font-size:11px">${_venueLogoEsc(e.kind)}</td>
+        <td style="font-size:11px">${e.id}</td>
+        <td style="font-size:11px">${e.show_id ? `<a href="/shows/${e.show_id}" style="color:var(--accent)">${e.show_id}</a>` : '—'}</td>
+        <td style="font-size:11px;overflow-wrap:anywhere">${_venueLogoEsc(e.name || '')}</td>
+        <td style="font-size:11px">${_venueLogoEsc(e.outcome)}</td>
+        <td style="font-size:11px;overflow-wrap:anywhere" class="text-dim">${_venueLogoEsc(e.error)}</td>
+      </tr>`).join('') + '</tbody></table></div>';
+  } catch (e) {
+    el.innerHTML = '<p style="font-size:12px;color:var(--danger)">Failed to load run details.</p>';
+  }
+}
+
+if (document.getElementById('file-redundancy-body')) {
+  loadFileRedundancy();
+}
+
 async function saveUploadSize(form) {
   const fd = new FormData(form);
   const msg = form.querySelector('.upload-size-msg');
@@ -3614,7 +3856,7 @@ async function loadFileManager() {
     const typeLabel = { attachment: 'Attachment', export: 'PDF Export', rental: 'Rental PDF' };
     // Archived files sort first (server-side) — they're the first candidates
     // for deletion when freeing up space.
-    el.innerHTML = `<table class="data-table"><thead><tr><th>SHOW</th><th>TYPE</th><th>FILE</th><th>SIZE</th><th>UPLOADED BY</th><th>DATE</th><th></th></tr></thead><tbody>` +
+    el.innerHTML = `<table class="data-table"><thead><tr><th>SHOW</th><th>TYPE</th><th>FILE</th><th>SIZE</th><th>STORED IN</th><th>UPLOADED BY</th><th>DATE</th><th></th></tr></thead><tbody>` +
       data.files.map(f => {
         const archivedBadge = f.archived
           ? ` <span class="badge" title="Archived${f.archived_by ? ' by ' + f.archived_by : ''}${f.archived_at ? ' · ' + fmtDate(f.archived_at) : ''}" style="background:rgba(240,78,35,.12);color:#f04e23;border:1px solid rgba(240,78,35,.35);font-size:10px;padding:1px 6px;border-radius:99px">ARCHIVED</span>`
@@ -3631,6 +3873,7 @@ async function loadFileManager() {
         <td style="font-size:11px" class="text-dim">${typeLabel[f.file_type] || f.file_type}</td>
         <td style="font-size:11px">${f.download_url ? `<a href="${f.download_url}">${f.filename}</a>` : f.filename}${archivedBadge}</td>
         <td style="font-size:11px" class="text-dim">${_fmtBytes(f.file_size)}</td>
+        <td style="font-size:11px" class="text-dim" title="Where this file's bytes are stored (Database → File Redundancy)">${f.stored_in || '—'}</td>
         <td style="font-size:11px">${f.uploader}</td>
         <td style="font-size:11px" class="text-dim">${fmtDate(f.created_at)}</td>
         <td style="white-space:nowrap">${actions}</td>
