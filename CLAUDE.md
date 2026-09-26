@@ -24,10 +24,12 @@ bootstrap, `db_type`, the SQL-dialect translation layer and the silent
 fallback connection were all removed in 3.0.0. Don't reintroduce any of them,
 and don't write "portable" SQLite/PG code or `if backend == …` branches.
 
-- **Config:** `db_config.ini` `[postgresql]` in the app dir (gitignored), or
-  the path in `THEATER_DB_CONFIG`. `db_adapter.read_db_settings()` parses it
-  (cached 30 s). That file is the ONLY bootstrap: `app_settings` and all
-  data live in PostgreSQL.
+- **Config:** `PG_*` keys in the app's `.env` (3.4.0), resolved by
+  `db_adapter.read_db_settings()` (cached 30 s) through `app_config.layered()`:
+  each key comes from the process env, then the `.env` file, then (legacy,
+  deprecated, per key) `db_config.ini [postgresql]` / `THEATER_DB_CONFIG`.
+  That is the ONLY bootstrap: `app_settings` and all data live in PostgreSQL.
+  See "Server config" below.
 - **No fallback, fail loud:** `db_adapter.connect()` / `get_db()` RAISE
   `db_adapter.DatabaseUnavailable` when PG is unconfigured or unreachable.
   Requests get a 503 (app-level errorhandler; JSON for API/XHR). Background
@@ -49,7 +51,7 @@ and don't write "portable" SQLite/PG code or `if backend == …` branches.
   pool, connects were most of every page's time (show page: 10 connects,
   ~100 of its ~160 ms). Pool rules — keep them:
   - Nothing waits on the pool: empty → open a new connection; full → close
-    the returned one. `[postgresql] pool_max_idle` in db_config.ini caps
+    the returned one. `PG_POOL_MAX_IDLE` in .env (legacy ini `pool_max_idle`) caps
     IDLE connections per process (default 4 → 16 per 4-worker server; 0 =
     the old connect-per-call behavior). Mind PG's `max_connections`
     (default 100) across servers + the sister apps sharing the DB.
@@ -153,6 +155,49 @@ work used a local PG 16). A cheap static check that catches syntax, unknown
 tables/columns and bad ON CONFLICT targets is to `PREPARE` each statement
 (with `%s` → `$n`) against a migrated schema.
 
+## Server config: ONE file, `.env` (app_config.py, 3.4.0)
+- Everything per-MACHINE lives in `.env` (path override `THEATER_ENV_FILE`):
+  `SECRET_KEY`, `PG_*`, `S3_*`, `TEST_MODE`, gateway/proxy keys. Documented in
+  `.env.example`. Read config through `app_config.get()/get_bool()` (process
+  env first — systemd `EnvironmentFile=` — then the file, parsed with
+  systemd's quoting rules so CLI and service agree), not `os.environ`.
+  `app_config` must stay dependency-free (db_adapter/s3_storage import it).
+- `db_config.ini` is a deprecated per-key FALLBACK so running installs don't
+  break while porting (`CONFIG_LEGACY` log, Settings → Database lists the
+  keys; `python3 app_config.py [--export]`). Keep the fallback until the
+  user says every server is ported; don't add new keys to the ini.
+- New per-machine setting → a `.env` key (+ `.env.example`), never
+  `app_settings` if it must differ between servers sharing one DB.
+- `.env` values are in the service's ENVIRONMENT, which children inherit.
+  Any subprocess that doesn't need the app's secrets (anything touching
+  uploaded files, third-party code) gets `env=app_config.child_env(...)`
+  (drops PG_*/S3_*/SECRET_KEY/GATEWAY_SHARED_SECRET/PGPASSWORD): soffice,
+  the Prism node bridge, pg_dump (+ PGPASSWORD) already do.
+- `app_config.py --export` must stay print-only and decide from the .env
+  FILE (never the shell env); it must never emit a key the file has.
+
+## TEST_MODE (test/staging install, 3.4.0) — keep every gate
+`TEST_MODE=1` in `.env` → `app.TEST_MODE` (read once at import). A test
+server may share production's database, so it must never act for production:
+- No cluster membership: `start_cluster_heartbeat()` no-ops,
+  `get_cluster_status()` returns early (no peer read), `am_i_leader()` is
+  False before anything else (even `cluster_force_leader=always`),
+  `/internal/cluster/primary` → 503 `reason=test-mode`. Hence every
+  leader-gated job skips — new side-effecting jobs just need the usual
+  `am_i_leader()` gate. `run_hourly_maintenance` is the one exception: in
+  TEST_MODE it runs host-locked (own DB housekeeping).
+- Email: `_send_email()` is the single chokepoint — delivers only to
+  `_test_mode_email_allowlist()` (reachable admin-ROLE accounts via
+  `_audience_emails(db, ['admin'])` — never `is_app_admin` — plus
+  `TEST_MODE_EMAIL_ALLOWLIST`), subject prefixed `TEST_INSTANCE_TAG`; the rest
+  are logged to email_outbox_log as not sent; returns False when nobody is
+  left so callers never write a "sent"/dedup row. Never add a send path that
+  bypasses `_send_email()`.
+- Syslog keeps forwarding; `_SYSLOG_FORMAT` prefixes every line with
+  `[TEST INSTANCE]` (stderr + remote handler).
+- UI: `test_mode` from `inject_version()` → badges in base.html (sidebar,
+  rail, mobile header), login.html, `[TEST]` title prefix.
+
 ## PDF rendering (WeasyPrint) — always pass the shared font config
 Every `HTML(...).write_pdf(...)` must pass `font_config=_wp_font_config()`
 (security_module gets it as the `pdf_font_config` dep). Without it WeasyPrint
@@ -249,7 +294,9 @@ apps. For a 321Theater access change, use this app's own flags instead
 
 ## S3 / SeaweedFS storage (s3_storage.py) — config source + failover (2.39.0)
 - Config source is chosen by `s3_config_source` app_setting: `ini` (default —
-  `db_config.ini [seaweedfs]`, single endpoint, the historical behavior) or
+  the server config: `S3_*` in `.env`, comma-separated `S3_ENDPOINT` allowed,
+  each missing key falling back to `db_config.ini [seaweedfs]`; the stored
+  value stays 'ini' for compatibility) or
   `gui` (app_settings keys `s3_endpoints` JSON list / `s3_access_key` /
   `s3_secret_key` / `s3_bucket`, edited in Settings → System → Database →
   File Storage). app.py injects the GUI reader via
@@ -569,7 +616,7 @@ to guess.
 
 - **Main app** (internal server, e.g. `10.201.2.101`): anything in `app.py`,
   `init_db.py`, `db_adapter.py`, `templates/`, `static/`, `prism_*`,
-  `start.sh`, `install.sh`, or the app's `.env`.
+  `start.sh`, `install.sh`, `app_config.py`, or the app's `.env`.
   → `cd <app dir> && git pull && sudo systemctl restart 321theater`
   (schema migrations auto-apply on startup — no manual `init_db --migrate`).
 

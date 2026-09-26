@@ -6,7 +6,7 @@
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="${APP_DIR}/venv"
-# Read app_port from app_settings in PostgreSQL (db_config.ini), fall back to 5400
+# Read app_port from app_settings in PostgreSQL (connection from .env), fall back to 5400
 PORT=$(cd "${APP_DIR}" && "${VENV}/bin/python" -c "
 import db_adapter
 try:

@@ -8,7 +8,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>{% block title %}3·2·1→Theater{% endblock %}</title>
+  <title>{% if test_mode %}[TEST] {% endif %}{% block title %}3·2·1→Theater{% endblock %}</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -96,7 +96,7 @@
     <button type="button" class="m-icon-btn" onclick="mToggleDrawer()" aria-label="Menu">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="22" height="22"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
-    <a class="m-brand" href="{{ url_for('viewer_home') if session.get('is_document_viewer') else url_for('dashboard') }}">3·2·1→THEATER</a>
+    <a class="m-brand" href="{{ url_for('viewer_home') if session.get('is_document_viewer') else url_for('dashboard') }}">3·2·1→THEATER{% if test_mode %} <span class="test-instance-badge">TEST</span>{% endif %}</a>
     <button type="button" class="m-icon-btn" onclick="openHelp()" aria-label="Help">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="20" height="20"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
     </button>
@@ -308,6 +308,9 @@
         </a>
       </div>
       <div class="app-version" style="font-size:10px;color:var(--text-dim);text-align:center;letter-spacing:.04em">v{{ app_version }}</div>
+      {% if test_mode %}
+      <div class="sidebar-test-flag" style="text-align:center;margin-top:3px"><span class="test-instance-badge" title="TEST_MODE is on in this server's .env: not clustered, email only to admins, leader-only background jobs off">TEST INSTANCE</span></div>
+      {% endif %}
       <div style="text-align:center;margin-top:2px">
         <button type="button" class="view-mode-link" onclick="setSiteMode('{{ 'desktop' if is_mobile_view else 'mobile' }}')">
           {{ 'Switch to desktop site' if is_mobile_view else 'Switch to mobile site' }}

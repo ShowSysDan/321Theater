@@ -61,6 +61,8 @@ from datetime import date, datetime, timedelta
 
 from flask import jsonify, redirect, render_template, request, session, url_for
 
+import app_config  # dependency-free; child_env() for the node subprocess
+
 # Dependencies injected by register() — keeps this module import-safe and
 # avoids a circular import with app.py.
 _d = {}
@@ -218,7 +220,8 @@ def _bridge_call(script_name, args=None, *, settings, timeout=None, debug_sink=N
     except (TypeError, ValueError):
         node_timeout = 120
 
-    env = {**os.environ, 'PRISM_TOKEN': settings.get('prism_token', '')}
+    # The vendor SDK gets its token and nothing of the app's own secrets.
+    env = app_config.child_env(PRISM_TOKEN=settings.get('prism_token', ''))
     cmd = ['node', script_name, json.dumps(args or {})]
     note(f'→ {script_name} args={json.dumps(args or {})[:1500]}')
 

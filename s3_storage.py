@@ -7,16 +7,19 @@ SeaweedFS / S3-compatible object storage for 321Theater.
 Configuration comes from one of two sources, chosen by the admin
 (Settings → System → Database → File Storage; `s3_config_source` app_setting):
 
-  - 'ini' (the default, and the historical behavior): the [seaweedfs] section
-    of db_config.ini next to this file — a single endpoint.
+  - 'ini' (the default, and the historical behavior): the server's own config
+    — S3_* keys in the app's .env (3.4.0; S3_ENDPOINT may list several
+    endpoints, comma-separated), each missing key falling back to the legacy
+    [seaweedfs] section of db_config.ini next to this file. The source is
+    still called 'ini' because that value is stored in app_settings.
   - 'gui': app_settings rows (s3_endpoints JSON list, s3_access_key,
     s3_secret_key, s3_bucket) managed in the Settings UI and stored in the
     live database, supporting MULTIPLE endpoints.
 
 app.py injects the GUI reader via set_settings_provider() — this module never
 imports app.py. If the provider is unset, errors, or the source is 'ini',
-db_config.ini is used exactly as before, so existing deployments keep working
-untouched.
+the server config (.env, then db_config.ini) is used exactly as before, so
+existing deployments keep working untouched.
 
 Multiple endpoints (e.g. two SeaweedFS S3 gateways fronting one cluster) are
 tried in order with automatic failover: the last endpoint that worked is
@@ -32,10 +35,11 @@ Key naming scheme (single bucket):
   asset-photos/{type_id}
   external-rentals/{er_id}/{filename}
 """
-import configparser
 import logging
 import os
 import time
+
+import app_config
 
 _logger = logging.getLogger('showadvance')  # same logger app.py wires to syslog
 
@@ -46,9 +50,17 @@ _CACHE_TTL = 30  # seconds
 
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'db_config.ini')
 
+# (settings key, .env key, legacy db_config.ini [seaweedfs] key, default).
+S3_SETTINGS_SPEC = (
+    ('endpoint',   'S3_ENDPOINT',   'endpoint',   ''),
+    ('access_key', 'S3_ACCESS_KEY', 'access_key', ''),
+    ('secret_key', 'S3_SECRET_KEY', 'secret_key', ''),
+    ('bucket',     'S3_BUCKET',     'bucket',     '321theater'),
+)
+
 # Injected by app.py: a zero-arg callable returning a settings dict (see
 # read_s3_settings for the shape) when the GUI source is active, or None to
-# fall back to db_config.ini. Kept as injection to avoid a circular import.
+# fall back to the server config. Kept as injection to avoid a circular import.
 _settings_provider = None
 
 # Index (into s3_endpoints) of the endpoint that most recently succeeded —
@@ -66,25 +78,20 @@ def set_settings_provider(fn) -> None:
 
 
 def _read_ini_settings() -> dict:
-    """The historical config source: db_config.ini [seaweedfs]."""
-    result = {}
-    if os.path.exists(_CONFIG_PATH):
-        try:
-            cp = configparser.ConfigParser()
-            cp.read(_CONFIG_PATH, encoding='utf-8')
-            if 'seaweedfs' in cp:
-                sec = cp['seaweedfs']
-                endpoint = sec.get('endpoint', '').rstrip('/')
-                result = {
-                    's3_endpoints':  [endpoint] if endpoint else [],
-                    's3_access_key': sec.get('access_key', ''),
-                    's3_secret_key': sec.get('secret_key', ''),
-                    's3_bucket':     sec.get('bucket', '321theater'),
-                    's3_source':     'ini',
-                }
-        except Exception:
-            pass
-    return result
+    """The historical config source, now the server config: S3_* in .env,
+    each missing key falling back to db_config.ini [seaweedfs]. {} when
+    neither configures S3."""
+    values, _sources, present = app_config.layered(S3_SETTINGS_SPEC, _CONFIG_PATH, 'seaweedfs')
+    if not present:
+        return {}
+    endpoints = [e.strip().rstrip('/') for e in values['endpoint'].split(',') if e.strip()]
+    return {
+        's3_endpoints':  endpoints,
+        's3_access_key': values['access_key'],
+        's3_secret_key': values['secret_key'],
+        's3_bucket':     values['bucket'] or '321theater',
+        's3_source':     'ini',
+    }
 
 
 def read_s3_settings() -> dict:
@@ -102,7 +109,7 @@ def read_s3_settings() -> dict:
         try:
             cfg = _settings_provider()   # dict when GUI source active, else None
         except Exception as e:
-            _logger.error(f'S3_SETTINGS_PROVIDER_ERROR error={e} — falling back to db_config.ini')
+            _logger.error(f'S3_SETTINGS_PROVIDER_ERROR error={e} — falling back to the server config (.env)')
             cfg = None
     if cfg is None:
         cfg = _read_ini_settings()
@@ -229,7 +236,7 @@ def test_connection() -> dict:
     bucket = cfg.get('s3_bucket', '')
     source = cfg.get('s3_source', 'ini')
     if not is_configured():
-        where = ('db_config.ini' if source == 'ini'
+        where = ('.env (S3_*) / db_config.ini' if source == 'ini'
                  else 'Settings → System → Database → File Storage')
         return {'success': False, 'message': f'S3 storage not configured in {where}.',
                 'endpoint': cfg.get('s3_endpoint', ''), 'bucket': bucket,

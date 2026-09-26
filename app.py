@@ -11,7 +11,8 @@ the per-show lifecycle (Advance Sheet → Production Schedule → Labor →
 Assets → Post-Show Notes), the cross-show Labor Scheduler, invoices/PDF
 export, the Asset Manager, admin/settings, and the JSON APIs the templates
 call. Data access goes through db_adapter — PostgreSQL only, credentials
-from db_config.ini; HTML lives in templates/, client JS in static/js/app.js.
+from .env (app_config.py; legacy db_config.ini fallback); HTML lives in
+templates/, client JS in static/js/app.js.
 
 Conventions
 -----------
@@ -28,7 +29,7 @@ Conventions
   bump it (and the README changelog) with every change — MINOR for features,
   PATCH for fixes.
 
-Run: python app.py   (after creating db_config.ini and running init_db.py)
+Run: python app.py   (after filling in .env — see .env.example — and running init_db.py)
 """
 import os
 import sys
@@ -55,6 +56,7 @@ from datetime import datetime, date, timedelta
 from functools import wraps
 from io import BytesIO
 
+import app_config
 import db_adapter
 from db_adapter import DBIntegrityError
 import s3_storage
@@ -117,6 +119,31 @@ def _sanitize_html(raw):
 
 app = Flask(__name__)
 
+# ── Test-server mode (TEST_MODE=1 in .env) ────────────────────────────────────
+# Marks this INSTALL as a test/staging server. Unrelated to per-show test mode
+# (shows.is_test / toggle_show_test_mode), which only keeps demo shows out of
+# reporting. A test server often points at a copy of — or even the same —
+# PostgreSQL as production, so it must never act for production:
+#   - never joins the cluster: no cluster_instances heartbeat row, never
+#     leader (am_i_leader() is False), never the gateway's primary
+#     (/internal/cluster/primary answers 503), so production's election and
+#     scheduled jobs are untouched;
+#   - every leader-only background job therefore skips: scheduled PDF emails,
+#     field-change alerts, no-labor alerts, Prism auto-sync (so it also never
+#     writes their email_send_log dedup rows, which would make production
+#     skip a real send on a shared DB);
+#   - _send_email() delivers only to 321Theater admin accounts (role, never
+#     is_app_admin) plus any TEST_MODE_EMAIL_ALLOWLIST addresses, with the
+#     subject prefixed "[TEST INSTANCE]"; everyone else is suppressed and
+#     logged in the Email Log as not sent;
+#   - syslog keeps flowing (stderr/journal and the remote server), every line
+#     tagged "[TEST INSTANCE]" so the collector can tell it apart.
+# Local-only work still runs: per-server backups and the hourly DB
+# housekeeping (session harvest). Lives in .env, never app_settings: a DB flag
+# would travel with a copied database. Read once at import (restart to change).
+TEST_MODE = app_config.TEST_MODE
+TEST_INSTANCE_TAG = '[TEST INSTANCE]'   # email subject + syslog line prefix
+
 # ── Trusted-proxy support (VPS gateway) ───────────────────────────────────────
 # When TRUSTED_PROXY_IPS is set (comma-separated IPs), requests arriving FROM
 # one of those socket peers get X-Forwarded-For / X-Forwarded-Proto applied:
@@ -127,7 +154,7 @@ app = Flask(__name__)
 # which trusts every peer. Unset (the default), the WSGI environ is
 # byte-for-byte unchanged.
 _TRUSTED_PROXY_IPS = {
-    _ip.strip() for _ip in os.environ.get('TRUSTED_PROXY_IPS', '').split(',')
+    _ip.strip() for _ip in app_config.get('TRUSTED_PROXY_IPS').split(',')
     if _ip.strip()
 }
 
@@ -155,25 +182,16 @@ if _TRUSTED_PROXY_IPS:
 
     app.wsgi_app = _TrustedProxyMiddleware(app.wsgi_app, _TRUSTED_PROXY_IPS)
 
-# ── SECRET_KEY — generate and persist if not provided via environment ─────────
-_secret = os.environ.get('SECRET_KEY', '')
+# ── SECRET_KEY — from the environment or .env (app_config), else ephemeral ────
+_secret = app_config.get('SECRET_KEY')
 if not _secret:
-    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
-    # Try to read from .env file
-    if os.path.exists(_env_path):
-        with open(_env_path) as _ef:
-            for _line in _ef:
-                if _line.strip().startswith('SECRET_KEY='):
-                    _secret = _line.strip().split('=', 1)[1]
-                    break
     # Auto-generate if still missing (first run / dev mode)
-    if not _secret:
-        import secrets as _secrets_mod
-        _secret = _secrets_mod.token_hex(32)
-        app.logger.warning(
-            'SECRET_KEY not set — generated an ephemeral key. '
-            'Run install.sh or set SECRET_KEY in .env for persistent sessions.'
-        )
+    import secrets as _secrets_mod
+    _secret = _secrets_mod.token_hex(32)
+    app.logger.warning(
+        'SECRET_KEY not set — generated an ephemeral key. '
+        'Run install.sh or set SECRET_KEY in .env for persistent sessions.'
+    )
 app.secret_key = _secret
 
 # ── Session cookie security ───────────────────────────────────────────────────
@@ -183,7 +201,7 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 # deployments should set SESSION_COOKIE_SECURE=1 in the env to upgrade the
 # cookie to Secure-only — the sid is now a bearer token (DB-backed sessions),
 # so leaking it over plaintext is more dangerous than the old signed cookie.
-if os.environ.get('SESSION_COOKIE_SECURE', '').lower() in ('1', 'true', 'yes'):
+if app_config.get_bool('SESSION_COOKIE_SECURE'):
     app.config['SESSION_COOKIE_SECURE'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
 
@@ -364,7 +382,7 @@ class _DBSessionInterface(_FlaskSessionInterface):
         )
 
 
-if os.environ.get('DISABLE_DB_SESSIONS', '').lower() not in ('1', 'true', 'yes'):
+if not app_config.get_bool('DISABLE_DB_SESSIONS'):
     app.session_interface = _DBSessionInterface()
 
 
@@ -470,7 +488,8 @@ def inject_version():
     # guard: a page served from the browser's prefetch cache compares this
     # stamp against a fresh response's Date header — same clock on both sides,
     # so client clock skew can't cause false reloads (see base.html + app.js).
-    return {'app_version': APP_VERSION, 'page_rendered_at': int(time.time())}
+    return {'app_version': APP_VERSION, 'page_rendered_at': int(time.time()),
+            'test_mode': TEST_MODE}
 
 
 # ── Mobile view mode ──────────────────────────────────────────────────────────
@@ -748,7 +767,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.3.3'
+APP_VERSION = '3.4.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -820,10 +839,12 @@ syslog_logger.setLevel(logging.INFO)
 # layered on top when Settings → Syslog is configured. Without this,
 # every syslog_logger.info() call disappeared into a NullHandler when
 # remote forwarding wasn't enabled — which is the default.
+# One line format for stderr and the remote collector. A TEST_MODE server
+# tags every line so its events can't be mistaken for production's.
+_SYSLOG_FORMAT = ('showadvance: ' + (f'{TEST_INSTANCE_TAG} ' if TEST_MODE else '')
+                  + '%(levelname)s %(message)s')
 _syslog_stream_handler = logging.StreamHandler()
-_syslog_stream_handler.setFormatter(
-    logging.Formatter('showadvance: %(levelname)s %(message)s')
-)
+_syslog_stream_handler.setFormatter(logging.Formatter(_SYSLOG_FORMAT))
 syslog_logger.addHandler(_syslog_stream_handler)
 # Keep at least one no-op handler around in case something later strips
 # the stream handler — prevents "No handlers could be found" warnings.
@@ -865,9 +886,7 @@ def reload_syslog_handler():
         _syslog_handler = logging.handlers.SysLogHandler(
             address=(host, port), facility=facility
         )
-        _syslog_handler.setFormatter(
-            logging.Formatter('showadvance: %(levelname)s %(message)s')
-        )
+        _syslog_handler.setFormatter(logging.Formatter(_SYSLOG_FORMAT))
         syslog_logger.addHandler(_syslog_handler)
     except Exception as e:
         app.logger.error(f'Failed to configure syslog: {e}')
@@ -1223,6 +1242,9 @@ def _perf_finish_request(exc=None):
 # its row goes stale (or is DELETEd by atexit on graceful exit) and the
 # next-lowest IP becomes leader on the very next read.
 #
+# TEST_MODE (.env) overrides all of this: a test server never heartbeats,
+# never reads peers and is never leader — see the TEST_MODE block at the top.
+#
 # Three settings affect leader behaviour:
 #   cluster_heartbeat_enabled  ('1'/'0', default '1')
 #       Master toggle. When '0', the heartbeat thread is not started, no row
@@ -1387,6 +1409,22 @@ def get_cluster_status():
     (ip, hostname) and report a worker_count so users see one entry per
     physical server instead of N entries per server.
     """
+    if TEST_MODE:
+        # Not a cluster member: don't read peers, never leader, never primary.
+        return {
+            'self_id':               _CLUSTER_INSTANCE_ID,
+            'self_ip':               _get_local_ip(),
+            'self_hostname':         socket.gethostname(),
+            'self_started_at':       _CLUSTER_STARTED_AT.isoformat(),
+            'leader_id':             None,
+            'leader_ip':             None,
+            'is_leader':             False,
+            'is_self_server_leader': False,
+            'enabled':               False,
+            'force_leader':          'auto',
+            'test_mode':             True,
+            'peers':                 [],
+        }
     enabled = get_app_setting('cluster_heartbeat_enabled', '1') in ('1', 'true')
     force = get_app_setting('cluster_force_leader', 'auto')
     self_ip = _get_local_ip()
@@ -1471,6 +1509,7 @@ def get_cluster_status():
         'is_self_server_leader':  is_self_server_leader, # per-server (drives UI badge)
         'enabled':                enabled,
         'force_leader':           force,
+        'test_mode':              False,
         'peers':                  aggregated,
     }
 
@@ -1480,8 +1519,12 @@ def am_i_leader():
 
     Cached for ~3 s to avoid hammering the DB if multiple callers exist.
     Single-instance / disabled fallback returns True so existing single-server
-    installs keep firing scheduled emails with no config changes.
+    installs keep firing scheduled emails with no config changes. A TEST_MODE
+    install is never leader, whatever cluster_force_leader says (that setting
+    lives in the DB a test server may share with production).
     """
+    if TEST_MODE:
+        return False
     now = time.monotonic()
     with _cluster_lock:
         if (now - _leader_cache['at']) < _LEADER_CACHE_TTL:
@@ -1510,8 +1553,11 @@ def _cluster_cleanup_on_exit():
 
 
 def start_cluster_heartbeat():
-    """Spawn the heartbeat daemon thread. Idempotent."""
+    """Spawn the heartbeat daemon thread. Idempotent. Never in TEST_MODE: a
+    test server writes no cluster_instances row, so production can't see it."""
     global _cluster_thread, _cluster_atexit_registered
+    if TEST_MODE:
+        return None
     if _cluster_thread and _cluster_thread.is_alive():
         return _cluster_thread
     _cluster_stop_event.clear()
@@ -1707,7 +1753,7 @@ def _connection_path():
     return 'internal'
 
 
-_GATEWAY_COOKIE_NAME = os.environ.get('GATEWAY_COOKIE_NAME', '__Host-321gate')
+_GATEWAY_COOKIE_NAME = app_config.get('GATEWAY_COOKIE_NAME', '__Host-321gate')
 
 
 def _clear_gateway_cookies(resp):
@@ -2143,8 +2189,7 @@ def _run_pg_dump(dest_path, settings):
     database-stored file (bytea is hex-encoded, ~2x its size), which made
     each backup a multi-GB allocation inside a Gunicorn worker.
     Returns the backup's size in bytes."""
-    env = os.environ.copy()
-    env['PGPASSWORD'] = settings.get('pg_password', '')
+    env = app_config.child_env(PGPASSWORD=settings.get('pg_password', ''))
     tmp_path = f'{dest_path}.{os.getpid()}.tmp'
     cmd = [
         'pg_dump',
@@ -2260,9 +2305,18 @@ def run_hourly_maintenance():
     behind) and expired rows are only deleted if that exact sid is presented
     again — which a rotated cookie never is — so without this sweep
     app_sessions grows forever. Also trims the perf-stats tables to their
-    retention windows. Leader-gated so one worker does it."""
+    retention windows. Leader-gated so one worker does it. A TEST_MODE server
+    is never leader but still owns its own database's housekeeping, so there
+    one worker per host does it (host lock, like the backups)."""
+    if TEST_MODE:
+        _run_once_per_host('maintenance', _hourly_maintenance_work)
+        return
     if not am_i_leader():
         return
+    _hourly_maintenance_work()
+
+
+def _hourly_maintenance_work():
     db = get_db()
     try:
         cur = db.execute('DELETE FROM app_sessions WHERE expires_at < %s',
@@ -2636,6 +2690,25 @@ def _log_outbox_send(recipients, subject, success, error_message, error_context)
         pass
 
 
+def _test_mode_email_allowlist():
+    """Lower-cased addresses a TEST_MODE server may still email: every
+    reachable 321Theater admin account (this app's own role, via
+    _audience_emails — never is_app_admin) plus TEST_MODE_EMAIL_ALLOWLIST
+    from .env. If the admin lookup fails only the .env list is used — fail
+    closed: suppress rather than guess."""
+    allow = set(app_config.test_email_allowlist())
+    try:
+        db = get_db()
+        try:
+            allow.update(a.lower() for a in _audience_emails(db, ['admin']))
+        finally:
+            db.close()
+    except Exception as e:
+        app.logger.warning(f'TEST_MODE: admin address lookup failed — only '
+                           f'TEST_MODE_EMAIL_ALLOWLIST will receive mail: {e}')
+    return allow
+
+
 def _send_email(subject, recipients, body_text=None, body_html=None,
                 attachments=None, from_address=None, error_context=None,
                 high_priority=False):
@@ -2658,7 +2731,30 @@ def _send_email(subject, recipients, body_text=None, body_html=None,
 
     Returns:
         (bool, str): (success, message)
+
+    TEST_MODE: delivered only to _test_mode_email_allowlist() (admins +
+    TEST_MODE_EMAIL_ALLOWLIST), subject prefixed "[TEST INSTANCE] ".
+    Suppressed recipients are written to email_outbox_log as not-sent and the
+    call returns False when nobody is left, so no caller records a
+    dedup/"sent" row for mail that never went.
     """
+    if TEST_MODE:
+        allow = _test_mode_email_allowlist()
+        kept = [r for r in (recipients or []) if (r or '').strip().lower() in allow]
+        dropped = [r for r in (recipients or []) if r not in kept]
+        if dropped:
+            _log_outbox_send(dropped, subject, False,
+                             'TEST MODE: not sent (suppressed on this test server)',
+                             error_context)
+            purpose = ((error_context or {}).get('pdf_type')
+                       or (error_context or {}).get('purpose') or '')
+            syslog_logger.info(f'TEST_MODE_EMAIL_SUPPRESSED recipients={len(dropped)} '
+                               f'purpose={purpose or "-"}')
+        if not kept:
+            return False, (f'Test mode: email not sent — this test server only emails '
+                           f'admins ({len(dropped)} recipient(s) suppressed).')
+        recipients = kept
+        subject = f'{TEST_INSTANCE_TAG} {subject}'
     provider = get_app_setting('email_provider', 'smtp')
     if provider == 'direct':
         ok, msg = _send_email_direct(subject, recipients, body_text, body_html,
@@ -4580,7 +4676,7 @@ _GATEWAY_OTP_MAX_PER_IP = 10       # codes per client IP per window
 # Raw socket peers allowed to call the endpoints (parsed once, like
 # _TRUSTED_PROXY_IPS). Empty set = no peer restriction.
 _GATEWAY_PEER_IPS = {
-    _ip.strip() for _ip in os.environ.get('GATEWAY_PEER_IPS', '').split(',')
+    _ip.strip() for _ip in app_config.get('GATEWAY_PEER_IPS').split(',')
     if _ip.strip()
 }
 
@@ -4591,7 +4687,7 @@ def _gateway_auth_ok():
     False when the feature is disabled (GATEWAY_SHARED_SECRET unset) or the
     caller fails either check. Callers 404 on False so the endpoints are
     indistinguishable from nonexistent routes."""
-    secret = os.environ.get('GATEWAY_SHARED_SECRET', '')
+    secret = app_config.get('GATEWAY_SHARED_SECRET')
     if not secret:
         return False
     supplied = request.headers.get('X-Gateway-Secret', '')
@@ -4695,7 +4791,9 @@ def cluster_primary_probe():
     so nothing changes for them. Returns only a boolean — no auth needed;
     the public edge blocks /internal/* outright. Answers 503 when PostgreSQL
     is unreachable: a server that can't see the database must not volunteer
-    to take public traffic."""
+    to take public traffic. A TEST_MODE server is never primary."""
+    if TEST_MODE:
+        return jsonify({'primary': False, 'reason': 'test-mode'}), 503
     try:
         db = get_db()
         try:
@@ -7077,7 +7175,8 @@ def _libreoffice_convert_to_pdf(data, filename):
                     '--outdir', workdir,
                     src_path,
                 ],
-                capture_output=True, timeout=90,
+                # Parses user-uploaded files: none of the app's secrets.
+                capture_output=True, timeout=90, env=app_config.child_env(),
             )
             if result.returncode != 0:
                 app.logger.warning(
@@ -8822,6 +8921,7 @@ def settings():
     db3.close()
 
     _pg = db_adapter.read_db_settings()
+    _pg_sources = db_adapter.settings_sources()
     db_settings = {
         'pg_host':          _pg.get('pg_host', ''),
         'pg_port':          _pg.get('pg_port', '5432'),
@@ -8830,6 +8930,11 @@ def settings():
         'pg_app_schema':    _pg.get('pg_app_schema', db_adapter.DEFAULT_APP_SCHEMA),
         'pg_shared_schema': _pg.get('pg_shared_schema', db_adapter.DEFAULT_SHARED_SCHEMA),
         'config_path':      db_adapter.CONFIG_PATH,
+        'env_path':         app_config.ENV_PATH,
+        # .env keys still supplied by the legacy db_config.ini (port them).
+        'legacy_keys':      [env_key for key, env_key, _i, _d in db_adapter.PG_SETTINGS_SPEC
+                             if _pg_sources.get(key) == app_config.SRC_INI],
+        'test_mode':        TEST_MODE,
     }
     ai_settings = {
         'ollama_enabled':   all_settings.get('ollama_enabled', '0'),
@@ -12212,10 +12317,10 @@ def check_field_key():
 @app.route('/settings/database/test', methods=['POST'])
 @admin_required
 def test_database_connection():
-    """Test the PostgreSQL connection described by db_config.ini."""
+    """Test the PostgreSQL connection described by .env (PG_*) / db_config.ini."""
     settings = db_adapter.read_db_settings()
     if not db_adapter.is_configured(settings):
-        return jsonify({'success': False, 'message': f'{db_adapter.CONFIG_PATH} not found or missing [postgresql] section. See db_config.ini.example.'})
+        return jsonify({'success': False, 'message': f'PostgreSQL is not configured: set PG_* in {app_config.ENV_PATH} (see .env.example).'})
     ok, err = db_adapter.test_postgres_connection(
         host=settings.get('pg_host', 'localhost'),
         port=settings.get('pg_port', 5432),
@@ -12741,6 +12846,7 @@ def pdf_email_diagnose():
                                   'false except during that hour — that is normal'),
         'scheduler':             sched_info,
         'this_worker_is_leader': cluster.get('is_leader'),
+        'test_mode':             TEST_MODE,
         'cluster': {
             'enabled':      cluster.get('enabled'),
             'force_leader': cluster.get('force_leader'),
@@ -23109,8 +23215,15 @@ if db_adapter.is_configured():
     except Exception as _mig_err:
         print(f"[startup] Migration warning: {_mig_err}")
 else:
-    print(f"[startup] PostgreSQL is not configured — create {db_adapter.CONFIG_PATH} "
-          f"(see db_config.ini.example), then run: python3 init_db.py", file=sys.stderr)
+    print(f"[startup] PostgreSQL is not configured — set PG_HOST / PG_DBNAME / PG_USER / "
+          f"PG_PASSWORD in {app_config.ENV_PATH} (see .env.example), then run: "
+          f"python3 init_db.py", file=sys.stderr)
+
+if TEST_MODE:
+    syslog_logger.warning(
+        'TEST_MODE: this is a TEST server — not joining the cluster, never leader, '
+        'email only to admins (+TEST_MODE_EMAIL_ALLOWLIST) with a [TEST INSTANCE] '
+        'subject, syslog lines tagged the same, leader-only background jobs skipped.')
 
 # Loud preflight checks for runtime dependencies that aren't import-required
 # but break specific features when missing. PyMuPDF is the new addition for
@@ -23141,13 +23254,13 @@ if not (os.environ.get('WERKZEUG_RUN_MAIN') == 'false'):
     _scheduler = start_scheduler()
     if _scheduler:
         atexit.register(lambda: _scheduler.shutdown(wait=False))
-    # Cluster heartbeat for multi-server leader election
-    if get_app_setting('cluster_heartbeat_enabled', '1') in ('1', 'true'):
+    # Cluster heartbeat for multi-server leader election (never in TEST_MODE)
+    if not TEST_MODE and get_app_setting('cluster_heartbeat_enabled', '1') in ('1', 'true'):
         start_cluster_heartbeat()
 
 if __name__ == '__main__':
     if not db_adapter.is_configured():
-        print("PostgreSQL not configured. Create db_config.ini, then run: python init_db.py")
+        print("PostgreSQL not configured. Fill in PG_* in .env (see .env.example), then run: python init_db.py")
         run_port = 5400
     else:
         try:

@@ -185,6 +185,13 @@ html.sidebar-collapsed .sidebar-collapse-btn,
 html.force-rail .sidebar-collapse-btn { margin: 0 auto 6px; }
 html.sidebar-collapsed .sidebar-collapse-btn svg,
 html.force-rail .sidebar-collapse-btn svg { transform: rotate(180deg); }
+/* TEST_MODE marker stays visible on the rail, shortened to "TEST". */
+html.sidebar-collapsed .sidebar-footer > div.sidebar-test-flag,
+html.force-rail .sidebar-footer > div.sidebar-test-flag { display: block; }
+html.sidebar-collapsed .sidebar-test-flag .test-instance-badge,
+html.force-rail .sidebar-test-flag .test-instance-badge { font-size: 0; padding: 1px 5px; }
+html.sidebar-collapsed .sidebar-test-flag .test-instance-badge::after,
+html.force-rail .sidebar-test-flag .test-instance-badge::after { content: 'TEST'; font-size: 9px; }
 
 /* ── Page Header ───────────────────────────────────────────────── */
 .page-header {
@@ -1208,6 +1215,8 @@ input[type=checkbox].oh-check:disabled {
 .login-brand p { font-size: 12px; color: var(--text-muted); }
 .login-form { display: flex; flex-direction: column; gap: 14px; }
 .login-footer { text-align: center; font-size: 11px; color: var(--text-muted); margin-top: 20px; }
+/* TEST_MODE install marker (sidebar footer, login card, mobile header). */
+.test-instance-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; background: var(--red); color: #fff; font-size: 10px; font-weight: 700; letter-spacing: .08em; line-height: 1.6; vertical-align: middle; }
 
 /* ── Utilities ───────────────────────────────────────────────────── */
 .hidden { display: none !important; }

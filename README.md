@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `3.3.3`**
+**Current version: `3.4.1`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,8 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `3.4.1` — **Config port tool made loss-proof; the app's secrets no longer reach LibreOffice or the Prism bridge.** (1) **`app_config.py --export` hardening.** It still only prints (you append it with `>>`), never writes, and never touches `db_config.ini`. Three edge cases could have lost or overridden a value, and all are fixed. It now decides what to export from the `.env` *file* only. Before, a `PG_*` variable exported in your shell made it skip that key, and deleting `db_config.ini` would then have lost it; the status report now flags shell-only variables. Output starts with a blank line, so a `.env` whose last line has no newline can't get its last value (e.g. `SECRET_KEY`) glued to the first exported line. If `.env` exists but can't be read, it refuses (exit 1, prints nothing). Before, it would re-export keys already in the file, and those later duplicates would override the file's newer values. It also refuses values containing a line break, stamps the port date in the comment header, and `python3 app_config.py` ends with a verdict: "db_config.ini can be deleted" or "STILL NEEDED for: …". It also notes any key where `.env` and `db_config.ini` disagree (`.env` already wins). (2) **Secrets scrubbed from child processes.** systemd loads `.env` into the service's environment, and every subprocess inherited it. After porting, that would include `PG_PASSWORD` and `S3_SECRET_KEY` in LibreOffice (which parses user-uploaded Office files) and the Prism node SDK. New `app_config.child_env()` drops every `PG_*`/`S3_*` key, `SECRET_KEY`, `GATEWAY_SHARED_SECRET` and `PGPASSWORD`. LibreOffice and the Prism bridge get that scrubbed environment (the bridge plus its `PRISM_TOKEN`), and `pg_dump` gets it plus `PGPASSWORD`. Verified: 17 port scenarios on realistic files (original `.env` bytes always intact, `db_config.ini` unmodified, identical PG + S3 settings after the ini is removed, including passwords containing `#`, `$`, `\`, `'` and `"`); a node child sees only `PATH` and `PRISM_TOKEN`; a real LibreOffice `.docx` → PDF conversion and a real `pg_dump` backup both work with the scrubbed environment. Deploy: main app only (all app servers).
+- `3.4.0` — **One config file (`.env`), and a `TEST_MODE` switch for test servers.** (1) **`.env` is now the only config file.** The PostgreSQL connection (`PG_HOST`, `PG_PORT`, `PG_DBNAME`, `PG_USER`, `PG_PASSWORD`, `PG_APP_SCHEMA`, `PG_SHARED_SCHEMA`, `PG_POOL_MAX_IDLE`) and S3 storage (`S3_ENDPOINT` (comma-separated for several gateways), `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`) now live in `.env` next to `SECRET_KEY` and the gateway settings. See the new `.env.example`. **Nothing breaks on upgrade:** each key missing from `.env` is still read from `db_config.ini`, key by key, so a server that hasn't ported yet runs exactly as before. The keys still coming from `db_config.ini` are logged once per worker (`CONFIG_LEGACY`) and listed in Settings → System → Database. To port: `python3 app_config.py --export >> .env` (prints the missing `PG_*`/`S3_*` lines, quoted so systemd reads them back unchanged), restart, check `python3 app_config.py` (shows where every value comes from, secrets masked), then delete `db_config.ini`. The loader is the new `app_config.py`. It reads the process environment (systemd's `EnvironmentFile=`) first, then the `.env` file itself with systemd's quoting rules, so CLI runs (`init_db.py`, `install.sh`) see the same values as the service. `install.sh` now accepts either file, fills in a blank `SECRET_KEY=` line in place, and always makes `.env` `chmod 600` (it now holds the DB password). (2) **`TEST_MODE=1` in `.env` marks a test server.** It is in `.env`, not the database, on purpose: a test server often runs on a copy of (or the same) database as production, and a database flag would travel with the data. A test server: **never joins the cluster** (writes no `cluster_instances` heartbeat, is never leader even if the shared DB says `cluster_force_leader=always`, and `/internal/cluster/primary` answers 503, so the gateway never routes public traffic to it and it can't take over production's jobs); **runs no leader-only jobs** (scheduled PDF emails, field-change alerts, no-labor alerts, Prism auto-sync). That also means it never writes their `email_send_log` dedup rows, which on a shared database would make production skip a real send. **Emails only admins:** accounts with the 321Theater admin role (not the cross-app `is_app_admin` flag; locked, pending and unconfirmed accounts are skipped), plus any exact addresses in `TEST_MODE_EMAIL_ALLOWLIST`, with the subject prefixed `[TEST INSTANCE]`. Everyone else is suppressed, shows as "not sent" in Settings → Email Log, and syslog gets `TEST_MODE_EMAIL_SUPPRESSED`. A send with nobody left returns a clear "Test mode: email not sent" message. **Still forwards syslog,** with every line prefixed `[TEST INSTANCE]`. It shows a red **TEST INSTANCE** badge in the sidebar footer (a "TEST" pill on the collapsed rail), in the mobile header and on the sign-in page, and browser tabs read `[TEST] …`. Local backups and the hourly DB housekeeping (session harvest) still run. **Caution:** point a test server at its own S3 bucket (`S3_BUCKET`). S3 keys are built from row ids, so a copied database writing into production's bucket could overwrite production's files. Verified against PostgreSQL 16: a legacy `db_config.ini`-only install, a partly ported one and a fully ported one (including a password containing `#`, `$` and `\`) all connect. `--export` output reconnects after the ini is removed. In `TEST_MODE`, with a live production peer heartbeating into the same DB: no heartbeat row, not leader, primary 503, leader jobs skipped, admin + allowlisted recipients delivered with the tagged subject, a locked admin and non-admins suppressed. In normal mode, heartbeat, leader election, primary probe, email and syslog are unchanged. Settings, Home and sign-in were checked in desktop and mobile. Deploy: main app only (all app servers). No config change is needed to upgrade; port `db_config.ini` to `.env` whenever convenient.
 - `3.3.3` — **Times shown by the browser are no longer 4–5 hours off, "today" no longer flips to tomorrow in the evening, and raw "Mon, 05 Oct 2026 00:00:00 GMT" dates are gone.** Background: PostgreSQL's `CURRENT_TIMESTAMP` stores the database server's *local* wall-clock time (SQLite stored UTC), but several screens still assumed UTC. They added a "Z" or trusted Flask's "GMT" label, so on a database server running US-Eastern time they showed times 4 hours early (5 in winter). A notification received a minute ago read "4 h ago". **(1) Timestamps now travel with their UTC offset:** the server selects them as `::timestamptz`, so PostgreSQL itself interprets each stored time in the zone it was written in, and sends ISO 8601 with the offset, e.g. `2026-09-25T09:00:00-04:00` (`_ts_out()` in app.py). The browser parses it with one shared helper, `parseServerTime()` in app.js. Fixed: the notification bell ("x min ago"), show comments, the "Another user saved this form at HH:MM" banner, the history-restore "a newer version was saved at…" warning, and Settings → Email → Recent Email Activity. Verified against PostgreSQL set to America/New_York (old code exactly 4.00 h off on every one, now exact) and to UTC (still exact). **(2) Show comments were sorted by weekday name** whenever the list was re-sorted (e.g. an admin viewing deleted comments): the browser string-compared "Fri, 25 Sep…" with "Mon, 21 Sep…". They now sort by real time. **(3) "Today" was the UTC date:** eleven places used `new Date().toISOString().slice(0,10)`, which after about 8 pm in Orlando (7 pm in winter) is already tomorrow. That moved the Asset Manager calendar's today marker, the asset-log entry date default, the asset-dashboard widgets' today and default ranges, the Asset Reports and Approvals default ranges, the overhead-crew and add-labor-day defaults, and PDF-form "today" fields. New `localTodayIso()` / `localIsoDate()` helpers (defined in base.html's `<head>` so every page's scripts can use them) use the browser's own date. **(4) Dates as ISO, not HTTP-date text:** the Staffing tab's labor cost table and the post-show cost lines (the billing engines still hand the PDFs real dates; only the JSON is converted), Asset Reports (page and CSV export, now also undated-last), asset log entries, the move-file show picker (`/api/shows`) and the merge-shows preview. **(5) Prism "missing in Prism" badge:** it compared each event's `last_synced_at` (database clock) with the last good sync's start (app-server clock, on purpose, for the daily-sync checks). With the two servers in different zones every event read as missing, or none did. Each event touched by a sync is now stamped with that run's own start time, one clock throughout. Verified with the database on Eastern and the app on UTC: the old code flagged both test events missing, the new code flags only the one that disappeared. **Unchanged, on purpose:** the cluster panel (its times are stamped from the app's UTC clock and were already right), and times printed directly into pages by the server, which show the database server's local time. Keep PostgreSQL's `timezone` set to the local zone (America/New_York) and don't change it on a live system: stored times are read in whatever zone it is set to. Checked in a real browser (Chromium, New York time zone) in desktop and mobile mode across 11 pages with no script errors. Deploy: main app only.
 - `3.3.2` — **Asset availability is calculated in a handful of queries instead of 4–6 per asset type or line, so the asset pages no longer slow down as the catalog grows.** Every "how many of this are free?" answer (the Asset Manager's overbooking check, the availability dashboard widget, the show Assets tab's overbooked-line flags, the Asset Approvals page and the System/Package component check when adding or resizing a line) used to run its own set of queries for each asset type, or each show on the Approvals page. They now share two batched building blocks: `_component_demand_many` (direct + System/Package demand for any number of types: 2 queries) and `_get_asset_availability_many` (flags, grouped item counts, demand and units for any number of types over one date window: at most 5 queries). The single-type functions `_component_demand` and `_get_asset_availability` are now thin wrappers around them, so the single and batched answers can never disagree. Also batched: the Approvals page's per-show asset lines, external rentals and rental windows (new `_show_rental_windows`), and the dashboard widget's per-show asset lists. Measured on a seeded catalog of 46 types, 6 systems and 14 shows, before → after: Asset Manager overbooked check 71 ms / 182 queries → 6.4 ms / 5; availability widget 75 ms / 265 queries → 6.9 ms / 9; Asset Approvals (4-month window) 62 ms / 127 queries → 23 ms / 6. The Assets tab now costs one batch per distinct rental window instead of per line. The savings grow with the catalog: the old cost was per type. **Nothing changes in the answers:** 517 outputs were captured from the previous version and this one against the same seeded data and compared, all identical. They covered availability and demand for every type over four date windows, component shortages for every system × quantity × window × back-out, the overbooked list, rental windows, the widget JSON with and without dates, every show's Assets tab and the Approvals page. The only byte that differed was the static-file cache-buster. Adding, resizing and over-booking a System gives the same results and messages. (Tied bookings now have a fixed order, by id.) No schema change. Deploy: main app only.
 - `3.3.1` — **Audit-log Undo works again, and can no longer delete the wrong thing. Backup failures and database reconnects now reach syslog.** (1) **Undo always failed** for "added" and "edited" entries (e.g. Contact added, Crew member edited, Labor request added): the undo tried to save the row's `created_at` timestamp into its own audit entry without converting it to text, crashed with *Object of type datetime is not JSON serializable*, and rolled back. Only undoing a *delete* worked. Fixed. **(2) Two undos would have deleted the wrong records once (1) was fixed**, so they're now blocked: *Asset member added* is logged against the parent System, so undoing it would have deleted the whole System asset type (and, through the database's cascades, its show bookings). *Asset item added* is logged with the asset *type's* id, so undoing it would have deleted whichever unrelated asset *item* happened to have that number. The old rule guessed what an undo should do from the last word of the action name (`…_ADD` = delete the row). It's replaced by an explicit list of 43 actions, each checked against the code that writes it (`_UNDO_ACTIONS` in app.py). Anything not on the list shows no Undo button. That also retires the RETIRE "undo", which tried to re-insert an asset type that still existed. **(3) Undoing an "added" entry is refused while the record is in use.** Deleting a row takes its dependents with it or blanks them: an asset category takes every asset type in it (and their items and show bookings), and a job position disappears from labor requests. Undo now checks every table that points at the row first and answers e.g. *Can't undo: asset category #11 is in use (2 in asset_types)*. Per-user read receipts of a site message don't count. **(4) File bytes are never part of an undo:** audit snapshots now leave out stored-file columns (asset photos, rental and template PDFs). They used to be saved as the text `<memory at 0x…>`, which an undo would have written back as the file. Restoring a deleted row writes only real columns. Undoing an add of a row that's already gone, or a delete of a row that's back, gets a clear message instead of a 500. **(5) Syslog:** new `AUDIT_UNDO` (success: action, kind, entity, the new audit entry id, who), `AUDIT_UNDO_REFUSED` (with the reason) alongside the existing `AUDIT_UNDO_FAILED`. New `BACKUP_FAILED` (type, file, elapsed, the pg_dump error): a scheduled backup that failed (pg_dump error, the 45-minute timeout, full disk) used to reach only the scheduler's own log, never syslog. New `DB_POOL_RECONNECT` (warning) when the 3.3.0 connection pool finds an idle connection died, e.g. after a PostgreSQL restart, and replaces it. **(6) "Run Backup Now" no longer claims success when it did nothing:** if another worker on the same server was mid-backup it silently skipped and still said *Backup created successfully*. It now says a backup is already running. Verified against PostgreSQL 16: undo of contact add/edit/delete, message create (with read receipts), in-use category and job position (refused), unused job position (undone), both asset actions (no Undo), double undo (refused), a legacy entry with non-column keys, a failing pg_dump, a busy backup lock and a killed pooled connection. Deploy: main app only.
@@ -169,10 +171,12 @@ Version history:
    - [Prism FM Integration](#prism-fm-integration)
 6. [Database Configuration](#database-configuration)
    - [PostgreSQL (Dual-Schema)](#postgresql-dual-schema)
+   - [Server Config (.env)](#server-config-env)
    - [Writing SQL (PostgreSQL-native)](#writing-sql-postgresql-native)
 7. [Multi-Server Deployment](#multi-server-deployment)
    - [Cluster Heartbeat & Leader Election](#cluster-heartbeat--leader-election)
    - [Adding a New Scheduled Task](#adding-a-new-scheduled-task)
+   - [Test Server (TEST_MODE)](#test-server-test_mode)
 8. [Security](#security)
 9. [Troubleshooting](#troubleshooting)
 
@@ -209,7 +213,7 @@ cd 321theater
 
 # Create the PostgreSQL database + role first, then point the app at it
 # (see Database Configuration below):
-cp db_config.ini.example db_config.ini && nano db_config.ini
+cp .env.example .env && chmod 600 .env && nano .env
 
 # Full install with systemd service (recommended):
 sudo ./install.sh
@@ -218,7 +222,7 @@ sudo ./install.sh
 ./install.sh
 ```
 
-The installer: creates a Python venv, installs dependencies, initialises/migrates the PostgreSQL database from `db_config.ini` (`python3 init_db.py`: idempotent, seeds defaults only on a fresh install), creates backup directories, writes a systemd service unit (`321theater`), generates a SECRET_KEY, and starts the service. PostgreSQL setup: see [Database Configuration](#database-configuration).
+The installer: creates a Python venv, installs dependencies, initialises/migrates the PostgreSQL database configured in `.env` (`python3 init_db.py`: idempotent, seeds defaults only on a fresh install), creates backup directories, writes a systemd service unit (`321theater`) that loads `.env`, generates a SECRET_KEY, and starts the service. PostgreSQL setup: see [Database Configuration](#database-configuration).
 
 After installation the app is available at `http://<server-ip>:<port>` (default port **5400**).
 
@@ -525,7 +529,7 @@ Done. Import complete.
 
 #### Notes
 
-- The script writes to the PostgreSQL database in `db_config.ini` inside ONE transaction: any error rolls the whole import back. (Take a `pg_dump` first if you want a restore point, or use Settings → Backups → Run Backup Now.)
+- The script writes to the PostgreSQL database configured in `.env` inside ONE transaction: any error rolls the whole import back. (Take a `pg_dump` first if you want a restore point, or use Settings → Backups → Run Backup Now.)
 - Run `python3 import_assets.py --dry-run` first to preview the import without modifying the database.
 - If the Asset Manager already has data, the script will abort unless you pass `--force`.
 - Re-running with `--force` will skip rows that would create duplicate category or type names — existing records are left unchanged.
@@ -994,7 +998,7 @@ documents all of the above for operators.
 
 ## Database Configuration
 
-321Theater runs on **PostgreSQL only** (since 3.0.0). The connection is configured in one place, `db_config.ini` in the app directory (or the path in the `THEATER_DB_CONFIG` environment variable). There is no SQLite backend and no fallback: if PostgreSQL is unreachable, pages return **503** and background jobs skip their run with a logged reason. Nothing silently reads stale data.
+321Theater runs on **PostgreSQL only** (since 3.0.0). The connection is configured in the app's `.env` file (`PG_*` keys, 3.4.0+; see [Server Config (.env)](#server-config-env)). An older `db_config.ini` is still read for any key missing from `.env`. There is no SQLite backend and no fallback: if PostgreSQL is unreachable, pages return **503** and background jobs skip their run with a logged reason. Nothing silently reads stale data.
 
 ### PostgreSQL (Dual-Schema)
 
@@ -1018,26 +1022,25 @@ This separation means another app can connect to the same PostgreSQL database an
    ALTER DATABASE "321theater" OWNER TO showadvance;
    ```
 
-2. **Create `db_config.ini`** in the app directory (copy from the example):
+2. **Fill in `.env`** in the app directory (copy from the example):
    ```bash
-   cp db_config.ini.example db_config.ini
-   nano db_config.ini
+   cp .env.example .env && chmod 600 .env
+   nano .env
    ```
 
    ```ini
-   [postgresql]
-   host           = localhost
-   port           = 5432
-   dbname         = 321theater
-   user           = showadvance
-   password       = your_secure_password
-   app_schema     = theater321
-   shared_schema  = shared
+   PG_HOST=localhost
+   PG_PORT=5432
+   PG_DBNAME=321theater
+   PG_USER=showadvance
+   PG_PASSWORD=your_secure_password
+   PG_APP_SCHEMA=theater321
+   PG_SHARED_SCHEMA=shared
    ```
 
    This file is **gitignored** — credentials are never committed.
 
-   Optional: `pool_max_idle = 4` (the default) is how many idle connections each app worker process keeps open for reuse (3.3.0 connection pool; a 4-worker server holds up to 16). Set `0` to go back to opening a fresh connection per query batch. Keep PostgreSQL's `max_connections` (default 100) above `servers × 4 workers × pool_max_idle` plus whatever the other apps sharing the database use. Restart the app after changing it.
+   Optional: `PG_POOL_MAX_IDLE=4` (the default) is how many idle connections each app worker process keeps open for reuse (3.3.0 connection pool; a 4-worker server holds up to 16). Set `0` to go back to opening a fresh connection per query batch. Keep PostgreSQL's `max_connections` (default 100) above `servers × 4 workers × pool_max_idle` plus whatever the other apps sharing the database use. Restart the app after changing it.
 
 3. **Initialize the schemas, tables and default data:**
    ```bash
@@ -1052,17 +1055,16 @@ This separation means another app can connect to the same PostgreSQL database an
 
 #### Configuration Reference
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `host` | `localhost` | PostgreSQL server hostname/IP, or a Unix-socket directory |
-| `port` | `5432` | PostgreSQL server port |
-| `dbname` | `321theater` | Database name |
-| `user` | — | Database user |
-| `password` | — | Database password |
-| `app_schema` | `theater321` | Schema for theater-specific tables |
-| `shared_schema` | `shared` | Schema for user/auth tables (shared across apps) |
-
-Legacy note: the old `schema` key is still accepted as a fallback for `app_schema`.
+| `.env` key | Legacy `db_config.ini` key | Default | Description |
+|-----|-----|---------|-------------|
+| `PG_HOST` | `host` | `localhost` | PostgreSQL server hostname/IP, or a Unix-socket directory |
+| `PG_PORT` | `port` | `5432` | PostgreSQL server port |
+| `PG_DBNAME` | `dbname` | `321theater` | Database name |
+| `PG_USER` | `user` | — | Database user |
+| `PG_PASSWORD` | `password` | — | Database password |
+| `PG_APP_SCHEMA` | `app_schema` (or the older `schema`) | `theater321` | Schema for theater-specific tables |
+| `PG_SHARED_SCHEMA` | `shared_schema` | `shared` | Schema for user/auth tables (shared across apps) |
+| `PG_POOL_MAX_IDLE` | `pool_max_idle` | `4` | Idle pooled connections per worker (`0` = no pool) |
 
 #### How it Works at Runtime
 
@@ -1077,6 +1079,29 @@ Each connection sets `search_path` to `"app_schema", "shared_schema"` at connect
 | `python3 init_db.py --reset` | **DROP both schemas and all data** (asks for `YES`), then re-initialize |
 
 (`--init-postgres` / `--reset-postgres` are accepted as aliases.)
+
+### Server Config (.env)
+
+Since 3.4.0 each install has **one config file, `.env`** in the app directory (override the path with `THEATER_ENV_FILE`). It holds everything that belongs to the *machine* rather than the shared database: `SECRET_KEY`, the PostgreSQL connection (`PG_*`), S3 storage (`S3_*`), `TEST_MODE`, and the HTTPS/gateway settings. Every key is documented in `.env.example`. systemd loads it (`EnvironmentFile=`), and `init_db.py` / `install.sh` / `python3 app.py` read the file directly, so all of them see the same values. **Restart the service after editing it.**
+
+Format: `KEY=value`, one per line, `#` comment lines. There are no inline comments and no `$VAR` expansion, so a password containing `#` or `$` works as-is. Wrap a value in single quotes if it contains a backslash or quotes (the export below does this for you).
+
+S3 keys (used when Settings → System → Database → File Storage is on **Server config (.env)**, the default): `S3_ENDPOINT` (comma-separated for several gateways, tried in order), `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`. Legacy `db_config.ini [seaweedfs]` keys: `endpoint`, `access_key`, `secret_key`, `bucket`.
+
+#### Porting from db_config.ini
+
+Nothing has to change on upgrade: any key missing from `.env` is still read from `db_config.ini` (or `THEATER_DB_CONFIG`), key by key. The keys it still supplies are logged once per worker (`CONFIG_LEGACY`) and listed under Settings → System → Database. When convenient:
+
+```bash
+cd /opt/321theater                      # the app directory
+cp -p .env .env.bak                     # optional belt-and-braces backup
+venv/bin/python app_config.py           # where each value comes from (secrets masked)
+venv/bin/python app_config.py --export >> .env   # appends only the PG_*/S3_* lines still missing
+chmod 600 .env
+sudo systemctl restart 321theater
+venv/bin/python app_config.py           # last line must say "db_config.ini can be deleted"
+rm db_config.ini                        # only after that verdict
+```
 
 ### Writing SQL (PostgreSQL-native)
 
@@ -1161,12 +1186,27 @@ The leader check is cached for 3 seconds per process, so calling it at the start
 - `run_scheduled_pdf_emails` (`app.py`) — leader-gated; sends external email
 - `run_hourly_backup` (`app.py`) — NOT gated; writes to local disk on every server
 
+### Test Server (TEST_MODE)
+
+Set `TEST_MODE=1` in a test/staging server's `.env` (and restart) so it can run next to production, even on a copy of, or the same, database, without acting for production:
+
+| | Production | `TEST_MODE=1` |
+|---|---|---|
+| Cluster membership | Heartbeats into `cluster_instances`, takes part in leader election | No heartbeat row, never leader (ignores `cluster_force_leader`), `/internal/cluster/primary` answers 503 |
+| Leader-only jobs (scheduled PDF emails, field-change alerts, no-labor alerts, Prism auto-sync) | Run on the leader | Never run (and never write their `email_send_log` dedup rows) |
+| Email | Everyone | Only 321Theater **admin**-role accounts (reachable ones) plus `TEST_MODE_EMAIL_ALLOWLIST`; subject prefixed `[TEST INSTANCE]`; others logged as "not sent" in Settings → Email Log |
+| Syslog | As configured | Still forwarded, every line prefixed `[TEST INSTANCE]` |
+| Local backups, hourly DB housekeeping | Run | Run |
+| UI | — | Red **TEST INSTANCE** badge (sidebar, mobile header, sign-in page); tab titles start `[TEST]` |
+
+The flag lives in `.env`, never in `app_settings`, because a database flag would travel with a copied database. Give the test server its own S3 bucket (`S3_BUCKET`): S3 object keys are built from row ids, so a copied database writing into production's bucket could overwrite production's files.
+
 ### Load-Balancer / VRRP Setup Notes
 
 The app's HTTP layer is stateless beyond the signed-cookie session, so any standard load balancer works (HAProxy, nginx, a router-held VIP via keepalived/VRRP, etc.). A few practical points:
 
 - **Same `.env` on every instance.** Copy it between machines: it holds `SECRET_KEY` (sessions are DB-backed, so this only matters with `DISABLE_DB_SESSIONS=1`, but keep them identical anyway) and the gateway settings (`GATEWAY_SHARED_SECRET`, which must equal the VPS's `GATE_SHARED_SECRET`, plus `GATEWAY_PEER_IPS` / `TRUSTED_PROXY_IPS`).
-- **Same `db_config.ini`** so every instance points at the shared PostgreSQL. If S3 is still in use with the `ini` config source, its `[seaweedfs]` section must match too, and the endpoint must be reachable from every server. `http://localhost:8333` on server A is *not* server A from server B. Switching the S3 config to the GUI source (Settings → System → Database → File Storage) stores it in PostgreSQL instead.
+- **Same `PG_*` in `.env`** (or, until ported, the same `db_config.ini`) so every instance points at the shared PostgreSQL. If S3 is still in use with the server-config source, its `S3_*` keys (or `[seaweedfs]` section) must match too, and the endpoint must be reachable from every server. `http://localhost:8333` on server A is *not* server A from server B. Switching the S3 config to the GUI source (Settings → System → Database → File Storage) stores it in PostgreSQL instead.
 - **Backups remain per-instance.** Either accept the redundancy (each server keeps its own copy) or mount `/backups/` on shared NFS / send to S3. The DB Snapshots page on an instance lists only that instance's backups.
 - **Prism SDK on every server.** `prism_bridge/node_modules/` is installed from the vendor tarball and not in git (see `prism_bridge/README.md`). Prism auto-sync runs on whichever instance is leader, so a server without the SDK fails the sync whenever it becomes leader.
 
@@ -1181,7 +1221,7 @@ Checked in 3.2.2: nothing a user uploads is kept on an app server's local disk.
 | Venue paperwork colors, PDF designer + nav layouts, all settings (including the Prism token and GUI S3 config) | PostgreSQL (`venue_colors`, `app_settings`) |
 | Security sign-in CSV imports, AI Extract document uploads | Read in memory; only the result (names / field suggestions) is saved. The file itself is not kept |
 | Sessions | PostgreSQL (`app_sessions`) |
-| **Per-server local disk, on purpose:** `backups/` (hourly/daily `pg_dump`, updater `pre_update_*` archives), `db_config.ini`, `.env`, `prism_bridge/node_modules/`, temp files (LibreOffice conversions, `/tmp` lock files; removed after use) | Local to each server. None of it is user data another instance needs |
+| **Per-server local disk, on purpose:** `backups/` (hourly/daily `pg_dump`, updater `pre_update_*` archives), `.env` (and a not-yet-ported `db_config.ini`), `prism_bridge/node_modules/`, temp files (LibreOffice conversions, `/tmp` lock files; removed after use) | Local to each server. None of it is user data another instance needs |
 
 **Finishing the S3 → PostgreSQL move, so no file depends on S3:**
 1. Settings → System → Database → File Redundancy → **Copy S3 → Database** for all five file types. Done when every type's *S3 only* count is 0.
@@ -1236,14 +1276,14 @@ journalctl -u 321theater -n 100
 venv/bin/python init_db.py --migrate
 ```
 
-**PostgreSQL "no schema has been selected to create in":** Ensure your `db_config.ini` has valid `app_schema` and `shared_schema` values. The database user must have permission to create schemas. Re-run:
+**PostgreSQL "no schema has been selected to create in":** Ensure `.env` has valid `PG_APP_SCHEMA` and `PG_SHARED_SCHEMA` values (`python3 app_config.py` shows what's in effect). The database user must have permission to create schemas. Re-run:
 ```bash
 python3 init_db.py
 ```
 
-**PostgreSQL connection refused:** Check that PostgreSQL is running, the host/port/credentials in `db_config.ini` are correct, and `pg_hba.conf` allows connections from the app server.
+**PostgreSQL connection refused:** Check that PostgreSQL is running, the host/port/credentials in `.env` (`PG_*`) are correct, and `pg_hba.conf` allows connections from the app server.
 
-**"The database is temporarily unavailable" (HTTP 503):** the app logs `PostgreSQL connection FAILED: …` with the driver's reason. Check `db_config.ini` credentials and PostgreSQL server status. There is no fallback database, so nothing runs against stale data while PG is down, and scheduled jobs log that they skipped.
+**"The database is temporarily unavailable" (HTTP 503):** the app logs `PostgreSQL connection FAILED: …` with the driver's reason. Check the `PG_*` credentials in `.env` (`python3 app_config.py`) and PostgreSQL server status. There is no fallback database, so nothing runs against stale data while PG is down, and scheduled jobs log that they skipped.
 
 **Login rate limiting:** After 15 failed login attempts per minute from an IP, further attempts return HTTP 429. Wait 60 seconds or restart the app.
 
