@@ -767,7 +767,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.4.0'
+APP_VERSION = '3.4.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -2189,8 +2189,7 @@ def _run_pg_dump(dest_path, settings):
     database-stored file (bytea is hex-encoded, ~2x its size), which made
     each backup a multi-GB allocation inside a Gunicorn worker.
     Returns the backup's size in bytes."""
-    env = os.environ.copy()
-    env['PGPASSWORD'] = settings.get('pg_password', '')
+    env = app_config.child_env(PGPASSWORD=settings.get('pg_password', ''))
     tmp_path = f'{dest_path}.{os.getpid()}.tmp'
     cmd = [
         'pg_dump',
@@ -7176,7 +7175,8 @@ def _libreoffice_convert_to_pdf(data, filename):
                     '--outdir', workdir,
                     src_path,
                 ],
-                capture_output=True, timeout=90,
+                # Parses user-uploaded files: none of the app's secrets.
+                capture_output=True, timeout=90, env=app_config.child_env(),
             )
             if result.returncode != 0:
                 app.logger.warning(

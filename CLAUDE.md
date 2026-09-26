@@ -168,6 +168,13 @@ tables/columns and bad ON CONFLICT targets is to `PREPARE` each statement
   user says every server is ported; don't add new keys to the ini.
 - New per-machine setting → a `.env` key (+ `.env.example`), never
   `app_settings` if it must differ between servers sharing one DB.
+- `.env` values are in the service's ENVIRONMENT, which children inherit.
+  Any subprocess that doesn't need the app's secrets (anything touching
+  uploaded files, third-party code) gets `env=app_config.child_env(...)`
+  (drops PG_*/S3_*/SECRET_KEY/GATEWAY_SHARED_SECRET/PGPASSWORD): soffice,
+  the Prism node bridge, pg_dump (+ PGPASSWORD) already do.
+- `app_config.py --export` must stay print-only and decide from the .env
+  FILE (never the shell env); it must never emit a key the file has.
 
 ## TEST_MODE (test/staging install, 3.4.0) — keep every gate
 `TEST_MODE=1` in `.env` → `app.TEST_MODE` (read once at import). A test

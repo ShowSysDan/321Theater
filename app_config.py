@@ -162,6 +162,17 @@ def read_ini_section(path, section):
     return dict(cp[section]) if section in cp else None
 
 
+def _ini_value(ini, ini_keys):
+    """First non-empty value among ini_keys (one key or a tuple), else ''."""
+    if isinstance(ini_keys, str):
+        ini_keys = (ini_keys,)
+    for k in ini_keys:
+        v = ((ini or {}).get(k) or '').strip()
+        if v:
+            return v
+    return ''
+
+
 def layered(spec, ini_path, ini_section):
     """Resolve a group of settings: .env first, then db_config.ini key by key.
 
@@ -182,14 +193,10 @@ def layered(spec, ini_path, ini_section):
         if val is not None:
             from_env = True
         else:
-            if isinstance(ini_keys, str):
-                ini_keys = (ini_keys,)
-            for k in ini_keys:
-                v = ((ini or {}).get(k) or '').strip()
-                if v:
-                    val, src = v, SRC_INI
-                    from_ini.append(env_key)
-                    break
+            v = _ini_value(ini, ini_keys)
+            if v:
+                val, src = v, SRC_INI
+                from_ini.append(env_key)
             else:
                 val, src = default, SRC_DEFAULT
         values[out_key] = val
@@ -213,6 +220,25 @@ def warn_legacy(section, env_keys):
         f'{", ".join(env_keys)} — move them to {ENV_PATH} '
         f'(python3 app_config.py --export prints the lines). '
         f'db_config.ini keeps working until then.')
+
+
+# ─── Subprocess environment ───────────────────────────────────────────────────
+# systemd loads .env into the service's environment, and every subprocess
+# inherits it. Children that don't need this app's secrets get a scrubbed copy:
+# LibreOffice (converts user-UPLOADED documents), the Prism node bridge (vendor
+# SDK), pg_dump (given PGPASSWORD explicitly). PG_*/S3_* are this app's own
+# prefixes (libpq's variables have no underscore: PGHOST, PGPASSWORD).
+_CHILD_SCRUB_PREFIXES = ('PG_', 'S3_')
+_CHILD_SCRUB_KEYS = frozenset({'SECRET_KEY', 'GATEWAY_SHARED_SECRET', 'PGPASSWORD',
+                               'TEST_MODE_EMAIL_ALLOWLIST'})
+
+
+def child_env(**extra):
+    """os.environ without this app's secrets, plus `extra`."""
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith(_CHILD_SCRUB_PREFIXES) or k in _CHILD_SCRUB_KEYS)}
+    env.update(extra)
+    return env
 
 
 # ─── Test mode ────────────────────────────────────────────────────────────────
@@ -247,42 +273,91 @@ def _mask(env_key, val):
     return '********'
 
 
+def _read_env_file_strict():
+    """The .env file's own values for the CLI ({} if the file doesn't exist).
+    None when it exists but can't be read — the CLI must then refuse to
+    export, or it would re-append keys the file already has (and the
+    appended copies, coming last, would override the file's newer values)."""
+    if not os.path.exists(ENV_PATH):
+        return {}
+    try:
+        with open(ENV_PATH, encoding='utf-8') as f:
+            return _parse_env_text(f.read())
+    except OSError as e:
+        print(f'Cannot read {ENV_PATH}: {e}\n'
+              f'Run this as the service user or with sudo.', file=sys.stderr)
+        return None
+
+
 def _main(argv):
     # The report below shows every db_config.ini source itself; keep the
     # one-time CONFIG_LEGACY warning off the terminal.
     _log.addHandler(logging.NullHandler())
     _log.propagate = False
+    import datetime
     import db_adapter
     import s3_storage
     groups = [
         ('PostgreSQL', db_adapter.CONFIG_PATH, 'postgresql', db_adapter.PG_SETTINGS_SPEC),
         ('S3 storage', s3_storage._CONFIG_PATH, 'seaweedfs', s3_storage.S3_SETTINGS_SPEC),
     ]
+    file_vals = _read_env_file_strict()
+    if file_vals is None:
+        return 1
+
+    def _not_yet_in_file(path, section, spec):
+        """(env_key, ini value) for every value db_config.ini holds that the
+        .env FILE doesn't. Decided from the file alone, never this shell's
+        environment: a variable exported in your shell is invisible to the
+        service, so it must not stop a value being ported."""
+        ini = read_ini_section(path, section) or {}
+        return [(env_key, _ini_value(ini, ini_keys)) for _o, env_key, ini_keys, _d in spec
+                if _ini_value(ini, ini_keys) and not file_vals.get(env_key)]
+
     if '--export' in argv:
+        # Only ever prints (append it yourself with >>). Never writes or
+        # deletes anything, never emits a key the .env file already has.
         lines = []
         for title, path, section, spec in groups:
-            values, sources, _ = layered(spec, path, section)
-            todo = [(env_key, values[out_key]) for out_key, env_key, _ini, _default in spec
-                    if sources[out_key] == SRC_INI]
+            todo = _not_yet_in_file(path, section, spec)
+            bad = [k for k, v in todo if '\n' in v or '\r' in v]
+            if bad:
+                print(f'Refusing to export: {", ".join(bad)} in {path} contains a line '
+                      f'break, which a .env line cannot hold. Copy it by hand.', file=sys.stderr)
+                return 1
             if todo:
-                lines.append(f'# {title} (ported from {os.path.basename(path)} [{section}])')
+                lines.append(f'# {title} — ported from {path} [{section}] on '
+                             f'{datetime.date.today().isoformat()}')
                 lines.extend(f'{k}={env_quote(v)}' for k, v in todo)
-        if lines:
-            print('\n'.join(lines))
-        else:
-            print('# Nothing to port: no value is coming from db_config.ini.', file=sys.stderr)
+        if not lines:
+            print('# Nothing to port: .env already has every value in db_config.ini.',
+                  file=sys.stderr)
+            return 0
+        # Leading blank line: if .env doesn't end in a newline, `>>` would
+        # otherwise glue the first line onto the file's last line.
+        print()
+        print('\n'.join(lines))
         return 0
+
     print(f'.env file:     {ENV_PATH} ({"found" if os.path.exists(ENV_PATH) else "MISSING"})')
     print(f'db_config.ini: {db_adapter.CONFIG_PATH} '
           f'({"found — legacy fallback" if os.path.exists(db_adapter.CONFIG_PATH) else "not present"})')
     print(f'TEST_MODE:     {"ON" if TEST_MODE else "off"}')
+    shell_keys, differs, still_needed = [], [], []
     for title, path, section, spec in groups:
         values, sources, present = layered(spec, path, section)
+        ini = read_ini_section(path, section) or {}
         print(f'\n{title}{"" if present else "  (not configured)"}')
-        for out_key, env_key, _ini_key, _default in spec:
+        for out_key, env_key, ini_keys, _default in spec:
             shown = _mask(env_key, values[out_key]) or (
                 '(built-in default)' if sources[out_key] == SRC_DEFAULT else '(empty)')
             print(f'  {env_key:<18} {shown:<32} ← {sources[out_key]}')
+            if sources[out_key] == SRC_ENVIRON and not file_vals.get(env_key):
+                shell_keys.append(env_key)
+            iv = _ini_value(ini, ini_keys)
+            if iv and file_vals.get(env_key) and file_vals[env_key] != iv:
+                differs.append(env_key)
+        still_needed += [k for k, _v in _not_yet_in_file(path, section, spec)]
     print('\nOther')
     for key in ('SECRET_KEY', 'TEST_MODE_EMAIL_ALLOWLIST', 'SESSION_COOKIE_SECURE',
                 'TRUSTED_PROXY_IPS', 'GATEWAY_SHARED_SECRET', 'GATEWAY_PEER_IPS'):
@@ -290,6 +365,20 @@ def _main(argv):
         if key == 'SECRET_KEY' or val is not None:
             shown = _mask(key, val) if val is not None else '(unset — sessions reset on restart)'
             print(f'  {key:<26} {shown:<32} ← {src or "-"}')
+    print()
+    if shell_keys:
+        print(f'NOTE: {", ".join(shell_keys)} come from THIS SHELL\'s environment, not .env — '
+              f'the service does not see them.')
+    if differs:
+        print(f'NOTE: .env and db_config.ini disagree on {", ".join(differs)}; '
+              f'.env wins (and is what the service uses now).')
+    if not os.path.exists(db_adapter.CONFIG_PATH) and not os.path.exists(s3_storage._CONFIG_PATH):
+        print('No db_config.ini — everything comes from .env.')
+    elif still_needed:
+        print(f'db_config.ini is STILL NEEDED for: {", ".join(still_needed)}. '
+              f'Port them with --export before deleting it.')
+    else:
+        print('db_config.ini can be deleted: every value it holds is also in .env.')
     return 0
 
 
