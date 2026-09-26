@@ -17,10 +17,11 @@ dialect translation and no fallback connection:
   never silently hands back some other database — the old silent SQLite
   fallback made background jobs act on stale bootstrap data.
 
-Connection settings come from db_config.ini ([postgresql] section) next to
-this file, or from the path in the THEATER_DB_CONFIG environment variable.
+Connection settings come from the app's .env file (PG_* keys, 3.4.0 — see
+app_config.py / .env.example). Any key missing there falls back to the legacy
+db_config.ini [postgresql] section (next to this file, or the path in
+THEATER_DB_CONFIG), so installs that haven't ported their config keep working.
 """
-import configparser
 import logging
 import os
 import re
@@ -32,9 +33,12 @@ import psycopg2.errors
 import psycopg2.extensions
 import psycopg2.extras
 
+import app_config
+
 _log = logging.getLogger('showadvance')
 
-CONFIG_PATH = os.environ.get('THEATER_DB_CONFIG') or os.path.join(
+# Legacy config file (deprecated fallback for any PG_* key missing from .env).
+CONFIG_PATH = app_config.get('THEATER_DB_CONFIG') or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'db_config.ini')
 
 DEFAULT_APP_SCHEMA = 'theater321'
@@ -61,66 +65,74 @@ class DBIntegrityError(Exception):
 query_timer_hook = None
 
 
-# ─── Config (db_config.ini) ────────────────────────────────────────────────────
-# read_db_settings() is called on every get_db(); cache the parsed ini for
-# 30 s so each connection doesn't re-read the file.
+# ─── Config (.env PG_*, falling back to db_config.ini) ─────────────────────────
+# read_db_settings() is called on every get_db(); cache the resolved settings
+# for 30 s so each connection doesn't re-read the files.
 _settings_cache: dict = {}
+_settings_sources: dict = {}
 _settings_ts: float = 0.0
 _CACHE_TTL = 30  # seconds
 
+# (settings key, .env key, legacy db_config.ini [postgresql] key, default).
+# app_config.layered() takes each key from .env first, then the ini.
+PG_SETTINGS_SPEC = (
+    ('pg_host',          'PG_HOST',          'host',          'localhost'),
+    ('pg_port',          'PG_PORT',          'port',          '5432'),
+    ('pg_dbname',        'PG_DBNAME',        'dbname',        '321theater'),
+    ('pg_user',          'PG_USER',          'user',          ''),
+    ('pg_password',      'PG_PASSWORD',      'password',      ''),
+    # 'schema' is the pre-two-schema ini name for the app schema.
+    ('pg_app_schema',    'PG_APP_SCHEMA',    ('app_schema', 'schema'), DEFAULT_APP_SCHEMA),
+    ('pg_shared_schema', 'PG_SHARED_SCHEMA', 'shared_schema', DEFAULT_SHARED_SCHEMA),
+    ('pg_pool_max_idle', 'PG_POOL_MAX_IDLE', 'pool_max_idle', ''),  # '' = pool default
+)
+
 
 def clear_settings_cache():
-    """Invalidate the config cache immediately (call after editing db_config.ini)."""
+    """Invalidate the config cache immediately (call after editing .env / db_config.ini)."""
     global _settings_cache, _settings_ts
     _settings_cache = {}
     _settings_ts = 0.0
 
 
+def settings_sources():
+    """{pg_* key: 'environment' | '.env' | 'db_config.ini' | 'default'} for the
+    active settings — the Settings → Database panel lists the keys still
+    coming from db_config.ini so they can be ported to .env."""
+    read_db_settings()
+    return dict(_settings_sources)
+
+
 def read_db_settings(config_path=None):
     """
-    Parse the [postgresql] section of db_config.ini into pg_* keys.
-    Returns {} when the file or section is missing.
+    The PostgreSQL connection settings as pg_* keys: each key from .env
+    (PG_HOST, PG_PORT, …) or, when missing there, from the legacy
+    db_config.ini [postgresql] section. Returns {} when neither configures
+    PostgreSQL at all.
 
     Two schemas are used:
       pg_app_schema    – theater-specific data (shows, schedules, etc.)
       pg_shared_schema – user/auth data shared across apps
-    Legacy 'schema' key maps to pg_app_schema for backward compatibility.
     """
-    global _settings_cache, _settings_ts
+    global _settings_cache, _settings_sources, _settings_ts
     path = config_path or CONFIG_PATH
     use_cache = path == CONFIG_PATH
     if use_cache and _settings_cache and (time.time() - _settings_ts) < _CACHE_TTL:
         return _settings_cache
+    values, sources, present = app_config.layered(PG_SETTINGS_SPEC, path, 'postgresql')
     result = {}
-    if os.path.exists(path):
-        try:
-            cp = configparser.ConfigParser()
-            cp.read(path, encoding='utf-8')
-            if 'postgresql' in cp:
-                sec = cp['postgresql']
-                legacy_schema = sec.get('schema', '')
-                result = {
-                    'pg_host':          sec.get('host',     'localhost'),
-                    'pg_port':          sec.get('port',     '5432'),
-                    'pg_dbname':        sec.get('dbname',   '321theater'),
-                    'pg_user':          sec.get('user',     ''),
-                    'pg_password':      sec.get('password', ''),
-                    'pg_app_schema':    (sec.get('app_schema', '') or legacy_schema
-                                         or DEFAULT_APP_SCHEMA),
-                    'pg_shared_schema': sec.get('shared_schema', '') or DEFAULT_SHARED_SCHEMA,
-                    'pg_pool_max_idle': sec.get('pool_max_idle', '') or str(_POOL_DEFAULT_MAX_IDLE),
-                }
-        except Exception as e:
-            _log.error(f'db_config.ini could not be parsed ({path}): {e}')
-            result = {}
+    if present:
+        result = dict(values)
+        result['pg_pool_max_idle'] = result['pg_pool_max_idle'] or str(_POOL_DEFAULT_MAX_IDLE)
     if use_cache:
         _settings_cache = result
+        _settings_sources = sources if present else {}
         _settings_ts = time.time()
     return result
 
 
 def is_configured(settings=None):
-    """True when db_config.ini has a usable [postgresql] section."""
+    """True when .env or db_config.ini configures PostgreSQL."""
     s = settings if settings is not None else read_db_settings()
     return bool(s.get('pg_host') or s.get('pg_dbname'))
 
@@ -152,8 +164,8 @@ def raw_connect(settings=None, search_path=True, connect_timeout=10, **extra):
     s = settings if settings is not None else read_db_settings()
     if not is_configured(s):
         raise DatabaseUnavailable(
-            f'PostgreSQL is not configured — create {CONFIG_PATH} '
-            f'(see db_config.ini.example)')
+            f'PostgreSQL is not configured — set PG_HOST / PG_DBNAME / PG_USER / '
+            f'PG_PASSWORD in {app_config.ENV_PATH} (see .env.example)')
     kwargs = dict(
         host=s.get('pg_host', 'localhost'),
         port=int(s.get('pg_port', 5432) or 5432),
@@ -352,7 +364,8 @@ class DBConnection:
 #   * Nothing ever waits on the pool: when it's empty a new connection is
 #     opened (exactly the old behavior), and when it's full the returned
 #     connection is closed. It only caps how many IDLE connections a process
-#     keeps: [postgresql] pool_max_idle in db_config.ini (default 4 per
+#     keeps: PG_POOL_MAX_IDLE in .env (legacy: [postgresql] pool_max_idle
+#     in db_config.ini; default 4 per
 #     process, i.e. per Gunicorn worker; 0 = no pooling, the pre-3.3.0
 #     connect-per-call behavior).
 #   * Fork-safe: a child process never touches its parent's pooled sockets.
@@ -451,7 +464,7 @@ _orphaned = []
 
 
 def _get_pool(settings):
-    """The process-wide pool for the current db_config.ini settings, or None
+    """The process-wide pool for the current connection settings, or None
     when pooling is off. Rebuilt (old idle connections closed) after a fork
     or when the connection settings change."""
     global _pool

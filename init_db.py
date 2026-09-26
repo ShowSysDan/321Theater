@@ -4,8 +4,9 @@
 """
 PostgreSQL schema creation, migration and seeding for 3·2·1→Theater.
 
-The app is PostgreSQL-only (3.0.0+). Connection settings come from
-db_config.ini (see db_config.ini.example / db_adapter.CONFIG_PATH).
+The app is PostgreSQL-only (3.0.0+). Connection settings come from the app's
+.env (PG_* keys, see .env.example), falling back per key to the legacy
+db_config.ini (db_adapter.read_db_settings).
 
 Usage:
   python init_db.py           — create schemas + tables (idempotent), apply
@@ -22,6 +23,7 @@ import json
 import re
 import sys
 
+import app_config
 import db_adapter
 
 SEED_CONTACTS = [
@@ -2134,8 +2136,8 @@ def init_db_postgres(settings=None, seed=True):
     """
     settings = settings if settings is not None else db_adapter.read_db_settings()
     if not db_adapter.is_configured(settings):
-        print(f"✗ {db_adapter.CONFIG_PATH} not found or missing [postgresql] section. "
-              f"See db_config.ini.example.")
+        print(f"✗ PostgreSQL is not configured: set PG_HOST / PG_DBNAME / PG_USER / "
+              f"PG_PASSWORD in {app_config.ENV_PATH} (see .env.example).")
         return False
     app_schema, shared_schema = db_adapter.schemas(settings)
     print(f"  app_schema={app_schema!r}, shared_schema={shared_schema!r}")

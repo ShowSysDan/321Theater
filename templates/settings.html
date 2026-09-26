@@ -975,14 +975,24 @@
   <div class="form-section" style="margin-bottom:16px">
     <div class="form-section-header"><span class="section-icon">◈</span> DATABASE STATUS</div>
     <div class="form-section-body" style="max-width:600px">
-      <p class="field-hint" style="margin-bottom:16px">The app runs on PostgreSQL only. Connection settings come from <code>db_config.ini</code> on the server; schema migrations apply automatically on startup.</p>
+      <p class="field-hint" style="margin-bottom:16px">The app runs on PostgreSQL only. Connection settings come from the server's <code>.env</code> file (<code>PG_*</code> keys; the old <code>db_config.ini</code> is still read for anything missing there); schema migrations apply automatically on startup.</p>
       <div class="field-hint" style="background:var(--bg-2,#23272e);border:1px solid var(--border,#333);border-radius:6px;padding:12px 14px;line-height:1.8;overflow-wrap:anywhere">
         <strong>Backend:</strong> <code>PostgreSQL</code><br>
         <strong>Host:</strong> <code>{{ db_settings.pg_host }}:{{ db_settings.pg_port }}/{{ db_settings.pg_dbname }}</code><br>
         <strong>App schema:</strong> <code>{{ db_settings.pg_app_schema }}</code> &nbsp; <strong>Shared schema:</strong> <code>{{ db_settings.pg_shared_schema }}</code><br>
+        {% if db_settings.legacy_keys %}
+        <span style="color:var(--yellow);font-size:12px">
+          Still read from the legacy <code>{{ db_settings.config_path }}</code>: <code>{{ db_settings.legacy_keys|join(', ') }}</code>.
+          Move them into <code>.env</code> (<code>python3 app_config.py --export</code> prints the lines), restart, then delete <code>db_config.ini</code>.
+        </span><br>
+        {% endif %}
+        {% if db_settings.test_mode %}
+        <span class="test-instance-badge">TEST INSTANCE</span>
+        <span class="text-dim" style="font-size:11px">TEST_MODE is on in <code>.env</code>: not clustered, email only to admins, leader-only jobs off.</span><br>
+        {% endif %}
         <span class="text-dim" style="font-size:11px">
-          Edit <code>{{ db_settings.config_path }}</code> and restart to change credentials. See <code>db_config.ini.example</code> for format.<br>
-          CLI: <code>python3 init_db.py</code> (create/upgrade schema + seed a fresh install)
+          Edit <code>{{ db_settings.env_path }}</code> and restart to change credentials. See <code>.env.example</code> for the keys.<br>
+          CLI: <code>python3 app_config.py</code> (where each setting comes from) · <code>python3 init_db.py</code> (create/upgrade schema + seed a fresh install)
         </span>
       </div>
       <div id="db-msg" class="field-msg" style="display:none;margin-top:8px"></div>
@@ -997,7 +1007,8 @@
     <div class="form-section-body" style="max-width:640px">
       <p class="field-hint" style="margin-bottom:12px">
         Where show file uploads, PDF exports and asset photos are stored. Config can come from
-        <code>db_config.ini [seaweedfs]</code> on the server (the historical default) or from the
+        the server's <code>.env</code> (<code>S3_*</code> keys, falling back to the old
+        <code>db_config.ini [seaweedfs]</code>; the historical default) or from the
         values saved here — which support <strong>multiple S3 gateway endpoints</strong> tried in
         order with automatic failover (for redundant SeaweedFS gateways fronting one cluster).
       </p>
@@ -3324,7 +3335,7 @@ async function loadS3Settings() {
               placeholder="http://10.201.2.50:8333" style="margin-bottom:6px">`).join('');
     const iniSummary = ini.present
       ? `<code>${_venueLogoEsc(ini.endpoint || '(no endpoint)')}</code> · bucket <code>${_venueLogoEsc(ini.bucket || '—')}</code> · key ${ini.access_key ? '<code>' + _venueLogoEsc(ini.access_key) + '</code>' : '—'}`
-      : '<span class="text-dim">no [seaweedfs] section found</span>';
+      : '<span class="text-dim">no S3_* keys in .env and no db_config.ini [seaweedfs] section</span>';
     const activeSummary = active.configured
       ? `${(active.endpoints || []).map(e => '<code>' + _venueLogoEsc(e) + '</code>').join(' → ')} · bucket <code>${_venueLogoEsc(active.bucket)}</code>`
       : '<span style="color:var(--danger)">not configured — files fall back to database storage</span>';
@@ -3333,7 +3344,7 @@ async function loadS3Settings() {
         <label class="field-label">CONFIG SOURCE</label>
         <label class="checkbox-label" style="display:block;margin:4px 0">
           <input type="radio" name="s3-source" value="ini" ${d.source !== 'gui' ? 'checked' : ''}>
-          <strong>db_config.ini</strong> <span class="text-dim">(server file — the default; ${iniSummary})</span>
+          <strong>Server config (.env)</strong> <span class="text-dim">(the default; ${iniSummary})</span>
         </label>
         <label class="checkbox-label" style="display:block;margin:4px 0">
           <input type="radio" name="s3-source" value="gui" ${d.source === 'gui' ? 'checked' : ''}>
@@ -3760,13 +3771,17 @@ async function loadClusterStatus() {
     const selfEl = document.getElementById('cluster-self');
     if (selfEl) {
       const serverIsLeader = !!d.is_self_server_leader;
-      const leaderBadge = serverIsLeader
+      const leaderBadge = d.test_mode
+        ? '<span class="test-instance-badge">TEST INSTANCE</span>'
+        : serverIsLeader
         ? '<span class="role-badge role-admin" style="background:#1a8754">LEADER</span>'
         : '<span class="role-badge" style="background:#6c757d">FOLLOWER</span>';
       const forceLine = d.force_leader && d.force_leader !== 'auto'
         ? `<br><strong>Override:</strong> <code>${d.force_leader}</code>`
         : '';
-      const enabledLine = d.enabled ? '' : '<br><span style="color:#dc3545">Cluster heartbeat is <strong>disabled</strong> — this instance acts as sole leader.</span>';
+      const enabledLine = d.test_mode
+        ? '<br><span style="color:#dc3545"><strong>TEST INSTANCE</strong> (TEST_MODE in .env) — not a cluster member: no heartbeat, never leader, never primary. Leader-only jobs (scheduled emails, alerts, Prism auto-sync) do not run here; email goes only to admins.</span>'
+        : d.enabled ? '' : '<br><span style="color:#dc3545">Cluster heartbeat is <strong>disabled</strong> — this instance acts as sole leader.</span>';
       selfEl.innerHTML =
         `<strong>IP:</strong> <code>${d.self_ip}</code> &nbsp; ` +
         `<strong>Hostname:</strong> <code>${d.self_hostname}</code> &nbsp; ${leaderBadge}<br>` +
@@ -3782,7 +3797,8 @@ async function loadClusterStatus() {
     const tbody = document.querySelector('#cluster-peers-table tbody');
     if (tbody) {
       if (!d.peers || !d.peers.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="text-dim" style="padding:16px;font-size:12px">No live peers (heartbeat disabled or no instances responding).</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="text-dim" style="padding:16px;font-size:12px">' +
+          (d.test_mode ? 'Test instance — peers are not read.' : 'No live peers (heartbeat disabled or no instances responding).') + '</td></tr>';
       } else {
         tbody.innerHTML = d.peers.map(p => {
           const role = p.is_leader

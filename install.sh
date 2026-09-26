@@ -100,8 +100,14 @@ info "Backup dirs ready: ${APP_DIR}/backups/{hourly,daily}"
 
 # ── Database ──────────────────────────────────────────────────────────────────
 step "Initializing PostgreSQL database..."
-if [ ! -f "${APP_DIR}/db_config.ini" ]; then
-    error "db_config.ini not found. Copy db_config.ini.example to ${APP_DIR}/db_config.ini, fill in the PostgreSQL credentials, and re-run."
+# Connection settings: PG_* in .env (3.4.0+), each missing key falling back to
+# the legacy db_config.ini — so an older install with only db_config.ini
+# still passes this check.
+if ! (cd "${APP_DIR}" && "$PYTHON" -c "import sys, db_adapter; sys.exit(0 if db_adapter.is_configured() else 1)"); then
+    error "PostgreSQL is not configured. Copy .env.example to ${ENV_FILE}, fill in PG_HOST / PG_DBNAME / PG_USER / PG_PASSWORD, and re-run."
+fi
+if [ -f "${APP_DIR}/db_config.ini" ]; then
+    warn "db_config.ini is deprecated — move its values into .env (python3 app_config.py --export prints the lines). It keeps working until then."
 fi
 # Idempotent: creates schemas/tables if missing, applies column migrations,
 # and seeds defaults only into empty tables (fresh installs).
@@ -126,19 +132,27 @@ if [ "$(id -u)" -eq 0 ]; then
 
     # Ensure all app files are owned by the service user
     chown -R "${RUN_USER}:${RUN_USER}" "${APP_DIR}/backups" 2>/dev/null || true
-    chown "${RUN_USER}:${RUN_USER}" "${APP_DIR}/db_config.ini" 2>/dev/null || true
-    chmod 600 "${APP_DIR}/db_config.ini" 2>/dev/null || true
+    if [ -f "${APP_DIR}/db_config.ini" ]; then
+        chown "${RUN_USER}:${RUN_USER}" "${APP_DIR}/db_config.ini" 2>/dev/null || true
+        chmod 600 "${APP_DIR}/db_config.ini" 2>/dev/null || true
+    fi
     chown "${RUN_USER}:${RUN_USER}" "${APP_DIR}" 2>/dev/null || true
 
-    # Generate SECRET_KEY if not already present
-    if [ ! -f "$ENV_FILE" ] || ! grep -q '^SECRET_KEY=' "$ENV_FILE" 2>/dev/null; then
+    # Generate SECRET_KEY if not already present (a blank "SECRET_KEY=" line,
+    # as in .env.example, is filled in place)
+    if [ ! -f "$ENV_FILE" ] || ! grep -q '^SECRET_KEY=.' "$ENV_FILE" 2>/dev/null; then
         SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
-        echo "SECRET_KEY=${SECRET_KEY}" >> "$ENV_FILE"
-        chmod 600 "$ENV_FILE"
+        if [ -f "$ENV_FILE" ] && grep -q '^SECRET_KEY=[[:space:]]*$' "$ENV_FILE"; then
+            sed -i "s/^SECRET_KEY=[[:space:]]*\$/SECRET_KEY=${SECRET_KEY}/" "$ENV_FILE"
+        else
+            echo "SECRET_KEY=${SECRET_KEY}" >> "$ENV_FILE"
+        fi
         info "Generated new SECRET_KEY → ${ENV_FILE}"
     else
         info "SECRET_KEY already present in ${ENV_FILE}"
     fi
+    # .env holds the DB password (3.4.0+): owner-only, always.
+    chmod 600 "$ENV_FILE"
 
     # Stub the VPS-gateway settings so admins can find them later. All three
     # stay commented out by default — the gateway endpoints and trusted-proxy
@@ -155,6 +169,16 @@ if [ "$(id -u)" -eq 0 ]; then
 # Honor X-Forwarded-For/-Proto only from these proxy IPs (comma-separated).
 #TRUSTED_PROXY_IPS=10.201.4.9
 GWEOF
+    fi
+
+    # Stub the test-server flag so admins can find it later (off by default).
+    if ! grep -q 'TEST_MODE' "$ENV_FILE" 2>/dev/null; then
+        cat >> "$ENV_FILE" << 'TMEOF'
+# ── Test server (optional — see .env.example) ────────────────────────────
+# 1 = TEST instance: never clusters/leads, leader-only jobs off, email only
+# to admins with a [TEST INSTANCE] subject, syslog lines tagged the same.
+#TEST_MODE=1
+TMEOF
     fi
 
     # Ensure .env is readable by service user
