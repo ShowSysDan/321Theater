@@ -7,7 +7,8 @@
   <form method="post" action="/__gate/login?next={{ next | urlencode }}" autocomplete="on">
     <label for="email">Email address</label>
     <input type="email" id="email" name="email" required autofocus
-           maxlength="254" autocomplete="email" placeholder="you@example.com">
+           maxlength="254" autocomplete="email" placeholder="you@example.com"
+           value="{{ email or '' }}">
     <button type="submit">Send code</button>
   </form>
 {% endblock %}

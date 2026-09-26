@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  {{- /* Served by CADDY itself (handle_errors in the Caddyfile), never by
+         the gateway app: it has to work when the gateway process, the
+         tunnel, or every app instance is down. So it is fully
+         self-contained (inline CSS, inline logo, no script) and rendered by
+         Caddy's `templates`: a GET retries itself every 30 s, a failed
+         POST must not (the retry would be a GET of a form target).
+         Styling mirrors static/gate.css; keep the two looking alike. */ -}}
+  {{if eq .Req.Method "GET" "HEAD"}}
+  <meta http-equiv="refresh" content="30">
+  {{end}}
+  <title>3·2·1→THEATER — Gateway offline</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 44" fill="none"%3E %3Crect x="16.5" y="0" width="3" height="6" rx="1.5" fill="rgba(245,127,32,0.55)"/%3E %3Crect x="10" y="5" width="16" height="12" rx="2.5" fill="#F57F20"/%3E %3Crect x="11.5" y="6.5" width="13" height="9" rx="1.5" fill="rgba(0,0,0,0.18)"/%3E %3Cellipse cx="18" cy="11" rx="4.5" ry="3.2" fill="rgba(255,255,255,0.1)"/%3E %3Cellipse cx="14.5" cy="8.2" rx="2.5" ry="1.5" fill="rgba(255,255,255,0.3)"/%3E %3Cpath d="M12,17 L24,17 L30,40 L6,40 Z" fill="rgba(245,127,32,0.13)"/%3E %3Cline x1="12" y1="17" x2="6" y2="40" stroke="rgba(245,127,32,0.3)" stroke-width="0.8"/%3E %3Cline x1="24" y1="17" x2="30" y2="40" stroke="rgba(245,127,32,0.3)" stroke-width="0.8"/%3E %3Crect x="4" y="40" width="28" height="2" rx="1" fill="rgba(245,127,32,0.4)"/%3E %3Cellipse cx="18" cy="41.5" rx="9" ry="2.5" fill="rgba(245,127,32,0.18)"/%3E %3C/svg%3E">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh; display: flex; align-items: center;
+      justify-content: center; padding: 1rem; background: #141414;
+      background-image: radial-gradient(ellipse at 60% 30%,
+                        rgba(245,127,32,0.06) 0%, transparent 60%);
+      color: #e8e8e8;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   Helvetica, Arial, sans-serif;
+    }
+    .gate-card { width: 100%; max-width: 23rem; background: #1e1e1e;
+                 border: 1px solid #333; border-radius: 12px; padding: 2.5rem; }
+    .gate-brand { text-align: center; margin-bottom: 1.75rem; }
+    .gate-brand-icon { width: 46px; height: 56px; display: block; margin: 0 auto 0.6rem; }
+    .gate-brand-name { font-weight: 700; letter-spacing: 0.1em; font-size: 1.35rem; }
+    .gate-arrow { color: #F57F20; padding: 0 0.1em; }
+    .gate-uplink { display: inline-flex; align-items: center; gap: 0.45rem;
+                   margin-top: 0.8rem; padding: 0.22rem 0.7rem; border-radius: 999px;
+                   border: 1px solid rgba(240,78,35,0.45); background: rgba(240,78,35,0.10);
+                   color: #f2b8ad; font-size: 0.72rem; letter-spacing: 0.04em; }
+    .gate-uplink-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%;
+                       background: #f04e23; box-shadow: 0 0 0 3px rgba(240,78,35,0.22); }
+    h1 { font-size: 1.15rem; margin-bottom: 0.5rem; }
+    .gate-sub { color: #909090; font-size: 0.9rem; margin-bottom: 1rem; line-height: 1.45; }
+    .gate-sub strong { color: #e8e8e8; }
+    .gate-alt { margin-top: 1.25rem; font-size: 0.85rem; text-align: center; }
+    .gate-alt a { color: #F57F20; text-decoration: none; }
+    .gate-alt a:hover { text-decoration: underline; }
+    .gate-foot { margin-top: 1.75rem; text-align: center; }
+    .gate-foot-org { font-size: 0.8rem; color: #909090; }
+    .gate-foot-fine { margin-top: 0.25rem; font-size: 0.68rem; color: #606060; line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <main class="gate-card">
+    <div class="gate-brand">
+      <svg class="gate-brand-icon" viewBox="0 0 36 44" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <rect x="16.5" y="0" width="3" height="6" rx="1.5" fill="rgba(245,127,32,0.55)"/>
+        <rect x="10" y="5" width="16" height="12" rx="2.5" fill="#F57F20"/>
+        <rect x="11.5" y="6.5" width="13" height="9" rx="1.5" fill="rgba(0,0,0,0.18)"/>
+        <ellipse cx="18" cy="11" rx="4.5" ry="3.2" fill="rgba(255,255,255,0.1)"/>
+        <ellipse cx="14.5" cy="8.2" rx="2.5" ry="1.5" fill="rgba(255,255,255,0.3)"/>
+        <path d="M12,17 L24,17 L30,40 L6,40 Z" fill="rgba(245,127,32,0.13)"/>
+        <line x1="12" y1="17" x2="6" y2="40" stroke="rgba(245,127,32,0.3)" stroke-width="0.8"/>
+        <line x1="24" y1="17" x2="30" y2="40" stroke="rgba(245,127,32,0.3)" stroke-width="0.8"/>
+        <rect x="4" y="40" width="28" height="2" rx="1" fill="rgba(245,127,32,0.4)"/>
+        <ellipse cx="18" cy="41.5" rx="9" ry="2.5" fill="rgba(245,127,32,0.18)"/>
+      </svg>
+      <div class="gate-brand-name">3·2·1<span class="gate-arrow">→</span>THEATER</div>
+      <div class="gate-uplink" role="status">
+        <span class="gate-uplink-dot" aria-hidden="true"></span>
+        <span>Gateway offline</span>
+      </div>
+    </div>
+    <h1>The 3·2·1→Theater gateway is offline</h1>
+    {{if eq .Req.Method "GET" "HEAD"}}
+    <p class="gate-sub">It&rsquo;s temporarily unavailable, usually because
+    of a short network outage. This page checks again every 30 seconds and
+    carries on by itself once the gateway is back.</p>
+    <p class="gate-alt"><a href="">Try again now</a></p>
+    {{else}}
+    <p class="gate-sub">It&rsquo;s temporarily unavailable, usually because
+    of a short network outage, so what you just submitted was
+    <strong>not</strong> delivered. Once the gateway is back, use your
+    browser&rsquo;s Back button and submit it again.</p>
+    {{end}}
+    <div class="gate-foot">
+      <div class="gate-foot-org">Dr. Phillips Center for the Performing Arts</div>
+      <div class="gate-foot-fine">MIT Licensed &middot; &copy; Dr. Phillips Center for the Performing Arts &middot; portions &copy; Thauma Systems, LLC</div>
+      <div class="gate-foot-fine">Authorized users only</div>
+    </div>
+  </main>
+</body>
+</html>

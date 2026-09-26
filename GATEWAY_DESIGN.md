@@ -113,6 +113,8 @@ Routes (all under `/__gate/` — no collision with app paths):
 - `GET/POST /__gate/code` — code form (email from pending cookie, never in URL/logs); POST calls `/internal/gateway/otp/verify`; success ⇒ mint gate cookie via `itsdangerous.URLSafeTimedSerializer` — `Secure; HttpOnly; SameSite=Lax; Max-Age=43200`, `__Host-` prefixed — redirect to `next`. Failure ⇒ generic "invalid or expired".
 - `GET /__gate/check` — the `forward_auth` target: valid cookie (`loads(..., max_age=12h)`) ⇒ 200 + `X-Gate-Email` header (informational only, never trusted for auth); invalid ⇒ 302 to `/__gate/login?next=<X-Forwarded-Uri>`, or **401 for AJAX** (`X-Requested-With`/JSON Accept) so in-app fetches fail cleanly.
 - `GET /__gate/signout` — clears the gate cookies; the page explains that the app's own session expires separately (the two are independent, both ~12 h).
+- `GET /__gate/uplink` (3.5.0) — the status pill's live value: exactly `{"state": "online"|"offline"|"unknown"}`, read from a background monitor's cache (never triggers a probe). The monitor calls the app's secret-gated `GET /internal/gateway/health` on the ONE server it would use; a 200 proves tunnel + app + secret + PostgreSQL. Details (addresses, reasons) go to the journal only.
+- App side (3.5.0): `GET /internal/gateway/health` (readiness, same secret gate as the OTP API) and `POST /internal/gateway/log` (the gateway's events, relayed over the tunnel into the app's `syslog_logger` so they reach the app's remote syslog server; control characters flattened, size + per-worker budget capped, 429 = retry later).
 
 Stateless on the VPS (no DB, no session store). Abuse controls: cheap in-process per-IP token bucket on the two POSTs (single worker ⇒ in-memory is fine), fail2ban-friendly `GATE_OTP_FAIL ip=<ip>` journald lines, real limits enforced in PG (§1a).
 
@@ -182,6 +184,7 @@ automatically.
 
 ## Notes / accepted trade-offs
 
+- 3.5.0 audit decisions: (a) visitor-visible "gateway offline" answers are given ONLY when the payload was never delivered to any app (connect-phase failure or no primary), so they can't leak account existence or code correctness; (b) with several servers every authenticated call goes to the one primary, and a delivered payload is never re-sent to another server (that would mail a second code or spend a second guess); (c) the Caddyfile's path block must be a `handle` (Caddy orders `handle` before `respond`, so the old bare `respond @blocked 404` never ran); (d) the branded offline page is served by Caddy from disk, so it works with the gateway process down.
 - Gate cookie and app session both last 12 h but on independent clocks — acceptable; sign-out page links both. (2.32.0: the gate's clock stays a HARD 12 h — no refresh endpoint, re-entering an emailed code is the model. What was added instead is visibility: pre-auth read-only `GET /__gate/status` reports seconds remaining so the app's session-expiry watchdog can warn at 15/10/5 min and offer a re-verify in a second tab. Keep it read-only; do not add cookie re-issuance to it.)
 - The per-process `memory://` Flask-Limiter weakness on `/login` is pre-existing and out of scope (real client IPs at least fix its keying).
 - LAN traffic stays HTTP; making `SESSION_COOKIE_SECURE` unconditional would require LAN HTTPS — future work.

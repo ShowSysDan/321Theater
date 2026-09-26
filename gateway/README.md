@@ -188,11 +188,12 @@ Enumeration resistance, in one place, because it's easy to regress:
 
 | Failure | Visible effect |
 |---|---|
-| Gateway service down | **Public outage** — `forward_auth` runs per request, so Caddy 502s everything. LAN unaffected. `systemctl restart 321gateway`. |
-| Tunnel down | Public users who passed the gate get Caddy 502s; the gate's email step also fails quietly (no codes sent). LAN unaffected. |
+| Gateway service down | **Public outage** — `forward_auth` runs per request, so nothing gets through. Since 3.5.0 Caddy shows the branded "gateway is offline" page (served from disk, no gateway needed) instead of a blank 502. LAN unaffected. `systemctl restart 321gateway`. |
+| Tunnel down | Gate pages show **Gateway offline** and say codes can't be sent; submitting the email form says "No code was sent" (before 3.5.0 this failed silently). People already past the gate get the branded offline page, which retries every 30 s. Journal: `GATE_UPLINK state=offline …=no-answer`. LAN unaffected. |
 | PostgreSQL down | App-side OTP endpoints **fail closed** (generic response, ERROR in the app journal, no code sent). Nobody new passes the gate; existing cookies still pass `forward_auth` but the app itself will be struggling anyway. |
 | SMTP broken | Codes are generated but never arrive. Check Settings → Email Send Errors (`gateway_otp` rows) on the app. |
-| Wrong/missing shared secret | The internal API answers 404; gate emails silently never send. Compare `GATE_SHARED_SECRET` (VPS) with `GATEWAY_SHARED_SECRET` (app `.env`). |
+| Wrong/missing shared secret | The internal API answers 404, so no codes are sent. Since 3.5.0 the pill shows **Gateway offline** and the journal says `…=http-404 (404 = GATE_SHARED_SECRET does not match …)`. Compare `GATE_SHARED_SECRET` (VPS) with `GATEWAY_SHARED_SECRET` (app `.env`). |
+| No server holds the primary role (multi-server) | Mid-failover (~30 s) or the database is down. The gateway sends nothing and shows **Gateway offline**; Caddy has no healthy upstream and shows the offline page. Journal: `GATE_UPSTREAM no server claims primary: …`. |
 
 ### 1.5 What the gate deliberately does NOT do
 
@@ -208,6 +209,53 @@ Enumeration resistance, in one place, because it's easy to regress:
 - `X-Gate-Email` (forwarded to the app for log correlation) is
   **informational only** — nothing in the app trusts it for auth, and nothing
   ever should.
+
+### 1.6 Status indicator, offline page and logs (3.5.0)
+
+**Status pill.** Every gate page shows **Gateway online / Gateway offline** under
+the logo, and a notice while offline. A background thread in `gateway_app.py`
+calls the app's secret-protected `GET /internal/gateway/health` on the ONE
+server it would use (every 30 s while online, 10 s while offline). A 200
+proves tunnel + app + shared secret + PostgreSQL. `static/gate.js` keeps an
+open page current by reading `GET /__gate/uplink`.
+
+- **Nothing internal is public.** `/__gate/uplink` answers exactly
+  `{"state": "online" | "offline" | "unknown"}`. Addresses, ports, error text
+  and server counts go to the journal only.
+- **Visitors can't trigger probes.** The page and `/__gate/uplink` only read
+  the cached result, so the endpoint can't be used to hammer the tunnel. It's
+  also a clean target for an external uptime monitor: alert when the body
+  stops saying `online`.
+- It is an availability oracle by design: anyone can see whether the site's
+  link is up, which the login page has to show anyway.
+
+**Failed submits say so.** If a request can't be delivered to any app (tunnel
+down, or nobody holds the primary role), the email form answers "No code was
+sent: the 3·2·1→Theater gateway is offline right now" and the code form says
+the code wasn't checked. This happens only when no app received the request,
+so it can't reveal anything about the email or code. These log
+`GATE_OTP_UNSENT` / `GATE_OTP_UNCHECKED`, which fail2ban ignores, so retrying
+during an outage never gets anyone banned.
+
+**Offline page.** When Caddy can't complete a request itself (tunnel down, no
+healthy upstream, or the gateway process down), `handle_errors` in the
+Caddyfile serves `offline/unavailable.html` straight from
+`/opt/321gateway/offline`. It's the branded "The 3·2·1→Theater gateway is
+offline" page, fully self-contained (inline CSS and logo, no script), so it
+works with the gateway dead. A GET retries every 30 s; a failed POST is told
+it was not delivered. App fetch/XHR calls get `{"error":"unavailable"}`
+instead. A 5xx the app itself returns passes through untouched.
+
+**Logs.** Everything the gateway logs goes to this VPS's journal **and** to
+the remote syslog server the main app uses. The VPS can't reach that server
+itself, and shouldn't: the WireGuard firewall rule confines it to the app's
+port. So events ride the tunnel to the primary app (`POST
+/internal/gateway/log`), which writes them through its own syslog logger,
+tagged `src=gateway at=<original UTC time>`. During an outage events wait in
+memory (up to 2,000; past that the oldest are dropped and the loss is
+reported as `GATE_LOG_RELAY dropped=N`) and are delivered when the link
+returns. Relay trouble itself (`GATE_LOG_RELAY paused` / `resumed`) is only
+in this journal. The gunicorn access log is not relayed.
 
 ---
 
@@ -433,13 +481,17 @@ traffic in flight. Keep the target small:
 | 5 | Fresh code, correct entry | Lands on the app's normal login page |
 | 6 | Log into the app, open a show, submit a form | Works (proves Host/CSRF passthrough) |
 | 7 | Download a labor PDF | Works (proves proxy streaming) |
-| 8 | `https://dpc.321.theater/register` | 404 |
-| 9 | `https://dpc.321.theater/internal/gateway/otp/request` | 404 |
+| 8 | **After passing the gate** (cookie set): `https://dpc.321.theater/register` | 404 (before 3.5.0 this reached the app: see §7) |
+| 9 | After passing the gate: `https://dpc.321.theater/internal/gateway/health` | 404 |
 | 10 | From the LAN: `http://10.201.2.101:5400/login` | Normal login, no gate anywhere |
 | 11 | On the app server: audit log for the test login | Shows your real public IP, not 10.201.4.9 |
 | 12 | Browser devtools → app session cookie via the gateway | Has the `Secure` flag |
 | 13 | `curl https://dpc.321.theater/robots.txt` | `Disallow: /` for `*` and the AI crawlers, served without hitting the gate |
 | 14 | `curl -sI https://dpc.321.theater/__gate/login \| grep -i x-robots` | `noindex, nofollow, noarchive, nosnippet, noai, noimageai` |
+| 15 | `curl -s https://dpc.321.theater/__gate/uplink` | `{"state":"online"}`, and nothing else |
+| 16 | On the VPS, `sudo systemctl stop 321gateway`, then load the site | Branded "The 3·2·1→Theater gateway is offline" page (not blank). `systemctl start 321gateway` afterwards |
+| 17 | Stop the tunnel briefly (`sudo wg-quick down wg0`; only when you're SSH'd in over the VPS's public address, NOT over the tunnel), wait ~15 s, load the gate | Pill says **Gateway offline**; submitting an email says "No code was sent". `wg-quick up wg0`: back to online within ~10 s |
+| 18 | App server: `journalctl -u 321theater \| grep src=gateway` | The gateway's `GATE_*` events, including the ones from test 17 |
 
 ## 7. Troubleshooting
 
@@ -451,6 +503,9 @@ traffic in flight. Keep the target small:
 | Audit logs show 10.201.4.9 for everyone | `TRUSTED_PROXY_IPS` unset/wrong on the app server, or the router NATs (re-run the source-IP check in §3). |
 | `__Host-321gate` cookie rejected by the browser | The site must be reached over HTTPS with no Domain attribute — check you're not testing via plain HTTP or an IP address. |
 | Let's Encrypt issuance fails | DNS not propagated yet, or port 80 blocked. `journalctl -u caddy`. |
+| Gate shows **Gateway offline** | `journalctl -u 321gateway \| grep GATE_UPLINK` gives the reason: `no-answer` = tunnel down (packets vanish; check `wg show` and the building's internet), `refused` = tunnel up but the app isn't listening, `http-404` = shared secret mismatch or an app older than 3.5.0, `http-503` = the app can't reach PostgreSQL, `no-primary` = no server holds the primary role. |
+| Gateway events missing from the syslog server | `journalctl -u 321gateway \| grep GATE_LOG_RELAY`: `paused` means the app isn't reachable and events are queued (they flush when it returns). On the app side, check Settings → Server & Logs → remote syslog. |
+| `/register` or `/internal/…` reachable from outside | The Caddyfile predates 3.5.0: its `respond @blocked 404` never ran (Caddy runs `handle` blocks first). `sudo bash install.sh --rewrite-caddy`. |
 
 ## 8. Multiple 321T servers (primary/secondary redundancy)
 
@@ -472,12 +527,22 @@ instead of inventing its own:
 
 - After editing the list, run `sudo bash install.sh --rewrite-caddy`. That
   regenerates the Caddyfile's proxy block with all upstreams,
-  `lb_policy first`, and a 10-second health check against the primary
+  `lb_policy first`, and a 5-second health check against the primary
   probe — so browsing traffic follows the election and fails over
   automatically when the primary dies (its heartbeats go stale and the
   next server wins the election within ~30s).
-- The gateway's own OTP calls do the same thing in-process: poll the
-  probe (cached 10s), send to the primary, retry the others on error.
+- **Only one server at a time (3.5.0).** The gateway sends codes, guesses,
+  its health probe and relayed logs to the current primary only. It finds
+  the primary by asking each server's unauthenticated, read-only probe in
+  list order and stopping at the first that claims it; that answer is
+  cached for 10 s. The other servers never see the shared secret or any
+  visitor data. A request fails over only when it was never delivered
+  (connect failure), once, to a freshly discovered primary. It is never
+  re-sent after a server received it, because that could mail a second code
+  or spend a second guess. With no primary, nothing is sent and the gate
+  shows **Gateway offline**. Caddy's browsing traffic follows the same
+  election (health check every 5 s, no retries), and with no primary Caddy
+  shows the offline page instead of picking a server anyway.
 
 Also required per added server: it must reach the same PostgreSQL, its
 `.env` needs the same `GATEWAY_SHARED_SECRET` + `TRUSTED_PROXY_IPS`, and
