@@ -46,8 +46,16 @@ Disallow: /
 	#  - /register        self-registration undermines the "email must already
 	#                     have an account" premise; register on the LAN instead
 	#  - /confirm-email/* only used by the registration flow
-	@blocked path /internal/* /register /confirm-email/*
-	respond @blocked 404
+	# MUST be a `handle` block. Caddy runs directives in a fixed order, not
+	# file order, and `handle` comes before `respond`: the bare
+	# `respond @blocked 404` this used to be never ran, because the
+	# catch-all `handle` below claimed every request first (found in 3.5.0
+	# with a live Caddy; these paths were reachable by anyone past the gate).
+	# A `handle` with a named matcher sorts ahead of the catch-all one.
+	@blocked path /internal/* /register /register/* /confirm-email/*
+	handle @blocked {
+		respond 404
+	}
 
 	# Everything else: ask the gateway whether this browser has passed the
 	# email-code check, then proxy to the app over the WireGuard tunnel.
@@ -69,12 +77,47 @@ Disallow: /
 		#   reverse_proxy 10.201.2.101:5400 10.201.2.102:5400 {
 		#       lb_policy first
 		#       health_uri /internal/cluster/primary
-		#       health_interval 10s
+		#       health_interval 5s
+		#       health_timeout 3s
 		#   }
 		#
 		# — each server's probe answers 200 only while it holds the primary
-		# role (the app's own leader election), so Caddy follows failover
-		# automatically.
+		# role (the app's own leader election), so every request goes to that
+		# ONE server and Caddy follows failover within ~5 s. With no server
+		# holding the role, Caddy has no healthy upstream and answers 503
+		# (shown as the page below) rather than picking one anyway. There
+		# are no retries (lb_try_duration is unset), so a request is never
+		# replayed against a second server.
 		reverse_proxy 10.201.2.101:5400
+	}
+
+	# Branded "gateway offline" page instead of a blank 502/503/504 whenever
+	# Caddy can't complete a request itself: the tunnel is down, no 321T
+	# server holds the primary role (no healthy upstream = 503), or the
+	# gateway process is down (forward_auth fails). Caddy serves the page
+	# from disk, so it works in every one of those cases. Only errors Caddy
+	# raises land here: a 5xx the app itself sends is an ordinary response
+	# and passes through untouched. App fetch()/XHR calls get JSON.
+	handle_errors {
+		@unreachable expression `{err.status_code} in [502, 503, 504]`
+		handle @unreachable {
+			header Cache-Control "no-store"
+			header Retry-After "30"
+			@api expression `{header.X-Requested-With} == "XMLHttpRequest" || {header.Accept}.contains("application/json")`
+			handle @api {
+				header Content-Type "application/json"
+				respond `{"error":"unavailable"}` 503
+			}
+			handle {
+				header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+				header X-Frame-Options "DENY"
+				header X-Content-Type-Options "nosniff"
+				header Referrer-Policy "same-origin"
+				root * /opt/321gateway/offline
+				rewrite * /unavailable.html
+				templates
+				file_server
+			}
+		}
 	}
 }

@@ -87,6 +87,10 @@ fi
 "${APP_DIR}/venv/bin/pip" install --quiet --upgrade pip
 "${APP_DIR}/venv/bin/pip" install --quiet -r "${APP_DIR}/requirements.txt"
 chown -R "${RUN_USER}:${RUN_USER}" "${APP_DIR}"
+# Caddy (user caddy) serves offline/unavailable.html itself when the
+# gateway or the tunnel is down, so that one page must be world-readable.
+chmod 755 "${APP_DIR}" "${APP_DIR}/offline"
+chmod 644 "${APP_DIR}/offline/unavailable.html"
 info "Dependencies installed."
 
 # ── Environment / secrets ─────────────────────────────────────────────────────
@@ -174,7 +178,8 @@ if len(ups) > 1:
     block = ('\t\treverse_proxy ' + ' '.join(ups) + ' {\n'
              '\t\t\tlb_policy first\n'
              '\t\t\thealth_uri /internal/cluster/primary\n'
-             '\t\t\thealth_interval 10s\n'
+             '\t\t\thealth_interval 5s\n'
+             '\t\t\thealth_timeout 3s\n'
              '\t\t}\n')
 else:
     block = '\t\treverse_proxy ' + ups[0] + '\n'

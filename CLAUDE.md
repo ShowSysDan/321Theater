@@ -608,6 +608,46 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   prefetches (the DB session interface already only sets cookies when the
   session changes).
 
+## VPS gateway (gateway/) — status, routing, edge rules (3.5.0)
+- **Public status is ONE word.** `/__gate/uplink` → `{"state": online|offline|unknown}`
+  and the pill on gate pages. Never put an address, port, exception text,
+  HTTP code or server count in anything a visitor can see (journal only).
+  Visitors must never be able to trigger a probe: pages/endpoints read the
+  monitor's cached state only.
+- **Tell the visitor "offline" only when the payload was never delivered**
+  (`UplinkDown`: `_never_delivered()` = connect timeout / urllib3
+  `NewConnectionError`, or no primary). Anything that reached an app stays
+  generic, or it becomes an account-existence / code-correctness oracle.
+  `GATE_OTP_UNSENT` / `GATE_OTP_UNCHECKED` must never match fail2ban's
+  `GATE_OTP_FAIL ip=` regex.
+- **One app instance at a time.** Codes, guesses, the health probe and the
+  log relay go to `_pick_upstream()` (the primary) only; other servers get
+  only the unauthenticated `/internal/cluster/primary` discovery probe. Never
+  re-send a payload a server received (second code mailed / second guess
+  spent); fail over only on `_never_delivered()`. No primary → send nothing.
+- All tunnel HTTP goes through `_tunnel()` (trust_env=False) with
+  `allow_redirects=False`: the secret header must not follow a redirect or
+  go through an env proxy.
+- `_client_ip()` = RIGHTMOST `X-Forwarded-For` entry, validated as an IP.
+  `_safe_next()` (gateway) and `_safe_local_path()` (app) refuse `//`,
+  backslash and control characters: browsers strip tab/CR/LF, so
+  `/<TAB>/evil.com` becomes `//evil.com`.
+- **Caddyfile: blocking must be a `handle`.** Caddy orders directives
+  (`handle` before `respond`), so a bare `respond @blocked 404` next to a
+  catch-all `handle` never runs. Verify edge changes with `caddy adapt`
+  (route order) and a live Caddy, not by reading the file.
+- The offline page (`gateway/offline/unavailable.html`) is served by CADDY
+  (`handle_errors`) so it works with the gateway down: keep it
+  self-contained (inline CSS/logo, no script) and branded; it must never
+  say "can't reach the theater". Flask must not serve it (not in static/).
+- **Log relay:** the gateway's `log` records are queued and POSTed to the
+  primary's `/internal/gateway/log` → `syslog_logger`. Relay trouble is
+  noted on the separate `gateway_relay` logger, never on `log` (it would
+  re-queue itself). Don't give the VPS direct access to the internal
+  syslog server; the WireGuard rule confines it to the app's port.
+- App errors reaching the browser via the gateway use `_client_error_text()`
+  (raw exception text can carry internal hosts).
+
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.
 At the end of any change that touches code/config, **state plainly which

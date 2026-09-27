@@ -7,6 +7,7 @@
   <title>3·2·1→THEATER — Access</title>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='gate.css') }}">
+  <script src="{{ url_for('static', filename='gate.js') }}" defer></script>
 </head>
 <body>
   <main class="gate-card">
@@ -24,6 +25,23 @@
         <ellipse cx="18" cy="41.5" rx="9" ry="2.5" fill="rgba(245,127,32,0.18)"/>
       </svg>
       <div class="gate-brand-name">3·2·1<span class="gate-arrow">→</span>THEATER</div>
+      {#- Can the gateway reach the theater? One word from the monitor's
+          cached state, nothing else (see gateway_app.py "Uplink status").
+          The labels live here only; gate.js swaps them in from data-*. #}
+      {%- set uplink_labels = {'online': 'Gateway online',
+                               'offline': 'Gateway offline',
+                               'unknown': 'Checking gateway…'} %}
+      <div class="gate-uplink gate-uplink--{{ uplink_state }}" id="gate-uplink"
+           role="status" aria-live="polite" data-state="{{ uplink_state }}"
+           {%- for key, label in uplink_labels.items() %} data-label-{{ key }}="{{ label }}"{% endfor %}>
+        <span class="gate-uplink-dot" aria-hidden="true"></span>
+        <span class="gate-uplink-text">{{ uplink_labels[uplink_state] }}</span>
+      </div>
+    </div>
+    <div class="gate-offline" id="gate-offline" {% if uplink_state != 'offline' %}hidden{% endif %}>
+      <strong>The 3·2·1→Theater gateway is offline right now,</strong>
+      so sign-in codes can&rsquo;t be sent. This is usually a short network
+      outage. This page updates on its own; try again once it shows online.
     </div>
     {% block content %}{% endblock %}
     <div class="gate-foot">

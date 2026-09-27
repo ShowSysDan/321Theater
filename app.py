@@ -767,7 +767,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.4.1'
+APP_VERSION = '3.5.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1751,6 +1751,17 @@ def _connection_path():
     if request.environ.get('werkzeug.proxy_fix.orig_remote_addr'):
         return 'gateway'
     return 'internal'
+
+
+def _client_error_text(e):
+    """Exception text safe to hand back to the browser. Raw text can carry
+    internal addresses (psycopg2, boto3/S3 and requests errors all embed
+    host:port), so a request that came in through the public gateway gets
+    a pointer to the server log instead; LAN users keep the detail for
+    troubleshooting. The full exception is always logged by the caller."""
+    if _connection_path() == 'gateway':
+        return 'details are in the server log'
+    return str(e)
 
 
 _GATEWAY_COOKIE_NAME = app_config.get('GATEWAY_COOKIE_NAME', '__Host-321gate')
@@ -4473,6 +4484,23 @@ def _login_page_messages():
     return [dict(r) for r in rows]
 
 
+_NEXT_CONTROL_CHARS = re.compile(r'[\x00-\x1f\x7f]')
+
+
+def _safe_local_path(raw):
+    """`raw` if it's a same-site relative path, else None. Rejects '//host',
+    any backslash (browsers may read '\\' as '/'), and any control
+    character: browsers silently STRIP tab/CR/LF from URLs, so '/<TAB>/evil.com'
+    passes a '//' test and then lands on evil.com (Chromium-verified in
+    3.5.0; this app is reachable from the internet through the gateway, so
+    a crafted login link was a real phishing redirect). Same rule as the
+    gateway's _safe_next()."""
+    if (not raw or not raw.startswith('/') or raw.startswith('//')
+            or '\\' in raw or _NEXT_CONTROL_CHARS.search(raw)):
+        return None
+    return raw
+
+
 def _render_login():
     return render_template('login.html', next=request.args.get('next', ''),
                            login_messages=_login_page_messages())
@@ -4533,8 +4561,7 @@ def _login_route():
             syslog_logger.info(
                 f"LOGIN user={username} ip={request.remote_addr} via={_cpath}")
             # Prevent open redirect — only allow relative paths
-            if not next_url or not next_url.startswith('/') or next_url.startswith('//'):
-                next_url = url_for('dashboard')
+            next_url = _safe_local_path(next_url) or url_for('dashboard')
             # Force password change if still using default
             try:
                 _must_change = user['must_change_password']
@@ -4810,6 +4837,89 @@ def cluster_primary_probe():
     if primary:
         return jsonify({'primary': True})
     return jsonify({'primary': False}), 503
+
+
+@app.route('/internal/gateway/health')
+def gateway_health():
+    """Readiness probe behind the VPS gateway's public "online / offline"
+    indicator (3.5.0). The gateway polls it every 10-30 s over the tunnel.
+
+    Same secret (+ peer) check as the OTP endpoints, so a 200 proves every
+    link a code request needs short of SMTP: tunnel up, this app up, shared
+    secret matching, PostgreSQL reachable. The unauthenticated cluster probe
+    can't catch a mismatched secret, which is the other way codes silently
+    stop sending. Any server can answer OTP calls (shared DB), so this
+    doesn't care about the primary role. Returns a bare boolean, never any
+    detail; the public edge blocks /internal/* anyway."""
+    if not _gateway_auth_ok():
+        abort(404)
+    db = _gateway_db()
+    if db is None:
+        return jsonify({'ok': False}), 503
+    try:
+        db.execute('SELECT 1')
+    except Exception as e:
+        app.logger.error(f'Gateway health: database check failed: {e}')
+        return jsonify({'ok': False}), 503
+    finally:
+        db.close()
+    return jsonify({'ok': True})
+
+
+_GATEWAY_LOG_MAX_BODY = 512 * 1024     # bytes per relay request
+_GATEWAY_LOG_MAX_EVENTS = 200          # events per relay request
+_GATEWAY_LOG_PER_MIN = 1200            # per worker; over it → 429, gateway retries
+_GATEWAY_LOG_LEVELS = {'INFO': logging.INFO, 'WARNING': logging.WARNING,
+                       'ERROR': logging.ERROR, 'CRITICAL': logging.ERROR}
+_GATEWAY_LOG_CTRL = re.compile(r'[\x00-\x1f\x7f]+')
+_gateway_log_budget = {'window': 0, 'count': 0}
+_gateway_log_lock = threading.Lock()
+
+
+@app.route('/internal/gateway/log', methods=['POST'])
+def gateway_log_relay():
+    """The VPS gateway's own events, relayed over the tunnel (3.5.0) so they
+    reach the same remote syslog server as ours: the VPS can't reach that
+    server directly, and the WireGuard rule keeps it that way. Written
+    through syslog_logger (our journal + the remote handler), tagged
+    src=gateway with the event's original UTC time: events queued during a
+    tunnel outage arrive late.
+
+    Same secret gate as the OTP endpoints (404 otherwise). Control
+    characters are flattened so a relayed line can never forge extra syslog
+    lines. A batch over the per-worker budget is refused whole (429, the
+    gateway retries later), so nothing is dropped or doubled."""
+    if not _gateway_auth_ok():
+        abort(404)
+    if (request.content_length or 0) > _GATEWAY_LOG_MAX_BODY:
+        return jsonify({'ok': False}), 413
+    events = _gateway_json_body().get('events')
+    if not isinstance(events, list):
+        return jsonify({'ok': False}), 400
+    events = [e for e in events[:_GATEWAY_LOG_MAX_EVENTS] if isinstance(e, dict)]
+    now = time.time()
+    with _gateway_log_lock:
+        window = int(now // 60)
+        if _gateway_log_budget['window'] != window:
+            _gateway_log_budget.update(window=window, count=0)
+        if _gateway_log_budget['count'] + len(events) > _GATEWAY_LOG_PER_MIN:
+            return jsonify({'ok': False}), 429
+        _gateway_log_budget['count'] += len(events)
+    accepted = 0
+    for ev in events:
+        msg = _GATEWAY_LOG_CTRL.sub(' ', str(ev.get('msg') or '')).strip()[:2000]
+        if not msg:
+            continue
+        at = ev.get('at')
+        if isinstance(at, bool) or not isinstance(at, (int, float)) \
+                or not (now - 7 * 86400 < at < now + 300):
+            at = now
+        level = _GATEWAY_LOG_LEVELS.get(str(ev.get('level', '')).upper(),
+                                        logging.INFO)
+        stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(at))
+        syslog_logger.log(level, f'{msg} src=gateway at={stamp}')
+        accepted += 1
+    return jsonify({'ok': True, 'accepted': accepted})
 
 
 @app.route('/internal/gateway/otp/request', methods=['POST'])
@@ -7987,10 +8097,8 @@ def _redirect_after_show_action():
     """Redirect back to the page the archive/restore form came from. Only
     relative in-app paths are accepted (no '//' or scheme) so a tampered
     `next` value can't turn this into an open redirect."""
-    nxt = request.form.get('next') or ''
-    if nxt.startswith('/') and not nxt.startswith('//') and '\\' not in nxt:
-        return redirect(nxt)
-    return redirect(url_for('dashboard'))
+    return redirect(_safe_local_path(request.form.get('next'))
+                    or url_for('dashboard'))
 
 
 @app.route('/settings/shows')
@@ -12951,7 +13059,8 @@ def ai_extract(show_id):
         return _ai_extract_impl(show_id)
     except Exception as e:
         app.logger.exception("ai_extract unhandled error")
-        return jsonify({'success': False, 'error': f'Server error: {e}'}), 500
+        return jsonify({'success': False,
+                        'error': f'Server error: {_client_error_text(e)}'}), 500
     finally:
         _release_ai_session(ai_sid)
 
@@ -23111,7 +23220,7 @@ def internal_error(e):
         return jsonify({
             'success': False,
             'error': 'Internal server error.',
-            'detail': str(getattr(e, 'original_exception', e) or e),
+            'detail': _client_error_text(getattr(e, 'original_exception', e) or e),
         }), 500
     return render_template('error.html', code=500,
                            message="An unexpected server error occurred.",
