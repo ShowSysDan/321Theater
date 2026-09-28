@@ -1978,3 +1978,50 @@ html[data-theme="light"] .login-page {
 .pw-rules li::before { content: '✕'; font-size: 10px; line-height: 1; width: 15px; height: 15px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: rgba(239,68,68,.15); flex-shrink: 0; transition: background .15s ease; }
 .pw-rules li.ok { color: var(--green); }
 .pw-rules li.ok::before { content: '✓'; background: rgba(34,197,94,.15); }
+
+/* ── Venue Branding panel (Settings → System → Branding & Paperwork) ──────
+   Each venue is two lines (logo, colors) of FIXED-width fields in a fixed
+   order, so every row lines up with the next. Reset always keeps its slot
+   (hidden when the venue has nothing to reset) and the contrast note lives
+   inside the fixed Preview slot — neither can shift the controls. */
+.venue-branding-row { padding: 14px 0; border-bottom: 1px solid var(--border); }
+.venue-branding-row:last-child { border-bottom: none; }
+.vb-head { display: flex; align-items: center; gap: 10px; min-height: 20px; margin-bottom: 10px; }
+.vb-name { font-weight: 600; font-size: 13px; }
+.vb-line + .vb-line { margin-top: 12px; }
+.vb-logo, .vb-logo-form { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.vb-logo { gap: 12px; }
+.vb-logo-thumb {
+  flex: 0 0 150px; height: 44px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px dashed var(--border); border-radius: 4px;
+  font-size: 11px; font-style: italic; color: var(--text-dim);
+}
+.vb-logo-thumb.has-logo { border-style: solid; background: #fff; }
+.vb-logo-thumb img { max-width: 142px; max-height: 38px; object-fit: contain; }
+.vb-logo-form input[type="file"] { width: 230px; }
+.vb-btn { min-width: 80px; justify-content: center; }
+.vb-colors { display: flex; align-items: flex-end; gap: 18px; flex-wrap: wrap; }
+.vb-field { display: flex; flex-direction: column; gap: 5px; margin: 0; }
+.vb-field-label {
+  font-size: 10px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--text-dim); white-space: nowrap;
+}
+.vb-field input[type="color"] {
+  width: 52px; height: 30px; padding: 2px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 4px; background: transparent;
+}
+/* Auto: shows the color that will be used; dashed = picked for you. */
+.vb-field input[type="color"]:disabled { border-style: dashed; cursor: not-allowed; }
+.vb-ctl { display: flex; align-items: center; gap: 8px; height: 30px; }
+.vb-auto { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-dim); cursor: pointer; }
+.vb-auto input { accent-color: var(--accent); margin: 0; }
+.vb-field-preview { width: 250px; }
+.vb-field-preview .vc-preview {
+  flex: 0 0 auto; height: 30px; line-height: 30px; padding: 0 10px; border-radius: 3px;
+  font-size: 10px; font-weight: 700; letter-spacing: .08em; white-space: nowrap;
+}
+.vb-field-preview .vc-contrast { font-size: 11px; white-space: nowrap; }
+.vb-actions { display: flex; gap: 6px; }
+.vb-actions .btn { height: 30px; padding-top: 0; padding-bottom: 0; }
+.vb-reset-none { visibility: hidden; }

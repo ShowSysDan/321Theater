@@ -297,16 +297,22 @@ apps. For a 321Theater access change, use this app's own flags instead
   Crew) stack each lunch's start (S) over its end (E) in one column per
   lunch; keep DOM/Tab order in that same sequence.
 
-## Production schedule PDF is page-aware (3.6.0)
+## Production schedule PDF is page-aware (3.6.0, 3.6.1)
 - `_fit_schedule_pdf()` lays the schedule out with WeasyPrint, reads which
   page every day/row landed on from the box tree (`<table data-sched-day>`,
   `<tr data-sched-row>` in schedule_pdf.html), and fixes days in document
-  order: a day spilling 1–4 rows (a row cut in half counts) is condensed a
-  step at a time (`cz-1`…`cz-3`); a short day stranded at a page foot that
-  can't be condensed moves whole to the next page (`pb-before`) only if it
-  then fits and nothing later gets worse; a day earlier fixes pulled up into
-  a split goes back to a fresh page. Invariant (fuzz-tested): no fix ever
-  creates a new split, more spill, or an extra page. ≤10 layout passes.
+  order: a day spilling 1–4 rows is condensed a step at a time
+  (`cz-1`…`cz-3`); a day that still splits (any spill, 3.6.1) moves whole to
+  the next page (`pb-before`, condensed a step if it overhangs by ≤4) only
+  if it then fits and nothing later gets worse — never day 1 (the header is
+  above it) or a day already at the top of a page (`_shares_page`); a day
+  earlier fixes pulled up into a split goes back to a fresh page. Invariant
+  (fuzz-tested): no fix ever creates a new split, more spill, or an extra
+  page. ≤10 layout passes.
+- Rows carry `break-inside: avoid` (3.6.1), so a tall row moves whole
+  instead of being cut in half across a page break. The footer's
+  "Page N of M" (schedule, advance, post-show notes) is `white-space:
+  nowrap` — a long footer-left squeezed it onto two lines.
 - The content hash is taken on the UN-fitted HTML (the fit is a pure
   function of it), so export reuse still works. `page._page_box` is
   WeasyPrint-internal: an AttributeError falls back to the plain, un-fitted

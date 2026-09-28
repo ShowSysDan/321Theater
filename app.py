@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.6.0'
+APP_VERSION = '3.6.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -7737,8 +7737,9 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
 
 # ─── Page-aware production schedule (3.6.0) ──────────────────────────────────
 # A day whose table would spill only a few rows onto the next page gets its
-# text/spacing condensed until it fits on the page it starts on. Measured, not
-# guessed: each candidate is laid out by WeasyPrint and the page every row
+# text/spacing condensed until it fits on the page it starts on; a day that
+# would still split moves whole to the next page when it fits there (3.6.1).
+# Measured, not guessed: each candidate is laid out by WeasyPrint and the page every row
 # landed on is read back from the box tree (the <table data-sched-day> and
 # <tr data-sched-row> markers in schedule_pdf.html).
 _SCHED_FIT_MAX_SPILL = 4      # rows on the next page that are worth condensing
@@ -7781,12 +7782,15 @@ def _fit_schedule_pdf(render_html, base_url):
     1-3}, 'breaks': [day, ...]}. Days are handled in document order.
 
     For each day that spills 1–_SCHED_FIT_MAX_SPILL rows onto the next page,
-    condense it one level at a time until nothing spills. If even the
-    tightest level can't make it fit, a short day stranded at the foot of a
-    page (≤ _SCHED_FIT_MAX_SPILL rows there) moves whole to the next page —
-    kept only if it then fits there and nothing after it gets worse (more
-    pages, or a later day spilling more). Otherwise the day is left exactly
-    as it was (a normal page break). A day that earlier fixes pulled up onto
+    condense it one level at a time until nothing spills. A day that still
+    splits (it spills more rows than that, or even the tightest level can't
+    make it fit) moves whole to the next page when something from an earlier
+    day shares the page it starts on — kept only if it then fits there
+    (condensed a step if it overhangs that page by a few rows) and nothing
+    after it gets worse (more pages, or a later day spilling more).
+    Otherwise the day is left exactly as it was (a normal page break). The
+    first day never moves (the header is above it) and neither does a day
+    already at the top of a page. A day that earlier fixes pulled up onto
     an earlier page and that now splits across pages goes back to starting
     on a fresh page (still no later than where it began originally), so
     condensing one day never splits another, while a day that fits in the
@@ -7832,6 +7836,13 @@ def _fit_schedule_pdf(render_html, base_url):
         return any(_schedule_spill(after[2], e) > _schedule_spill(before[2], e)
                    for e in after[2] if e > day)
 
+    def _shares_page(days, day):
+        """Does an earlier day end on the page `day` starts on? (If not, the
+        day already starts at the top of a page and moving it gains nothing.)"""
+        start = days[day][0]
+        return any(max(rows.values(), default=s) >= start
+                   for e, (s, rows) in days.items() if e < day)
+
     orig = cur[2]
     for day in sorted(orig):
         spill = _schedule_spill(cur[2], day)
@@ -7843,21 +7854,21 @@ def _fit_schedule_pdf(render_html, base_url):
             if got:
                 cur = got
                 continue
-            # Too tall to condense onto its page: a short day stranded at the
-            # foot of a page (a few rows there, a few on the next) moves whole
-            # to the next page instead — kept only if it fits there and
-            # nothing after it gets worse. (A pulled-up day gets that break
-            # below regardless.)
-            head = len(cur[2][day][1]) - spill
-            if (not pulled_up and head <= _SCHED_FIT_MAX_SPILL
-                    and fit['renders'] < _SCHED_FIT_MAX_RENDERS):
-                fit['breaks'].append(day)
-                trial = _layout()
-                if (_schedule_spill(trial[2], day) == 0
-                        and not _worse_after(cur, trial, day)):
-                    cur = trial
-                    continue
-                fit['breaks'].remove(day)
+        # Still split: move the whole day to the next page instead — kept
+        # only if it fits there and nothing after it gets worse. (A
+        # pulled-up day gets that break below regardless.)
+        if (not pulled_up and _shares_page(cur[2], day)
+                and fit['renders'] < _SCHED_FIT_MAX_RENDERS):
+            fit['breaks'].append(day)
+            trial = _layout()
+            if 1 <= _schedule_spill(trial[2], day) <= _SCHED_FIT_MAX_SPILL:
+                trial = _condense(day) or trial
+            if (_schedule_spill(trial[2], day) == 0
+                    and not _worse_after(cur, trial, day)):
+                cur = trial
+                continue
+            fit['breaks'].remove(day)
+            fit['levels'].pop(day, None)
         if pulled_up and fit['renders'] < _SCHED_FIT_MAX_RENDERS:
             fit['breaks'].append(day)
             cur = _layout()

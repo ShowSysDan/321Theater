@@ -32,7 +32,7 @@
     size: letter portrait;
     margin: 0.3in 0.6in 0.55in;
     @bottom-left   { content: element(footerLeft);   font-size: 6.5pt; color: #888; border-top: 1px solid #ddd; padding-top: 4px; vertical-align: middle; }
-    @bottom-center { content: "Page " counter(page) " of " counter(pages); font-size: 6.5pt; color: #888; border-top: 1px solid #ddd; padding-top: 4px; vertical-align: middle; }
+    @bottom-center { content: "Page " counter(page) " of " counter(pages); font-family: Arial, Helvetica, sans-serif; font-size: 6.5pt; color: #888; border-top: 1px solid #ddd; padding-top: 4px; vertical-align: middle; white-space: nowrap; }
     @bottom-right  { content: element(footerRight);  font-size: 6.5pt; color: #888; border-top: 1px solid #ddd; padding-top: 4px; vertical-align: middle; text-align: right; }
   }
   .footer-left  { position: running(footerLeft);  font-size: 6.5pt; color: #888; }
@@ -65,6 +65,9 @@
   .cols-row th { background: {{ C1 }}; color: {{ C1_ON_SOFT }}; font-size: 7pt; letter-spacing: 0.08em; text-align: left;
                  padding: 3px 8px; text-transform: uppercase; border-top: 1px solid {{ C1_MID }}; }
   .sched-table td { padding: 5px 8px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
+  /* A row never splits across a page break (3.6.1): a two-line row cut in
+     half reads as two items. The whole row moves to the next page. */
+  .sched-table tbody tr { break-inside: avoid; page-break-inside: avoid; }
   .sched-table tbody tr:nth-child(even) td { background: #fafafa; }
   .sched-table tbody tr:last-child td { border-bottom: 2px solid #bbb; }
   .sched-table .time-col { font-weight: bold; white-space: nowrap; font-size: 8.5pt; color: #333; }
@@ -80,9 +83,9 @@
   /* ── Page-aware fit (3.6.0) — set by _fit_schedule_pdf() in app.py ──
      A day that would spill 4 or fewer rows onto the next page is condensed a
      step at a time (cz-1 → cz-3) until it fits on its own page. pb-before
-     starts a day on a fresh page: a short day that can't be condensed onto
-     the foot of a page moves over whole, and a following day goes back to a
-     fresh page (where it began before) when freed-up space would split it. */
+     starts a day on a fresh page: a day that would still split moves over
+     whole when it fits there, and a following day goes back to a fresh page
+     (where it began before) when freed-up space would split it. */
   .sched-table.cz-1 td { padding: 3px 7px; line-height: 1.25; }
   .sched-table.cz-1 .time-col, .sched-table.cz-1 .desc-col { font-size: 8pt; }
   .sched-table.cz-1 .notes-col { font-size: 7pt; }

@@ -239,3 +239,14 @@ html.mobile-view .ps-worked-by { flex-direction: column; align-items: stretch; g
 /* Settle Now banner: text above a full-width button. */
 html.mobile-view .ps-settle-banner { flex-direction: column; align-items: stretch; margin: 10px 10px 0; }
 html.mobile-view .ps-settle-banner > div { min-width: 0; }
+
+/* ── Venue Branding panel (Settings → Branding & Paperwork) ──────────────── */
+/* Pickers wrap; the logo file input and the color actions take the full
+   width. */
+html.mobile-view .vb-colors { gap: 14px; }
+html.mobile-view .vb-logo-form { flex: 1 1 100%; }
+html.mobile-view .vb-logo-form input[type="file"] { width: 100%; }
+html.mobile-view .vb-field-preview { width: auto; }
+html.mobile-view .vb-actions { width: 100%; }
+html.mobile-view .vb-actions .btn { flex: 1; justify-content: center; }
+html.mobile-view .vb-reset-none { display: none; }
