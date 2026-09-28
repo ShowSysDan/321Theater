@@ -241,12 +241,15 @@ html.mobile-view .ps-settle-banner { flex-direction: column; align-items: stretc
 html.mobile-view .ps-settle-banner > div { min-width: 0; }
 
 /* ── Venue Branding panel (Settings → Branding & Paperwork) ──────────────── */
-/* Pickers wrap; the logo file input and the color actions take the full
-   width. */
-html.mobile-view .vb-colors { gap: 14px; }
-html.mobile-view .vb-logo-form { flex: 1 1 100%; }
-html.mobile-view .vb-logo-form input[type="file"] { width: 100%; }
-html.mobile-view .vb-field-preview { width: auto; }
-html.mobile-view .vb-actions { width: 100%; }
-html.mobile-view .vb-actions .btn { flex: 1; justify-content: center; }
-html.mobile-view .vb-reset-none { display: none; }
+/* List: the color chip drops under the venue name. Dialog: colors stack. */
+html.mobile-view .vb-row {
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  grid-template-areas: "logo info edit" "logo chip edit";
+  row-gap: 5px;
+}
+html.mobile-view .vb-row > .vb-logo-thumb { width: 72px; }
+html.mobile-view .vbm-colors { grid-template-columns: minmax(0, 1fr); }
+html.mobile-view .vbm-logo { flex-direction: column; }
+html.mobile-view .vbm-logo-ctl { width: 100%; }
+html.mobile-view .vbm-card .modal-footer { flex-wrap: wrap; }
+html.mobile-view .vbm-msg { flex: 1 1 100%; order: -1; }

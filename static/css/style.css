@@ -1980,48 +1980,77 @@ html[data-theme="light"] .login-page {
 .pw-rules li.ok::before { content: '✓'; background: rgba(34,197,94,.15); }
 
 /* ── Venue Branding panel (Settings → System → Branding & Paperwork) ──────
-   Each venue is two lines (logo, colors) of FIXED-width fields in a fixed
-   order, so every row lines up with the next. Reset always keeps its slot
-   (hidden when the venue has nothing to reset) and the contrast note lives
-   inside the fixed Preview slot — neither can shift the controls. */
-.venue-branding-row { padding: 14px 0; border-bottom: 1px solid var(--border); }
-.venue-branding-row:last-child { border-bottom: none; }
-.vb-head { display: flex; align-items: center; gap: 10px; min-height: 20px; margin-bottom: 10px; }
-.vb-name { font-weight: 600; font-size: 13px; }
-.vb-line + .vb-line { margin-top: 12px; }
-.vb-logo, .vb-logo-form { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.vb-logo { gap: 12px; }
+   The list is one quiet summary line per venue (logo, name, a mini banner
+   chip, Edit); all the controls live in #venue-branding-modal. */
+.vb-row {
+  display: grid; grid-template-columns: 96px minmax(0, 1fr) auto auto;
+  grid-template-areas: "logo info chip edit";
+  align-items: center; column-gap: 14px;
+  padding: 10px 0; border-bottom: 1px solid var(--border);
+}
+.vb-row:last-child { border-bottom: none; }
+.vb-row > .vb-logo-thumb { grid-area: logo; }
+.vb-info { grid-area: info; min-width: 0; }
+.vb-chip { grid-area: chip; }
+.vb-edit { grid-area: edit; }
+.vb-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vb-meta { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.vb-row.is-custom .vb-meta { color: var(--text-muted); }
 .vb-logo-thumb {
-  flex: 0 0 150px; height: 44px;
+  width: 96px; height: 34px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
   border: 1px dashed var(--border); border-radius: 4px;
-  font-size: 11px; font-style: italic; color: var(--text-dim);
+  font-size: 10px; color: var(--text-dim);
 }
-.vb-logo-thumb.has-logo { border-style: solid; background: #fff; }
-.vb-logo-thumb img { max-width: 142px; max-height: 38px; object-fit: contain; }
-.vb-logo-form input[type="file"] { width: 230px; }
-.vb-btn { min-width: 80px; justify-content: center; }
-.vb-colors { display: flex; align-items: flex-end; gap: 18px; flex-wrap: wrap; }
-.vb-field { display: flex; flex-direction: column; gap: 5px; margin: 0; }
-.vb-field-label {
-  font-size: 10px; font-weight: 700; letter-spacing: .06em;
-  text-transform: uppercase; color: var(--text-dim); white-space: nowrap;
+.vb-logo-thumb.has-logo { border: 1px solid var(--border); background: #fff; }
+.vb-logo-thumb img { max-width: calc(100% - 8px); max-height: calc(100% - 6px); object-fit: contain; }
+/* The organization logo, standing in for a venue with no logo of its own. */
+.vb-logo-thumb.is-default img { opacity: .4; }
+.vb-chip {
+  display: inline-flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 92px; height: 22px; padding: 0 8px; border-radius: 3px;
+  font-size: 10px; font-weight: 700; white-space: nowrap;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
 }
-.vb-field input[type="color"] {
-  width: 52px; height: 30px; padding: 2px; cursor: pointer;
+
+/* The editor dialog */
+.vbm-card { width: 520px; }
+.vbm-section { display: flex; flex-direction: column; gap: 10px; }
+.vbm-section + .vbm-section { border-top: 1px solid var(--border); padding-top: 16px; }
+.vbm-logo { display: flex; align-items: flex-start; gap: 14px; }
+.vbm-logo-thumb { width: 150px; height: 56px; font-size: 11px; }
+.vbm-logo-ctl { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.vbm-logo-ctl input[type="file"] { width: 100%; }
+.vbm-hint { font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+#vbm-logo-remove { margin-left: -9px; }   /* text lines up with the hint above */
+.vbm-colors { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.vbm-color {
+  display: flex; align-items: center; gap: 8px; margin: 0; min-width: 0;
+  padding: 8px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+}
+.vbm-color input[type="color"] {
+  width: 34px; height: 34px; flex-shrink: 0; padding: 2px; cursor: pointer;
   border: 1px solid var(--border); border-radius: 4px; background: transparent;
 }
-/* Auto: shows the color that will be used; dashed = picked for you. */
-.vb-field input[type="color"]:disabled { border-style: dashed; cursor: not-allowed; }
-.vb-ctl { display: flex; align-items: center; gap: 8px; height: 30px; }
-.vb-auto { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-dim); cursor: pointer; }
+/* Auto: the swatch shows the color that will be used; dashed = picked for you. */
+.vbm-color input[type="color"]:disabled { border-style: dashed; cursor: default; }
+.vbm-color-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: 12px; }
+.vbm-color-txt small { font-size: 10.5px; color: var(--text-dim); }
+.vb-auto { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-dim); cursor: pointer; margin: 0; }
 .vb-auto input { accent-color: var(--accent); margin: 0; }
-.vb-field-preview { width: 250px; }
-.vb-field-preview .vc-preview {
-  flex: 0 0 auto; height: 30px; line-height: 30px; padding: 0 10px; border-radius: 3px;
-  font-size: 10px; font-weight: 700; letter-spacing: .08em; white-space: nowrap;
+/* Miniature schedule page — always white paper, whatever the app theme. */
+.vbm-paper {
+  background: #fff; color: #1a1a1a; border-radius: 4px; padding: 12px 14px 10px;
+  font-family: Arial, Helvetica, sans-serif; box-shadow: 0 1px 3px rgba(0,0,0,.25);
 }
-.vb-field-preview .vc-contrast { font-size: 11px; white-space: nowrap; }
-.vb-actions { display: flex; gap: 6px; }
-.vb-actions .btn { height: 30px; padding-top: 0; padding-bottom: 0; }
-.vb-reset-none { visibility: hidden; }
+.vbm-doc-type { font-size: 8px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.vbm-doc-name { font-size: 15px; font-weight: 900; padding-bottom: 5px; margin-bottom: 8px; border-bottom: 2px solid; }
+.vbm-bar { display: flex; gap: 10px; padding: 4px 8px; }
+.vbm-day { justify-content: space-between; font-size: 11px; font-weight: 700; }
+.vbm-cols { font-size: 8px; letter-spacing: .08em; text-transform: uppercase; border-top: 1px solid; padding-top: 3px; padding-bottom: 3px; }
+.vbm-cols span:nth-child(-n+2), .vbm-line > :nth-child(-n+2) { width: 38px; flex-shrink: 0; }
+.vbm-line { display: flex; gap: 10px; padding: 4px 8px; font-size: 10px; border-bottom: 1px solid #e0e0e0; }
+.vbm-line:nth-child(even) { background: #fafafa; }
+.vbm-reset { margin-right: auto; }
+.vbm-msg { font-size: 12px; align-self: center; }
+.vbm-msg:empty { display: none; }

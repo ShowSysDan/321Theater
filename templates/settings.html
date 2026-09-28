@@ -745,7 +745,7 @@
       <p class="text-dim" style="font-size:12px;margin-bottom:12px">Default logo shown in PDF headers when a show's venue has no override below. Max 2 MB (PNG/JPG/GIF/WebP).</p>
       {% if logo_data %}
       <div style="margin-bottom:12px">
-        <img src="{{ logo_data }}" alt="Logo" style="max-height:60px;max-width:200px;border:1px solid var(--border);border-radius:4px;padding:4px">
+        <img id="org-logo-img" src="{{ logo_data }}" alt="Logo" style="max-height:60px;max-width:200px;border:1px solid var(--border);border-radius:4px;padding:4px">
         <button class="btn btn-xs btn-danger-ghost" style="margin-left:8px" onclick="deleteLogo()">Remove</button>
       </div>
       {% endif %}
@@ -766,14 +766,9 @@
       <button class="btn btn-xs btn-ghost" style="margin-left:auto" onclick="loadVenueBranding()" title="Refresh list">Refresh</button>
     </div>
     <div class="form-section-body">
-      <p class="text-dim" style="font-size:12px;margin-bottom:12px">
-        Each venue's full paperwork identity in one place: a logo override (PDFs for shows at that venue
-        use it instead of the organization logo, max 2 MB PNG/JPG/GIF/WebP) and its primary (structural
-        navy) / secondary (accent gold) colors — lighter shades (row backgrounds, banners) are derived
-        automatically. <strong>Banner text</strong> is the color printed on top of the primary-colored bars
-        (section headings, day banners, table headers, total bars); leave it on <strong>Auto</strong> to
-        have white or black picked for contrast. Venues are auto-listed from existing shows; anything
-        left unset keeps the defaults.
+      <p class="text-dim" style="font-size:12px;margin-bottom:6px">
+        The logo and colors printed on the PDFs for shows at each venue. Venues are listed from existing
+        shows; anything left unset uses the defaults. Click <strong>Edit</strong> to change a venue.
       </p>
       <div id="venue-branding-list">
         <p class="text-dim" style="font-size:12px">Loading…</p>
@@ -1997,6 +1992,64 @@
 
 {# ── MODALS ────────────────────────────────────────────────────────────────── #}
 
+{# Venue Branding editor (Settings → System → Branding & Paperwork). One
+   venue at a time; the list itself only summarises. #}
+{% if user.role == 'admin' %}
+<div id="venue-branding-modal" class="modal-overlay hidden" onclick="if(event.target===this)closeVenueBranding()">
+  <div class="modal-card vbm-card" role="dialog" aria-labelledby="vbm-title">
+    <div class="modal-header"><span id="vbm-title">Venue Branding</span> <button type="button" onclick="closeVenueBranding()" class="modal-close" aria-label="Close">×</button></div>
+    <div class="modal-body">
+      <div class="vbm-section">
+        <div class="field-label">Logo</div>
+        <div class="vbm-logo">
+          <span id="vbm-logo-thumb" class="vb-logo-thumb vbm-logo-thumb"></span>
+          <div class="vbm-logo-ctl">
+            <input type="file" id="vbm-logo-file" class="field-input field-input-sm" accept="image/png,image/jpeg,image/gif,image/webp" onchange="_vbmLogoPicked(this)">
+            <div class="vbm-hint" id="vbm-logo-hint"></div>
+            <button type="button" id="vbm-logo-remove" class="btn btn-xs btn-danger-ghost" onclick="removeVenueBrandingLogo()">Remove logo</button>
+          </div>
+        </div>
+      </div>
+      <div class="vbm-section">
+        <div class="field-label">Paperwork colors</div>
+        <div class="vbm-colors">
+          <label class="vbm-color">
+            <input type="color" id="vbm-primary" oninput="_vbmPreview()">
+            <span class="vbm-color-txt"><b>Primary</b><small>Bars &amp; headings</small></span>
+          </label>
+          <label class="vbm-color">
+            <input type="color" id="vbm-secondary" oninput="_vbmPreview()">
+            <span class="vbm-color-txt"><b>Secondary</b><small>Accents</small></span>
+          </label>
+          <div class="vbm-color" title="The text printed on the primary-colored bars. Auto picks white or black, whichever reads better.">
+            <input type="color" id="vbm-text" oninput="_vbmPreview()" aria-label="Banner text color">
+            <span class="vbm-color-txt"><b>Banner text</b>
+              <label class="vb-auto"><input type="checkbox" id="vbm-text-auto" onchange="_vbmPreview()"> Auto</label></span>
+          </div>
+        </div>
+        {# A miniature of the Production Schedule PDF, colored exactly as the
+           PDF will be (same palette math as _get_venue_pdf_colors). #}
+        <div class="vbm-paper" aria-hidden="true">
+          <div class="vbm-doc-type" id="vbm-pv-doctype">Production Schedule</div>
+          <div class="vbm-doc-name" id="vbm-pv-rule">Show Name</div>
+          <div class="vbm-bar vbm-day" id="vbm-pv-day"><span id="vbm-pv-daytext">Monday - June 14th 2026</span><span id="vbm-pv-accent">Day 1 · 19:30</span></div>
+          <div class="vbm-bar vbm-cols" id="vbm-pv-cols"><span>Start</span><span>End</span><span>Description</span></div>
+          <div class="vbm-line"><b>18:00</b><b>19:00</b><span>Doors</span></div>
+          <div class="vbm-line"><b>19:30</b><b>21:45</b><span>Show</span></div>
+        </div>
+        <div class="vbm-hint" id="vbm-contrast"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" id="vbm-reset" class="btn btn-sm btn-ghost vbm-reset" onclick="resetVenueBrandingColors()" title="Remove this venue's colors; its PDFs go back to the default theme">Reset colors</button>
+      <span id="vbm-msg" class="vbm-msg"></span>
+      <button type="button" class="btn btn-ghost" onclick="closeVenueBranding()">Cancel</button>
+      <button type="button" id="vbm-save" class="btn btn-primary" onclick="saveVenueBranding()">Save</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <!-- Edit Contact Modal -->
 {% if user.role == 'admin' or is_content_admin %}
 <div id="add-contact-modal" class="modal-overlay hidden" onclick="if(event.target===this)this.classList.add('hidden')">
@@ -3169,12 +3222,15 @@ function _venueLogoEsc(s) {
   return d.innerHTML;
 }
 
-/* ── Venue Branding: logos + paperwork colors, one panel, one dataset ── */
+/* ── Venue Branding: logos + paperwork colors, one panel, one dataset ──
+   The list is one summary line per venue; Edit opens #venue-branding-modal
+   for that venue alone. */
 const _VC_DEFAULT_PRIMARY = '#1a4a7a';
 const _VC_DEFAULT_SECONDARY = '#B8840A';
 
-// WCAG contrast — the same math as _contrast_ratio / _contrast_text in app.py,
-// so "Auto" previews exactly what the PDFs will print.
+// Palette math — a port of _mix_hex / _contrast_ratio / _contrast_text /
+// _ensure_contrast and the on-bar keys of _get_venue_pdf_colors in app.py,
+// so the previews show exactly what the PDFs will print.
 function _vcLum(hex) {
   const h = (hex || '#000000').replace('#', '');
   const lin = [0, 2, 4].map(i => {
@@ -3190,31 +3246,56 @@ function _vcContrast(a, b) {
 function _vcAutoText(bg) {
   return _vcContrast(bg, '#ffffff') >= _vcContrast(bg, '#1a1a1a') ? '#ffffff' : '#1a1a1a';
 }
-
-// Live banner preview + contrast hint for one venue row. Called by the
-// primary / banner-text pickers and the Auto checkbox, and once per row
-// after the list renders.
-function _vcPreview(el) {
-  const row = el.closest('.venue-branding-row');
-  if (!row) return;
-  const p = row.querySelector('.vc-primary')?.value || _VC_DEFAULT_PRIMARY;
-  const txt = row.querySelector('.vc-bannertext');
-  const auto = row.querySelector('.vc-bannertext-auto');
-  if (!txt || !auto) return;
-  txt.disabled = auto.checked;
-  if (auto.checked) txt.value = _vcAutoText(p);
-  const t = txt.value;
-  const pv = row.querySelector('.vc-preview');
-  if (pv) { pv.style.background = p; pv.style.color = t; }
-  const hint = row.querySelector('.vc-contrast');
-  if (hint) {
-    const ratio = _vcContrast(t, p);
-    const low = ratio < 4.5;
-    hint.textContent = low ? `⚠ Low contrast ${ratio.toFixed(1)}:1` : `${ratio.toFixed(1)}:1`;
-    hint.style.color = low ? 'var(--danger)' : 'var(--text-dim)';
-    hint.title = low ? 'Text may be hard to read on this banner color (4.5:1 or more is recommended).' : 'Contrast ratio';
-  }
+function _vcMix(hex, f, toward) {
+  const h = hex.replace('#', ''), t = (toward || '#ffffff').replace('#', '');
+  return '#' + [0, 2, 4].map(i => {
+    const a = parseInt(h.substr(i, 2), 16), b = parseInt(t.substr(i, 2), 16);
+    return Math.round(a + (b - a) * f).toString(16).padStart(2, '0');
+  }).join('');
 }
+function _vcEnsure(fg, bg, min) {
+  if (_vcContrast(fg, bg) >= min) return fg;
+  const pole = _vcAutoText(bg) === '#ffffff' ? '#ffffff' : '#000000';
+  for (let step = 1; step <= 20; step++) {
+    const c = _vcMix(fg, step / 20, pole);
+    if (_vcContrast(c, bg) >= min) return c;
+  }
+  return pole;
+}
+// p/s = primary/secondary, t = chosen banner text ('' = Auto).
+function _vcPalette(p, s, t) {
+  const pal = {
+    primary: p,
+    mid: _vcMix(p, 0.18),
+    onPrimary: t || _vcAutoText(p),
+    onSoft: _vcEnsure(_vcMix(p, 0.72), p, 3.0),
+    accent: _vcEnsure(_vcMix(s, 0.30), p, 3.0),
+    secondaryText: _vcEnsure(s, '#ffffff', 3.0),
+  };
+  if (t) {
+    let soft = _vcMix(t, 0.25, p);
+    if (_vcContrast(soft, p) < Math.min(3.0, _vcContrast(t, p))) soft = t;
+    pal.onSoft = soft;
+  }
+  return pal;
+}
+
+let _vbVenues = [];
+
+// A venue with no logo of its own prints the organization logo: show that,
+// faded, so every thumbnail previews what the PDF header will carry.
+function _vbOrgLogo() {
+  return document.getElementById('org-logo-img')?.getAttribute('src') || '';
+}
+function _vbThumbHtml(venueLogo, extraClass) {
+  const cls = 'vb-logo-thumb' + (extraClass ? ' ' + extraClass : '');
+  if (venueLogo) return `<span class="${cls} has-logo"><img src="${venueLogo}" alt=""></span>`;
+  const org = _vbOrgLogo();
+  return org
+    ? `<span class="${cls} has-logo is-default" title="Organization logo"><img src="${org}" alt=""></span>`
+    : `<span class="${cls}">No logo</span>`;
+}
+let _vbCur = null;      // {v, p, s, t} — the venue being edited, as loaded
 
 async function loadVenueBranding() {
   const host = document.getElementById('venue-branding-list');
@@ -3224,171 +3305,198 @@ async function loadVenueBranding() {
     const r = await fetch('/settings/venue-branding');
     if (!r.ok) throw new Error('http ' + r.status);
     const d = await r.json();
-    const venues = d.venues || [];
-    if (!venues.length) {
+    _vbVenues = d.venues || [];
+    if (!_vbVenues.length) {
       host.innerHTML = '<p class="text-dim" style="font-size:12px">No venues found yet. Create a show first.</p>';
       return;
     }
-    host.innerHTML = venues.map(v => {
+    host.innerHTML = _vbVenues.map((v, i) => {
       const safe = _venueLogoEsc(v.name);
-      const nameArg = safe.replace(/'/g, "\\'");
       const hasLogo = !!v.logo_data;
       const hasColors = !!(v.primary_color || v.secondary_color);
-      const p = v.primary_color || _VC_DEFAULT_PRIMARY;
-      const sc = v.secondary_color || _VC_DEFAULT_SECONDARY;
-      const bt = v.banner_text_color || '';
-      const btEff = bt || v.banner_text_auto || _vcAutoText(p);
-      // Fixed-width fields in a fixed order, so every venue row lines up with
-      // the next; Reset always keeps its slot (hidden when there's nothing
-      // to reset) and the contrast note lives inside the preview slot, so
-      // neither shifts the controls around.
-      const logoThumb = hasLogo
-        ? `<span class="vb-logo-thumb has-logo"><img src="${v.logo_data}" alt=""></span>`
-        : `<span class="vb-logo-thumb">Default logo</span>`;
-      const colorBadge = hasColors
-        ? `<span class="badge" style="background:${p};color:${btEff};font-size:10px;padding:1px 8px;border-radius:99px;border:2px solid ${sc}">CUSTOM COLORS</span>`
-        : `<span class="text-dim" style="font-size:11px;font-style:italic">Default theme</span>`;
-      const removeLogoBtn = hasLogo
-        ? `<button type="button" class="btn btn-sm btn-danger-ghost" onclick="deleteVenueLogo('${nameArg}')">Remove</button>`
-        : '';
-      return `<div class="venue-branding-row" data-venue="${safe}">
-        <div class="vb-head">
-          <span class="vb-name">${safe}</span>
-          ${colorBadge}
-        </div>
-        <div class="vb-line">
-          <div class="vb-logo">
-            ${logoThumb}
-            <form class="vb-logo-form" onsubmit="event.preventDefault(); uploadVenueLogo(this, '${nameArg}')" enctype="multipart/form-data">
-              <input type="file" name="logo" class="field-input field-input-sm" accept="image/*" required>
-              <button type="submit" class="btn btn-sm btn-primary vb-btn">${hasLogo ? 'Replace' : 'Upload'}</button>
-              ${removeLogoBtn}
-            </form>
-          </div>
-        </div>
-        <div class="vb-line">
-          <div class="vb-colors">
-            <label class="vb-field"><span class="vb-field-label">Primary</span>
-              <input type="color" class="vc-primary" value="${p}" oninput="_vcPreview(this)">
-            </label>
-            <label class="vb-field"><span class="vb-field-label">Secondary</span>
-              <input type="color" class="vc-secondary" value="${sc}">
-            </label>
-            <div class="vb-field" title="Text printed on the primary-colored bars (section headings, day banners, table headers, total bars). Auto picks white or black for contrast.">
-              <span class="vb-field-label">Banner text</span>
-              <span class="vb-ctl">
-                <input type="color" class="vc-bannertext" value="${btEff}" ${bt ? '' : 'disabled'} oninput="_vcPreview(this)" aria-label="Banner text color">
-                <label class="vb-auto"><input type="checkbox" class="vc-bannertext-auto" ${bt ? '' : 'checked'} onchange="_vcPreview(this)">Auto</label>
-              </span>
-            </div>
-            <div class="vb-field vb-field-preview">
-              <span class="vb-field-label">Preview</span>
-              <span class="vb-ctl">
-                <span class="vc-preview" title="Preview of a paperwork banner" style="background:${p};color:${btEff}">BANNER TEXT</span>
-                <span class="vc-contrast"></span>
-              </span>
-            </div>
-            <div class="vb-actions">
-              <button type="button" class="btn btn-sm btn-primary" onclick="saveVenueColors(this, '${nameArg}')">Save Colors</button>
-              <button type="button" class="btn btn-sm btn-ghost vb-reset${hasColors ? '' : ' vb-reset-none'}" onclick="clearVenueColors('${nameArg}')"
-                      title="Back to the default theme" ${hasColors ? '' : 'disabled aria-hidden="true" tabindex="-1"'}>Reset</button>
-            </div>
-          </div>
-        </div>
-        <span class="venue-branding-msg field-msg" style="display:none;font-size:11px;margin-top:6px"></span>
+      const pal = _vcPalette(v.primary_color || _VC_DEFAULT_PRIMARY,
+                             v.secondary_color || _VC_DEFAULT_SECONDARY,
+                             hasColors ? (v.banner_text_color || '') : '');
+      const thumb = _vbThumbHtml(hasLogo ? v.logo_data : '');
+      const meta = [hasLogo ? 'Custom logo' : 'Default logo',
+                    hasColors ? 'Custom colors' : 'Default colors'].join(' · ');
+      return `<div class="vb-row${hasLogo || hasColors ? ' is-custom' : ''}">
+        ${thumb}
+        <div class="vb-info"><div class="vb-name">${safe}</div><div class="vb-meta">${meta}</div></div>
+        <span class="vb-chip" title="How the colored bars print on this venue's paperwork" style="background:${pal.primary}">
+          <span style="color:${pal.onPrimary}">Aa</span><span style="color:${pal.accent}">Day 1</span></span>
+        <button type="button" class="btn btn-sm btn-ghost vb-edit" onclick="openVenueBranding(${i})">Edit</button>
       </div>`;
     }).join('');
-    host.querySelectorAll('.venue-branding-row .vc-primary').forEach(_vcPreview);
   } catch (e) {
     host.innerHTML = '<p class="text-dim" style="font-size:12px;color:#F56565">Failed to load venue list.</p>';
   }
 }
 
-function _vbMsg(el, text, ok) {
-  const row = el.closest('.venue-branding-row');
-  const msg = row && row.querySelector('.venue-branding-msg');
-  if (msg) {
-    msg.style.display = 'block';
-    msg.textContent = text;
-    msg.style.color = ok ? 'var(--accent)' : 'var(--danger)';
-  }
+function _vbmMsg(text, ok) {
+  const m = document.getElementById('vbm-msg');
+  m.textContent = text || '';
+  m.style.color = ok ? 'var(--text-dim)' : 'var(--red)';
 }
 
-async function uploadVenueLogo(form, venueName) {
-  const fd = new FormData(form);
-  fd.append('venue', venueName);
-  const btn = form.querySelector('button[type="submit"]');
-  _vbMsg(form, 'Uploading…', true);
-  if (btn) btn.disabled = true;
-  try {
-    const r = await fetch('/settings/venue-logos', { method: 'POST', body: fd });
-    const d = await r.json();
-    _vbMsg(form, d.success ? '✓ Logo saved' : (d.error || 'Upload failed'), !!d.success);
-    if (d.success) {
-      showSaveToast(`✓ Logo saved for "${venueName}"`);
-      setTimeout(loadVenueBranding, 600);
-    }
-  } finally {
-    if (btn) btn.disabled = false;
-  }
+function _vbmLogo(dataUrl, pending) {
+  document.getElementById('vbm-logo-thumb').outerHTML = _vbThumbHtml(dataUrl, 'vbm-logo-thumb')
+    .replace('<span class="', '<span id="vbm-logo-thumb" class="');
+  document.getElementById('vbm-logo-hint').textContent = pending
+    ? 'New logo — saved when you click Save.'
+    : (dataUrl ? 'Printed instead of the organization logo on this venue’s PDFs.'
+               : 'Uses the organization logo. To override it, choose a PNG, JPG, GIF or WebP (max 2\u00a0MB).');
+  document.getElementById('vbm-logo-remove').style.display = (_vbCur.v.logo_data && !pending) ? '' : 'none';
 }
 
-async function deleteVenueLogo(venueName) {
-  if (!confirm(`Remove the override logo for "${venueName}"? (Default logo will be used.)`)) return;
-  const r = await fetch('/settings/venue-logos/delete', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ venue: venueName })
-  });
-  const d = await r.json();
-  if (d.success) {
-    showSaveToast(`✓ Override removed for "${venueName}"`);
-    loadVenueBranding();
+function openVenueBranding(i) {
+  const v = _vbVenues[i];
+  if (!v) return;
+  const hasColors = !!(v.primary_color || v.secondary_color);
+  _vbCur = {
+    v,
+    p: (v.primary_color || _VC_DEFAULT_PRIMARY).toLowerCase(),
+    s: (v.secondary_color || _VC_DEFAULT_SECONDARY).toLowerCase(),
+    t: hasColors ? (v.banner_text_color || '').toLowerCase() : '',
+  };
+  document.getElementById('vbm-title').textContent = v.name;
+  document.getElementById('vbm-primary').value = _vbCur.p;
+  document.getElementById('vbm-secondary').value = _vbCur.s;
+  document.getElementById('vbm-text-auto').checked = !_vbCur.t;
+  document.getElementById('vbm-text').value = _vbCur.t || _vcAutoText(_vbCur.p);
+  document.getElementById('vbm-logo-file').value = '';
+  document.getElementById('vbm-reset').style.visibility = hasColors ? '' : 'hidden';
+  document.getElementById('vbm-save').disabled = false;
+  _vbmLogo(v.logo_data, false);
+  _vbmMsg('');
+  _vbmPreview();
+  document.getElementById('venue-branding-modal').classList.remove('hidden');
+}
+
+function closeVenueBranding() {
+  document.getElementById('venue-branding-modal').classList.add('hidden');
+  _vbCur = null;
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && _vbCur) closeVenueBranding();
+});
+
+// The colors as the form now stands: {p, s, t} with t = '' for Auto.
+function _vbmValues() {
+  const p = document.getElementById('vbm-primary').value.toLowerCase();
+  const s = document.getElementById('vbm-secondary').value.toLowerCase();
+  const auto = document.getElementById('vbm-text-auto').checked;
+  return { p, s, t: auto ? '' : document.getElementById('vbm-text').value.toLowerCase() };
+}
+
+function _vbmPreview() {
+  const txt = document.getElementById('vbm-text');
+  const auto = document.getElementById('vbm-text-auto').checked;
+  txt.disabled = auto;
+  if (auto) txt.value = _vcAutoText(document.getElementById('vbm-primary').value);
+  const c = _vbmValues();
+  const pal = _vcPalette(c.p, c.s, c.t);
+  const day = document.getElementById('vbm-pv-day');
+  day.style.background = pal.primary;
+  document.getElementById('vbm-pv-daytext').style.color = pal.onPrimary;
+  document.getElementById('vbm-pv-accent').style.color = pal.accent;
+  const cols = document.getElementById('vbm-pv-cols');
+  cols.style.background = pal.primary;
+  cols.style.color = pal.onSoft;
+  cols.style.borderTopColor = pal.mid;
+  document.getElementById('vbm-pv-doctype').style.color = pal.secondaryText;
+  document.getElementById('vbm-pv-rule').style.borderBottomColor = pal.primary;
+  const ratio = _vcContrast(pal.onPrimary, pal.primary);
+  const hint = document.getElementById('vbm-contrast');
+  if (ratio < 4.5) {
+    hint.textContent = `⚠ Banner text may be hard to read (contrast ${ratio.toFixed(1)}:1; 4.5:1 or more is recommended). It will print as chosen.`;
+    hint.style.color = 'var(--red)';
   } else {
-    alert(d.error || 'Remove failed');
+    hint.textContent = `Banner text contrast ${ratio.toFixed(1)}:1`;
+    hint.style.color = '';
   }
 }
 
-async function saveVenueColors(btn, venueName) {
-  const row = btn.closest('.venue-branding-row');
-  const primary = row.querySelector('.vc-primary')?.value || '';
-  const secondary = row.querySelector('.vc-secondary')?.value || '';
-  // Auto → blank (the server keeps choosing a contrasting color).
-  const bannerText = row.querySelector('.vc-bannertext-auto')?.checked
-    ? '' : (row.querySelector('.vc-bannertext')?.value || '');
+function _vbmLogoPicked(input) {
+  const f = input.files && input.files[0];
+  if (!f) { _vbmLogo(_vbCur.v.logo_data, false); return; }
+  const rd = new FileReader();
+  rd.onload = () => _vbmLogo(rd.result, true);
+  rd.readAsDataURL(f);
+}
+
+// One Save for both halves: uploads the picked logo (if any), then the colors
+// (only if they changed, so opening a default venue and saving never creates
+// a colors override).
+async function saveVenueBranding() {
+  if (!_vbCur) return;
+  const name = _vbCur.v.name;
+  const file = document.getElementById('vbm-logo-file').files[0];
+  const c = _vbmValues();
+  const colorsChanged = c.p !== _vbCur.p || c.s !== _vbCur.s || c.t !== _vbCur.t;
+  if (!file && !colorsChanged) { closeVenueBranding(); return; }
+  const btn = document.getElementById('vbm-save');
   btn.disabled = true;
+  _vbmMsg('Saving…', true);
   try {
-    const r = await fetch('/settings/venue-colors', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({venue: venueName, primary_color: primary, secondary_color: secondary,
-                            banner_text_color: bannerText})
-    });
-    const d = await r.json();
-    _vbMsg(btn, d.success ? '✓ Saved — new exports use these colors' : (d.error || 'Save failed'), !!d.success);
-    if (d.success) {
-      showSaveToast(`✓ Colors saved for "${venueName}"`);
-      setTimeout(loadVenueBranding, 600);
+    if (file) {
+      const fd = new FormData();
+      fd.append('venue', name);
+      fd.append('logo', file);
+      const d = await (await fetch('/settings/venue-logos', { method: 'POST', body: fd })).json();
+      if (!d.success) { _vbmMsg(d.error || 'Logo upload failed', false); return; }
     }
+    if (colorsChanged) {
+      const d = await (await fetch('/settings/venue-colors', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({venue: name, primary_color: c.p, secondary_color: c.s, banner_text_color: c.t})
+      })).json();
+      if (!d.success) { _vbmMsg(d.error || 'Saving colors failed', false); return; }
+    }
+    showSaveToast(`✓ Branding saved for "${name}"`);
+    closeVenueBranding();
+    loadVenueBranding();
+  } catch (e) {
+    _vbmMsg('Save failed — check your connection and try again.', false);
   } finally {
     btn.disabled = false;
   }
 }
 
-async function clearVenueColors(venueName) {
-  if (!confirm(`Reset "${venueName}" to the default paperwork theme?`)) return;
-  const r = await fetch('/settings/venue-colors', {
+async function removeVenueBrandingLogo() {
+  if (!_vbCur) return;
+  const name = _vbCur.v.name;
+  if (!confirm(`Remove the logo for "${name}"? Its PDFs will use the organization logo.`)) return;
+  const d = await (await fetch('/settings/venue-logos/delete', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ venue: name })
+  })).json();
+  if (!d.success) { _vbmMsg(d.error || 'Remove failed', false); return; }
+  showSaveToast(`✓ Logo removed for "${name}"`);
+  if (_vbCur) {
+    _vbCur.v.logo_data = '';
+    document.getElementById('vbm-logo-file').value = '';
+    _vbmLogo('', false);
+  }
+  loadVenueBranding();
+}
+
+async function resetVenueBrandingColors() {
+  if (!_vbCur) return;
+  const name = _vbCur.v.name;
+  if (!confirm(`Reset "${name}" to the default paperwork colors?`)) return;
+  const d = await (await fetch('/settings/venue-colors', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({venue: venueName, primary_color: '', secondary_color: ''})
-  });
-  const d = await r.json();
-  if (d.success) {
-    showSaveToast(`✓ "${venueName}" back on the default theme`);
-    loadVenueBranding();
-  } else {
-    alert(d.error || 'Reset failed');
-  }
+    body: JSON.stringify({venue: name, primary_color: '', secondary_color: ''})
+  })).json();
+  if (!d.success) { _vbmMsg(d.error || 'Reset failed', false); return; }
+  showSaveToast(`✓ "${name}" back on the default colors`);
+  closeVenueBranding();
+  loadVenueBranding();
 }
 
 if (document.getElementById('venue-branding-list')) {
