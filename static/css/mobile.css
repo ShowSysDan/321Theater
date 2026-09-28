@@ -231,3 +231,11 @@ html.mobile-view .login-card {
   width: min(360px, 100%);
   padding: 28px 22px;
 }
+
+/* ── Post-Show settlement (3.6.0) ────────────────────────────────────────── */
+/* "Worked by": label over a full-width technician picker, so the name isn't
+   clipped in the narrow first column of the side-scrolling grid. */
+html.mobile-view .ps-worked-by { flex-direction: column; align-items: stretch; gap: 3px; }
+/* Settle Now banner: text above a full-width button. */
+html.mobile-view .ps-settle-banner { flex-direction: column; align-items: stretch; margin: 10px 10px 0; }
+html.mobile-view .ps-settle-banner > div { min-width: 0; }

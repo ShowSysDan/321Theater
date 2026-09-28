@@ -23,9 +23,23 @@
   <div class="form-section-body" style="border-bottom:1px solid var(--border)">
     <p class="text-dim" style="font-size:12px;margin:0">
       Archiving hides a show from the active dashboard — nothing is ever deleted, and a show
-      can be restored at any time. Shows also archive themselves automatically once their last
-      performance date has passed.
+      can be restored at any time. Shows also archive themselves automatically a set number of
+      days after their last date (their last performance or load-out, whichever is later); until
+      then they stay on the dashboard marked <strong>PAST</strong>. A show you restore gets the
+      same number of days again, counted from the restore.
     </p>
+    <div id="auto-archive-setting" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;font-size:12px">
+      <label for="auto-archive-days" style="font-weight:600">Auto-archive shows</label>
+      <input type="number" id="auto-archive-days" class="field-input field-input-sm" style="width:72px"
+             min="0" max="{{ auto_archive_days_max }}" step="1" value="{{ auto_archive_days }}"
+             {% if user.role != 'admin' %}disabled title="Only an admin can change this"{% endif %}>
+      <span>days after their last date</span>
+      <span class="text-dim">(0 = the day after it)</span>
+      {% if user.role == 'admin' %}
+      <button type="button" class="btn btn-xs btn-primary" onclick="saveAutoArchiveDays(this)">Save</button>
+      {% endif %}
+      <span id="auto-archive-msg" class="field-msg" style="font-size:11px"></span>
+    </div>
   </div>
   <div class="form-section-body no-pad">
     <div class="table-toolbar">
@@ -71,6 +85,10 @@
             <span style="font-size:10px;background:rgba(239,68,68,.12);color:var(--red);padding:2px 7px;border-radius:3px;letter-spacing:.06em">ARCHIVED</span>
             {% else %}
             <span style="font-size:10px;background:rgba(34,197,94,.12);color:var(--green);padding:2px 7px;border-radius:3px;letter-spacing:.06em">ACTIVE</span>
+            {% if s.is_past %}
+            <span class="past-badge" style="margin-left:4px">PAST</span>
+            {% if s.archives_on %}<div class="text-dim" style="font-size:10px;margin-top:3px;white-space:nowrap">archives {{ s.archives_on }}</div>{% endif %}
+            {% endif %}
             {% endif %}
           </td>
           <td class="text-dim">{{ s.creator or '—' }}</td>
@@ -101,6 +119,29 @@
 
 {% block scripts %}
 <script>
+async function saveAutoArchiveDays(btn) {
+  const input = document.getElementById('auto-archive-days');
+  const msg = document.getElementById('auto-archive-msg');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/settings/auto-archive', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
+      body: JSON.stringify({days: input.value}),
+    });
+    const d = await r.json();
+    msg.textContent = d.success
+      ? `✓ Saved — shows archive ${d.days} day${d.days === 1 ? '' : 's'} after their last date. Reloading…`
+      : (d.error || 'Save failed');
+    msg.style.color = d.success ? 'var(--accent)' : 'var(--danger)';
+    if (d.success) setTimeout(() => location.reload(), 900);
+  } catch (e) {
+    msg.textContent = 'Save failed'; msg.style.color = 'var(--danger)';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function confirmArchive(form) {
   return confirm('Archive “' + form.dataset.name + '”?\n\n' +
                  'It will be hidden from the dashboard but nothing is deleted — ' +

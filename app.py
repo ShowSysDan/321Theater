@@ -711,6 +711,48 @@ def dowlongdate_filter(value):
     return f"{d.strftime('%A')} - {d.strftime('%B')} {day}{suffix} {d.year}"
 
 
+def _format_show_dates(values):
+    """Spell out a show's dates for a paperwork header (3.6.0), collapsing
+    back-to-back days into ranges and listing the gaps:
+
+        [Oct 2]                     → 'Friday, October 2, 2026'
+        [Oct 2, Oct 3, Oct 4]       → 'Friday, October 2 – Sunday, October 4, 2026'
+        [Oct 2, 3, 4, Oct 9]        → 'Friday, October 2 – Sunday, October 4 & Friday, October 9, 2026'
+        three or more runs          → 'A – B; C & D, 2026'  (';' because each date has a comma)
+
+    The year is printed once at the end when every date shares it, otherwise
+    on every date (a New Year's run reads 'Thursday, December 31, 2026 –
+    Friday, January 1, 2027'). Unparseable values are ignored; nothing
+    parseable → ''."""
+    days = sorted({d for d in (_as_date(v) for v in (values or [])) if d})
+    if not days:
+        return ''
+    one_year = days[0].year == days[-1].year
+
+    def _fmt(d):
+        s = f"{d.strftime('%A')}, {d.strftime('%B')} {d.day}"
+        return s if one_year else f'{s}, {d.year}'
+
+    runs = [[days[0], days[0]]]
+    for d in days[1:]:
+        if (d - runs[-1][1]).days == 1:
+            runs[-1][1] = d
+        else:
+            runs.append([d, d])
+    parts = [_fmt(a) if a == b else f'{_fmt(a)} – {_fmt(b)}' for a, b in runs]
+    if len(parts) == 1:
+        text = parts[0]
+    else:
+        text = '; '.join(parts[:-1]) + ' & ' + parts[-1]
+    return f'{text}, {days[0].year}' if one_year else text
+
+
+@app.template_filter('showdates')
+def showdates_filter(values):
+    """Jinja wrapper for _format_show_dates — pass a list of dates."""
+    return _format_show_dates(values)
+
+
 @app.template_filter('reltime')
 def reltime_filter(value):
     """Relative time for a stored timestamp: 'just now', '12 min ago',
@@ -767,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.5.0'
+APP_VERSION = '3.6.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -3582,10 +3624,44 @@ def start_scheduler():
 
 _AUTO_ARCHIVE_EVERY_S = 60.0
 _auto_archive_at = 0.0
+AUTO_ARCHIVE_DAYS_DEFAULT = 3
+AUTO_ARCHIVE_DAYS_MAX = 365
+
+
+def _auto_archive_days():
+    """Settings → Shows 'auto-archive N days after the show's last date'
+    (app_settings key auto_archive_days, 3.6.0). Default 3; clamped 0–365."""
+    try:
+        n = int(get_app_setting('auto_archive_days', str(AUTO_ARCHIVE_DAYS_DEFAULT)))
+    except (TypeError, ValueError):
+        n = AUTO_ARCHIVE_DAYS_DEFAULT
+    return max(0, min(n, AUTO_ARCHIVE_DAYS_MAX))
+
+
+def _show_last_date(show_date, load_out_date, perf_dates):
+    """A show's last date for archiving: the latest of its performance dates,
+    load-out date and (legacy) show date. None when it has none."""
+    days = [d for d in (_as_date(v) for v in [show_date, load_out_date, *perf_dates]) if d]
+    return max(days) if days else None
+
+
+def _show_archive_on(last_date, restored_on, grace_days):
+    """First day the auto-archiver will archive an active show: the day after
+    `grace_days` full days have passed since its last date — or since a
+    manual restore, whichever is later. None = it never auto-archives."""
+    if last_date is None:
+        return None
+    anchor = max(d for d in (last_date, _as_date(restored_on)) if d)
+    return anchor + timedelta(days=grace_days + 1)
 
 
 def auto_archive_past_shows():
-    """Move shows whose last performance date has passed into 'archived' status.
+    """Archive active shows whose last date — the latest performance date,
+    load-out date or legacy show date — is more than the configured number of
+    days (auto_archive_days, default 3) in the past. Until then they stay on
+    the dashboard with a PAST badge. A show restored by hand gets the same
+    grace again, counted from the restore (shows.restored_on). Shows with an
+    undated performance, or no dates at all, are never auto-archived.
 
     Called from page GETs (Home, Settings → Shows, reports), which hover
     prefetch also fires. The outcome only changes when the date rolls over
@@ -3596,25 +3672,20 @@ def auto_archive_past_shows():
     if now - _auto_archive_at < _AUTO_ARCHIVE_EVERY_S:
         return
     _auto_archive_at = now
+    cutoff = (date.today() - timedelta(days=_auto_archive_days())).isoformat()
     db = get_db()
-    today = date.today().isoformat()
+    # GREATEST() skips NULLs (and is NULL only when every argument is), so a
+    # show with no dates at all is left alone.
     db.execute("""
-        UPDATE shows SET status = 'archived'
-        WHERE status = 'active'
-          AND (
-            -- Has performances: archive only when ALL have passed
-            (id IN (SELECT DISTINCT show_id FROM show_performances)
-             AND id NOT IN (
-               SELECT DISTINCT show_id FROM show_performances
-               WHERE perf_date IS NULL OR perf_date >= %s
-             ))
-            OR
-            -- No performances: use legacy show_date field
-            (id NOT IN (SELECT DISTINCT show_id FROM show_performances)
-             AND show_date IS NOT NULL
-             AND show_date < %s)
-          )
-    """, (today, today))
+        UPDATE shows s SET status = 'archived'
+        WHERE s.status = 'active'
+          AND NOT EXISTS (SELECT 1 FROM show_performances p
+                           WHERE p.show_id = s.id AND p.perf_date IS NULL)
+          AND GREATEST((SELECT MAX(p.perf_date) FROM show_performances p
+                         WHERE p.show_id = s.id),
+                       s.load_out_date, s.show_date) < %s
+          AND (s.restored_on IS NULL OR s.restored_on < %s)
+    """, (cutoff, cutoff))
     db.commit()
     db.close()
 
@@ -5261,6 +5332,22 @@ def dashboard():
     active = _attach_perfs(active)
     archived = _attach_perfs(archived)
 
+    # PAST badge (3.6.0): an active show whose last date has gone by stays on
+    # the dashboard through the auto-archive grace period — say so on its card
+    # and when it will drop into the archive.
+    _grace = _auto_archive_days()
+    _today = date.today()
+    for s in active:
+        perfs = s.get('performances') or []
+        # An undated performance could still be ahead: not "past", and the
+        # archiver never touches such a show.
+        undated = any(not p.get('perf_date') for p in perfs)
+        last = _show_last_date(s.get('show_date'), s.get('load_out_date'),
+                               [p.get('perf_date') for p in perfs])
+        s['is_past'] = bool(last and last < _today and not undated)
+        on = _show_archive_on(last, s.get('restored_on'), _grace) if s['is_past'] else None
+        s['archives_on_label'] = f"{on.strftime('%a %b')} {on.day}" if on else ''
+
     # ── "Happening Today" — shows where today falls in load-in/out, matches the
     # show date, or matches any performance date. For each, surface the venue,
     # production manager (from advance_data), and today's crew call times.
@@ -5578,11 +5665,10 @@ def show_page(show_id):
     """, (show_id,)).fetchall()
     labor_requests_data = [_normalize_row_dates(dict(r)) for r in labor_rows]
 
-    # Post-show actual labor (billing snapshot) for the Post-Show tab.
-    # Auto-pulls scheduled labor (pre-filled with its times) on first access
-    # so the PM doesn't have to click anything to get started.
-    _ensure_post_show_labor(db2, show_id)
+    # Post-show actual labor (billing snapshot) for the Post-Show tab. Nothing
+    # is pulled from the schedule until someone presses Settle Now (3.6.0).
     post_show_labor_data = _post_show_labor_rows(db2, show_id)
+    post_show_settlement = _post_show_settlement(db2, show_id)
 
     # Asset categories (for the Assets tab)
     asset_cats = db2.execute('SELECT * FROM asset_categories ORDER BY sort_order, name').fetchall()
@@ -5627,6 +5713,7 @@ def show_page(show_id):
                            sched_templates=sched_templates,
                            labor_requests_data=labor_requests_data,
                            post_show_labor_data=post_show_labor_data,
+                           post_show_settlement=post_show_settlement,
                            asset_categories=asset_categories_for_tab,
                            is_content_admin_user=session.get('is_content_admin', False),
                            can_edit_advance=can_edit_advance,
@@ -6984,6 +7071,11 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
     advance_data = {r['field_key']: r['field_value'] for r in adv_rows}
     contacts = db.execute('SELECT * FROM contacts ORDER BY name').fetchall()
     contact_map = {c['id']: dict(c) for c in contacts}
+    # Every performance date, for the header's spelled-out date line.
+    show_dates = [r['perf_date'] for r in db.execute(
+        'SELECT DISTINCT perf_date FROM show_performances '
+        'WHERE show_id = %s AND perf_date IS NOT NULL ORDER BY perf_date',
+        (show_id,)).fetchall()]
 
     logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
     pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
@@ -7038,6 +7130,7 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
                                    assets_by_section=assets_by_section,
                                    logo_data=logo_data,
                                    pdf_colors=pdf_colors,
+                                   show_dates=show_dates,
                                    version=version,
                                    layout=layout,
                                    export_date=export_date)
@@ -7050,6 +7143,7 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
                                    assets_by_section={},
                                    logo_data=logo_data,
                                    pdf_colors=pdf_colors,
+                                   show_dates=show_dates,
                                    version=version,
                                    layout=layout,
                                    export_date=export_date)
@@ -7573,10 +7667,15 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
 
     sched_layout = pdf_layouts.PdfLayout('schedule', get_app_setting)
 
-    def _render(version, export_date):
+    # Every performance date, for the header's spelled-out date line.
+    show_dates = sorted(perf_by_date.keys())
+
+    def _render(version, export_date, fit=None):
         return render_template('pdf/schedule_pdf.html',
                                show=show,
                                pdf_colors=pdf_colors,
+                               show_dates=show_dates,
+                               sched_fit=fit or {},
                                schedule_days=schedule_days,
                                schedule_meta=schedule_meta,
                                sched_meta_fields=get_schedule_meta_fields(),
@@ -7593,6 +7692,8 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
                                export_date=export_date)
 
     # Reuse the previous version's bytes when nothing in the document changed.
+    # The hash is taken on the un-fitted HTML: the page-aware fit below is a
+    # pure function of that content, so equal hashes still mean equal PDFs.
     content_hash = _pdf_content_hash(_render(_HASH_VERSION_SENTINEL, _HASH_DATE_SENTINEL))
     cached_row, cached_bytes = _find_reusable_export(db, show_id, 'schedule', content_hash)
     if cached_row:
@@ -7611,12 +7712,18 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
     db.commit()
     db.close()
 
-    html = _render(new_v, datetime.now().strftime('%B %d, %Y at %I:%M %p'))
+    _export_date = datetime.now().strftime('%B %d, %Y at %I:%M %p')
+    html = _render(new_v, _export_date)
 
-    # Generate PDF bytes (S3 push is handled by the caller)
+    # Generate PDF bytes (S3 push is handled by the caller). Page-aware: a day
+    # that would spill a few rows onto the next page is condensed to fit.
     try:
-        from weasyprint import HTML as WP_HTML
-        pdf_bytes = WP_HTML(string=html, base_url=base_url).write_pdf(font_config=_wp_font_config())
+        html, pdf_bytes, fit = _fit_schedule_pdf(
+            lambda f: _render(new_v, _export_date, f), base_url)
+        if fit['levels'] or fit['breaks']:
+            syslog_logger.info(
+                f"PDF_SCHEDULE_FIT show_id={show_id} v={new_v} "
+                f"condensed={fit['levels']} breaks={fit['breaks']} renders={fit['renders']}")
     except Exception as e:
         app.logger.error(f"PDF_GENERATION_FAILED show_id={show_id} type=schedule error={e}")
         pdf_bytes = None
@@ -7626,6 +7733,140 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
         f"PDF_EXPORT show_id={show_id} type=schedule v={new_v} by={exported_by_id}"
     )
     return html, new_v, dict(show), pdf_bytes, log_id, True
+
+
+# ─── Page-aware production schedule (3.6.0) ──────────────────────────────────
+# A day whose table would spill only a few rows onto the next page gets its
+# text/spacing condensed until it fits on the page it starts on. Measured, not
+# guessed: each candidate is laid out by WeasyPrint and the page every row
+# landed on is read back from the box tree (the <table data-sched-day> and
+# <tr data-sched-row> markers in schedule_pdf.html).
+_SCHED_FIT_MAX_SPILL = 4      # rows on the next page that are worth condensing
+_SCHED_FIT_LEVELS = 3         # cz-1 … cz-3 in schedule_pdf.html
+_SCHED_FIT_MAX_RENDERS = 10   # hard cap on layout passes per export
+
+
+def _schedule_day_pages(doc):
+    """{day_index: (start_page, {row_key: last_page})} for a rendered
+    WeasyPrint document of schedule_pdf.html. A row is keyed to the LAST page
+    any fragment of it lands on: WeasyPrint splits a tall row across a page
+    break, and half a row at the foot of a page still spills."""
+    days = {}
+    for pno, page in enumerate(doc.pages):
+        for box in page._page_box.descendants():
+            el = getattr(box, 'element', None)
+            if el is None:
+                continue
+            d = el.get('data-sched-day')
+            if d is not None:
+                days.setdefault(int(d), (pno, {}))
+                continue
+            r = el.get('data-sched-row')
+            if r is not None and type(box).__name__ == 'TableRowBox':
+                di = int(r.split('-')[0])
+                days.setdefault(di, (pno, {}))[1][r] = pno   # pages ascend
+    return days
+
+
+def _schedule_spill(days, day):
+    """Rows of `day` that landed on a later page than the day starts on."""
+    start, rows = days.get(day, (0, {}))
+    return sum(1 for p in rows.values() if p > start)
+
+
+def _fit_schedule_pdf(render_html, base_url):
+    """Lay the schedule out page-aware and return (html, pdf_bytes, fit).
+
+    render_html(fit) renders schedule_pdf.html with fit = {'levels': {day:
+    1-3}, 'breaks': [day, ...]}. Days are handled in document order.
+
+    For each day that spills 1–_SCHED_FIT_MAX_SPILL rows onto the next page,
+    condense it one level at a time until nothing spills. If even the
+    tightest level can't make it fit, a short day stranded at the foot of a
+    page (≤ _SCHED_FIT_MAX_SPILL rows there) moves whole to the next page —
+    kept only if it then fits there and nothing after it gets worse (more
+    pages, or a later day spilling more). Otherwise the day is left exactly
+    as it was (a normal page break). A day that earlier fixes pulled up onto
+    an earlier page and that now splits across pages goes back to starting
+    on a fresh page (still no later than where it began originally), so
+    condensing one day never splits another, while a day that fits in the
+    freed space simply stays there."""
+    from weasyprint import HTML as WP_HTML
+    fit = {'levels': {}, 'breaks': [], 'renders': 0}
+
+    def _layout():
+        h = render_html({'levels': dict(fit['levels']), 'breaks': list(fit['breaks'])})
+        fit['renders'] += 1
+        doc = WP_HTML(string=h, base_url=base_url).render(font_config=_wp_font_config())
+        return h, doc, _schedule_day_pages(doc)
+
+    try:
+        cur = _layout()                   # (html, doc, pages)
+    except AttributeError as e:
+        # The box tree is WeasyPrint-internal (page._page_box). If an upgrade
+        # ever changes it, fall back to the plain, un-fitted schedule rather
+        # than failing the export.
+        app.logger.warning(f'schedule page-aware fit unavailable: {e}')
+        h = render_html({})
+        return h, WP_HTML(string=h, base_url=base_url).write_pdf(
+            font_config=_wp_font_config()), fit
+
+    def _condense(day):
+        """Try cz-1 … cz-N on `day`. The fitted layout, or None with
+        fit['levels'] put back (the caller's layout is then still current)."""
+        for level in range(1, _SCHED_FIT_LEVELS + 1):
+            if fit['renders'] >= _SCHED_FIT_MAX_RENDERS:
+                break
+            fit['levels'][day] = level
+            trial = _layout()
+            if _schedule_spill(trial[2], day) == 0:
+                return trial
+        fit['levels'].pop(day, None)
+        return None
+
+    def _worse_after(before, after, day):
+        """Did moving `day` make anything after it worse (more pages, or any
+        later day spilling more rows)?"""
+        if len(after[1].pages) > len(before[1].pages):
+            return True
+        return any(_schedule_spill(after[2], e) > _schedule_spill(before[2], e)
+                   for e in after[2] if e > day)
+
+    orig = cur[2]
+    for day in sorted(orig):
+        spill = _schedule_spill(cur[2], day)
+        if spill == 0:
+            continue
+        pulled_up = cur[2][day][0] < orig[day][0]
+        if spill <= _SCHED_FIT_MAX_SPILL:
+            got = _condense(day)
+            if got:
+                cur = got
+                continue
+            # Too tall to condense onto its page: a short day stranded at the
+            # foot of a page (a few rows there, a few on the next) moves whole
+            # to the next page instead — kept only if it fits there and
+            # nothing after it gets worse. (A pulled-up day gets that break
+            # below regardless.)
+            head = len(cur[2][day][1]) - spill
+            if (not pulled_up and head <= _SCHED_FIT_MAX_SPILL
+                    and fit['renders'] < _SCHED_FIT_MAX_RENDERS):
+                fit['breaks'].append(day)
+                trial = _layout()
+                if (_schedule_spill(trial[2], day) == 0
+                        and not _worse_after(cur, trial, day)):
+                    cur = trial
+                    continue
+                fit['breaks'].remove(day)
+        if pulled_up and fit['renders'] < _SCHED_FIT_MAX_RENDERS:
+            fit['breaks'].append(day)
+            cur = _layout()
+            if 1 <= _schedule_spill(cur[2], day) <= _SCHED_FIT_MAX_SPILL:
+                got = _condense(day)
+                if got:
+                    cur = got
+    html, doc, _ = cur
+    return html, doc.write_pdf(), fit
 
 
 @app.route('/shows/<int:show_id>/export/advance')
@@ -8118,7 +8359,10 @@ def manage_shows():
                (SELECT COUNT(*) FROM show_performances WHERE show_id=s.id) AS perf_count,
                {eff_date} AS first_date,
                (SELECT MAX(perf_date) FROM show_performances
-                 WHERE show_id=s.id AND perf_date IS NOT NULL) AS last_perf
+                 WHERE show_id=s.id AND perf_date IS NOT NULL) AS last_perf,
+               s.show_date AS raw_show_date, s.load_out_date, s.restored_on,
+               EXISTS (SELECT 1 FROM show_performances
+                        WHERE show_id=s.id AND perf_date IS NULL) AS has_undated_perf
         FROM shows s LEFT JOIN users u ON s.created_by = u.id
         ORDER BY {eff_date} DESC NULLS LAST, s.name
     """).fetchall()
@@ -8132,18 +8376,55 @@ def manage_shows():
         except AttributeError:
             return str(v)
 
+    grace = _auto_archive_days()
+    today = date.today()
     shows = []
     for r in rows:
         d = dict(r)
         d['first_date'] = _norm(d['first_date'])
         d['last_perf'] = _norm(d['last_perf'])
+        # Active shows past their last date: when they'll auto-archive.
+        last = _show_last_date(d['raw_show_date'], d['load_out_date'], [d['last_perf']])
+        d['is_past'] = (d['status'] != 'archived' and not d['has_undated_perf']
+                        and bool(last and last < today))
+        on = _show_archive_on(last, d['restored_on'], grace) if d['is_past'] else None
+        d['archives_on'] = on.isoformat() if on else ''
         shows.append(d)
     archived_count = sum(1 for s in shows if s['status'] == 'archived')
     return render_template('manage_shows.html',
                            shows=shows,
                            active_count=len(shows) - archived_count,
                            archived_count=archived_count,
+                           auto_archive_days=grace,
+                           auto_archive_days_max=AUTO_ARCHIVE_DAYS_MAX,
                            user=get_current_user())
+
+
+@app.route('/settings/auto-archive', methods=['POST'])
+@admin_required
+def save_auto_archive_days():
+    """Settings → Shows: how many days after a show's last date (latest of
+    performances / load-out / show date) it stays on the dashboard, marked
+    PAST, before archiving itself. 0 = the day after its last date."""
+    data = request.get_json(force=True) or {}
+    try:
+        days = int(data.get('days'))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'Enter a whole number of days.'}), 400
+    if not 0 <= days <= AUTO_ARCHIVE_DAYS_MAX:
+        return jsonify({'success': False,
+                        'error': f'Days must be between 0 and {AUTO_ARCHIVE_DAYS_MAX}.'}), 400
+    db = get_db()
+    db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) '
+               'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+               ('auto_archive_days', str(days)))
+    log_audit(db, 'SETTINGS_CHANGE', 'setting', None, detail=f'auto_archive_days={days}')
+    db.commit(); db.close()
+    # Apply at once on this worker (others re-check within a minute).
+    global _auto_archive_at
+    _auto_archive_at = 0.0
+    syslog_logger.info(f"SETTINGS_CHANGE detail=auto_archive_days={days} by={session.get('username')}")
+    return jsonify({'success': True, 'days': days})
 
 
 @app.route('/shows/<int:show_id>/archive', methods=['POST'])
@@ -8166,7 +8447,10 @@ def restore_show(show_id):
     if session.get('user_role') != 'admin' and not can_access_show(session['user_id'], show_id):
         abort(403)
     db = get_db()
-    db.execute("UPDATE shows SET status='active' WHERE id=%s", (show_id,))
+    # restored_on restarts the auto-archive grace period, so a past show that
+    # is brought back isn't re-archived within the minute.
+    db.execute("UPDATE shows SET status='active', restored_on=%s WHERE id=%s",
+               (date.today().isoformat(), show_id))
     log_audit(db, 'SHOW_RESTORE', 'show', show_id, show_id=show_id)
     db.commit(); db.close()
     syslog_logger.info(f"SHOW_RESTORE show_id={show_id} by={session.get('username')}")
@@ -12030,7 +12314,8 @@ def venue_branding_list():
         'SELECT venue_name, logo_data FROM venue_logos'
     ).fetchall()}
     colors = {r['venue_name']: r for r in db.execute(
-        'SELECT venue_name, primary_color, secondary_color FROM venue_colors'
+        'SELECT venue_name, primary_color, secondary_color, banner_text_color '
+        'FROM venue_colors'
     ).fetchall()}
     db.close()
     # Include venues that only exist as overrides (logo or colors configured
@@ -12039,12 +12324,21 @@ def venue_branding_list():
         if v not in venues:
             venues.append(v)
     venues.sort(key=lambda v: v.lower())
+
+    def _auto_text(v):
+        # What "Auto" banner text resolves to for this venue's primary, so
+        # the panel can preview it (same rule as _get_venue_pdf_colors).
+        p = (colors[v]['primary_color'] if v in colors else '') or ''
+        return _contrast_text(p if _valid_hex_color(p) else '#1a4a7a')
+
     return jsonify({
         'venues': [{
             'name': v,
             'logo_data': logos.get(v, ''),
             'primary_color':   (colors[v]['primary_color'] if v in colors else ''),
             'secondary_color': (colors[v]['secondary_color'] if v in colors else ''),
+            'banner_text_color': (colors[v]['banner_text_color'] if v in colors else ''),
+            'banner_text_auto': _auto_text(v),
         } for v in venues]
     })
 
@@ -12181,14 +12475,17 @@ def _get_venue_pdf_colors(db, venue_name):
     if not venue_name:
         return None
     row = db.execute(
-        'SELECT primary_color, secondary_color FROM venue_colors WHERE venue_name=%s',
+        'SELECT primary_color, secondary_color, banner_text_color '
+        'FROM venue_colors WHERE venue_name=%s',
         (venue_name,)).fetchone()
     if not row:
         return None
     p = (row['primary_color'] or '').strip()
     s = (row['secondary_color'] or '').strip()
+    t = (row['banner_text_color'] or '').strip()
     p = p if _valid_hex_color(p) else ''
     s = s if _valid_hex_color(s) else ''
+    t = t if _valid_hex_color(t) else ''
     if not p and not s:
         return None
     p = p or '#1a4a7a'
@@ -12236,6 +12533,19 @@ def _get_venue_pdf_colors(db, venue_name):
             _mix_hex(s, 0.40, toward='#000000'),                  # ≈ #7a5a00
             palette['secondary_bg'], 4.5),
     })
+    # ── Chosen banner text color (3.6.0) ────────────────────────────────────
+    # An admin may pick the text color for the primary bars instead of the
+    # automatic white/black. It is used exactly as chosen — even at low
+    # contrast (the settings panel warns) — and the muted on-bar text (column
+    # legends, 12-hour hints) becomes a softened shade of it, never less
+    # readable than the chosen color itself. The secondary-hued on-bar accent
+    # keeps its own color. Blank = the automatic behavior above, unchanged.
+    if t:
+        soft = _mix_hex(t, 0.25, toward=p)
+        if _contrast_ratio(soft, p) < min(3.0, _contrast_ratio(t, p)):
+            soft = t
+        palette['on_primary'] = t
+        palette['on_primary_soft'] = soft
     return palette
 
 
@@ -12243,14 +12553,16 @@ def _get_venue_pdf_colors(db, venue_name):
 @admin_required
 def venue_colors_save():
     """Set (or clear) a venue's paperwork colors. Blank both = remove the
-    override entirely — that venue's PDFs go back to the app default theme."""
+    override entirely — that venue's PDFs go back to the app default theme
+    (the banner text color goes with it). banner_text_color blank = Auto."""
     data = request.get_json(force=True) or {}
     venue_name = (data.get('venue') or '').strip()
     if not venue_name:
         return jsonify({'success': False, 'error': 'Venue name required.'}), 400
     primary = (data.get('primary_color') or '').strip()
     secondary = (data.get('secondary_color') or '').strip()
-    for v in (primary, secondary):
+    banner_text = (data.get('banner_text_color') or '').strip()
+    for v in (primary, secondary, banner_text):
         if v and not _valid_hex_color(v):
             return jsonify({'success': False,
                             'error': 'Colors must be #rrggbb hex values.'}), 400
@@ -12258,19 +12570,22 @@ def venue_colors_save():
     if not primary and not secondary:
         db.execute('DELETE FROM venue_colors WHERE venue_name=%s', (venue_name,))
         action = 'venue_colors_clear'
+        banner_text = ''
     else:
         db.execute(
             "INSERT INTO venue_colors "
-            "(venue_name, primary_color, secondary_color, updated_at) "
-            "VALUES (%s, %s, %s, CURRENT_TIMESTAMP) ON CONFLICT (venue_name) DO UPDATE SET primary_color = EXCLUDED.primary_color, secondary_color = EXCLUDED.secondary_color, updated_at = EXCLUDED.updated_at",
-            (venue_name, primary, secondary))
+            "(venue_name, primary_color, secondary_color, banner_text_color, updated_at) "
+            "VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP) ON CONFLICT (venue_name) DO UPDATE SET primary_color = EXCLUDED.primary_color, secondary_color = EXCLUDED.secondary_color, banner_text_color = EXCLUDED.banner_text_color, updated_at = EXCLUDED.updated_at",
+            (venue_name, primary, secondary, banner_text))
         action = 'venue_colors_set'
     log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
-              detail=f'{action} venue={venue_name} primary={primary or "-"} secondary={secondary or "-"}')
+              detail=f'{action} venue={venue_name} primary={primary or "-"} '
+                     f'secondary={secondary or "-"} banner_text={banner_text or "auto"}')
     db.commit(); db.close()
     syslog_logger.info(
         f"SETTINGS_CHANGE detail={action} venue={venue_name} "
-        f"primary={primary or '-'} secondary={secondary or '-'} by={session.get('username')}")
+        f"primary={primary or '-'} secondary={secondary or '-'} "
+        f"banner_text={banner_text or 'auto'} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -14286,9 +14601,11 @@ def _calc_post_show_labor_cost(db, show_id):
     # Split each shift's actual hours into straight / overtime per technician
     # per Monday–Sunday work week. Manually added hours lines are left out of
     # the allocator entirely (always straight, never accrue).
-    # Identity: the scheduling link's crew member when the line was pulled from
-    # the schedule, else the sched_crew_name snapshot, else the per-position
-    # slot heuristic (see _ot_shift_key).
+    # Identity: the technician recorded as having WORKED the line (the
+    # settlement's editable "worked by", crew_member_id — 3.6.0), else the
+    # scheduling link's crew member when the line was pulled from the
+    # schedule, else the sched_crew_name snapshot, else the per-position slot
+    # heuristic (see _ot_shift_key).
     slot_counters = {}
     ot_idx = [i for i, d in enumerate(rows) if not d.get('is_added_hours')]
     shifts = []
@@ -14296,7 +14613,7 @@ def _calc_post_show_labor_cost(db, show_id):
         d = rows[i]
         shifts.append({
             'key': _ot_shift_key(slot_counters,
-                                 d.get('src_crew_member_id'),
+                                 d.get('crew_member_id') or d.get('src_crew_member_id'),
                                  d.get('sched_crew_name'),
                                  d.get('position_id') or (d.get('position_name') or ''),
                                  d.get('work_date') or ''),
@@ -14412,20 +14729,23 @@ def _pull_scheduled_into_post_show(db, show_id):
     not already pulled (matched by source_request_id). The scheduled in/out/lunch
     times are copied into BOTH the read-only sched_* reference columns AND the
     editable billable columns, so each line arrives PRE-FILLED for the PM to
-    tweak rather than starting blank. Never touches labor_requests.
+    tweak rather than starting blank; the scheduled crew member becomes the
+    line's "worked by" technician (crew_member_id, editable). Never touches
+    labor_requests.
 
     A line can be flagged scheduled (and given times) before a specific crew
     member is assigned. If the initial pull happened in that window, the row was
     frozen with a blank crew name and an unresolved rate; when the crew member
     is later assigned, a re-sync should backfill that reference data on the
     already-pulled row. So existing rows that have since gained a crew
-    assignment get their sched_crew_name (and, only when the PM hasn't already
-    entered a rate, pay_rate_snapshot) refreshed — never clobbering PM edits.
+    assignment get their sched_crew_name, worked-by technician (only if none
+    was recorded) and, only when the PM hasn't already entered a rate,
+    pay_rate_snapshot refreshed — never clobbering PM edits.
 
     Returns (added, refreshed): newly inserted lines and existing lines whose
     reference data was backfilled. The caller is responsible for committing."""
     existing = {r['source_request_id']: r for r in db.execute(
-        'SELECT source_request_id, sched_crew_name, pay_rate_snapshot '
+        'SELECT source_request_id, sched_crew_name, pay_rate_snapshot, crew_member_id '
         'FROM post_show_labor '
         'WHERE show_id=%s AND source_request_id IS NOT NULL', (show_id,)
     ).fetchall()}
@@ -14449,6 +14769,9 @@ def _pull_scheduled_into_post_show(db, show_id):
             if crew_name and not (prev['sched_crew_name'] or '').strip():
                 sets = ['sched_crew_name=%s']
                 vals = [crew_name]
+                if not prev['crew_member_id'] and s['scheduled_crew_member_id']:
+                    sets.append('crew_member_id=%s')
+                    vals.append(s['scheduled_crew_member_id'])
                 # Backfill the rate too, but only if the PM hasn't already set
                 # a real (non-zero) one — manual rate edits must survive.
                 if not float(prev['pay_rate_snapshot'] or 0):
@@ -14470,45 +14793,110 @@ def _pull_scheduled_into_post_show(db, show_id):
                  sched_in_time, sched_out_time, sched_break_start, sched_break_end,
                  sched_break2_start, sched_break2_end, sched_crew_name,
                  in_time, out_time, break_start, break_end, break2_start, break2_end,
-                 pay_rate_snapshot, sort_order)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 pay_rate_snapshot, crew_member_id, sort_order)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (show_id, s['id'], s['position_id'], s['work_date'],
               s['in_time'], s['out_time'], s['break_start'], s['break_end'],
               s['break2_start'], s['break2_end'], s['scheduled_crew_name'] or '',
               # editable (billable) times pre-filled from the schedule:
               s['in_time'], s['out_time'], s['break_start'], s['break_end'],
               s['break2_start'], s['break2_end'],
-              rate, order))
+              rate, s['scheduled_crew_member_id'], order))
         order += 10
         added += 1
     return added, refreshed
 
 
-def _ensure_post_show_labor(db, show_id):
-    """Auto-snapshot the show's scheduled labor into post_show_labor the FIRST
-    time the post-show data is accessed, so the PM never has to click anything.
-    A per-show marker in post_show_notes makes this run once — later PM
-    add/delete/edits are never undone on subsequent loads. Safe to call on any
-    read path; swallows errors so it can't break a page render."""
-    try:
-        marker = db.execute(
-            'SELECT field_value FROM post_show_notes WHERE show_id=%s AND field_key=%s',
-            (show_id, _PSL_INIT_KEY)
-        ).fetchone()
-        if marker:
-            return 0
-        added, _ = _pull_scheduled_into_post_show(db, show_id)
-        if added:
-            db.execute(
-                'INSERT INTO post_show_notes (show_id, field_key, field_value) '
-                'VALUES (%s, %s, %s) ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value',
-                (show_id, _PSL_INIT_KEY, '1')
-            )
-            db.commit()
-        return added
-    except Exception as e:
-        app.logger.warning(f'_ensure_post_show_labor show_id={show_id} failed: {e}')
-        return 0
+# ─── Settle Now (3.6.0) ──────────────────────────────────────────────────────
+# Nothing is copied from the labor schedule into the settlement until a person
+# presses Settle Now on the Post-Show tab (normally once the show is over), so
+# the snapshot is the FINAL schedule — before 3.6.0 it was taken the first time
+# anyone opened the show page, and later schedule changes never reached it.
+# shows.labor_settled_at/by record the press; the pre-3.6.0 first-access
+# marker (post_show_notes _PSL_INIT_KEY) still counts as settled. An unsettled
+# show's Final / Combined Invoice bills no labor and says so.
+
+def _post_show_settlement(db, show_id):
+    """{'at': ISO timestamp or None, 'by': display name} once the show's
+    post-show labor is settled, else None."""
+    row = db.execute("""
+        SELECT s.labor_settled_at::timestamptz AS at, u.display_name AS by_name,
+               EXISTS (SELECT 1 FROM post_show_notes n
+                        WHERE n.show_id = s.id AND n.field_key = %s) AS legacy
+          FROM shows s LEFT JOIN users u ON u.id = s.labor_settled_by
+         WHERE s.id = %s
+    """, (_PSL_INIT_KEY, show_id)).fetchone()
+    if not row or (row['at'] is None and not row['legacy']):
+        return None
+    return {'at': _ts_out(row['at']), 'by': row['by_name'] or ''}
+
+
+def _unsettled_show_ids(db, show_ids):
+    """The subset of show_ids whose post-show labor hasn't been settled."""
+    if not show_ids:
+        return set()
+    ph = ','.join(['%s'] * len(show_ids))
+    return {r['id'] for r in db.execute(f"""
+        SELECT s.id FROM shows s
+         WHERE s.id IN ({ph}) AND s.labor_settled_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM post_show_notes n
+                            WHERE n.show_id = s.id AND n.field_key = %s)
+    """, list(show_ids) + [_PSL_INIT_KEY]).fetchall()}
+
+
+def _pull_and_mark_settled(db, show_id, user_id):
+    """Pull scheduled labor into the settlement and record the show as
+    settled (first time only). Serialized per show with a row lock so two
+    people pressing Settle Now / Re-sync together can't pull a line twice.
+    Returns (added, refreshed, newly_settled), or None when the show doesn't
+    exist. Caller commits."""
+    row = db.execute('SELECT labor_settled_at FROM shows WHERE id=%s FOR UPDATE',
+                     (show_id,)).fetchone()
+    if row is None:
+        return None
+    newly = row['labor_settled_at'] is None
+    added, refreshed = _pull_scheduled_into_post_show(db, show_id)
+    if newly:
+        db.execute('UPDATE shows SET labor_settled_at=CURRENT_TIMESTAMP, '
+                   'labor_settled_by=%s WHERE id=%s', (user_id, show_id))
+    # Keep the pre-3.6.0 marker too, so an older build never re-snapshots.
+    db.execute(
+        'INSERT INTO post_show_notes (show_id, field_key, field_value) '
+        'VALUES (%s, %s, %s) ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value',
+        (show_id, _PSL_INIT_KEY, '1'))
+    return added, refreshed, newly
+
+
+@app.route('/shows/<int:show_id>/post-show-labor/settle', methods=['POST'])
+@login_required
+def settle_post_show_labor(show_id):
+    """Settle Now: pull the show's scheduled labor — technicians, positions
+    and times as the labor schedule has them right now — into the settlement
+    as the starting point for actuals, and mark the show settled. After that
+    the button is Re-sync from Schedule (newly scheduled lines only)."""
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_restricted') or session.get('is_readonly'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    db = get_db()
+    res = _pull_and_mark_settled(db, show_id, session['user_id'])
+    if res is None:
+        db.close()
+        return jsonify({'success': False, 'error': 'Show not found.'}), 404
+    added, refreshed, newly = res
+    if newly:
+        log_audit(db, 'POST_SHOW_LABOR_SETTLE', 'show', show_id, show_id=show_id,
+                  detail=f'added={added}')
+    db.commit()
+    rows = _post_show_labor_rows(db, show_id)
+    settlement = _post_show_settlement(db, show_id)
+    db.close()
+    syslog_logger.info(
+        f"POST_SHOW_LABOR_SETTLE show_id={show_id} added={added} "
+        f"{'first' if newly else 'already_settled'} by={session.get('username')}")
+    return jsonify({'success': True, 'added': added, 'refreshed': refreshed,
+                    'already_settled': not newly, 'settlement': settlement,
+                    'rows': rows})
 
 
 @app.route('/shows/<int:show_id>/post-show-labor/pull', methods=['POST'])
@@ -14517,25 +14905,27 @@ def pull_post_show_labor(show_id):
     """Re-sync: pull any newly-SCHEDULED labor lines into post_show_labor,
     pre-filled with their scheduled times. Idempotent (matched by
     source_request_id) — never clobbers the PM's edits or PM-added lines, and
-    never touches the labor scheduler."""
+    never touches the labor scheduler. An explicit pull, so it also settles a
+    show that wasn't yet (same as Settle Now)."""
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     if session.get('is_restricted') or session.get('is_readonly'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     db = get_db()
-    added, refreshed = _pull_scheduled_into_post_show(db, show_id)
-    db.execute(
-        'INSERT INTO post_show_notes (show_id, field_key, field_value) '
-        'VALUES (%s, %s, %s) ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value',
-        (show_id, _PSL_INIT_KEY, '1')
-    )
+    res = _pull_and_mark_settled(db, show_id, session['user_id'])
+    if res is None:
+        db.close()
+        return jsonify({'success': False, 'error': 'Show not found.'}), 404
+    added, refreshed, newly = res
     log_audit(db, 'POST_SHOW_LABOR_PULL', 'show', show_id, show_id=show_id,
-              detail=f'added={added}; refreshed={refreshed}')
+              detail=f'added={added}; refreshed={refreshed}' + ('; settled' if newly else ''))
     db.commit()
     rows = _post_show_labor_rows(db, show_id)
+    settlement = _post_show_settlement(db, show_id)
     db.close()
     syslog_logger.info(f"POST_SHOW_LABOR_PULL show_id={show_id} added={added} refreshed={refreshed} by={session.get('username')}")
-    return jsonify({'success': True, 'added': added, 'refreshed': refreshed, 'rows': rows})
+    return jsonify({'success': True, 'added': added, 'refreshed': refreshed,
+                    'settlement': settlement, 'rows': rows})
 
 
 @app.route('/shows/<int:show_id>/post-show-labor/hide-billable', methods=['POST'])
@@ -20903,10 +21293,14 @@ def show_post_invoice(show_id):
 
         # Final Invoice bills ACTUAL labor recorded on the Post-Show tab
         # (post_show_labor), not the schedule. Tech names are never exposed.
-        # Ensure scheduled labor has been auto-snapshotted (first-access pull) so
-        # the invoice is correct even if the Post-Show tab was never opened.
-        _ensure_post_show_labor(db, show_id)
-        labor_lines, labor_total = _calc_post_show_labor_cost(db, show_id)
+        # Until the labor is settled (Settle Now) no labor is billed and the
+        # invoice says so — nothing is pulled from the schedule behind anyone's
+        # back (3.6.0).
+        labor_settled = _post_show_settlement(db, show_id) is not None
+        if labor_settled:
+            labor_lines, labor_total = _calc_post_show_labor_cost(db, show_id)
+        else:
+            labor_lines, labor_total = [], 0.0
         er_pdfs = _fetch_external_rental_pdfs(db, show_id)
         logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
         pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
@@ -20925,6 +21319,7 @@ def show_post_invoice(show_id):
         external_subtotal=external_subtotal,
         labor_lines=labor_lines,
         labor_total=labor_total,
+        labor_settled=labor_settled,
         grand_total=grand_total,
         performance_company=performance_company,
         layout=pdf_layouts.PdfLayout('post_show_invoice', get_app_setting),
@@ -20997,10 +21392,13 @@ def combined_invoice_page():
                (SELECT MAX(perf_date) FROM show_performances
                  WHERE show_id=s.id AND perf_date IS NOT NULL) AS last_perf,
                (SELECT field_value FROM advance_data
-                 WHERE show_id=s.id AND field_key='performance_company') AS company
+                 WHERE show_id=s.id AND field_key='performance_company') AS company,
+               (s.labor_settled_at IS NOT NULL OR EXISTS (
+                    SELECT 1 FROM post_show_notes n
+                     WHERE n.show_id = s.id AND n.field_key = %s)) AS labor_settled
         FROM shows s
         ORDER BY {eff_date} DESC NULLS LAST, s.name
-    """).fetchall()
+    """, (_PSL_INIT_KEY,)).fetchall()
     db.close()
 
     shows = []
@@ -21049,14 +21447,17 @@ def combined_invoice_pdf():
         return 'Show(s) not found: ' + ', '.join(missing), 404
 
     sections = []
+    unsettled = _unsettled_show_ids(db, ids)
     for sid in ids:
         show = by_id[sid]
         assets_list, ext_list, assets_subtotal, external_subtotal = \
             _fetch_show_assets_and_externals(db, sid)
-        # Same auto-snapshot the single-show Final Invoice does, so labor is
-        # billed from actuals even if the Post-Show tab was never opened.
-        _ensure_post_show_labor(db, sid)
-        labor_lines, labor_total = _calc_post_show_labor_cost(db, sid)
+        # Same rule as the single-show Final Invoice: actual labor once the
+        # show is settled (Settle Now), otherwise none — flagged on the page.
+        if sid in unsettled:
+            labor_lines, labor_total = [], 0.0
+        else:
+            labor_lines, labor_total = _calc_post_show_labor_cost(db, sid)
 
         perf = db.execute(
             'SELECT MIN(perf_date) AS first_perf, MAX(perf_date) AS last_perf '
@@ -21077,6 +21478,7 @@ def combined_invoice_pdf():
             'assets': assets_list,
             'external_rentals': ext_list,
             'labor_lines': labor_lines,
+            'labor_settled': sid not in unsettled,
             'assets_subtotal': assets_subtotal,
             'external_subtotal': external_subtotal,
             'labor_total': labor_total,

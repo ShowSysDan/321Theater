@@ -119,7 +119,10 @@
             <div class="doc-type"><span style="text-transform:none">dpc</span> {{ layout.label('header', 'ADVANCE') }} SHEET</div>
             <div class="show-name">{{ show.name }}</div>
             <div class="show-sub">
-              {% if show.venue %}{{ show.venue }} &nbsp;·&nbsp; {% endif %}<strong>{{ show.show_date | dowdate or show.show_date or '—' }}</strong>{% if show.show_time %} &nbsp;·&nbsp; {{ show.show_time | dualtime }}{% endif %}
+              {# Every show (performance) date spelled out, back-to-back days
+                 collapsed into ranges; no performances → the show date. #}
+              {% set _hdr_text = (show_dates if (show_dates is defined and show_dates) else [show.show_date]) | showdates %}
+              {% if show.venue %}{{ show.venue }} &nbsp;·&nbsp; {% endif %}<strong>{{ _hdr_text or '—' }}</strong>{% if show.show_time %} &nbsp;·&nbsp; {{ show.show_time | dualtime }}{% endif %}
             </div>
             <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
           </div>
@@ -233,7 +236,8 @@
         <div class="doc-type"><span style="text-transform:none">dpc</span> ADVANCE SHEET</div>
         <div class="show-name">{{ show.name }}</div>
         <div class="show-sub">
-          {% if show.venue %}{{ show.venue }} &nbsp;·&nbsp; {% endif %}<strong>{{ show.show_date | dowdate or show.show_date or '—' }}</strong>{% if show.show_time %} &nbsp;·&nbsp; {{ show.show_time | dualtime }}{% endif %}
+          {% set _hdr_text = (show_dates if (show_dates is defined and show_dates) else [show.show_date]) | showdates %}
+          {% if show.venue %}{{ show.venue }} &nbsp;·&nbsp; {% endif %}<strong>{{ _hdr_text or '—' }}</strong>{% if show.show_time %} &nbsp;·&nbsp; {{ show.show_time | dualtime }}{% endif %}
         </div>
         <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
       </div>

@@ -56,6 +56,8 @@
   .footer { margin-top: 24px; border-top: 1px solid #e0e0e0; padding-top: 10px; font-size: 9px; color: #aaa; text-align: center; }
   .badge { display: inline-block; background: #f0f0f0; color: #555; font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 600; letter-spacing: 0.05em; }
   .empty-note { color: #999; font-size: 10px; font-style: italic; margin: 6px 0 0 0; }
+  /* Show whose labor hasn't been settled (Settle Now) — 3.6.0 */
+  .unsettled-note { color: {{ C2_DARK }}; background: {{ C2_BG }}; font-size: 10px; padding: 7px 10px; margin: 6px 0 0 0; }
 </style>
 </head>
 <body>
@@ -100,7 +102,7 @@
       <td><strong>{{ sec.show.name }}</strong></td>
       <td class="text-dim">{{ sec.date_label or '—' }}</td>
       <td class="text-dim">{{ sec.show.venue or '—' }}</td>
-      <td class="num">${{ '%.2f' | format(sec.labor_total) }}</td>
+      <td class="num">{% if sec.labor_settled %}${{ '%.2f' | format(sec.labor_total) }}{% else %}<span class="text-dim">not settled</span>{% endif %}</td>
       <td class="num">${{ '%.2f' | format(sec.assets_subtotal) }}</td>
       <td class="num">${{ '%.2f' | format(sec.external_subtotal) }}</td>
       <td class="num"><strong>${{ '%.2f' | format(sec.show_total) }}</strong></td>
@@ -200,6 +202,11 @@
 </table>
 {% endif %}
 
+{% if not sec.labor_settled %}
+<div class="section-title">Actual Labor</div>
+<p class="unsettled-note"><strong>Labor not settled yet</strong> — no labor is included for this show on this invoice.</p>
+{% endif %}
+
 {% if sec.labor_lines %}
 <div class="section-title">Actual Labor</div>
 <table>
@@ -207,8 +214,8 @@
     <tr>
       <th>Position</th>
       <th class="num">In</th>
-      <th class="num">Out</th>
       <th>Breaks</th>
+      <th class="num">Out</th>
       <th class="num">Hours</th>
       <th class="num">Rate</th>
       <th class="num">Line Total</th>
@@ -224,8 +231,8 @@
     <tr>
       <td>{{ l.position_name or '—' }} <span class="text-dim">(per crew)</span></td>
       <td class="num text-dim">—</td>
-      <td class="num text-dim">—</td>
       <td class="text-dim">{{ l.crew_count }} crew billed</td>
+      <td class="num text-dim">—</td>
       <td class="num">× {{ l.crew_count }}</td>
       <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/crew</td>
       <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
@@ -244,8 +251,8 @@
     <tr{% if l.is_overtime %} class="ot-row"{% endif %}>
       <td>{{ l.position_name or '—' }}{% if l.is_added_hours %} <span class="added-tag">added hours</span>{% if l.justification %}<div class="text-dim" style="font-size:9px">{{ l.justification }}</div>{% endif %}{% endif %}</td>
       <td class="num text-dim">{{ l.in_time | dualtime or '—' }}</td>
-      <td class="num text-dim">{{ l.out_time | dualtime or '—' }}</td>
       <td class="text-dim">{{ l.breaks or '—' }}</td>
+      <td class="num text-dim">{{ l.out_time | dualtime or '—' }}</td>
       <td class="num">{{ '%.2f' | format(l.hours) }}h</td>
       <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/hr</td>
       <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
@@ -260,7 +267,7 @@
 </table>
 {% endif %}
 
-{% if not sec.assets and not sec.external_rentals and not sec.labor_lines %}
+{% if sec.labor_settled and not sec.assets and not sec.external_rentals and not sec.labor_lines %}
 <p class="empty-note">Nothing billed for this show yet — no assets, external costs, or labor recorded.</p>
 {% endif %}
 

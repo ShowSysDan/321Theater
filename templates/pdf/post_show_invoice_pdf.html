@@ -53,6 +53,8 @@
   .day-subtotal-row td { font-weight: 700; font-size: 10px; color: #444; background: #fafafa; border-top: 1px solid #ddd; border-bottom: 1px solid #ddd; padding: 4px 8px; }
   .added-tag { display: inline-block; font-size: 8px; font-weight: 700; color: {{ C2_TEXT }}; letter-spacing: 0.05em; text-transform: uppercase; margin-left: 4px; }
   .ot-row td { color: {{ C2_DARK }}; background: {{ C2_BG }}; }
+  /* Labor not settled yet (Settle Now) — 3.6.0 */
+  .unsettled-note { color: {{ C2_DARK }}; background: {{ C2_BG }}; font-size: 10px; padding: 7px 10px; margin: 6px 0 0 0; }
   .grand-total { background: {{ C1 }}; color: {{ C1_ON }}; padding: 12px 16px; margin-top: 20px; display: flex; justify-content: space-between; align-items: center; }
   .grand-total-label { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
   .grand-total-amount { font-size: 20px; font-weight: 700; color: {{ C2_ON }}; }
@@ -164,6 +166,10 @@
   {% endif %}
 
   {% elif skey == 'labor' %}
+  {% if labor_settled is defined and not labor_settled %}
+  <div class="section-title">{{ layout.label('labor', 'Actual Labor') }}</div>
+  <p class="unsettled-note"><strong>Labor not settled yet</strong> — no labor is included on this invoice.</p>
+  {% endif %}
   {% if labor_lines %}
   <div class="section-title">{{ layout.label('labor', 'Actual Labor') }}</div>
   <table style="font-size: {{ layout.font_size('labor', '11px') }}">
@@ -171,8 +177,8 @@
       <tr>
         <th>Position</th>
         <th class="num">In</th>
-        <th class="num">Out</th>
         <th>Breaks</th>
+        <th class="num">Out</th>
         <th class="num">Hours</th>
         <th class="num">Rate</th>
         <th class="num">Line Total</th>
@@ -188,8 +194,8 @@
       <tr>
         <td>{{ l.position_name or '—' }} <span class="text-dim">(per crew)</span></td>
         <td class="num text-dim">—</td>
-        <td class="num text-dim">—</td>
         <td class="text-dim">{{ l.crew_count }} crew billed</td>
+        <td class="num text-dim">—</td>
         <td class="num">× {{ l.crew_count }}</td>
         <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/crew</td>
         <td class="num">${{ '%.2f' | format(l.line_total) }}</td>
@@ -208,8 +214,8 @@
       <tr{% if l.is_overtime %} class="ot-row"{% endif %}>
         <td>{{ l.position_name or '—' }}{% if l.is_added_hours %} <span class="added-tag">added hours</span>{% if l.justification %}<div class="text-dim" style="font-size:9px">{{ l.justification }}</div>{% endif %}{% endif %}</td>
         <td class="num text-dim">{{ l.in_time | dualtime or '—' }}</td>
-        <td class="num text-dim">{{ l.out_time | dualtime or '—' }}</td>
         <td class="text-dim">{{ l.breaks or '—' }}</td>
+        <td class="num text-dim">{{ l.out_time | dualtime or '—' }}</td>
         <td class="num">{{ '%.2f' | format(l.hours) }}h</td>
         <td class="num">${{ '%.2f' | format(l.hourly_rate) }}/hr</td>
         <td class="num">${{ '%.2f' | format(l.line_total) }}</td>

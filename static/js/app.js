@@ -2484,9 +2484,10 @@ function _appendLaborPresetRow(tbody, r) {
   tr.innerHTML = `
     <td><select class="sched-cell lp-pos">${_lpPositionOptions(r.position_id)}</select></td>
     <td><input type="number" class="sched-cell lp-qty" min="1" max="50" value="${parseInt(r.quantity, 10) || 1}"></td>
-    ${time(r.in_time, '17:00')}${time(r.out_time, '23:00')}
+    ${time(r.in_time, '17:00')}
     ${time(r.break_start, '')}${time(r.break_end, '')}
     ${time(r.break2_start, '')}${time(r.break2_end, '')}
+    ${time(r.out_time, '23:00')}
     <td><input type="text" class="sched-cell lp-notes" placeholder="Notes" value="${_esc(r.notes || '')}"></td>
     <td><button type="button" class="row-del-btn" onclick="this.closest('tr').remove()">×</button></td>
   `;
@@ -2514,12 +2515,13 @@ async function saveLaborPreset() {
     rows.push({
       position_id:  posId,
       quantity:     tr.querySelector('.lp-qty')?.value || 1,
+      // Cells are in shift order: in, lunch 1 start/end, lunch 2 start/end, out.
       in_time:      cells[0]?.value || '',
-      out_time:     cells[1]?.value || '',
-      break_start:  cells[2]?.value || '',
-      break_end:    cells[3]?.value || '',
-      break2_start: cells[4]?.value || '',
-      break2_end:   cells[5]?.value || '',
+      break_start:  cells[1]?.value || '',
+      break_end:    cells[2]?.value || '',
+      break2_start: cells[3]?.value || '',
+      break2_end:   cells[4]?.value || '',
+      out_time:     cells[5]?.value || '',
       notes:        tr.querySelector('.lp-notes')?.value || '',
     });
   });

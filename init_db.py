@@ -493,6 +493,15 @@ CREATE TABLE IF NOT EXISTS shows (
     -- Per-show classification: 'show' (default) or 'event'. Drives the home
     -- screen accent color and the per-recipient show/event email filter.
     show_mode TEXT DEFAULT 'show',
+    -- Date a user last restored the show from the archive (3.6.0). The
+    -- auto-archiver gives a restored show the same grace period again,
+    -- counted from this date, instead of re-archiving it within a minute.
+    restored_on DATE DEFAULT NULL,
+    -- When (and by whom) the post-show labor was settled with "Settle Now"
+    -- (3.6.0). NULL = not settled yet: no labor snapshot is taken until a
+    -- person presses the button, and the Final Invoice bills no labor.
+    labor_settled_at TIMESTAMP DEFAULT NULL,
+    labor_settled_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     last_saved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     last_saved_at TIMESTAMP,
@@ -1133,11 +1142,14 @@ CREATE TABLE IF NOT EXISTS venue_logos (
 );
 
 -- Per-venue accent colors for PDF paperwork ('#rrggbb' hex, empty = app default).
+-- banner_text_color (3.6.0) is the text printed ON the primary-colored bars,
+-- empty = picked automatically for contrast.
 CREATE TABLE IF NOT EXISTS venue_colors (
-    venue_name      TEXT PRIMARY KEY,
-    primary_color   TEXT NOT NULL DEFAULT '',
-    secondary_color TEXT NOT NULL DEFAULT '',
-    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    venue_name        TEXT PRIMARY KEY,
+    primary_color     TEXT NOT NULL DEFAULT '',
+    secondary_color   TEXT NOT NULL DEFAULT '',
+    banner_text_color TEXT NOT NULL DEFAULT '',
+    updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Security sign-in sheet personnel names (security_module.py, one row per
@@ -1915,6 +1927,13 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".post_show_labor ADD COLUMN IF NOT EXISTS is_added_hours INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".post_show_labor ADD COLUMN IF NOT EXISTS manual_hours DOUBLE PRECISION DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".post_show_labor ADD COLUMN IF NOT EXISTS crew_member_id INTEGER',
+        # Per-venue banner text color on paperwork — 3.6.0
+        f"ALTER TABLE \"{app_schema}\".venue_colors ADD COLUMN IF NOT EXISTS banner_text_color TEXT NOT NULL DEFAULT ''",
+        # Restore-from-archive date (auto-archive grace restarts) — 3.6.0
+        f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS restored_on DATE DEFAULT NULL',
+        # "Settle Now" — post-show labor settled explicitly — 3.6.0
+        f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS labor_settled_at TIMESTAMP DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS labor_settled_by INTEGER',
     ]
 
     shared_alters = [
@@ -1952,6 +1971,12 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         cat = _catalog(cur, app_schema, shared_schema)
     if billable_is_new is None:
         billable_is_new = (app_schema, 'show_labor_billable_items') not in cat['tables']
+    # 3.6.0's one-time "Settle Now" upgrade runs in the same transaction that
+    # first adds shows.labor_settled_at, so it happens exactly once (a failed
+    # start rolls both back and retries). Fresh installs create the column in
+    # PG_SCHEMA and have nothing to upgrade.
+    settle_is_new = ((app_schema, 'shows') in cat['tables']
+                     and (app_schema, 'shows', 'labor_settled_at') not in cat['cols'])
     n = 0
     for sql in app_alters + shared_alters:
         if 'INSERT INTO' in sql and 'show_labor_billable_items' in sql:
@@ -1968,6 +1993,9 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
             m = _MK_TABLE_RE.search(sql)
             cat['tables'].add((m.group(1) or app_schema, m.group(2)))
         n += 1
+
+    if settle_is_new:
+        _settle_now_upgrade(cur, app_schema)
 
     # Data backfills. Each runs in its own SAVEPOINT so one failure can't
     # silently abort the rest of the migration transaction, and each only
@@ -2020,6 +2048,106 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         """, (col,))
 
     return n
+
+
+_PSL_MARKER = '_post_show_labor_initialized'   # app.py _PSL_INIT_KEY
+# Audit actions that mean a PERSON worked on a show's post-show labor.
+_PSL_HUMAN_ACTIONS = ['POST_SHOW_LABOR_ADD', 'POST_SHOW_LABOR_EDIT',
+                      'POST_SHOW_LABOR_DELETE', 'POST_SHOW_LABOR_PULL']
+
+
+def _settle_now_upgrade(cur, app_schema, today=None):
+    """One-time 3.6.0 data step for "Settle Now", run in the transaction that
+    first adds shows.labor_settled_at.
+
+    Before 3.6.0 the post-show labor was snapshotted from the schedule the
+    first time anyone opened the show page, often weeks before the show, so
+    later schedule changes never reached the settlement. From 3.6.0 nothing
+    is pulled until someone presses Settle Now. This step:
+
+    1. Clears the automatic snapshot on shows that have NOT happened yet
+       (last performance / load-out / show date is today or later, no
+       undated performance) when nobody ever touched it: no post-show labor
+       add / edit / delete / re-sync in the audit log, and every row is still
+       a verbatim copy of the schedule (actual times == scheduled times, no
+       notes, no technician, no added hours, nothing typed in by hand). Those
+       shows get the Settle Now button; each gets a POST_SHOW_LABOR_RESET
+       audit entry.
+    2. Marks every show that still has settlement data (rows or the old
+       marker) as settled, dated by its first settlement row — past shows and
+       anything a person filled out are left exactly as they were.
+    """
+    from datetime import date
+    today = today or date.today()
+    a = f'"{app_schema}"'
+    cur.execute('SAVEPOINT _settle_now')
+    try:
+        cur.execute(f"""
+            SELECT s.id,
+                   (SELECT COUNT(*) FROM {a}.post_show_labor x WHERE x.show_id = s.id)
+              FROM {a}.shows s
+             WHERE EXISTS (SELECT 1 FROM {a}.post_show_labor x WHERE x.show_id = s.id)
+               AND NOT EXISTS (SELECT 1 FROM {a}.show_performances p
+                                WHERE p.show_id = s.id AND p.perf_date IS NULL)
+               AND GREATEST((SELECT MAX(p.perf_date) FROM {a}.show_performances p
+                              WHERE p.show_id = s.id),
+                            s.load_out_date, s.show_date) >= %s
+               AND NOT EXISTS (SELECT 1 FROM {a}.audit_log l
+                                WHERE l.show_id = s.id AND l.action = ANY(%s))
+               AND NOT EXISTS (
+                   SELECT 1 FROM {a}.post_show_labor x
+                    WHERE x.show_id = s.id AND (
+                          COALESCE(x.is_added_hours, 0) <> 0
+                       OR COALESCE(x.notes, '') <> ''
+                       OR x.crew_member_id IS NOT NULL
+                       -- a line typed in by hand (+ Add Line): no schedule
+                       -- link and nothing copied from a schedule
+                       OR (x.source_request_id IS NULL
+                           AND COALESCE(x.sched_in_time, '') = ''
+                           AND COALESCE(x.sched_out_time, '') = ''
+                           AND COALESCE(x.sched_crew_name, '') = '')
+                       OR COALESCE(x.in_time, '')      <> COALESCE(x.sched_in_time, '')
+                       OR COALESCE(x.out_time, '')     <> COALESCE(x.sched_out_time, '')
+                       OR COALESCE(x.break_start, '')  <> COALESCE(x.sched_break_start, '')
+                       OR COALESCE(x.break_end, '')    <> COALESCE(x.sched_break_end, '')
+                       OR COALESCE(x.break2_start, '') <> COALESCE(x.sched_break2_start, '')
+                       OR COALESCE(x.break2_end, '')   <> COALESCE(x.sched_break2_end, '')))
+             ORDER BY s.id
+        """, (today, _PSL_HUMAN_ACTIONS))
+        reset = cur.fetchall()
+        ids = [r[0] for r in reset]
+        if ids:
+            cur.execute(f'DELETE FROM {a}.post_show_labor WHERE show_id = ANY(%s)', (ids,))
+            cur.execute(f'DELETE FROM {a}.post_show_notes WHERE field_key = %s AND show_id = ANY(%s)',
+                        (_PSL_MARKER, ids))
+            for sid, n_rows in reset:
+                cur.execute(
+                    f"INSERT INTO {a}.audit_log (username, action, entity_type, entity_id, show_id, detail) "
+                    f"VALUES ('system', 'POST_SHOW_LABOR_RESET', 'show', %s, %s, %s)",
+                    (str(sid), sid,
+                     f'3.6.0 upgrade: cleared the automatic labor snapshot ({n_rows} line(s), '
+                     f'never edited, show not yet happened) so the show gets the Settle Now '
+                     f'button; it will pull the then-current schedule.'))
+        cur.execute(f"""
+            UPDATE {a}.shows s
+               SET labor_settled_at = COALESCE(
+                     (SELECT MIN(x.created_at) FROM {a}.post_show_labor x WHERE x.show_id = s.id),
+                     CURRENT_TIMESTAMP)
+             WHERE s.labor_settled_at IS NULL
+               AND (EXISTS (SELECT 1 FROM {a}.post_show_labor x WHERE x.show_id = s.id)
+                    OR EXISTS (SELECT 1 FROM {a}.post_show_notes n
+                                WHERE n.show_id = s.id AND n.field_key = %s))
+        """, (_PSL_MARKER,))
+        settled = cur.rowcount
+        cur.execute('RELEASE SAVEPOINT _settle_now')
+        print(f"[migrate_pg] Settle Now upgrade: marked {settled} show(s) with existing "
+              f"settlement data as settled; cleared the untouched automatic labor snapshot "
+              f"on {len(ids)} upcoming show(s)" + (f" (show ids {ids})" if ids else ''))
+    except Exception as e:
+        cur.execute('ROLLBACK TO SAVEPOINT _settle_now')
+        # Settlements that were already pulled still read as settled (the
+        # app also honors the old marker), so this degrades safely.
+        print(f"[migrate_pg] ERROR: Settle Now upgrade step failed, skipped: {e}")
 
 
 def _widen_real_columns(cur, app_schema, shared_schema):

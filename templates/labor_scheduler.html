@@ -72,7 +72,8 @@
   .sched-time-input:focus { outline: none; border-color: var(--accent); }
   .sched-add-row { font-size: 12px; }
 
-  /* Stacked Lunch 1/2 + Tech (Requested over Scheduled) */
+  /* Stacked cells: one column per lunch — start (S) over end (E), so a row
+     reads in → lunch 1 → lunch 2 → out (3.6.0) — and Tech (Requested over Scheduled) */
   .sched-stack-cell { padding: 4px 6px !important; }
   .sched-stack-cell .sched-stack-row {
     display: flex; align-items: center; gap: 5px;
@@ -441,25 +442,25 @@
       <td><input type="text" class="sched-time-input sched-in"   value="${escapeHtml(lr.in_time||'')}"    placeholder="HH:MM" maxlength="5"
                  onchange="window.__scheduler.onTimeChange(this)"></td>
       <td class="sched-stack-cell">
-        <div class="sched-stack-row">
-          <span class="sched-stack-tag">1</span>
+        <div class="sched-stack-row" title="Lunch 1 start">
+          <span class="sched-stack-tag">S</span>
           <input type="text" class="sched-time-input sched-bstart"  value="${escapeHtml(lr.break_start||'')}"  placeholder="HH:MM" maxlength="5"
                  onchange="window.__scheduler.onTimeChange(this)">
         </div>
-        <div class="sched-stack-row">
-          <span class="sched-stack-tag">2</span>
-          <input type="text" class="sched-time-input sched-b2start" value="${escapeHtml(lr.break2_start||'')}" placeholder="HH:MM" maxlength="5"
+        <div class="sched-stack-row" title="Lunch 1 end">
+          <span class="sched-stack-tag">E</span>
+          <input type="text" class="sched-time-input sched-bend"    value="${escapeHtml(lr.break_end||'')}"    placeholder="HH:MM" maxlength="5"
                  onchange="window.__scheduler.onTimeChange(this)">
         </div>
       </td>
       <td class="sched-stack-cell">
-        <div class="sched-stack-row">
-          <span class="sched-stack-tag">1</span>
-          <input type="text" class="sched-time-input sched-bend"    value="${escapeHtml(lr.break_end||'')}"    placeholder="HH:MM" maxlength="5"
+        <div class="sched-stack-row" title="Lunch 2 start">
+          <span class="sched-stack-tag">S</span>
+          <input type="text" class="sched-time-input sched-b2start" value="${escapeHtml(lr.break2_start||'')}" placeholder="HH:MM" maxlength="5"
                  onchange="window.__scheduler.onTimeChange(this)">
         </div>
-        <div class="sched-stack-row">
-          <span class="sched-stack-tag">2</span>
+        <div class="sched-stack-row" title="Lunch 2 end">
+          <span class="sched-stack-tag">E</span>
           <input type="text" class="sched-time-input sched-b2end"   value="${escapeHtml(lr.break2_end||'')}"   placeholder="HH:MM" maxlength="5"
                  onchange="window.__scheduler.onTimeChange(this)">
         </div>
@@ -548,8 +549,8 @@
           <th style="width:58px;text-align:center;line-height:1.05" title="Training shift — extra body on this position for learning, doesn't replace the staffed tech">IN<br>TRAINING</th>
           <th style="min-width:160px">POSITION</th>
           <th style="width:72px">IN</th>
-          <th style="width:78px;white-space:nowrap">LUNCH START</th>
-          <th style="width:78px;white-space:nowrap">LUNCH END</th>
+          <th style="width:78px;white-space:nowrap" title="Lunch 1 — start (S) over end (E)">LUNCH 1</th>
+          <th style="width:78px;white-space:nowrap" title="Lunch 2 — start (S) over end (E)">LUNCH 2</th>
           <th style="width:72px">OUT</th>
           <th style="min-width:200px">TECH</th>
           <th style="width:40px"></th>
@@ -660,8 +661,8 @@
             <th style="width:110px">DATE</th>
             <th style="min-width:160px">POSITION</th>
             <th style="width:72px">IN</th>
-            <th style="width:78px;white-space:nowrap">LUNCH START</th>
-            <th style="width:78px;white-space:nowrap">LUNCH END</th>
+            <th style="width:78px;white-space:nowrap" title="Lunch 1 — start (S) over end (E)">LUNCH 1</th>
+            <th style="width:78px;white-space:nowrap" title="Lunch 2 — start (S) over end (E)">LUNCH 2</th>
             <th style="width:72px">OUT</th>
             <th style="min-width:200px">TECH</th>
             <th style="width:40px"></th>
