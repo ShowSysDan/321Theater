@@ -417,7 +417,9 @@ apps. For a 321Theater access change, use this app's own flags instead
   template, use the vars (or add a tint to the helper), never a raw brand
   hex; and give any new var a fallback matching the un-themed look.
 - Admin UI: Settings → System → Branding & Paperwork → the combined **Venue
-  Branding** panel (2.42.0): ONE dataset (`GET /settings/venue-branding` —
+  Branding** panel (2.42.0; since 3.6.2 a one-line-per-venue list + an Edit
+  dialog `#venue-branding-modal` whose preview ports the palette math to JS
+  as `_vcPalette()` — keep it in step with `_get_venue_pdf_colors`): ONE dataset (`GET /settings/venue-branding` —
   venues + logo + colors; the old venue-logos/venue-colors GET lists are
   gone) with the unchanged POSTs (`/settings/venue-logos[/delete]`,
   `/settings/venue-colors` — hex-validated, blank-both = delete row). Colors
