@@ -934,7 +934,7 @@ const _HELP_PAGES = {
       <p>PDF exports, their history, and file attachments.</p>
       <ul style="${_HELP_UL}">
         <li>Export cards: <strong>Advance Sheet</strong>, <strong>Production Schedule</strong>, <strong>Post-Show Report</strong> (each with a version number and an Email button that sends to the configured recipients), <strong>Final Invoice</strong> (warns when the show's labor hasn't been settled yet), and <strong>Pre-Show Estimate</strong> (labor + assets quote).</li>
-        <li>The Production Schedule PDF is <strong>page-aware</strong>: a day that would spill 4 or fewer rows onto the next page is tightened a step at a time so it fits on its own page (or, if it's short, moves whole to the next page).</li>
+        <li>The Production Schedule PDF is <strong>page-aware</strong>: a day that would spill 4 or fewer rows onto the next page is tightened a step at a time so it fits on its own page, and a day that would still be split moves whole to the next page when it fits there. A row is never cut in half at a page break.</li>
         <li><strong>Export History</strong> — the last 10 exports; Download re-fetches that exact stored PDF.</li>
         <li><strong>Attachments</strong> — + Attach File or drag-and-drop; admins can move a file to another show.</li>
         <li><strong>Advance Read By</strong> — read receipts for who has viewed the advance.</li>

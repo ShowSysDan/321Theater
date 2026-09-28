@@ -19,7 +19,7 @@
     size: letter;
     margin: 0.35in 0.55in 0.55in;
     @bottom-left   { content: element(footerLeft);   font-size: 6.5pt; color: #888; border-top: 1px solid #ddd; padding-top: 4px; vertical-align: middle; }
-    @bottom-center { content: "Page " counter(page) " of " counter(pages); font-size: 6.5pt; color: #888; border-top: 1px solid #ddd; padding-top: 4px; vertical-align: middle; }
+    @bottom-center { content: "Page " counter(page) " of " counter(pages); font-family: Arial, Helvetica, sans-serif; font-size: 6.5pt; color: #888; border-top: 1px solid #ddd; padding-top: 4px; vertical-align: middle; white-space: nowrap; }
     @bottom-right  { content: element(footerRight);  font-size: 6.5pt; color: #888; border-top: 1px solid #ddd; padding-top: 4px; vertical-align: middle; text-align: right; }
   }
   .footer-left  { position: running(footerLeft);  font-size: 6.5pt; color: #888; }

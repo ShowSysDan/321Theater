@@ -3238,53 +3238,61 @@ async function loadVenueBranding() {
       const sc = v.secondary_color || _VC_DEFAULT_SECONDARY;
       const bt = v.banner_text_color || '';
       const btEff = bt || v.banner_text_auto || _vcAutoText(p);
-      const logoPreview = hasLogo
-        ? `<img src="${v.logo_data}" alt="" style="max-height:44px;max-width:150px;border:1px solid var(--border);border-radius:4px;padding:3px;background:#fff">`
-        : `<span class="text-dim" style="font-size:11px;font-style:italic">Default logo</span>`;
+      // Fixed-width fields in a fixed order, so every venue row lines up with
+      // the next; Reset always keeps its slot (hidden when there's nothing
+      // to reset) and the contrast note lives inside the preview slot, so
+      // neither shifts the controls around.
+      const logoThumb = hasLogo
+        ? `<span class="vb-logo-thumb has-logo"><img src="${v.logo_data}" alt=""></span>`
+        : `<span class="vb-logo-thumb">Default logo</span>`;
       const colorBadge = hasColors
         ? `<span class="badge" style="background:${p};color:${btEff};font-size:10px;padding:1px 8px;border-radius:99px;border:2px solid ${sc}">CUSTOM COLORS</span>`
         : `<span class="text-dim" style="font-size:11px;font-style:italic">Default theme</span>`;
       const removeLogoBtn = hasLogo
-        ? `<button type="button" class="btn btn-xs btn-danger-ghost" onclick="deleteVenueLogo('${nameArg}')">Remove</button>`
+        ? `<button type="button" class="btn btn-sm btn-danger-ghost" onclick="deleteVenueLogo('${nameArg}')">Remove</button>`
         : '';
-      return `<div class="venue-branding-row" data-venue="${safe}"
-                   style="padding:12px 0;border-bottom:1px solid var(--border)">
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
-          <span style="font-weight:600;font-size:13px">${safe}</span>
+      return `<div class="venue-branding-row" data-venue="${safe}">
+        <div class="vb-head">
+          <span class="vb-name">${safe}</span>
           ${colorBadge}
         </div>
-        <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            ${logoPreview}
-            <form onsubmit="event.preventDefault(); uploadVenueLogo(this, '${nameArg}')" enctype="multipart/form-data"
-                  style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-              <input type="file" name="logo" class="field-input field-input-sm" accept="image/*" style="max-width:190px" required>
-              <button type="submit" class="btn btn-sm btn-primary">${hasLogo ? 'Replace' : 'Upload'}</button>
+        <div class="vb-line">
+          <div class="vb-logo">
+            ${logoThumb}
+            <form class="vb-logo-form" onsubmit="event.preventDefault(); uploadVenueLogo(this, '${nameArg}')" enctype="multipart/form-data">
+              <input type="file" name="logo" class="field-input field-input-sm" accept="image/*" required>
+              <button type="submit" class="btn btn-sm btn-primary vb-btn">${hasLogo ? 'Replace' : 'Upload'}</button>
               ${removeLogoBtn}
             </form>
           </div>
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-left:auto">
-            <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)">PRIMARY
-              <input type="color" class="vc-primary" value="${p}" oninput="_vcPreview(this)" style="width:44px;height:28px;padding:1px;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer">
+        </div>
+        <div class="vb-line">
+          <div class="vb-colors">
+            <label class="vb-field"><span class="vb-field-label">Primary</span>
+              <input type="color" class="vc-primary" value="${p}" oninput="_vcPreview(this)">
             </label>
-            <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)">SECONDARY
-              <input type="color" class="vc-secondary" value="${sc}" style="width:44px;height:28px;padding:1px;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer">
+            <label class="vb-field"><span class="vb-field-label">Secondary</span>
+              <input type="color" class="vc-secondary" value="${sc}">
             </label>
-            <span style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)"
-                  title="Text printed on the primary-colored bars (section headings, day banners, table headers, total bars). Auto picks white or black for contrast.">
-              <label style="display:flex;align-items:center;gap:6px">BANNER TEXT
-                <input type="color" class="vc-bannertext" value="${btEff}" ${bt ? '' : 'disabled'}
-                       oninput="_vcPreview(this)" style="width:44px;height:28px;padding:1px;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer">
-              </label>
-              <label style="display:flex;align-items:center;gap:3px;cursor:pointer">
-                <input type="checkbox" class="vc-bannertext-auto" ${bt ? '' : 'checked'} onchange="_vcPreview(this)" style="accent-color:var(--accent)">Auto
-              </label>
-            </span>
-            <span class="vc-preview" title="Preview of a paperwork banner"
-                  style="display:inline-block;background:${p};color:${btEff};font-size:10px;font-weight:700;letter-spacing:.08em;padding:5px 9px;border-radius:3px;white-space:nowrap">BANNER TEXT</span>
-            <span class="vc-contrast" style="font-size:11px"></span>
-            <button type="button" class="btn btn-sm btn-primary" onclick="saveVenueColors(this, '${nameArg}')">Save Colors</button>
-            ${hasColors ? `<button type="button" class="btn btn-sm btn-ghost" onclick="clearVenueColors('${nameArg}')" title="Back to the default theme">Reset</button>` : ''}
+            <div class="vb-field" title="Text printed on the primary-colored bars (section headings, day banners, table headers, total bars). Auto picks white or black for contrast.">
+              <span class="vb-field-label">Banner text</span>
+              <span class="vb-ctl">
+                <input type="color" class="vc-bannertext" value="${btEff}" ${bt ? '' : 'disabled'} oninput="_vcPreview(this)" aria-label="Banner text color">
+                <label class="vb-auto"><input type="checkbox" class="vc-bannertext-auto" ${bt ? '' : 'checked'} onchange="_vcPreview(this)">Auto</label>
+              </span>
+            </div>
+            <div class="vb-field vb-field-preview">
+              <span class="vb-field-label">Preview</span>
+              <span class="vb-ctl">
+                <span class="vc-preview" title="Preview of a paperwork banner" style="background:${p};color:${btEff}">BANNER TEXT</span>
+                <span class="vc-contrast"></span>
+              </span>
+            </div>
+            <div class="vb-actions">
+              <button type="button" class="btn btn-sm btn-primary" onclick="saveVenueColors(this, '${nameArg}')">Save Colors</button>
+              <button type="button" class="btn btn-sm btn-ghost vb-reset${hasColors ? '' : ' vb-reset-none'}" onclick="clearVenueColors('${nameArg}')"
+                      title="Back to the default theme" ${hasColors ? '' : 'disabled aria-hidden="true" tabindex="-1"'}>Reset</button>
+            </div>
           </div>
         </div>
         <span class="venue-branding-msg field-msg" style="display:none;font-size:11px;margin-top:6px"></span>
