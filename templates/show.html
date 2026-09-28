@@ -2234,15 +2234,20 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
   {# ── Actual Labor (billing) ──────────────────────────────────────────────
      Snapshot of the SCHEDULED labor lines that the PM edits to bill ACTUALS.
-     Lives in post_show_labor — the labor scheduler is never touched. Lines
-     start blank → $0 until actuals are entered. Tech names never hit the
-     Final Invoice (scheduled name shown here only as a reference). #}
+     Lives in post_show_labor — the labor scheduler is never touched. Nothing
+     is copied from the schedule until someone presses Settle Now (3.6.0), so
+     the snapshot is the final schedule. Tech names ("Worked by") never hit
+     the Final Invoice — they're tracking only. #}
   <div class="form-section" id="ps-labor-section">
     <div class="form-section-header">
       <span class="section-icon">◈</span> ACTUAL LABOR (BILLING)
       {% if not restricted %}
       <div class="action-btns ml-auto" style="display:flex;gap:6px">
+        <button type="button" class="btn btn-sm btn-primary" id="ps-settle-btn" onclick="settleNow(this)"
+                {% if post_show_settlement %}style="display:none"{% endif %}
+                title="Pull the final labor schedule — who worked each position and their times — in as the starting point for billing.">Settle Now</button>
         <button type="button" class="btn btn-sm btn-ghost" id="ps-pull-btn" onclick="pullScheduledLabor()"
+                {% if not post_show_settlement %}style="display:none"{% endif %}
                 title="Pull in any newly-scheduled labor lines (with their times). Your edits are kept.">Re-sync from Schedule</button>
         <button type="button" class="btn btn-sm btn-ghost" onclick="openAddHoursForm()"
                 title="Bill arbitrary hours (e.g. prep work weeks out) with a justification. Straight time only — never counts toward overtime.">+ Add Hours</button>
@@ -2251,8 +2256,20 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       {% endif %}
     </div>
     <div class="form-section-body no-pad">
+      <div id="ps-settle-banner" class="ps-settle-banner"{% if post_show_settlement %} style="display:none"{% endif %}>
+        <div>
+          <strong>Labor hasn't been settled yet.</strong>
+          When the show is over, press <strong>Settle Now</strong> to pull in the final labor schedule — who worked
+          each position and their times — as the starting point for billing. Nothing is copied from the schedule
+          before then, so later schedule changes are never missed. Until it's settled, the Final Invoice bills no labor.
+        </div>
+        {% if not restricted %}
+        <button type="button" class="btn btn-sm btn-primary" onclick="settleNow(this)">Settle Now</button>
+        {% endif %}
+      </div>
+      <p id="ps-settled-info" class="text-dim" style="padding:10px 14px 0;font-size:11px;margin:0{% if not post_show_settlement %};display:none{% endif %}">✓ Settled</p>
       <p class="text-dim" style="padding:10px 14px 0;font-size:11px;margin:0">
-        Scheduled labor is pulled in automatically with its times filled in — just tweak what actually happened. Edits here bill the client and never change the schedule. Use <strong>+ Add Line</strong> for extra crew, or <strong>+ Add Hours</strong> to bill hours worked outside the schedule (prep work etc. — straight time, never overtime, justification required).
+        Settle Now pulls the scheduled labor in with its people and times filled in — then adjust what actually happened, including who worked each line (<strong>Worked by</strong> — tracking only, never printed on paperwork). Edits here bill the client and never change the schedule. Use <strong>+ Add Line</strong> for extra crew, or <strong>+ Add Hours</strong> to bill hours worked outside the schedule (prep work etc. — straight time, never overtime, justification required).
       </p>
       {% if not restricted %}
       <div id="ps-addhours-form" style="display:none;margin:10px 14px 0;padding:10px 12px;border:1px dashed var(--border);border-radius:6px">
@@ -2277,13 +2294,13 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       <table class="data-table" id="ps-labor-table" style="font-size:12px;min-width:760px">
         <thead>
           <tr>
-            <th>Position / Scheduled (ref)</th>
+            <th>Position / Scheduled (ref) / Worked by</th>
             <th>Actual In</th>
-            <th>Actual Out</th>
             <th>Lunch 1 Start</th>
             <th>Lunch 1 End</th>
             <th>Lunch 2 Start</th>
             <th>Lunch 2 End</th>
+            <th>Actual Out</th>
             <th style="text-align:right">Hours</th>
             <th style="text-align:right">Rate</th>
             <th style="text-align:right">Cost</th>
@@ -2301,7 +2318,10 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       </table>
       </div>
       <p class="text-dim" id="ps-labor-empty" style="padding:16px;text-align:center;display:none">
-        {% if restricted %}No actual labor recorded.{% else %}Scheduled labor appears here automatically once it's scheduled. Use <strong>+ Add Line</strong> for extra crew, or <strong>Re-sync from Schedule</strong> to pull newly-scheduled lines.{% endif %}
+        {% if restricted %}No actual labor recorded.{% else %}
+        <span class="ps-empty-unsettled"{% if post_show_settlement %} style="display:none"{% endif %}>No labor lines yet. Press <strong>Settle Now</strong> once the show is over to pull in the scheduled labor, or use <strong>+ Add Line</strong> / <strong>+ Add Hours</strong>.</span>
+        <span class="ps-empty-settled"{% if not post_show_settlement %} style="display:none"{% endif %}>No labor lines. Use <strong>+ Add Line</strong> for extra crew, or <strong>Re-sync from Schedule</strong> to pull newly-scheduled lines.</span>
+        {% endif %}
       </p>
     </div>
   </div>
@@ -2336,9 +2356,10 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 </form>
 </div>{# end tab-postnotes #}
 
-{# Seed post-show actual-labor rows for initPostShowLaborTab() in JS #}
+{# Seed post-show actual-labor rows (+ Settle Now state) for initPostShowLaborTab() in JS #}
 <script>
 window._postShowLaborData = {{ post_show_labor_data | tojson }};
+window._psSettlement = {{ post_show_settlement | tojson }};
 </script>
 
 
@@ -2443,6 +2464,12 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
         <h3 class="export-card-title">Final Invoice PDF</h3>
       </div>
       <p class="export-card-desc">Final billing invoice: internal &amp; external assets, actual labor, and costs.</p>
+      {% if not post_show_settlement %}
+      <p class="ps-unsettled-hint" style="font-size:11px;color:#f59e0b;margin:0 0 10px">
+        ⚠ Labor not settled yet — this invoice bills no labor until someone presses
+        <a href="#" onclick="switchTab('postnotes');return false;" style="color:inherit;text-decoration:underline">Settle Now on the Post-Show tab</a>.
+      </p>
+      {% endif %}
       <div class="export-card-foot">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a href="{{ url_for('show_post_invoice', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Export PDF</a>
@@ -2680,7 +2707,8 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
 }
 /* Selects (position, requested_name) fill their column */
 .labor-day-table select.labor-field { width: 100%; }
-/* Stacked Lunch 1 / Lunch 2 cells in staffing labor tables */
+/* Stacked lunch cells in staffing labor tables: one column per lunch, start
+   (S) over end (E), so a row reads in → lunch 1 → lunch 2 → out (3.6.0). */
 .labor-stack-cell { padding: 3px 4px !important; }
 .labor-stack-cell .labor-stack-row {
   display: flex; align-items: center; gap: 5px;
@@ -2736,6 +2764,21 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
   text-transform: uppercase; color: var(--text-muted); margin-bottom: 1px;
 }
 .ps-eff-rate .ps-eff-rate-unit { font-size: 11px; font-weight: 600; }
+/* Post-Show "Settle Now" call-to-action (3.6.0) — shown until the labor is
+   settled; the Final Invoice bills no labor before then. */
+.ps-settle-banner {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin: 12px 14px 0; padding: 10px 12px;
+  border: 1px solid rgba(245, 158, 11, 0.45); border-radius: 6px;
+  background: rgba(245, 158, 11, 0.10);
+  font-size: 12px; line-height: 1.45;
+}
+.ps-settle-banner > div { flex: 1; min-width: 240px; }
+/* "Worked by" technician picker under each line's scheduled reference. */
+.ps-worked-by { display: flex; align-items: center; gap: 6px; margin-top: 5px; }
+.ps-worked-by label { font-size: 10px; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--text-muted); white-space: nowrap; }
+.ps-worked-by select { flex: 1; min-width: 0; }
 /* Show-level labor notes box (top of staffing tab) */
 .show-labor-notes-wrap {
   padding: 10px 14px 8px;
@@ -3291,22 +3334,22 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
       <td><select class="field-input field-input-sm labor-field" data-field="position_id" ${RESTRICTED ? 'disabled' : ''}></select></td>
       <td><input type="text" class="field-input field-input-sm labor-field" data-field="in_time" value="${lr.in_time || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}></td>
       <td class="labor-stack-cell">
-        <div class="labor-stack-row">
-          <span class="labor-stack-tag">1</span>
+        <div class="labor-stack-row" title="Lunch 1 start">
+          <span class="labor-stack-tag">S</span>
           <input type="text" class="field-input field-input-sm labor-field" data-field="break_start"  value="${lr.break_start  || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
         </div>
-        <div class="labor-stack-row">
-          <span class="labor-stack-tag">2</span>
-          <input type="text" class="field-input field-input-sm labor-field" data-field="break2_start" value="${lr.break2_start || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
+        <div class="labor-stack-row" title="Lunch 1 end">
+          <span class="labor-stack-tag">E</span>
+          <input type="text" class="field-input field-input-sm labor-field" data-field="break_end"    value="${lr.break_end    || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
         </div>
       </td>
       <td class="labor-stack-cell">
-        <div class="labor-stack-row">
-          <span class="labor-stack-tag">1</span>
-          <input type="text" class="field-input field-input-sm labor-field" data-field="break_end"    value="${lr.break_end    || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
+        <div class="labor-stack-row" title="Lunch 2 start">
+          <span class="labor-stack-tag">S</span>
+          <input type="text" class="field-input field-input-sm labor-field" data-field="break2_start" value="${lr.break2_start || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
         </div>
-        <div class="labor-stack-row">
-          <span class="labor-stack-tag">2</span>
+        <div class="labor-stack-row" title="Lunch 2 end">
+          <span class="labor-stack-tag">E</span>
           <input type="text" class="field-input field-input-sm labor-field" data-field="break2_end"   value="${lr.break2_end   || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
         </div>
       </td>
@@ -3401,8 +3444,8 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
             ${RESTRICTED ? '' : '<th style="text-align:center"><input type="checkbox" class="labor-day-select-all" title="Select / deselect all in this day"></th>'}
             <th>POSITION</th>
             <th>IN</th>
-            <th style="white-space:nowrap">LUNCH START</th>
-            <th style="white-space:nowrap">LUNCH END</th>
+            <th style="white-space:nowrap" title="Lunch 1 — start (S) over end (E)">LUNCH 1</th>
+            <th style="white-space:nowrap" title="Lunch 2 — start (S) over end (E)">LUNCH 2</th>
             <th>OUT</th>
             <th style="white-space:nowrap">REQUESTED TECH</th>
             <th style="text-align:center" title="Scheduled by the labor scheduler">SCHED</th>
@@ -4043,7 +4086,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
   }
 
   document.addEventListener('DOMContentLoaded', () => {
-    if (INITIAL_TAB === 'staffing') { initLaborTab(); loadLaborCost(); }
+    if (INITIAL_TAB === 'staffing') { window._laborTabInited = true; initLaborTab(); loadLaborCost(); }
     // When the user changes load-in / load-out in the Advance tab, extend the
     // Labor tab with a day block for each newly-covered date and re-check
     // the show-within-range validation warning.
@@ -4166,25 +4209,83 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
   }
 
   function _psSchedRef(r) {
+    // The scheduled shift in shift order: in → lunch 1 → lunch 2 → out.
     const seg = [];
-    if (r.sched_in_time || r.sched_out_time)
-      seg.push((r.sched_in_time || '?') + '–' + (r.sched_out_time || '?'));
-    const lunch = [];
-    if (r.sched_break_start && r.sched_break_end) lunch.push(r.sched_break_start + '–' + r.sched_break_end);
-    if (r.sched_break2_start && r.sched_break2_end) lunch.push(r.sched_break2_start + '–' + r.sched_break2_end);
-    if (lunch.length) seg.push('L ' + lunch.join(', '));
-    let s = seg.join('  ');
+    if (r.sched_in_time) seg.push('In ' + r.sched_in_time);
+    if (r.sched_break_start && r.sched_break_end) seg.push('L1 ' + r.sched_break_start + '–' + r.sched_break_end);
+    if (r.sched_break2_start && r.sched_break2_end) seg.push('L2 ' + r.sched_break2_start + '–' + r.sched_break2_end);
+    if (r.sched_out_time) seg.push('Out ' + r.sched_out_time);
+    let s = seg.join(' · ');
     if (r.sched_crew_name) s = (s ? s + ' · ' : '') + r.sched_crew_name;
     return s || '—';
+  }
+
+  /* ── Settle Now (3.6.0) ──────────────────────────────────────────────────
+     Until someone presses Settle Now nothing is copied from the labor
+     schedule; the banner + button show and the Final Invoice bills no labor.
+     Afterwards the button becomes Re-sync from Schedule. */
+  function _psApplySettlement(settlement) {
+    window._psSettlement = settlement || null;
+    const settled = !!window._psSettlement;
+    const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
+    show('ps-settle-banner', !settled);
+    show('ps-settle-btn', !settled);
+    show('ps-pull-btn', settled);
+    show('ps-settled-info', settled);
+    document.querySelectorAll('.ps-empty-unsettled').forEach(el => { el.style.display = settled ? 'none' : ''; });
+    document.querySelectorAll('.ps-empty-settled').forEach(el => { el.style.display = settled ? '' : 'none'; });
+    document.querySelectorAll('.ps-unsettled-hint').forEach(el => { el.style.display = settled ? 'none' : ''; });
+    const info = document.getElementById('ps-settled-info');
+    if (info && settled) {
+      const s = window._psSettlement;
+      let text = '✓ Settled';
+      const d = s.at ? parseServerTime(s.at) : null;
+      if (d && !isNaN(d)) {
+        text += ' ' + d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) +
+                ' at ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+      }
+      if (s.by) text += ' by ' + s.by;
+      info.textContent = RESTRICTED ? text
+        : text + ' — use Re-sync from Schedule to pull in lines scheduled since.';
+    }
+  }
+
+  async function settleNow(btn) {
+    if (!confirm('Settle this show\'s labor now?\n\n' +
+                 'Pulls the labor schedule as it stands right now — who worked each position and their ' +
+                 'times — into the settlement as the starting point for billing. Do this once the show is ' +
+                 'over. Afterwards you edit the lines here; the schedule itself is never changed.')) return;
+    const btns = [document.getElementById('ps-settle-btn'), btn].filter(Boolean);
+    btns.forEach(b => { b.disabled = true; });
+    try {
+      const resp = await fetch(`/shows/${SHOW_ID}/post-show-labor/settle`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: '{}',
+      });
+      const data = await resp.json();
+      if (!data.success) { alert('Error: ' + (data.error || 'Unknown')); return; }
+      window._postShowLaborData = data.rows || [];
+      await _loadLaborPositions();
+      _psApplySettlement(data.settlement);
+      _renderPostShowLabor();
+      if (typeof showSaveToast === 'function') {
+        showSaveToast(data.already_settled
+          ? '✓ Already settled'
+          : `✓ Settled — pulled ${data.added} scheduled line${data.added === 1 ? '' : 's'}`);
+      }
+    } finally {
+      btns.forEach(b => { b.disabled = false; });
+    }
   }
 
   function _renderPostShowLabor() {
     const tbody = document.getElementById('ps-labor-tbody');
     if (!tbody) return;
     const rows = window._postShowLaborData || [];
-    // Added-hours rows need the crew list for their technician select; fetch
-    // it once and re-render when it lands (first paint shows a blank select).
-    if (!_psCrewList && rows.some(r => r.is_added_hours)) {
+    // Every row has a technician select (Worked by / added-hours technician);
+    // fetch the crew list once and re-render when it lands (first paint shows
+    // blank selects).
+    if (!_psCrewList && rows.length) {
       _loadPsCrewList().then(() => _renderPostShowLabor());
     }
     tbody.innerHTML = '';
@@ -4291,6 +4392,29 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
       ? 'Added hours — straight time, never counts toward overtime'
       : _psSchedRef(r);
     posTd.appendChild(ref);
+    if (!r.is_added_hours) {
+      // Who actually worked the line (3.6.0). Settle Now pre-fills the
+      // scheduled technician; pre-3.6.0 lines show the schedule's link until
+      // someone picks. Tracking only — never on paperwork, never changes the
+      // rate — but overtime is per technician, so it follows this pick.
+      const wb = document.createElement('div');
+      wb.className = 'ps-worked-by';
+      const lab = document.createElement('label');
+      lab.textContent = 'Worked by';
+      lab.htmlFor = 'ps-wb-' + r.id;
+      const crewSel = document.createElement('select');
+      crewSel.id = 'ps-wb-' + r.id;
+      crewSel.className = 'field-input field-input-sm';
+      crewSel.dataset.field = 'crew_member_id';
+      crewSel.title = 'Who actually worked this line. Tracking only: never printed on paperwork and ' +
+                      "doesn't change the rate — but overtime (40 h per technician per week) follows it.";
+      _buildCrewSelect(crewSel, r.crew_member_id || r.src_crew_member_id, '— not recorded —');
+      if (RESTRICTED) crewSel.disabled = true;
+      crewSel.addEventListener('change', () => _savePostShowLabor(r.id, { crew_member_id: crewSel.value || null }, tr));
+      wb.appendChild(lab);
+      wb.appendChild(crewSel);
+      posTd.appendChild(wb);
+    }
     tr.appendChild(posTd);
 
     if (r.is_added_hours) {
@@ -4322,7 +4446,8 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
       infoTd.appendChild(wrap);
       tr.appendChild(infoTd);
     } else {
-      ['in_time', 'out_time', 'break_start', 'break_end', 'break2_start', 'break2_end'].forEach(field => {
+      // Shift order, left to right: in → lunch 1 → lunch 2 → out.
+      ['in_time', 'break_start', 'break_end', 'break2_start', 'break2_end', 'out_time'].forEach(field => {
         const td = document.createElement('td');
         const inp = document.createElement('input');
         inp.type = 'text'; inp.maxLength = 5; inp.placeholder = 'HH:MM';
@@ -4564,10 +4689,10 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
     return _psCrewList;
   }
 
-  function _buildCrewSelect(sel, selectedId) {
+  function _buildCrewSelect(sel, selectedId, blankLabel) {
     sel.innerHTML = '';
     const blank = document.createElement('option');
-    blank.value = ''; blank.textContent = '— technician —';
+    blank.value = ''; blank.textContent = blankLabel || '— technician —';
     sel.appendChild(blank);
     (_psCrewList || []).forEach(m => {
       const o = document.createElement('option');
@@ -4637,6 +4762,7 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
       if (!data.success) { alert('Error: ' + (data.error || 'Unknown')); return; }
       window._postShowLaborData = data.rows || [];
       await _loadLaborPositions();
+      if (data.settlement) _psApplySettlement(data.settlement);
       _renderPostShowLabor();
       const parts = [];
       if (data.added) parts.push(`pulled ${data.added} newly-scheduled line(s)`);
@@ -4651,25 +4777,38 @@ window._postShowLaborData = {{ post_show_labor_data | tojson }};
 
   window._laborTabInited = false;
   window._postShowLaborInited = false;
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const oc = btn.getAttribute('onclick') || '';
-      if (oc.includes('staffing') && !window._laborTabInited) {
-        window._laborTabInited = true;
-        initLaborTab();
-        loadLaborCost();
-      }
-      if (oc.includes('postnotes') && !window._postShowLaborInited) {
-        window._postShowLaborInited = true;
-        initPostShowLaborTab();
-      }
-    });
-  });
+  // Lazy-init the Labor and Post-Show grids the first time their tab opens.
+  // Hooked on switchTab() itself — the one path shared by the desktop tab
+  // bar, the mobile tab strip and in-page links. (Hooking only the desktop
+  // .tab-btn clicks left both grids empty when a phone switched tabs.)
+  function _lazyInitShowTab(name) {
+    if (name === 'staffing' && !window._laborTabInited) {
+      window._laborTabInited = true;
+      initLaborTab();
+      loadLaborCost();
+    }
+    if (name === 'postnotes' && !window._postShowLaborInited) {
+      window._postShowLaborInited = true;
+      initPostShowLaborTab();
+    }
+  }
+  if (typeof window.switchTab === 'function' && !window.switchTab._lazyInit) {
+    const _switchTabBase = window.switchTab;
+    window.switchTab = function (name) {
+      const done = _switchTabBase.apply(this, arguments);
+      _lazyInitShowTab(name);
+      return done;
+    };
+    window.switchTab._lazyInit = true;
+  }
   // Deep-link / server-rendered active tab: init the grid if we land on Post-Show.
   if (INITIAL_TAB === 'postnotes' && !window._postShowLaborInited) {
     window._postShowLaborInited = true;
     initPostShowLaborTab();
   }
+  // Settle Now state (banner/button visibility is server-rendered; this fills
+  // in the "Settled <date> by <name>" line in the viewer's own time zone).
+  _psApplySettlement(window._psSettlement);
 
   // Expose helpers so switchTab() (in app.js) can refresh labor-tab state
   // when the user flips back from the Advance Sheet without forcing a reload.

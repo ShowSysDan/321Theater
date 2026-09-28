@@ -821,11 +821,11 @@ const _HELP_PAGES = {
         <li><strong>New Show</strong> — creates a show from just a name; dates, venue and everything else are filled in on its Advance Sheet.</li>
         <li><strong>Search</strong> — filters by show name or venue, across active <em>and</em> archived shows at once.</li>
         <li><strong>Date pickers</strong> — narrow the board by show date.</li>
-        <li><strong>Venue pills</strong> — toggle a whole venue column on/off.</li>
+        <li><strong>Venue pills</strong> — every venue shows by default (<strong>All venues</strong> lit). Click a venue to show <em>only</em> that venue; click more to add them, click a lit one to drop it, or <strong>All venues</strong> to reset. The archived list follows the pick too.</li>
         <li><strong>Layout / density</strong> — Columns vs Stacked, Normal vs Slim; saved to your account instantly.</li>
         <li><strong>ARCHIVED</strong> section — view, restore, or (admins) permanently delete finished shows.</li>
       </ul>
-      <p>Shows auto-archive once their last performance date passes. Card badges: <strong>EVENT</strong> (event mode), <strong>TEST</strong> (excluded from reports), and the show's Prism status tag.</p>
+      <p>A show whose last date (last performance or load-out, whichever is later) has passed stays on the board with a <strong>PAST</strong> badge — hover it to see the day it moves to the archive — and archives itself a set number of days later (3 by default; admins change it in Settings → Shows). Other card badges: <strong>EVENT</strong> (event mode), <strong>TEST</strong> (excluded from reports), and the show's Prism status tag.</p>
     `
   },
   new_show: {
@@ -869,7 +869,7 @@ const _HELP_PAGES = {
       <p>Request crew per day. Rows save individually as you edit.</p>
       <ul style="${_HELP_UL}">
         <li><strong>+ Add Day</strong> — each day block has its own date, a <strong>Day PM</strong> (covering PM for that date only), day notes, and Clone to… / Delete Day.</li>
-        <li>Rows: Position, In, Lunch 1 &amp; 2, Out, Requested Tech. <strong>SCHED and Scheduled Tech are read-only here</strong> — the Labor Scheduler sets them.</li>
+        <li>Rows read like a shift, left to right: Position, In, Lunch 1 (start over end), Lunch 2 (start over end), Out, Requested Tech. <strong>SCHED and Scheduled Tech are read-only here</strong> — the Labor Scheduler sets them.</li>
         <li><strong>Quick Fill</strong> — enter times once, then Apply to Selected / Apply to All.</li>
         <li><strong>Show Labor Notes</strong> — visible to schedulers and on the Labor Overview.</li>
         <li><strong>Per-Crew Billable Extras</strong> — pick extras (e.g. parking) and optionally fold them into the hourly rate.</li>
@@ -908,8 +908,9 @@ const _HELP_PAGES = {
       <p>What actually happened — notes and settlement.</p>
       <ul style="${_HELP_UL}">
         <li>Crew Called / Cast / Crew counts plus four notes areas (Tour/Client, House, Equipment, Misc).</li>
-        <li><strong>Actual Labor (Billing)</strong> — scheduled labor is pulled in with times pre-filled the first time you open the tab. Edit actual In/Out/lunches; hours, rate and cost recompute, overtime is broken out. <strong>Edits here bill the client and never change the labor schedule.</strong></li>
-        <li><strong>Re-sync from Schedule</strong> — pulls newly scheduled lines while keeping your edits; + Add Line for extra crew.</li>
+        <li><strong>Settle Now</strong> — nothing is copied from the labor schedule until someone presses it (normally once the show is over), so the settlement always starts from the <em>final</em> schedule: every scheduled line arrives with its position, technician and times filled in. Until then the Final Invoice bills no labor and says so.</li>
+        <li><strong>Actual Labor (Billing)</strong> — edit what actually happened: In, Lunch 1, Lunch 2, Out (left to right, like a shift); hours, rate and cost recompute, overtime is broken out. <strong>Worked by</strong> records which technician actually worked each line — tracking only, never printed on paperwork and it doesn't change the rate, but overtime (40 h per tech per week) follows it. <strong>Edits here bill the client and never change the labor schedule.</strong></li>
+        <li><strong>Re-sync from Schedule</strong> (after settling) — pulls lines scheduled since, keeping your edits; + Add Line for extra crew.</li>
         <li><strong>+ Add Hours</strong> — bill hours worked outside the schedule (e.g. prep work weeks out): pick the technician and position (the rate resolves automatically), enter the hours and a <strong>required justification</strong>. Added hours always bill at straight time and never count toward the 40 h overtime week.</li>
         <li><strong>Final Invoice PDF</strong>, <strong>Export PDF</strong> (post-show report) and <strong>Email</strong> buttons in the header.</li>
         <li>A read-only copy of the production schedule is collapsible at the bottom.</li>
@@ -932,7 +933,8 @@ const _HELP_PAGES = {
     html: `
       <p>PDF exports, their history, and file attachments.</p>
       <ul style="${_HELP_UL}">
-        <li>Export cards: <strong>Advance Sheet</strong>, <strong>Production Schedule</strong>, <strong>Post-Show Report</strong> (each with a version number and an Email button that sends to the configured recipients), <strong>Final Invoice</strong>, and <strong>Pre-Show Estimate</strong> (labor + assets quote).</li>
+        <li>Export cards: <strong>Advance Sheet</strong>, <strong>Production Schedule</strong>, <strong>Post-Show Report</strong> (each with a version number and an Email button that sends to the configured recipients), <strong>Final Invoice</strong> (warns when the show's labor hasn't been settled yet), and <strong>Pre-Show Estimate</strong> (labor + assets quote).</li>
+        <li>The Production Schedule PDF is <strong>page-aware</strong>: a day that would spill 4 or fewer rows onto the next page is tightened a step at a time so it fits on its own page (or, if it's short, moves whole to the next page).</li>
         <li><strong>Export History</strong> — the last 10 exports; Download re-fetches that exact stored PDF.</li>
         <li><strong>Attachments</strong> — + Attach File or drag-and-drop; admins can move a file to another show.</li>
         <li><strong>Advance Read By</strong> — read receipts for who has viewed the advance.</li>
@@ -946,7 +948,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li><strong>Search</strong> (name / venue / year) and a <strong>status filter</strong> (All / Active / Archived).</li>
         <li><strong>Archive</strong> hides a show from the home board — nothing is deleted; <strong>Restore</strong> brings it back.</li>
-        <li>Shows auto-archive once their last performance date passes.</li>
+        <li>Shows auto-archive a set number of days after their last date (last performance or load-out) — 3 by default. Until then they're marked <strong>PAST</strong> with the day they'll archive; admins set the number of days at the top of this page. A restored show gets the same number of days again, counted from the restore.</li>
       </ul>
     `
   },
@@ -1111,7 +1113,7 @@ const _HELP_PAGES = {
         <li><strong>Form Fields</strong> — Advance Fields, Schedule Fields, and Day Templates; drag to reorder sections and fields.</li>
         <li><strong>Job Positions / Technicians</strong> — venues, categories, positions (incl. training-only), pay rate levels, roster, and per-crew billable items.</li>
         <li><strong>Email</strong> — SMTP setup, the Advance / Production Schedule auto-emails, send-time, the Next Scheduled Send preview, and the send-error panel.</li>
-        <li><strong>System</strong> — messages (site-wide banners for chosen groups, plus <strong>Maintenance Notices</strong>: email a notice — optionally high priority — to Admins / Staff / Users / Doc Viewers, post it as a banner, then send a work-completed email), updates, branding &amp; paperwork (logos, per-venue colors — text printed on those colors picks a contrasting shade automatically, WiFi defaults, PDF time format), server &amp; logs (app port, remote syslog), backups, files (upload limit + file manager with archived-file restore/purge), database &amp; file storage (S3), AI, cluster.</li>
+        <li><strong>System</strong> — messages (site-wide banners for chosen groups, plus <strong>Maintenance Notices</strong>: email a notice — optionally high priority — to Admins / Staff / Users / Doc Viewers, post it as a banner, then send a work-completed email), updates, branding &amp; paperwork (logos, per-venue colors — text printed on those colors picks a contrasting shade automatically, or set each venue's <strong>Banner text</strong> color yourself; WiFi defaults, PDF time format), server &amp; logs (app port, remote syslog), backups, files (upload limit + file manager with archived-file restore/purge), database &amp; file storage (S3), AI, cluster.</li>
         <li>Links out to: Shows, PDF Designer, Audit Log, Performance, DB Snapshots, Dashboards, Prism Sync, Sidebar Editor, Merge Duplicates.</li>
         <li><strong>My Account</strong> — change your password. (Theme is the sun/moon button in the sidebar.)</li>
       </ul>

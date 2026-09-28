@@ -77,6 +77,28 @@
   .sched-table .desc-col { font-size: 8.5pt; }
   .sched-table .notes-col { font-size: 7.5pt; color: #555; }
 
+  /* ── Page-aware fit (3.6.0) — set by _fit_schedule_pdf() in app.py ──
+     A day that would spill 4 or fewer rows onto the next page is condensed a
+     step at a time (cz-1 → cz-3) until it fits on its own page. pb-before
+     starts a day on a fresh page: a short day that can't be condensed onto
+     the foot of a page moves over whole, and a following day goes back to a
+     fresh page (where it began before) when freed-up space would split it. */
+  .sched-table.cz-1 td { padding: 3px 7px; line-height: 1.25; }
+  .sched-table.cz-1 .time-col, .sched-table.cz-1 .desc-col { font-size: 8pt; }
+  .sched-table.cz-1 .notes-col { font-size: 7pt; }
+  .sched-table.cz-2 td { padding: 2px 6px; line-height: 1.18; }
+  .sched-table.cz-2 .time-col, .sched-table.cz-2 .desc-col { font-size: 7.5pt; }
+  .sched-table.cz-2 .notes-col { font-size: 6.75pt; }
+  .sched-table.cz-2 .day-row th { padding-top: 3px; padding-bottom: 3px; }
+  .sched-table.cz-2 .cols-row th { padding-top: 2px; padding-bottom: 2px; }
+  .sched-table.cz-3 td { padding: 1px 5px; line-height: 1.1; }
+  .sched-table.cz-3 .time-col, .sched-table.cz-3 .desc-col { font-size: 7pt; }
+  .sched-table.cz-3 .notes-col { font-size: 6.5pt; }
+  .sched-table.cz-3 .time-col .t12 { font-size: 0.72em; }
+  .sched-table.cz-3 .day-row th { padding-top: 2px; padding-bottom: 2px; }
+  .sched-table.cz-3 .cols-row th { padding-top: 1px; padding-bottom: 1px; }
+  .sched-table.pb-before { break-before: page; page-break-before: always; }
+
   /* ── Sidebar: venue/config info as a vertical column ── */
   .info-bar { display: block; margin-bottom: 10px; background: #f5f5f5; border: 1px solid #ddd; padding: 6px 9px; }
   .info-item { padding: 3px 0; border-bottom: 1px solid #e6e6e6; }
@@ -138,8 +160,14 @@
       <div class="show-name">{{ show.name }}</div>
       <div class="show-sub">
         {% if show.venue %}{{ show.venue }}{% endif %}
-        {% set _hdr_date = show.show_date or (schedule_days[0].perf.perf_date if schedule_days else None) %}
-        {% if _hdr_date %}{% if show.venue %} &nbsp;·&nbsp; {% endif %}<strong>{{ _hdr_date | dowdate or _hdr_date }}</strong>{% endif %}
+        {# Every show (performance) date, spelled out, back-to-back days
+           collapsed into ranges ("Friday, October 2 – Sunday, October 4 &
+           Friday, October 9, 2026"). No performance dates → the show date,
+           then the first schedule day. #}
+        {% set _hdr_dates = show_dates if (show_dates is defined and show_dates)
+             else [show.show_date or (schedule_days[0].perf.perf_date if schedule_days else None)] %}
+        {% set _hdr_text = _hdr_dates | showdates %}
+        {% if _hdr_text %}{% if show.venue %} &nbsp;·&nbsp; {% endif %}<strong>{{ _hdr_text }}</strong>{% endif %}
         {% if schedule_days | length > 1 %} &nbsp;·&nbsp; {{ schedule_days | length }} days{% endif %}
       </div>
       <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
@@ -157,8 +185,13 @@
   {# ── Left 2/3: the day-by-day schedule ── #}
   <div class="sched-main">
     {% if layout.visible('sched_table') %}
+    {% set _fit = sched_fit if (sched_fit is defined and sched_fit) else {} %}
     {% for day in schedule_days %}
-    <table class="sched-table" style="font-size: {{ layout.font_size('sched_table', '8.5pt') }}">
+    {# data-sched-day / data-sched-row let _fit_schedule_pdf() see which page
+       each day and row landed on; cz-N / pb-before are its fixes. #}
+    {% set _di = loop.index %}
+    {% set _cz = (_fit.get('levels') or {}).get(_di, 0) %}
+    <table class="sched-table{% if _cz %} cz-{{ _cz }}{% endif %}{% if _di in (_fit.get('breaks') or []) %} pb-before{% endif %}" data-sched-day="{{ _di }}" style="font-size: {{ layout.font_size('sched_table', '8.5pt') }}">
       <thead>
         {% if layout.visible('day_banner') and schedule_days | length > 1 %}
         {# The banner heading is the calendar date itself ("Monday - June 14th
@@ -179,7 +212,7 @@
       <tbody>
         {% for row in day.rows %}
         {% if row.description or row.start_time %}
-        <tr>
+        <tr data-sched-row="{{ _di }}-{{ loop.index }}">
           <td class="time-col">{{ row.start_time | dualtime }}</td>
           <td class="time-col">{{ row.end_time | dualtime }}</td>
           <td class="desc-col">{{ row.description or '' }}</td>
@@ -188,7 +221,7 @@
         {% endif %}
         {% endfor %}
         {% if not day.rows %}
-        <tr><td colspan="4" style="text-align:center;color:#aaa;padding:12px;">No schedule rows entered.</td></tr>
+        <tr data-sched-row="{{ _di }}-0"><td colspan="4" style="text-align:center;color:#aaa;padding:12px;">No schedule rows entered.</td></tr>
         {% endif %}
       </tbody>
     </table>

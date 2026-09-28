@@ -30,6 +30,7 @@
       are attached at the end. Shows appear on the invoice in date order.
     </p>
     <div id="sel-chips" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center"></div>
+    <p id="sel-unsettled" style="display:none;margin:0;font-size:12px;color:#f59e0b"></p>
   </div>
 </div>
 
@@ -77,6 +78,7 @@
           <td style="text-align:center">
             <input type="checkbox" class="show-check" value="{{ s.id }}"
                    data-name="{{ s.name }}" data-venue="{{ s.venue or '' }}" data-date="{{ s.first_date or '' }}"
+                   data-unsettled="{{ '0' if s.labor_settled else '1' }}"
                    onchange="onCheck(this)" onclick="event.stopPropagation()"
                    style="accent-color:var(--accent);width:15px;height:15px;cursor:pointer">
           </td>
@@ -97,6 +99,10 @@
             <span style="font-size:10px;background:rgba(239,68,68,.12);color:var(--red);padding:2px 7px;border-radius:3px;letter-spacing:.06em">ARCHIVED</span>
             {% else %}
             <span style="font-size:10px;background:rgba(34,197,94,.12);color:var(--green);padding:2px 7px;border-radius:3px;letter-spacing:.06em">ACTIVE</span>
+            {% endif %}
+            {% if not s.labor_settled %}
+            <span style="font-size:10px;background:rgba(245,158,11,.14);color:#f59e0b;padding:2px 7px;border-radius:3px;letter-spacing:.06em;margin-left:4px;white-space:nowrap"
+                  title="Labor hasn't been settled (Post-Show tab → Settle Now) — the invoice would bill no labor for this show">NOT SETTLED</span>
             {% endif %}
           </td>
         </tr>
@@ -130,7 +136,8 @@ function onCheck(cb) {
       alert('A combined invoice can include at most ' + MAX_SHOWS + ' shows.');
       return;
     }
-    selected.set(id, {name: cb.dataset.name, venue: cb.dataset.venue, date: cb.dataset.date});
+    selected.set(id, {name: cb.dataset.name, venue: cb.dataset.venue, date: cb.dataset.date,
+                      unsettled: cb.dataset.unsettled === '1'});
   } else {
     selected.delete(id);
   }
@@ -164,7 +171,8 @@ function renderSelection() {
       const chip = document.createElement('span');
       chip.style.cssText = 'display:inline-flex;align-items:center;gap:7px;background:var(--bg-hover);border:1px solid var(--border-light);border-radius:14px;padding:4px 6px 4px 11px;font-size:12px';
       const label = document.createElement('span');
-      label.textContent = s.name + (s.date ? ' · ' + s.date : '') + (s.venue ? ' · ' + s.venue : '');
+      label.textContent = (s.unsettled ? '⚠ ' : '') + s.name + (s.date ? ' · ' + s.date : '') + (s.venue ? ' · ' + s.venue : '');
+      if (s.unsettled) label.title = 'Labor not settled yet — no labor will be billed for this show';
       const x = document.createElement('button');
       x.type = 'button';
       x.textContent = '×';
@@ -175,6 +183,15 @@ function renderSelection() {
       chip.appendChild(x);
       wrap.appendChild(chip);
     });
+  }
+  const unsettled = Array.from(selected.values()).filter(s => s.unsettled).length;
+  const warn = document.getElementById('sel-unsettled');
+  if (warn) {
+    warn.style.display = unsettled ? '' : 'none';
+    warn.textContent = unsettled
+      ? `⚠ ${unsettled} selected show${unsettled === 1 ? " hasn't" : "s haven't"} had labor settled yet — ` +
+        'no labor will be billed for them. Press Settle Now on the Post-Show tab first.'
+      : '';
   }
   document.getElementById('sel-count').textContent = selected.size ? (selected.size + ' selected') : '';
   document.getElementById('generate-btn').disabled = !selected.size;

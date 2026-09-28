@@ -770,7 +770,10 @@
         Each venue's full paperwork identity in one place: a logo override (PDFs for shows at that venue
         use it instead of the organization logo, max 2 MB PNG/JPG/GIF/WebP) and its primary (structural
         navy) / secondary (accent gold) colors — lighter shades (row backgrounds, banners) are derived
-        automatically. Venues are auto-listed from existing shows; anything left unset keeps the defaults.
+        automatically. <strong>Banner text</strong> is the color printed on top of the primary-colored bars
+        (section headings, day banners, table headers, total bars); leave it on <strong>Auto</strong> to
+        have white or black picked for contrast. Venues are auto-listed from existing shows; anything
+        left unset keeps the defaults.
       </p>
       <div id="venue-branding-list">
         <p class="text-dim" style="font-size:12px">Loading…</p>
@@ -1372,9 +1375,10 @@
       <table class="schedule-table" style="margin-bottom:8px;min-width:720px">
         <thead><tr>
           <th>POSITION</th><th style="width:52px">QTY</th>
-          <th style="width:72px">IN</th><th style="width:72px">OUT</th>
+          <th style="width:72px">IN</th>
           <th style="width:72px">BRK 1 S</th><th style="width:72px">BRK 1 E</th>
           <th style="width:72px">BRK 2 S</th><th style="width:72px">BRK 2 E</th>
+          <th style="width:72px">OUT</th>
           <th style="width:120px">NOTES</th>
           <th style="width:36px"></th>
         </tr></thead>
@@ -3169,6 +3173,49 @@ function _venueLogoEsc(s) {
 const _VC_DEFAULT_PRIMARY = '#1a4a7a';
 const _VC_DEFAULT_SECONDARY = '#B8840A';
 
+// WCAG contrast — the same math as _contrast_ratio / _contrast_text in app.py,
+// so "Auto" previews exactly what the PDFs will print.
+function _vcLum(hex) {
+  const h = (hex || '#000000').replace('#', '');
+  const lin = [0, 2, 4].map(i => {
+    const c = parseInt(h.substr(i, 2), 16) / 255;
+    return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+}
+function _vcContrast(a, b) {
+  const la = _vcLum(a), lb = _vcLum(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+function _vcAutoText(bg) {
+  return _vcContrast(bg, '#ffffff') >= _vcContrast(bg, '#1a1a1a') ? '#ffffff' : '#1a1a1a';
+}
+
+// Live banner preview + contrast hint for one venue row. Called by the
+// primary / banner-text pickers and the Auto checkbox, and once per row
+// after the list renders.
+function _vcPreview(el) {
+  const row = el.closest('.venue-branding-row');
+  if (!row) return;
+  const p = row.querySelector('.vc-primary')?.value || _VC_DEFAULT_PRIMARY;
+  const txt = row.querySelector('.vc-bannertext');
+  const auto = row.querySelector('.vc-bannertext-auto');
+  if (!txt || !auto) return;
+  txt.disabled = auto.checked;
+  if (auto.checked) txt.value = _vcAutoText(p);
+  const t = txt.value;
+  const pv = row.querySelector('.vc-preview');
+  if (pv) { pv.style.background = p; pv.style.color = t; }
+  const hint = row.querySelector('.vc-contrast');
+  if (hint) {
+    const ratio = _vcContrast(t, p);
+    const low = ratio < 4.5;
+    hint.textContent = low ? `⚠ Low contrast ${ratio.toFixed(1)}:1` : `${ratio.toFixed(1)}:1`;
+    hint.style.color = low ? 'var(--danger)' : 'var(--text-dim)';
+    hint.title = low ? 'Text may be hard to read on this banner color (4.5:1 or more is recommended).' : 'Contrast ratio';
+  }
+}
+
 async function loadVenueBranding() {
   const host = document.getElementById('venue-branding-list');
   if (!host) return;
@@ -3189,11 +3236,13 @@ async function loadVenueBranding() {
       const hasColors = !!(v.primary_color || v.secondary_color);
       const p = v.primary_color || _VC_DEFAULT_PRIMARY;
       const sc = v.secondary_color || _VC_DEFAULT_SECONDARY;
+      const bt = v.banner_text_color || '';
+      const btEff = bt || v.banner_text_auto || _vcAutoText(p);
       const logoPreview = hasLogo
         ? `<img src="${v.logo_data}" alt="" style="max-height:44px;max-width:150px;border:1px solid var(--border);border-radius:4px;padding:3px;background:#fff">`
         : `<span class="text-dim" style="font-size:11px;font-style:italic">Default logo</span>`;
       const colorBadge = hasColors
-        ? `<span class="badge" style="background:${p};color:#fff;font-size:10px;padding:1px 8px;border-radius:99px;border:2px solid ${sc}">CUSTOM COLORS</span>`
+        ? `<span class="badge" style="background:${p};color:${btEff};font-size:10px;padding:1px 8px;border-radius:99px;border:2px solid ${sc}">CUSTOM COLORS</span>`
         : `<span class="text-dim" style="font-size:11px;font-style:italic">Default theme</span>`;
       const removeLogoBtn = hasLogo
         ? `<button type="button" class="btn btn-xs btn-danger-ghost" onclick="deleteVenueLogo('${nameArg}')">Remove</button>`
@@ -3216,11 +3265,24 @@ async function loadVenueBranding() {
           </div>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-left:auto">
             <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)">PRIMARY
-              <input type="color" class="vc-primary" value="${p}" style="width:44px;height:28px;padding:1px;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer">
+              <input type="color" class="vc-primary" value="${p}" oninput="_vcPreview(this)" style="width:44px;height:28px;padding:1px;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer">
             </label>
             <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)">SECONDARY
               <input type="color" class="vc-secondary" value="${sc}" style="width:44px;height:28px;padding:1px;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer">
             </label>
+            <span style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)"
+                  title="Text printed on the primary-colored bars (section headings, day banners, table headers, total bars). Auto picks white or black for contrast.">
+              <label style="display:flex;align-items:center;gap:6px">BANNER TEXT
+                <input type="color" class="vc-bannertext" value="${btEff}" ${bt ? '' : 'disabled'}
+                       oninput="_vcPreview(this)" style="width:44px;height:28px;padding:1px;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer">
+              </label>
+              <label style="display:flex;align-items:center;gap:3px;cursor:pointer">
+                <input type="checkbox" class="vc-bannertext-auto" ${bt ? '' : 'checked'} onchange="_vcPreview(this)" style="accent-color:var(--accent)">Auto
+              </label>
+            </span>
+            <span class="vc-preview" title="Preview of a paperwork banner"
+                  style="display:inline-block;background:${p};color:${btEff};font-size:10px;font-weight:700;letter-spacing:.08em;padding:5px 9px;border-radius:3px;white-space:nowrap">BANNER TEXT</span>
+            <span class="vc-contrast" style="font-size:11px"></span>
             <button type="button" class="btn btn-sm btn-primary" onclick="saveVenueColors(this, '${nameArg}')">Save Colors</button>
             ${hasColors ? `<button type="button" class="btn btn-sm btn-ghost" onclick="clearVenueColors('${nameArg}')" title="Back to the default theme">Reset</button>` : ''}
           </div>
@@ -3228,6 +3290,7 @@ async function loadVenueBranding() {
         <span class="venue-branding-msg field-msg" style="display:none;font-size:11px;margin-top:6px"></span>
       </div>`;
     }).join('');
+    host.querySelectorAll('.venue-branding-row .vc-primary').forEach(_vcPreview);
   } catch (e) {
     host.innerHTML = '<p class="text-dim" style="font-size:12px;color:#F56565">Failed to load venue list.</p>';
   }
@@ -3282,12 +3345,16 @@ async function saveVenueColors(btn, venueName) {
   const row = btn.closest('.venue-branding-row');
   const primary = row.querySelector('.vc-primary')?.value || '';
   const secondary = row.querySelector('.vc-secondary')?.value || '';
+  // Auto → blank (the server keeps choosing a contrasting color).
+  const bannerText = row.querySelector('.vc-bannertext-auto')?.checked
+    ? '' : (row.querySelector('.vc-bannertext')?.value || '');
   btn.disabled = true;
   try {
     const r = await fetch('/settings/venue-colors', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({venue: venueName, primary_color: primary, secondary_color: secondary})
+      body: JSON.stringify({venue: venueName, primary_color: primary, secondary_color: secondary,
+                            banner_text_color: bannerText})
     });
     const d = await r.json();
     _vbMsg(btn, d.success ? '✓ Saved — new exports use these colors' : (d.error || 'Save failed'), !!d.success);

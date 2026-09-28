@@ -795,6 +795,24 @@ html[data-theme="light"] select.field-input {
 }
 .show-card.show-card-test { border-style: dashed; }
 
+/* ── Past-Show Badge (3.6.0) ─────────────────────────────────────────
+   An active show whose last date has gone by stays on the dashboard for the
+   auto-archive grace period (Settings → Shows); the badge says so, and its
+   tooltip gives the day it archives. */
+.past-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 0 5px;
+  border-radius: 3px;
+  letter-spacing: .06em;
+  background: rgba(148,163,184,.16);
+  border: 1px solid rgba(148,163,184,.45);
+  color: var(--text-dim);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
 /* ── Event-Mode Accent ───────────────────────────────────────────────
    Event-mode shows swap the orange home accent for teal. Overriding the
    local --accent/--accent-dim means the card's left border + hover state

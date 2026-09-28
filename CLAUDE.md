@@ -251,7 +251,9 @@ apps. For a 321Theater access change, use this app's own flags instead
 - **Overtime:** >40h per technician per Monday–Sunday work week (within a
   show/event; the accumulator resets each Monday) bills at 1.5×, split by
   `_allocate_overtime()` with tech identity from `_ot_shift_key()` (crew id →
-  requested name → per-position day-slot). The 1.5× premium applies to the
+  requested name → per-position day-slot; on settlement actuals the crew id is
+  the line's "Worked by" `post_show_labor.crew_member_id`, falling back to
+  the schedule link). The 1.5× premium applies to the
   labor rate ONLY — per-crew billable extras (parking), including the
   fold-into-rate "hidden" mode, ride on OT hours at 1× and must never be
   multiplied. Training shifts neither bill nor accrue OT hours.
@@ -269,6 +271,57 @@ apps. For a 321Theater access change, use this app's own flags instead
   schedule templates' client-side DOM apply, because labor rows autosave
   individually (no bulk form save exists to catch a half-applied day).
   Presets never delete or alter existing requests.
+- **Settle Now (3.6.0) — never auto-snapshot the settlement again.** Nothing
+  copies `labor_requests` into `post_show_labor` until a person presses
+  Settle Now (`POST …/post-show-labor/settle`) or Re-sync (`…/pull`), both via
+  `_pull_and_mark_settled()` (row-locks the show so a double press can't pull
+  a line twice). The old first-access `_ensure_post_show_labor()` (show page,
+  Final + Combined Invoice) snapshotted weeks early and later schedule changes
+  never reached the settlement — it is gone; don't add a pull to any read
+  path. "Settled" = `shows.labor_settled_at` set OR the pre-3.6.0 marker
+  (`post_show_notes` `_PSL_INIT_KEY`) — `_post_show_settlement()` /
+  `_unsettled_show_ids()`. An unsettled show's Final / Combined Invoice bills
+  NO labor and prints "Labor not settled yet". The one-time upgrade
+  (`init_db._settle_now_upgrade`, gated on `labor_settled_at` being created)
+  cleared only untouched automatic snapshots on shows not yet happened
+  (POST_SHOW_LABOR_RESET audit rows) and marked every other show with
+  settlement data settled.
+- **Worked by** = `post_show_labor.crew_member_id` on every line (added-hours
+  lines already used it as their technician). Pulls pre-fill it with the
+  scheduled crew member. Tracking only: never on paperwork, and changing it
+  on a regular line never re-resolves the rate (added-hours lines still do).
+- **Labor times always read like a shift, left to right: In → Lunch 1 start →
+  Lunch 1 end → Lunch 2 start → Lunch 2 end → Out** — every grid, form, quick
+  fill, preset modal, the Post-Show grid and the labor PDFs (In | Breaks |
+  Out). The compact grids (Labor Requests tab, Labor Scheduler, Overhead
+  Crew) stack each lunch's start (S) over its end (E) in one column per
+  lunch; keep DOM/Tab order in that same sequence.
+
+## Production schedule PDF is page-aware (3.6.0)
+- `_fit_schedule_pdf()` lays the schedule out with WeasyPrint, reads which
+  page every day/row landed on from the box tree (`<table data-sched-day>`,
+  `<tr data-sched-row>` in schedule_pdf.html), and fixes days in document
+  order: a day spilling 1–4 rows (a row cut in half counts) is condensed a
+  step at a time (`cz-1`…`cz-3`); a short day stranded at a page foot that
+  can't be condensed moves whole to the next page (`pb-before`) only if it
+  then fits and nothing later gets worse; a day earlier fixes pulled up into
+  a split goes back to a fresh page. Invariant (fuzz-tested): no fix ever
+  creates a new split, more spill, or an extra page. ≤10 layout passes.
+- The content hash is taken on the UN-fitted HTML (the fit is a pure
+  function of it), so export reuse still works. `page._page_box` is
+  WeasyPrint-internal: an AttributeError falls back to the plain, un-fitted
+  PDF — keep that fallback so an upgrade can't break schedule exports.
+
+## Show auto-archive grace + PAST badge (3.6.0)
+- `auto_archive_past_shows()` archives when GREATEST(max perf date, load-out,
+  show_date) < today − `auto_archive_days` (app_settings, default 3, 0–365,
+  Settings → Shows, admin) and `shows.restored_on` (stamped by a manual
+  restore) is older than that too. Undated performance or no dates → never.
+  `_show_last_date()` / `_show_archive_on()` feed the dashboard PAST badge and
+  the Shows list's "archives <date>" — keep them in step with the SQL.
+- Past-dated active shows stay active for the grace days, so anything that
+  selects `status='active'` sees them: side-effecting jobs must keep their own
+  date guards (the email/no-labor planners require days_until ≥ 0).
 
 ## Show file attachments — deletion is ARCHIVE, never destroy (2.36.0)
 - `show_attachments` soft-deletes: `deleted_at`/`deleted_by` stamp the row,
@@ -364,6 +417,11 @@ apps. For a 321Theater access change, use this app's own flags instead
   `/settings/venue-colors` — hex-validated, blank-both = delete row). Colors
   land in the rendered HTML, so the export content-hash correctly cuts a new
   PDF version when a venue's colors change.
+- `venue_colors.banner_text_color` (3.6.0, '' = Auto): overrides the palette's
+  `on_primary` (text on the primary bars) and derives `on_primary_soft` from
+  it; used exactly as picked, even at low contrast (the panel warns). Every
+  on-bar text in the templates must go through `C1_ON` / `C1_ON_SOFT` so the
+  setting reaches it. Blank keeps today's automatic output byte-identical.
 
 ## Optional feature modules (`APP_MODULES` + Settings → System → Modules)
 - `APP_MODULES` registry + `module_enabled(key)` in app.py; flags live in
@@ -572,6 +630,10 @@ that is deliberate (no dual-maintenance drift). What switches:
   don't put desktop styles in mobile.css.
 - The "Switch to mobile/desktop site" links live in the sidebar/drawer
   footer next to the version number (`setSiteMode()` in base.html).
+- The mobile tab strip calls `switchTab()` directly, never the desktop
+  `.tab-btn` buttons — so show-page lazy init must hook `switchTab()` (see
+  `_lazyInitShowTab` in show.html, 3.6.0). Hooking only `.tab-btn` clicks left
+  the Labor and Post-Show grids empty on phones.
 
 **Rule for future UI changes: any change to templates, style.css, or app.js
 UI behavior must be checked in BOTH modes** (append `?site=mobile` /
