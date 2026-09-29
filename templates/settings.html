@@ -644,6 +644,8 @@
       <p class="text-dim" style="font-size:12px;margin-bottom:4px">
         Send audit events (logins, saves, exports, user changes) to a remote syslog server via UDP.
         Requires the syslog server to accept UDP on the configured port.
+        Each line carries the app name 321Theater and this server's hostname.
+        Changes reach every server within a minute.
       </p>
       <form onsubmit="event.preventDefault(); saveSyslogSettings(this)" style="max-width:440px">
         <div class="field-group">
@@ -673,6 +675,15 @@
             <option value="{{ fac }}" {% if syslog_settings.get('syslog_facility','LOG_LOCAL0') == fac %}selected{% endif %}>{{ fac }}</option>
             {% endfor %}
           </select>
+        </div>
+        <div class="field-group">
+          <label class="field-label">MESSAGE FORMAT</label>
+          {% set _syslog_fmt = syslog_settings.get('syslog_format') %}
+          <select name="syslog_format" class="field-input">
+            <option value="rfc3164" {% if _syslog_fmt != 'rfc5424' %}selected{% endif %}>BSD (RFC 3164)</option>
+            <option value="rfc5424" {% if _syslog_fmt == 'rfc5424' %}selected{% endif %}>IETF (RFC 5424)</option>
+          </select>
+          <p class="field-hint" style="font-size:11px">BSD suits most syslog servers. If yours shows these lines with no app name, try IETF.</p>
         </div>
         <div class="syslog-save-msg field-msg"></div>
         <button type="submit" class="btn btn-primary">Save Syslog Settings</button>

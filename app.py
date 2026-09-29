@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.6.2'
+APP_VERSION = '3.6.3'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -874,6 +874,11 @@ DEPARTMENTS = ['Production', 'Programming', 'Event Manager', 'Education Team',
 
 # ─── Syslog ───────────────────────────────────────────────────────────────────
 
+# The app name every line carries, on stderr and on the remote collector.
+# The logger keeps its ShowAdvance-era name because db_adapter, app_config
+# and s3_storage log through it by that name; the name never reaches the
+# output.
+SYSLOG_APP_NAME = '321Theater'
 syslog_logger = logging.getLogger('showadvance')
 syslog_logger.setLevel(logging.INFO)
 # Always emit to stderr so events land in journalctl / docker logs /
@@ -881,57 +886,120 @@ syslog_logger.setLevel(logging.INFO)
 # layered on top when Settings → Syslog is configured. Without this,
 # every syslog_logger.info() call disappeared into a NullHandler when
 # remote forwarding wasn't enabled — which is the default.
-# One line format for stderr and the remote collector. A TEST_MODE server
+# One message body for stderr and the remote collector. A TEST_MODE server
 # tags every line so its events can't be mistaken for production's.
-_SYSLOG_FORMAT = ('showadvance: ' + (f'{TEST_INSTANCE_TAG} ' if TEST_MODE else '')
+_SYSLOG_FORMAT = ((f'{TEST_INSTANCE_TAG} ' if TEST_MODE else '')
                   + '%(levelname)s %(message)s')
 _syslog_stream_handler = logging.StreamHandler()
-_syslog_stream_handler.setFormatter(logging.Formatter(_SYSLOG_FORMAT))
+_syslog_stream_handler.setFormatter(
+    logging.Formatter(f'{SYSLOG_APP_NAME}: {_SYSLOG_FORMAT}'))
 syslog_logger.addHandler(_syslog_stream_handler)
 # Keep at least one no-op handler around in case something later strips
 # the stream handler — prevents "No handlers could be found" warnings.
 syslog_logger.addHandler(logging.NullHandler())
 syslog_logger.propagate = False  # don't double-log through the root logger
 _syslog_handler = None
+_syslog_applied = None   # the syslog_* settings _syslog_handler was built from
+_syslog_failed = None    # settings whose handler failed (logged once, retried)
+_syslog_reload_lock = threading.Lock()
+
+# Settings → Syslog → Message Format. BSD is the default: every collector
+# reads it (it is what rsyslog forwards).
+SYSLOG_FORMATS = ('rfc3164', 'rfc5424')
+_SYSLOG_MONTHS = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
+
+
+class _SyslogWireFormatter(logging.Formatter):
+    """A remote syslog line: a complete header, then the stderr body.
+
+    SysLogHandler adds only <PRI>. A collector that finds no timestamp and
+    hostname after it can't split out the app name, so lines used to land
+    with a blank APP column and 'showadvance: ' glued onto the message.
+      rfc3164: <PRI>Sep 29 07:43:37 host 321Theater: INFO LOGIN ...
+      rfc5424: <PRI>1 2026-09-29T07:43:37.123-04:00 host 321Theater 4242 - - INFO LOGIN ...
+    """
+
+    def __init__(self, wire_format):
+        super().__init__(_SYSLOG_FORMAT)
+        self.wire_format = wire_format
+        # Printable ASCII only: a space would shift every later header field.
+        self.host = ''.join(c for c in socket.gethostname()
+                            if '!' <= c <= '~')[:255] or 'localhost'
+
+    def format(self, record):
+        body = super().format(record)
+        if self.wire_format == 'rfc5424':
+            ts = (datetime.fromtimestamp(record.created).astimezone()
+                  .isoformat(timespec='milliseconds'))
+            return (f'1 {ts} {self.host} {SYSLOG_APP_NAME} '
+                    f'{record.process or "-"} - - {body}')
+        # Local time with English month names whatever the locale, and the
+        # day padded with a space ('Oct  3'), as RFC 3164 spells it.
+        t = self.converter(record.created)
+        return (f'{_SYSLOG_MONTHS[t.tm_mon - 1]} {t.tm_mday:2d} '
+                f'{t.tm_hour:02d}:{t.tm_min:02d}:{t.tm_sec:02d} '
+                f'{self.host} {SYSLOG_APP_NAME}: {body}')
 
 
 def reload_syslog_handler():
-    """Read syslog settings from DB and reconfigure the handler."""
-    global _syslog_handler
-    try:
-        db = get_db()
-        rows = db.execute(
-            "SELECT key, value FROM app_settings WHERE key LIKE 'syslog_%'"
-        ).fetchall()
-        db.close()
-    except Exception:
-        return
-    settings = {r['key']: r['value'] for r in rows}
+    """Build the remote syslog handler from the syslog_* settings.
 
-    if _syslog_handler:
-        syslog_logger.removeHandler(_syslog_handler)
-        _syslog_handler.close()
-        _syslog_handler = None
+    Runs at startup, after a save, and once a minute in every worker
+    (start_scheduler's syslog_settings_refresh): a save reaches only the
+    worker that served it, so the others pick it up from the database.
+    Unchanged settings leave the handler alone. If PostgreSQL can't be
+    read, the current handler stays as it is."""
+    global _syslog_handler, _syslog_applied, _syslog_failed
+    with _syslog_reload_lock:
+        try:
+            db = get_db()
+            try:
+                rows = db.execute(
+                    "SELECT key, value FROM app_settings WHERE key LIKE 'syslog_%'"
+                ).fetchall()
+            finally:
+                db.close()
+        except Exception:
+            return
+        settings = {r['key']: r['value'] for r in rows}
+        if settings == _syslog_applied:
+            return
 
-    if settings.get('syslog_enabled') != '1':
-        return
+        if _syslog_handler:
+            syslog_logger.removeHandler(_syslog_handler)
+            _syslog_handler.close()
+            _syslog_handler = None
 
-    host = settings.get('syslog_host', '127.0.0.1')
-    try:
-        port = int(settings.get('syslog_port', 514))
-    except ValueError:
-        port = 514
-    facility_name = settings.get('syslog_facility', 'LOG_LOCAL0')
-    facility = getattr(logging.handlers.SysLogHandler, facility_name,
-                       logging.handlers.SysLogHandler.LOG_LOCAL0)
-    try:
-        _syslog_handler = logging.handlers.SysLogHandler(
-            address=(host, port), facility=facility
-        )
-        _syslog_handler.setFormatter(logging.Formatter(_SYSLOG_FORMAT))
-        syslog_logger.addHandler(_syslog_handler)
-    except Exception as e:
-        app.logger.error(f'Failed to configure syslog: {e}')
+        if settings.get('syslog_enabled') != '1':
+            _syslog_applied, _syslog_failed = settings, None
+            return
+
+        host = settings.get('syslog_host') or '127.0.0.1'
+        try:
+            port = int(settings.get('syslog_port', 514))
+        except (TypeError, ValueError):
+            port = 514
+        facility_name = settings.get('syslog_facility', 'LOG_LOCAL0')
+        facility = getattr(logging.handlers.SysLogHandler, facility_name,
+                           logging.handlers.SysLogHandler.LOG_LOCAL0)
+        wire_format = settings.get('syslog_format')
+        if wire_format not in SYSLOG_FORMATS:
+            wire_format = 'rfc3164'
+        try:
+            handler = logging.handlers.SysLogHandler(
+                address=(host, port), facility=facility
+            )
+        except Exception as e:
+            # e.g. the host name doesn't resolve yet: retried every minute.
+            if settings != _syslog_failed:
+                app.logger.error(f'Failed to configure syslog: {e}')
+            _syslog_failed = settings
+            return
+        handler.append_nul = False   # a UDP datagram needs no terminator
+        handler.setFormatter(_SyslogWireFormatter(wire_format))
+        syslog_logger.addHandler(handler)
+        _syslog_handler, _syslog_applied, _syslog_failed = handler, settings, None
 
 
 # ─── App Settings Helper ──────────────────────────────────────────────────────
@@ -3570,6 +3638,14 @@ def start_scheduler():
         scheduler.add_job(run_hourly_backup, 'interval', hours=1, id='hourly_backup')
         scheduler.add_job(run_daily_backup, 'cron', hour=0, minute=0, id='daily_backup')
         scheduler.add_job(run_hourly_maintenance, 'interval', hours=1, id='hourly_maintenance')
+        # Syslog settings: NOT leader-gated — every worker owns its own
+        # handler. A save reconfigures only the worker that served it; the
+        # others pick the change up here within a minute. The grace window
+        # lets a tick a busy worker runs late still run, instead of being
+        # dropped with a "missed" warning in the journal.
+        scheduler.add_job(reload_syslog_handler, 'interval', minutes=1,
+                          id='syslog_settings_refresh', misfire_grace_time=30,
+                          coalesce=True)
         # PDF emails: leader-gated inside run_scheduled_pdf_emails() so
         # recipients never receive a duplicate when multiple instances run.
         # cron (top of every hour) — not interval — so the run aligns to the
@@ -11244,8 +11320,11 @@ def save_syslog_settings():
         'LOG_USER', 'LOG_DAEMON', 'LOG_SYSLOG', 'LOG_AUTH']
     if data.get('syslog_facility') and data['syslog_facility'] not in valid_facilities:
         return jsonify({'success': False, 'error': 'Invalid syslog facility.'}), 400
+    if data.get('syslog_format') and data['syslog_format'] not in SYSLOG_FORMATS:
+        return jsonify({'success': False, 'error': 'Invalid syslog message format.'}), 400
     db = get_db()
-    for key in ('syslog_host', 'syslog_port', 'syslog_facility', 'syslog_enabled'):
+    for key in ('syslog_host', 'syslog_port', 'syslog_facility', 'syslog_enabled',
+                'syslog_format'):
         if key in data:
             db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                        (key, str(data[key])))

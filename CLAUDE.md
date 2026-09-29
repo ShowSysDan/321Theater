@@ -193,10 +193,31 @@ server may share production's database, so it must never act for production:
   are logged to email_outbox_log as not sent; returns False when nobody is
   left so callers never write a "sent"/dedup row. Never add a send path that
   bypasses `_send_email()`.
-- Syslog keeps forwarding; `_SYSLOG_FORMAT` prefixes every line with
-  `[TEST INSTANCE]` (stderr + remote handler).
+- Syslog keeps forwarding; `_SYSLOG_FORMAT` (the message body both the
+  stderr and the remote handler use) starts every message with
+  `[TEST INSTANCE]`.
 - UI: `test_mode` from `inject_version()` → badges in base.html (sidebar,
   rail, mobile header), login.html, `[TEST]` title prefix.
+
+## Syslog — full header, app name 321Theater (3.6.3)
+- `syslog_logger` is logger `'showadvance'`: the name is kept because
+  db_adapter / app_config / s3_storage log through it by that name, and it
+  never reaches the output. stderr line: `321Theater: ` + `_SYSLOG_FORMAT`.
+- The remote handler is a UDP `SysLogHandler`, which adds only `<PRI>`, so
+  `_SyslogWireFormatter` writes the rest of the header: `rfc3164` (default)
+  `Mmm dd hh:mm:ss host 321Theater: body` or `rfc5424`
+  `1 <ISO ts> host 321Theater <pid> - - body` (app_setting `syslog_format`,
+  Settings → Server & Logs → Syslog). Without a timestamp + hostname a
+  collector can't split out the app name: until 3.6.3 the APP column was
+  blank and `showadvance:` sat in the message. Keep the name in
+  `SYSLOG_APP_NAME`, month names English (never `%b`, it's locale-bound),
+  `append_nul = False`.
+- A save reconfigures only the worker that served it, so every worker
+  re-reads the `syslog_%` settings once a minute (`syslog_settings_refresh`
+  job, NOT leader-gated: the handler is per-process) and rebuilds only when
+  they changed, under `_syslog_reload_lock`. A DB outage keeps the current
+  handler; a handler that fails to build is retried every tick and logged
+  once per settings value.
 
 ## PDF rendering (WeasyPrint) — always pass the shared font config
 Every `HTML(...).write_pdf(...)` must pass `font_config=_wp_font_config()`
