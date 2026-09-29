@@ -281,6 +281,7 @@ APP_SETTINGS_SEED = [
     ('syslog_host',           '127.0.0.1'),
     ('syslog_port',           '514'),
     ('syslog_facility',       'LOG_LOCAL0'),
+    ('syslog_format',         'rfc3164'),
     # Venue list (JSON array)
     ('venue_list',            json.dumps(["Judson's Live", "Walt Disney Theater", "Alexis & Jim Pugh Theater", "Dr. Phillips CenterStage"])),
     # WiFi defaults
