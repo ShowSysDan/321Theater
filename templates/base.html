@@ -1060,15 +1060,18 @@ const _HELP_PAGES = {
   reports: {
     title: 'Reports',
     html: `
-      <p><strong>Reports across the whole app.</strong> The filter bar (date range on each show's date, venue, Arts Group) applies to every tab; test/demo shows are left out. You see the tabs your permissions allow.</p>
+      <p><strong>Reports across the whole app.</strong> The filter bar (date range on each show's date, venue, Arts Group) applies to every tab; test/demo shows are left out. <strong>More filters</strong> narrows to one show, shows that had an item or category booked (groups count their child items, systems their components), or used a job position or technician. You see the tabs your permissions allow.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Overview</strong> — shows by venue / month / status and the money by area: assets, external costs, settled labor, piano tunings.</li>
-        <li><strong>Arts Groups</strong> — per company: shows, how often they rented gear (lines, units, unit-days), their top items and what they spent. Click a row for every item they rented and their shows.</li>
-        <li><strong>Assets</strong> — per item type: times rented, shows, unit-days, revenue, last use, units owned and (with a date range) utilization. Idle gear is listed too. Click a row for the individual units (bookings pinned to a unit, maintenance and log history).</li>
-        <li><strong>Rental Lines</strong> — every asset line with its own category / type filters and CSV export (the old Asset Reports page).</li>
-        <li><strong>Labor &amp; Techs</strong> — per technician: shows, scheduled shifts and hours, actual hours from settlements, training and overhead shifts; per position: requested vs filled.</li>
-        <li><strong>Piano Tuning</strong> — tunings and cost by vendor and by piano.</li>
-        <li>Labor money is the settlement (Final Invoice) figure, so only settled shows count. Every table has <strong>CSV</strong>.</li>
+        <li><strong>Overview</strong>: shows by venue, month and status, the money by area (assets, external costs, settled labor, piano tunings), and the list of matching shows.</li>
+        <li><strong>Arts Groups</strong>: for each company, its shows, how often it rented gear, its top items and what it spent. Click a row for every item it rented and its shows.</li>
+        <li><strong>Assets</strong>: for each item type, times rented, unit-days, revenue, last use and utilization; idle gear is listed too. Click a row for the individual units.</li>
+        <li><strong>Rental Lines</strong>: every asset line, with category and type filters.</li>
+        <li><strong>Labor &amp; Techs</strong>: for each technician, scheduled, settled, training and overhead shifts and hours; for each position, requested against filled.</li>
+        <li><strong>Labor Lines</strong>: every shift, with its scheduled tech and, once settled, the actual times and Worked by. Example: Had item = a projector plus Position = Video Tech lists who was the video tech.</li>
+        <li><strong>Break Exceptions</strong>: settled shifts whose lunch was not taken, shorter or longer than scheduled, added, or moved, broken down by tech, position and show.</li>
+        <li><strong>Estimate vs Settlement</strong>: for each settled show, labor estimate against the Final Invoice labor, biggest increases first.</li>
+        <li><strong>Piano Tuning</strong>: tunings and cost by vendor, month, Arts Group, requester and piano.</li>
+        <li><strong>PDF</strong> prints the current tab with its filters (the drill-down dialogs have their own PDF button). Every table has <strong>CSV</strong>. Labor money is always the settlement figure, so only settled shows count.</li>
       </ul>
     `
   },
@@ -1110,8 +1113,10 @@ const _HELP_PAGES = {
     html: `
       <p>Per-page response times and DB query timing — is anything getting slower as the data grows?</p>
       <ul style="${_HELP_UL}">
-        <li>Pick a period (7 days → 3 years); tiles show requests, avg response, avg DB time, and DB share.</li>
-        <li>Daily stacked chart of DB vs app time; a per-page table with min/max and each page's slowest query (click to see the SQL).</li>
+        <li><strong>History</strong>: pick a period (Today, 7 days to 3 years, or a custom range). Tiles show requests, avg response, avg DB time and DB share, with a daily DB-vs-app chart and a per-page table (click a slowest query to see its SQL).</li>
+        <li><strong>Day / hours</strong>: one day, hour by hour, for any hour window (hourly detail is kept 90 days).</li>
+        <li><strong>Live</strong>: every request as it happens, from every server, with filter, Hide polling, ≥ 250 ms, Pause and Clear. Capture runs only while this view is open and switches itself off 10 minutes after you leave.</li>
+        <li><strong>Reset stats…</strong>: clears the stats for a date range or everything, to start a clean measurement (audit-logged).</li>
         <li>Slowest individual queries are kept for 90 days. Stats flush from memory about once a minute.</li>
       </ul>
     `
@@ -1229,6 +1234,7 @@ const _HELP_PAGES = {
         <li><strong>Vendors</strong> — the vendor list with each one's typical price, contact and notes. Picking a vendor in Manage fills an empty cost with its typical price. Archive a vendor to drop it from the list; past tunings keep it.</li>
         <li><strong>Manage</strong> — vendor, tuning date + start time, cost, paperwork and notes. Setting the tuning date marks it <strong>Scheduled</strong>, puts a read-only 🎹 row on that day of the show's production schedule and emails the requester.</li>
         <li><strong>Cost</strong> appears on the show's <strong>Final Invoice</strong> and the Combined Invoice under External Assets &amp; Costs. Cancelled tunings are never billed and their schedule row is removed.</li>
+        <li>The <strong>bell</strong> notifies you of new requests, PM changes and cancellation requests. Click one to open that tuning. Requesters get a notification when their tuning is scheduled, moved, completed or cancelled.</li>
       </ul>
     `
   },

@@ -2759,6 +2759,11 @@ async function refreshNotifBadge() {
   } catch (e) { /* ignore — offline / not authenticated */ }
 }
 
+const _NOTIF_KIND_LABELS = {
+  asset_approval: 'Asset approval', piano_tuning: 'Piano tuning',
+  field_alert: 'Advance change', no_labor_alert: 'Labor', mention: 'Mention', system: 'System',
+};
+
 async function _loadNotifPanel() {
   const list = document.getElementById('notif-panel-list');
   if (!list) return;
@@ -2778,7 +2783,7 @@ async function _loadNotifPanel() {
         const inner = `
           <div class="notif-item-title">${titleHtml}</div>
           ${bodyHtml}
-          <div class="notif-item-meta">${_escNotif(t)} · ${_escNotif(n.kind)}</div>
+          <div class="notif-item-meta">${_escNotif(t)} · ${_escNotif(_NOTIF_KIND_LABELS[n.kind] || n.kind)}</div>
         `;
         if (n.link_url) {
           return `<a href="${_escNotif(n.link_url)}" class="${cls}" data-nid="${n.id}" onclick="markNotifRead(${n.id})">${inner}</a>`;

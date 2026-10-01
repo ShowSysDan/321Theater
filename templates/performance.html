@@ -12,20 +12,102 @@
     <h1 class="page-title">Performance</h1>
     <p class="page-sub">Per-page response times and database query timing — is anything getting slower as the data grows?</p>
   </div>
-  <a href="{{ url_for('settings') }}" class="btn btn-secondary">← Settings</a>
+  <a href="{{ url_for('settings') }}" class="btn btn-ghost">← Settings</a>
 </div>
 
+{# ── View tabs (3.14.0) ───────────────────────────────────────────────────── #}
+<div class="perf-views" role="tablist">
+  <a href="{{ url_for('performance_view') }}" class="perf-view {{ 'active' if view == 'history' }}">History</a>
+  <a href="{{ url_for('performance_view', view='day', date=today) }}" class="perf-view {{ 'active' if view == 'day' }}">Day / hours</a>
+  <a href="{{ url_for('performance_view', view='live') }}" class="perf-view {{ 'active' if view == 'live' }}">
+    Live{% if live_on %} <span class="perf-live-dot" title="Live capture is on"></span>{% endif %}</a>
+  <button type="button" class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="perfToggleReset()">Reset stats…</button>
+</div>
+
+<div id="perf-reset" class="form-section" style="display:none;margin-bottom:1.25rem">
+  <div class="form-section-header"><span class="section-icon">◈</span> RESET PERFORMANCE STATS</div>
+  <div class="form-section-body">
+    <p class="text-dim" style="margin:0 0 .6rem;font-size:.85rem">Deletes the daily and hourly page stats, slow queries and live log for the
+      chosen days, so you can start a clean measurement after a change. Stats still buffered in a worker
+      (up to about a minute old) land afterwards. Recorded in the audit log.</p>
+    <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+      <input type="date" id="perf-reset-from" class="field-input field-input-sm" value="{{ today }}" style="width:140px">
+      <span class="text-dim">–</span>
+      <input type="date" id="perf-reset-to" class="field-input field-input-sm" value="{{ today }}" style="width:140px">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="perfReset('range')">Reset these days</button>
+      <button type="button" class="btn btn-danger-ghost btn-sm" onclick="perfReset('all')">Reset everything</button>
+    </div>
+  </div>
+</div>
+
+{% if view == 'history' %}
 {# ── Period selector ──────────────────────────────────────────────────────── #}
-<div style="display:flex;gap:.5rem;margin-bottom:1.25rem;flex-wrap:wrap">
-  {% for d, label in [(7, '7 days'), (30, '30 days'), (90, '90 days'), (365, '1 year'), (1095, '3 years')] %}
+<div class="perf-range">
+  {% for d, label in [(1, 'Today'), (7, '7 days'), (30, '30 days'), (90, '90 days'), (365, '1 year'), (1095, '3 years')] %}
   <a href="{{ url_for('performance_view', days=d) }}"
-     class="btn {{ 'btn-primary' if days == d else 'btn-secondary' }} btn-sm">{{ label }}</a>
+     class="btn {{ 'btn-primary' if days == d else 'btn-ghost' }} btn-sm">{{ label }}</a>
   {% endfor %}
+  <form method="get" class="perf-range-form">
+    <input type="date" name="from" class="field-input field-input-sm" value="{{ d_from }}" style="width:140px" aria-label="From">
+    <span class="text-dim">–</span>
+    <input type="date" name="to" class="field-input field-input-sm" value="{{ d_to }}" style="width:140px" aria-label="To">
+    <button class="btn {{ 'btn-primary' if not days else 'btn-ghost' }} btn-sm">Apply range</button>
+  </form>
 </div>
+{% elif view == 'day' %}
+<form method="get" class="perf-range">
+  <input type="hidden" name="view" value="day">
+  <input type="date" name="date" class="field-input field-input-sm" value="{{ day }}" style="width:150px" aria-label="Day">
+  <select name="h_from" class="field-input field-input-sm" style="width:auto" aria-label="From hour">
+    {% for h in range(24) %}<option value="{{ h }}" {{ 'selected' if h == h_from }}>{{ '%02d'|format(h) }}:00</option>{% endfor %}
+  </select>
+  <span class="text-dim">to</span>
+  <select name="h_to" class="field-input field-input-sm" style="width:auto" aria-label="To hour">
+    {% for h in range(24) %}<option value="{{ h }}" {{ 'selected' if h == h_to }}>{{ '%02d'|format(h) }}:59</option>{% endfor %}
+  </select>
+  <button class="btn btn-primary btn-sm">Show</button>
+  <span class="text-dim" style="font-size:.78rem">Hourly detail is kept 90 days (recorded from 3.14.0 on).</span>
+</form>
+{% endif %}
 
+{% if view == 'live' %}
+<div class="form-section">
+  <div class="form-section-header" style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+    <span><span class="section-icon">◈</span> LIVE REQUESTS</span>
+    <span id="perf-live-state" class="text-dim" style="font-size:.75rem;font-weight:normal"></span>
+    <span style="margin-left:auto;display:flex;gap:.4rem;align-items:center;flex-wrap:wrap">
+      <input type="text" id="perf-live-filter" class="field-input field-input-sm" placeholder="Filter page, path, user…" style="width:190px">
+      <label style="font-size:.75rem;font-weight:normal;display:flex;gap:4px;align-items:center">
+        <input type="checkbox" id="perf-live-hidepoll" checked> Hide polling</label>
+      <label style="font-size:.75rem;font-weight:normal;display:flex;gap:4px;align-items:center">
+        <input type="checkbox" id="perf-live-slow"> ≥ 250 ms only</label>
+      <button type="button" class="btn btn-ghost btn-sm" id="perf-live-pause">Pause</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="perf-live-clear">Clear</button>
+      <button type="button" class="btn btn-danger-ghost btn-sm" id="perf-live-stop">Stop capture</button>
+    </span>
+  </div>
+  <div class="form-section-body" style="padding:.5rem 1rem;font-size:.78rem">
+    <span class="text-dim">Every worker on every server writes finished requests here while this page is open
+      (renewed each minute; capture switches itself off {{ (live_ttl // 60) }} min after the page closes).
+      Rows appear within a few seconds. Kept 2 days.</span>
+    <span id="perf-live-stats" style="float:right"></span>
+  </div>
+  <div class="perf-live-wrap">
+    <table class="data-table" style="font-size:.8rem">
+      <thead><tr>
+        <th style="width:84px">TIME</th><th style="width:56px">METHOD</th><th>PAGE</th><th>PATH</th>
+        <th style="text-align:right;width:56px">STATUS</th><th style="text-align:right;width:80px">TOTAL</th>
+        <th style="text-align:right;width:74px">DB</th><th style="text-align:right;width:58px">QUERIES</th>
+        <th style="width:110px">USER</th><th style="width:150px">WORKER</th>
+      </tr></thead>
+      <tbody id="perf-live-body"><tr><td colspan="10" class="text-dim">Starting capture…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+{% else %}
 {% if not pages %}
 <div class="empty-state">
-  <p>No performance data recorded for this period yet.</p>
+  <p>No performance data recorded for this {{ 'window' if view == 'day' else 'period' }} yet.</p>
   <p class="text-dim" style="font-size:.85rem">Stats are buffered in memory and written out about once a minute —
      browse a few pages and check back shortly.</p>
 </div>
@@ -53,9 +135,9 @@
 
 {# ── Daily trend ──────────────────────────────────────────────────────────── #}
 {% if trend|length > 1 %}
-{% set trend_max = trend|map(attribute='avg_ms')|max %}
+{% set trend_max = trend|map(attribute='avg_ms')|max %}{% set trend_max = trend_max or 1 %}
 <div class="form-section" style="margin-bottom:1.5rem">
-  <div class="form-section-header"><span class="section-icon">◈</span> AVG RESPONSE TIME PER DAY</div>
+  <div class="form-section-header"><span class="section-icon">◈</span> AVG RESPONSE TIME PER {{ 'HOUR' if view == 'day' else 'DAY' }}</div>
   <div class="form-section-body">
     <div class="perf-legend">
       <span><i class="perf-swatch perf-swatch-db"></i> DB time</span>
@@ -175,8 +257,28 @@
 </div>
 
 {% endif %}
+{% endif %}{# view != live #}
 
 <style>
+.perf-views { display:flex; gap:4px; align-items:center; margin-bottom:1rem; flex-wrap:wrap;
+  border-bottom:1px solid var(--border); }
+.perf-view { padding:.45rem .9rem; font-size:.85rem; color:var(--text-dim); text-decoration:none;
+  border-bottom:2px solid transparent; margin-bottom:-1px; }
+.perf-view:hover { color:var(--text-primary, inherit); }
+.perf-view.active { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
+.perf-live-dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#e5484d;
+  box-shadow:0 0 6px #e5484d; vertical-align:1px; animation:perfPulse 1.6s ease-in-out infinite; }
+@keyframes perfPulse { 50% { opacity:.35; } }
+.perf-range { display:flex; gap:.5rem; margin-bottom:1.25rem; flex-wrap:wrap; align-items:center; }
+.perf-range-form { display:flex; gap:.4rem; align-items:center; flex-wrap:wrap; margin-left:.5rem; }
+.perf-live-wrap { max-height:65vh; overflow:auto; }
+.perf-live-wrap td { font-variant-numeric:tabular-nums; white-space:nowrap; }
+.perf-live-wrap td.perf-path { max-width:340px; overflow:hidden; text-overflow:ellipsis; font-family:var(--font-mono,monospace); }
+.perf-live-new { animation:perfNew 1.2s ease-out; }
+@keyframes perfNew { from { background:rgba(99,102,241,.18); } to { background:transparent; } }
+.perf-slow { color:#e5a50a; font-weight:600; }
+.perf-vslow { color:#e5484d; font-weight:600; }
+.perf-err { color:#e5484d; }
 .perf-tiles {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -277,6 +379,120 @@
 </style>
 
 <script>
+function perfToggleReset() {
+  const el = document.getElementById('perf-reset');
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+async function perfReset(scope) {
+  const body = { scope };
+  if (scope === 'range') {
+    body.from = document.getElementById('perf-reset-from').value;
+    body.to = document.getElementById('perf-reset-to').value;
+    if (!body.from || !body.to) { alert('Pick both dates.'); return; }
+    if (!confirm(`Delete all performance stats from ${body.from} to ${body.to}?`)) return;
+  } else if (!confirm('Delete ALL collected performance stats? This cannot be undone.')) return;
+  const r = await fetch('{{ url_for('performance_reset') }}', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.success) { alert(d.error || 'Reset failed.'); return; }
+  const n = Object.values(d.deleted || {}).reduce((a, b) => a + b, 0);
+  alert(`Deleted ${n.toLocaleString()} rows.`);
+  location.reload();
+}
+{% if view == 'live' %}
+(function () {
+  const CONTROL = '{{ url_for('performance_live_control') }}';
+  const FEED = '{{ url_for('performance_live_feed') }}';
+  const MAX_ROWS = 500;
+  // Endpoints that fire on a timer from open tabs — noise when you're
+  // watching what a person just clicked.
+  const POLL_RE = /(sync|heartbeat|pending.count|pending_count|session_status|messages_api|api_messages|notifications?_(count|poll)|unread)/i;
+  const body = document.getElementById('perf-live-body');
+  const stateEl = document.getElementById('perf-live-state');
+  const statsEl = document.getElementById('perf-live-stats');
+  const filterEl = document.getElementById('perf-live-filter');
+  const hidePoll = document.getElementById('perf-live-hidepoll');
+  const slowOnly = document.getElementById('perf-live-slow');
+  const pauseBtn = document.getElementById('perf-live-pause');
+  let rows = [], cursor = 0, paused = false, stopped = false, timer = null, renewTimer = null;
+
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const msCls = ms => ms >= 1000 ? 'perf-vslow' : (ms >= 250 ? 'perf-slow' : '');
+  function visible(r) {
+    if (hidePoll.checked && POLL_RE.test(r.endpoint)) return false;
+    if (slowOnly.checked && r.total_ms < 250) return false;
+    const q = filterEl.value.trim().toLowerCase();
+    return !q || (r.endpoint + ' ' + r.path + ' ' + r.username + ' ' + r.worker + ' ' + r.status)
+      .toLowerCase().includes(q);
+  }
+  function render(newIds) {
+    const shown = rows.filter(visible);
+    if (!shown.length) {
+      body.innerHTML = `<tr><td colspan="10" class="text-dim">${rows.length ? 'No captured requests match the filter.' : 'Waiting for requests…'}</td></tr>`;
+    } else {
+      body.innerHTML = shown.slice().reverse().map(r => {
+        const t = parseServerTime(r.at);
+        return `<tr class="${newIds && newIds.has(r.id) ? 'perf-live-new' : ''}">
+        <td class="text-dim">${t ? t.toLocaleTimeString() : ''}</td>
+        <td>${esc(r.method)}</td>
+        <td style="font-family:var(--font-mono,monospace)">${esc(r.endpoint)}</td>
+        <td class="perf-path" title="${esc(r.path)}">${esc(r.path)}</td>
+        <td style="text-align:right" class="${r.status >= 400 ? 'perf-err' : 'text-dim'}">${r.status || ''}</td>
+        <td style="text-align:right" class="${msCls(r.total_ms)}">${r.total_ms.toFixed(0)} ms</td>
+        <td style="text-align:right">${r.db_ms.toFixed(0)} ms</td>
+        <td style="text-align:right" class="text-dim">${r.db_queries}</td>
+        <td>${esc(r.username)}</td>
+        <td class="text-dim" style="font-size:.72rem">${esc(r.worker)}</td></tr>`;
+      }).join('');
+    }
+    if (shown.length) {
+      const tot = shown.reduce((a, r) => a + r.total_ms, 0);
+      const sorted = shown.map(r => r.total_ms).sort((a, b) => a - b);
+      const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
+      statsEl.textContent = `${shown.length} shown · avg ${(tot / shown.length).toFixed(0)} ms · p95 ${p95.toFixed(0)} ms`;
+    } else statsEl.textContent = '';
+  }
+  async function control(on) {
+    try {
+      await fetch(CONTROL, { method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ on }) });
+    } catch (e) {}
+  }
+  async function poll() {
+    if (stopped) return;
+    try {
+      const r = await fetch(FEED + '?after=' + cursor, { headers: {'X-Requested-With': 'XMLHttpRequest'} });
+      if (r.ok) {
+        const d = await r.json();
+        stateEl.textContent = d.on ? '● capturing' : 'capture off';
+        stateEl.style.color = d.on ? '#e5484d' : '';
+        if (d.rows.length) {
+          cursor = d.rows[d.rows.length - 1].id;
+          rows = rows.concat(d.rows).slice(-MAX_ROWS);
+          if (!paused) render(new Set(d.rows.map(x => x.id)));
+        } else if (!rows.length) render();
+      }
+    } catch (e) { stateEl.textContent = 'feed unreachable — retrying'; }
+    timer = setTimeout(poll, document.hidden ? 10000 : 2000);
+  }
+  pauseBtn.addEventListener('click', () => {
+    paused = !paused;
+    pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+    if (!paused) render();
+  });
+  document.getElementById('perf-live-clear').addEventListener('click', () => { rows = []; render(); });
+  document.getElementById('perf-live-stop').addEventListener('click', async () => {
+    stopped = true; clearTimeout(timer); clearInterval(renewTimer);
+    await control(false);
+    stateEl.textContent = 'capture stopped'; stateEl.style.color = '';
+    pauseBtn.disabled = true;
+  });
+  [filterEl, hidePoll, slowOnly].forEach(el => el.addEventListener(el.type === 'text' ? 'input' : 'change', () => render()));
+  control(true).then(poll);
+  renewTimer = setInterval(() => { if (!stopped) control(true); }, 60000);
+})();
+{% endif %}
 function togglePerfSql(key) {
   const row = document.getElementById('perf-sql-' + key);
   if (row) row.style.display = row.style.display === 'none' ? '' : 'none';

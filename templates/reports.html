@@ -10,7 +10,7 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">Reports</h1>
-    <p class="page-sub">Shows, Arts Groups, gear, labor and piano tunings — one filter for every tab. Test/demo shows are left out.</p>
+    <p class="page-sub">Shows, Arts Groups, gear, labor and piano tunings — one filter for every tab, drill down with More filters, and PDF any tab. Test/demo shows are left out.</p>
   </div>
 </div>
 
@@ -41,6 +41,7 @@
         </select>
       </div>
       <div class="rpt-filter-actions">
+        <button type="button" class="btn btn-xs btn-ghost" id="rf-more-btn" onclick="rptToggleMore()">More filters <span id="rf-more-count" class="rpt-more-count"></span></button>
         <div class="rpt-presets">
           <button type="button" class="btn btn-xs btn-ghost" data-preset="month">This month</button>
           <button type="button" class="btn btn-xs btn-ghost" data-preset="year">This year</button>
@@ -49,7 +50,54 @@
           <button type="button" class="btn btn-xs btn-ghost" data-preset="all">All time</button>
         </div>
         <button type="button" class="btn btn-primary btn-sm" onclick="rptRun()">Run</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="rptPdf()" title="This tab as a PDF, with the current filters">PDF</button>
       </div>
+    </div>
+    {# Drill-down filters (3.14.0) — each narrows the shows every tab reports on. #}
+    <div class="rpt-filter-row rpt-more" id="rf-more" hidden>
+      <div class="field-group" style="min-width:240px">
+        <label class="field-label">SHOW</label>
+        <input type="text" id="rf-show" class="field-input" list="rf-show-list" placeholder="Any show — type to search" autocomplete="off">
+        <datalist id="rf-show-list">
+          {% for sh in shows %}<option value="{{ sh.name }}{% if sh.date %} ({{ sh.date }}){% endif %} #{{ sh.id }}"></option>{% endfor %}
+        </datalist>
+      </div>
+      {% if can_assets or can_labor %}
+      <div class="field-group">
+        <label class="field-label">HAD ITEM BOOKED</label>
+        <select id="rf-has-type" class="field-input">
+          <option value="">Any</option>
+          {% for t in asset_types %}<option value="{{ t.id }}">{{ t.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field-group">
+        <label class="field-label">HAD CATEGORY BOOKED</label>
+        <select id="rf-has-category" class="field-input">
+          <option value="">Any</option>
+          {% for cat in asset_categories %}<option value="{{ cat.id }}">{{ cat.name }}</option>{% endfor %}
+        </select>
+      </div>
+      {% endif %}
+      {% if can_labor %}
+      <div class="field-group">
+        <label class="field-label">JOB POSITION</label>
+        <select id="rf-position" class="field-input">
+          <option value="">Any</option>
+          {% for p in positions %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field-group">
+        <label class="field-label">TECHNICIAN</label>
+        <select id="rf-tech" class="field-input">
+          <option value="">Any</option>
+          {% for t in techs %}<option value="{{ t.id }}">{{ t.name }}</option>{% endfor %}
+        </select>
+      </div>
+      {% endif %}
+      <div class="rpt-filter-actions">
+        <button type="button" class="btn btn-xs btn-ghost" onclick="rptClearMore()">Clear</button>
+      </div>
+      <p class="rpt-note" style="flex-basis:100%;margin:0">Each of these narrows the shows every tab reports on — e.g. <em>Had item booked</em> = a projector and <em>Job position</em> = Video Tech, then the <em>Labor Lines</em> tab lists who worked it. An item group counts its child items; systems/packages count their components. On Labor Lines and Break Exceptions, position and technician also filter the individual lines.</p>
     </div>
   </div>
 </div>
@@ -61,7 +109,10 @@
   <button type="button" class="rpt-tab" data-tab="assets">Assets</button>
   <button type="button" class="rpt-tab" data-tab="rentals">Rental Lines</button>
   {% endif %}
-  {% if can_labor %}<button type="button" class="rpt-tab" data-tab="labor">Labor &amp; Techs</button>{% endif %}
+  {% if can_labor %}<button type="button" class="rpt-tab" data-tab="labor">Labor &amp; Techs</button>
+  <button type="button" class="rpt-tab" data-tab="lines">Labor Lines</button>
+  <button type="button" class="rpt-tab" data-tab="breaks">Break Exceptions</button>
+  <button type="button" class="rpt-tab" data-tab="variance">Estimate vs Settlement</button>{% endif %}
   {% if can_piano %}<button type="button" class="rpt-tab" data-tab="piano">Piano Tuning</button>{% endif %}
 </div>
 
@@ -95,6 +146,7 @@
   <div class="modal-card" style="max-width:960px;width:94vw;max-height:90vh;overflow-y:auto">
     <div class="modal-header">
       <span id="rpt-modal-title"></span>
+      <button type="button" class="btn btn-xs btn-ghost" id="rpt-modal-pdf" style="margin-left:auto;margin-right:8px" hidden>PDF</button>
       <button type="button" onclick="rptCloseModal()" class="modal-close">×</button>
     </div>
     <div class="modal-body" id="rpt-modal-body"></div>
@@ -131,6 +183,17 @@
 .rpt-subfilters { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
 .rpt-subfilters .field-group { margin: 0; min-width: 160px; }
 .rpt-idle td { opacity: .6; }
+.rpt-more[hidden] { display: none; }
+.rpt-more { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); }
+.rpt-more-count:empty { display: none; }
+.rpt-more-count { display: inline-block; min-width: 16px; padding: 0 5px; border-radius: 8px; background: var(--accent); color: #fff; font-size: 10px; line-height: 16px; }
+.rpt-pill { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.rpt-pill-bad { background: rgba(229,72,77,.14); color: #e5484d; }
+.rpt-pill-warn { background: rgba(229,165,10,.16); color: #c98a00; }
+.rpt-pill-ok { background: rgba(48,164,108,.15); color: #30a46c; }
+.rpt-pill-dim { background: var(--bg-hover); color: var(--text-dim); }
+.rpt-up { color: #e5484d; font-weight: 600; }
+.rpt-down { color: #30a46c; font-weight: 600; }
 </style>
 {% endblock %}
 
@@ -153,9 +216,53 @@
     const f = document.getElementById('rf-from').value, t = document.getElementById('rf-to').value;
     const v = document.getElementById('rf-venue').value, c = document.getElementById('rf-company').value;
     if (f) p.set('from', f); if (t) p.set('to', t); if (v) p.set('venue', v); if (c) p.set('company', c);
+    Object.entries(drill()).forEach(([k, val]) => { if (val) p.set(k, val); });
     Object.entries(extra || {}).forEach(([k, val]) => { if (val !== '' && val != null) p.set(k, val); });
     return p.toString();
   }
+  const _val = id => (document.getElementById(id) || {}).value || '';
+  function drill() {
+    const m = /#(\d+)\s*$/.exec(_val('rf-show'));
+    return {show: m ? m[1] : '', has_type: _val('rf-has-type'), has_category: _val('rf-has-category'),
+            position: _val('rf-position'), tech: _val('rf-tech')};
+  }
+  function moreCount() {
+    const n = Object.values(drill()).filter(Boolean).length;
+    document.getElementById('rf-more-count').textContent = n ? n : '';
+  }
+  window.rptToggleMore = function() {
+    const el = document.getElementById('rf-more');
+    el.hidden = !el.hidden;
+  };
+  window.rptClearMore = function() {
+    ['rf-show', 'rf-has-type', 'rf-has-category', 'rf-position', 'rf-tech'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.value = '';
+    });
+    moreCount(); rptLoad();
+  };
+  ['rf-has-type', 'rf-has-category', 'rf-position', 'rf-tech'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', () => { moreCount(); rptLoad(); });
+  });
+  (function() {
+    const el = document.getElementById('rf-show');
+    el.addEventListener('change', () => { moreCount(); rptLoad(); });
+    el.addEventListener('input', () => { if (!el.value) { moreCount(); rptLoad(); } });
+  })();
+  // ── PDF: the server renders the same JSON this tab shows ──
+  const PDF_KEY = {overview: 'overview', groups: 'groups', assets: 'assets', rentals: 'rentals',
+                   labor: 'labor', lines: 'lines', breaks: 'breaks', variance: 'variance', piano: 'piano'};
+  function openPdf(report, extra) {
+    window.open('/reports/pdf?' + params(Object.assign({report}, extra || {})), '_blank', 'noopener');
+  }
+  window.rptPdf = function() {
+    const extra = {};
+    if (_tab === 'rentals') {
+      extra.asset_category_id = _val('rr-category'); extra.asset_type_id = _val('rr-type');
+    }
+    if (_tab === 'breaks') extra.min_diff = _val('rb-min');
+    openPdf(PDF_KEY[_tab], extra);
+  };
   function preset(kind) {
     const now = new Date();
     let from = '', to = '';
@@ -281,7 +388,13 @@
       ]) + table('t-venues', 'By venue', vcols, d.by_venue, {sortKey: 'shows'})
         + table('t-months', 'Shows by month', [{key: 'month', label: 'Month'}, {key: 'shows', label: 'Shows', num: true}], d.by_month)
         + table('t-status', 'Shows by status', [{key: 'status', label: 'Status'}, {key: 'shows', label: 'Shows', num: true}],
-                Object.entries(d.by_status).map(([k, v]) => ({status: k, shows: v})), {sortKey: 'shows'});
+                Object.entries(d.by_status).map(([k, v]) => ({status: k, shows: v})), {sortKey: 'shows'})
+        + table('t-showlist', 'Matching shows', [
+          {key: 'name', label: 'Show', fmt: (v, r) => showLink(v, r.id)}, {key: 'date', label: 'Date'},
+          {key: 'venue', label: 'Venue'}, {key: 'company', label: 'Arts Group'},
+          {key: 'status', label: 'Status'},
+          {key: 'settled', label: 'Labor settled', fmt: v => v ? 'Yes' : '—', csv: r => r.settled ? 'Yes' : 'No'},
+        ], d.shows, {sortKey: 'date'});
     },
     async groups() {
       const d = await get('/api/reports/arts-groups?' + params());
@@ -392,6 +505,86 @@
         note: 'Scheduled = labor requests with this tech assigned. Settled = post-show lines whose "Worked by" is this tech. Overhead / project shifts follow the date range only.'})
         + table('t-positions', 'Positions', pcols, d.positions, {sortKey: 'requested'});
     },
+    async lines() {
+      const d = await get('/api/reports/labor-lines?' + params());
+      const t = d.totals;
+      const st = {settled: 'ok', scheduled: 'dim', unfilled: 'bad', training: 'dim', 'added hours': 'warn', 'added at settlement': 'warn'};
+      const cols = [
+        {key: 'date', label: 'Date'},
+        {key: 'show', label: 'Show', fmt: (v, r) => showLink(v, r.show_id), sub: r => esc(r.company || '')},
+        {key: 'position', label: 'Position'},
+        {key: 'tech', label: 'Scheduled tech', fmt: (v, r) => v ? esc(v) : (r.requested_name ? `<span class="sub">asked for ${esc(r.requested_name)}</span>` : '—'),
+         csv: r => r.tech || ''},
+        {key: 'sched', label: 'Scheduled'},
+        {key: 'sched_hours', label: 'Sched. hrs', num: true, fmt: v => num(v, 2)},
+        {key: 'worked_by', label: 'Worked by', fmt: (v, r) => v ? (r.tech && v !== r.tech ? `<strong>${esc(v)}</strong>` : esc(v)) : '—', csv: r => r.worked_by || ''},
+        {key: 'actual', label: 'Actual'},
+        {key: 'actual_hours', label: 'Worked hrs', num: true, fmt: v => num(v, 2)},
+        {key: 'state', label: 'Status', fmt: v => `<span class="rpt-pill rpt-pill-${st[v] || 'dim'}">${esc(v)}</span>`, csv: r => r.state},
+      ];
+      return cards([
+        [num(t.lines), 'Lines'], [num(t.shows), 'Shows'], [num(t.techs), 'Techs'],
+        [num(t.sched_hours, 1), 'Scheduled hours'], [num(t.actual_hours, 1), 'Worked hours (settled)'],
+        [num(t.unfilled), 'Unfilled'],
+      ]) + table('t-lines', 'Labor lines', cols, d.lines, {sortKey: 'date',
+        note: (d.truncated ? '<strong>Only the first 5,000 lines are shown — narrow the filters.</strong> ' : '')
+          + 'One row per requested shift; settled shows add the settlement line\'s actual times and <em>Worked by</em> (bold when someone other than the scheduled tech worked it). Settlement-only lines (added hours, lines added at settlement) are listed too. Training shifts never bill.'});
+    },
+    async breaks() {
+      const min = _val('rb-min') || '5';
+      const d = await get('/api/reports/breaks?' + params({min_diff: min}));
+      const kc = {'Not taken': 'bad', Shorter: 'warn', Longer: 'warn', Added: 'dim', Moved: 'dim'};
+      const k = d.kinds || {};
+      const diff = v => v === 0 ? '0' : `<span class="${v < 0 ? 'rpt-down' : 'rpt-up'}">${v > 0 ? '+' : ''}${v}</span>`;
+      const gcols = key => [
+        {key, label: key === 'tech' ? 'Technician' : key === 'position' ? 'Position' : 'Show'},
+        {key: 'exceptions', label: 'Exceptions', num: true}, {key: 'not_taken', label: 'Not taken', num: true},
+        {key: 'shorter', label: 'Shorter', num: true}, {key: 'longer', label: 'Longer', num: true},
+        {key: 'net_min', label: 'Net minutes', num: true, fmt: diff},
+      ];
+      return `<div class="rpt-subfilters"><div class="field-group"><label class="field-label">COUNT A CHANGE OF AT LEAST</label>
+          <select id="rb-min" class="field-input" onchange="rptLoad()">${[1, 5, 10, 15, 30].map(m => `<option value="${m}" ${String(m) === min ? 'selected' : ''}>${m} min</option>`).join('')}</select></div></div>`
+        + cards([
+          [num(d.lines_checked), 'Settled shifts checked'], [num(d.exceptions.length), 'Exceptions'],
+          [num(k['Not taken'] || 0), 'Lunch not taken'], [num(k.Shorter || 0), 'Shorter'],
+          [num(k.Longer || 0), 'Longer'], [num((k.Added || 0) + (k.Moved || 0)), 'Added / moved'],
+        ]) + table('t-breaks', 'Break exceptions', [
+          {key: 'date', label: 'Date'},
+          {key: 'show', label: 'Show', fmt: (v, r) => showLink(v, r.show_id)},
+          {key: 'position', label: 'Position'}, {key: 'tech', label: 'Tech'},
+          {key: 'lunch', label: 'Lunch', num: true},
+          {key: 'kind', label: 'Exception', fmt: v => `<span class="rpt-pill rpt-pill-${kc[v] || 'dim'}">${esc(v)}</span>`, csv: r => r.kind},
+          {key: 'scheduled', label: 'Scheduled', sub: r => r.sched_min ? `${r.sched_min} min` : ''},
+          {key: 'actual', label: 'On settlement', sub: r => r.actual_min ? `${r.actual_min} min` : ''},
+          {key: 'diff_min', label: 'Diff (min)', num: true, fmt: diff},
+        ], d.exceptions, {sortKey: 'date',
+          note: 'Compares each settled shift\'s lunches with the lunches that were scheduled when it was settled. <em>Not taken</em> = scheduled but blank on the settlement; <em>Shorter/Longer</em> = length changed by the amount above; <em>Added</em> = a lunch with none scheduled; <em>Moved</em> = same length, started 30+ min off. Shifts with no actual times (no-shows) and added-hours lines are skipped.'})
+        + table('t-brtech', 'By technician', gcols('tech'), d.by_tech, {sortKey: 'exceptions'})
+        + table('t-brpos', 'By position', gcols('position'), d.by_position, {sortKey: 'exceptions'})
+        + table('t-brshow', 'By show', gcols('show'), d.by_show, {sortKey: 'exceptions'});
+    },
+    async variance() {
+      const d = await get('/api/reports/variance?' + params());
+      const t = d.totals;
+      const sd = v => v == null ? '—' : `<span class="${v > 0.005 ? 'rpt-up' : v < -0.005 ? 'rpt-down' : ''}">${v > 0 ? '+' : ''}${money(v)}</span>`;
+      const sp = v => v == null ? '—' : `<span class="${v > 0 ? 'rpt-up' : v < 0 ? 'rpt-down' : ''}">${v > 0 ? '+' : ''}${v}%</span>`;
+      return cards([
+        [num(t.shows), 'Settled shows'], [num(t.over), 'Settled over estimate'], [num(t.under), 'Under estimate'],
+        [money(t.estimate), 'Estimated labor'], [money(t.settled), 'Settled labor'], [sd(t.diff), 'Difference'],
+      ]) + table('t-variance', 'Estimate vs settlement', [
+        {key: 'show', label: 'Show', fmt: (v, r) => showLink(v, r.show_id), sub: r => esc(r.company || '')},
+        {key: 'date', label: 'Date'},
+        {key: 'estimate', label: 'Estimate', num: true, fmt: money},
+        {key: 'settled', label: 'Settled', num: true, fmt: money},
+        {key: 'diff', label: 'Difference', num: true, fmt: sd},
+        {key: 'diff_pct', label: 'Diff %', num: true, fmt: sp},
+        {key: 'est_hours', label: 'Est. hrs', num: true, fmt: v => num(v, 2)},
+        {key: 'act_hours', label: 'Worked hrs', num: true, fmt: v => num(v, 2)},
+        {key: 'hours_diff', label: 'Hrs diff', num: true, fmt: v => v > 0 ? `<span class="rpt-up">+${num(v, 2)}</span>` : v < 0 ? `<span class="rpt-down">${num(v, 2)}</span>` : '0'},
+        {key: 'added_lines', label: 'Added lines', num: true},
+      ], d.shows, {sortKey: 'diff',
+        note: 'Settled shows only. Estimate = the Labor Estimate engine over the show\'s labor requests as they stand today; Settled = the Final Invoice labor (settlement engine). A jump usually means longer shifts, added hours, overtime or a higher-rate tech than estimated — open the show\'s Post-Show tab to see which lines.'});
+    },
     async piano() {
       const d = await get('/api/reports/piano?' + params());
       const t = d.totals;
@@ -429,7 +622,10 @@
   };
 
   // ── drill-downs ──
-  function modal(title, html) {
+  function modal(title, html, pdf) {
+    const pb = document.getElementById('rpt-modal-pdf');
+    pb.hidden = !pdf;
+    pb.onclick = pdf ? () => openPdf(pdf[0], pdf[1]) : null;
     document.getElementById('rpt-modal-title').textContent = title;
     document.getElementById('rpt-modal-body').innerHTML = html;
     document.getElementById('rpt-modal').style.display = 'flex';
@@ -453,7 +649,7 @@
         {key: 'name', label: 'Show', fmt: (v, r) => showLink(v, r.id)}, {key: 'date', label: 'Date'},
         {key: 'venue', label: 'Venue'}, {key: 'status', label: 'Status'},
         {key: 'lines', label: 'Rental lines', num: true}, {key: 'assets', label: 'Assets', num: true, fmt: money},
-      ], d.shows, {sortKey: 'date'}));
+      ], d.shows, {sortKey: 'date'}), ['group_detail', {group: g.key || '', group_name: g.name}]);
     } catch (e) { modal(g.name, `<p style="color:#e53e3e">${esc(e.message)}</p>`); }
   }
   async function assetUnits(t) {
@@ -470,7 +666,7 @@
         {key: 'bookings', label: 'Pinned bookings', num: true}, {key: 'unit_days', label: 'Pinned days', num: true},
         {key: 'last_show', label: 'Last show', sub: r => esc(r.last_date || '')},
         {key: 'maintenance', label: 'Maintenance', num: true}, {key: 'logs', label: 'Log entries', num: true},
-      ], d.units, {sortKey: 'bookings', note: 'A booking counts against a unit only when that unit was picked on the show. Bookings from the general pool are counted above, not per unit.'}));
+      ], d.units, {sortKey: 'bookings', note: 'A booking counts against a unit only when that unit was picked on the show. Bookings from the general pool are counted above, not per unit.'}), ['asset_units', {type_id: t.type_id, type_name: t.type}]);
     } catch (e) { modal(t.type, `<p style="color:#e53e3e">${esc(e.message)}</p>`); }
   }
 

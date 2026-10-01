@@ -83,6 +83,7 @@ RESTORE_BLOCKED = {
     'gateway_otp_codes', 'ai_sessions',
     'audit_log', 'email_send_log', 'email_outbox_log', 'export_log',
     'cluster_instances', 'perf_page_stats', 'perf_slow_queries',
+    'perf_hourly_stats', 'perf_request_log',
     'file_migration_runs',
 }
 

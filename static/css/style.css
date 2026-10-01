@@ -2102,3 +2102,51 @@ html[data-theme="light"] .modal-card { box-shadow: var(--hl), 0 24px 70px rgba(0
 .btn-primary:hover { box-shadow: inset 0 1px 0 rgba(255,255,255,.3), 0 5px 16px -5px rgba(245,127,32,.7); }
 .sidebar { box-shadow: 2px 0 14px rgba(0,0,0,.22), inset -1px 0 0 rgba(255,255,255,.07), inset 0 1px 0 rgba(255,255,255,.08); }
 .data-table thead th { background-image: linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,0)); }
+
+/* ── WebRetriever2 colour layer (3.14.0) ──────────────────────────────────
+   Step two toward the WR2 look, still subtle: a faint fixed "aurora" behind
+   the surfaces (orange top-right, blue bottom-left — the brand accent plus
+   one cool tone), a top sheen on raised surfaces, a glowing gradient
+   underline on active tabs, a lit section icon, and recessed inputs. Uses
+   only --accent + two literal tints; layout, spacing and palette unchanged. */
+body {
+  background:
+    radial-gradient(1100px 540px at 88% -12%, rgba(245,127,32,.075), transparent 60%),
+    radial-gradient(900px 560px at -10% 108%, rgba(59,130,246,.06), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
+}
+html[data-theme="light"] body {
+  background:
+    radial-gradient(1100px 540px at 88% -12%, rgba(208,104,16,.06), transparent 60%),
+    radial-gradient(900px 560px at -10% 108%, rgba(59,130,246,.05), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
+}
+.form-section, .rpt-card, .perf-tile, .today-box {
+  background-image: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,0) 55%);
+}
+html[data-theme="light"] .form-section, html[data-theme="light"] .rpt-card,
+html[data-theme="light"] .perf-tile, html[data-theme="light"] .today-box {
+  background-image: linear-gradient(180deg, rgba(255,255,255,.45), rgba(255,255,255,0) 55%);
+}
+.section-icon { text-shadow: 0 0 10px rgba(245,127,32,.45); }
+.tab-btn.active, .rpt-tab.active, .perf-view.active {
+  text-shadow: 0 0 14px rgba(245,127,32,.4);
+  background-image: linear-gradient(180deg, transparent 35%, rgba(245,127,32,.08));
+  border-bottom-color: transparent !important;
+  position: relative;
+}
+.tab-btn.active::after, .rpt-tab.active::after, .perf-view.active::after {
+  content: ''; position: absolute; left: 10px; right: 10px; bottom: -1px; height: 2px;
+  border-radius: 2px; background: linear-gradient(90deg, var(--accent), #f5b342);
+  box-shadow: 0 0 10px rgba(245,127,32,.6);
+}
+html[data-theme="light"] .tab-btn.active, html[data-theme="light"] .rpt-tab.active,
+html[data-theme="light"] .perf-view.active { text-shadow: none; }
+html:not([data-theme="light"]) .field-input { box-shadow: inset 0 1px 3px rgba(0,0,0,.35); }
+.nav-approvals-badge, .notif-bell-badge { box-shadow: 0 0 10px rgba(229,62,62,.45); }
+@media (prefers-reduced-motion: no-preference) {
+  .show-card { transition: box-shadow .15s, transform .15s; }
+  .show-card:hover { transform: translateY(-1px); }
+}

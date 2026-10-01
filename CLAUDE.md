@@ -537,6 +537,19 @@ apps. For a 321Theater access change, use this app's own flags instead
   which would clobber. A flush that can't reach PostgreSQL drops its batch. Retention is trimmed in `run_hourly_maintenance`.
 - Background-job queries (no request context) are intentionally not tracked.
   Keep the hook path allocation-free and never let it raise.
+- 3.14.0: the buffer is keyed (day, HOUR, endpoint); each flush writes
+  `perf_hourly_stats` (Day / hours view, 90 days) and rolls up into the
+  daily table (`_perf_rollup_daily`) — both additive upserts.
+- **Live view** (`perf_request_log`, 2 days): OFF unless an admin has the
+  Live page open. The page POSTs `/admin/performance/live/control` every
+  minute, which sets app_setting `perf_live_until` (epoch, Python clock) to
+  now + `_PERF_LIVE_TTL`; capture lapses on its own. Workers re-read it at
+  most every 5 s (`_perf_live_on`) and write their buffer at most every 2 s
+  (one executemany, capped at 500 rows). The feed/control endpoints are in
+  `_PERF_LIVE_SKIP` so watching doesn't record itself. Never make capture
+  always-on or drop the TTL: it is a write per request cluster-wide.
+- `POST /admin/performance/reset` (range or all) deletes from all four perf
+  tables; audit PERF_STATS_RESET + syslog.
 
 ## DB snapshot inspection & recovery (Settings → DB Snapshots)
 - `snapshot_module.py` + `templates/snapshots.html`, wired by one
@@ -832,6 +845,23 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   `_calc_hours`. Never fork billing math into a report. Asset lines exclude
   `is_hidden` (matches invoices); piano $ = the piano-linked external lines.
 - Client tables escape every value; CSV prefixes formula-leading cells.
+- **Drill filters (3.14.0)** `show / has_type / has_category / position /
+  tech` (`_report_drill()`) narrow the show set inside `_report_shows()` via
+  `_report_drill_show_ids()` (has_type includes child types of a group and
+  system/package components), so every tab honours them; Rental Lines adds
+  `s.id = ANY(...)` when any is set. Labor Lines / Break Exceptions also
+  apply position + tech per LINE (`_report_line_filter`).
+- Break Exceptions compare `post_show_labor.sched_break*` (snapshot at
+  Settle Now) with the actual `break*`; Estimate vs Settlement calls both
+  billing engines (`_calc_labor_cost_for_show` vs
+  `_calc_post_show_labor_cost`) — never re-derive either.
+- **PDFs:** `GET /reports/pdf?report=<key>&<filters>` calls the tab's own
+  JSON view function (`app.view_functions[...]`, same request args, so its
+  gate applies) and renders `templates/pdf/report_pdf.html` from the
+  declarative `_RPT_PDF` spec (cards + tables, `_rpt_fmt`). A new tab = a
+  new `_RPT_PDF` entry (+ `PDF_KEY` in reports.html). Rows capped at
+  `_RPT_PDF_ROW_CAP`; passes `font_config=_wp_font_config()`. `/reports/pdf`
+  is covered by the `*/pdf` hover-prefetch exclusions.
 - TEST_MODE: `html.test-mode` + `.test-mode-frame` (base.html, style.css;
   label hidden on mobile). Keep it `pointer-events: none`.
 
@@ -844,9 +874,30 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   renders `#nav-<name>-badge` and a poller per name
   (`/api/asset-approvals/pending-count`, `/api/piano-tunings/pending-count`).
   Keep each count endpoint one cheap aggregate (polled every 60 s per tab).
-- The "Light glass refresh" block at the END of style.css (+ one m-header rule
-  in mobile.css) is the only place the WebRetriever2-style tokens
-  (`--hl`, `--lift`, `--lift-hover`) live; the bigger restyle comes later.
+- The "Light glass refresh" block near the END of style.css (+ one m-header
+  rule in mobile.css) is the only place the WebRetriever2-style tokens
+  (`--hl`, `--lift`, `--lift-hover`) live; the "WebRetriever2 colour layer"
+  block after it (3.14.0: body aurora, surface sheen, active-tab glow
+  underline via `::after`) is step two. Keep WR2 styling in those blocks;
+  the bigger restyle comes later.
+
+## In-app notifications (bell) for managers (3.14.0)
+- `notify_users(db, user_ids, ..., coalesce_key=)` (caller commits, never
+  raises): with a key, a user's UNREAD row of the same kind + show +
+  `field_key` is refreshed instead of stacking a new one per edit.
+  `_role_user_ids(db, 'is_asset_manager'|'is_piano_manager')` = flagged,
+  unlocked, approved users, falling back to admins (321Theater flags only —
+  never `is_app_*`). The actor never notifies themself.
+- Assets: `_notify_asset_change()` from `_reset_asset_approval()` (every gear
+  write path already calls it) — kind `asset_approval`, key
+  `asset_approval`, link `/shows/<id>?tab=assets`; approve marks every
+  manager's item read. Test/demo shows are skipped.
+- Piano: `_piano_bell()` — managers get kind `piano_tuning`, key
+  `piano:<tid>`, link `/piano-tuning?open=<tid>` (piano_tuning.html opens
+  that dialog, widening to All); `_piano_bell_done()` marks it read when the
+  manager changes status or declines a cancel. Requesters get key
+  `piano_req:<tid>` linking to `#piano-tuning-section` on the show.
+- Link URLs are relative paths (no url_for — keeps it usable from jobs).
 
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.

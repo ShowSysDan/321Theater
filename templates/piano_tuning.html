@@ -430,7 +430,20 @@
     if (await put(id, {status})) load();
   };
 
-  load();
+  // ?open=<id> deep link (notifications): open that tuning's dialog,
+  // widening the list to All when it isn't an open one.
+  const _openId = parseInt(new URLSearchParams(location.search).get('open') || '', 10);
+  (async () => {
+    await load();
+    if (!_openId) return;
+    if (!_rows.some(x => x.id === _openId)) {
+      const all = document.querySelector('.piano-filter [data-status="all"]');
+      if (all) all.click();
+      for (let i = 0; i < 20 && !_rows.some(x => x.id === _openId); i++)
+        await new Promise(r => setTimeout(r, 150));
+    }
+    if (_rows.some(x => x.id === _openId)) ptOpen(_openId);
+  })();
 })();
 </script>
 {% endblock %}
