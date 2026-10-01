@@ -14,15 +14,21 @@
     <p class="page-sub">{{ active_shows|length }} active show{{ '' if active_shows|length == 1 else 's' }} where you're the production manager or a covering PM</p>
     {% else %}
     <h1 class="page-title">Shows</h1>
-    <p class="page-sub">{{ active_shows|length }} active · {{ archived_shows|length }} archived</p>
+    <p class="page-sub">{{ active_shows|length }} active · <a href="{{ url_for('archived_shows_page') }}">{{ archived_count }} archived</a></p>
     {% endif %}
   </div>
-  {% if not restricted %}
+  {% if not my_shows %}
   <div style="display:flex;gap:8px;align-items:center">
+    <a href="{{ url_for('archived_shows_page') }}" class="btn btn-ghost" title="Archived shows — search, restore">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+      Archived{% if archived_count %} ({{ archived_count }}){% endif %}
+    </a>
+    {% if not restricted %}
     <a href="{{ url_for('new_show') }}" class="btn btn-primary">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       New Show
     </a>
+    {% endif %}
   </div>
   {% endif %}
 </div>
@@ -91,7 +97,7 @@
 <div class="dash-toolbar">
   <div class="dash-search-wrap">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15" class="dash-search-icon"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-    <input type="text" id="dash-search" class="dash-search-input" placeholder="{{ 'Search my shows…' if my_shows else 'Search active &amp; archived shows…' }}" oninput="filterDash(this.value)" autocomplete="off">
+    <input type="text" id="dash-search" class="dash-search-input" placeholder="{{ 'Search my shows…' if my_shows else 'Search active shows…' }}" oninput="filterDash(this.value)" autocomplete="off">
     <button id="dash-clear-btn" class="dash-clear-btn" onclick="clearSearch()" style="display:none" title="Clear">×</button>
   </div>
   <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
@@ -165,7 +171,7 @@
 </div>
 </div>{# end .venue-columns-wrap #}
 
-<p id="dash-no-results" class="text-dim" style="display:none;font-size:13px;padding:24px 0">No shows match your search.</p>
+<p id="dash-no-results" class="text-dim" style="display:none;font-size:13px;padding:24px 0">No active shows match your search.{% if not my_shows %} <a id="dash-arch-link" href="{{ url_for('archived_shows_page') }}">Search the archive →</a>{% endif %}</p>
 
 {% else %}
 <div class="empty-state">
@@ -287,6 +293,8 @@ function filterDash(q) {
 
   document.getElementById('dash-no-results').style.display =
     (totalVisible + archivedVisible === 0 && hasFilter) ? '' : 'none';
+  const archLink = document.getElementById('dash-arch-link');
+  if (archLink) archLink.href = '{{ url_for('archived_shows_page') }}' + (term ? '?q=' + encodeURIComponent(term) : '');
 }
 
 function clearSearch() {

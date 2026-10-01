@@ -749,8 +749,9 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
 
 ## Performance Company asset rates (3.8.0)
 - `asset_company_rates` (asset_type_id, company) = special day/week rates;
-  companies come from the `performance_company` form field's dropdown
-  options (`_performance_company_options`), matched via `_company_key()`.
+  companies come from the Arts Groups list (`arts_groups` — the field is an
+  arts_group_dropdown storing the NAME) plus any plain dropdown options
+  (`_performance_company_options`), matched via `_company_key()`.
   `_price_asset_line()` is THE pricing call for add + re-date (company rate
   if the type has one, else standard; same `_compute_locked_price` math);
   `show_assets.rate_company` records which card priced the line.
@@ -782,7 +783,8 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   first insert stranded it when the time changed.
   The editor renders them read-only (`.piano-sched-row`, `data-piano-id`);
   copy-day / template-replace skip them.
-- Piano = an asset type in a category named like 'Piano'
+- Piano = an asset type under a GROUP (parent type) or in a category named
+  like 'Piano' — groups with children are headings, excluded (3.11.0)
   (`_piano_asset_types`; stored as `piano_asset_type_id` + name snapshot in
   `piano`); free text only when no such category exists. No location field
   (always the stage). "Not on Assets tab" warning = `_piano_booked()` (direct
@@ -810,6 +812,41 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   retired/legacy values survive a Save). Non-managers never get
   manager_notes / sent_by / updated_by from the show endpoint. Piano rows are
   locked on the rental routes only while the module is on.
+- Cancellation request (3.11.0): once the manager is on it, a PM only ASKS
+  (`/piano-tunings/<id>/cancel-request` POST; DELETE = withdraw / manager
+  decline) — `cancel_pending` = flag set and status requested/scheduled. The
+  manager cancels through the normal status change. Refusals syslog
+  `PIANO_TUNING_DENIED reason=…`; every write route syslogs.
+
+## Reports (3.12.0)
+- `/reports` (`reports_page`, `templates/reports.html`) is its own nav
+  section (nav key `reports`, audience `reports` = `_can_view_reports()`).
+  The old `/reports/assets` redirects to `?tab=rentals`; its data endpoint
+  `/api/reports/assets` is the Rental Lines tab.
+- Every tab shares `_report_shows()` (effective date = show date → load-in →
+  first performance; venue; company via `_company_key`; `is_test` excluded).
+  Each `/api/reports/*` endpoint gates itself: assets/arts-groups/rentals →
+  `_can_report_assets`, labor → `_can_report_labor`, piano →
+  `_can_report_piano`. Add a tab = add an endpoint with its own gate.
+- Labor $ only from `_calc_post_show_labor_cost` for SETTLED shows; hours via
+  `_calc_hours`. Never fork billing math into a report. Asset lines exclude
+  `is_hidden` (matches invoices); piano $ = the piano-linked external lines.
+- Client tables escape every value; CSV prefixes formula-leading cells.
+- TEST_MODE: `html.test-mode` + `.test-mode-frame` (base.html, style.css;
+  label hidden on mobile). Keep it `pointer-events: none`.
+
+## Archived shows page + nav badges + glass layer (3.13.0)
+- Home (`_render_show_board`) no longer renders archived cards — only
+  `archived_count` for the **Archived** button; `/shows/archived`
+  (`archived_shows_page`, `archived_shows.html`) is the archive with its own
+  client-side search/date/venue filters and Restore/Delete forms.
+- Nav badges are NAMED: catalog `'badge': 'approvals' | 'piano'` → base.html
+  renders `#nav-<name>-badge` and a poller per name
+  (`/api/asset-approvals/pending-count`, `/api/piano-tunings/pending-count`).
+  Keep each count endpoint one cheap aggregate (polled every 60 s per tab).
+- The "Light glass refresh" block at the END of style.css (+ one m-header rule
+  in mobile.css) is the only place the WebRetriever2-style tokens
+  (`--hl`, `--lift`, `--lift-hover`) live; the bigger restyle comes later.
 
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.

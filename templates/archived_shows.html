@@ -1,0 +1,115 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{% block title %}Archived Shows — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <a href="{{ url_for('dashboard') }}" class="back-link">← Home</a>
+    <h1 class="page-title">Archived Shows</h1>
+    <p class="page-sub"><span id="arch-visible">{{ shows|length }}</span> of {{ shows|length }} archived show{{ '' if shows|length == 1 else 's' }}, newest first. Shows archive themselves a few days after their last date; Restore brings one back to Home.</p>
+  </div>
+</div>
+
+{% if shows %}
+<div class="dash-toolbar">
+  <div class="dash-search-wrap">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15" class="dash-search-icon"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input type="text" id="arch-search" class="dash-search-input" placeholder="Search archived shows — name, venue, Arts Group…" autocomplete="off" autofocus>
+    <button id="arch-clear" class="dash-clear-btn" type="button" style="display:none" title="Clear">×</button>
+  </div>
+  <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+    <input type="date" id="arch-from" class="field-input field-input-sm" title="Date from" style="width:130px">
+    <span style="color:var(--text-dim);font-size:12px">–</span>
+    <input type="date" id="arch-to" class="field-input field-input-sm" title="Date to" style="width:130px">
+  </div>
+  <div class="dash-venue-pills" id="arch-venues" role="group" aria-label="Filter by venue">
+    <button type="button" class="venue-pill venue-pill-all active" data-venue="" aria-pressed="true">All venues</button>
+    {% for v in venues %}
+    <button type="button" class="venue-pill" data-venue="{{ v }}" aria-pressed="false">{{ v }}</button>
+    {% endfor %}
+  </div>
+</div>
+
+<div id="arch-list" class="show-grid archived">
+  {% for s in shows %}
+  <div class="show-card archived" data-search="{{ (s.name ~ ' ' ~ (s.venue or '') ~ ' ' ~ (s.company or ''))|lower }}"
+       data-date="{{ s.show_date or '' }}" data-venue="{{ s.venue or 'Unassigned' }}">
+    <a class="show-card-link-overlay" href="{{ url_for('show_page', show_id=s.id, tab='advance') }}"></a>
+    <div class="show-card-name">{{ s.name }}{% if s.is_test %} <span class="test-instance-badge" style="font-size:9px">TEST</span>{% endif %}</div>
+    <div class="show-card-dates">
+      <div>{{ s.show_date or 'No date' }}</div>
+      <div class="show-meta" style="margin-top:2px">{{ s.venue or '—' }}{% if s.company %} · {{ s.company }}{% endif %}</div>
+    </div>
+    <div class="show-card-actions" style="padding:8px 12px">
+      <a href="{{ url_for('show_page', show_id=s.id, tab='advance') }}" class="btn btn-sm btn-ghost">View</a>
+      {% if not restricted %}
+      <form method="post" action="{{ url_for('restore_show', show_id=s.id) }}" style="display:inline">
+        <button class="btn btn-sm btn-ghost">Restore</button>
+      </form>
+      {% endif %}
+      {% if user.role == 'admin' %}
+      <form method="post" action="{{ url_for('delete_show', show_id=s.id) }}" style="display:inline" onsubmit="return confirm('Permanently delete this show and all its data?')">
+        <button class="btn btn-sm btn-danger-ghost">Delete</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+<p id="arch-none" class="text-dim" style="display:none;font-size:13px;padding:24px 0">No archived shows match.</p>
+{% else %}
+<div class="empty-state">
+  <p>No archived shows yet.</p>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+  const search = document.getElementById('arch-search');
+  if (!search) return;
+  const from = document.getElementById('arch-from'), to = document.getElementById('arch-to');
+  const clear = document.getElementById('arch-clear');
+  const venues = new Set();
+  const cards = Array.from(document.querySelectorAll('#arch-list .show-card'));
+  function apply() {
+    const term = search.value.toLowerCase().trim(), f = from.value, t = to.value;
+    let n = 0;
+    cards.forEach(c => {
+      const d = c.dataset.date || '';
+      const ok = (!term || (c.dataset.search || '').includes(term))
+        && (!f || (d && d >= f)) && (!t || (d && d <= t))
+        && (venues.size === 0 || venues.has(c.dataset.venue));
+      c.style.display = ok ? '' : 'none';
+      if (ok) n++;
+    });
+    document.getElementById('arch-visible').textContent = n;
+    document.getElementById('arch-none').style.display = n ? 'none' : '';
+    clear.style.display = (term || f || t) ? '' : 'none';
+  }
+  search.addEventListener('input', apply);
+  from.addEventListener('change', apply);
+  to.addEventListener('change', apply);
+  clear.addEventListener('click', () => { search.value = ''; from.value = ''; to.value = ''; apply(); search.focus(); });
+  document.querySelectorAll('#arch-venues .venue-pill').forEach(btn => btn.addEventListener('click', () => {
+    const v = btn.dataset.venue || '';
+    if (!v) venues.clear(); else if (venues.has(v)) venues.delete(v); else venues.add(v);
+    document.querySelectorAll('#arch-venues .venue-pill').forEach(p => {
+      const pv = p.dataset.venue || '', on = pv ? venues.has(pv) : venues.size === 0;
+      p.classList.toggle('active', on);
+      p.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    apply();
+  }));
+  // ?q= deep link (e.g. from Home's search)
+  const q = new URLSearchParams(location.search).get('q');
+  if (q) { search.value = q; apply(); }
+})();
+</script>
+{% endblock %}

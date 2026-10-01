@@ -4,7 +4,7 @@
   MIT Licensed — see LICENSE for details.
 #}
 <!DOCTYPE html>
-<html lang="en" data-theme="{{ user.theme if user else 'dark' }}"{% if is_mobile_view %} class="mobile-view"{% endif %}>
+<html lang="en" data-theme="{{ user.theme if user else 'dark' }}"{% if is_mobile_view or test_mode %} class="{{ 'mobile-view' if is_mobile_view }}{{ ' test-mode' if test_mode }}"{% endif %}>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
@@ -84,6 +84,7 @@
   {% block head %}{% endblock %}
 </head>
 <body>
+{% if test_mode %}{# 3.12.0: impossible-to-miss test-server frame (pointer-events: none) #}<div class="test-mode-frame" aria-hidden="true"><span>TEST INSTANCE — not production</span></div>{% endif %}
 
 {% if user %}
 <div class="app-layout">
@@ -248,10 +249,10 @@
       {% if entry.type == 'section' %}
       <div class="nav-section-label">{{ entry.label }}</div>
       {% else %}
-      <a href="{{ url_for(entry.endpoint) }}" class="nav-item{% if entry.indent %} sub{% endif %}{% if entry.active %} active{% endif %}"{% if entry.badge %} id="nav-approvals-link"{% endif %}>
+      <a href="{{ url_for(entry.endpoint) }}" class="nav-item{% if entry.indent %} sub{% endif %}{% if entry.active %} active{% endif %}"{% if entry.badge %} id="nav-{{ entry.badge }}-link"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">{{ entry.icon|safe }}</svg>
         {{ entry.label }}
-        {% if entry.badge %}<span id="nav-approvals-badge" class="nav-approvals-badge" hidden></span>{% endif %}
+        {% if entry.badge %}<span id="nav-{{ entry.badge }}-badge" class="nav-approvals-badge" hidden></span>{% endif %}
       </a>
       {% endif %}
       {% endfor %}
@@ -824,7 +825,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li><strong>Happening Today</strong> — appears when there's activity today, with auto tags like Load-In, Performance, Load-Out.</li>
         <li><strong>New Show</strong> — creates a show from just a name; dates, venue and everything else are filled in on its Advance Sheet.</li>
-        <li><strong>Search</strong> — filters by show name or venue, across active <em>and</em> archived shows at once.</li>
+        <li><strong>Search</strong> — filters the active shows by name or venue. Archived shows have their own page: the <strong>Archived</strong> button next to New Show (with its own search, dates and venue filter, plus Restore).</li>
         <li><strong>Date pickers</strong> — narrow the board by show date.</li>
         <li><strong>Venue pills</strong> — every venue shows by default (<strong>All venues</strong> lit). Click a venue to show <em>only</em> that venue; click more to add them, click a lit one to drop it, or <strong>All venues</strong> to reset. The archived list follows the pick too.</li>
         <li><strong>Layout / density</strong> — Columns vs Stacked, Normal vs Slim; saved to your account instantly.</li>
@@ -849,7 +850,7 @@ const _HELP_PAGES = {
         <li>Sections and fields are configured in Settings → Form Fields; some fields appear only when another field is set a certain way (each field's "Conditional show when" — several conditions can be combined with <code>&amp;&amp;</code>).</li>
         <li><strong>AI Extract</strong> (when enabled) — upload a rider/tech spec or pick an attachment; review the suggested values and apply the ones you want.</li>
         <li><strong>History</strong> — browse saved versions of the form and restore one.</li>
-        <li><strong>Piano Tuning</strong> (below Backline) — <strong>+ Request Tuning</strong> sends a request to the piano tuning manager (the piano — picked from the Asset Manager's Piano category — date/time needed and notes; tunings are always on the stage). A warning shows when the picked piano isn't on the show's Assets tab yet. Edit or cancel it until they schedule it with the vendor; once they set the tuning time it appears on the Production Schedule as a read-only 🎹 row, and its cost goes on the Final Invoice.</li>
+        <li><strong>Piano Tuning</strong> (below Backline) — <strong>+ Request Tuning</strong> sends a request to the piano tuning manager (the piano — picked from the Asset Manager's Piano category — date/time needed and notes; tunings are always on the stage). A warning shows when the picked piano isn't on the show's Assets tab yet. Edit or cancel it until the manager starts on it; after that, <strong>Request cancellation</strong> asks them to cancel it with the vendor (they're emailed and either cancel it or decline, and you're told if it stays on); once they set the tuning time it appears on the Production Schedule as a read-only 🎹 row, and its cost goes on the Final Invoice.</li>
         <li>The presence indicator shows who else is on this show; other people's edits merge in live (updated fields flash briefly).</li>
       </ul>
     `
@@ -1037,7 +1038,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li>Search types/manufacturers/models; sort by name, units, or cost.</li>
         <li>Type details: daily/weekly rates, reserve (spare) count, supplier, photo, storage location, <strong>📅 Calendar</strong> of per-day availability, and the unit list (barcodes, add units, remove-from-service with reason, unit logs).</li>
-        <li><strong>Company Rates</strong> (Edit type) — special day/week rates per <em>Performance Company</em>, picked from the advance form's Performance Company dropdown. A show with that company is priced at them; the type's card shows "+ N company rates".</li>
+        <li><strong>Company Rates</strong> (Edit type) — special day/week rates per <em>Performance Company</em>, picked from the Arts Groups list (what the advance form's Performance Company field uses). A show with that company is priced at them; the type's card shows "+ N company rates".</li>
         <li><strong>Bulk: Hide from Advance Picker</strong> — mass-toggle which types show up in the show-page asset search.</li>
         <li><strong>⚠ Overbooked</strong> appears when demand exceeds usable units anywhere.</li>
         <li><strong>Systems &amp; Packages</strong> — bundles of component types with per-component quantities.</li>
@@ -1056,14 +1057,18 @@ const _HELP_PAGES = {
       </ul>
     `
   },
-  asset_reports: {
-    title: 'Asset Reports',
+  reports: {
+    title: 'Reports',
     html: `
-      <p>Rental revenue and utilisation.</p>
+      <p><strong>Reports across the whole app.</strong> The filter bar (date range on each show's date, venue, Arts Group) applies to every tab; test/demo shows are left out. You see the tabs your permissions allow.</p>
       <ul style="${_HELP_UL}">
-        <li>Filter by company, venue, category, type, and date range (defaults to the past year), then <strong>Run Report</strong>.</li>
-        <li>Summary cards (revenue, line items, shows, categories) plus a line-item table with a revenue total.</li>
-        <li><strong>Export CSV</strong> downloads the loaded rows.</li>
+        <li><strong>Overview</strong> — shows by venue / month / status and the money by area: assets, external costs, settled labor, piano tunings.</li>
+        <li><strong>Arts Groups</strong> — per company: shows, how often they rented gear (lines, units, unit-days), their top items and what they spent. Click a row for every item they rented and their shows.</li>
+        <li><strong>Assets</strong> — per item type: times rented, shows, unit-days, revenue, last use, units owned and (with a date range) utilization. Idle gear is listed too. Click a row for the individual units (bookings pinned to a unit, maintenance and log history).</li>
+        <li><strong>Rental Lines</strong> — every asset line with its own category / type filters and CSV export (the old Asset Reports page).</li>
+        <li><strong>Labor &amp; Techs</strong> — per technician: shows, scheduled shifts and hours, actual hours from settlements, training and overhead shifts; per position: requested vs filled.</li>
+        <li><strong>Piano Tuning</strong> — tunings and cost by vendor and by piano.</li>
+        <li>Labor money is the settlement (Final Invoice) figure, so only settled shows count. Every table has <strong>CSV</strong>.</li>
       </ul>
     `
   },
@@ -1203,6 +1208,16 @@ const _HELP_PAGES = {
       </ul>
     `
   },
+  archived_shows: {
+    title: 'Archived Shows',
+    html: `
+      <p>Every archived show, newest first. A show archives itself a few days after its last date (Settings → Shows sets how many).</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Search</strong> matches show name, venue and Arts Group; the date pickers and venue pills narrow it further.</li>
+        <li><strong>Restore</strong> puts a show back on Home (its archive clock restarts). Admins can also <strong>Delete</strong> permanently.</li>
+      </ul>
+    `
+  },
   piano_tuning: {
     title: 'Piano Tuning',
     html: `
@@ -1210,6 +1225,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li><strong>Open</strong> = Requested and Scheduled. The status buttons filter; search matches show, piano, vendor and PM.</li>
         <li><strong>Mark scheduled</strong> — one click: it's with the vendor (the PM can no longer edit or cancel it). Setting the tuning date does the same.</li>
+        <li><strong>⚠ Cancellation requested</strong> — the PM asked to cancel (reason shown). <strong>Cancel tuning</strong> once it's off with the vendor, or <strong>Decline cancel</strong> if it can't be (the PM is emailed).</li>
         <li><strong>Vendors</strong> — the vendor list with each one's typical price, contact and notes. Picking a vendor in Manage fills an empty cost with its typical price. Archive a vendor to drop it from the list; past tunings keep it.</li>
         <li><strong>Manage</strong> — vendor, tuning date + start time, cost, paperwork and notes. Setting the tuning date marks it <strong>Scheduled</strong>, puts a read-only 🎹 row on that day of the show's production schedule and emails the requester.</li>
         <li><strong>Cost</strong> appears on the show's <strong>Final Invoice</strong> and the Combined Invoice under External Assets &amp; Costs. Cancelled tunings are never billed and their schedule row is removed.</li>
@@ -1263,7 +1279,7 @@ const _HELP_PAGES = {
    longest matching prefix wins — but keep specific paths (e.g. /settings/…)
    listed so they don't fall through to their parent page's entry. #}
 const _HELP_ROUTES = [
-  ['/dashboard', 'home'], ['/my-shows', 'my_shows'], ['/piano-tuning', 'piano_tuning'], ['/shows/new', 'new_show'],
+  ['/dashboard', 'home'], ['/my-shows', 'my_shows'], ['/shows/archived', 'archived_shows'], ['/piano-tuning', 'piano_tuning'], ['/shows/new', 'new_show'],
   ['/settings/shows', 'manage_shows'], ['/settings/pdf-templates', 'pdf_templates'],
   ['/settings', 'settings'],
   ['/admin/merge-shows', 'merge_shows'], ['/admin/audit', 'audit_log'],
@@ -1274,7 +1290,7 @@ const _HELP_ROUTES = [
   ['/combined-invoice', 'combined_invoice'],
   ['/assets/approvals', 'asset_approvals'], ['/assets/retired', 'assets_retired'],
   ['/assets/db-tools', 'asset_db_tools'], ['/assets', 'assets_admin'],
-  ['/reports/assets', 'asset_reports'],
+  ['/reports', 'reports'],
   ['/prism', 'prism'],
   ['/dashboards', 'dashboards'],
   ['/viewer/calendar', 'viewer_calendar'], ['/viewer/account', 'viewer_account'],
@@ -1384,6 +1400,33 @@ function dismissMsg(id, btn) {
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) refreshBadge();
   });
+})();
+
+// ── Piano Tuning badge (3.12.1) ───────────────────────────────────────────────
+// New requests + open cancellation requests waiting on the piano manager;
+// red + pulsing when one is needed within a week or a cancellation is waiting.
+(function() {
+  const badge = document.getElementById('nav-piano-badge');
+  if (!badge) return;
+  async function refresh() {
+    try {
+      const r = await fetch('/api/piano-tunings/pending-count', {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+      if (!r.ok) return;
+      const d = await r.json();
+      const n = (d.pending | 0);
+      badge.hidden = n <= 0;
+      badge.textContent = n > 0 ? String(n) : '';
+      badge.classList.toggle('urgent', n > 0 && ((d.urgent | 0) > 0 || (d.cancel_requests | 0) > 0));
+      const parts = [];
+      if (d.requested) parts.push(`${d.requested} new request${d.requested === 1 ? '' : 's'}`);
+      if (d.cancel_requests) parts.push(`${d.cancel_requests} cancellation request${d.cancel_requests === 1 ? '' : 's'}`);
+      if (d.urgent) parts.push(`${d.urgent} needed within ${d.urgent_days} days`);
+      badge.title = parts.join(' · ');
+    } catch (_) { /* silent */ }
+  }
+  refresh();
+  setInterval(refresh, 60 * 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 })();
 </script>
 {% endif %}
