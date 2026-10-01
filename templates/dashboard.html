@@ -17,7 +17,7 @@
     <p class="page-sub">{{ active_shows|length }} active · {{ archived_shows|length }} archived</p>
     {% endif %}
   </div>
-  {% if not restricted %}
+  {% if not restricted and not my_shows %}
   <div style="display:flex;gap:8px;align-items:center">
     <a href="{{ url_for('new_show') }}" class="btn btn-primary">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>

@@ -2093,7 +2093,7 @@ window.addCompanyRateRow = function(rt) {
   rt = rt || {company: '', rental_cost: 0, weekly_rate: 0};
   const host = document.getElementById('type-company-rates');
   if (!_companyOptions.length && !rt.company) {
-    alert('No Performance Companies to pick from. Add options to the Performance Company dropdown on the advance form (Settings → Form Fields) first.');
+    alert('No Performance Companies to pick from. Add them under Settings → Arts Groups first.');
     return;
   }
   const opts = _companyOptions.slice();

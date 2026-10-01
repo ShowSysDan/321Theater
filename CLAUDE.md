@@ -749,8 +749,9 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
 
 ## Performance Company asset rates (3.8.0)
 - `asset_company_rates` (asset_type_id, company) = special day/week rates;
-  companies come from the `performance_company` form field's dropdown
-  options (`_performance_company_options`), matched via `_company_key()`.
+  companies come from the Arts Groups list (`arts_groups` — the field is an
+  arts_group_dropdown storing the NAME) plus any plain dropdown options
+  (`_performance_company_options`), matched via `_company_key()`.
   `_price_asset_line()` is THE pricing call for add + re-date (company rate
   if the type has one, else standard; same `_compute_locked_price` math);
   `show_assets.rate_company` records which card priced the line.
@@ -782,7 +783,8 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   first insert stranded it when the time changed.
   The editor renders them read-only (`.piano-sched-row`, `data-piano-id`);
   copy-day / template-replace skip them.
-- Piano = an asset type in a category named like 'Piano'
+- Piano = an asset type under a GROUP (parent type) or in a category named
+  like 'Piano' — groups with children are headings, excluded (3.11.0)
   (`_piano_asset_types`; stored as `piano_asset_type_id` + name snapshot in
   `piano`); free text only when no such category exists. No location field
   (always the stage). "Not on Assets tab" warning = `_piano_booked()` (direct
@@ -810,6 +812,11 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   retired/legacy values survive a Save). Non-managers never get
   manager_notes / sent_by / updated_by from the show endpoint. Piano rows are
   locked on the rental routes only while the module is on.
+- Cancellation request (3.11.0): once the manager is on it, a PM only ASKS
+  (`/piano-tunings/<id>/cancel-request` POST; DELETE = withdraw / manager
+  decline) — `cancel_pending` = flag set and status requested/scheduled. The
+  manager cancels through the normal status change. Refusals syslog
+  `PIANO_TUNING_DENIED reason=…`; every write route syslogs.
 
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.

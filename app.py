@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.10.3'
+APP_VERSION = '3.11.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -18889,9 +18889,10 @@ def _company_key(name):
 
 
 def _performance_company_options(db):
-    """Companies an asset manager can attach special rates to: the options of
-    the advance form's `performance_company` dropdown (strings or
-    {'value': …} dicts), plus any company that already has rates (so rates
+    """Companies an asset manager can attach special rates to: the Arts
+    Groups list (what the arts_group_dropdown Performance Company field picks
+    from), any plain-dropdown options of that field (strings or {'value': …}
+    dicts), plus any company that already has rates (so rates
     for an option later removed from the dropdown stay visible/editable)."""
     out, seen = [], set()
 
@@ -18902,6 +18903,10 @@ def _performance_company_options(db):
             seen.add(k)
             out.append(v)
 
+    # The field is normally an arts_group_dropdown (3.10.4): its choices are
+    # the Arts Groups list (Settings → Arts Groups), which stores the name.
+    for r in db.execute('SELECT name FROM arts_groups ORDER BY sort_order, name').fetchall():
+        _add(r['name'])
     ff = db.execute("SELECT options_json FROM form_fields "
                     "WHERE field_key='performance_company'").fetchone()
     if ff and ff['options_json']:
@@ -22064,21 +22069,23 @@ def _piano_module_on():
 
 def _piano_asset_types(db):
     """[{id, name}] — the pianos a request can pick: live (not retired, not
-    system/package) asset types in any asset category named like 'Piano'.
-    Child types read 'Parent › Child'."""
+    system/package) asset types under an asset GROUP named like 'Piano'
+    (Category → Group "Piano" → Steinway, Baldwin…), or in a category named
+    like 'Piano'. A group that has types under it is a heading, not a
+    bookable piano, so it's left out (3.10.4)."""
     rows = db.execute("""
         SELECT t.id, t.name, p.name AS parent_name
         FROM asset_types t
         JOIN asset_categories c ON c.id = t.category_id
         LEFT JOIN asset_types p ON p.id = t.parent_type_id
-        WHERE c.name ILIKE %s AND COALESCE(t.is_retired, 0) = 0
+        WHERE (c.name ILIKE %s OR p.name ILIKE %s)
+          AND COALESCE(t.is_retired, 0) = 0
           AND COALESCE(t.is_system, 0) = 0 AND COALESCE(t.is_package, 0) = 0
-        ORDER BY c.sort_order, c.name, COALESCE(p.sort_order, t.sort_order),
-                 COALESCE(p.name, t.name), t.parent_type_id NULLS FIRST, t.sort_order, t.name
-    """, ('%piano%',)).fetchall()
-    return [{'id': r['id'],
-             'name': f"{r['parent_name']} › {r['name']}" if r['parent_name'] else r['name']}
-            for r in rows]
+          AND NOT EXISTS (SELECT 1 FROM asset_types ch
+                          WHERE ch.parent_type_id = t.id AND COALESCE(ch.is_retired, 0) = 0)
+        ORDER BY c.sort_order, c.name, t.sort_order, t.name
+    """, ('%piano%', '%piano%')).fetchall()
+    return [{'id': r['id'], 'name': r['name']} for r in rows]
 
 
 def _piano_booked(db, show_ids):
@@ -22123,9 +22130,12 @@ def _piano_out(r):
     for k in ('requested_date', 'tuning_date'):
         v = _as_date(d.get(k))
         d[k] = v.isoformat() if v else None
-    for k in ('created_at', 'sent_at', 'completed_at', 'updated_at'):
+    for k in ('created_at', 'sent_at', 'completed_at', 'updated_at', 'cancel_requested_at'):
         if k in d:
             d[k] = _ts_out(d[k])
+    # An open cancellation request (3.10.4) — moot once cancelled/completed.
+    d['cancel_pending'] = bool(d.get('cancel_requested_at')) and d.get('status') in (
+        'requested', 'scheduled')
     d['cost'] = float(d['cost']) if d.get('cost') is not None else None
     d['status_label'] = PIANO_STATUS_LABELS.get(d.get('status'), d.get('status'))
     return d
@@ -22473,27 +22483,29 @@ def piano_tuning_update(tid):
     manager = _is_piano_manager()
     editor = (not session.get('is_readonly') and not session.get('is_restricted')
               and can_access_show(session['user_id'], show_id))
+    def _denied(reason, msg, code):
+        syslog_logger.warning(f"PIANO_TUNING_DENIED id={tid} show_id={show_id} reason={reason} "
+                              f"by={session.get('username')}")
+        db.close()
+        return jsonify({'error': msg}), code
     if not manager:
         if not editor:
-            db.close()
-            return jsonify({'error': 'Access denied'}), 403
+            return _denied('no_access', 'Access denied', 403)
         if cur['status'] != 'requested':
-            db.close()
-            return jsonify({'error': 'This request is already with the piano tuning '
-                                     'manager — ask them to change it.'}), 409
+            return _denied('not_requested', 'This request is already with the piano tuning '
+                                            'manager — use Request cancellation, or ask them '
+                                            'to change it.', 409)
         if any(k in data for k in _PIANO_MANAGER_FIELDS) or \
                 data.get('status') not in (None, 'requested', 'cancelled'):
-            db.close()
-            return jsonify({'error': 'Only the piano tuning manager can change that.'}), 403
+            return _denied('manager_field', 'Only the piano tuning manager can change that.', 403)
         # Once the manager has started on it (vendor, cost or paperwork) the
         # PM can't change or cancel it — cancelling would delete that work.
         has_paper = db.execute(
             "SELECT 1 FROM show_external_rentals WHERE piano_tuning_id=%s "
             "AND COALESCE(pdf_filename, '') <> ''", (tid,)).fetchone()
         if cur['cost'] is not None or (cur['vendor'] or '').strip() or has_paper:
-            db.close()
-            return jsonify({'error': 'The piano tuning manager is already working on this '
-                                     'request — ask them to change it.'}), 409
+            return _denied('manager_working', 'The piano tuning manager is already working '
+                                              'on this request — use Request cancellation.', 409)
     vals, err = _piano_clean(data, _PIANO_REQUEST_FIELDS + (_PIANO_MANAGER_FIELDS if manager else ()))
     # The piano / vendor already stored is accepted as-is (it may since have
     # been retired, re-categorised or archived, or be a 3.9 free-text value):
@@ -22719,8 +22731,8 @@ def piano_vendor_update(vid):
     if set(data) == {'is_active'}:
         active = 1 if data.get('is_active') else 0
         db.execute('UPDATE piano_vendors SET is_active=%s WHERE id=%s', (active, vid))
-        log_audit(db, 'PIANO_VENDOR_ARCHIVE' if not active else 'PIANO_VENDOR_RESTORE',
-                  'piano_vendor', vid)
+        event = 'PIANO_VENDOR_ARCHIVE' if not active else 'PIANO_VENDOR_RESTORE'
+        log_audit(db, event, 'piano_vendor', vid)
     else:
         vals, err = _piano_vendor_clean(data)
         if err:
@@ -22733,10 +22745,100 @@ def piano_vendor_update(vid):
         db.execute('UPDATE piano_vendors SET name=%s, typical_price=%s, contact=%s, notes=%s '
                    'WHERE id=%s', (vals['name'], vals['typical_price'], vals['contact'],
                                    vals['notes'], vid))
-        log_audit(db, 'PIANO_VENDOR_EDIT', 'piano_vendor', vid, detail=vals['name'])
+        event = 'PIANO_VENDOR_EDIT'
+        log_audit(db, event, 'piano_vendor', vid, detail=vals['name'])
     db.commit()
     db.close()
-    syslog_logger.info(f"PIANO_VENDOR_EDIT id={vid} by={session.get('username')}")
+    syslog_logger.info(f"{event} id={vid} by={session.get('username')}")
+    return jsonify({'success': True})
+
+
+@app.route('/piano-tunings/<int:tid>/cancel-request', methods=['POST', 'DELETE'])
+@login_required
+def piano_tuning_cancel_request(tid):
+    """POST: a show editor asks the piano manager to cancel a tuning the
+    manager is already working on (the PM can't cancel it outright then) —
+    with an optional reason; the managers are emailed and the list flags it.
+    DELETE: the PM withdraws the ask, or the manager declines it (the asker
+    is emailed). The manager actually cancels via the normal status change."""
+    if not _piano_module_on():
+        abort(404)
+    db = get_db()
+    t = db.execute('SELECT t.*, s.name AS show_name FROM piano_tunings t '
+                   'JOIN shows s ON s.id = t.show_id WHERE t.id=%s FOR UPDATE OF t',
+                   (tid,)).fetchone()
+    if not t:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+    manager = _is_piano_manager()
+    editor = (not session.get('is_readonly') and not session.get('is_restricted')
+              and can_access_show(session['user_id'], t['show_id']))
+    if not (manager or editor):
+        syslog_logger.warning(f"PIANO_TUNING_DENIED id={tid} reason=cancel_request_no_access "
+                              f"by={session.get('username')}")
+        db.close()
+        return jsonify({'error': 'Access denied'}), 403
+    if t['status'] not in ('requested', 'scheduled'):
+        db.close()
+        return jsonify({'error': 'This tuning is already ' + PIANO_STATUS_LABELS.get(
+            t['status'], t['status']).lower() + '.'}), 409
+    who = session.get('display_name') or session.get('username') or 'Someone'
+    if request.method == 'POST':
+        note = str((request.get_json(force=True) or {}).get('note') or '').strip()[:2000]
+        db.execute('UPDATE piano_tunings SET cancel_requested_at=CURRENT_TIMESTAMP, '
+                   'cancel_requested_by=%s, cancel_request_note=%s WHERE id=%s',
+                   (session['user_id'], note, tid))
+        log_audit(db, 'PIANO_TUNING_CANCEL_REQUEST', 'piano_tuning', tid,
+                  show_id=t['show_id'], detail=note[:200])
+        recipients = _piano_manager_emails(db, exclude_user_id=session['user_id'])
+        db.commit()
+        db.close()
+        syslog_logger.info(f"PIANO_TUNING_CANCEL_REQUEST id={tid} show_id={t['show_id']} "
+                           f"by={session.get('username')}")
+        try:
+            link = url_for('piano_tuning_page', _external=True)
+        except Exception:
+            link = ''
+        when = f"{_as_date(t['tuning_date']).isoformat()} {t['tuning_start'] or ''}".strip() \
+            if t['tuning_date'] else 'not scheduled yet'
+        _piano_notify(
+            recipients,
+            f'3·2·1→THEATER: Piano Tuning Cancellation Requested — {t["show_name"]}',
+            f'{who} asked to cancel a piano tuning.\n\n'
+            f'Show: {t["show_name"]}\n'
+            f'Piano: {t["piano"] or "—"}\n'
+            f'Tuning: {when}\n'
+            f'Vendor: {t["vendor"] or "—"}\n'
+            f'Reason: {note or "—"}\n\n'
+            'Cancel it with the vendor if you can, then mark it Cancelled — or decline '
+            'the request on the Piano Tuning list.\n'
+            + (f'\n{link}\n' if link else ''))
+        return jsonify({'success': True})
+    # DELETE — withdraw (asker / show editor) or decline (manager)
+    if not t['cancel_requested_at']:
+        db.close()
+        return jsonify({'success': True})
+    asker = t['cancel_requested_by']
+    declined = manager and asker != session['user_id']
+    db.execute('UPDATE piano_tunings SET cancel_requested_at=NULL, cancel_requested_by=NULL, '
+               "cancel_request_note='' WHERE id=%s", (tid,))
+    log_audit(db, 'PIANO_TUNING_CANCEL_DECLINED' if declined else 'PIANO_TUNING_CANCEL_WITHDRAWN',
+              'piano_tuning', tid, show_id=t['show_id'])
+    asker_email = None
+    if declined and asker:
+        r = db.execute("SELECT email FROM users WHERE id=%s AND COALESCE(is_locked, 0) = 0 "
+                       "AND COALESCE(email, '') <> ''", (asker,)).fetchone()
+        asker_email = r['email'] if r else None
+    db.commit()
+    db.close()
+    syslog_logger.info(f"PIANO_TUNING_CANCEL_{'DECLINED' if declined else 'WITHDRAWN'} "
+                       f"id={tid} by={session.get('username')}")
+    if asker_email:
+        _piano_notify(
+            [asker_email],
+            f'3·2·1→THEATER: Piano Tuning Will Go Ahead — {t["show_name"]}',
+            f'{who} could not cancel the piano tuning for {t["show_name"]} '
+            f'({t["piano"] or "piano"}), so it is still on. Contact them with questions.\n')
     return jsonify({'success': True})
 
 

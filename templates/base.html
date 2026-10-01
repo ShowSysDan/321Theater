@@ -849,7 +849,7 @@ const _HELP_PAGES = {
         <li>Sections and fields are configured in Settings → Form Fields; some fields appear only when another field is set a certain way (each field's "Conditional show when" — several conditions can be combined with <code>&amp;&amp;</code>).</li>
         <li><strong>AI Extract</strong> (when enabled) — upload a rider/tech spec or pick an attachment; review the suggested values and apply the ones you want.</li>
         <li><strong>History</strong> — browse saved versions of the form and restore one.</li>
-        <li><strong>Piano Tuning</strong> (below Backline) — <strong>+ Request Tuning</strong> sends a request to the piano tuning manager (the piano — picked from the Asset Manager's Piano category — date/time needed and notes; tunings are always on the stage). A warning shows when the picked piano isn't on the show's Assets tab yet. Edit or cancel it until they schedule it with the vendor; once they set the tuning time it appears on the Production Schedule as a read-only 🎹 row, and its cost goes on the Final Invoice.</li>
+        <li><strong>Piano Tuning</strong> (below Backline) — <strong>+ Request Tuning</strong> sends a request to the piano tuning manager (the piano — picked from the Asset Manager's Piano category — date/time needed and notes; tunings are always on the stage). A warning shows when the picked piano isn't on the show's Assets tab yet. Edit or cancel it until the manager starts on it; after that, <strong>Request cancellation</strong> asks them to cancel it with the vendor (they're emailed and either cancel it or decline, and you're told if it stays on); once they set the tuning time it appears on the Production Schedule as a read-only 🎹 row, and its cost goes on the Final Invoice.</li>
         <li>The presence indicator shows who else is on this show; other people's edits merge in live (updated fields flash briefly).</li>
       </ul>
     `
@@ -1037,7 +1037,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li>Search types/manufacturers/models; sort by name, units, or cost.</li>
         <li>Type details: daily/weekly rates, reserve (spare) count, supplier, photo, storage location, <strong>📅 Calendar</strong> of per-day availability, and the unit list (barcodes, add units, remove-from-service with reason, unit logs).</li>
-        <li><strong>Company Rates</strong> (Edit type) — special day/week rates per <em>Performance Company</em>, picked from the advance form's Performance Company dropdown. A show with that company is priced at them; the type's card shows "+ N company rates".</li>
+        <li><strong>Company Rates</strong> (Edit type) — special day/week rates per <em>Performance Company</em>, picked from the Arts Groups list (what the advance form's Performance Company field uses). A show with that company is priced at them; the type's card shows "+ N company rates".</li>
         <li><strong>Bulk: Hide from Advance Picker</strong> — mass-toggle which types show up in the show-page asset search.</li>
         <li><strong>⚠ Overbooked</strong> appears when demand exceeds usable units anywhere.</li>
         <li><strong>Systems &amp; Packages</strong> — bundles of component types with per-component quantities.</li>
@@ -1210,6 +1210,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li><strong>Open</strong> = Requested and Scheduled. The status buttons filter; search matches show, piano, vendor and PM.</li>
         <li><strong>Mark scheduled</strong> — one click: it's with the vendor (the PM can no longer edit or cancel it). Setting the tuning date does the same.</li>
+        <li><strong>⚠ Cancellation requested</strong> — the PM asked to cancel (reason shown). <strong>Cancel tuning</strong> once it's off with the vendor, or <strong>Decline cancel</strong> if it can't be (the PM is emailed).</li>
         <li><strong>Vendors</strong> — the vendor list with each one's typical price, contact and notes. Picking a vendor in Manage fills an empty cost with its typical price. Archive a vendor to drop it from the list; past tunings keep it.</li>
         <li><strong>Manage</strong> — vendor, tuning date + start time, cost, paperwork and notes. Setting the tuning date marks it <strong>Scheduled</strong>, puts a read-only 🎹 row on that day of the show's production schedule and emails the requester.</li>
         <li><strong>Cost</strong> appears on the show's <strong>Final Invoice</strong> and the Combined Invoice under External Assets &amp; Costs. Cancelled tunings are never billed and their schedule row is removed.</li>
