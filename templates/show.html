@@ -473,6 +473,26 @@
     </div>
   </div>
 
+{% macro piano_tuning_panel() %}
+  {# ── Piano Tuning (3.9.0) — requests for this show. Only buttons live
+     inside #advance-form (no inputs), so nothing here triggers the advance
+     autosave; the request dialog is outside the form. #}
+  <div class="form-section" id="piano-tuning-section">
+    <div class="form-section-header">
+      <span class="section-icon">🎹</span> PIANO TUNING
+      <div style="display:flex;gap:6px;align-items:center;margin-left:auto">
+        <a href="{{ url_for('piano_tuning_page') }}" id="piano-manage-link" class="btn btn-sm btn-ghost" style="display:none">Piano Tuning list →</a>
+        {% if can_edit_advance %}
+        <button type="button" class="btn btn-sm btn-primary" onclick="openPianoRequest()">+ Request Tuning</button>
+        {% endif %}
+      </div>
+    </div>
+    <div class="form-section-body">
+      <div id="piano-tuning-list"><p class="text-dim" style="font-size:12px;margin:0">Loading…</p></div>
+    </div>
+  </div>
+{% endmacro %}
+  {% set _piano_ns = namespace(done=False) %}
   {% for section in form_sections %}
   <div class="form-section{% if section.collapsible and section.default_open == 0 %} collapsed{% endif %}"
        data-key="{{ section.section_key }}" data-default-open="{{ '0' if section.default_open == 0 else '1' }}">
@@ -489,9 +509,154 @@
       {% endfor %}
     </div>
   </div>
+  {% if piano_tuning_enabled and section.section_key == 'backline_section' and not _piano_ns.done %}
+    {% set _piano_ns.done = True %}
+    {{ piano_tuning_panel() }}
+  {% endif %}
   {% endfor %}
+  {% if piano_tuning_enabled and not _piano_ns.done %}{{ piano_tuning_panel() }}{% endif %}
 
 </form>
+
+{% if piano_tuning_enabled %}
+{# Piano Tuning request / edit dialog (outside #advance-form on purpose). #}
+<div id="piano-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closePianoModal()">
+  <div class="modal-card" style="max-width:560px;max-height:90vh;overflow-y:auto">
+    <div class="modal-header">
+      <span id="piano-modal-title">Request Piano Tuning</span>
+      <button type="button" onclick="closePianoModal()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="piano-edit-id">
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field-group" style="grid-column:span 2">
+          <label class="field-label">EVENT / SHOW LOCATION</label>
+          <input type="text" id="piano-location" class="field-input" maxlength="300" placeholder="e.g. Walt Disney Theater — stage">
+        </div>
+        <div class="field-group" style="grid-column:span 2">
+          <label class="field-label">PIANO</label>
+          <input type="text" id="piano-piano" class="field-input" maxlength="300" placeholder="e.g. Steinway D (house)">
+        </div>
+        <div class="field-group">
+          <label class="field-label">NEEDED ON *</label>
+          <input type="date" id="piano-req-date" class="field-input">
+        </div>
+        <div class="field-group">
+          <label class="field-label">TUNED BY (time)</label>
+          <input type="text" id="piano-req-time" class="field-input" maxlength="5" placeholder="14:00">
+        </div>
+        <div class="field-group" style="grid-column:span 2">
+          <label class="field-label">NOTES</label>
+          <textarea id="piano-notes" class="field-input field-textarea" rows="3" maxlength="4000" placeholder="Pitch (A440?), access, quiet time needed, rehearsal schedule…"></textarea>
+        </div>
+      </div>
+      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">The piano tuning manager is emailed. Once they set the tuning time it's added to this show's production schedule. You can change or cancel the request until they send it to the vendor.</p>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
+      <button type="button" class="btn btn-ghost" onclick="closePianoModal()">Close</button>
+      <button type="button" class="btn btn-primary" id="piano-save-btn" onclick="savePianoRequest()">Send Request</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const SHOW_ID = {{ show.id }};
+  const CAN_EDIT = {{ 'true' if can_edit_advance else 'false' }};
+  let _tunings = [], _defaults = {}, _canManage = false;
+  const H = {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'};
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const money = v => (v === null || v === undefined) ? '' : `$${Number(v).toFixed(2)}`;
+
+  async function loadPiano() {
+    const host = document.getElementById('piano-tuning-list');
+    if (!host) return;
+    try {
+      const r = await fetch(`/shows/${SHOW_ID}/piano-tunings`, {headers: H});
+      if (!r.ok) throw new Error(r.status);
+      const d = await r.json();
+      _tunings = d.tunings || []; _defaults = d.defaults || {}; _canManage = !!d.can_manage;
+    } catch (e) {
+      host.innerHTML = '<p style="font-size:12px;color:#e53e3e;margin:0">Couldn\'t load piano tunings.</p>';
+      return;
+    }
+    document.getElementById('piano-manage-link').style.display = _canManage ? '' : 'none';
+    if (!_tunings.length) {
+      host.innerHTML = '<p class="text-dim" style="font-size:12px;margin:0">No piano tuning requested for this show.</p>';
+      return;
+    }
+    host.innerHTML = `<div style="overflow-x:auto"><table class="data-table piano-table">
+      <thead><tr><th>Status</th><th>Piano</th><th>Location</th><th>Needed</th><th>Scheduled</th><th class="num">Cost</th><th></th></tr></thead>
+      <tbody>${_tunings.map(t => {
+        const sched = t.tuning_date
+          ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}${t.tuning_end ? '–' + esc(t.tuning_end) : ''}`
+            + (t.status !== 'cancelled' && !t.on_schedule ? ' <span class="piano-warn" title="This date isn\'t one of the show\'s schedule days, so the row won\'t show on the production schedule until the show\'s dates cover it.">not on schedule dates</span>' : '')
+          : '—';
+        const mine = CAN_EDIT && t.status === 'requested';
+        return `<tr>
+          <td><span class="piano-status piano-status-${esc(t.status)}">${esc(t.status_label)}</span></td>
+          <td>${esc(t.piano) || '—'}${t.vendor ? `<div class="text-dim" style="font-size:10px">Vendor: ${esc(t.vendor)}</div>` : ''}</td>
+          <td>${esc(t.location) || '—'}</td>
+          <td style="white-space:nowrap">${esc(t.requested_date || '')} ${esc(t.requested_time || '')}</td>
+          <td style="white-space:nowrap">${sched}</td>
+          <td class="num">${money(t.cost) || '—'}</td>
+          <td style="white-space:nowrap">${mine ? `<button type="button" class="btn btn-xs btn-ghost" onclick="openPianoRequest(${t.id})">Edit</button>
+            <button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="cancelPianoRequest(${t.id})">Cancel</button>` : ''}</td>
+        </tr>${t.notes ? `<tr class="piano-notes-row"><td></td><td colspan="6" class="text-dim" style="font-size:11px;white-space:pre-wrap">${esc(t.notes)}</td></tr>` : ''}`;
+      }).join('')}</tbody></table></div>`;
+  }
+  window.loadPianoTunings = loadPiano;
+
+  window.openPianoRequest = function(id) {
+    const t = id ? _tunings.find(x => x.id === id) : null;
+    const v = t || _defaults;
+    document.getElementById('piano-edit-id').value = t ? t.id : '';
+    document.getElementById('piano-modal-title').textContent = t ? 'Edit Piano Tuning Request' : 'Request Piano Tuning';
+    document.getElementById('piano-save-btn').textContent = t ? 'Save' : 'Send Request';
+    document.getElementById('piano-location').value = v.location || '';
+    document.getElementById('piano-piano').value = v.piano || '';
+    document.getElementById('piano-req-date').value = v.requested_date || '';
+    document.getElementById('piano-req-time').value = v.requested_time || '';
+    document.getElementById('piano-notes').value = v.notes || '';
+    document.getElementById('piano-modal').style.display = 'flex';
+  };
+  window.closePianoModal = function() { document.getElementById('piano-modal').style.display = 'none'; };
+
+  window.savePianoRequest = async function() {
+    const id = document.getElementById('piano-edit-id').value;
+    const payload = {
+      location: document.getElementById('piano-location').value.trim(),
+      piano: document.getElementById('piano-piano').value.trim(),
+      requested_date: document.getElementById('piano-req-date').value,
+      requested_time: document.getElementById('piano-req-time').value.trim(),
+      notes: document.getElementById('piano-notes').value.trim(),
+    };
+    if (!payload.requested_date) { alert('Pick the date the piano needs tuning.'); return; }
+    const btn = document.getElementById('piano-save-btn');
+    btn.disabled = true;
+    try {
+      const r = await fetch(id ? `/piano-tunings/${id}` : `/shows/${SHOW_ID}/piano-tunings`,
+                            {method: id ? 'PUT' : 'POST', headers: H, body: JSON.stringify(payload)});
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { alert(d.error || 'Could not save the request.'); return; }
+      closePianoModal();
+      loadPiano();
+    } finally { btn.disabled = false; }
+  };
+
+  window.cancelPianoRequest = async function(id) {
+    if (!confirm('Cancel this piano tuning request?')) return;
+    const r = await fetch(`/piano-tunings/${id}`, {method: 'PUT', headers: H, body: JSON.stringify({status: 'cancelled'})});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(d.error || 'Could not cancel.'); return; }
+    loadPiano();
+  };
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', loadPiano);
+  else loadPiano();
+})();
+</script>
+{% endif %}
 </div>{# end tab-advance #}
 
 
@@ -659,6 +824,18 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
           </thead>
           <tbody id="schedule-rows-{{ d.date_key }}">
             {% for row in day_rows %}
+            {% if row.piano_tuning_id %}
+            {# Piano Tuning row (3.9.0): owned by the piano tuning request —
+               read-only here, re-derived on every save; can be dragged. #}
+            <tr class="schedule-row piano-sched-row" data-piano-id="{{ row.piano_tuning_id }}" title="Added by Piano Tuning — change it on the Advance tab's Piano Tuning panel">
+              {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
+              <td><input type="text" class="sched-cell" value="{{ row.start_time }}" readonly tabindex="-1"></td>
+              <td><input type="text" class="sched-cell" value="{{ row.end_time }}" readonly tabindex="-1"></td>
+              <td><input type="text" class="sched-cell" value="{{ row.description }}" readonly tabindex="-1"></td>
+              <td><input type="text" class="sched-cell" value="{{ row.notes }}" readonly tabindex="-1"></td>
+              {% if not restricted %}<td><span class="piano-sched-lock" title="Managed by Piano Tuning">🎹</span></td>{% endif %}
+            </tr>
+            {% else %}
             <tr class="schedule-row">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
               <td><input type="text" class="sched-cell" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
@@ -667,6 +844,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
               <td><input type="text" class="sched-cell" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
               {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)" title="Remove">×</button></td>{% endif %}
             </tr>
+            {% endif %}
             {% endfor %}
           </tbody>
         </table>
@@ -712,6 +890,16 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
           <tbody id="schedule-rows-null">
             {% set null_rows = schedule_rows | selectattr('perf_id', 'none') | list %}
             {% for row in null_rows %}
+            {% if row.piano_tuning_id %}
+            <tr class="schedule-row piano-sched-row" data-piano-id="{{ row.piano_tuning_id }}" title="Added by Piano Tuning — change it on the Advance tab's Piano Tuning panel">
+              {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
+              <td><input type="text" class="sched-cell" value="{{ row.start_time }}" readonly tabindex="-1"></td>
+              <td><input type="text" class="sched-cell" value="{{ row.end_time }}" readonly tabindex="-1"></td>
+              <td><input type="text" class="sched-cell" value="{{ row.description }}" readonly tabindex="-1"></td>
+              <td><input type="text" class="sched-cell" value="{{ row.notes }}" readonly tabindex="-1"></td>
+              {% if not restricted %}<td><span class="piano-sched-lock" title="Managed by Piano Tuning">🎹</span></td>{% endif %}
+            </tr>
+            {% else %}
             <tr class="schedule-row">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
               <td><input type="text" class="sched-cell" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
@@ -720,6 +908,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
               <td><input type="text" class="sched-cell" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
               {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>{% endif %}
             </tr>
+            {% endif %}
             {% endfor %}
           </tbody>
         </table>
@@ -1186,6 +1375,8 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     </div>
   </div>
 
+  <div id="assets-company-rate-banner" class="assets-company-rate-banner" style="display:none"></div>
+
   {# ── Asset List ─────────────────────────────────────────────────────────── #}
   <div id="assets-container">
     <div id="assets-list-wrap">
@@ -1277,6 +1468,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           <label class="field-label" title="Auto-calculated from the asset type's rate card. Only the approver can override prices in the approval portal.">UNIT PRICE (locked)</label>
           <input type="text" id="asset-add-price" class="field-input" placeholder="0.00" readonly style="background:var(--bg);cursor:not-allowed;opacity:.7">
           <div style="font-size:10px;color:var(--text-dim);margin-top:2px">Auto-filled from rate card · price overrides happen in the approval portal</div>
+          <div id="asset-add-rate-note" style="display:none;font-size:10px;color:#2F855A;font-weight:600;margin-top:2px"></div>
         </div>
         <div id="asset-add-breakdown" class="field-group" style="grid-column:span 2;display:none;margin:-4px 0 0">
           <div style="font-size:11px;color:var(--text-dim);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:7px 10px;line-height:1.5">
@@ -1353,6 +1545,10 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
   let _currentAssetIsSystem = false;
   let _availFetchSeq = 0;
   let _currentAssetRate = {daily: 0, weekly: 0, isConsumable: false};
+  // Performance Company special rates (3.8.0) — {type_id: {company, daily,
+  // weekly}} for this show's company, from GET /shows/<id>/assets.
+  let _companyRates = {};
+  let _perfCompany = '';
 
   // Smart-cap rate-card math — mirrors _compute_locked_price() in app.py so the
   // add-asset preview matches what the server will lock in. Returns the per-unit
@@ -1445,6 +1641,8 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     const r = await fetch(`/shows/${SHOW_ID}/assets`, {headers:{'X-Requested-With':'XMLHttpRequest'}});
     const data = await r.json();
     _assetRentalWindow = data.rental_window || {start: null, end: null};
+    _companyRates = data.company_rates || {};
+    _perfCompany = data.performance_company || '';
     renderAssets(data.assets || [], data.external_rentals || []);
     renderApprovalBadge(data.approval || {approved: false});
   };
@@ -1490,6 +1688,9 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           ? ` <span title="Pinned to specific unit" style="font-size:10px;color:#fff;background:rgba(99,102,241,.85);padding:1px 6px;border-radius:3px;margin-left:4px;font-weight:600">UNIT ${esc(a.unit_barcode ? a.unit_barcode : '#' + a.asset_item_id)}</span>`
           : '';
         const subHtml = sub ? `<div style="font-size:10px;color:var(--text-dim);margin-top:1px">${esc(sub)}</div>` : '';
+        const companyBadge = a.rate_company
+          ? ` <span title="Priced at the ${esc(a.rate_company)} company rate" style="font-size:10px;color:#2F855A;background:rgba(72,187,120,.15);padding:1px 6px;border-radius:3px;margin-left:4px;font-weight:600">COMPANY RATE</span>`
+          : '';
         // Unit-pinned rows lock qty at 1 — server forces it anyway, no need for a number input.
         const qtyCell = (IS_ADMIN && !a.asset_item_id)
           ? `<input type="number" min="1" step="1" value="${a.quantity}" data-sa-id="${a.id}" data-orig="${a.quantity}" class="asset-qty-input field-input" style="width:64px;padding:2px 6px;font-size:12px;text-align:right">`
@@ -1508,7 +1709,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         if (a._avail_overbooked) tr.style.background = 'rgba(197,48,48,.08)';
         tr.innerHTML = `
           <td style="color:var(--text-dim);font-size:11px">${esc(a.category_name)}</td>
-          <td><div style="font-weight:500">${esc(label)}${unitBadge}${hiddenBadge}${overbookedBadge}</div>${subHtml}</td>
+          <td><div style="font-weight:500">${esc(label)}${unitBadge}${companyBadge}${hiddenBadge}${overbookedBadge}</div>${subHtml}</td>
           <td>${qtyCell}</td>
           <td style="font-size:11px;white-space:nowrap">${rentalCell}</td>
           <td>$${Number(a.locked_price).toFixed(2)}</td>
@@ -1531,6 +1732,21 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       tbody.querySelectorAll('.asset-date-input').forEach(inp => {
         inp.addEventListener('change', () => updateAssetDates(inp));
       });
+    }
+
+    // Lines priced for another (or no) Performance Company than the show has
+    // now — offer to re-price them onto the current rate card.
+    const banner = document.getElementById('assets-company-rate-banner');
+    if (banner) {
+      const n = assets.filter(a => a._rate_mismatch).length;
+      if (n) {
+        const what = _perfCompany ? `the ${esc(_perfCompany)} rates` : 'standard rates';
+        banner.innerHTML = `<span>${n} line${n === 1 ? ' was' : 's were'} priced for a different Performance Company than this show has now. Re-price ${n === 1 ? 'it' : 'them'} at ${what}?</span>`
+          + (IS_ADMIN ? ` <button class="btn btn-xs btn-primary" onclick="applyCompanyRates()">Re-price</button>` : '');
+        banner.style.display = 'flex';
+      } else {
+        banner.style.display = 'none';
+      }
     }
 
     // External rentals
@@ -1567,6 +1783,16 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
   function esc(s) {
     return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
+
+  window.applyCompanyRates = async function() {
+    if (!confirm('Re-price these lines at the current Performance Company rates? Hand-set approver prices are left alone. If the rental is approved, it will need approval again.')) return;
+    const r = await fetch(`/shows/${SHOW_ID}/assets/apply-company-rates`, {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}, body: '{}'});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(d.error || 'Re-price failed'); return; }
+    if (d.skipped_override) alert(`${d.changed} line(s) re-priced. ${d.skipped_override} line(s) with a hand-set approver price were left alone.`);
+    loadAssetsTab();
+  };
 
   // For strings embedded in a single-quoted JS literal inside a double-quoted
   // inline onclick attribute: JS-escape FIRST, then HTML-escape. esc() alone
@@ -1616,11 +1842,16 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     const renderCard = (t) => {
       const label = t.name;  // Description is always the primary title
       const sub = [t.manufacturer, t.model].filter(Boolean).join(' ');
-      const rateLabel = t.is_consumable
-        ? `$${Number(t.rental_cost||0).toFixed(2)}/item`
-        : (t.weekly_rate > 0
-            ? `$${Number(t.rental_cost||0).toFixed(2)}/day · $${Number(t.weekly_rate||0).toFixed(2)}/wk`
-            : `$${Number(t.rental_cost||0).toFixed(2)}/day`);
+      // This show's Performance Company rate replaces the standard one.
+      const cr = _companyRates[String(t.id)];
+      const daily = cr ? cr.daily : t.rental_cost;
+      const weekly = cr ? cr.weekly : t.weekly_rate;
+      const rateLabel = (t.is_consumable
+        ? `$${Number(daily||0).toFixed(2)}/item`
+        : (weekly > 0
+            ? `$${Number(daily||0).toFixed(2)}/day · $${Number(weekly||0).toFixed(2)}/wk`
+            : `$${Number(daily||0).toFixed(2)}/day`))
+        + (cr ? ' · company rate' : '');
       const systemBadge = t.is_system ? '<span style="font-size:9px;font-weight:700;background:rgba(245,127,32,0.2);color:#F57F20;border-radius:3px;padding:1px 5px;margin-left:4px;letter-spacing:.04em">SYSTEM</span>' : '';
       return `<button class="btn btn-ghost btn-sm" style="text-align:left;white-space:normal;align-items:flex-start;flex-direction:column;gap:2px;width:100%;min-width:0" onclick="selectAssetType(${t.id}, '${escJsAttr(label)}', ${t.rental_cost || 0}, ${t.weekly_rate || 0}, ${t.is_system ? 1 : 0}, ${t.is_consumable ? 1 : 0})">
         <div style="font-weight:500">${esc(label)}${systemBadge}</div>
@@ -1696,11 +1927,17 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
     // Remember this type's rate card so the price + breakdown can recompute
     // live as the dates / quantity change (see _recalcAssetPrice).
+    const cr = _companyRates[String(typeId)];
     _currentAssetRate = {
-      daily:       Number(price)      || 0,
-      weekly:      Number(weeklyRate) || 0,
+      daily:       Number(cr ? cr.daily  : price)      || 0,
+      weekly:      Number(cr ? cr.weekly : weeklyRate) || 0,
       isConsumable: !!isConsumable,
     };
+    const rateNote = document.getElementById('asset-add-rate-note');
+    if (rateNote) {
+      rateNote.textContent = cr ? `${cr.company} company rate` : '';
+      rateNote.style.display = cr ? '' : 'none';
+    }
     _recalcAssetPrice();
 
     closeAssetSearch();
@@ -2860,6 +3097,19 @@ window._psSettlement = {{ post_show_settlement | tojson }};
 .asset-approval-badge.pending {
   background: rgba(245,158,11,0.12);
   color: #f59e0b;
+  border: 1px solid rgba(245,158,11,0.35);
+}
+
+/* Performance Company re-price prompt (3.8.0) */
+.assets-company-rate-banner {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  border-radius: var(--radius);
+  background: rgba(245,158,11,0.10);
   border: 1px solid rgba(245,158,11,0.35);
 }
 

@@ -1379,8 +1379,11 @@ function copySchedDay(sourceKey, targetKey) {
   const src = document.getElementById(`schedule-rows-${sourceKey}`);
   const tgt = document.getElementById(`schedule-rows-${targetKey}`);
   if (!src || !tgt) return;
+  // Piano Tuning rows belong to their own day: keep the target's, never copy.
+  const keepPiano = Array.from(tgt.querySelectorAll('.piano-sched-row'));
   tgt.innerHTML = '';
-  src.querySelectorAll('.schedule-row').forEach(row => {
+  keepPiano.forEach(r => tgt.appendChild(r));
+  src.querySelectorAll('.schedule-row:not(.piano-sched-row)').forEach(row => {
     const cells = row.querySelectorAll('.sched-cell');
     const tr = document.createElement('tr');
     tr.className = 'schedule-row';
@@ -1530,7 +1533,8 @@ async function applySchedTemplate(templateId, dayKey) {
   if (!d.rows) return;
 
   if (mode === 'replace') {
-    tbody.innerHTML = '';
+    // Piano Tuning rows aren't the PM's to replace — keep them.
+    Array.from(tbody.querySelectorAll('.schedule-row:not(.piano-sched-row)')).forEach(tr => tr.remove());
   } else {
     // Merge: strip out any all-empty rows currently in the tbody so they
     // don't end up sandwiched between real entries.
@@ -1582,6 +1586,8 @@ function collectScheduleData() {
         end_time:    cells[1]?.value || '',
         description: cells[2]?.value || '',
         notes:       cells[3]?.value || '',
+        // Piano Tuning rows keep their link; the server re-derives their text.
+        piano_tuning_id: tr.dataset.pianoId ? parseInt(tr.dataset.pianoId, 10) : null,
       });
     });
   });

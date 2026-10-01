@@ -37,6 +37,7 @@ AUDIENCE_LABELS = {
     'content_admin':   'Admins & content admins',
     'asset_manager':   'Admins, content admins & asset managers',
     'labor_scheduler': 'Labor schedulers (staff, admins & users with the Scheduler permission)',
+    'piano_manager':   'Admins & piano tuning managers (when the Piano Tuning module is on)',
 }
 
 # `icon` is the inner markup of the nav <svg> (the wrapper with viewBox /
@@ -79,6 +80,9 @@ NAV_CATALOG = [
     {'key': 'assets_retired', 'label': 'Retired Archive', 'endpoint': 'assets_retired',
      'active': ('assets_retired',), 'audience': 'asset_manager',
      'icon': '<circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/>'},
+    {'key': 'piano_tuning', 'label': 'Piano Tuning', 'endpoint': 'piano_tuning_page',
+     'active': ('piano_tuning_page',), 'audience': 'piano_manager',
+     'icon': '<path d="M3 5h18v14H3z"/><path d="M8 5v8"/><path d="M12 5v8"/><path d="M16 5v8"/><path d="M6.5 13h3"/><path d="M14.5 13h3"/><path d="M8 13v6"/><path d="M16 13v6"/><path d="M12 13v6"/>'},
     {'key': 'settings', 'label': 'Settings', 'endpoint': 'settings',
      'active': ('settings',), 'audience': 'all', 'required': True,
      'icon': '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>'},
@@ -101,6 +105,8 @@ DEFAULT_ENTRIES = [
     {'type': 'item', 'key': 'asset_approvals', 'label': '', 'indent': True, 'hidden': False},
     {'type': 'item', 'key': 'asset_reports', 'label': '', 'indent': True, 'hidden': False},
     {'type': 'item', 'key': 'assets_retired', 'label': '', 'indent': True, 'hidden': False},
+    {'type': 'section', 'label': 'SERVICES'},
+    {'type': 'item', 'key': 'piano_tuning', 'label': '', 'indent': False, 'hidden': False},
     {'type': 'section', 'label': 'SETTINGS'},
     {'type': 'item', 'key': 'settings', 'label': '', 'indent': False, 'hidden': False},
     {'type': 'item', 'key': 'combined_invoice', 'label': '', 'indent': True, 'hidden': False},

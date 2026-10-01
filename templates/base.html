@@ -203,6 +203,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
         Home
       </a>
+      <a href="{{ url_for('my_shows') }}" class="nav-item {% if request.endpoint == 'my_shows' %}active{% endif %}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M16 3l1.5 1.5L20 2"/></svg>
+        My Shows
+      </a>
 
       {% if request.endpoint in ['show_page'] and show is defined %}
       <div class="nav-section-label">CURRENT SHOW</div>
@@ -271,6 +275,7 @@
           <option value="readonly">Read-only</option>
           <option value="scheduler">Scheduler</option>
           <option value="asset_manager">Asset Manager</option>
+          <option value="piano_manager">Piano Tuning Manager</option>
         </select>
         {% endif %}
       </div>
@@ -844,6 +849,7 @@ const _HELP_PAGES = {
         <li>Sections and fields are configured in Settings → Form Fields; some fields appear only when another field is set a certain way (each field's "Conditional show when" — several conditions can be combined with <code>&amp;&amp;</code>).</li>
         <li><strong>AI Extract</strong> (when enabled) — upload a rider/tech spec or pick an attachment; review the suggested values and apply the ones you want.</li>
         <li><strong>History</strong> — browse saved versions of the form and restore one.</li>
+        <li><strong>Piano Tuning</strong> (below Backline) — <strong>+ Request Tuning</strong> sends a request to the piano tuning manager (location, piano, date/time needed, notes; pre-filled from the show). Edit or cancel it until they send it to the vendor; once they set the tuning time it appears on the Production Schedule as a read-only 🎹 row, and its cost goes on the Final Invoice.</li>
         <li>The presence indicator shows who else is on this show; other people's edits merge in live (updated fields flash briefly).</li>
       </ul>
     `
@@ -884,6 +890,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li><strong>+ Add Asset</strong> — search the catalog, optionally pin a specific unit, set quantity and rental dates. Availability is checked live; overbooking is blocked.</li>
         <li><strong>Unit price is read-only here</strong> — it comes from the rate card; only the Approvals portal can override it per show.</li>
+        <li><strong>Company rates</strong> — if the show's <em>Performance Company</em> (Advance Sheet) has special rates in the Asset Manager, those are used and the line shows a <strong>COMPANY RATE</strong> tag. Change the company later and a banner offers to <strong>Re-price</strong> the lines priced for the old one (hand-set approver prices are left alone).</li>
         <li><strong>+ External Rental</strong> — description, cost, optional rental PDF.</li>
         <li>The <strong>approval badge</strong> shows whether an asset manager has approved this list; any change resets approval.</li>
         <li><strong>Asset Estimate PDF</strong> button and a running total in the header.</li>
@@ -1030,6 +1037,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li>Search types/manufacturers/models; sort by name, units, or cost.</li>
         <li>Type details: daily/weekly rates, reserve (spare) count, supplier, photo, storage location, <strong>📅 Calendar</strong> of per-day availability, and the unit list (barcodes, add units, remove-from-service with reason, unit logs).</li>
+        <li><strong>Company Rates</strong> (Edit type) — special day/week rates per <em>Performance Company</em>, picked from the advance form's Performance Company dropdown. A show with that company is priced at them; the type's card shows "+ N company rates".</li>
         <li><strong>Bulk: Hide from Advance Picker</strong> — mass-toggle which types show up in the show-page asset search.</li>
         <li><strong>⚠ Overbooked</strong> appears when demand exceeds usable units anywhere.</li>
         <li><strong>Systems &amp; Packages</strong> — bundles of component types with per-component quantities.</li>
@@ -1195,6 +1203,29 @@ const _HELP_PAGES = {
       </ul>
     `
   },
+  piano_tuning: {
+    title: 'Piano Tuning',
+    html: `
+      <p><strong>The running list of piano tunings</strong> requested from show pages (Advance tab → Piano Tuning). For admins and users with the <em>Piano Tuning Manager</em> permission.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Open</strong> = Requested, Sent to Vendor and Scheduled. The status buttons filter; search matches show, piano, location, vendor and PM.</li>
+        <li><strong>Sent to vendor</strong> — one click marks it sent (the PM can no longer edit or cancel it).</li>
+        <li><strong>Manage</strong> — vendor, tuning date + start/end, cost and notes. Setting the tuning date marks it <strong>Scheduled</strong>, puts a read-only 🎹 row on that day of the show's production schedule and emails the requester.</li>
+        <li><strong>Cost</strong> appears on the show's <strong>Final Invoice</strong> and the Combined Invoice under External Assets &amp; Costs. Cancelled tunings are never billed and their schedule row is removed.</li>
+      </ul>
+    `
+  },
+  my_shows: {
+    title: 'My Shows',
+    html: `
+      <p><strong>Just your shows.</strong> The same board as Home, narrowed to the <em>active</em> shows where you are the <strong>Production Manager</strong> on the Advance Sheet or the <strong>covering PM</strong> on any labor day.</p>
+      <ul style="${_HELP_UL}">
+        <li>Matching uses the contact linked to your user account (kept in step with your display name) — the PM picked on the show must be that contact. If a show you run is missing, check the PM name on its Advance Sheet / labor days.</li>
+        <li>Archived shows don't appear here; use Home's search for those.</li>
+        <li>Search, date pickers, venue pills and layout work exactly as on Home.</li>
+      </ul>
+    `
+  },
   viewer_home: {
     title: 'Documents',
     html: `
@@ -1231,7 +1262,7 @@ const _HELP_PAGES = {
    longest matching prefix wins — but keep specific paths (e.g. /settings/…)
    listed so they don't fall through to their parent page's entry. #}
 const _HELP_ROUTES = [
-  ['/dashboard', 'home'], ['/shows/new', 'new_show'],
+  ['/dashboard', 'home'], ['/my-shows', 'my_shows'], ['/piano-tuning', 'piano_tuning'], ['/shows/new', 'new_show'],
   ['/settings/shows', 'manage_shows'], ['/settings/pdf-templates', 'pdf_templates'],
   ['/settings', 'settings'],
   ['/admin/merge-shows', 'merge_shows'], ['/admin/audit', 'audit_log'],

@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.6.3'
+APP_VERSION = '3.9.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1041,6 +1041,15 @@ APP_MODULES = [
         'name': 'Security Sign-In Sheets',
         'description': 'Per-show personnel list that prints as the sign-in '
                        'sheet at the security desk (show page → Export & Files).',
+        'default': '1',
+    },
+    {
+        'key': 'piano_tuning',
+        'name': 'Piano Tuning',
+        'description': 'PMs request piano tunings from the show page (Advance '
+                       'tab); the piano tuning manager works the running list, '
+                       'schedules them onto the production schedule and adds '
+                       'the cost to the show settlement.',
         'default': '1',
     },
 ]
@@ -1790,6 +1799,23 @@ def asset_manager_required(f):
     return decorated
 
 
+def piano_manager_required(f):
+    """Allow admins or users with the is_piano_manager flag (3.9.0)."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'user_id' not in session:
+            return redirect(url_for('login'))
+        if _is_piano_manager():
+            return f(*args, **kwargs)
+        abort(403)
+    return decorated
+
+
+def _is_piano_manager():
+    """Piano Tuning manager: admins, or the per-user is_piano_manager flag."""
+    return session.get('user_role') == 'admin' or bool(session.get('is_piano_manager'))
+
+
 def show_advance_editor_required(f):
     """Allow any user with access to the show to edit its advance section
     (add / edit / remove show_assets and external rentals).
@@ -1835,6 +1861,7 @@ def _populate_session_from_user(user, ts=None):
     session['is_readonly']        = bool(user.get('is_readonly', 0))
     session['is_scheduler']       = bool(user.get('is_scheduler', 0))
     session['is_asset_manager']   = bool(user.get('is_asset_manager', 0))
+    session['is_piano_manager']   = bool(user.get('is_piano_manager', 0))
     session['is_document_viewer'] = bool(user.get('is_document_viewer', 0))
     session['viewer_venues']      = _decode_json_list(user.get('viewer_venues'))
     session['viewer_doc_types']   = _decode_json_list(user.get('viewer_doc_types'))
@@ -1919,7 +1946,7 @@ def _refresh_session_roles():
         try:
             user = db.execute(
                 'SELECT id, role, display_name, is_readonly, is_scheduler, is_asset_manager, '
-                '       is_document_viewer, viewer_venues, viewer_doc_types, '
+                '       is_piano_manager, is_document_viewer, viewer_venues, viewer_doc_types, '
                 '       viewer_labor_overview, viewer_show_calendar, is_locked '
                 'FROM users WHERE id=%s',
                 (session['user_id'],)
@@ -1955,6 +1982,7 @@ def get_current_user():
             'is_labor_scheduler': session.get('is_labor_scheduler', False),
             'is_scheduler': session.get('is_scheduler', False),
             'is_asset_manager': session.get('is_asset_manager', False),
+            'is_piano_manager': session.get('is_piano_manager', False),
         }
     return None
 
@@ -2149,6 +2177,8 @@ def _nav_audience_ok(audience):
     if audience == 'asset_manager':
         return (role == 'admin' or bool(session.get('is_content_admin'))
                 or bool(session.get('is_asset_manager')))
+    if audience == 'piano_manager':
+        return _is_piano_manager() and module_enabled('piano_tuning')
     if audience == 'labor_scheduler':
         # Share the route guard's predicate (scheduler_required) so the nav
         # link and page access can never disagree — is_labor_scheduler alone
@@ -5202,6 +5232,7 @@ _VIEW_AS_PROFILES = {
     'staff':         {'user_role': 'staff'},
     'scheduler':     {'user_role': 'user',  'is_scheduler': True},
     'asset_manager': {'user_role': 'user',  'is_asset_manager': True},
+    'piano_manager': {'user_role': 'user',  'is_piano_manager': True},
 }
 
 
@@ -5220,6 +5251,7 @@ def _apply_view_as_override(view_as):
     session['is_labor_scheduler'] = profile.get('is_labor_scheduler', False)
     session['is_scheduler']       = profile.get('is_scheduler', False)
     session['is_asset_manager']   = profile.get('is_asset_manager', False)
+    session['is_piano_manager']   = profile.get('is_piano_manager', False)
 
 
 @app.route('/admin/view-as', methods=['POST'])
@@ -5244,6 +5276,7 @@ def admin_view_as():
         session['_real_is_labor_scheduler'] = session.get('is_labor_scheduler', False)
         session['_real_is_scheduler'] = session.get('is_scheduler', False)
         session['_real_is_asset_manager'] = session.get('is_asset_manager', False)
+        session['_real_is_piano_manager'] = session.get('is_piano_manager', False)
     session['_view_as'] = view_as
     syslog_logger.info(f"ADMIN_VIEW_AS view_as={view_as} by={session.get('username')}")
     _apply_view_as_override(view_as)
@@ -5262,6 +5295,7 @@ def admin_view_as_reset():
     session['is_labor_scheduler'] = session.pop('_real_is_labor_scheduler', False)
     session['is_scheduler'] = session.pop('_real_is_scheduler', False)
     session['is_asset_manager'] = session.pop('_real_is_asset_manager', False)
+    session['is_piano_manager'] = session.pop('_real_is_piano_manager', False)
     session.pop('_view_as', None)
     syslog_logger.info(f"ADMIN_VIEW_AS_RESET by={session.get('username')}")
     return jsonify({'success': True})
@@ -5319,9 +5353,62 @@ def index():
 @app.route('/dashboard')
 @login_required
 def dashboard():
+    return _render_show_board(mine=False)
+
+
+def _my_pm_names(db, user_id):
+    """Lower-cased contact names the PM fields may hold for this user. The
+    `production_manager` advance field and `show_labor_days.cover_pm` store
+    the contact NAME, so 'me' = every contact linked to my account
+    (contacts.user_id); with none linked, my display name is the fallback."""
+    names = {(r['name'] or '').strip().lower() for r in db.execute(
+        'SELECT name FROM contacts WHERE user_id=%s', (user_id,)).fetchall()}
+    names.discard('')
+    if not names:
+        u = db.execute('SELECT display_name FROM users WHERE id=%s',
+                       (user_id,)).fetchone()
+        dn = ((u and u['display_name']) or '').strip().lower()
+        if dn:
+            names.add(dn)
+    return names
+
+
+def _my_pm_show_ids(db, user_id):
+    """Ids of ACTIVE shows where this user is the production manager or the
+    covering PM on any labor day (3.7.0 — My Shows)."""
+    names = sorted(_my_pm_names(db, user_id))
+    if not names:
+        return set()
+    ph = ','.join(['%s'] * len(names))
+    rows = db.execute(f"""
+        SELECT s.id FROM shows s
+        WHERE s.status = 'active' AND (
+          EXISTS (SELECT 1 FROM advance_data ad
+                  WHERE ad.show_id = s.id AND ad.field_key = 'production_manager'
+                    AND LOWER(TRIM(ad.field_value)) IN ({ph}))
+          OR EXISTS (SELECT 1 FROM show_labor_days ld
+                     WHERE ld.show_id = s.id
+                       AND LOWER(TRIM(ld.cover_pm)) IN ({ph})))
+    """, names + names).fetchall()
+    return {r['id'] for r in rows}
+
+
+@app.route('/my-shows')
+@login_required
+def my_shows():
+    return _render_show_board(mine=True)
+
+
+def _render_show_board(mine=False):
+    """Home dashboard; mine=True is the My Shows view — the same board
+    narrowed to the active shows I PM or cover (no archive section)."""
     auto_archive_past_shows()
     accessible = get_accessible_shows(session['user_id'])
     db = get_db()
+    if mine:
+        mine_ids = _my_pm_show_ids(db, session['user_id'])
+        accessible = sorted(mine_ids if accessible is None
+                            else mine_ids.intersection(accessible))
 
     _eff_date = """COALESCE(s.show_date,
         (SELECT MIN(perf_date) FROM show_performances
@@ -5405,6 +5492,8 @@ def dashboard():
             out.append(d)
         return out
 
+    if mine:
+        archived = []
     active = _attach_perfs(active)
     archived = _attach_perfs(archived)
 
@@ -5535,6 +5624,7 @@ def dashboard():
                            restricted=restricted,
                            home_layout=home_layout,
                            home_density=home_density,
+                           my_shows=mine,
                            user=get_current_user())
 
 
@@ -5765,6 +5855,7 @@ def show_page(show_id):
     return render_template('show.html',
                            pdf_form_status=pdf_form_status,
                            security_signin_enabled=security_signin_enabled,
+                           piano_tuning_enabled=module_enabled('piano_tuning'),
                            security_max_names=security_module.MAX_NAMES,
                            show=show,
                            tab=tab,
@@ -6046,12 +6137,19 @@ def save_schedule(show_id):
             day_date = row.get('day_date') or None
             if isinstance(day_date, str):
                 day_date = day_date.strip() or None
+            # A piano-tuning row keeps its link (its text is re-derived by
+            # _sync_piano_schedule_rows below, so edits to it don't stick).
+            try:
+                piano_id = int(row.get('piano_tuning_id') or 0) or None
+            except (TypeError, ValueError):
+                piano_id = None
             db.execute("""
-                INSERT INTO schedule_rows (show_id, perf_id, day_date, sort_order, start_time, end_time, description, notes)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO schedule_rows (show_id, perf_id, day_date, sort_order, start_time, end_time, description, notes, piano_tuning_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (show_id, perf_id, day_date, i,
                   row.get('start_time', ''), row.get('end_time', ''),
-                  row.get('description', ''), row.get('notes', '')))
+                  row.get('description', ''), row.get('notes', ''), piano_id))
+        _sync_piano_schedule_rows(db, show_id)
 
     db.execute('UPDATE shows SET updated_at=CURRENT_TIMESTAMP WHERE id=%s', (show_id,))
     db.execute("""
@@ -6229,6 +6327,8 @@ def restore_history(show_id, hist_id):
                     VALUES (%s, %s, %s, %s, %s, %s)
                 """, (show_id, i, row.get('start_time',''), row.get('end_time',''),
                       row.get('description',''), row.get('notes','')))
+            # Restored rows carry no piano link — put the current tunings back.
+            _sync_piano_schedule_rows(db, show_id)
 
     elif form_type == 'postnotes':
         notes = snapshot.get('notes_data', {})
@@ -8674,7 +8774,7 @@ _SHOW_PURGE_TABLES = ['advance_data', 'schedule_rows', 'schedule_meta',
 # is preserved instead of being cascade-deleted with the duplicate.
 _SHOW_MERGE_MOVE_TABLES = ['labor_requests', 'post_show_labor', 'show_assets',
     'show_external_rentals', 'show_performances', 'show_comments',
-    'show_attachments', 'security_signin_names']
+    'show_attachments', 'security_signin_names', 'piano_tunings']
 
 # Friendly labels for the merge preview's "what will move" summary.
 _SHOW_MERGE_MOVE_LABELS = {
@@ -8682,6 +8782,7 @@ _SHOW_MERGE_MOVE_LABELS = {
     'show_assets': 'Assets', 'show_external_rentals': 'External rentals',
     'show_performances': 'Performances', 'show_comments': 'Comments',
     'show_attachments': 'Files', 'security_signin_names': 'Security sign-in names',
+    'piano_tunings': 'Piano tunings',
 }
 
 # Advance fields stored as scalar columns on the shows row (vs the advance_data
@@ -8858,6 +8959,8 @@ def merge_shows(keeper_id):
             db.execute(f"UPDATE shows SET {', '.join(sets)} WHERE id=%s", params)
         # 5. Delete the now-emptied duplicate.
         _purge_show(db, source_id)
+        # The duplicate's piano tunings moved but its schedule rows didn't.
+        _sync_piano_schedule_rows(db, keeper_id)
         log_audit(db, 'SHOW_MERGE', 'show', keeper_id, show_id=keeper_id,
                   detail=f"absorbed show {source_id} ('{source.get('name')}'); "
                          f"labor={moved.get('labor_requests')}, files={moved.get('show_attachments')}, "
@@ -9332,7 +9435,7 @@ def settings():
     contacts = db.execute('SELECT * FROM contacts ORDER BY department, name').fetchall()
     users_raw = db.execute(
         'SELECT id, username, display_name, email, role, created_at, '
-        '       is_readonly, is_scheduler, is_asset_manager, '
+        '       is_readonly, is_scheduler, is_asset_manager, is_piano_manager, '
         '       is_document_viewer, viewer_venues, viewer_doc_types, '
         '       viewer_labor_overview, viewer_show_calendar, '
         '       is_app_user, is_app_admin, is_locked, must_change_password, '
@@ -9693,6 +9796,7 @@ def edit_user(uid):
     is_readonly = 1 if data.get('is_readonly') else 0
     is_scheduler = 1 if data.get('is_scheduler') else 0
     is_asset_manager = 1 if data.get('is_asset_manager') else 0
+    is_piano_manager = 1 if data.get('is_piano_manager') else 0
     is_document_viewer = 1 if data.get('is_document_viewer') else 0
     # Extra read-only grant: doc viewers can also reach the Labor Overview page.
     # Only meaningful alongside is_document_viewer, so clear it otherwise.
@@ -9747,13 +9851,13 @@ def edit_user(uid):
     was_document_viewer = bool(row.get('is_document_viewer', 0))
     db.execute(
         'UPDATE users SET display_name=%s, email=%s, role=%s, is_readonly=%s, '
-        '                 is_scheduler=%s, is_asset_manager=%s, '
+        '                 is_scheduler=%s, is_asset_manager=%s, is_piano_manager=%s, '
         '                 is_document_viewer=%s, viewer_venues=%s, viewer_doc_types=%s, '
         '                 viewer_labor_overview=%s, viewer_show_calendar=%s, '
         '                 is_app_user=%s, is_app_admin=%s '
         'WHERE id=%s',
         (display_name or row['username'], email, role, is_readonly,
-         is_scheduler, is_asset_manager,
+         is_scheduler, is_asset_manager, is_piano_manager,
          is_document_viewer, viewer_venues_json, viewer_doc_types_json,
          viewer_labor_overview, viewer_show_calendar,
          is_app_user, is_app_admin, uid)
@@ -9768,7 +9872,8 @@ def edit_user(uid):
             pass  # Table missing or DB-sessions disabled — fall through
     log_audit(db, 'USER_EDIT', 'user', uid,
               detail=(f'role={role} readonly={is_readonly} scheduler={is_scheduler} '
-                      f'asset_mgr={is_asset_manager} doc_viewer={is_document_viewer} '
+                      f'asset_mgr={is_asset_manager} piano_mgr={is_piano_manager} '
+                      f'doc_viewer={is_document_viewer} '
                       f'viewer_labor_overview={viewer_labor_overview} '
                       f'viewer_show_calendar={viewer_show_calendar} '
                       f'app_user={is_app_user} app_admin={is_app_admin} '
@@ -9781,6 +9886,7 @@ def edit_user(uid):
     syslog_logger.info(
         f"USER_EDIT user_id={uid} role={role} readonly={is_readonly} "
         f"scheduler={is_scheduler} asset_mgr={is_asset_manager} "
+        f"piano_mgr={is_piano_manager} "
         f"doc_viewer={is_document_viewer} app_user={is_app_user} "
         f"app_admin={is_app_admin} by={session.get('username')}"
     )
@@ -17725,7 +17831,8 @@ def asset_types_admin_list():
                ac.name as category_name,
                pt.name as parent_name,
                (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id) as item_count,
-               (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id AND ai.status = 'retired') as retired_item_count
+               (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id AND ai.status = 'retired') as retired_item_count,
+               (SELECT COUNT(*) FROM asset_company_rates cr WHERE cr.asset_type_id = at.id) as company_rate_count
         FROM asset_types at
         JOIN asset_categories ac ON ac.id = at.category_id
         LEFT JOIN asset_types pt ON pt.id = at.parent_type_id
@@ -17774,6 +17881,12 @@ def asset_type_add():
         1 if data.get('allow_unit_selection') else 0,
         max_order + 1,
     )).fetchone()['id']
+    if data.get('company_rates'):
+        err = _save_company_rates(db, _new_id, data.get('company_rates'))
+        if err:
+            db.rollback()
+            db.close()
+            return jsonify({'error': err}), 400
     db.commit()
     row = db.execute('SELECT * FROM asset_types WHERE id=%s', (_new_id,)).fetchone()
     log_audit(db, 'ASSET_TYPE_ADD', 'asset_type', row['id'], detail=name)
@@ -17821,11 +17934,81 @@ def asset_type_edit(type_id):
         1 if data.get('allow_unit_selection') else 0,
         type_id,
     ))
+    if 'company_rates' in data:
+        err = _save_company_rates(db, type_id, data.get('company_rates'))
+        if err:
+            db.rollback()
+            db.close()
+            return jsonify({'error': err}), 400
     db.commit()
     log_audit(db, 'ASSET_TYPE_EDIT', 'asset_type', type_id, detail=name)
     db.commit()
     db.close()
     return jsonify({'success': True})
+
+
+def _save_company_rates(db, type_id, rates):
+    """Replace this asset type's Performance Company special rates with
+    `rates` ([{company, rental_cost, weekly_rate}]). Returns an error string
+    or None. Doesn't commit. Existing show lines keep their locked prices."""
+    if not isinstance(rates, list):
+        return 'company_rates must be a list'
+    clean, seen = [], set()
+    for r in rates:
+        if not isinstance(r, dict):
+            continue
+        company = ' '.join(str(r.get('company') or '').split())
+        if not company:
+            continue
+        if _company_key(company) in seen:
+            return f'"{company}" is listed twice.'
+        seen.add(_company_key(company))
+        try:
+            daily = float(r.get('rental_cost') or 0)
+            weekly = float(r.get('weekly_rate') or 0)
+        except (TypeError, ValueError):
+            return f'Invalid rate for "{company}".'
+        if daily < 0 or weekly < 0:
+            return f'Rates for "{company}" can\'t be negative.'
+        clean.append((company, daily, weekly))
+    before = {r['company']: (float(r['rental_cost'] or 0), float(r['weekly_rate'] or 0))
+              for r in db.execute('SELECT company, rental_cost, weekly_rate '
+                                  'FROM asset_company_rates WHERE asset_type_id=%s',
+                                  (type_id,)).fetchall()}
+    after = {c: (d, w) for c, d, w in clean}
+    if before == after:
+        return None
+    db.execute('DELETE FROM asset_company_rates WHERE asset_type_id=%s', (type_id,))
+    for company, daily, weekly in clean:
+        db.execute('INSERT INTO asset_company_rates '
+                   '(asset_type_id, company, rental_cost, weekly_rate, updated_by) '
+                   'VALUES (%s,%s,%s,%s,%s)',
+                   (type_id, company, daily, weekly, session.get('user_id')))
+    log_audit(db, 'ASSET_COMPANY_RATES', 'asset_type', type_id,
+              detail='; '.join(f'{c}: {d:.2f}/day {w:.2f}/wk' for c, d, w in clean)
+              or 'cleared')
+    syslog_logger.info(f"ASSET_COMPANY_RATES type_id={type_id} count={len(clean)} "
+                       f"by={session.get('username')}")
+    return None
+
+
+@app.route('/settings/asset-company-rates', methods=['GET'])
+@asset_manager_required
+def asset_company_rates_get():
+    """Company list (the Performance Company dropdown's options) plus, with
+    ?type_id=, that asset type's special rates — for the item-type modal."""
+    db = get_db()
+    companies = _performance_company_options(db)
+    rates = []
+    tid = request.args.get('type_id', type=int)
+    if tid:
+        rates = [{'company': r['company'], 'rental_cost': float(r['rental_cost'] or 0),
+                  'weekly_rate': float(r['weekly_rate'] or 0)}
+                 for r in db.execute('SELECT company, rental_cost, weekly_rate '
+                                     'FROM asset_company_rates WHERE asset_type_id=%s '
+                                     'ORDER BY company', (tid,)).fetchall()]
+    db.close()
+    return jsonify({'companies': companies, 'rates': rates})
 
 
 @app.route('/settings/asset-types/bulk-hide-from-pm', methods=['POST'])
@@ -18689,6 +18872,79 @@ def _compute_locked_price(daily_rate, weekly_rate, rental_start, rental_end,
     return daily * days
 
 
+def _company_key(name):
+    """Comparison form of a Performance Company name (case/space-insensitive)."""
+    return ' '.join(str(name or '').split()).lower()
+
+
+def _performance_company_options(db):
+    """Companies an asset manager can attach special rates to: the options of
+    the advance form's `performance_company` dropdown (strings or
+    {'value': …} dicts), plus any company that already has rates (so rates
+    for an option later removed from the dropdown stay visible/editable)."""
+    out, seen = [], set()
+
+    def _add(v):
+        v = ' '.join(str(v or '').split())
+        k = v.lower()
+        if v and v not in ('—', '-') and k not in seen:
+            seen.add(k)
+            out.append(v)
+
+    ff = db.execute("SELECT options_json FROM form_fields "
+                    "WHERE field_key='performance_company'").fetchone()
+    if ff and ff['options_json']:
+        try:
+            for o in json.loads(ff['options_json']) or []:
+                _add(o.get('value') if isinstance(o, dict) else o)
+        except (ValueError, TypeError, AttributeError):
+            pass
+    for r in db.execute('SELECT DISTINCT company FROM asset_company_rates '
+                        'ORDER BY company').fetchall():
+        _add(r['company'])
+    return out
+
+
+def _show_company_rates(db, show_id):
+    """(company, {asset_type_id: {'company','daily','weekly'}}) for the show's
+    Performance Company — the special rate card that replaces the standard
+    rental_cost / weekly_rate when a line is priced (3.8.0). ('', {}) when
+    the show has no company or the company has no special rates."""
+    company = (_show_performance_company(db, show_id) or '').strip()
+    if not company:
+        return '', {}
+    rows = db.execute(
+        "SELECT asset_type_id, company, rental_cost, weekly_rate "
+        "FROM asset_company_rates "
+        "WHERE LOWER(REGEXP_REPLACE(TRIM(company), '\\s+', ' ', 'g')) = %s",
+        (_company_key(company),)).fetchall()
+    return company, {r['asset_type_id']: {'company': r['company'],
+                                          'daily': float(r['rental_cost'] or 0),
+                                          'weekly': float(r['weekly_rate'] or 0)}
+                     for r in rows}
+
+
+def _price_asset_line(db, show_id, type_row, asset_type_id, rental_start,
+                      rental_end, rates=None):
+    """Rate-card price for one unit on this show: the Performance Company's
+    special rate when the type has one, else the standard rate card.
+    Returns (unit_price, rate_company or None). type_row needs rental_cost,
+    weekly_rate, is_consumable. `rates` = a prefetched _show_company_rates()
+    map, to price many lines with one lookup."""
+    if rates is None:
+        rates = _show_company_rates(db, show_id)[1]
+    cr = rates.get(int(asset_type_id)) if asset_type_id is not None else None
+    if cr:
+        return (_compute_locked_price(cr['daily'], cr['weekly'], rental_start,
+                                      rental_end,
+                                      is_consumable=type_row['is_consumable']),
+                cr['company'])
+    return (_compute_locked_price(type_row['rental_cost'], type_row['weekly_rate'],
+                                  rental_start, rental_end,
+                                  is_consumable=type_row['is_consumable']),
+            None)
+
+
 def _find_overbooked_types(db):
     """
     Scan every trackable asset type and report any that are overbooked on at
@@ -19143,7 +19399,8 @@ def show_assets_list(show_id):
 
     rows = db.execute("""
         SELECT sa.*, at.name as type_name, at.is_consumable, at.manufacturer, at.model,
-               at.rental_cost as current_price, at.allow_unit_selection,
+               at.rental_cost as current_price, at.weekly_rate as current_weekly_rate,
+               at.allow_unit_selection,
                ac.name as category_name,
                ai.barcode as unit_barcode, ai.status as unit_status
         FROM show_assets sa
@@ -19177,6 +19434,7 @@ def show_assets_list(show_id):
     # Attach per-line availability info so the UI can flag overbooked rows.
     # One batched lookup per distinct rental window (lines usually share the
     # show's window) instead of 4–6 queries per line.
+    company, company_rates = _show_company_rates(db, show_id)
     by_window = {}
     for r in rows:
         by_window.setdefault((r['rental_start'], r['rental_end']), set()).add(r['asset_type_id'])
@@ -19198,12 +19456,23 @@ def show_assets_list(show_id):
             and av.get('available') is not None
             and av.get('available') < 0
         )
+        # Company-rate drift (3.8.0): the line was priced for a different
+        # Performance Company than the show has now (or for none).
+        cr = company_rates.get(r['asset_type_id'])
+        d['_rate_mismatch'] = (
+            _company_key(r['rate_company']) != _company_key(cr['company'] if cr else '')
+            and not _asset_line_hand_priced(db, r, r['current_price'],
+                                            r['current_weekly_rate'], r['is_consumable']))
         assets_out.append(d)
 
     win_start, win_end = _show_rental_window(db, show_id)
     db.close()
     return jsonify({
         'assets': assets_out,
+        # Performance Company special rates for the add-asset preview:
+        # {asset_type_id: {company, daily, weekly}}.
+        'performance_company': company,
+        'company_rates': {str(k): v for k, v in company_rates.items()},
         'external_rentals': [dict(r) for r in ext_rows],
         'approval': approval,
         # Allowed rental bounds for the date editors (show load-in → load-out).
@@ -19290,15 +19559,28 @@ def show_asset_add(show_id):
         or session.get('is_content_admin')
         or session.get('is_asset_manager')
     )
-    if is_price_authority and data.get('locked_price') is not None:
-        locked_price = float(data['locked_price'])
-    elif type_row:
-        locked_price = _compute_locked_price(
+    # Performance Company special rates (3.8.0): the rate-card price is the
+    # company's rate when this type has one. An approver's typed price is an
+    # override only when it differs from the STANDARD price — a client that
+    # just echoed the standard rate (a preview not yet aware of the company
+    # rate) must not knock the line off the company rate.
+    rate_company = None
+    if type_row:
+        locked_price, rate_company = _price_asset_line(
+            db, show_id, type_row, asset_type_id, rental_start, rental_end)
+        standard_price = _compute_locked_price(
             type_row['rental_cost'], type_row['weekly_rate'], rental_start, rental_end,
-            is_consumable=type_row['is_consumable']
-        )
+            is_consumable=type_row['is_consumable'])
     else:
-        locked_price = 0.0
+        locked_price, standard_price = 0.0, 0.0
+    if is_price_authority and data.get('locked_price') is not None:
+        try:
+            typed = float(data['locked_price'])
+        except (TypeError, ValueError):
+            typed = None
+        if typed is not None and round(typed, 2) != round(locked_price, 2) and (
+                rate_company is None or round(typed, 2) != round(standard_price, 2)):
+            locked_price, rate_company = typed, None
 
     # is_hidden is a per-line visibility toggle the user controls from the
     # show's Assets tab. We no longer auto-hide based on hide_from_pm —
@@ -19351,11 +19633,13 @@ def show_asset_add(show_id):
     _new_id = db.execute("""
         INSERT INTO show_assets
           (show_id, asset_type_id, asset_item_id, quantity, rental_start, rental_end,
-           locked_price, original_locked_price, is_hidden, notes, added_by)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+           locked_price, original_locked_price, is_hidden, notes, added_by,
+           rate_company)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (show_id, asset_type_id, asset_item_id, quantity, rental_start, rental_end,
           locked_price, locked_price, is_hidden,
-          (data.get('notes') or '').strip(), session['user_id'])).fetchone()['id']
+          (data.get('notes') or '').strip(), session['user_id'],
+          rate_company)).fetchone()['id']
     db.commit()
     row = db.execute('SELECT * FROM show_assets WHERE id=%s', (_new_id,)).fetchone()
 
@@ -19469,16 +19753,17 @@ def show_asset_edit(show_id, sa_id):
         or _as_date(rental_end) != _as_date(existing['rental_end']))
     locked_price = existing['locked_price']
     original_locked_price = existing['original_locked_price']
+    rate_company = existing.get('rate_company')
     repriced = False
     if window_changed:
         rate_row = db.execute(
             'SELECT rental_cost, weekly_rate, is_consumable '
             'FROM asset_types WHERE id=%s', (existing['asset_type_id'],)).fetchone()
         if rate_row:
-            new_price = _compute_locked_price(
-                rate_row['rental_cost'], rate_row['weekly_rate'],
-                rental_start, rental_end,
-                is_consumable=rate_row['is_consumable'])
+            # Re-lock on the show's CURRENT rate card (company rate if any).
+            new_price, rate_company = _price_asset_line(
+                db, show_id, rate_row, existing['asset_type_id'],
+                rental_start, rental_end)
             repriced = round(float(locked_price or 0), 2) != round(new_price, 2)
             locked_price = new_price
             original_locked_price = new_price
@@ -19572,10 +19857,11 @@ def show_asset_edit(show_id, sa_id):
 
     db.execute("""
         UPDATE show_assets SET quantity=%s, rental_start=%s, rental_end=%s,
-               is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s
+               is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s,
+               rate_company=%s
         WHERE id=%s AND show_id=%s
     """, (quantity, rental_start, rental_end, is_hidden, notes,
-          locked_price, original_locked_price, sa_id, show_id))
+          locked_price, original_locked_price, rate_company, sa_id, show_id))
     db.commit()
 
     # Post-commit verification — see show_asset_add for rationale. If a
@@ -19587,12 +19873,13 @@ def show_asset_edit(show_id, sa_id):
             and post_avail['available'] < 0):
         db.execute("""
             UPDATE show_assets SET quantity=%s, rental_start=%s, rental_end=%s,
-                   is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s
+                   is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s,
+                   rate_company=%s
             WHERE id=%s AND show_id=%s
         """, (existing['quantity'], existing['rental_start'], existing['rental_end'],
               existing['is_hidden'], existing['notes'],
               existing['locked_price'], existing['original_locked_price'],
-              sa_id, show_id))
+              existing.get('rate_company'), sa_id, show_id))
         db.commit()
         type_name_row = db.execute(
             'SELECT name FROM asset_types WHERE id=%s', (existing['asset_type_id'],)
@@ -19621,12 +19908,13 @@ def show_asset_edit(show_id, sa_id):
         if post_shortages:
             db.execute("""
                 UPDATE show_assets SET quantity=%s, rental_start=%s, rental_end=%s,
-                       is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s
+                       is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s,
+                       rate_company=%s
                 WHERE id=%s AND show_id=%s
             """, (existing['quantity'], existing['rental_start'], existing['rental_end'],
                   existing['is_hidden'], existing['notes'],
                   existing['locked_price'], existing['original_locked_price'],
-                  sa_id, show_id))
+                  existing.get('rate_company'), sa_id, show_id))
             db.commit()
             sys_name = edit_type['name'] or f"System #{existing['asset_type_id']}"
             syslog_logger.warning(
@@ -19674,6 +19962,77 @@ def show_asset_remove(show_id, sa_id):
     syslog_logger.info(f"ASSET_REMOVED_FROM_SHOW show_id={show_id} sa_id={sa_id} by={session.get('username')}")
     db.close()
     return jsonify({'success': True})
+
+
+def _asset_line_hand_priced(db, r, std_daily, std_weekly, is_consumable):
+    """True when a show_assets line `r` carries a hand-set price: changed
+    since add (locked != original), or not what its own rate card (its
+    rate_company's special rate, else the standard one passed in) gives for
+    its window — an approver's price typed at add time is stored as the
+    original too. Company re-pricing leaves these alone (3.8.0)."""
+    locked = round(float(r['locked_price'] or 0), 2)
+    if (r['original_locked_price'] is not None
+            and locked != round(float(r['original_locked_price']), 2)):
+        return True
+    if r['rate_company']:
+        own = db.execute(
+            "SELECT rental_cost, weekly_rate FROM asset_company_rates "
+            "WHERE asset_type_id=%s AND company=%s",
+            (r['asset_type_id'], r['rate_company'])).fetchone()
+        if not own:
+            return True  # its company rate was since removed — can't tell
+        daily, weekly = own['rental_cost'], own['weekly_rate']
+    else:
+        daily, weekly = std_daily, std_weekly
+    return locked != round(_compute_locked_price(
+        daily, weekly, r['rental_start'], r['rental_end'],
+        is_consumable=is_consumable), 2)
+
+
+@app.route('/shows/<int:show_id>/assets/apply-company-rates', methods=['POST'])
+@show_advance_editor_required
+def show_assets_apply_company_rates(show_id):
+    """Re-price this show's lines that were priced for a different Performance
+    Company than the show has now (or for none) onto the CURRENT rate card —
+    the company's special rate where the type has one, else standard (3.8.0).
+    Lines already on the right rate card are untouched; hand-priced lines
+    (see below) are left alone and counted. Standard catalog price changes
+    still never reach lines on the right rate card."""
+    db = get_db()
+    company, rates = _show_company_rates(db, show_id)
+    rows = db.execute("""
+        SELECT sa.id, sa.asset_type_id, sa.rental_start, sa.rental_end,
+               sa.locked_price, sa.original_locked_price, sa.rate_company,
+               at.rental_cost, at.weekly_rate, at.is_consumable
+        FROM show_assets sa JOIN asset_types at ON at.id = sa.asset_type_id
+        WHERE sa.show_id = %s FOR UPDATE OF sa
+    """, (show_id,)).fetchall()
+    changed, skipped_override = 0, 0
+    for r in rows:
+        cr = rates.get(r['asset_type_id'])
+        if _company_key(r['rate_company']) == _company_key(cr['company'] if cr else ''):
+            continue
+        if _asset_line_hand_priced(db, r, r['rental_cost'], r['weekly_rate'],
+                                   r['is_consumable']):
+            skipped_override += 1
+            continue
+        price, rc = _price_asset_line(db, show_id, r, r['asset_type_id'],
+                                      r['rental_start'], r['rental_end'], rates)
+        db.execute('UPDATE show_assets SET locked_price=%s, original_locked_price=%s, '
+                   'rate_company=%s WHERE id=%s', (price, price, rc, r['id']))
+        log_audit(db, 'ASSET_COMPANY_REPRICE', 'show_asset', r['id'], show_id=show_id,
+                  detail=f"old={float(r['locked_price'] or 0):.2f} new={price:.2f} "
+                         f"rate={rc or 'standard'}")
+        changed += 1
+    if changed:
+        _reset_asset_approval(db, show_id, 'asset_company_repriced')
+    db.commit()
+    db.close()
+    syslog_logger.info(f"ASSET_COMPANY_REPRICE show_id={show_id} company={company!r} "
+                       f"changed={changed} skipped_override={skipped_override} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'changed': changed,
+                    'skipped_override': skipped_override, 'company': company})
 
 
 @app.route('/shows/<int:show_id>/assets/<int:sa_id>/reset-price', methods=['POST'])
@@ -21170,10 +21529,11 @@ def _fetch_external_rental_pdfs(db, show_id):
 
 
 
-def _fetch_show_assets_and_externals(db, show_id):
+def _fetch_show_assets_and_externals(db, show_id, include_piano=False):
     """Assets + external rentals for a show's invoices, with subtotals.
     Shared by the asset invoice and the final (post-show) invoice so the
-    two stay in lock-step."""
+    two stay in lock-step. include_piano (Final / Combined Invoice — the
+    settlement) adds costed piano tunings as external-cost lines."""
     assets = db.execute("""
         SELECT sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end, sa.notes,
                at.name as type_name, at.manufacturer, at.model,
@@ -21192,6 +21552,8 @@ def _fetch_show_assets_and_externals(db, show_id):
     """, (show_id,)).fetchall()
     assets_list = [dict(a) for a in assets]
     ext_list    = [dict(e) for e in external_rentals]
+    if include_piano:
+        ext_list += _piano_invoice_lines(db, show_id)
     assets_subtotal   = sum((a['locked_price'] or 0) * a['quantity'] for a in assets_list)
     external_subtotal = sum(e['cost'] or 0 for e in ext_list)
     return assets_list, ext_list, assets_subtotal, external_subtotal
@@ -21378,7 +21740,7 @@ def show_post_invoice(show_id):
             abort(404)
 
         assets_list, ext_list, assets_subtotal, external_subtotal = \
-            _fetch_show_assets_and_externals(db, show_id)
+            _fetch_show_assets_and_externals(db, show_id, include_piano=True)
         performance_company = _show_performance_company(db, show_id)
 
         # Final Invoice bills ACTUAL labor recorded on the Post-Show tab
@@ -21541,7 +21903,7 @@ def combined_invoice_pdf():
     for sid in ids:
         show = by_id[sid]
         assets_list, ext_list, assets_subtotal, external_subtotal = \
-            _fetch_show_assets_and_externals(db, sid)
+            _fetch_show_assets_and_externals(db, sid, include_piano=True)
         # Same rule as the single-show Final Invoice: actual labor once the
         # show is settled (Settle Now), otherwise none — flagged on the page.
         if sid in unsettled:
@@ -21644,6 +22006,443 @@ def combined_invoice_pdf():
     resp.headers['Content-Type'] = 'application/pdf'
     resp.headers['Content-Disposition'] = _safe_content_disposition(fname)
     return resp
+
+
+# ─── Piano Tuning (3.9.0) ────────────────────────────────────────────────────
+# A PM requests a tuning from the show page (Advance tab → Piano Tuning). The
+# piano manager (admin or users.is_piano_manager) works the running list on
+# /piano-tuning: sends it to the vendor, sets the tuning date/time — which
+# puts ONE read-only row on that day of the show's production schedule
+# (schedule_rows.piano_tuning_id, kept by _sync_piano_schedule_rows) — and
+# the cost, billed on the Final / Combined Invoice. Optional module
+# 'piano_tuning' (Settings → System → Modules); a disabled module hides the
+# UI and 404s the routes, while existing schedule rows and billed costs stay.
+
+PIANO_STATUSES = ('requested', 'sent', 'scheduled', 'completed', 'cancelled')
+PIANO_STATUS_LABELS = {
+    'requested': 'Requested', 'sent': 'Sent to Vendor', 'scheduled': 'Scheduled',
+    'completed': 'Completed', 'cancelled': 'Cancelled',
+}
+# Fields the requesting PM may edit while the request is still 'requested'.
+_PIANO_REQUEST_FIELDS = ('location', 'piano', 'requested_date', 'requested_time', 'notes')
+# Fields only the piano manager edits.
+_PIANO_MANAGER_FIELDS = ('vendor', 'tuning_date', 'tuning_start', 'tuning_end',
+                         'cost', 'manager_notes')
+
+
+def _piano_module_on():
+    return module_enabled('piano_tuning')
+
+
+def _piano_out(r):
+    d = dict(r)
+    for k in ('requested_date', 'tuning_date'):
+        v = _as_date(d.get(k))
+        d[k] = v.isoformat() if v else None
+    for k in ('created_at', 'sent_at', 'completed_at', 'updated_at'):
+        if k in d:
+            d[k] = _ts_out(d[k])
+    d['cost'] = float(d['cost']) if d.get('cost') is not None else None
+    d['status_label'] = PIANO_STATUS_LABELS.get(d.get('status'), d.get('status'))
+    return d
+
+
+def _piano_schedule_text(t):
+    """(description, notes) of a tuning's production-schedule row."""
+    piano = (t['piano'] or '').strip()
+    desc = f'Piano Tuning — {piano}' if piano else 'Piano Tuning'
+    notes = ' · '.join(x for x in ((t['location'] or '').strip(),
+                                   (t['vendor'] or '').strip()) if x)
+    return desc, notes
+
+
+def _hhmm_minutes(v):
+    m = re.match(r'^\s*(\d{1,2}):(\d{2})', str(v or ''))
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    return h * 60 + mi if h < 24 and mi < 60 else None
+
+
+def _sync_piano_schedule_rows(db, show_id):
+    """Make the show's piano-tuning schedule rows match piano_tunings: one row
+    per tuning that has a tuning date and isn't cancelled, on that date,
+    with the module's text. Rows whose tuning is gone/cancelled/undated (or
+    duplicates, e.g. a copied day) are removed; a missing row is inserted in
+    time order within its day. Called after every write to either side —
+    including save_schedule, which rebuilds schedule_rows wholesale from the
+    browser — so a schedule tab open since before the tuning was scheduled
+    can't drop the row. Caller commits."""
+    want = {t['id']: t for t in db.execute(
+        "SELECT id, tuning_date, tuning_start, tuning_end, piano, location, vendor "
+        "FROM piano_tunings WHERE show_id=%s AND tuning_date IS NOT NULL "
+        "AND status <> 'cancelled'", (show_id,)).fetchall()}
+    seen = set()
+    for r in db.execute(
+            'SELECT id, piano_tuning_id FROM schedule_rows WHERE show_id=%s '
+            'AND piano_tuning_id IS NOT NULL ORDER BY sort_order, id',
+            (show_id,)).fetchall():
+        tid = r['piano_tuning_id']
+        if tid not in want or tid in seen:
+            db.execute('DELETE FROM schedule_rows WHERE id=%s', (r['id'],))
+            continue
+        seen.add(tid)
+        t = want[tid]
+        desc, notes = _piano_schedule_text(t)
+        db.execute(
+            'UPDATE schedule_rows SET perf_id=NULL, day_date=%s, start_time=%s, '
+            'end_time=%s, description=%s, notes=%s WHERE id=%s',
+            (_as_date(t['tuning_date']).isoformat(), t['tuning_start'] or '',
+             t['tuning_end'] or '', desc, notes, r['id']))
+    for tid, t in want.items():
+        if tid in seen:
+            continue
+        day = _as_date(t['tuning_date']).isoformat()
+        day_rows = db.execute(
+            'SELECT sort_order, start_time FROM schedule_rows '
+            'WHERE show_id=%s AND day_date=%s ORDER BY sort_order, id',
+            (show_id, day)).fetchall()
+        start_m = _hhmm_minutes(t['tuning_start'])
+        pos = None
+        if start_m is not None:
+            for dr in day_rows:
+                m = _hhmm_minutes(dr['start_time'])
+                if m is not None and m > start_m:
+                    pos = dr['sort_order']
+                    break
+        if pos is None:
+            if day_rows:
+                pos = max(int(dr['sort_order'] or 0) for dr in day_rows) + 1
+            else:
+                pos = db.execute('SELECT COALESCE(MAX(sort_order), -1) + 1 AS n '
+                                 'FROM schedule_rows WHERE show_id=%s',
+                                 (show_id,)).fetchone()['n']
+        db.execute('UPDATE schedule_rows SET sort_order = sort_order + 1 '
+                   'WHERE show_id=%s AND sort_order >= %s', (show_id, pos))
+        desc, notes = _piano_schedule_text(t)
+        db.execute(
+            'INSERT INTO schedule_rows (show_id, perf_id, day_date, sort_order, '
+            'start_time, end_time, description, notes, piano_tuning_id) '
+            'VALUES (%s, NULL, %s, %s, %s, %s, %s, %s, %s)',
+            (show_id, day, pos, t['tuning_start'] or '', t['tuning_end'] or '',
+             desc, notes, tid))
+
+
+def _piano_invoice_lines(db, show_id):
+    """Piano tunings billed on the Final / Combined Invoice: every tuning with
+    a cost that isn't cancelled, as External Assets & Costs lines."""
+    out = []
+    for r in db.execute(
+            "SELECT piano, tuning_date, requested_date, cost FROM piano_tunings "
+            "WHERE show_id=%s AND status <> 'cancelled' AND cost IS NOT NULL "
+            "ORDER BY COALESCE(tuning_date, requested_date), id", (show_id,)).fetchall():
+        d = _as_date(r['tuning_date']) or _as_date(r['requested_date'])
+        piano = (r['piano'] or '').strip()
+        desc = 'Piano tuning' + (f' — {piano}' if piano else '') + (f' ({d.isoformat()})' if d else '')
+        out.append({'description': desc, 'cost': float(r['cost'] or 0), 'pdf_filename': ''})
+    return out
+
+
+def _piano_manager_emails(db, exclude_user_id=None):
+    rows = db.execute(
+        "SELECT id, email FROM users WHERE is_piano_manager = 1 "
+        "AND COALESCE(is_locked, 0) = 0 AND COALESCE(email, '') <> ''").fetchall()
+    out = []
+    for r in rows:
+        e = r['email'].strip()
+        if r['id'] != exclude_user_id and e.lower() not in {x.lower() for x in out}:
+            out.append(e)
+    return out
+
+
+def _piano_notify(recipients, subject, body):
+    """Fire-and-forget: SMTP latency never holds up the request."""
+    if not recipients:
+        return
+
+    def _bg():
+        for addr in recipients:
+            try:
+                _send_simple_email(addr, subject, body)
+            except Exception as exc:
+                app.logger.error(f'piano tuning notify to {addr} failed: {exc}')
+    threading.Thread(target=_bg, daemon=True).start()
+
+
+def _piano_clean(data, fields):
+    """Validate/normalize the submitted subset of `fields`. Returns
+    (dict, error)."""
+    out = {}
+    for k in fields:
+        if k not in data:
+            continue
+        v = data.get(k)
+        if k in ('requested_date', 'tuning_date'):
+            v = (str(v or '')).strip()[:10]
+            if v:
+                try:
+                    v = date.fromisoformat(v).isoformat()
+                except ValueError:
+                    return None, f'Invalid date for {k.replace("_", " ")}.'
+            out[k] = v or None
+        elif k in ('requested_time', 'tuning_start', 'tuning_end'):
+            out[k] = _normalize_perf_time(str(v or ''))[:20]
+        elif k == 'cost':
+            s = str(v if v is not None else '').strip().replace('$', '').replace(',', '')
+            if not s:
+                out[k] = None
+            else:
+                try:
+                    c = round(float(s), 2)
+                except ValueError:
+                    return None, 'Cost must be a number.'
+                if c < 0:
+                    return None, "Cost can't be negative."
+                out[k] = c
+        else:
+            limit = 4000 if k in ('notes', 'manager_notes') else 300
+            out[k] = str(v or '').strip()[:limit]
+    return out, None
+
+
+def _piano_defaults(db, show_id):
+    """Pre-fill for a new request from the show + its advance sheet."""
+    show = db.execute('SELECT venue, show_date, load_in_date FROM shows WHERE id=%s',
+                      (show_id,)).fetchone()
+    adv = {r['field_key']: (r['field_value'] or '') for r in db.execute(
+        "SELECT field_key, field_value FROM advance_data WHERE show_id=%s "
+        "AND field_key IN ('backline_piano_notes', 'backline_piano')", (show_id,)).fetchall()}
+    first = db.execute('SELECT MIN(perf_date) AS d FROM show_performances '
+                       'WHERE show_id=%s AND perf_date IS NOT NULL', (show_id,)).fetchone()
+    d = _as_date(first['d']) if first else None
+    d = d or (_as_date(show['show_date']) if show else None)
+    return {
+        'location': (show['venue'] if show else '') or '',
+        'piano': adv.get('backline_piano_notes', '').strip(),
+        'requested_date': d.isoformat() if d else '',
+        'requested_time': '',
+        'notes': '',
+    }
+
+
+@app.route('/shows/<int:show_id>/piano-tunings', methods=['GET'])
+@login_required
+def show_piano_tunings(show_id):
+    if not _piano_module_on():
+        abort(404)
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'error': 'Access denied'}), 403
+    db = get_db()
+    rows = db.execute("""
+        SELECT t.*, u.display_name AS requested_by_name, u.username AS requested_by_username
+        FROM piano_tunings t LEFT JOIN users u ON u.id = t.requested_by
+        WHERE t.show_id = %s ORDER BY t.created_at, t.id
+    """, (show_id,)).fetchall()
+    days = {d['date_key'] for d in _build_schedule_days(db, show_id)[1]}
+    defaults = _piano_defaults(db, show_id)
+    db.close()
+    out = []
+    for r in rows:
+        d = _piano_out(r)
+        d['requested_by_name'] = r['requested_by_name'] or r['requested_by_username'] or ''
+        d['on_schedule'] = bool(d['tuning_date'] and d['tuning_date'] in days)
+        out.append(d)
+    return jsonify({'tunings': out, 'defaults': defaults,
+                    'can_manage': _is_piano_manager(),
+                    'statuses': [{'key': k, 'label': PIANO_STATUS_LABELS[k]}
+                                 for k in PIANO_STATUSES]})
+
+
+@app.route('/shows/<int:show_id>/piano-tunings', methods=['POST'])
+@show_advance_editor_required
+def show_piano_tuning_create(show_id):
+    if not _piano_module_on():
+        abort(404)
+    data = request.get_json(force=True) or {}
+    vals, err = _piano_clean(data, _PIANO_REQUEST_FIELDS)
+    if err:
+        return jsonify({'error': err}), 400
+    if not vals.get('requested_date'):
+        return jsonify({'error': 'Pick the date the piano needs tuning.'}), 400
+    db = get_db()
+    show = db.execute('SELECT name FROM shows WHERE id=%s', (show_id,)).fetchone()
+    if not show:
+        db.close()
+        return jsonify({'error': 'Show not found'}), 404
+    tid = db.execute("""
+        INSERT INTO piano_tunings (show_id, status, location, piano, requested_date,
+                                   requested_time, notes, requested_by, updated_by)
+        VALUES (%s, 'requested', %s, %s, %s, %s, %s, %s, %s) RETURNING id
+    """, (show_id, vals.get('location', ''), vals.get('piano', ''),
+          vals.get('requested_date'), vals.get('requested_time', ''),
+          vals.get('notes', ''), session['user_id'], session['user_id'])).fetchone()['id']
+    log_audit(db, 'PIANO_TUNING_REQUEST', 'piano_tuning', tid, show_id=show_id,
+              detail=f"date={vals.get('requested_date')} piano={vals.get('piano', '')!r}")
+    recipients = _piano_manager_emails(db, exclude_user_id=session['user_id'])
+    db.commit()
+    db.close()
+    syslog_logger.info(f"PIANO_TUNING_REQUEST id={tid} show_id={show_id} "
+                       f"by={session.get('username')}")
+    who = session.get('display_name') or session.get('username') or 'Someone'
+    try:
+        link = url_for('piano_tuning_page', _external=True)
+    except Exception:
+        link = ''
+    _piano_notify(
+        recipients,
+        f'3·2·1→THEATER: Piano Tuning Request — {show["name"]}',
+        f'{who} requested a piano tuning.\n\n'
+        f'Show: {show["name"]}\n'
+        f'Location: {vals.get("location") or "—"}\n'
+        f'Piano: {vals.get("piano") or "—"}\n'
+        f'Needed: {vals.get("requested_date")} {vals.get("requested_time") or ""}\n'
+        f'Notes: {vals.get("notes") or "—"}\n\n'
+        + (f'Piano Tuning list:\n{link}\n' if link else ''))
+    return jsonify({'success': True, 'id': tid}), 201
+
+
+@app.route('/piano-tunings/<int:tid>', methods=['PUT'])
+@login_required
+def piano_tuning_update(tid):
+    """Edit a tuning. The piano manager may change anything (status, vendor,
+    tuning date/time, cost, notes); a show editor may change the request
+    fields — or cancel it — only while it is still 'requested'."""
+    if not _piano_module_on():
+        abort(404)
+    data = request.get_json(force=True) or {}
+    db = get_db()
+    cur = db.execute('SELECT t.*, s.name AS show_name FROM piano_tunings t '
+                     'JOIN shows s ON s.id = t.show_id WHERE t.id=%s FOR UPDATE OF t',
+                     (tid,)).fetchone()
+    if not cur:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+    show_id = cur['show_id']
+    manager = _is_piano_manager()
+    editor = (not session.get('is_readonly') and not session.get('is_restricted')
+              and can_access_show(session['user_id'], show_id))
+    if not manager:
+        if not editor:
+            db.close()
+            return jsonify({'error': 'Access denied'}), 403
+        if cur['status'] != 'requested':
+            db.close()
+            return jsonify({'error': 'This request is already with the piano tuning '
+                                     'manager — ask them to change it.'}), 409
+        if any(k in data for k in _PIANO_MANAGER_FIELDS) or \
+                data.get('status') not in (None, 'requested', 'cancelled'):
+            db.close()
+            return jsonify({'error': 'Only the piano tuning manager can change that.'}), 403
+    vals, err = _piano_clean(data, _PIANO_REQUEST_FIELDS + (_PIANO_MANAGER_FIELDS if manager else ()))
+    if err:
+        db.close()
+        return jsonify({'error': err}), 400
+    status = data.get('status', cur['status'])
+    if status not in PIANO_STATUSES:
+        db.close()
+        return jsonify({'error': 'Unknown status'}), 400
+    if 'requested_date' in vals and not vals['requested_date']:
+        db.close()
+        return jsonify({'error': 'Pick the date the piano needs tuning.'}), 400
+    # Putting a tuning date in moves an open request to Scheduled.
+    tuning_date = vals['tuning_date'] if 'tuning_date' in vals else cur['tuning_date']
+    if tuning_date and status in ('requested', 'sent') and 'status' not in data:
+        status = 'scheduled'
+    if status == 'scheduled' and not tuning_date:
+        db.close()
+        return jsonify({'error': 'Set the tuning date to mark it scheduled.'}), 400
+    sets = [f'{k}=%s' for k in vals] + ['status=%s', 'updated_by=%s',
+                                        'updated_at=CURRENT_TIMESTAMP']
+    params = list(vals.values()) + [status, session['user_id']]
+    if status in ('sent', 'scheduled', 'completed') and not cur['sent_at']:
+        sets += ['sent_at=CURRENT_TIMESTAMP', 'sent_by=%s']
+        params.append(session['user_id'])
+    if status == 'completed' and not cur['completed_at']:
+        sets.append('completed_at=CURRENT_TIMESTAMP')
+    elif status != 'completed' and cur['completed_at']:
+        sets.append('completed_at=NULL')
+    params.append(tid)
+    db.execute(f"UPDATE piano_tunings SET {', '.join(sets)} WHERE id=%s", params)
+    _sync_piano_schedule_rows(db, show_id)
+    db.execute('UPDATE shows SET updated_at=CURRENT_TIMESTAMP WHERE id=%s', (show_id,))
+    changed = sorted(k for k in vals if str(vals[k] or '') != str(_piano_out(cur).get(k) or ''))
+    log_audit(db, 'PIANO_TUNING_EDIT', 'piano_tuning', tid, show_id=show_id,
+              detail=f"status={cur['status']}->{status} changed={','.join(changed) or '-'}")
+    newly_scheduled = status == 'scheduled' and cur['status'] != 'scheduled'
+    requester = None
+    if newly_scheduled and cur['requested_by'] and cur['requested_by'] != session['user_id']:
+        requester = db.execute(
+            "SELECT email FROM users WHERE id=%s AND COALESCE(is_locked, 0) = 0 "
+            "AND COALESCE(email, '') <> ''", (cur['requested_by'],)).fetchone()
+    db.commit()
+    row = db.execute('SELECT * FROM piano_tunings WHERE id=%s', (tid,)).fetchone()
+    db.close()
+    syslog_logger.info(f"PIANO_TUNING_EDIT id={tid} show_id={show_id} "
+                       f"status={cur['status']}->{status} by={session.get('username')}")
+    if requester:
+        r = _piano_out(row)
+        when = f"{r['tuning_date']} {r['tuning_start'] or ''}".strip()
+        if r['tuning_end']:
+            when += f"–{r['tuning_end']}"
+        _piano_notify(
+            [requester['email']],
+            f'3·2·1→THEATER: Piano Tuning Scheduled — {cur["show_name"]}',
+            f'Your piano tuning request for {cur["show_name"]} is scheduled.\n\n'
+            f'When: {when}\n'
+            f'Piano: {r["piano"] or "—"}\n'
+            f'Location: {r["location"] or "—"}\n'
+            + (f'Vendor: {r["vendor"]}\n' if r['vendor'] else '')
+            + '\nIt has been added to the show\'s production schedule.\n')
+    return jsonify({'success': True, 'tuning': _piano_out(row)})
+
+
+@app.route('/piano-tuning')
+@piano_manager_required
+def piano_tuning_page():
+    if not _piano_module_on():
+        abort(404)
+    return render_template('piano_tuning.html', user=get_current_user(),
+                           statuses=[(k, PIANO_STATUS_LABELS[k]) for k in PIANO_STATUSES])
+
+
+@app.route('/api/piano-tunings')
+@piano_manager_required
+def piano_tunings_list():
+    """The running list. ?status=open (default: not completed/cancelled) |
+    all | one status key."""
+    if not _piano_module_on():
+        abort(404)
+    status = request.args.get('status', 'open')
+    where, params = [], []
+    if status == 'open':
+        where.append("t.status IN ('requested', 'sent', 'scheduled')")
+    elif status in PIANO_STATUSES:
+        where.append('t.status = %s')
+        params.append(status)
+    db = get_db()
+    rows = db.execute(f"""
+        SELECT t.*, s.name AS show_name, s.venue AS show_venue, s.status AS show_status,
+               u.display_name AS requested_by_name, u.username AS requested_by_username,
+               {_ADV_PM_SQL} AS production_manager
+        FROM piano_tunings t
+        JOIN shows s ON s.id = t.show_id
+        LEFT JOIN users u ON u.id = t.requested_by
+        {('WHERE ' + ' AND '.join(where)) if where else ''}
+        ORDER BY COALESCE(t.tuning_date, t.requested_date) NULLS LAST, t.id
+    """, params).fetchall()
+    counts = {r['status']: r['n'] for r in db.execute(
+        'SELECT status, COUNT(*) AS n FROM piano_tunings GROUP BY status').fetchall()}
+    db.close()
+    out = []
+    for r in rows:
+        d = _piano_out(r)
+        d['requested_by_name'] = r['requested_by_name'] or r['requested_by_username'] or ''
+        out.append(d)
+    return jsonify({'tunings': out, 'counts': counts})
+
+
+_ADV_PM_SQL = ("(SELECT field_value FROM advance_data WHERE show_id = s.id "
+               "AND field_key = 'production_manager')")
 
 
 # ─── In-App Updates ───────────────────────────────────────────────────────────

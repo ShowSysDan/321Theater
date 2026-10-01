@@ -410,6 +410,7 @@
           <label class="field-label" title="Auto-filled from the rate card. As approver you may override before adding — the value gets locked to this line on save and becomes the new restore target.">UNIT PRICE</label>
           <input type="text" id="appr-add-price" class="field-input" placeholder="0.00">
           <div style="font-size:10px;color:var(--text-dim);margin-top:2px">Auto-filled from rate card · editable here (approver override) · locks on save</div>
+          <div id="appr-add-rate-note" style="display:none;font-size:10px;color:#2F855A;font-weight:600;margin-top:2px"></div>
         </div>
         <div class="field-group">
           <label class="field-label">RENTAL START</label>
@@ -829,18 +830,39 @@ async function selectApprAssetType(typeId, label, price, weeklyRate, isSystem, i
     if (_apprDefaultEnd)   inp.max = _apprDefaultEnd;   else inp.removeAttribute('max');
   });
 
-  // Smart price. Consumables are a flat rate per item (no day/week math).
-  const dailyRate = Number(price) || 0;
-  const wkRate    = Number(weeklyRate) || 0;
+  // Smart price — mirrors _compute_locked_price() in app.py (smart-cap
+  // weeks; consumables flat per item), on the show's Performance Company
+  // rate when this type has one (3.8.0). The server treats a price that
+  // differs from its own as an approver override, so this must match it.
+  document.getElementById('appr-add-price').value = '';
+  let cr = null;
+  try {
+    const rr = await fetch(`/shows/${_apprCurrentShowId}/assets`, {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+    if (rr.ok) cr = ((await rr.json()).company_rates || {})[String(typeId)] || null;
+  } catch (e) {}
+  const dailyRate = Number(cr ? cr.daily : price) || 0;
+  const wkRate    = Number(cr ? cr.weekly : weeklyRate) || 0;
   let calcPrice = dailyRate;
-  if (!isConsumable && _apprDefaultStart && _apprDefaultEnd) {
-    try {
+  if (!isConsumable) {
+    let days = 1;
+    if (_apprDefaultStart && _apprDefaultEnd) {
       const d1 = new Date(_apprDefaultStart), d2 = new Date(_apprDefaultEnd);
-      const days = Math.max(1, Math.round((d2 - d1) / 86400000) + 1);
-      calcPrice = wkRate > 0 && days >= 7 ? wkRate * Math.ceil(days / 7) : dailyRate * days;
-    } catch(e) {}
+      if (!isNaN(d1) && !isNaN(d2)) days = Math.max(1, Math.round((d2 - d1) / 86400000) + 1);
+    }
+    if (wkRate > 0 && dailyRate > 0) {
+      calcPrice = Math.floor(days / 7) * wkRate + Math.min((days % 7) * dailyRate, wkRate);
+    } else if (wkRate > 0) {
+      calcPrice = Math.ceil(days / 7) * wkRate;
+    } else {
+      calcPrice = dailyRate * days;
+    }
   }
   document.getElementById('appr-add-price').value = calcPrice.toFixed(2);
+  const apprRateNote = document.getElementById('appr-add-rate-note');
+  if (apprRateNote) {
+    apprRateNote.textContent = cr ? `${cr.company} company rate` : '';
+    apprRateNote.style.display = cr ? '' : 'none';
+  }
 
   // Reset unit picker before fetching availability.
   const apprUnitRow = document.getElementById('appr-add-unit-row');

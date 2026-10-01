@@ -253,3 +253,10 @@ html.mobile-view .vbm-logo { flex-direction: column; }
 html.mobile-view .vbm-logo-ctl { width: 100%; }
 html.mobile-view .vbm-card .modal-footer { flex-wrap: wrap; }
 html.mobile-view .vbm-msg { flex: 1 1 100%; order: -1; }
+
+/* Piano Tuning (3.9.0): the show panel + manager list are wide tables —
+   scroll them sideways (their wrappers are overflow-x:auto) instead of
+   squeezing every column to a word per line. */
+html.mobile-view .piano-table { min-width: 640px; }
+html.mobile-view #piano-list-table { min-width: 860px; }
+html.mobile-view .piano-toolbar #piano-search { max-width: none; }

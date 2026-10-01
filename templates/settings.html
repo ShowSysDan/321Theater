@@ -232,6 +232,7 @@
               <span class="role-badge role-{{ u.role }}">{% if u.is_document_viewer %}Doc Viewer{% elif u.is_readonly %}Read-only{% else %}{{ u.role }}{% endif %}</span>
               {% if u.is_scheduler %}<span style="font-size:10px;background:rgba(74,158,255,.15);color:#4A9EFF;padding:2px 6px;border-radius:99px;border:1px solid rgba(74,158,255,.3);margin-left:4px">Scheduler</span>{% endif %}
               {% if u.is_asset_manager %}<span style="font-size:10px;background:rgba(72,187,120,.15);color:#68D391;padding:2px 6px;border-radius:99px;border:1px solid rgba(72,187,120,.3);margin-left:4px">Asset Mgr</span>{% endif %}
+              {% if u.is_piano_manager %}<span style="font-size:10px;background:rgba(236,72,153,.15);color:#F472B6;padding:2px 6px;border-radius:99px;border:1px solid rgba(236,72,153,.3);margin-left:4px">Piano Mgr</span>{% endif %}
               {% if u.is_document_viewer %}<span style="font-size:10px;background:rgba(168,85,247,.15);color:#C084FC;padding:2px 6px;border-radius:99px;border:1px solid rgba(168,85,247,.3);margin-left:4px">Doc Viewer</span>{% endif %}
               {% if u.is_app_user %}<span title="Flag for other apps that share this user directory — no effect in 321Theater" style="font-size:10px;background:rgba(45,212,191,.15);color:#2DD4BF;padding:2px 6px;border-radius:99px;border:1px solid rgba(45,212,191,.3);margin-left:4px">App User</span>{% endif %}
               {% if u.is_app_admin %}<span title="Flag for other apps that share this user directory — no effect in 321Theater" style="font-size:10px;background:rgba(251,146,60,.15);color:#FB923C;padding:2px 6px;border-radius:99px;border:1px solid rgba(251,146,60,.3);margin-left:4px">App Admin</span>{% endif %}
@@ -258,6 +259,7 @@
                         data-readonly="{{ 1 if u.is_readonly else 0 }}"
                         data-scheduler="{{ 1 if u.is_scheduler else 0 }}"
                         data-asset-mgr="{{ 1 if u.is_asset_manager else 0 }}"
+                        data-piano-mgr="{{ 1 if u.is_piano_manager else 0 }}"
                         data-doc-viewer="{{ 1 if u.is_document_viewer else 0 }}"
                         data-labor-overview="{{ 1 if u.viewer_labor_overview else 0 }}"
                         data-show-calendar="{{ 1 if u.viewer_show_calendar else 0 }}"
@@ -2543,6 +2545,10 @@
             Asset Manager — access to asset inventory, approvals, retired &amp; reports pages
           </label>
           <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);cursor:pointer">
+            <input type="checkbox" id="edit-user-piano-manager" style="width:auto;margin:0">
+            Piano Tuning Manager — works the Piano Tuning request list (vendor, schedule, cost)
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);cursor:pointer">
             <input type="checkbox" id="edit-user-doc-viewer" style="width:auto;margin:0"
                    onchange="document.getElementById('edit-user-viewer-extras').style.display = this.checked ? '' : 'none'">
             Document Viewer — read-only; can only see filtered documents
@@ -2899,18 +2905,20 @@ document.addEventListener('click', e => {
     Number(btn.dataset.appAdmin) ? 1 : 0,
     Number(btn.dataset.laborOverview) ? 1 : 0,
     Number(btn.dataset.showCalendar) ? 1 : 0,
+    Number(btn.dataset.pianoMgr) ? 1 : 0,
   );
 });
 
 function openEditUser(id, name, email, role, isReadonly, isScheduler, isAssetManager,
                       isDocViewer, viewerVenues, viewerDocTypes, isAppUser, isAppAdmin,
-                      viewerLaborOverview, viewerShowCalendar) {
+                      viewerLaborOverview, viewerShowCalendar, isPianoManager) {
   document.getElementById('edit-user-id').value = id;
   document.getElementById('edit-user-name').value = name;
   document.getElementById('edit-user-email').value = email;
   document.getElementById('edit-user-role').value = isReadonly ? 'readonly' : role;
   document.getElementById('edit-user-scheduler').checked = !!isScheduler;
   document.getElementById('edit-user-asset-manager').checked = !!isAssetManager;
+  document.getElementById('edit-user-piano-manager').checked = !!isPianoManager;
   const docViewer = !!isDocViewer;
   const docViewerCb = document.getElementById('edit-user-doc-viewer');
   if (docViewerCb) {
@@ -2963,6 +2971,7 @@ async function saveEditUser() {
     is_readonly: selectedRole === 'readonly' || isDocViewer,
     is_scheduler: document.getElementById('edit-user-scheduler').checked,
     is_asset_manager: document.getElementById('edit-user-asset-manager').checked,
+    is_piano_manager: document.getElementById('edit-user-piano-manager').checked,
     is_document_viewer: isDocViewer,
     viewer_venues,
     viewer_doc_types,

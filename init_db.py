@@ -433,6 +433,7 @@ CREATE TABLE IF NOT EXISTS users (
     pending_approval INTEGER DEFAULT 0,
     is_scheduler INTEGER DEFAULT 0,
     is_asset_manager INTEGER DEFAULT 0,
+    is_piano_manager INTEGER DEFAULT 0,
     is_document_viewer INTEGER DEFAULT 0,
     viewer_venues TEXT DEFAULT NULL,
     viewer_doc_types TEXT DEFAULT NULL,
@@ -528,9 +529,40 @@ CREATE TABLE IF NOT EXISTS schedule_rows (
     start_time TEXT DEFAULT '',
     end_time TEXT DEFAULT '',
     description TEXT DEFAULT '',
-    notes TEXT DEFAULT ''
+    notes TEXT DEFAULT '',
+    piano_tuning_id INTEGER DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_rows_show ON schedule_rows(show_id);
+
+-- Piano Tuning requests (3.9.0). A PM requests from the show page; the piano
+-- manager (users.is_piano_manager) sends it to the vendor, sets the tuning
+-- date/time (which owns one read-only production-schedule row,
+-- schedule_rows.piano_tuning_id) and the cost (billed on the Final /
+-- Combined Invoice).
+CREATE TABLE IF NOT EXISTS piano_tunings (
+    id             SERIAL PRIMARY KEY,
+    show_id        INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    status         TEXT NOT NULL DEFAULT 'requested',
+    location       TEXT DEFAULT '',
+    piano          TEXT DEFAULT '',
+    requested_date DATE DEFAULT NULL,
+    requested_time TEXT DEFAULT '',
+    notes          TEXT DEFAULT '',
+    vendor         TEXT DEFAULT '',
+    tuning_date    DATE DEFAULT NULL,
+    tuning_start   TEXT DEFAULT '',
+    tuning_end     TEXT DEFAULT '',
+    cost           DOUBLE PRECISION DEFAULT NULL,
+    manager_notes  TEXT DEFAULT '',
+    requested_by   INTEGER,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    sent_at        TIMESTAMP DEFAULT NULL,
+    sent_by        INTEGER,
+    completed_at   TIMESTAMP DEFAULT NULL,
+    updated_by     INTEGER,
+    updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_piano_tunings_show ON piano_tunings(show_id);
 
 CREATE TABLE IF NOT EXISTS schedule_meta (
     id SERIAL PRIMARY KEY,
@@ -1263,7 +1295,20 @@ CREATE TABLE IF NOT EXISTS show_assets (
     is_hidden      INTEGER DEFAULT 0,
     notes          TEXT DEFAULT '',
     added_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    rate_company   TEXT DEFAULT NULL
+);
+
+-- Special asset rates per Performance Company (3.8.0). company holds the
+-- advance field's dropdown value, matched case/space-insensitively.
+CREATE TABLE IF NOT EXISTS asset_company_rates (
+    asset_type_id INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
+    company       TEXT NOT NULL,
+    rental_cost   DOUBLE PRECISION DEFAULT 0.0,
+    weekly_rate   DOUBLE PRECISION DEFAULT 0.0,
+    updated_by    INTEGER,
+    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (asset_type_id, company)
 );
 
 CREATE TABLE IF NOT EXISTS show_external_rentals (
@@ -1935,6 +1980,10 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         # "Settle Now" — post-show labor settled explicitly — 3.6.0
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS labor_settled_at TIMESTAMP DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS labor_settled_by INTEGER',
+        # Performance Company special asset rates — 3.8.0
+        f'ALTER TABLE "{app_schema}".show_assets ADD COLUMN IF NOT EXISTS rate_company TEXT DEFAULT NULL',
+        # Piano Tuning's production-schedule row — 3.9.0
+        f'ALTER TABLE "{app_schema}".schedule_rows ADD COLUMN IF NOT EXISTS piano_tuning_id INTEGER DEFAULT NULL',
     ]
 
     shared_alters = [
@@ -1950,6 +1999,8 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS must_change_password INTEGER DEFAULT 0',
         f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS is_scheduler INTEGER DEFAULT 0',
         f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS is_asset_manager INTEGER DEFAULT 0',
+        # Piano Tuning manager permission — 3.9.0
+        f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS is_piano_manager INTEGER DEFAULT 0',
         f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS is_document_viewer INTEGER DEFAULT 0',
         f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS viewer_venues TEXT DEFAULT NULL',
         f'ALTER TABLE "{shared_schema}".users ADD COLUMN IF NOT EXISTS viewer_doc_types TEXT DEFAULT NULL',
