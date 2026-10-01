@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.6.3'
+APP_VERSION = '3.7.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -5319,9 +5319,62 @@ def index():
 @app.route('/dashboard')
 @login_required
 def dashboard():
+    return _render_show_board(mine=False)
+
+
+def _my_pm_names(db, user_id):
+    """Lower-cased contact names the PM fields may hold for this user. The
+    `production_manager` advance field and `show_labor_days.cover_pm` store
+    the contact NAME, so 'me' = every contact linked to my account
+    (contacts.user_id); with none linked, my display name is the fallback."""
+    names = {(r['name'] or '').strip().lower() for r in db.execute(
+        'SELECT name FROM contacts WHERE user_id=%s', (user_id,)).fetchall()}
+    names.discard('')
+    if not names:
+        u = db.execute('SELECT display_name FROM users WHERE id=%s',
+                       (user_id,)).fetchone()
+        dn = ((u and u['display_name']) or '').strip().lower()
+        if dn:
+            names.add(dn)
+    return names
+
+
+def _my_pm_show_ids(db, user_id):
+    """Ids of ACTIVE shows where this user is the production manager or the
+    covering PM on any labor day (3.7.0 — My Shows)."""
+    names = sorted(_my_pm_names(db, user_id))
+    if not names:
+        return set()
+    ph = ','.join(['%s'] * len(names))
+    rows = db.execute(f"""
+        SELECT s.id FROM shows s
+        WHERE s.status = 'active' AND (
+          EXISTS (SELECT 1 FROM advance_data ad
+                  WHERE ad.show_id = s.id AND ad.field_key = 'production_manager'
+                    AND LOWER(TRIM(ad.field_value)) IN ({ph}))
+          OR EXISTS (SELECT 1 FROM show_labor_days ld
+                     WHERE ld.show_id = s.id
+                       AND LOWER(TRIM(ld.cover_pm)) IN ({ph})))
+    """, names + names).fetchall()
+    return {r['id'] for r in rows}
+
+
+@app.route('/my-shows')
+@login_required
+def my_shows():
+    return _render_show_board(mine=True)
+
+
+def _render_show_board(mine=False):
+    """Home dashboard; mine=True is the My Shows view — the same board
+    narrowed to the active shows I PM or cover (no archive section)."""
     auto_archive_past_shows()
     accessible = get_accessible_shows(session['user_id'])
     db = get_db()
+    if mine:
+        mine_ids = _my_pm_show_ids(db, session['user_id'])
+        accessible = sorted(mine_ids if accessible is None
+                            else mine_ids.intersection(accessible))
 
     _eff_date = """COALESCE(s.show_date,
         (SELECT MIN(perf_date) FROM show_performances
@@ -5405,6 +5458,8 @@ def dashboard():
             out.append(d)
         return out
 
+    if mine:
+        archived = []
     active = _attach_perfs(active)
     archived = _attach_perfs(archived)
 
@@ -5535,6 +5590,7 @@ def dashboard():
                            restricted=restricted,
                            home_layout=home_layout,
                            home_density=home_density,
+                           my_shows=mine,
                            user=get_current_user())
 
 

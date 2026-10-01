@@ -203,6 +203,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
         Home
       </a>
+      <a href="{{ url_for('my_shows') }}" class="nav-item {% if request.endpoint == 'my_shows' %}active{% endif %}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M16 3l1.5 1.5L20 2"/></svg>
+        My Shows
+      </a>
 
       {% if request.endpoint in ['show_page'] and show is defined %}
       <div class="nav-section-label">CURRENT SHOW</div>
@@ -1195,6 +1199,17 @@ const _HELP_PAGES = {
       </ul>
     `
   },
+  my_shows: {
+    title: 'My Shows',
+    html: `
+      <p><strong>Just your shows.</strong> The same board as Home, narrowed to the <em>active</em> shows where you are the <strong>Production Manager</strong> on the Advance Sheet or the <strong>covering PM</strong> on any labor day.</p>
+      <ul style="${_HELP_UL}">
+        <li>Matching uses the contact linked to your user account (kept in step with your display name) — the PM picked on the show must be that contact. If a show you run is missing, check the PM name on its Advance Sheet / labor days.</li>
+        <li>Archived shows don't appear here; use Home's search for those.</li>
+        <li>Search, date pickers, venue pills and layout work exactly as on Home.</li>
+      </ul>
+    `
+  },
   viewer_home: {
     title: 'Documents',
     html: `
@@ -1231,7 +1246,7 @@ const _HELP_PAGES = {
    longest matching prefix wins — but keep specific paths (e.g. /settings/…)
    listed so they don't fall through to their parent page's entry. #}
 const _HELP_ROUTES = [
-  ['/dashboard', 'home'], ['/shows/new', 'new_show'],
+  ['/dashboard', 'home'], ['/my-shows', 'my_shows'], ['/shows/new', 'new_show'],
   ['/settings/shows', 'manage_shows'], ['/settings/pdf-templates', 'pdf_templates'],
   ['/settings', 'settings'],
   ['/admin/merge-shows', 'merge_shows'], ['/admin/audit', 'audit_log'],
