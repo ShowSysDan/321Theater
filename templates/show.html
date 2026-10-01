@@ -550,7 +550,7 @@
           <textarea id="piano-notes" class="field-input field-textarea" rows="3" maxlength="4000" placeholder="Pitch (A440?), access, quiet time needed, rehearsal schedule…"></textarea>
         </div>
       </div>
-      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">The piano is booked on this show's Assets (asset approval applies to the piano itself; the tuning charge doesn't need it). The piano tuning manager is emailed. Once they set the tuning time it's added to this show's production schedule. You can change or cancel the request until they send it to the vendor.</p>
+      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">The piano is booked on this show's Assets (asset approval applies to the piano itself; the tuning charge doesn't need it). The piano tuning manager is emailed. Once they set the tuning time it's added to this show's production schedule. You can change or cancel the request until they schedule it with the vendor.</p>
     </div>
     <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
       <button type="button" class="btn btn-ghost" onclick="closePianoModal()">Close</button>
@@ -590,7 +590,7 @@
       <thead><tr><th>Status</th><th>Piano</th><th>Needed</th><th>Scheduled</th><th class="num">Cost</th><th></th></tr></thead>
       <tbody>${_tunings.map(t => {
         const sched = t.tuning_date
-          ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}${t.tuning_end ? '–' + esc(t.tuning_end) : ''}`
+          ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}`
             + (t.status !== 'cancelled' && !t.on_schedule ? ' <span class="piano-warn" title="This date isn\'t one of the show\'s schedule days, so the row won\'t show on the production schedule until the show\'s dates cover it.">not on schedule dates</span>' : '')
           : '—';
         const mine = CAN_EDIT && t.status === 'requested';
@@ -859,7 +859,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
             </tr>
           </thead>
           <tbody id="schedule-rows-{{ d.date_key }}">
-            {% for row in day_rows %}
+            {% for row in day_rows | sort(attribute="sort_order") %}
             {% if row.piano_tuning_id %}
             {# Piano Tuning row (3.9.0): owned by the piano tuning request —
                read-only here, re-derived on every save; can be dragged. #}

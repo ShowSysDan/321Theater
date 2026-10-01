@@ -766,11 +766,20 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
 - Optional module `piano_tuning` (APP_MODULES). `piano_tunings` table; the
   manager = admin or `users.is_piano_manager` (`_is_piano_manager()`,
   `@piano_manager_required`) — a 321Theater flag, never `is_app_*`.
+- Statuses (3.10.2): requested → scheduled (= sent to the vendor; a tuning
+  date also moves it there) → completed, plus cancelled. 'sent' is gone
+  (migrated; an incoming 'sent' is read as 'scheduled'). Start time only —
+  `tuning_end` is legacy, never set or shown. Vendors = `piano_vendors`
+  (typical price fills an EMPTY cost client-side); tunings keep
+  `piano_vendor_id` + a `vendor` name snapshot; vendors archive, never delete.
 - A tuning with a tuning_date (not cancelled) owns ONE schedule row
   (`schedule_rows.piano_tuning_id`). `_sync_piano_schedule_rows()` is the
   only writer of those rows and MUST run after anything that rewrites
   schedule_rows (save_schedule, history restore, show merge) — the browser
   rebuilds the schedule wholesale, so without it a stale tab drops the row.
+  Every sync deletes and re-inserts each row in time order within its day
+  (day = `day_date` rows + legacy perf_id rows of that date); placing only on
+  first insert stranded it when the time changed.
   The editor renders them read-only (`.piano-sched-row`, `data-piano-id`);
   copy-day / template-replace skip them.
 - Piano = an asset type in a category named like 'Piano'

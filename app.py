@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.10.1'
+APP_VERSION = '3.10.2'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -22027,9 +22027,12 @@ def combined_invoice_pdf():
 # 'piano_tuning' (Settings → System → Modules); a disabled module hides the
 # UI and 404s the routes, while existing schedule rows and billed costs stay.
 
-PIANO_STATUSES = ('requested', 'sent', 'scheduled', 'completed', 'cancelled')
+# 'Sent to vendor' and 'Scheduled' are one step (3.10.2): Scheduled = handed
+# to the vendor; the tuning date/time may follow. Old 'sent' rows were
+# migrated to 'scheduled'; a submitted 'sent' is read as 'scheduled'.
+PIANO_STATUSES = ('requested', 'scheduled', 'completed', 'cancelled')
 PIANO_STATUS_LABELS = {
-    'requested': 'Requested', 'sent': 'Sent to Vendor', 'scheduled': 'Scheduled',
+    'requested': 'Requested', 'scheduled': 'Scheduled',
     'completed': 'Completed', 'cancelled': 'Cancelled',
 }
 # Fields the requesting PM may edit while the request is still 'requested'.
@@ -22038,7 +22041,8 @@ PIANO_STATUS_LABELS = {
 _PIANO_REQUEST_FIELDS = ('piano_asset_type_id', 'piano', 'requested_date',
                          'requested_time', 'notes')
 # Fields only the piano manager edits.
-_PIANO_MANAGER_FIELDS = ('vendor', 'tuning_date', 'tuning_start', 'tuning_end',
+# Only a start time (3.10.2): tuning_end is no longer set or shown.
+_PIANO_MANAGER_FIELDS = ('piano_vendor_id', 'tuning_date', 'tuning_start',
                          'cost', 'manager_notes')
 
 
@@ -22133,41 +22137,30 @@ def _hhmm_minutes(v):
 def _sync_piano_schedule_rows(db, show_id):
     """Make the show's piano-tuning schedule rows match piano_tunings: one row
     per tuning that has a tuning date and isn't cancelled, on that date,
-    with the module's text. Rows whose tuning is gone/cancelled/undated (or
-    duplicates, e.g. a copied day) are removed; a missing row is inserted in
-    time order within its day. Called after every write to either side —
-    including save_schedule, which rebuilds schedule_rows wholesale from the
-    browser — so a schedule tab open since before the tuning was scheduled
-    can't drop the row. Caller commits."""
-    want = {t['id']: t for t in db.execute(
-        "SELECT id, tuning_date, tuning_start, tuning_end, piano, vendor "
+    with the module's text, IN TIME ORDER within its day. Called after every
+    write to either side — including save_schedule, which rebuilds
+    schedule_rows wholesale from the browser — so a stale tab can't drop the
+    row. Every call re-places each row (delete + insert before the day's
+    first row that starts later): placing it only on first insert left it
+    stranded at the bottom when the tuning time changed or the day's other
+    rows were added after it (3.10.2). Caller commits."""
+    want = db.execute(
+        "SELECT id, tuning_date, tuning_start, piano, vendor "
         "FROM piano_tunings WHERE show_id=%s AND tuning_date IS NOT NULL "
-        "AND status <> 'cancelled'", (show_id,)).fetchall()}
-    seen = set()
-    for r in db.execute(
-            'SELECT id, piano_tuning_id FROM schedule_rows WHERE show_id=%s '
-            'AND piano_tuning_id IS NOT NULL ORDER BY sort_order, id',
-            (show_id,)).fetchall():
-        tid = r['piano_tuning_id']
-        if tid not in want or tid in seen:
-            db.execute('DELETE FROM schedule_rows WHERE id=%s', (r['id'],))
-            continue
-        seen.add(tid)
-        t = want[tid]
-        desc, notes = _piano_schedule_text(t)
-        db.execute(
-            'UPDATE schedule_rows SET perf_id=NULL, day_date=%s, start_time=%s, '
-            'end_time=%s, description=%s, notes=%s WHERE id=%s',
-            (_as_date(t['tuning_date']).isoformat(), t['tuning_start'] or '',
-             t['tuning_end'] or '', desc, notes, r['id']))
-    for tid, t in want.items():
-        if tid in seen:
-            continue
+        "AND status <> 'cancelled' ORDER BY tuning_date, tuning_start, id",
+        (show_id,)).fetchall()
+    db.execute('DELETE FROM schedule_rows WHERE show_id=%s AND piano_tuning_id IS NOT NULL',
+               (show_id,))
+    for t in want:
         day = _as_date(t['tuning_date']).isoformat()
+        # The day's rows: stamped with its date, or legacy rows (no day_date)
+        # tied to a performance on that date — the same rows the schedule
+        # tab shows under that day.
         day_rows = db.execute(
-            'SELECT sort_order, start_time FROM schedule_rows '
-            'WHERE show_id=%s AND day_date=%s ORDER BY sort_order, id',
-            (show_id, day)).fetchall()
+            'SELECT sr.sort_order, sr.start_time FROM schedule_rows sr '
+            'WHERE sr.show_id=%s AND (sr.day_date=%s OR (sr.day_date IS NULL AND sr.perf_id IN '
+            '  (SELECT p.id FROM show_performances p WHERE p.show_id=%s AND p.perf_date=%s))) '
+            'ORDER BY sr.sort_order, sr.id', (show_id, day, show_id, day)).fetchall()
         start_m = _hhmm_minutes(t['tuning_start'])
         pos = None
         if start_m is not None:
@@ -22190,8 +22183,7 @@ def _sync_piano_schedule_rows(db, show_id):
             'INSERT INTO schedule_rows (show_id, perf_id, day_date, sort_order, '
             'start_time, end_time, description, notes, piano_tuning_id) '
             'VALUES (%s, NULL, %s, %s, %s, %s, %s, %s, %s)',
-            (show_id, day, pos, t['tuning_start'] or '', t['tuning_end'] or '',
-             desc, notes, tid))
+            (show_id, day, pos, t['tuning_start'] or '', '', desc, notes, t['id']))
 
 
 _PIANO_ER_LOCKED = ('This line comes from Piano Tuning — the piano tuning manager '
@@ -22287,12 +22279,13 @@ def _piano_clean(data, fields):
                 except ValueError:
                     return None, f'Invalid date for {k.replace("_", " ")}.'
             out[k] = v or None
-        elif k == 'piano_asset_type_id':
+        elif k in ('piano_asset_type_id', 'piano_vendor_id'):
             try:
                 out[k] = int(v) if v not in (None, '') else None
             except (TypeError, ValueError):
-                return None, 'Pick the piano from the list.'
-        elif k in ('requested_time', 'tuning_start', 'tuning_end'):
+                return None, ('Pick the piano from the list.' if k == 'piano_asset_type_id'
+                              else 'Pick the vendor from the list.')
+        elif k in ('requested_time', 'tuning_start'):
             out[k] = _normalize_perf_time(str(v or ''))[:20]
         elif k == 'cost':
             s = str(v if v is not None else '').strip().replace('$', '').replace(',', '')
@@ -22454,27 +22447,37 @@ def piano_tuning_update(tid):
     vals, err = _piano_clean(data, _PIANO_REQUEST_FIELDS + (_PIANO_MANAGER_FIELDS if manager else ()))
     if not err:
         err = _piano_resolve(db, vals, require=False)
+    if not err and 'piano_vendor_id' in vals:
+        # The vendor is picked from the list; keep a name snapshot.
+        if vals['piano_vendor_id'] is None:
+            vals['vendor'] = ''
+        else:
+            v = db.execute('SELECT name FROM piano_vendors WHERE id=%s',
+                           (vals['piano_vendor_id'],)).fetchone()
+            if not v:
+                err = 'Pick the vendor from the list.'
+            else:
+                vals['vendor'] = v['name']
     if err:
         db.close()
         return jsonify({'error': err}), 400
     status = data.get('status', cur['status'])
+    if status == 'sent':
+        status = 'scheduled'
     if status not in PIANO_STATUSES:
         db.close()
         return jsonify({'error': 'Unknown status'}), 400
     if 'requested_date' in vals and not vals['requested_date']:
         db.close()
         return jsonify({'error': 'Pick the date the piano needs tuning.'}), 400
-    # Putting a tuning date in moves an open request to Scheduled.
+    # Putting a tuning date in moves a request to Scheduled.
     tuning_date = vals['tuning_date'] if 'tuning_date' in vals else cur['tuning_date']
-    if tuning_date and status in ('requested', 'sent') and 'status' not in data:
+    if tuning_date and status == 'requested' and 'status' not in data:
         status = 'scheduled'
-    if status == 'scheduled' and not tuning_date:
-        db.close()
-        return jsonify({'error': 'Set the tuning date to mark it scheduled.'}), 400
     sets = [f'{k}=%s' for k in vals] + ['status=%s', 'updated_by=%s',
                                         'updated_at=CURRENT_TIMESTAMP']
     params = list(vals.values()) + [status, session['user_id']]
-    if status in ('sent', 'scheduled', 'completed') and not cur['sent_at']:
+    if status in ('scheduled', 'completed') and not cur['sent_at']:
         sets += ['sent_at=CURRENT_TIMESTAMP', 'sent_by=%s']
         params.append(session['user_id'])
     if status == 'completed' and not cur['completed_at']:
@@ -22489,9 +22492,15 @@ def piano_tuning_update(tid):
     changed = sorted(k for k in vals if str(vals[k] or '') != str(_piano_out(cur).get(k) or ''))
     log_audit(db, 'PIANO_TUNING_EDIT', 'piano_tuning', tid, show_id=show_id,
               detail=f"status={cur['status']}->{status} changed={','.join(changed) or '-'}")
-    newly_scheduled = status == 'scheduled' and cur['status'] != 'scheduled'
+    # Tell the requester when it's scheduled, and again whenever the tuning
+    # date/time is set or moved.
+    old = _piano_out(cur)
+    when_changed = any(k in vals and str(vals[k] or '') != str(old.get(k) or '')
+                       for k in ('tuning_date', 'tuning_start'))
+    notify = status == 'scheduled' and (cur['status'] != 'scheduled' or
+                                        (when_changed and tuning_date))
     requester = None
-    if newly_scheduled and cur['requested_by'] and cur['requested_by'] != session['user_id']:
+    if notify and cur['requested_by'] and cur['requested_by'] != session['user_id']:
         requester = db.execute(
             "SELECT email FROM users WHERE id=%s AND COALESCE(is_locked, 0) = 0 "
             "AND COALESCE(email, '') <> ''", (cur['requested_by'],)).fetchone()
@@ -22502,17 +22511,15 @@ def piano_tuning_update(tid):
                        f"status={cur['status']}->{status} by={session.get('username')}")
     if requester:
         r = _piano_out(row)
-        when = f"{r['tuning_date']} {r['tuning_start'] or ''}".strip()
-        if r['tuning_end']:
-            when += f"–{r['tuning_end']}"
+        when = f"{r['tuning_date'] or ''} {r['tuning_start'] or ''}".strip()
         _piano_notify(
             [requester['email']],
             f'3·2·1→THEATER: Piano Tuning Scheduled — {cur["show_name"]}',
-            f'Your piano tuning request for {cur["show_name"]} is scheduled.\n\n'
-            f'When: {when}\n'
+            f'Your piano tuning request for {cur["show_name"]} is scheduled with the vendor.\n\n'
+            f'When: {when or "time to be confirmed"}\n'
             f'Piano: {r["piano"] or "—"}\n'
             + (f'Vendor: {r["vendor"]}\n' if r['vendor'] else '')
-            + '\nIt has been added to the show\'s production schedule.\n')
+            + ('\nIt has been added to the show\'s production schedule.\n' if when else ''))
     return jsonify({'success': True, 'tuning': _piano_out(row)})
 
 
@@ -22535,7 +22542,7 @@ def piano_tunings_list():
     status = request.args.get('status', 'open')
     where, params = [], []
     if status == 'open':
-        where.append("t.status IN ('requested', 'sent', 'scheduled')")
+        where.append("t.status IN ('requested', 'scheduled')")
     elif status in PIANO_STATUSES:
         where.append('t.status = %s')
         params.append(status)
@@ -22554,6 +22561,7 @@ def piano_tunings_list():
         'SELECT status, COUNT(*) AS n FROM piano_tunings GROUP BY status').fetchall()}
     booked = _piano_booked(db, [r['show_id'] for r in rows])
     pianos = _piano_asset_types(db)
+    vendors = _piano_vendor_list(db)
     db.close()
     out = []
     for r in rows:
@@ -22562,7 +22570,110 @@ def piano_tunings_list():
         d['piano_on_show'] = ((r['show_id'], r['piano_asset_type_id']) in booked
                               if r['piano_asset_type_id'] else None)
         out.append(d)
-    return jsonify({'tunings': out, 'counts': counts, 'pianos': pianos})
+    return jsonify({'tunings': out, 'counts': counts, 'pianos': pianos,
+                    'vendors': vendors})
+
+
+def _piano_vendor_list(db, include_inactive=False):
+    rows = db.execute(
+        'SELECT id, name, typical_price, contact, notes, is_active FROM piano_vendors '
+        + ('' if include_inactive else 'WHERE is_active = 1 ')
+        + 'ORDER BY is_active DESC, LOWER(name), id').fetchall()
+    return [dict(r, typical_price=(float(r['typical_price'])
+                                   if r['typical_price'] is not None else None))
+            for r in rows]
+
+
+def _piano_vendor_clean(data):
+    name = ' '.join(str(data.get('name') or '').split())[:200]
+    if not name:
+        return None, 'Vendor name is required.'
+    price = str(data.get('typical_price') if data.get('typical_price') is not None else '')
+    price = price.strip().replace('$', '').replace(',', '')
+    if price:
+        try:
+            price = round(float(price), 2)
+        except ValueError:
+            return None, 'Typical price must be a number.'
+        if price < 0:
+            return None, "Typical price can't be negative."
+    else:
+        price = None
+    return {'name': name, 'typical_price': price,
+            'contact': str(data.get('contact') or '').strip()[:300],
+            'notes': str(data.get('notes') or '').strip()[:2000]}, None
+
+
+@app.route('/api/piano-vendors')
+@piano_manager_required
+def piano_vendors_list():
+    if not _piano_module_on():
+        abort(404)
+    db = get_db()
+    out = _piano_vendor_list(db, include_inactive=True)
+    db.close()
+    return jsonify({'vendors': out})
+
+
+@app.route('/api/piano-vendors', methods=['POST'])
+@piano_manager_required
+def piano_vendor_create():
+    if not _piano_module_on():
+        abort(404)
+    vals, err = _piano_vendor_clean(request.get_json(force=True) or {})
+    if err:
+        return jsonify({'error': err}), 400
+    db = get_db()
+    if db.execute('SELECT 1 FROM piano_vendors WHERE LOWER(name) = LOWER(%s)',
+                  (vals['name'],)).fetchone():
+        db.close()
+        return jsonify({'error': f'"{vals["name"]}" is already on the list.'}), 409
+    vid = db.execute('INSERT INTO piano_vendors (name, typical_price, contact, notes) '
+                     'VALUES (%s, %s, %s, %s) RETURNING id',
+                     (vals['name'], vals['typical_price'], vals['contact'],
+                      vals['notes'])).fetchone()['id']
+    log_audit(db, 'PIANO_VENDOR_ADD', 'piano_vendor', vid, detail=vals['name'])
+    db.commit()
+    db.close()
+    syslog_logger.info(f"PIANO_VENDOR_ADD id={vid} by={session.get('username')}")
+    return jsonify({'success': True, 'id': vid}), 201
+
+
+@app.route('/api/piano-vendors/<int:vid>', methods=['PUT'])
+@piano_manager_required
+def piano_vendor_update(vid):
+    """Edit a vendor, or archive/restore it ({"is_active": 0|1}). Archived
+    vendors drop out of the pick list but stay on tunings that used them.
+    Renaming doesn't rewrite past tunings' vendor name."""
+    if not _piano_module_on():
+        abort(404)
+    data = request.get_json(force=True) or {}
+    db = get_db()
+    if not db.execute('SELECT 1 FROM piano_vendors WHERE id=%s', (vid,)).fetchone():
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+    if set(data) == {'is_active'}:
+        active = 1 if data.get('is_active') else 0
+        db.execute('UPDATE piano_vendors SET is_active=%s WHERE id=%s', (active, vid))
+        log_audit(db, 'PIANO_VENDOR_ARCHIVE' if not active else 'PIANO_VENDOR_RESTORE',
+                  'piano_vendor', vid)
+    else:
+        vals, err = _piano_vendor_clean(data)
+        if err:
+            db.close()
+            return jsonify({'error': err}), 400
+        if db.execute('SELECT 1 FROM piano_vendors WHERE LOWER(name) = LOWER(%s) AND id <> %s',
+                      (vals['name'], vid)).fetchone():
+            db.close()
+            return jsonify({'error': f'"{vals["name"]}" is already on the list.'}), 409
+        db.execute('UPDATE piano_vendors SET name=%s, typical_price=%s, contact=%s, notes=%s '
+                   'WHERE id=%s', (vals['name'], vals['typical_price'], vals['contact'],
+                                   vals['notes'], vid))
+        log_audit(db, 'PIANO_VENDOR_EDIT', 'piano_vendor', vid, detail=vals['name'])
+    db.commit()
+    db.close()
+    syslog_logger.info(f"PIANO_VENDOR_EDIT id={vid} by={session.get('username')}")
+    return jsonify({'success': True})
 
 
 # The tuning's linked external-rental line: its id + paperwork file name.
