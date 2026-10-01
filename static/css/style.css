@@ -2065,5 +2065,7 @@ html[data-theme="light"] .login-page {
 .piano-status-completed { background: rgba(34,197,94,.14); color: #16a34a; }
 .piano-status-cancelled { background: rgba(148,163,184,.18); color: var(--text-muted); text-decoration: line-through; }
 .piano-warn { font-size: 10px; color: #d97706; margin-left: 4px; }
+.piano-er-tag { font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+.piano-pick-warn { font-size: 11px; color: #d97706; margin-top: 4px; line-height: 1.4; }
 .piano-table td { vertical-align: top; }
 .piano-notes-row td { border-top: 0; padding-top: 0; }

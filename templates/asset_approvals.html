@@ -346,8 +346,12 @@
           <td class="appr-line-total">${{ '%.2f' | format(r.cost or 0) }}</td>
           <td>{% if r.has_pdf %}<a href="{{ url_for('external_rental_pdf', show_id=s.id, er_id=r.id) }}" target="_blank" class="btn btn-xs btn-ghost">View</a>{% else %}<span class="text-dim">—</span>{% endif %}</td>
           <td>
+            {% if r.piano_tuning_id %}
+            <span title="From Piano Tuning — managed on the Piano Tuning page">🎹</span>
+            {% else %}
             <button class="btn btn-xs btn-danger-ghost" title="Remove external rental"
                     onclick="removeExternal({{ s.id }}, {{ r.id }})">×</button>
+            {% endif %}
           </td>
         </tr>
       {% endfor %}
