@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.10.0'
+APP_VERSION = '3.10.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -20355,7 +20355,10 @@ def asset_approvals():
         for r in db.execute("""
             SELECT show_id, id, description, cost, pdf_filename, piano_tuning_id,
                    (pdf_data IS NOT NULL OR s3_key IS NOT NULL) AS has_pdf
-            FROM show_external_rentals WHERE show_id = ANY(%s) ORDER BY sort_order, id
+            FROM show_external_rentals
+            -- Piano Tuning charges are the piano manager's, not asset approval's.
+            WHERE show_id = ANY(%s) AND piano_tuning_id IS NULL
+            ORDER BY sort_order, id
         """, (show_ids,)).fetchall():
             d = dict(r)
             ext_by_show.setdefault(d.pop('show_id'), []).append(d)
@@ -20415,7 +20418,7 @@ def asset_approvals_pending_count():
                (SELECT COUNT(*) FROM show_assets sa
                  WHERE sa.show_id = s.id AND sa.is_hidden = 0) AS asset_count,
                (SELECT COUNT(*) FROM show_external_rentals er
-                 WHERE er.show_id = s.id) AS ext_count
+                 WHERE er.show_id = s.id AND er.piano_tuning_id IS NULL) AS ext_count
         FROM shows s
         WHERE COALESCE(s.status, 'active') = 'active'
           AND COALESCE(s.assets_approved, 0) = 0

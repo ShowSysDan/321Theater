@@ -784,7 +784,12 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   shows on the Assets tab / Asset Estimate / Final / Combined Invoice like any
   external rental — never add a second billing path. The external-rental
   edit/delete routes 409 on these rows, and they're excluded from
-  `_compute_asset_snapshot_hash` (piano charges don't reset asset approval).
+  `_compute_asset_snapshot_hash`, the Approvals page list and its pending
+  count — the piano manager owns the charge, asset approval never sees it.
+- The PIANO is gear: a PM request for a piano not on the show books it first
+  via the ordinary `POST /shows/<id>/assets` (client-side in show.html's
+  `savePianoRequest`), so availability/pricing/asset approval apply. Don't add
+  a second, server-side booking path.
   Paperwork uploads (`/piano-tunings/<id>/paperwork`) go to that row via
   S3/DB like other rental PDFs.
 

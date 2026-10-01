@@ -550,7 +550,7 @@
           <textarea id="piano-notes" class="field-input field-textarea" rows="3" maxlength="4000" placeholder="Pitch (A440?), access, quiet time needed, rehearsal schedule…"></textarea>
         </div>
       </div>
-      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">The piano tuning manager is emailed. Once they set the tuning time it's added to this show's production schedule. You can change or cancel the request until they send it to the vendor.</p>
+      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">The piano is booked on this show's Assets (asset approval applies to the piano itself; the tuning charge doesn't need it). The piano tuning manager is emailed. Once they set the tuning time it's added to this show's production schedule. You can change or cancel the request until they send it to the vendor.</p>
     </div>
     <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
       <button type="button" class="btn btn-ghost" onclick="closePianoModal()">Close</button>
@@ -641,7 +641,7 @@
     const missing = _pianos.length && pick.value && opt && opt.dataset.onShow !== '1';
     warn.style.display = missing ? '' : 'none';
     warn.textContent = missing
-      ? `⚠ ${opt.textContent} isn't on this show's Assets tab yet — add it there so the piano is reserved for the show.`
+      ? `${opt.textContent} isn't on this show's Assets yet — it will be added (show dates) when you send this, and goes through asset approval like any gear.`
       : '';
   };
   window.closePianoModal = function() { document.getElementById('piano-modal').style.display = 'none'; };
@@ -660,6 +660,17 @@
     const btn = document.getElementById('piano-save-btn');
     btn.disabled = true;
     try {
+      // The piano is an asset: book it on the show through the normal asset
+      // path (availability, rate card, asset approval) before the request.
+      const pick = document.getElementById('piano-pick');
+      const opt = pick.selectedOptions[0];
+      if (_pianos.length && payload.piano_asset_type_id && opt && opt.dataset.onShow !== '1') {
+        const ar = await fetch(`/shows/${SHOW_ID}/assets`, {method: 'POST', headers: H,
+          body: JSON.stringify({asset_type_id: parseInt(payload.piano_asset_type_id, 10), quantity: 1})});
+        const ad = await ar.json().catch(() => ({}));
+        if (!ar.ok && !confirm(`Couldn't add ${opt.textContent} to this show's Assets: ${ad.error || 'error'}\n\nSend the tuning request anyway?`)) return;
+        if (ar.ok && window.loadAssetsTab) window.loadAssetsTab();
+      }
       const r = await fetch(id ? `/piano-tunings/${id}` : `/shows/${SHOW_ID}/piano-tunings`,
                             {method: id ? 'PUT' : 'POST', headers: H, body: JSON.stringify(payload)});
       const d = await r.json().catch(() => ({}));
@@ -1789,7 +1800,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           <td>$${Number(er.cost).toFixed(2)}</td>
           <td>${er.pdf_filename ? `<a href="/shows/${SHOW_ID}/external-rentals/${er.id}/pdf" target="_blank" style="font-size:11px">View PDF</a>` : '—'}</td>
           ${IS_ADMIN ? `<td style="white-space:nowrap">${er.piano_tuning_id
-            ? `<span class="piano-er-tag" title="From Piano Tuning — the piano tuning manager sets its cost and paperwork">🎹 Piano Tuning</span>`
+            ? `<span class="piano-er-tag" title="From Piano Tuning — the piano tuning manager sets its cost and paperwork; not part of asset approval">🎹 Piano Tuning</span>`
             : `<button class="btn btn-xs btn-ghost" onclick="editExternalRental(${esc(JSON.stringify(er))})" title="Edit">✎</button>
             <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="removeExternalRental(${er.id})" title="Remove">✕</button>`}
           </td>` : ''}
