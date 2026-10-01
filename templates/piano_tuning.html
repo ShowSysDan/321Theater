@@ -1,0 +1,243 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{% block title %}Piano Tuning — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Piano Tuning</h1>
+    <p class="page-sub">Every tuning requested from a show page. Send it to the vendor, set the tuning time (it goes onto the show's production schedule) and the cost (billed on the show's Final Invoice).</p>
+  </div>
+</div>
+
+<div class="piano-toolbar">
+  <div class="piano-filter" role="group" aria-label="Filter by status">
+    <button type="button" class="btn btn-sm btn-primary" data-status="open">Open <span class="piano-count" data-count="open"></span></button>
+    {% for key, label in statuses %}
+    <button type="button" class="btn btn-sm btn-ghost" data-status="{{ key }}">{{ label }} <span class="piano-count" data-count="{{ key }}"></span></button>
+    {% endfor %}
+    <button type="button" class="btn btn-sm btn-ghost" data-status="all">All</button>
+  </div>
+  <input type="text" id="piano-search" class="field-input field-input-sm" placeholder="Search show, piano, location, vendor…" autocomplete="off">
+</div>
+
+<div class="form-section">
+  <div class="form-section-body no-pad" style="overflow-x:auto">
+    <table class="data-table piano-table" id="piano-list-table">
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>Show</th>
+          <th>Piano / Location</th>
+          <th>Needed</th>
+          <th>Scheduled</th>
+          <th>Vendor</th>
+          <th class="num">Cost</th>
+          <th>Requested by</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="piano-list-body"><tr><td colspan="9" class="text-dim">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+{# Manage dialog #}
+<div id="pt-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)ptClose()">
+  <div class="modal-card" style="max-width:620px;max-height:90vh;overflow-y:auto">
+    <div class="modal-header">
+      <span id="pt-title">Piano Tuning</span>
+      <button type="button" onclick="ptClose()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="pt-id">
+      <div id="pt-show" style="font-size:12px;color:var(--text-dim);margin-bottom:10px"></div>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field-group">
+          <label class="field-label">STATUS</label>
+          <select id="pt-status" class="field-input">
+            {% for key, label in statuses %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field-group">
+          <label class="field-label">VENDOR</label>
+          <input type="text" id="pt-vendor" class="field-input" maxlength="300">
+        </div>
+        <div class="field-group" style="grid-column:span 2">
+          <label class="field-label">EVENT / SHOW LOCATION</label>
+          <input type="text" id="pt-location" class="field-input" maxlength="300">
+        </div>
+        <div class="field-group" style="grid-column:span 2">
+          <label class="field-label">PIANO</label>
+          <input type="text" id="pt-piano" class="field-input" maxlength="300">
+        </div>
+        <div class="field-group">
+          <label class="field-label">NEEDED ON</label>
+          <input type="date" id="pt-req-date" class="field-input">
+        </div>
+        <div class="field-group">
+          <label class="field-label">TUNED BY (time)</label>
+          <input type="text" id="pt-req-time" class="field-input" maxlength="5" placeholder="14:00">
+        </div>
+        <div class="field-group" style="grid-column:span 2;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px">
+          <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim);margin-bottom:8px">TUNING TIME — goes on the show's production schedule</div>
+          <div style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr);gap:8px">
+            <label style="font-size:10px;color:var(--text-dim)">DATE<input type="date" id="pt-date" class="field-input"></label>
+            <label style="font-size:10px;color:var(--text-dim)">START<input type="text" id="pt-start" class="field-input" maxlength="5" placeholder="09:00"></label>
+            <label style="font-size:10px;color:var(--text-dim)">END<input type="text" id="pt-end" class="field-input" maxlength="5" placeholder="11:00"></label>
+          </div>
+        </div>
+        <div class="field-group">
+          <label class="field-label">COST ($)</label>
+          <input type="text" id="pt-cost" class="field-input" inputmode="decimal" placeholder="Billed on the Final Invoice">
+        </div>
+        <div class="field-group"></div>
+        <div class="field-group" style="grid-column:span 2">
+          <label class="field-label">REQUEST NOTES (from the PM)</label>
+          <textarea id="pt-notes" class="field-input field-textarea" rows="2" maxlength="4000"></textarea>
+        </div>
+        <div class="field-group" style="grid-column:span 2">
+          <label class="field-label">MANAGER NOTES</label>
+          <textarea id="pt-mgr-notes" class="field-input field-textarea" rows="2" maxlength="4000" placeholder="Vendor confirmation, PO number…"></textarea>
+        </div>
+      </div>
+      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">Setting the tuning date moves an open request to <strong>Scheduled</strong> and emails the requester. Cancelling removes the schedule row and keeps the cost off the invoice.</p>
+    </div>
+    <div class="modal-footer">
+      <a id="pt-show-link" class="btn btn-ghost" href="#" style="margin-right:auto">Open show →</a>
+      <button type="button" class="btn btn-ghost" onclick="ptClose()">Close</button>
+      <button type="button" class="btn btn-primary" id="pt-save" onclick="ptSave()">Save</button>
+    </div>
+  </div>
+</div>
+
+<style>
+.piano-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 14px; }
+.piano-filter { display: flex; gap: 6px; flex-wrap: wrap; }
+.piano-toolbar #piano-search { flex: 1 1 220px; max-width: 360px; }
+.piano-count:empty { display: none; }
+.piano-count { font-size: 10px; opacity: .75; }
+.piano-table .sub { font-size: 11px; color: var(--text-dim); }
+</style>
+
+<script>
+(function() {
+  const H = {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'};
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  let _status = 'open', _rows = [], _seq = 0;
+
+  async function load() {
+    const seq = ++_seq;
+    const body = document.getElementById('piano-list-body');
+    let d;
+    try {
+      const r = await fetch(`/api/piano-tunings?status=${encodeURIComponent(_status)}`, {headers: H});
+      if (!r.ok) throw new Error(r.status);
+      d = await r.json();
+    } catch (e) {
+      if (seq === _seq) body.innerHTML = '<tr><td colspan="9" style="color:#e53e3e">Couldn\'t load the list.</td></tr>';
+      return;
+    }
+    if (seq !== _seq) return;
+    _rows = d.tunings || [];
+    const c = d.counts || {};
+    document.querySelectorAll('.piano-count').forEach(el => {
+      const k = el.dataset.count;
+      const n = k === 'open' ? (c.requested || 0) + (c.sent || 0) + (c.scheduled || 0) : (c[k] || 0);
+      el.textContent = n ? `(${n})` : '';
+    });
+    render();
+  }
+
+  function render() {
+    const body = document.getElementById('piano-list-body');
+    const q = (document.getElementById('piano-search').value || '').trim().toLowerCase();
+    const rows = !q ? _rows : _rows.filter(t =>
+      [t.show_name, t.piano, t.location, t.vendor, t.production_manager, t.requested_by_name]
+        .some(v => String(v || '').toLowerCase().includes(q)));
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="9" class="text-dim">${_rows.length ? 'No tunings match your search.' : 'No piano tunings here.'}</td></tr>`;
+      return;
+    }
+    body.innerHTML = rows.map(t => `
+      <tr>
+        <td><span class="piano-status piano-status-${esc(t.status)}">${esc(t.status_label)}</span></td>
+        <td><a href="/shows/${t.show_id}?tab=advance">${esc(t.show_name)}</a>
+          <div class="sub">${esc(t.show_venue || '')}${t.production_manager ? ' · PM ' + esc(t.production_manager) : ''}</div></td>
+        <td>${esc(t.piano) || '—'}<div class="sub">${esc(t.location || '')}</div></td>
+        <td style="white-space:nowrap">${esc(t.requested_date || '')} ${esc(t.requested_time || '')}</td>
+        <td style="white-space:nowrap">${t.tuning_date ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}${t.tuning_end ? '–' + esc(t.tuning_end) : ''}` : '—'}</td>
+        <td>${esc(t.vendor) || '—'}</td>
+        <td class="num">${t.cost === null || t.cost === undefined ? '—' : '$' + Number(t.cost).toFixed(2)}</td>
+        <td class="sub">${esc(t.requested_by_name || '')}</td>
+        <td><div style="display:flex;flex-direction:column;gap:4px;align-items:stretch">
+          ${t.status === 'requested' ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptQuick(${t.id},'sent')">Sent to vendor</button>` : ''}
+          ${t.status === 'scheduled' ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptQuick(${t.id},'completed')">Completed</button>` : ''}
+          <button type="button" class="btn btn-xs btn-primary" onclick="ptOpen(${t.id})">Manage</button>
+        </div></td>
+      </tr>`).join('');
+  }
+
+  document.querySelectorAll('.piano-filter [data-status]').forEach(btn => btn.addEventListener('click', () => {
+    _status = btn.dataset.status;
+    document.querySelectorAll('.piano-filter [data-status]').forEach(b => {
+      b.classList.toggle('btn-primary', b === btn);
+      b.classList.toggle('btn-ghost', b !== btn);
+    });
+    load();
+  }));
+  document.getElementById('piano-search').addEventListener('input', render);
+
+  const F = {status: 'pt-status', vendor: 'pt-vendor', location: 'pt-location', piano: 'pt-piano',
+             requested_date: 'pt-req-date', requested_time: 'pt-req-time', tuning_date: 'pt-date',
+             tuning_start: 'pt-start', tuning_end: 'pt-end', notes: 'pt-notes', manager_notes: 'pt-mgr-notes'};
+
+  window.ptOpen = function(id) {
+    const t = _rows.find(x => x.id === id);
+    if (!t) return;
+    document.getElementById('pt-id').value = t.id;
+    document.getElementById('pt-title').textContent = `Piano Tuning #${t.id}`;
+    document.getElementById('pt-show').textContent =
+      `${t.show_name}${t.show_venue ? ' · ' + t.show_venue : ''}${t.requested_by_name ? ' · requested by ' + t.requested_by_name : ''}`;
+    document.getElementById('pt-show-link').href = `/shows/${t.show_id}?tab=schedule`;
+    Object.entries(F).forEach(([k, el]) => { document.getElementById(el).value = t[k] || ''; });
+    document.getElementById('pt-cost').value = t.cost === null || t.cost === undefined ? '' : Number(t.cost).toFixed(2);
+    document.getElementById('pt-status').dataset.orig = t.status;
+    document.getElementById('pt-modal').style.display = 'flex';
+  };
+  window.ptClose = function() { document.getElementById('pt-modal').style.display = 'none'; };
+
+  async function put(id, payload) {
+    const r = await fetch(`/piano-tunings/${id}`, {method: 'PUT', headers: H, body: JSON.stringify(payload)});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(d.error || 'Could not save.'); return false; }
+    return true;
+  }
+
+  window.ptSave = async function() {
+    const id = document.getElementById('pt-id').value;
+    const payload = {};
+    Object.entries(F).forEach(([k, el]) => { payload[k] = document.getElementById(el).value; });
+    payload.cost = document.getElementById('pt-cost').value;
+    // Status untouched → let the server move an open request to Scheduled
+    // when a tuning date is set.
+    if (payload.status === document.getElementById('pt-status').dataset.orig) delete payload.status;
+    const btn = document.getElementById('pt-save');
+    btn.disabled = true;
+    try {
+      if (await put(id, payload)) { ptClose(); load(); }
+    } finally { btn.disabled = false; }
+  };
+
+  window.ptQuick = async function(id, status) {
+    if (await put(id, {status})) load();
+  };
+
+  load();
+})();
+</script>
+{% endblock %}

@@ -739,6 +739,44 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
 - App errors reaching the browser via the gateway use `_client_error_text()`
   (raw exception text can carry internal hosts).
 
+## My Shows (3.7.0)
+- `/my-shows` = the Home board (`_render_show_board(mine=True)`) narrowed to
+  ACTIVE shows where the user is the `production_manager` advance value or
+  a `show_labor_days.cover_pm`. Both store the contact NAME, matched
+  case/space-insensitively against the contacts linked to the user
+  (`contacts.user_id`, kept in sync by `_sync_contact_for_user`; display name
+  as fallback) — `_my_pm_show_ids()`. No archive section.
+
+## Performance Company asset rates (3.8.0)
+- `asset_company_rates` (asset_type_id, company) = special day/week rates;
+  companies come from the `performance_company` form field's dropdown
+  options (`_performance_company_options`), matched via `_company_key()`.
+  `_price_asset_line()` is THE pricing call for add + re-date (company rate
+  if the type has one, else standard; same `_compute_locked_price` math);
+  `show_assets.rate_company` records which card priced the line.
+- An approver's typed price is an override only if it differs from the
+  computed price AND (on a company-rated line) from the standard price — a
+  client echoing the standard rate must not knock a line off its company
+  rate. The approvals add preview must mirror `_compute_locked_price`.
+- Company changes never silently re-price: the Assets tab offers Re-price
+  (`…/assets/apply-company-rates`) for lines whose `rate_company` doesn't
+  match, skipping hand-priced lines (`_asset_line_hand_priced`).
+
+## Piano Tuning module (3.9.0)
+- Optional module `piano_tuning` (APP_MODULES). `piano_tunings` table; the
+  manager = admin or `users.is_piano_manager` (`_is_piano_manager()`,
+  `@piano_manager_required`) — a 321Theater flag, never `is_app_*`.
+- A tuning with a tuning_date (not cancelled) owns ONE schedule row
+  (`schedule_rows.piano_tuning_id`). `_sync_piano_schedule_rows()` is the
+  only writer of those rows and MUST run after anything that rewrites
+  schedule_rows (save_schedule, history restore, show merge) — the browser
+  rebuilds the schedule wholesale, so without it a stale tab drops the row.
+  The editor renders them read-only (`.piano-sched-row`, `data-piano-id`);
+  copy-day / template-replace skip them.
+- Costs bill only on the settlement (Final + Combined Invoice) through
+  `_fetch_show_assets_and_externals(..., include_piano=True)`, as external
+  lines; never on the Asset Estimate. Cancelled = never billed.
+
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.
 At the end of any change that touches code/config, **state plainly which

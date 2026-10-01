@@ -473,6 +473,26 @@
     </div>
   </div>
 
+{% macro piano_tuning_panel() %}
+  {# ── Piano Tuning (3.9.0) — requests for this show. Only buttons live
+     inside #advance-form (no inputs), so nothing here triggers the advance
+     autosave; the request dialog is outside the form. #}
+  <div class="form-section" id="piano-tuning-section">
+    <div class="form-section-header">
+      <span class="section-icon">🎹</span> PIANO TUNING
+      <div style="display:flex;gap:6px;align-items:center;margin-left:auto">
+        <a href="{{ url_for('piano_tuning_page') }}" id="piano-manage-link" class="btn btn-sm btn-ghost" style="display:none">Piano Tuning list →</a>
+        {% if can_edit_advance %}
+        <button type="button" class="btn btn-sm btn-primary" onclick="openPianoRequest()">+ Request Tuning</button>
+        {% endif %}
+      </div>
+    </div>
+    <div class="form-section-body">
+      <div id="piano-tuning-list"><p class="text-dim" style="font-size:12px;margin:0">Loading…</p></div>
+    </div>
+  </div>
+{% endmacro %}
+  {% set _piano_ns = namespace(done=False) %}
   {% for section in form_sections %}
   <div class="form-section{% if section.collapsible and section.default_open == 0 %} collapsed{% endif %}"
        data-key="{{ section.section_key }}" data-default-open="{{ '0' if section.default_open == 0 else '1' }}">
@@ -489,9 +509,154 @@
       {% endfor %}
     </div>
   </div>
+  {% if piano_tuning_enabled and section.section_key == 'backline_section' and not _piano_ns.done %}
+    {% set _piano_ns.done = True %}
+    {{ piano_tuning_panel() }}
+  {% endif %}
   {% endfor %}
+  {% if piano_tuning_enabled and not _piano_ns.done %}{{ piano_tuning_panel() }}{% endif %}
 
 </form>
+
+{% if piano_tuning_enabled %}
+{# Piano Tuning request / edit dialog (outside #advance-form on purpose). #}
+<div id="piano-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closePianoModal()">
+  <div class="modal-card" style="max-width:560px;max-height:90vh;overflow-y:auto">
+    <div class="modal-header">
+      <span id="piano-modal-title">Request Piano Tuning</span>
+      <button type="button" onclick="closePianoModal()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="piano-edit-id">
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field-group" style="grid-column:span 2">
+          <label class="field-label">EVENT / SHOW LOCATION</label>
+          <input type="text" id="piano-location" class="field-input" maxlength="300" placeholder="e.g. Walt Disney Theater — stage">
+        </div>
+        <div class="field-group" style="grid-column:span 2">
+          <label class="field-label">PIANO</label>
+          <input type="text" id="piano-piano" class="field-input" maxlength="300" placeholder="e.g. Steinway D (house)">
+        </div>
+        <div class="field-group">
+          <label class="field-label">NEEDED ON *</label>
+          <input type="date" id="piano-req-date" class="field-input">
+        </div>
+        <div class="field-group">
+          <label class="field-label">TUNED BY (time)</label>
+          <input type="text" id="piano-req-time" class="field-input" maxlength="5" placeholder="14:00">
+        </div>
+        <div class="field-group" style="grid-column:span 2">
+          <label class="field-label">NOTES</label>
+          <textarea id="piano-notes" class="field-input field-textarea" rows="3" maxlength="4000" placeholder="Pitch (A440?), access, quiet time needed, rehearsal schedule…"></textarea>
+        </div>
+      </div>
+      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">The piano tuning manager is emailed. Once they set the tuning time it's added to this show's production schedule. You can change or cancel the request until they send it to the vendor.</p>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
+      <button type="button" class="btn btn-ghost" onclick="closePianoModal()">Close</button>
+      <button type="button" class="btn btn-primary" id="piano-save-btn" onclick="savePianoRequest()">Send Request</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const SHOW_ID = {{ show.id }};
+  const CAN_EDIT = {{ 'true' if can_edit_advance else 'false' }};
+  let _tunings = [], _defaults = {}, _canManage = false;
+  const H = {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'};
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const money = v => (v === null || v === undefined) ? '' : `$${Number(v).toFixed(2)}`;
+
+  async function loadPiano() {
+    const host = document.getElementById('piano-tuning-list');
+    if (!host) return;
+    try {
+      const r = await fetch(`/shows/${SHOW_ID}/piano-tunings`, {headers: H});
+      if (!r.ok) throw new Error(r.status);
+      const d = await r.json();
+      _tunings = d.tunings || []; _defaults = d.defaults || {}; _canManage = !!d.can_manage;
+    } catch (e) {
+      host.innerHTML = '<p style="font-size:12px;color:#e53e3e;margin:0">Couldn\'t load piano tunings.</p>';
+      return;
+    }
+    document.getElementById('piano-manage-link').style.display = _canManage ? '' : 'none';
+    if (!_tunings.length) {
+      host.innerHTML = '<p class="text-dim" style="font-size:12px;margin:0">No piano tuning requested for this show.</p>';
+      return;
+    }
+    host.innerHTML = `<div style="overflow-x:auto"><table class="data-table piano-table">
+      <thead><tr><th>Status</th><th>Piano</th><th>Location</th><th>Needed</th><th>Scheduled</th><th class="num">Cost</th><th></th></tr></thead>
+      <tbody>${_tunings.map(t => {
+        const sched = t.tuning_date
+          ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}${t.tuning_end ? '–' + esc(t.tuning_end) : ''}`
+            + (t.status !== 'cancelled' && !t.on_schedule ? ' <span class="piano-warn" title="This date isn\'t one of the show\'s schedule days, so the row won\'t show on the production schedule until the show\'s dates cover it.">not on schedule dates</span>' : '')
+          : '—';
+        const mine = CAN_EDIT && t.status === 'requested';
+        return `<tr>
+          <td><span class="piano-status piano-status-${esc(t.status)}">${esc(t.status_label)}</span></td>
+          <td>${esc(t.piano) || '—'}${t.vendor ? `<div class="text-dim" style="font-size:10px">Vendor: ${esc(t.vendor)}</div>` : ''}</td>
+          <td>${esc(t.location) || '—'}</td>
+          <td style="white-space:nowrap">${esc(t.requested_date || '')} ${esc(t.requested_time || '')}</td>
+          <td style="white-space:nowrap">${sched}</td>
+          <td class="num">${money(t.cost) || '—'}</td>
+          <td style="white-space:nowrap">${mine ? `<button type="button" class="btn btn-xs btn-ghost" onclick="openPianoRequest(${t.id})">Edit</button>
+            <button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="cancelPianoRequest(${t.id})">Cancel</button>` : ''}</td>
+        </tr>${t.notes ? `<tr class="piano-notes-row"><td></td><td colspan="6" class="text-dim" style="font-size:11px;white-space:pre-wrap">${esc(t.notes)}</td></tr>` : ''}`;
+      }).join('')}</tbody></table></div>`;
+  }
+  window.loadPianoTunings = loadPiano;
+
+  window.openPianoRequest = function(id) {
+    const t = id ? _tunings.find(x => x.id === id) : null;
+    const v = t || _defaults;
+    document.getElementById('piano-edit-id').value = t ? t.id : '';
+    document.getElementById('piano-modal-title').textContent = t ? 'Edit Piano Tuning Request' : 'Request Piano Tuning';
+    document.getElementById('piano-save-btn').textContent = t ? 'Save' : 'Send Request';
+    document.getElementById('piano-location').value = v.location || '';
+    document.getElementById('piano-piano').value = v.piano || '';
+    document.getElementById('piano-req-date').value = v.requested_date || '';
+    document.getElementById('piano-req-time').value = v.requested_time || '';
+    document.getElementById('piano-notes').value = v.notes || '';
+    document.getElementById('piano-modal').style.display = 'flex';
+  };
+  window.closePianoModal = function() { document.getElementById('piano-modal').style.display = 'none'; };
+
+  window.savePianoRequest = async function() {
+    const id = document.getElementById('piano-edit-id').value;
+    const payload = {
+      location: document.getElementById('piano-location').value.trim(),
+      piano: document.getElementById('piano-piano').value.trim(),
+      requested_date: document.getElementById('piano-req-date').value,
+      requested_time: document.getElementById('piano-req-time').value.trim(),
+      notes: document.getElementById('piano-notes').value.trim(),
+    };
+    if (!payload.requested_date) { alert('Pick the date the piano needs tuning.'); return; }
+    const btn = document.getElementById('piano-save-btn');
+    btn.disabled = true;
+    try {
+      const r = await fetch(id ? `/piano-tunings/${id}` : `/shows/${SHOW_ID}/piano-tunings`,
+                            {method: id ? 'PUT' : 'POST', headers: H, body: JSON.stringify(payload)});
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { alert(d.error || 'Could not save the request.'); return; }
+      closePianoModal();
+      loadPiano();
+    } finally { btn.disabled = false; }
+  };
+
+  window.cancelPianoRequest = async function(id) {
+    if (!confirm('Cancel this piano tuning request?')) return;
+    const r = await fetch(`/piano-tunings/${id}`, {method: 'PUT', headers: H, body: JSON.stringify({status: 'cancelled'})});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(d.error || 'Could not cancel.'); return; }
+    loadPiano();
+  };
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', loadPiano);
+  else loadPiano();
+})();
+</script>
+{% endif %}
 </div>{# end tab-advance #}
 
 
@@ -659,6 +824,18 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
           </thead>
           <tbody id="schedule-rows-{{ d.date_key }}">
             {% for row in day_rows %}
+            {% if row.piano_tuning_id %}
+            {# Piano Tuning row (3.9.0): owned by the piano tuning request —
+               read-only here, re-derived on every save; can be dragged. #}
+            <tr class="schedule-row piano-sched-row" data-piano-id="{{ row.piano_tuning_id }}" title="Added by Piano Tuning — change it on the Advance tab's Piano Tuning panel">
+              {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
+              <td><input type="text" class="sched-cell" value="{{ row.start_time }}" readonly tabindex="-1"></td>
+              <td><input type="text" class="sched-cell" value="{{ row.end_time }}" readonly tabindex="-1"></td>
+              <td><input type="text" class="sched-cell" value="{{ row.description }}" readonly tabindex="-1"></td>
+              <td><input type="text" class="sched-cell" value="{{ row.notes }}" readonly tabindex="-1"></td>
+              {% if not restricted %}<td><span class="piano-sched-lock" title="Managed by Piano Tuning">🎹</span></td>{% endif %}
+            </tr>
+            {% else %}
             <tr class="schedule-row">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
               <td><input type="text" class="sched-cell" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
@@ -667,6 +844,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
               <td><input type="text" class="sched-cell" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
               {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)" title="Remove">×</button></td>{% endif %}
             </tr>
+            {% endif %}
             {% endfor %}
           </tbody>
         </table>
@@ -712,6 +890,16 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
           <tbody id="schedule-rows-null">
             {% set null_rows = schedule_rows | selectattr('perf_id', 'none') | list %}
             {% for row in null_rows %}
+            {% if row.piano_tuning_id %}
+            <tr class="schedule-row piano-sched-row" data-piano-id="{{ row.piano_tuning_id }}" title="Added by Piano Tuning — change it on the Advance tab's Piano Tuning panel">
+              {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
+              <td><input type="text" class="sched-cell" value="{{ row.start_time }}" readonly tabindex="-1"></td>
+              <td><input type="text" class="sched-cell" value="{{ row.end_time }}" readonly tabindex="-1"></td>
+              <td><input type="text" class="sched-cell" value="{{ row.description }}" readonly tabindex="-1"></td>
+              <td><input type="text" class="sched-cell" value="{{ row.notes }}" readonly tabindex="-1"></td>
+              {% if not restricted %}<td><span class="piano-sched-lock" title="Managed by Piano Tuning">🎹</span></td>{% endif %}
+            </tr>
+            {% else %}
             <tr class="schedule-row">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
               <td><input type="text" class="sched-cell" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
@@ -720,6 +908,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
               <td><input type="text" class="sched-cell" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
               {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>{% endif %}
             </tr>
+            {% endif %}
             {% endfor %}
           </tbody>
         </table>

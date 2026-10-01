@@ -275,6 +275,7 @@
           <option value="readonly">Read-only</option>
           <option value="scheduler">Scheduler</option>
           <option value="asset_manager">Asset Manager</option>
+          <option value="piano_manager">Piano Tuning Manager</option>
         </select>
         {% endif %}
       </div>
@@ -848,6 +849,7 @@ const _HELP_PAGES = {
         <li>Sections and fields are configured in Settings → Form Fields; some fields appear only when another field is set a certain way (each field's "Conditional show when" — several conditions can be combined with <code>&amp;&amp;</code>).</li>
         <li><strong>AI Extract</strong> (when enabled) — upload a rider/tech spec or pick an attachment; review the suggested values and apply the ones you want.</li>
         <li><strong>History</strong> — browse saved versions of the form and restore one.</li>
+        <li><strong>Piano Tuning</strong> (below Backline) — <strong>+ Request Tuning</strong> sends a request to the piano tuning manager (location, piano, date/time needed, notes; pre-filled from the show). Edit or cancel it until they send it to the vendor; once they set the tuning time it appears on the Production Schedule as a read-only 🎹 row, and its cost goes on the Final Invoice.</li>
         <li>The presence indicator shows who else is on this show; other people's edits merge in live (updated fields flash briefly).</li>
       </ul>
     `
@@ -1201,6 +1203,18 @@ const _HELP_PAGES = {
       </ul>
     `
   },
+  piano_tuning: {
+    title: 'Piano Tuning',
+    html: `
+      <p><strong>The running list of piano tunings</strong> requested from show pages (Advance tab → Piano Tuning). For admins and users with the <em>Piano Tuning Manager</em> permission.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Open</strong> = Requested, Sent to Vendor and Scheduled. The status buttons filter; search matches show, piano, location, vendor and PM.</li>
+        <li><strong>Sent to vendor</strong> — one click marks it sent (the PM can no longer edit or cancel it).</li>
+        <li><strong>Manage</strong> — vendor, tuning date + start/end, cost and notes. Setting the tuning date marks it <strong>Scheduled</strong>, puts a read-only 🎹 row on that day of the show's production schedule and emails the requester.</li>
+        <li><strong>Cost</strong> appears on the show's <strong>Final Invoice</strong> and the Combined Invoice under External Assets &amp; Costs. Cancelled tunings are never billed and their schedule row is removed.</li>
+      </ul>
+    `
+  },
   my_shows: {
     title: 'My Shows',
     html: `
@@ -1248,7 +1262,7 @@ const _HELP_PAGES = {
    longest matching prefix wins — but keep specific paths (e.g. /settings/…)
    listed so they don't fall through to their parent page's entry. #}
 const _HELP_ROUTES = [
-  ['/dashboard', 'home'], ['/my-shows', 'my_shows'], ['/shows/new', 'new_show'],
+  ['/dashboard', 'home'], ['/my-shows', 'my_shows'], ['/piano-tuning', 'piano_tuning'], ['/shows/new', 'new_show'],
   ['/settings/shows', 'manage_shows'], ['/settings/pdf-templates', 'pdf_templates'],
   ['/settings', 'settings'],
   ['/admin/merge-shows', 'merge_shows'], ['/admin/audit', 'audit_log'],
