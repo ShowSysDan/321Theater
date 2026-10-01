@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.11.0'
+APP_VERSION = '3.12.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -2177,6 +2177,8 @@ def _nav_audience_ok(audience):
     if audience == 'asset_manager':
         return (role == 'admin' or bool(session.get('is_content_admin'))
                 or bool(session.get('is_asset_manager')))
+    if audience == 'reports':
+        return _can_view_reports()
     if audience == 'piano_manager':
         return _is_piano_manager() and module_enabled('piano_tuning')
     if audience == 'labor_scheduler':
@@ -24866,32 +24868,626 @@ def public_dashboard(slug):
 
 # ─── Asset Reports ─────────────────────────────────────────────────────────────
 
+# ─── Reports (3.12.0) ────────────────────────────────────────────────────────
+# One Reports area (/reports), its own sidebar section — not an asset tool.
+# Every tab shares one show filter (date range on the show's effective date,
+# venue, Arts Group / Performance Company; test/demo shows excluded) and each
+# tab's data endpoint enforces its own audience:
+#   assets / arts groups / rental lines → admin, content admin, asset manager
+#   labor & techs                       → labor schedulers (_can_schedule_labor)
+#   piano tuning                        → piano managers (module on)
+# Labor DOLLARS come only from the settlement engine (_calc_post_show_labor_cost)
+# for SETTLED shows, so a report can never disagree with a Final Invoice; hours
+# come from the same _calc_hours the grids use.
+
+def _can_report_assets():
+    return (session.get('user_role') == 'admin' or bool(session.get('is_content_admin'))
+            or bool(session.get('is_asset_manager')))
+
+
+def _can_report_labor():
+    return _can_schedule_labor()
+
+
+def _can_report_piano():
+    return _is_piano_manager() and module_enabled('piano_tuning')
+
+
+def _can_view_reports():
+    return _can_report_assets() or _can_report_labor() or _can_report_piano()
+
+
+def reports_required(f):
+    """The Reports page: anyone who can see at least one report tab."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'user_id' not in session:
+            return redirect(url_for('login'))
+        if _can_view_reports():
+            return f(*args, **kwargs)
+        abort(403)
+    return decorated
+
+
+def _report_need(check):
+    """None when allowed, else the 403 response for a report data endpoint."""
+    if check():
+        return None
+    return jsonify({'error': 'You do not have access to this report.'}), 403
+
+
+def _report_filters():
+    """(date_from, date_to, venue, company_key) from the query string."""
+    def _d(k):
+        v = (request.args.get(k) or '').strip()[:10]
+        try:
+            return date.fromisoformat(v) if v else None
+        except ValueError:
+            return None
+    return (_d('from'), _d('to'), (request.args.get('venue') or '').strip(),
+            _company_key(request.args.get('company') or ''))
+
+
+def _report_shows(db):
+    """{show_id: {...}} for the shows the current filters select, with each
+    show's effective date (show date → load-in → first performance), venue,
+    Performance Company (raw + comparison key) and settled flag."""
+    d_from, d_to, venue, company = _report_filters()
+    rows = db.execute("""
+        SELECT s.id, s.name, s.venue, s.status, s.labor_settled_at,
+               COALESCE(s.show_date, s.load_in_date,
+                        (SELECT MIN(p.perf_date) FROM show_performances p
+                          WHERE p.show_id = s.id)) AS eff_date,
+               COALESCE(NULLIF(TRIM(ad.field_value), ''),
+                        NULLIF(TRIM(s.performance_company), ''), '') AS company
+        FROM shows s
+        LEFT JOIN advance_data ad ON ad.show_id = s.id AND ad.field_key = 'performance_company'
+        WHERE COALESCE(s.is_test, 0) = 0
+    """).fetchall()
+    out = {}
+    for r in rows:
+        eff = _as_date(r['eff_date'])
+        if d_from and (not eff or eff < d_from):
+            continue
+        if d_to and (not eff or eff > d_to):
+            continue
+        if venue and (r['venue'] or '').strip() != venue:
+            continue
+        key = _company_key(r['company'])
+        if company and key != company:
+            continue
+        out[r['id']] = {'id': r['id'], 'name': r['name'], 'venue': (r['venue'] or '').strip(),
+                        'status': r['status'], 'date': eff.isoformat() if eff else None,
+                        'company': (r['company'] or '').strip(), 'company_key': key,
+                        'settled': bool(r['labor_settled_at'])}
+    if out:
+        # Pre-3.6.0 settlement marker counts as settled too.
+        for sid in set(out) - set(_unsettled_show_ids(db, list(out))):
+            out[sid]['settled'] = True
+    return out
+
+
+def _report_company_names(db):
+    """{company_key: display name} from the Arts Groups list."""
+    return {_company_key(r['name']): r['name']
+            for r in db.execute('SELECT name FROM arts_groups').fetchall()}
+
+
+def _rental_days(start, end):
+    s, e = _as_date(start), _as_date(end)
+    return max(1, (e - s).days + 1) if s and e else 1
+
+
+def _report_asset_lines(db, show_ids):
+    """Billed (not hidden) asset lines on these shows, with type/category."""
+    if not show_ids:
+        return []
+    return db.execute("""
+        SELECT sa.show_id, sa.asset_type_id, sa.asset_item_id, sa.quantity,
+               sa.locked_price, sa.rental_start, sa.rental_end, sa.rate_company,
+               at.name AS type_name, ac.name AS category_name
+        FROM show_assets sa
+        JOIN asset_types at ON at.id = sa.asset_type_id
+        JOIN asset_categories ac ON ac.id = at.category_id
+        WHERE sa.show_id = ANY(%s) AND sa.is_hidden = 0
+    """, (list(show_ids),)).fetchall()
+
+
+def _report_externals(db, show_ids):
+    """{show_id: (external_total, piano_total)} — piano tuning lines apart."""
+    out = {}
+    if not show_ids:
+        return out
+    for r in db.execute("""
+        SELECT show_id,
+               SUM(CASE WHEN piano_tuning_id IS NULL THEN cost ELSE 0 END) AS ext,
+               SUM(CASE WHEN piano_tuning_id IS NOT NULL THEN cost ELSE 0 END) AS piano
+        FROM show_external_rentals WHERE show_id = ANY(%s) GROUP BY show_id
+    """, (list(show_ids),)).fetchall():
+        out[r['show_id']] = (float(r['ext'] or 0), float(r['piano'] or 0))
+    return out
+
+
+def _report_labor_billed(db, shows):
+    """{show_id: billed labor $} for SETTLED shows (settlement engine)."""
+    out = {}
+    for sid, s in shows.items():
+        if s['settled']:
+            try:
+                out[sid] = float(_calc_post_show_labor_cost(db, sid)[1] or 0)
+            except Exception as e:
+                app.logger.warning(f'report labor cost failed for show {sid}: {e}')
+    return out
+
+
+@app.route('/reports')
+@reports_required
+def reports_page():
+    db = get_db()
+    venues = [r['venue'] for r in db.execute(
+        "SELECT DISTINCT TRIM(venue) AS venue FROM shows "
+        "WHERE COALESCE(TRIM(venue), '') <> '' ORDER BY 1").fetchall()]
+    companies = _performance_company_options(db)
+    asset_categories = [dict(r) for r in db.execute(
+        'SELECT id, name FROM asset_categories ORDER BY sort_order, name').fetchall()]
+    asset_types = [dict(r) for r in db.execute(
+        'SELECT id, name, category_id FROM asset_types WHERE is_retired=0 ORDER BY name').fetchall()]
+    db.close()
+    return render_template('reports.html', venues=venues, companies=companies,
+                           asset_categories=asset_categories, asset_types=asset_types,
+                           can_assets=_can_report_assets(), can_labor=_can_report_labor(),
+                           can_piano=_can_report_piano(), user=get_current_user())
+
+
+@app.route('/api/reports/overview')
+@reports_required
+def report_overview():
+    """Show counts by status / venue / month, and the money each part of the
+    business brought in — only the parts this user may see."""
+    db = get_db()
+    shows = _report_shows(db)
+    ids = list(shows)
+    by_venue, by_month, by_status = {}, {}, {}
+    for s in shows.values():
+        v = s['venue'] or 'Unassigned'
+        by_venue.setdefault(v, {'venue': v, 'shows': 0, 'assets': 0.0, 'external': 0.0,
+                                'labor': 0.0, 'piano': 0.0})['shows'] += 1
+        m = (s['date'] or '')[:7] or 'Undated'
+        by_month[m] = by_month.get(m, 0) + 1
+        by_status[s['status'] or 'active'] = by_status.get(s['status'] or 'active', 0) + 1
+    totals = {'shows': len(shows), 'settled': sum(1 for s in shows.values() if s['settled'])}
+    if _can_report_assets():
+        a_tot = 0.0
+        for r in _report_asset_lines(db, ids):
+            amt = float(r['locked_price'] or 0) * int(r['quantity'] or 1)
+            a_tot += amt
+            by_venue[shows[r['show_id']]['venue'] or 'Unassigned']['assets'] += amt
+        ext = _report_externals(db, ids)
+        e_tot = 0.0
+        for sid, (e, _p) in ext.items():
+            e_tot += e
+            by_venue[shows[sid]['venue'] or 'Unassigned']['external'] += e
+        totals.update(assets=round(a_tot, 2), external=round(e_tot, 2))
+    if _can_report_labor():
+        labor = _report_labor_billed(db, shows)
+        for sid, amt in labor.items():
+            by_venue[shows[sid]['venue'] or 'Unassigned']['labor'] += amt
+        totals['labor'] = round(sum(labor.values()), 2)
+    if _can_report_piano():
+        ext = _report_externals(db, ids)
+        p_tot = 0.0
+        for sid, (_e, p) in ext.items():
+            p_tot += p
+            by_venue[shows[sid]['venue'] or 'Unassigned']['piano'] += p
+        totals['piano'] = round(p_tot, 2)
+    db.close()
+    venues = sorted(by_venue.values(), key=lambda v: (-v['shows'], v['venue']))
+    for v in venues:
+        for k in ('assets', 'external', 'labor', 'piano'):
+            v[k] = round(v[k], 2)
+    return jsonify({'totals': totals, 'by_venue': venues,
+                    'by_month': [{'month': k, 'shows': by_month[k]} for k in sorted(by_month)],
+                    'by_status': by_status,
+                    'show': {'assets': _can_report_assets(), 'labor': _can_report_labor(),
+                             'piano': _can_report_piano()}})
+
+
+@app.route('/api/reports/arts-groups')
+@reports_required
+def report_arts_groups():
+    """Per Arts Group / Performance Company: shows, how often they rented
+    gear (lines, units, unit-days), what they rent most, and what they spent
+    (assets, external, piano, settled labor)."""
+    denied = _report_need(_can_report_assets)
+    if denied:
+        return denied
+    db = get_db()
+    shows = _report_shows(db)
+    names = _report_company_names(db)
+    groups = {}
+
+    def _g(key, raw):
+        return groups.setdefault(key, {
+            'key': key, 'name': names.get(key) or raw or '(No company)',
+            'is_arts_group': key in names, 'shows': 0, 'rental_shows': set(),
+            'lines': 0, 'units': 0, 'unit_days': 0, 'assets': 0.0, 'external': 0.0,
+            'piano': 0.0, 'labor': 0.0, 'last_date': None, '_types': {}})
+    for s in shows.values():
+        g = _g(s['company_key'], s['company'])
+        g['shows'] += 1
+        if s['date'] and (not g['last_date'] or s['date'] > g['last_date']):
+            g['last_date'] = s['date']
+    for r in _report_asset_lines(db, list(shows)):
+        s = shows[r['show_id']]
+        g = _g(s['company_key'], s['company'])
+        qty = int(r['quantity'] or 1)
+        g['rental_shows'].add(r['show_id'])
+        g['lines'] += 1
+        g['units'] += qty
+        g['unit_days'] += qty * _rental_days(r['rental_start'], r['rental_end'])
+        g['assets'] += float(r['locked_price'] or 0) * qty
+        g['_types'][r['type_name']] = g['_types'].get(r['type_name'], 0) + 1
+    for sid, (e, p) in _report_externals(db, list(shows)).items():
+        g = groups[shows[sid]['company_key']]
+        g['external'] += e
+        g['piano'] += p
+    if _can_report_labor():
+        for sid, amt in _report_labor_billed(db, shows).items():
+            groups[shows[sid]['company_key']]['labor'] += amt
+    db.close()
+    out = []
+    for g in groups.values():
+        top = sorted(g.pop('_types').items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+        g['rental_shows'] = len(g['rental_shows'])
+        g['top_types'] = [{'name': n, 'lines': c} for n, c in top]
+        for k in ('assets', 'external', 'piano', 'labor'):
+            g[k] = round(g[k], 2)
+        g['total'] = round(g['assets'] + g['external'] + g['piano'] + g['labor'], 2)
+        out.append(g)
+    out.sort(key=lambda g: (g['key'] == '', -g['total'], -g['shows'], g['name'].lower()))
+    return jsonify({'groups': out, 'labor_included': _can_report_labor()})
+
+
+@app.route('/api/reports/arts-groups/detail')
+@reports_required
+def report_arts_group_detail():
+    """One company: every asset type it rented (with counts) and its shows."""
+    denied = _report_need(_can_report_assets)
+    if denied:
+        return denied
+    key = _company_key(request.args.get('group') or '')
+    db = get_db()
+    shows = {sid: s for sid, s in _report_shows(db).items() if s['company_key'] == key}
+    types, per_show = {}, {sid: {'lines': 0, 'assets': 0.0} for sid in shows}
+    for r in _report_asset_lines(db, list(shows)):
+        qty = int(r['quantity'] or 1)
+        amt = float(r['locked_price'] or 0) * qty
+        t = types.setdefault(r['asset_type_id'], {
+            'type_id': r['asset_type_id'], 'type': r['type_name'],
+            'category': r['category_name'], 'lines': 0, 'shows': set(), 'units': 0,
+            'unit_days': 0, 'revenue': 0.0, 'company_rate_lines': 0})
+        t['lines'] += 1
+        t['shows'].add(r['show_id'])
+        t['units'] += qty
+        t['unit_days'] += qty * _rental_days(r['rental_start'], r['rental_end'])
+        t['revenue'] += amt
+        if r['rate_company']:
+            t['company_rate_lines'] += 1
+        per_show[r['show_id']]['lines'] += 1
+        per_show[r['show_id']]['assets'] += amt
+    db.close()
+    tlist = []
+    for t in types.values():
+        t['shows'] = len(t['shows'])
+        t['revenue'] = round(t['revenue'], 2)
+        tlist.append(t)
+    tlist.sort(key=lambda t: (-t['lines'], -t['revenue'], t['type'].lower()))
+    slist = sorted(({**s, **{k: (round(v, 2) if isinstance(v, float) else v)
+                             for k, v in per_show[sid].items()}}
+                    for sid, s in shows.items()),
+                   key=lambda s: s['date'] or '', reverse=True)
+    return jsonify({'types': tlist, 'shows': slist})
+
+
+@app.route('/api/reports/asset-types')
+@reports_required
+def report_asset_types():
+    """Per asset type: how often it went out (lines, shows, units, unit-days),
+    revenue, last use, units owned and — with a date range — utilization
+    (unit-days booked ÷ units owned × days in range). Never-rented types are
+    listed too, so idle gear shows up."""
+    denied = _report_need(_can_report_assets)
+    if denied:
+        return denied
+    d_from, d_to, _v, _c = _report_filters()
+    db = get_db()
+    shows = _report_shows(db)
+    types = {r['id']: {
+        'type_id': r['id'], 'type': r['name'], 'category': r['category_name'],
+        'is_system': bool(r['is_system'] or r['is_package']),
+        'units_owned': int(r['units'] or 0), 'lines': 0, 'shows': set(), 'units': 0,
+        'unit_days': 0, 'revenue': 0.0, 'last_used': None, 'companies': set()}
+        for r in db.execute("""
+            SELECT at.id, at.name, at.is_system, at.is_package, ac.name AS category_name,
+                   (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id
+                     AND ai.status <> 'retired') AS units
+            FROM asset_types at JOIN asset_categories ac ON ac.id = at.category_id
+            WHERE at.is_retired = 0
+              AND NOT EXISTS (SELECT 1 FROM asset_types ch WHERE ch.parent_type_id = at.id)
+        """).fetchall()}
+    for r in _report_asset_lines(db, list(shows)):
+        t = types.get(r['asset_type_id'])
+        if not t:
+            continue
+        qty = int(r['quantity'] or 1)
+        t['lines'] += 1
+        t['shows'].add(r['show_id'])
+        t['units'] += qty
+        t['unit_days'] += qty * _rental_days(r['rental_start'], r['rental_end'])
+        t['revenue'] += float(r['locked_price'] or 0) * qty
+        d = shows[r['show_id']]['date']
+        if d and (not t['last_used'] or d > t['last_used']):
+            t['last_used'] = d
+        if shows[r['show_id']]['company_key']:
+            t['companies'].add(shows[r['show_id']]['company_key'])
+    db.close()
+    span = (d_to - d_from).days + 1 if d_from and d_to and d_to >= d_from else None
+    out = []
+    for t in types.values():
+        t['shows'] = len(t['shows'])
+        t['companies'] = len(t['companies'])
+        t['revenue'] = round(t['revenue'], 2)
+        t['utilization'] = (round(100.0 * t['unit_days'] / (t['units_owned'] * span), 1)
+                            if span and t['units_owned'] else None)
+        out.append(t)
+    out.sort(key=lambda t: (-t['lines'], -t['revenue'], t['type'].lower()))
+    return jsonify({'types': out, 'range_days': span})
+
+
+@app.route('/api/reports/asset-units')
+@reports_required
+def report_asset_units():
+    """Individual units of one type: bookings pinned to that unit (lines that
+    picked a specific unit), unit-days, last show, and its maintenance / log
+    history. Pool bookings (no unit picked) can't be pinned to a unit — they
+    are counted separately."""
+    denied = _report_need(_can_report_assets)
+    if denied:
+        return denied
+    tid = request.args.get('type_id', type=int)
+    if not tid:
+        return jsonify({'error': 'type_id required'}), 400
+    db = get_db()
+    shows = _report_shows(db)
+    items = {r['id']: {**dict(r), 'bookings': 0, 'unit_days': 0, 'last_show': None,
+                       'last_date': None}
+             for r in db.execute("""
+                 SELECT ai.id, ai.barcode, ai.status, ai.condition, ai.year_purchased,
+                        (SELECT COUNT(*) FROM asset_maintenance m WHERE m.asset_item_id = ai.id) AS maintenance,
+                        (SELECT COUNT(*) FROM asset_logs l WHERE l.asset_item_id = ai.id) AS logs
+                 FROM asset_items ai WHERE ai.asset_type_id = %s
+                 ORDER BY ai.sort_order, ai.barcode, ai.id""", (tid,)).fetchall()}
+    pooled = {'lines': 0, 'units': 0, 'unit_days': 0}
+    for r in _report_asset_lines(db, list(shows)):
+        if r['asset_type_id'] != tid:
+            continue
+        days = _rental_days(r['rental_start'], r['rental_end'])
+        it = items.get(r['asset_item_id']) if r['asset_item_id'] else None
+        if it:
+            it['bookings'] += 1
+            it['unit_days'] += days
+            d = shows[r['show_id']]['date']
+            if d and (not it['last_date'] or d > it['last_date']):
+                it['last_date'], it['last_show'] = d, shows[r['show_id']]['name']
+        else:
+            qty = int(r['quantity'] or 1)
+            pooled['lines'] += 1
+            pooled['units'] += qty
+            pooled['unit_days'] += qty * days
+    db.close()
+    return jsonify({'units': list(items.values()), 'pooled': pooled})
+
+
+@app.route('/api/reports/labor')
+@reports_required
+def report_labor():
+    """Techs booked on shows (scheduled shifts/hours), what they actually
+    worked (settlement lines' "Worked by"), overhead/project shifts, and per
+    position how many requested shifts got filled."""
+    denied = _report_need(_can_report_labor)
+    if denied:
+        return denied
+    d_from, d_to, _v, _c = _report_filters()
+    db = get_db()
+    shows = _report_shows(db)
+    ids = list(shows)
+    techs = {r['id']: {'id': r['id'], 'name': r['name'], 'level': r['level'] or '',
+                       'shows': set(), 'sched_shifts': 0, 'sched_hours': 0.0,
+                       'training_shifts': 0, 'actual_shifts': 0, 'actual_hours': 0.0,
+                       'overhead_shifts': 0, 'overhead_hours': 0.0, 'last_date': None}
+             for r in db.execute("""
+                 SELECT cm.id, cm.name, pl.name AS level FROM crew_members cm
+                 LEFT JOIN pay_rate_levels pl ON pl.id = cm.rate_level_id""").fetchall()}
+    positions, unfilled_upcoming = {}, 0
+    today = date.today()
+
+    def _in_range(d):
+        d = _as_date(d)
+        return not ((d_from and (not d or d < d_from)) or (d_to and (not d or d > d_to)))
+
+    def _seen(t, d):
+        d = _as_date(d)
+        if d and (not t['last_date'] or d.isoformat() > t['last_date']):
+            t['last_date'] = d.isoformat()
+    if ids:
+        for r in db.execute("""
+            SELECT lr.show_id, lr.work_date, s.show_date, lr.in_time, lr.out_time,
+                   lr.break_start, lr.break_end, lr.break2_start, lr.break2_end,
+                   lr.is_training_shift, lr.scheduled_crew_member_id,
+                   COALESCE(jp.name, '(No position)') AS position
+            FROM labor_requests lr JOIN shows s ON s.id = lr.show_id
+            LEFT JOIN job_positions jp ON jp.id = lr.position_id
+            WHERE lr.show_id = ANY(%s)""", (ids,)).fetchall():
+            hrs = _calc_hours(r['in_time'], r['out_time'], r['break_start'], r['break_end'],
+                              r['break2_start'], r['break2_end'])
+            p = positions.setdefault(r['position'], {'position': r['position'], 'requested': 0,
+                                                     'filled': 0, 'hours': 0.0})
+            p['requested'] += 1
+            p['hours'] += hrs
+            t = techs.get(r['scheduled_crew_member_id'])
+            if t:
+                p['filled'] += 1
+                t['shows'].add(r['show_id'])
+                if r['is_training_shift']:
+                    t['training_shifts'] += 1
+                else:
+                    t['sched_shifts'] += 1
+                    t['sched_hours'] += hrs
+                _seen(t, r['work_date'] or r['show_date'])
+            elif (_as_date(r['work_date'] or r['show_date']) or today) >= today:
+                unfilled_upcoming += 1
+        for r in db.execute("""
+            SELECT show_id, work_date, crew_member_id, in_time, out_time, break_start,
+                   break_end, break2_start, break2_end, is_added_hours, manual_hours
+            FROM post_show_labor WHERE show_id = ANY(%s) AND crew_member_id IS NOT NULL""",
+                (ids,)).fetchall():
+            t = techs.get(r['crew_member_id'])
+            if not t:
+                continue
+            hrs = (float(r['manual_hours'] or 0) if r['is_added_hours'] else
+                   _calc_hours(r['in_time'], r['out_time'], r['break_start'], r['break_end'],
+                               r['break2_start'], r['break2_end']))
+            if hrs <= 0:
+                continue
+            t['actual_shifts'] += 1
+            t['actual_hours'] += hrs
+            t['shows'].add(r['show_id'])
+    # Overhead / project crew isn't tied to a show: date range only.
+    for r in db.execute("""
+        SELECT scheduled_crew_member_id AS cid, work_date, in_time, out_time,
+               break_start, break_end, break2_start, break2_end,
+               actual_in_time, actual_out_time, actual_break_start, actual_break_end,
+               actual_break2_start, actual_break2_end
+        FROM overhead_labor_requests WHERE scheduled_crew_member_id IS NOT NULL""").fetchall():
+        t = techs.get(r['cid'])
+        if not t or not _in_range(r['work_date']):
+            continue
+        if r['actual_in_time'] and r['actual_out_time']:
+            hrs = _calc_hours(r['actual_in_time'], r['actual_out_time'], r['actual_break_start'],
+                              r['actual_break_end'], r['actual_break2_start'], r['actual_break2_end'])
+        else:
+            hrs = _calc_hours(r['in_time'], r['out_time'], r['break_start'], r['break_end'],
+                              r['break2_start'], r['break2_end'])
+        t['overhead_shifts'] += 1
+        t['overhead_hours'] += hrs
+        _seen(t, r['work_date'])
+    db.close()
+    tlist = []
+    for t in techs.values():
+        if not (t['shows'] or t['overhead_shifts'] or t['training_shifts']):
+            continue
+        t['shows'] = len(t['shows'])
+        for k in ('sched_hours', 'actual_hours', 'overhead_hours'):
+            t[k] = round(t[k], 2)
+        tlist.append(t)
+    tlist.sort(key=lambda t: (-(t['sched_hours'] + t['overhead_hours']), t['name'].lower()))
+    plist = []
+    for p in positions.values():
+        p['hours'] = round(p['hours'], 2)
+        p['fill_rate'] = round(100.0 * p['filled'] / p['requested'], 1) if p['requested'] else None
+        plist.append(p)
+    plist.sort(key=lambda p: (-p['requested'], p['position'].lower()))
+    return jsonify({'techs': tlist, 'positions': plist, 'unfilled_upcoming': unfilled_upcoming,
+                    'totals': {'shifts': sum(p['requested'] for p in plist),
+                               'filled': sum(p['filled'] for p in plist),
+                               'hours': round(sum(p['hours'] for p in plist), 2)}})
+
+
+@app.route('/api/reports/piano')
+@reports_required
+def report_piano():
+    """Piano tunings: by vendor, by piano, by Arts Group, by who requested
+    them, and a month-by-month count / cost / average trend."""
+    denied = _report_need(_can_report_piano)
+    if denied:
+        return denied
+    db = get_db()
+    shows = _report_shows(db)
+    rows = db.execute("""
+        SELECT t.show_id, t.status, t.piano, t.vendor, t.cost, t.tuning_date,
+               t.requested_date, COALESCE(u.display_name, u.username, '') AS requester
+        FROM piano_tunings t LEFT JOIN users u ON u.id = t.requested_by
+        WHERE t.show_id = ANY(%s)""", (list(shows) or [0],)).fetchall()
+    names = _report_company_names(db)
+    db.close()
+    vendors, pianos, groups, people, months = {}, {}, {}, {}, {}
+
+    def _bump(bucket, key, label_key, label, live, cost, priced, st):
+        b = bucket.setdefault(key, {label_key: label, 'tunings': 0, 'completed': 0,
+                                    'cancelled': 0, 'cost': 0.0, 'priced': 0})
+        b['tunings'] += 1
+        b['completed'] += st == 'completed'
+        b['cancelled'] += st == 'cancelled'
+        if live and priced:
+            b['cost'] += cost
+            b['priced'] += 1
+        return b
+    totals = {'tunings': 0, 'completed': 0, 'cancelled': 0, 'open': 0, 'cost': 0.0}
+    for r in rows:
+        st = r['status']
+        totals['tunings'] += 1
+        totals['cancelled' if st == 'cancelled' else
+               'completed' if st == 'completed' else 'open'] += 1
+        live = st != 'cancelled'
+        cost = float(r['cost'] or 0) if live and r['cost'] is not None else 0.0
+        totals['cost'] += cost
+        v = vendors.setdefault((r['vendor'] or '').strip() or '(No vendor yet)', {
+            'vendor': (r['vendor'] or '').strip() or '(No vendor yet)', 'tunings': 0,
+            'completed': 0, 'cancelled': 0, 'cost': 0.0, 'priced': 0})
+        v['tunings'] += 1
+        v['completed'] += st == 'completed'
+        v['cancelled'] += st == 'cancelled'
+        if live and r['cost'] is not None:
+            v['cost'] += cost
+            v['priced'] += 1
+        sh = shows.get(r['show_id']) or {}
+        gk = sh.get('company_key') or ''
+        _bump(groups, gk, 'group', names.get(gk) or sh.get('company') or '(No company)',
+              live, cost, r['cost'] is not None, st)
+        _bump(people, r['requester'] or '(unknown)', 'requester', r['requester'] or '(unknown)',
+              live, cost, r['cost'] is not None, st)
+        d = _as_date(r['tuning_date']) or _as_date(r['requested_date'])
+        _bump(months, d.strftime('%Y-%m') if d else 'Undated', 'month',
+              d.strftime('%Y-%m') if d else 'Undated', live, cost, r['cost'] is not None, st)
+        p = pianos.setdefault((r['piano'] or '').strip() or '(Unnamed)', {
+            'piano': (r['piano'] or '').strip() or '(Unnamed)', 'tunings': 0, 'cost': 0.0,
+            'last_date': None})
+        if live:
+            p['tunings'] += 1
+            p['cost'] += cost
+            d = _as_date(r['tuning_date']) or _as_date(r['requested_date'])
+            if d and (not p['last_date'] or d.isoformat() > p['last_date']):
+                p['last_date'] = d.isoformat()
+    for bucket in (vendors, groups, people, months):
+        for v in bucket.values():
+            v['avg_cost'] = round(v['cost'] / v['priced'], 2) if v['priced'] else None
+            v['cost'] = round(v['cost'], 2)
+    for p in pianos.values():
+        p['cost'] = round(p['cost'], 2)
+    totals['cost'] = round(totals['cost'], 2)
+    return jsonify({'totals': totals,
+                    'vendors': sorted(vendors.values(), key=lambda v: (-v['tunings'], v['vendor'])),
+                    'pianos': sorted(pianos.values(), key=lambda p: (-p['tunings'], p['piano'])),
+                    'groups': sorted(groups.values(), key=lambda g: (-g['tunings'], g['group'])),
+                    'requesters': sorted(people.values(), key=lambda g: (-g['tunings'], g['requester'])),
+                    'months': [months[k] for k in sorted(months)]})
+
+
 @app.route('/reports/assets')
 @asset_manager_required
 def asset_reports():
-    db = get_db()
-    companies = db.execute("""
-        SELECT DISTINCT ad.field_value as company
-        FROM advance_data ad
-        WHERE ad.field_key = 'performance_company' AND ad.field_value != ''
-        ORDER BY ad.field_value
-    """).fetchall()
-    venues = db.execute("""
-        SELECT DISTINCT venue FROM shows WHERE venue != '' ORDER BY venue
-    """).fetchall()
-    asset_categories = db.execute(
-        'SELECT id, name FROM asset_categories ORDER BY sort_order, name'
-    ).fetchall()
-    asset_types = db.execute(
-        'SELECT id, name, category_id FROM asset_types WHERE is_retired=0 ORDER BY name'
-    ).fetchall()
-    db.close()
-    return render_template('asset_reports.html',
-                           companies=[r['company'] for r in companies],
-                           venues=[r['venue'] for r in venues],
-                           asset_categories=[dict(r) for r in asset_categories],
-                           asset_types=[dict(r) for r in asset_types],
-                           user=get_current_user())
+    """Old address of the asset report — now the Rental Lines tab (3.12.0)."""
+    return redirect(url_for('reports_page', tab='rentals'))
 
 
 @app.route('/api/reports/assets')

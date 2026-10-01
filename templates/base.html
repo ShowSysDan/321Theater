@@ -4,7 +4,7 @@
   MIT Licensed — see LICENSE for details.
 #}
 <!DOCTYPE html>
-<html lang="en" data-theme="{{ user.theme if user else 'dark' }}"{% if is_mobile_view %} class="mobile-view"{% endif %}>
+<html lang="en" data-theme="{{ user.theme if user else 'dark' }}"{% if is_mobile_view or test_mode %} class="{{ 'mobile-view' if is_mobile_view }}{{ ' test-mode' if test_mode }}"{% endif %}>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
@@ -84,6 +84,7 @@
   {% block head %}{% endblock %}
 </head>
 <body>
+{% if test_mode %}{# 3.12.0: impossible-to-miss test-server frame (pointer-events: none) #}<div class="test-mode-frame" aria-hidden="true"><span>TEST INSTANCE — not production</span></div>{% endif %}
 
 {% if user %}
 <div class="app-layout">
@@ -1056,14 +1057,18 @@ const _HELP_PAGES = {
       </ul>
     `
   },
-  asset_reports: {
-    title: 'Asset Reports',
+  reports: {
+    title: 'Reports',
     html: `
-      <p>Rental revenue and utilisation.</p>
+      <p><strong>Reports across the whole app.</strong> The filter bar (date range on each show's date, venue, Arts Group) applies to every tab; test/demo shows are left out. You see the tabs your permissions allow.</p>
       <ul style="${_HELP_UL}">
-        <li>Filter by company, venue, category, type, and date range (defaults to the past year), then <strong>Run Report</strong>.</li>
-        <li>Summary cards (revenue, line items, shows, categories) plus a line-item table with a revenue total.</li>
-        <li><strong>Export CSV</strong> downloads the loaded rows.</li>
+        <li><strong>Overview</strong> — shows by venue / month / status and the money by area: assets, external costs, settled labor, piano tunings.</li>
+        <li><strong>Arts Groups</strong> — per company: shows, how often they rented gear (lines, units, unit-days), their top items and what they spent. Click a row for every item they rented and their shows.</li>
+        <li><strong>Assets</strong> — per item type: times rented, shows, unit-days, revenue, last use, units owned and (with a date range) utilization. Idle gear is listed too. Click a row for the individual units (bookings pinned to a unit, maintenance and log history).</li>
+        <li><strong>Rental Lines</strong> — every asset line with its own category / type filters and CSV export (the old Asset Reports page).</li>
+        <li><strong>Labor &amp; Techs</strong> — per technician: shows, scheduled shifts and hours, actual hours from settlements, training and overhead shifts; per position: requested vs filled.</li>
+        <li><strong>Piano Tuning</strong> — tunings and cost by vendor and by piano.</li>
+        <li>Labor money is the settlement (Final Invoice) figure, so only settled shows count. Every table has <strong>CSV</strong>.</li>
       </ul>
     `
   },
@@ -1275,7 +1280,7 @@ const _HELP_ROUTES = [
   ['/combined-invoice', 'combined_invoice'],
   ['/assets/approvals', 'asset_approvals'], ['/assets/retired', 'assets_retired'],
   ['/assets/db-tools', 'asset_db_tools'], ['/assets', 'assets_admin'],
-  ['/reports/assets', 'asset_reports'],
+  ['/reports', 'reports'],
   ['/prism', 'prism'],
   ['/dashboards', 'dashboards'],
   ['/viewer/calendar', 'viewer_calendar'], ['/viewer/account', 'viewer_account'],

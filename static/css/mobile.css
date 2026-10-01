@@ -260,3 +260,7 @@ html.mobile-view .vbm-msg { flex: 1 1 100%; order: -1; }
 html.mobile-view .piano-table { min-width: 640px; }
 html.mobile-view #piano-list-table { min-width: 860px; }
 html.mobile-view .piano-toolbar #piano-search { max-width: none; }
+
+/* TEST_MODE frame (3.12.0): on phones the header already carries the TEST
+   badge and both edges hold fixed chrome, so keep just the red frame. */
+html.mobile-view .test-mode-frame span { display: none; }

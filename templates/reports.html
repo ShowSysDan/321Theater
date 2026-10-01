@@ -1,0 +1,482 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{% block title %}Reports — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Reports</h1>
+    <p class="page-sub">Shows, Arts Groups, gear, labor and piano tunings — one filter for every tab. Test/demo shows are left out.</p>
+  </div>
+</div>
+
+{# Shared filters — every tab re-runs with these. #}
+<div class="form-section rpt-filters">
+  <div class="form-section-body">
+    <div class="rpt-filter-row">
+      <div class="field-group">
+        <label class="field-label">FROM</label>
+        <input type="date" id="rf-from" class="field-input">
+      </div>
+      <div class="field-group">
+        <label class="field-label">TO</label>
+        <input type="date" id="rf-to" class="field-input">
+      </div>
+      <div class="field-group">
+        <label class="field-label">VENUE</label>
+        <select id="rf-venue" class="field-input">
+          <option value="">All venues</option>
+          {% for v in venues %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field-group">
+        <label class="field-label">ARTS GROUP</label>
+        <select id="rf-company" class="field-input">
+          <option value="">All</option>
+          {% for c in companies %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="rpt-filter-actions">
+        <div class="rpt-presets">
+          <button type="button" class="btn btn-xs btn-ghost" data-preset="month">This month</button>
+          <button type="button" class="btn btn-xs btn-ghost" data-preset="year">This year</button>
+          <button type="button" class="btn btn-xs btn-ghost" data-preset="12m">Last 12 months</button>
+          <button type="button" class="btn btn-xs btn-ghost" data-preset="next12">Next 12 months</button>
+          <button type="button" class="btn btn-xs btn-ghost" data-preset="all">All time</button>
+        </div>
+        <button type="button" class="btn btn-primary btn-sm" onclick="rptRun()">Run</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="rpt-tabs" role="tablist">
+  <button type="button" class="rpt-tab" data-tab="overview">Overview</button>
+  {% if can_assets %}
+  <button type="button" class="rpt-tab" data-tab="groups">Arts Groups</button>
+  <button type="button" class="rpt-tab" data-tab="assets">Assets</button>
+  <button type="button" class="rpt-tab" data-tab="rentals">Rental Lines</button>
+  {% endif %}
+  {% if can_labor %}<button type="button" class="rpt-tab" data-tab="labor">Labor &amp; Techs</button>{% endif %}
+  {% if can_piano %}<button type="button" class="rpt-tab" data-tab="piano">Piano Tuning</button>{% endif %}
+</div>
+
+<div id="rpt-body">
+  <div class="rpt-loading text-dim">Loading…</div>
+</div>
+
+{# Rental Lines keeps its own category / type filters. #}
+<template id="rpt-rentals-filters">
+  <div class="rpt-subfilters">
+    <div class="field-group">
+      <label class="field-label">CATEGORY</label>
+      <select id="rr-category" class="field-input" onchange="rptRentalTypes()">
+        <option value="">All categories</option>
+        {% for cat in asset_categories %}<option value="{{ cat.id }}">{{ cat.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field-group">
+      <label class="field-label">ITEM TYPE</label>
+      <select id="rr-type" class="field-input">
+        <option value="">All types</option>
+        {% for t in asset_types %}<option value="{{ t.id }}" data-cat="{{ t.category_id }}">{{ t.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <button type="button" class="btn btn-sm btn-ghost" onclick="rptLoad()">Apply</button>
+  </div>
+</template>
+
+{# Drill-down dialog (Arts Group detail / asset units) #}
+<div id="rpt-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)rptCloseModal()">
+  <div class="modal-card" style="max-width:960px;width:94vw;max-height:90vh;overflow-y:auto">
+    <div class="modal-header">
+      <span id="rpt-modal-title"></span>
+      <button type="button" onclick="rptCloseModal()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body" id="rpt-modal-body"></div>
+  </div>
+</div>
+
+<style>
+.rpt-filters { margin-bottom: 12px; }
+.rpt-filter-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.rpt-filter-row .field-group { margin: 0; min-width: 140px; flex: 0 1 auto; }
+.rpt-filter-row .field-group select { min-width: 170px; }
+.rpt-filter-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-left: auto; }
+.rpt-presets { display: flex; gap: 4px; flex-wrap: wrap; }
+.rpt-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 14px; overflow-x: auto; }
+.rpt-tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-dim); padding: 9px 14px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+.rpt-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.rpt-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.rpt-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+.rpt-card .v { font-size: 22px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.rpt-card .l { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.rpt-section { margin-bottom: 16px; }
+.rpt-section .form-section-header { display: flex; align-items: center; gap: 8px; }
+.rpt-table { width: 100%; }
+.rpt-table th { cursor: pointer; user-select: none; white-space: nowrap; }
+.rpt-table th.sorted::after { content: ' ▾'; }
+.rpt-table th.sorted.asc::after { content: ' ▴'; }
+.rpt-table td.num, .rpt-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.rpt-table tr.clickable { cursor: pointer; }
+.rpt-table tr.clickable:hover td { background: var(--bg-hover); }
+.rpt-table .sub { font-size: 11px; color: var(--text-dim); }
+.rpt-scroll { overflow-x: auto; }
+.rpt-loading { padding: 30px; text-align: center; }
+.rpt-note { font-size: 11px; color: var(--text-dim); margin: 6px 0 0; line-height: 1.45; }
+.rpt-subfilters { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
+.rpt-subfilters .field-group { margin: 0; min-width: 160px; }
+.rpt-idle td { opacity: .6; }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+  const H = {'X-Requested-With': 'XMLHttpRequest'};
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const money = v => (v === null || v === undefined) ? '—' : '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  const num = (v, d = 0) => (v === null || v === undefined) ? '—' : Number(v).toLocaleString(undefined, {maximumFractionDigits: d});
+  const TABS = Array.from(document.querySelectorAll('.rpt-tab')).map(b => b.dataset.tab);
+  let _tab = new URLSearchParams(location.search).get('tab');
+  if (!TABS.includes(_tab)) _tab = TABS[0];
+  let _seq = 0;
+  const _tables = {};   // id -> {cols, rows, sortKey, asc, onRow}
+
+  // ── filters ──
+  function params(extra) {
+    const p = new URLSearchParams();
+    const f = document.getElementById('rf-from').value, t = document.getElementById('rf-to').value;
+    const v = document.getElementById('rf-venue').value, c = document.getElementById('rf-company').value;
+    if (f) p.set('from', f); if (t) p.set('to', t); if (v) p.set('venue', v); if (c) p.set('company', c);
+    Object.entries(extra || {}).forEach(([k, val]) => { if (val !== '' && val != null) p.set(k, val); });
+    return p.toString();
+  }
+  function preset(kind) {
+    const now = new Date();
+    let from = '', to = '';
+    if (kind === 'month') { from = localIsoDate(new Date(now.getFullYear(), now.getMonth(), 1)); to = localIsoDate(new Date(now.getFullYear(), now.getMonth() + 1, 0)); }
+    if (kind === 'year')  { from = `${now.getFullYear()}-01-01`; to = `${now.getFullYear()}-12-31`; }
+    if (kind === '12m')   { const p = new Date(now); p.setFullYear(p.getFullYear() - 1); from = localIsoDate(p); to = localIsoDate(now); }
+    if (kind === 'next12') { const p = new Date(now); p.setFullYear(p.getFullYear() + 1); from = localIsoDate(now); to = localIsoDate(p); }
+    document.getElementById('rf-from').value = from;
+    document.getElementById('rf-to').value = to;
+  }
+  document.querySelectorAll('[data-preset]').forEach(b => b.addEventListener('click', () => { preset(b.dataset.preset); rptLoad(); }));
+  window.rptRun = () => rptLoad();
+
+  // ── tabs ──
+  function setTab(tab) {
+    _tab = tab;
+    document.querySelectorAll('.rpt-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    try { const u = new URL(location.href); u.searchParams.set('tab', tab); history.replaceState(null, '', u); } catch (e) {}
+    rptLoad();
+  }
+  document.querySelectorAll('.rpt-tab').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
+
+  async function get(url) {
+    const r = await fetch(url, {headers: H});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  }
+
+  // ── table helper: sortable columns + CSV ──
+  // col = {key, label, num?, fmt?(v,row) -> html, csv?(row) -> text, sub?(row) -> html}
+  function table(id, title, cols, rows, opts = {}) {
+    _tables[id] = {cols, rows, sortKey: opts.sortKey || null, asc: false, onRow: opts.onRow || null,
+                   rowClass: opts.rowClass || null, title};
+    return `<div class="form-section rpt-section">
+      <div class="form-section-header"><span class="section-icon">◈</span> ${esc(title)}
+        <span class="text-dim" style="font-weight:400;font-size:11px">${rows.length} row${rows.length === 1 ? '' : 's'}</span>
+        <button type="button" class="btn btn-xs btn-ghost" style="margin-left:auto" onclick="rptCsv('${id}')">CSV</button></div>
+      <div class="form-section-body no-pad rpt-scroll"><table class="data-table rpt-table" id="${id}"></table></div>
+      ${opts.note ? `<p class="rpt-note" style="padding:0 16px 12px">${opts.note}</p>` : ''}
+    </div>`;
+  }
+  function drawTable(id) {
+    const t = _tables[id], el = document.getElementById(id);
+    if (!t || !el) return;
+    let rows = t.rows.slice();
+    if (t.sortKey) {
+      const col = t.cols.find(c => c.key === t.sortKey);
+      rows.sort((a, b) => {
+        let x = a[t.sortKey], y = b[t.sortKey];
+        if (col && col.num) { x = x == null ? -Infinity : Number(x); y = y == null ? -Infinity : Number(y); }
+        else { x = String(x == null ? '' : x).toLowerCase(); y = String(y == null ? '' : y).toLowerCase(); }
+        return (x < y ? -1 : x > y ? 1 : 0) * (t.asc ? 1 : -1);
+      });
+    }
+    el.innerHTML = `<thead><tr>${t.cols.map(c => `<th data-k="${c.key}" class="${c.num ? 'num' : ''}${t.sortKey === c.key ? ' sorted' + (t.asc ? ' asc' : '') : ''}">${esc(c.label)}</th>`).join('')}</tr></thead>
+      <tbody>${rows.length ? rows.map((r, i) => `<tr data-i="${t.rows.indexOf(r)}" class="${t.onRow ? 'clickable ' : ''}${t.rowClass ? t.rowClass(r) : ''}">${t.cols.map(c =>
+        `<td class="${c.num ? 'num' : ''}">${c.fmt ? c.fmt(r[c.key], r) : esc(r[c.key] == null ? '—' : r[c.key])}${c.sub ? `<div class="sub">${c.sub(r)}</div>` : ''}</td>`).join('')}</tr>`).join('')
+        : `<tr><td colspan="${t.cols.length}" class="text-dim">Nothing for these filters.</td></tr>`}</tbody>`;
+    el.querySelectorAll('th').forEach(th => th.addEventListener('click', () => {
+      t.asc = t.sortKey === th.dataset.k ? !t.asc : false;
+      t.sortKey = th.dataset.k;
+      drawTable(id);
+    }));
+    if (t.onRow) el.querySelectorAll('tbody tr[data-i]').forEach(tr => tr.addEventListener('click', e => {
+      if (e.target.closest('a')) return;
+      t.onRow(t.rows[+tr.dataset.i]);
+    }));
+  }
+  function drawAll() { Object.keys(_tables).forEach(drawTable); }
+  window.rptCsv = function(id) {
+    const t = _tables[id];
+    if (!t) return;
+    const strip = h => String(h == null ? '' : h).replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+    const lines = [t.cols.map(c => c.label)].concat(t.rows.map(r => t.cols.map(c =>
+      c.csv ? c.csv(r) : (c.num ? (r[c.key] == null ? '' : r[c.key]) : strip(r[c.key])))));
+    // Cells starting with = + - @ are prefixed so a spreadsheet never runs them as formulas.
+    const cell = v => { let s = String(v == null ? '' : v); if (/^[=+\-@]/.test(s) && isNaN(Number(s))) s = "'" + s; return `"${s.replace(/"/g, '""')}"`; };
+    const blob = new Blob([lines.map(r => r.map(cell).join(',')).join('\n')], {type: 'text/csv'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${t.title.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${localTodayIso()}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+  const cards = items => `<div class="rpt-cards">${items.filter(Boolean).map(([v, l]) => `<div class="rpt-card"><div class="v">${v}</div><div class="l">${esc(l)}</div></div>`).join('')}</div>`;
+  const showLink = (name, id) => id ? `<a href="/shows/${encodeURIComponent(id)}">${esc(name)}</a>` : esc(name);
+
+  // ── loaders per tab ──
+  window.rptLoad = async function() {
+    const seq = ++_seq;
+    const body = document.getElementById('rpt-body');
+    Object.keys(_tables).forEach(k => delete _tables[k]);
+    body.innerHTML = '<div class="rpt-loading text-dim">Loading…</div>';
+    try {
+      const html = await LOADERS[_tab]();
+      if (seq !== _seq) return;
+      body.innerHTML = html;
+      if (_tab === 'rentals') rptRentalTypes(true);
+      drawAll();
+    } catch (e) {
+      if (seq === _seq) body.innerHTML = `<div class="rpt-loading" style="color:#e53e3e">Couldn't load this report: ${esc(e.message)}</div>`;
+    }
+  };
+
+  const LOADERS = {
+    async overview() {
+      const d = await get('/api/reports/overview?' + params());
+      const t = d.totals, s = d.show;
+      const money_total = (t.assets || 0) + (t.external || 0) + (t.labor || 0) + (t.piano || 0);
+      const vcols = [{key: 'venue', label: 'Venue'}, {key: 'shows', label: 'Shows', num: true}];
+      if (s.assets) vcols.push({key: 'assets', label: 'Assets', num: true, fmt: money}, {key: 'external', label: 'External', num: true, fmt: money});
+      if (s.labor) vcols.push({key: 'labor', label: 'Labor (settled)', num: true, fmt: money});
+      if (s.piano) vcols.push({key: 'piano', label: 'Piano', num: true, fmt: money});
+      return cards([
+        [num(t.shows), 'Shows'],
+        s.labor ? [`${num(t.settled)} / ${num(t.shows)}`, 'Labor settled'] : null,
+        s.assets ? [money(t.assets), 'Asset rentals'] : null,
+        s.assets ? [money(t.external), 'External costs'] : null,
+        s.labor ? [money(t.labor), 'Labor billed (settled shows)'] : null,
+        s.piano ? [money(t.piano), 'Piano tunings'] : null,
+        (s.assets && s.labor) ? [money(money_total), 'Total billed'] : null,
+      ]) + table('t-venues', 'By venue', vcols, d.by_venue, {sortKey: 'shows'})
+        + table('t-months', 'Shows by month', [{key: 'month', label: 'Month'}, {key: 'shows', label: 'Shows', num: true}], d.by_month)
+        + table('t-status', 'Shows by status', [{key: 'status', label: 'Status'}, {key: 'shows', label: 'Shows', num: true}],
+                Object.entries(d.by_status).map(([k, v]) => ({status: k, shows: v})), {sortKey: 'shows'});
+    },
+    async groups() {
+      const d = await get('/api/reports/arts-groups?' + params());
+      const g = d.groups;
+      const cols = [
+        {key: 'name', label: 'Arts Group', fmt: (v, r) => esc(v) + (r.key && !r.is_arts_group ? ' <span class="sub" title="Typed on a show but not in Settings → Arts Groups">(not in list)</span>' : '')},
+        {key: 'shows', label: 'Shows', num: true},
+        {key: 'rental_shows', label: 'Shows w/ rentals', num: true},
+        {key: 'lines', label: 'Rental lines', num: true},
+        {key: 'units', label: 'Units', num: true},
+        {key: 'unit_days', label: 'Unit-days', num: true},
+        {key: 'top', label: 'Rents most', fmt: (v, r) => r.top_types.map(x => `${esc(x.name)} <span class="sub">×${x.lines}</span>`).join('<br>') || '—',
+         csv: r => r.top_types.map(x => `${x.name} x${x.lines}`).join('; ')},
+        {key: 'assets', label: 'Assets', num: true, fmt: money},
+        {key: 'external', label: 'External', num: true, fmt: money},
+        {key: 'piano', label: 'Piano', num: true, fmt: money},
+      ];
+      if (d.labor_included) cols.push({key: 'labor', label: 'Labor (settled)', num: true, fmt: money});
+      cols.push({key: 'total', label: 'Total', num: true, fmt: money}, {key: 'last_date', label: 'Last show'});
+      return cards([
+        [num(g.filter(x => x.key).length), 'Companies with shows'],
+        [num(g.reduce((a, x) => a + x.lines, 0)), 'Rental lines'],
+        [money(g.reduce((a, x) => a + x.assets, 0)), 'Asset revenue'],
+      ]) + table('t-groups', 'Arts Groups', cols, g, {sortKey: 'total', onRow: groupDetail,
+        note: 'Click a row for every item that group rented and their shows. "Unit-days" = units × rental days. Labor counts only settled shows (Final Invoice figure).'});
+    },
+    async assets() {
+      const d = await get('/api/reports/asset-types?' + params());
+      const cols = [
+        {key: 'type', label: 'Item', sub: r => esc(r.category) + (r.is_system ? ' · system/package' : '')},
+        {key: 'lines', label: 'Times rented', num: true},
+        {key: 'shows', label: 'Shows', num: true},
+        {key: 'companies', label: 'Arts Groups', num: true},
+        {key: 'units', label: 'Units out', num: true},
+        {key: 'unit_days', label: 'Unit-days', num: true},
+        {key: 'units_owned', label: 'Units owned', num: true},
+        {key: 'utilization', label: 'Utilization', num: true, fmt: v => v == null ? '—' : `${v}%`},
+        {key: 'revenue', label: 'Revenue', num: true, fmt: money},
+        {key: 'last_used', label: 'Last used'},
+      ];
+      const used = d.types.filter(t => t.lines);
+      return cards([
+        [num(used.length), 'Item types rented'],
+        [num(d.types.length - used.length), 'Never rented in range'],
+        [num(used.reduce((a, t) => a + t.lines, 0)), 'Rental lines'],
+        [money(used.reduce((a, t) => a + t.revenue, 0)), 'Revenue'],
+      ]) + table('t-types', 'Asset usage by item', cols, d.types, {sortKey: 'lines', onRow: assetUnits,
+        rowClass: r => r.lines ? '' : 'rpt-idle',
+        note: 'Click an item for its individual units. ' + (d.range_days ? `Utilization = unit-days booked ÷ (units owned × ${d.range_days} days in range).` : 'Pick a From and To date to see utilization.') + ' Dimmed rows were never rented in the range.'});
+    },
+    async rentals() {
+      const extra = {asset_category_id: (document.getElementById('rr-category') || {}).value || '',
+                     asset_type_id: (document.getElementById('rr-type') || {}).value || ''};
+      const keep = {cat: extra.asset_category_id, type: extra.asset_type_id};
+      const d = await get('/api/reports/assets?' + params(extra));
+      const rows = d.rows || [];
+      const cols = [
+        {key: 'show_name', label: 'Show', fmt: (v, r) => showLink(v, r.show_id)},
+        {key: 'show_date', label: 'Date'},
+        {key: 'venue', label: 'Venue'},
+        {key: 'performance_company', label: 'Arts Group'},
+        {key: 'category_name', label: 'Category'},
+        {key: 'type_name', label: 'Item', sub: r => esc(r.manufacturer || '')},
+        {key: 'quantity', label: 'Qty', num: true},
+        {key: 'locked_price', label: 'Unit price', num: true, fmt: money},
+        {key: 'line_total', label: 'Line total', num: true, fmt: money},
+      ];
+      const html = document.getElementById('rpt-rentals-filters').innerHTML + cards([
+        [money(d.total_revenue || 0), 'Revenue'], [num(rows.length), 'Line items'],
+        [num(new Set(rows.map(r => r.show_id)).size), 'Shows'],
+        [num(new Set(rows.map(r => r.category_name)).size), 'Categories'],
+      ]) + table('t-rentals', 'Rental lines', cols, rows);
+      setTimeout(() => {
+        const c = document.getElementById('rr-category'), t = document.getElementById('rr-type');
+        if (c) c.value = keep.cat; rptRentalTypes(true); if (t) t.value = keep.type;
+      });
+      return html;
+    },
+    async labor() {
+      const d = await get('/api/reports/labor?' + params());
+      const tcols = [
+        {key: 'name', label: 'Technician', sub: r => esc(r.level)},
+        {key: 'shows', label: 'Shows', num: true},
+        {key: 'sched_shifts', label: 'Scheduled shifts', num: true},
+        {key: 'sched_hours', label: 'Scheduled hrs', num: true, fmt: v => num(v, 2)},
+        {key: 'actual_shifts', label: 'Settled shifts', num: true},
+        {key: 'actual_hours', label: 'Worked hrs (settled)', num: true, fmt: v => num(v, 2)},
+        {key: 'training_shifts', label: 'Training', num: true},
+        {key: 'overhead_shifts', label: 'Overhead shifts', num: true},
+        {key: 'overhead_hours', label: 'Overhead hrs', num: true, fmt: v => num(v, 2)},
+        {key: 'last_date', label: 'Last booked'},
+      ];
+      const pcols = [
+        {key: 'position', label: 'Position'},
+        {key: 'requested', label: 'Shifts requested', num: true},
+        {key: 'filled', label: 'Filled', num: true},
+        {key: 'fill_rate', label: 'Fill rate', num: true, fmt: v => v == null ? '—' : `${v}%`},
+        {key: 'hours', label: 'Requested hrs', num: true, fmt: v => num(v, 2)},
+      ];
+      const tt = d.totals;
+      return cards([
+        [num(d.techs.length), 'Techs booked'],
+        [num(tt.shifts), 'Shifts requested'],
+        [tt.shifts ? `${Math.round(100 * tt.filled / tt.shifts)}%` : '—', 'Filled'],
+        [num(d.unfilled_upcoming), 'Unfilled upcoming'],
+        [num(tt.hours, 1), 'Requested hours'],
+      ]) + table('t-techs', 'Technicians', tcols, d.techs, {sortKey: 'sched_hours',
+        note: 'Scheduled = labor requests with this tech assigned. Settled = post-show lines whose "Worked by" is this tech. Overhead / project shifts follow the date range only.'})
+        + table('t-positions', 'Positions', pcols, d.positions, {sortKey: 'requested'});
+    },
+    async piano() {
+      const d = await get('/api/reports/piano?' + params());
+      const t = d.totals;
+      return cards([
+        [num(t.tunings), 'Tunings'], [num(t.open), 'Open'], [num(t.completed), 'Completed'],
+        [num(t.cancelled), 'Cancelled'], [money(t.cost), 'Cost (not cancelled)'],
+      ]) + table('t-vendors', 'By vendor', [
+        {key: 'vendor', label: 'Vendor'}, {key: 'tunings', label: 'Tunings', num: true},
+        {key: 'completed', label: 'Completed', num: true}, {key: 'cancelled', label: 'Cancelled', num: true},
+        {key: 'cost', label: 'Cost', num: true, fmt: money}, {key: 'avg_cost', label: 'Avg cost', num: true, fmt: money},
+      ], d.vendors, {sortKey: 'tunings'}) + table('t-pmonths', 'Trend by month', [
+        {key: 'month', label: 'Month'}, {key: 'tunings', label: 'Tunings', num: true},
+        {key: 'cancelled', label: 'Cancelled', num: true},
+        {key: 'cost', label: 'Cost', num: true, fmt: money}, {key: 'avg_cost', label: 'Avg cost', num: true, fmt: money},
+      ], d.months, {note: 'Months follow each tuning\'s date (or the date it was needed by). Avg cost is over tunings with a cost entered.'})
+        + table('t-pgroups', 'By Arts Group', [
+        {key: 'group', label: 'Arts Group'}, {key: 'tunings', label: 'Tunings', num: true},
+        {key: 'completed', label: 'Completed', num: true}, {key: 'cancelled', label: 'Cancelled', num: true},
+        {key: 'cost', label: 'Cost', num: true, fmt: money}, {key: 'avg_cost', label: 'Avg cost', num: true, fmt: money},
+      ], d.groups, {sortKey: 'tunings'}) + table('t-preq', 'By who requested', [
+        {key: 'requester', label: 'Requested by'}, {key: 'tunings', label: 'Tunings', num: true},
+        {key: 'cancelled', label: 'Cancelled', num: true}, {key: 'cost', label: 'Cost', num: true, fmt: money},
+      ], d.requesters, {sortKey: 'tunings'}) + table('t-pianos', 'By piano', [
+        {key: 'piano', label: 'Piano'}, {key: 'tunings', label: 'Tunings', num: true},
+        {key: 'cost', label: 'Cost', num: true, fmt: money}, {key: 'last_date', label: 'Last tuning'},
+      ], d.pianos, {sortKey: 'tunings'});
+    },
+  };
+
+  window.rptRentalTypes = function(keep) {
+    const c = document.getElementById('rr-category'), t = document.getElementById('rr-type');
+    if (!c || !t) return;
+    t.querySelectorAll('option').forEach(o => { if (o.value) o.hidden = !!c.value && o.dataset.cat !== c.value; });
+    if (!keep && t.selectedOptions[0] && t.selectedOptions[0].hidden) t.value = '';
+  };
+
+  // ── drill-downs ──
+  function modal(title, html) {
+    document.getElementById('rpt-modal-title').textContent = title;
+    document.getElementById('rpt-modal-body').innerHTML = html;
+    document.getElementById('rpt-modal').style.display = 'flex';
+    drawAll();
+  }
+  window.rptCloseModal = function() {
+    document.getElementById('rpt-modal').style.display = 'none';
+    ['m-gtypes', 'm-gshows', 'm-units'].forEach(k => delete _tables[k]);
+  };
+  async function groupDetail(g) {
+    modal(g.name, '<div class="rpt-loading text-dim">Loading…</div>');
+    try {
+      const d = await get('/api/reports/arts-groups/detail?' + params({group: g.key || ''}));
+      modal(g.name, table('m-gtypes', `${g.name} — items rented`, [
+        {key: 'type', label: 'Item', sub: r => esc(r.category)},
+        {key: 'lines', label: 'Times rented', num: true}, {key: 'shows', label: 'Shows', num: true},
+        {key: 'units', label: 'Units', num: true}, {key: 'unit_days', label: 'Unit-days', num: true},
+        {key: 'company_rate_lines', label: 'At company rate', num: true},
+        {key: 'revenue', label: 'Revenue', num: true, fmt: money},
+      ], d.types, {sortKey: 'lines'}) + table('m-gshows', `${g.name} — shows`, [
+        {key: 'name', label: 'Show', fmt: (v, r) => showLink(v, r.id)}, {key: 'date', label: 'Date'},
+        {key: 'venue', label: 'Venue'}, {key: 'status', label: 'Status'},
+        {key: 'lines', label: 'Rental lines', num: true}, {key: 'assets', label: 'Assets', num: true, fmt: money},
+      ], d.shows, {sortKey: 'date'}));
+    } catch (e) { modal(g.name, `<p style="color:#e53e3e">${esc(e.message)}</p>`); }
+  }
+  async function assetUnits(t) {
+    modal(t.type, '<div class="rpt-loading text-dim">Loading…</div>');
+    try {
+      const d = await get('/api/reports/asset-units?' + params({type_id: t.type_id}));
+      const p = d.pooled;
+      modal(t.type, cards([
+        [num(d.units.length), 'Units'], [num(p.lines), 'Pool bookings (no unit picked)'], [num(p.unit_days), 'Pool unit-days'],
+      ]) + table('m-units', `${t.type} — individual units`, [
+        {key: 'barcode', label: 'Unit / barcode', fmt: (v, r) => esc(v || ('#' + r.id))},
+        {key: 'status', label: 'Status'}, {key: 'condition', label: 'Condition'},
+        {key: 'year_purchased', label: 'Year', num: true, fmt: v => v || '—'},
+        {key: 'bookings', label: 'Pinned bookings', num: true}, {key: 'unit_days', label: 'Pinned days', num: true},
+        {key: 'last_show', label: 'Last show', sub: r => esc(r.last_date || '')},
+        {key: 'maintenance', label: 'Maintenance', num: true}, {key: 'logs', label: 'Log entries', num: true},
+      ], d.units, {sortKey: 'bookings', note: 'A booking counts against a unit only when that unit was picked on the show. Bookings from the general pool are counted above, not per unit.'}));
+    } catch (e) { modal(t.type, `<p style="color:#e53e3e">${esc(e.message)}</p>`); }
+  }
+
+  // Default range: this calendar year (past and upcoming shows).
+  preset('year');
+  setTab(_tab);
+})();
+</script>
+{% endblock %}

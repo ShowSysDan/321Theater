@@ -818,6 +818,23 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   manager cancels through the normal status change. Refusals syslog
   `PIANO_TUNING_DENIED reason=…`; every write route syslogs.
 
+## Reports (3.12.0)
+- `/reports` (`reports_page`, `templates/reports.html`) is its own nav
+  section (nav key `reports`, audience `reports` = `_can_view_reports()`).
+  The old `/reports/assets` redirects to `?tab=rentals`; its data endpoint
+  `/api/reports/assets` is the Rental Lines tab.
+- Every tab shares `_report_shows()` (effective date = show date → load-in →
+  first performance; venue; company via `_company_key`; `is_test` excluded).
+  Each `/api/reports/*` endpoint gates itself: assets/arts-groups/rentals →
+  `_can_report_assets`, labor → `_can_report_labor`, piano →
+  `_can_report_piano`. Add a tab = add an endpoint with its own gate.
+- Labor $ only from `_calc_post_show_labor_cost` for SETTLED shows; hours via
+  `_calc_hours`. Never fork billing math into a report. Asset lines exclude
+  `is_hidden` (matches invoices); piano $ = the piano-linked external lines.
+- Client tables escape every value; CSV prefixes formula-leading cells.
+- TEST_MODE: `html.test-mode` + `.test-mode-frame` (base.html, style.css;
+  label hidden on mobile). Keep it `pointer-events: none`.
+
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.
 At the end of any change that touches code/config, **state plainly which
