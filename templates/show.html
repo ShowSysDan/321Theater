@@ -568,13 +568,16 @@
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const money = v => (v === null || v === undefined) ? '' : `$${Number(v).toFixed(2)}`;
 
+  let _pianoSeq = 0;
   async function loadPiano() {
     const host = document.getElementById('piano-tuning-list');
     if (!host) return;
+    const seq = ++_pianoSeq;
     try {
       const r = await fetch(`/shows/${SHOW_ID}/piano-tunings`, {headers: H});
       if (!r.ok) throw new Error(r.status);
       const d = await r.json();
+      if (seq !== _pianoSeq) return;  // a newer load is already rendering
       _tunings = d.tunings || []; _defaults = d.defaults || {}; _canManage = !!d.can_manage;
       _pianos = d.pianos || [];
     } catch (e) {
@@ -593,7 +596,9 @@
           ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}`
             + (t.status !== 'cancelled' && !t.on_schedule ? ' <span class="piano-warn" title="This date isn\'t one of the show\'s schedule days, so the row won\'t show on the production schedule until the show\'s dates cover it.">not on schedule dates</span>' : '')
           : '—';
-        const mine = CAN_EDIT && t.status === 'requested';
+        // Editable by the PM until the manager starts on it (vendor/cost/paperwork).
+        const mine = CAN_EDIT && t.status === 'requested' && t.cost === null
+                     && !(t.vendor || '').trim() && !t.paperwork_filename;
         return `<tr>
           <td><span class="piano-status piano-status-${esc(t.status)}">${esc(t.status_label)}</span></td>
           <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? ` <span class="piano-warn" title="Add this piano on the Assets tab so it's reserved for the show.">⚠ not on Assets tab</span>` : ''}${t.vendor ? `<div class="text-dim" style="font-size:10px">Vendor: ${esc(t.vendor)}</div>` : ''}</td>
@@ -660,21 +665,22 @@
     const btn = document.getElementById('piano-save-btn');
     btn.disabled = true;
     try {
-      // The piano is an asset: book it on the show through the normal asset
-      // path (availability, rate card, asset approval) before the request.
       const pick = document.getElementById('piano-pick');
       const opt = pick.selectedOptions[0];
-      if (_pianos.length && payload.piano_asset_type_id && opt && opt.dataset.onShow !== '1') {
-        const ar = await fetch(`/shows/${SHOW_ID}/assets`, {method: 'POST', headers: H,
-          body: JSON.stringify({asset_type_id: parseInt(payload.piano_asset_type_id, 10), quantity: 1})});
-        const ad = await ar.json().catch(() => ({}));
-        if (!ar.ok && !confirm(`Couldn't add ${opt.textContent} to this show's Assets: ${ad.error || 'error'}\n\nSend the tuning request anyway?`)) return;
-        if (ar.ok && window.loadAssetsTab) window.loadAssetsTab();
-      }
       const r = await fetch(id ? `/piano-tunings/${id}` : `/shows/${SHOW_ID}/piano-tunings`,
                             {method: id ? 'PUT' : 'POST', headers: H, body: JSON.stringify(payload)});
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { alert(d.error || 'Could not save the request.'); return; }
+      // The piano is an asset: once the request is saved, book it on the show
+      // through the normal asset path (availability, rate card, asset approval).
+      // Only after success, so a refused request never books a piano.
+      if (_pianos.length && payload.piano_asset_type_id && opt && opt.dataset.onShow !== '1') {
+        const ar = await fetch(`/shows/${SHOW_ID}/assets`, {method: 'POST', headers: H,
+          body: JSON.stringify({asset_type_id: parseInt(payload.piano_asset_type_id, 10), quantity: 1})});
+        const ad = await ar.json().catch(() => ({}));
+        if (!ar.ok) alert(`Request sent, but ${opt.textContent} couldn't be added to this show's Assets: ${ad.error || 'error'}. Add it on the Assets tab.`);
+        else if (window.loadAssetsTab) window.loadAssetsTab();
+      }
       closePianoModal();
       loadPiano();
     } finally { btn.disabled = false; }
@@ -862,9 +868,9 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
             {% for row in day_rows | sort(attribute="sort_order") %}
             {% if row.piano_tuning_id %}
             {# Piano Tuning row (3.9.0): owned by the piano tuning request —
-               read-only here, re-derived on every save; can be dragged. #}
+               read-only here, re-derived (and re-placed by time) on every save. #}
             <tr class="schedule-row piano-sched-row" data-piano-id="{{ row.piano_tuning_id }}" title="Added by Piano Tuning — change it on the Advance tab's Piano Tuning panel">
-              {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
+              {% if not restricted %}<td class="drag-col"></td>{% endif %}
               <td><input type="text" class="sched-cell" value="{{ row.start_time }}" readonly tabindex="-1"></td>
               <td><input type="text" class="sched-cell" value="{{ row.end_time }}" readonly tabindex="-1"></td>
               <td><input type="text" class="sched-cell" value="{{ row.description }}" readonly tabindex="-1"></td>
@@ -928,7 +934,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
             {% for row in null_rows %}
             {% if row.piano_tuning_id %}
             <tr class="schedule-row piano-sched-row" data-piano-id="{{ row.piano_tuning_id }}" title="Added by Piano Tuning — change it on the Advance tab's Piano Tuning panel">
-              {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
+              {% if not restricted %}<td class="drag-col"></td>{% endif %}
               <td><input type="text" class="sched-cell" value="{{ row.start_time }}" readonly tabindex="-1"></td>
               <td><input type="text" class="sched-cell" value="{{ row.end_time }}" readonly tabindex="-1"></td>
               <td><input type="text" class="sched-cell" value="{{ row.description }}" readonly tabindex="-1"></td>

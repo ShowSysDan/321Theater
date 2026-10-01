@@ -1340,6 +1340,7 @@ CREATE TABLE IF NOT EXISTS show_external_rentals (
     piano_tuning_id INTEGER DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_show_external_rentals_show ON show_external_rentals(show_id);
+CREATE INDEX IF NOT EXISTS idx_show_external_rentals_piano ON show_external_rentals(piano_tuning_id);
 
 CREATE TABLE IF NOT EXISTS asset_type_system_members (
     system_type_id    INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
@@ -2004,6 +2005,7 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS piano_asset_type_id INTEGER DEFAULT NULL',
         # A tuning's charge + paperwork = a linked external rental — 3.9.1
         f'ALTER TABLE "{app_schema}".show_external_rentals ADD COLUMN IF NOT EXISTS piano_tuning_id INTEGER DEFAULT NULL',
+        f'CREATE INDEX IF NOT EXISTS idx_show_external_rentals_piano ON "{app_schema}".show_external_rentals(piano_tuning_id)',
         # Piano tuning vendor list — 3.10.2
         f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS piano_vendor_id INTEGER DEFAULT NULL',
     ]

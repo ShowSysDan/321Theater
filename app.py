@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.10.2'
+APP_VERSION = '3.10.3'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -6322,10 +6322,21 @@ def restore_history(show_id, hist_id):
         if 'rows' in snapshot:
             db.execute('DELETE FROM schedule_rows WHERE show_id=%s', (show_id,))
             for i, row in enumerate(snapshot['rows']):
+                if row.get('piano_tuning_id'):
+                    continue  # re-derived by the sync below (else a stale copy)
+                # Keep each row's day (3.10.3): restoring without day_date /
+                # perf_id piled every day's rows onto the first day.
+                day_date = row.get('day_date') or None
+                if not (isinstance(day_date, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', day_date)):
+                    day_date = None
+                try:
+                    perf_id = int(row.get('perf_id')) if row.get('perf_id') else None
+                except (TypeError, ValueError):
+                    perf_id = None
                 db.execute("""
-                    INSERT INTO schedule_rows (show_id, sort_order, start_time, end_time, description, notes)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (show_id, i, row.get('start_time',''), row.get('end_time',''),
+                    INSERT INTO schedule_rows (show_id, perf_id, day_date, sort_order, start_time, end_time, description, notes)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (show_id, perf_id, day_date, i, row.get('start_time',''), row.get('end_time',''),
                       row.get('description',''), row.get('notes','')))
             # Restored rows carry no piano link — put the current tunings back.
             _sync_piano_schedule_rows(db, show_id)
@@ -20160,7 +20171,7 @@ def external_rental_update(show_id, er_id):
     if not row:
         db.close()
         return jsonify({'error': 'Not found'}), 404
-    if row['piano_tuning_id']:
+    if row['piano_tuning_id'] and module_enabled('piano_tuning'):
         db.close()
         return jsonify({'error': _PIANO_ER_LOCKED}), 409
 
@@ -20232,7 +20243,8 @@ def external_rental_delete(show_id, er_id):
     db = get_db()
     row = db.execute('SELECT s3_key, piano_tuning_id FROM show_external_rentals '
                      'WHERE id=%s AND show_id=%s', (er_id, show_id)).fetchone()
-    if row and row['piano_tuning_id']:
+    # Module off: the line is an ordinary rental again, so it can be removed.
+    if row and row['piano_tuning_id'] and module_enabled('piano_tuning'):
         db.close()
         return jsonify({'error': _PIANO_ER_LOCKED}), 409
     if row and row['s3_key']:
@@ -22144,6 +22156,9 @@ def _sync_piano_schedule_rows(db, show_id):
     first row that starts later): placing it only on first insert left it
     stranded at the bottom when the tuning time changed or the day's other
     rows were added after it (3.10.2). Caller commits."""
+    # Serialize with any other sync / schedule save on this show, or two
+    # concurrent delete+insert rounds could each leave a row behind.
+    db.execute('SELECT 1 FROM shows WHERE id=%s FOR UPDATE', (show_id,))
     want = db.execute(
         "SELECT id, tuning_date, tuning_start, piano, vendor "
         "FROM piano_tunings WHERE show_id=%s AND tuning_date IS NOT NULL "
@@ -22184,6 +22199,13 @@ def _sync_piano_schedule_rows(db, show_id):
             'start_time, end_time, description, notes, piano_tuning_id) '
             'VALUES (%s, NULL, %s, %s, %s, %s, %s, %s, %s)',
             (show_id, day, pos, t['tuning_start'] or '', '', desc, notes, t['id']))
+    if want:
+        # Compact sort_order back to 0..n-1 (the shifts above only grow it).
+        db.execute('''
+            UPDATE schedule_rows sr SET sort_order = o.n
+            FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY sort_order, id) - 1 AS n
+                  FROM schedule_rows WHERE show_id=%s) o
+            WHERE sr.id = o.id AND sr.sort_order IS DISTINCT FROM o.n''', (show_id,))
 
 
 _PIANO_ER_LOCKED = ('This line comes from Piano Tuning — the piano tuning manager '
@@ -22196,13 +22218,15 @@ def _piano_er_description(t):
     return 'Piano tuning' + (f' — {piano}' if piano else '') + (f' ({d.isoformat()})' if d else '')
 
 
-def _sync_piano_external_rental(db, tid):
+def _sync_piano_external_rental(db, tid, s3_deletes):
     """Keep tuning `tid`'s linked show_external_rentals line (3.9.1): it
     exists while the tuning isn't cancelled and has a cost or paperwork, so
     the charge shows on the Assets tab, the Asset Estimate and the Final /
     Combined Invoice like any external rental (paperwork PDF appended).
-    Cancelling removes the line and its paperwork. Caller commits. Returns
-    the line id or None."""
+    Cancelling removes the line and its paperwork. Caller commits, THEN
+    deletes the S3 keys this appended to `s3_deletes` (_piano_s3_cleanup), so
+    a rollback never leaves the DB pointing at a deleted object. Returns the
+    line id or None."""
     t = db.execute('SELECT id, show_id, status, piano, tuning_date, requested_date, cost '
                    'FROM piano_tunings WHERE id=%s', (tid,)).fetchone()
     er = db.execute('SELECT id, s3_key, pdf_filename FROM show_external_rentals '
@@ -22216,11 +22240,7 @@ def _sync_piano_external_rental(db, tid):
         keep = None
     for r in extra:
         if r['s3_key']:
-            try:
-                s3_storage.delete_file(r['s3_key'])
-            except Exception as e:
-                syslog_logger.error(f"S3_DELETE_FAILED table=show_external_rentals "
-                                    f"id={r['id']} piano_tuning={tid} error={e}")
+            s3_deletes.append(r['s3_key'])
         db.execute('DELETE FROM show_external_rentals WHERE id=%s', (r['id'],))
     if not want:
         return None
@@ -22237,10 +22257,25 @@ def _sync_piano_external_rental(db, tid):
         (t['show_id'], desc, cost, '', order, tid)).fetchone()['id']
 
 
+def _piano_s3_cleanup(keys, tid):
+    """Delete paperwork objects — only after the DB change committed."""
+    for key in keys:
+        try:
+            s3_storage.delete_file(key)
+        except Exception as e:
+            syslog_logger.error(f"S3_DELETE_FAILED table=show_external_rentals key={key} "
+                                f"piano_tuning={tid} error={e}")
+
+
 def _piano_manager_emails(db, exclude_user_id=None):
     rows = db.execute(
         "SELECT id, email FROM users WHERE is_piano_manager = 1 "
         "AND COALESCE(is_locked, 0) = 0 AND COALESCE(email, '') <> ''").fetchall()
+    if not rows:
+        # Nobody flagged yet: admins are piano managers too, so they get it.
+        rows = db.execute(
+            "SELECT id, email FROM users WHERE role = 'admin' "
+            "AND COALESCE(is_locked, 0) = 0 AND COALESCE(email, '') <> ''").fetchall()
     out = []
     for r in rows:
         e = r['email'].strip()
@@ -22338,6 +22373,7 @@ def show_piano_tunings(show_id):
         WHERE t.show_id = %s ORDER BY t.created_at, t.id
     """, (show_id,)).fetchall()
     days = {d['date_key'] for d in _build_schedule_days(db, show_id)[1]}
+    manager = _is_piano_manager()
     pianos = _piano_asset_types(db)
     booked = _piano_booked(db, [show_id])
     defaults = _piano_defaults(db, show_id, pianos, booked)
@@ -22349,10 +22385,15 @@ def show_piano_tunings(show_id):
         d['on_schedule'] = bool(d['tuning_date'] and d['tuning_date'] in days)
         d['piano_on_show'] = ((show_id, r['piano_asset_type_id']) in booked
                               if r['piano_asset_type_id'] else None)
+        if not manager:
+            # Manager-only working notes / who-did-what stay on /piano-tuning.
+            for k in ('manager_notes', 'sent_by', 'updated_by', 'requested_by',
+                      'requested_by_username'):
+                d.pop(k, None)
         out.append(d)
     return jsonify({'tunings': out, 'defaults': defaults,
                     'pianos': [dict(p, on_show=(show_id, p['id']) in booked) for p in pianos],
-                    'can_manage': _is_piano_manager(),
+                    'can_manage': manager,
                     'statuses': [{'key': k, 'label': PIANO_STATUS_LABELS[k]}
                                  for k in PIANO_STATUSES]})
 
@@ -22444,9 +22485,28 @@ def piano_tuning_update(tid):
                 data.get('status') not in (None, 'requested', 'cancelled'):
             db.close()
             return jsonify({'error': 'Only the piano tuning manager can change that.'}), 403
+        # Once the manager has started on it (vendor, cost or paperwork) the
+        # PM can't change or cancel it — cancelling would delete that work.
+        has_paper = db.execute(
+            "SELECT 1 FROM show_external_rentals WHERE piano_tuning_id=%s "
+            "AND COALESCE(pdf_filename, '') <> ''", (tid,)).fetchone()
+        if cur['cost'] is not None or (cur['vendor'] or '').strip() or has_paper:
+            db.close()
+            return jsonify({'error': 'The piano tuning manager is already working on this '
+                                     'request — ask them to change it.'}), 409
     vals, err = _piano_clean(data, _PIANO_REQUEST_FIELDS + (_PIANO_MANAGER_FIELDS if manager else ()))
+    # The piano / vendor already stored is accepted as-is (it may since have
+    # been retired, re-categorised or archived, or be a 3.9 free-text value):
+    # only a CHANGED pick is validated, so Save never fails or wipes it.
+    if not err and 'piano_asset_type_id' in vals and (
+            vals['piano_asset_type_id'] == cur['piano_asset_type_id']):
+        vals.pop('piano_asset_type_id')
+        vals.pop('piano', None)
     if not err:
         err = _piano_resolve(db, vals, require=False)
+    if not err and 'piano_vendor_id' in vals and (
+            vals['piano_vendor_id'] == cur['piano_vendor_id']):
+        vals.pop('piano_vendor_id')
     if not err and 'piano_vendor_id' in vals:
         # The vendor is picked from the list; keep a name snapshot.
         if vals['piano_vendor_id'] is None:
@@ -22470,9 +22530,9 @@ def piano_tuning_update(tid):
     if 'requested_date' in vals and not vals['requested_date']:
         db.close()
         return jsonify({'error': 'Pick the date the piano needs tuning.'}), 400
-    # Putting a tuning date in moves a request to Scheduled.
+    # The manager putting a tuning date in moves a request to Scheduled.
     tuning_date = vals['tuning_date'] if 'tuning_date' in vals else cur['tuning_date']
-    if tuning_date and status == 'requested' and 'status' not in data:
+    if manager and tuning_date and status == 'requested' and 'status' not in data:
         status = 'scheduled'
     sets = [f'{k}=%s' for k in vals] + ['status=%s', 'updated_by=%s',
                                         'updated_at=CURRENT_TIMESTAMP']
@@ -22484,10 +22544,13 @@ def piano_tuning_update(tid):
         sets.append('completed_at=CURRENT_TIMESTAMP')
     elif status != 'completed' and cur['completed_at']:
         sets.append('completed_at=NULL')
+    if status == 'requested' and cur['sent_at']:
+        sets += ['sent_at=NULL', 'sent_by=NULL']
     params.append(tid)
     db.execute(f"UPDATE piano_tunings SET {', '.join(sets)} WHERE id=%s", params)
     _sync_piano_schedule_rows(db, show_id)
-    _sync_piano_external_rental(db, tid)
+    s3_deletes = []
+    _sync_piano_external_rental(db, tid, s3_deletes)
     db.execute('UPDATE shows SET updated_at=CURRENT_TIMESTAMP WHERE id=%s', (show_id,))
     changed = sorted(k for k in vals if str(vals[k] or '') != str(_piano_out(cur).get(k) or ''))
     log_audit(db, 'PIANO_TUNING_EDIT', 'piano_tuning', tid, show_id=show_id,
@@ -22505,6 +22568,7 @@ def piano_tuning_update(tid):
             "SELECT email FROM users WHERE id=%s AND COALESCE(is_locked, 0) = 0 "
             "AND COALESCE(email, '') <> ''", (cur['requested_by'],)).fetchone()
     db.commit()
+    _piano_s3_cleanup(s3_deletes, tid)
     row = db.execute('SELECT * FROM piano_tunings WHERE id=%s', (tid,)).fetchone()
     db.close()
     syslog_logger.info(f"PIANO_TUNING_EDIT id={tid} show_id={show_id} "
@@ -22734,16 +22798,13 @@ def piano_tuning_paperwork_upload(tid):
     db.execute('UPDATE show_external_rentals SET pdf_data=%s, pdf_filename=%s, s3_key=%s, '
                'content_sha256=%s WHERE id=%s',
                (data if keep_db else None, filename, s3_key, sha, er_id))
-    if old_key and old_key != s3_key:
-        try:
-            s3_storage.delete_file(old_key)
-        except Exception as e:
-            app.logger.warning(f'S3 delete of old piano paperwork {old_key} failed: {e}')
-    _sync_piano_external_rental(db, tid)
+    s3_deletes = [old_key] if old_key and old_key != s3_key else []
+    _sync_piano_external_rental(db, tid, s3_deletes)
     log_audit(db, 'PIANO_TUNING_PAPERWORK', 'piano_tuning', tid, show_id=t['show_id'],
               detail=f'file={filename}')
     db.commit()
     db.close()
+    _piano_s3_cleanup(s3_deletes, tid)  # only once the new copy is committed
     syslog_logger.info(f"PIANO_TUNING_PAPERWORK id={tid} show_id={t['show_id']} "
                        f"file={filename!r} by={session.get('username')}")
     return jsonify({'success': True, 'er_id': er_id, 'paperwork_filename': filename})
@@ -22761,18 +22822,14 @@ def piano_tuning_paperwork_remove(tid):
     if not er:
         db.close()
         return jsonify({'success': True})
-    if er['s3_key']:
-        try:
-            s3_storage.delete_file(er['s3_key'])
-        except Exception as e:
-            syslog_logger.error(f"S3_DELETE_FAILED table=show_external_rentals id={er['id']} "
-                                f"piano_tuning={tid} error={e}")
+    s3_deletes = [er['s3_key']] if er['s3_key'] else []
     db.execute("UPDATE show_external_rentals SET pdf_data=NULL, pdf_filename='', s3_key=NULL, "
                "content_sha256=NULL WHERE id=%s", (er['id'],))
-    _sync_piano_external_rental(db, tid)
+    _sync_piano_external_rental(db, tid, s3_deletes)
     log_audit(db, 'PIANO_TUNING_PAPERWORK_REMOVE', 'piano_tuning', tid, show_id=er['show_id'])
     db.commit()
     db.close()
+    _piano_s3_cleanup(s3_deletes, tid)
     syslog_logger.info(f"PIANO_TUNING_PAPERWORK_REMOVE id={tid} by={session.get('username')}")
     return jsonify({'success': True})
 
