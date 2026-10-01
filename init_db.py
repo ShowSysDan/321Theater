@@ -546,6 +546,7 @@ CREATE TABLE IF NOT EXISTS piano_tunings (
     location       TEXT DEFAULT '',
     piano          TEXT DEFAULT '',
     piano_asset_type_id INTEGER DEFAULT NULL,
+    piano_vendor_id INTEGER DEFAULT NULL,
     requested_date DATE DEFAULT NULL,
     requested_time TEXT DEFAULT '',
     notes          TEXT DEFAULT '',
@@ -564,6 +565,19 @@ CREATE TABLE IF NOT EXISTS piano_tunings (
     updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_piano_tunings_show ON piano_tunings(show_id);
+
+-- Piano tuning vendors + their typical price (3.10.2), kept by the piano
+-- manager on /piano-tuning. A tuning stores the picked id plus a name
+-- snapshot in piano_tunings.vendor.
+CREATE TABLE IF NOT EXISTS piano_vendors (
+    id            SERIAL PRIMARY KEY,
+    name          TEXT NOT NULL,
+    typical_price DOUBLE PRECISION DEFAULT NULL,
+    contact       TEXT DEFAULT '',
+    notes         TEXT DEFAULT '',
+    is_active     INTEGER DEFAULT 1,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 CREATE TABLE IF NOT EXISTS schedule_meta (
     id SERIAL PRIMARY KEY,
@@ -1326,6 +1340,7 @@ CREATE TABLE IF NOT EXISTS show_external_rentals (
     piano_tuning_id INTEGER DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_show_external_rentals_show ON show_external_rentals(show_id);
+CREATE INDEX IF NOT EXISTS idx_show_external_rentals_piano ON show_external_rentals(piano_tuning_id);
 
 CREATE TABLE IF NOT EXISTS asset_type_system_members (
     system_type_id    INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
@@ -1990,6 +2005,9 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS piano_asset_type_id INTEGER DEFAULT NULL',
         # A tuning's charge + paperwork = a linked external rental — 3.9.1
         f'ALTER TABLE "{app_schema}".show_external_rentals ADD COLUMN IF NOT EXISTS piano_tuning_id INTEGER DEFAULT NULL',
+        f'CREATE INDEX IF NOT EXISTS idx_show_external_rentals_piano ON "{app_schema}".show_external_rentals(piano_tuning_id)',
+        # Piano tuning vendor list — 3.10.2
+        f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS piano_vendor_id INTEGER DEFAULT NULL',
     ]
 
     shared_alters = [
@@ -2089,6 +2107,11 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         except Exception as e:
             cur.execute('ROLLBACK TO SAVEPOINT _bf')
             print(f"[migrate_pg] {label} backfill warning: {e}")
+    # 3.10.2: Piano Tuning's 'sent' (to vendor) status merged into
+    # 'scheduled' — touches only rows still marked 'sent'.
+    _backfill('piano tuning sent→scheduled', f"""
+        UPDATE "{app_schema}".piano_tunings SET status = 'scheduled'
+        WHERE status = 'sent'""")
 
     # original_locked_price for legacy show_assets rows that pre-date the
     # column (new rows always set it, so this is a no-op on current data).

@@ -766,11 +766,20 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
 - Optional module `piano_tuning` (APP_MODULES). `piano_tunings` table; the
   manager = admin or `users.is_piano_manager` (`_is_piano_manager()`,
   `@piano_manager_required`) — a 321Theater flag, never `is_app_*`.
+- Statuses (3.10.2): requested → scheduled (= sent to the vendor; a tuning
+  date also moves it there) → completed, plus cancelled. 'sent' is gone
+  (migrated; an incoming 'sent' is read as 'scheduled'). Start time only —
+  `tuning_end` is legacy, never set or shown. Vendors = `piano_vendors`
+  (typical price fills an EMPTY cost client-side); tunings keep
+  `piano_vendor_id` + a `vendor` name snapshot; vendors archive, never delete.
 - A tuning with a tuning_date (not cancelled) owns ONE schedule row
   (`schedule_rows.piano_tuning_id`). `_sync_piano_schedule_rows()` is the
   only writer of those rows and MUST run after anything that rewrites
   schedule_rows (save_schedule, history restore, show merge) — the browser
   rebuilds the schedule wholesale, so without it a stale tab drops the row.
+  Every sync deletes and re-inserts each row in time order within its day
+  (day = `day_date` rows + legacy perf_id rows of that date); placing only on
+  first insert stranded it when the time changed.
   The editor renders them read-only (`.piano-sched-row`, `data-piano-id`);
   copy-day / template-replace skip them.
 - Piano = an asset type in a category named like 'Piano'
@@ -784,9 +793,23 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   shows on the Assets tab / Asset Estimate / Final / Combined Invoice like any
   external rental — never add a second billing path. The external-rental
   edit/delete routes 409 on these rows, and they're excluded from
-  `_compute_asset_snapshot_hash` (piano charges don't reset asset approval).
+  `_compute_asset_snapshot_hash`, the Approvals page list and its pending
+  count — the piano manager owns the charge, asset approval never sees it.
+- The PIANO is gear: a PM request for a piano not on the show books it first
+  via the ordinary `POST /shows/<id>/assets` (client-side in show.html's
+  `savePianoRequest`), so availability/pricing/asset approval apply. Don't add
+  a second, server-side booking path.
   Paperwork uploads (`/piano-tunings/<id>/paperwork`) go to that row via
   S3/DB like other rental PDFs.
+- 3.10.3 rules: S3 deletes are collected (`s3_deletes`) and run by
+  `_piano_s3_cleanup()` only AFTER `db.commit()`. `_sync_piano_schedule_rows`
+  locks the show row first and compacts sort_order. History restore skips
+  rows carrying `piano_tuning_id` (the sync re-adds them). A PM may edit/cancel
+  only while 'requested' AND the manager hasn't set vendor/cost/paperwork. A
+  submitted piano/vendor equal to the stored one is accepted unvalidated (so
+  retired/legacy values survive a Save). Non-managers never get
+  manager_notes / sent_by / updated_by from the show endpoint. Piano rows are
+  locked on the rental routes only while the module is on.
 
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.

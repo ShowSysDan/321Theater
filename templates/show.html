@@ -550,7 +550,7 @@
           <textarea id="piano-notes" class="field-input field-textarea" rows="3" maxlength="4000" placeholder="Pitch (A440?), access, quiet time needed, rehearsal schedule…"></textarea>
         </div>
       </div>
-      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">The piano tuning manager is emailed. Once they set the tuning time it's added to this show's production schedule. You can change or cancel the request until they send it to the vendor.</p>
+      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">The piano is booked on this show's Assets (asset approval applies to the piano itself; the tuning charge doesn't need it). The piano tuning manager is emailed. Once they set the tuning time it's added to this show's production schedule. You can change or cancel the request until they schedule it with the vendor.</p>
     </div>
     <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
       <button type="button" class="btn btn-ghost" onclick="closePianoModal()">Close</button>
@@ -568,13 +568,16 @@
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const money = v => (v === null || v === undefined) ? '' : `$${Number(v).toFixed(2)}`;
 
+  let _pianoSeq = 0;
   async function loadPiano() {
     const host = document.getElementById('piano-tuning-list');
     if (!host) return;
+    const seq = ++_pianoSeq;
     try {
       const r = await fetch(`/shows/${SHOW_ID}/piano-tunings`, {headers: H});
       if (!r.ok) throw new Error(r.status);
       const d = await r.json();
+      if (seq !== _pianoSeq) return;  // a newer load is already rendering
       _tunings = d.tunings || []; _defaults = d.defaults || {}; _canManage = !!d.can_manage;
       _pianos = d.pianos || [];
     } catch (e) {
@@ -590,10 +593,12 @@
       <thead><tr><th>Status</th><th>Piano</th><th>Needed</th><th>Scheduled</th><th class="num">Cost</th><th></th></tr></thead>
       <tbody>${_tunings.map(t => {
         const sched = t.tuning_date
-          ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}${t.tuning_end ? '–' + esc(t.tuning_end) : ''}`
+          ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}`
             + (t.status !== 'cancelled' && !t.on_schedule ? ' <span class="piano-warn" title="This date isn\'t one of the show\'s schedule days, so the row won\'t show on the production schedule until the show\'s dates cover it.">not on schedule dates</span>' : '')
           : '—';
-        const mine = CAN_EDIT && t.status === 'requested';
+        // Editable by the PM until the manager starts on it (vendor/cost/paperwork).
+        const mine = CAN_EDIT && t.status === 'requested' && t.cost === null
+                     && !(t.vendor || '').trim() && !t.paperwork_filename;
         return `<tr>
           <td><span class="piano-status piano-status-${esc(t.status)}">${esc(t.status_label)}</span></td>
           <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? ` <span class="piano-warn" title="Add this piano on the Assets tab so it's reserved for the show.">⚠ not on Assets tab</span>` : ''}${t.vendor ? `<div class="text-dim" style="font-size:10px">Vendor: ${esc(t.vendor)}</div>` : ''}</td>
@@ -641,7 +646,7 @@
     const missing = _pianos.length && pick.value && opt && opt.dataset.onShow !== '1';
     warn.style.display = missing ? '' : 'none';
     warn.textContent = missing
-      ? `⚠ ${opt.textContent} isn't on this show's Assets tab yet — add it there so the piano is reserved for the show.`
+      ? `${opt.textContent} isn't on this show's Assets yet — it will be added (show dates) when you send this, and goes through asset approval like any gear.`
       : '';
   };
   window.closePianoModal = function() { document.getElementById('piano-modal').style.display = 'none'; };
@@ -660,10 +665,22 @@
     const btn = document.getElementById('piano-save-btn');
     btn.disabled = true;
     try {
+      const pick = document.getElementById('piano-pick');
+      const opt = pick.selectedOptions[0];
       const r = await fetch(id ? `/piano-tunings/${id}` : `/shows/${SHOW_ID}/piano-tunings`,
                             {method: id ? 'PUT' : 'POST', headers: H, body: JSON.stringify(payload)});
       const d = await r.json().catch(() => ({}));
       if (!r.ok) { alert(d.error || 'Could not save the request.'); return; }
+      // The piano is an asset: once the request is saved, book it on the show
+      // through the normal asset path (availability, rate card, asset approval).
+      // Only after success, so a refused request never books a piano.
+      if (_pianos.length && payload.piano_asset_type_id && opt && opt.dataset.onShow !== '1') {
+        const ar = await fetch(`/shows/${SHOW_ID}/assets`, {method: 'POST', headers: H,
+          body: JSON.stringify({asset_type_id: parseInt(payload.piano_asset_type_id, 10), quantity: 1})});
+        const ad = await ar.json().catch(() => ({}));
+        if (!ar.ok) alert(`Request sent, but ${opt.textContent} couldn't be added to this show's Assets: ${ad.error || 'error'}. Add it on the Assets tab.`);
+        else if (window.loadAssetsTab) window.loadAssetsTab();
+      }
       closePianoModal();
       loadPiano();
     } finally { btn.disabled = false; }
@@ -848,12 +865,12 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
             </tr>
           </thead>
           <tbody id="schedule-rows-{{ d.date_key }}">
-            {% for row in day_rows %}
+            {% for row in day_rows | sort(attribute="sort_order") %}
             {% if row.piano_tuning_id %}
             {# Piano Tuning row (3.9.0): owned by the piano tuning request —
-               read-only here, re-derived on every save; can be dragged. #}
+               read-only here, re-derived (and re-placed by time) on every save. #}
             <tr class="schedule-row piano-sched-row" data-piano-id="{{ row.piano_tuning_id }}" title="Added by Piano Tuning — change it on the Advance tab's Piano Tuning panel">
-              {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
+              {% if not restricted %}<td class="drag-col"></td>{% endif %}
               <td><input type="text" class="sched-cell" value="{{ row.start_time }}" readonly tabindex="-1"></td>
               <td><input type="text" class="sched-cell" value="{{ row.end_time }}" readonly tabindex="-1"></td>
               <td><input type="text" class="sched-cell" value="{{ row.description }}" readonly tabindex="-1"></td>
@@ -917,7 +934,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
             {% for row in null_rows %}
             {% if row.piano_tuning_id %}
             <tr class="schedule-row piano-sched-row" data-piano-id="{{ row.piano_tuning_id }}" title="Added by Piano Tuning — change it on the Advance tab's Piano Tuning panel">
-              {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
+              {% if not restricted %}<td class="drag-col"></td>{% endif %}
               <td><input type="text" class="sched-cell" value="{{ row.start_time }}" readonly tabindex="-1"></td>
               <td><input type="text" class="sched-cell" value="{{ row.end_time }}" readonly tabindex="-1"></td>
               <td><input type="text" class="sched-cell" value="{{ row.description }}" readonly tabindex="-1"></td>
@@ -1789,7 +1806,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           <td>$${Number(er.cost).toFixed(2)}</td>
           <td>${er.pdf_filename ? `<a href="/shows/${SHOW_ID}/external-rentals/${er.id}/pdf" target="_blank" style="font-size:11px">View PDF</a>` : '—'}</td>
           ${IS_ADMIN ? `<td style="white-space:nowrap">${er.piano_tuning_id
-            ? `<span class="piano-er-tag" title="From Piano Tuning — the piano tuning manager sets its cost and paperwork">🎹 Piano Tuning</span>`
+            ? `<span class="piano-er-tag" title="From Piano Tuning — the piano tuning manager sets its cost and paperwork; not part of asset approval">🎹 Piano Tuning</span>`
             : `<button class="btn btn-xs btn-ghost" onclick="editExternalRental(${esc(JSON.stringify(er))})" title="Edit">✎</button>
             <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="removeExternalRental(${er.id})" title="Remove">✕</button>`}
           </td>` : ''}

@@ -10,7 +10,10 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">Piano Tuning</h1>
-    <p class="page-sub">Every tuning requested from a show page. Send it to the vendor, set the tuning time (it goes onto the show's production schedule) and the cost (billed on the show's Final Invoice).</p>
+    <p class="page-sub">Every tuning requested from a show page. Schedule it with a vendor, set the tuning time (it goes onto the show's production schedule) and the cost (it shows on the show's Assets tab and invoices).</p>
+  </div>
+  <div class="header-actions">
+    <button type="button" class="btn btn-ghost btn-sm" onclick="pvOpen()">Vendors</button>
   </div>
 </div>
 
@@ -65,7 +68,7 @@
         </div>
         <div class="field-group">
           <label class="field-label">VENDOR</label>
-          <input type="text" id="pt-vendor" class="field-input" maxlength="300">
+          <select id="pt-vendor" class="field-input" onchange="ptVendorPicked()"></select>
         </div>
         <div class="field-group" style="grid-column:span 2">
           <label class="field-label">PIANO</label>
@@ -83,15 +86,14 @@
         </div>
         <div class="field-group" style="grid-column:span 2;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px">
           <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim);margin-bottom:8px">TUNING TIME — goes on the show's production schedule</div>
-          <div style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr);gap:8px">
+          <div style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:8px">
             <label style="font-size:10px;color:var(--text-dim)">DATE<input type="date" id="pt-date" class="field-input"></label>
             <label style="font-size:10px;color:var(--text-dim)">START<input type="text" id="pt-start" class="field-input" maxlength="5" placeholder="09:00"></label>
-            <label style="font-size:10px;color:var(--text-dim)">END<input type="text" id="pt-end" class="field-input" maxlength="5" placeholder="11:00"></label>
           </div>
         </div>
         <div class="field-group">
           <label class="field-label">COST ($)</label>
-          <input type="text" id="pt-cost" class="field-input" inputmode="decimal" placeholder="Shows on the show's Assets tab">
+          <input type="text" id="pt-cost" class="field-input" inputmode="decimal" placeholder="Vendor's typical price fills in">
         </div>
         <div class="field-group">
           <label class="field-label">PAPERWORK (PDF)</label>
@@ -107,12 +109,47 @@
           <textarea id="pt-mgr-notes" class="field-input field-textarea" rows="2" maxlength="4000" placeholder="Vendor confirmation, PO number…"></textarea>
         </div>
       </div>
-      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">Setting the tuning date moves an open request to <strong>Scheduled</strong> and emails the requester. The cost and paperwork appear right away as an external rental on the show's Assets tab (and its Asset Estimate / Final Invoice, with the PDF attached). Cancelling removes the schedule row, the charge and the paperwork.</p>
+      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45"><strong>Scheduled</strong> = sent to the vendor. Setting the tuning date also marks it Scheduled; the requester is emailed when it's scheduled and when the time changes. The cost and paperwork appear right away as an external rental on the show's Assets tab (and its Asset Estimate / Final Invoice, with the PDF attached). Cancelling removes the schedule row, the charge and the paperwork.</p>
     </div>
     <div class="modal-footer">
       <a id="pt-show-link" class="btn btn-ghost" href="#" style="margin-right:auto">Open show →</a>
       <button type="button" class="btn btn-ghost" onclick="ptClose()">Close</button>
       <button type="button" class="btn btn-primary" id="pt-save" onclick="ptSave()">Save</button>
+    </div>
+  </div>
+</div>
+
+{# Vendors dialog #}
+<div id="pv-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)pvClose()">
+  <div class="modal-card" style="max-width:720px;max-height:90vh;overflow-y:auto">
+    <div class="modal-header">
+      <span>Piano Tuning Vendors</span>
+      <button type="button" onclick="pvClose()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body">
+      <div style="overflow-x:auto">
+        <table class="data-table piano-table" id="pv-table">
+          <thead><tr><th>Vendor</th><th class="num">Typical price</th><th>Contact</th><th>Notes</th><th></th></tr></thead>
+          <tbody id="pv-body"></tbody>
+        </table>
+      </div>
+      <div class="pv-form">
+        <input type="hidden" id="pv-id">
+        <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px;margin-top:14px">
+          <div class="field-group"><label class="field-label" id="pv-form-title">ADD VENDOR — NAME *</label>
+            <input type="text" id="pv-name" class="field-input" maxlength="200"></div>
+          <div class="field-group"><label class="field-label">TYPICAL PRICE ($)</label>
+            <input type="text" id="pv-price" class="field-input" inputmode="decimal"></div>
+          <div class="field-group"><label class="field-label">CONTACT</label>
+            <input type="text" id="pv-contact" class="field-input" maxlength="300" placeholder="Name, phone, email"></div>
+          <div class="field-group"><label class="field-label">NOTES</label>
+            <input type="text" id="pv-notes" class="field-input" maxlength="2000"></div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
+          <button type="button" class="btn btn-ghost btn-sm" id="pv-cancel-edit" style="display:none" onclick="pvEdit(null)">Cancel edit</button>
+          <button type="button" class="btn btn-primary btn-sm" id="pv-save" onclick="pvSave()">Add vendor</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -124,13 +161,15 @@
 .piano-count:empty { display: none; }
 .piano-count { font-size: 10px; opacity: .75; }
 .piano-table .sub { font-size: 11px; color: var(--text-dim); }
+.pv-archived td { opacity: .55; }
+.pv-form { border-top: 1px solid var(--border); margin-top: 10px; }
 </style>
 
 <script>
 (function() {
   const H = {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'};
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  let _status = 'open', _rows = [], _seq = 0, _pianos = [];
+  let _status = 'open', _rows = [], _seq = 0, _pianos = [], _vendors = [];
 
   async function load() {
     const seq = ++_seq;
@@ -147,10 +186,11 @@
     if (seq !== _seq) return;
     _rows = d.tunings || [];
     _pianos = d.pianos || [];
+    _vendors = d.vendors || [];
     const c = d.counts || {};
     document.querySelectorAll('.piano-count').forEach(el => {
       const k = el.dataset.count;
-      const n = k === 'open' ? (c.requested || 0) + (c.sent || 0) + (c.scheduled || 0) : (c[k] || 0);
+      const n = k === 'open' ? (c.requested || 0) + (c.scheduled || 0) : (c[k] || 0);
       el.textContent = n ? `(${n})` : '';
     });
     render();
@@ -173,12 +213,12 @@
           <div class="sub">${esc(t.show_venue || '')}${t.production_manager ? ' · PM ' + esc(t.production_manager) : ''}</div></td>
         <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? '<div class="piano-warn" style="margin-left:0" title="The show hasn\'t added this piano on its Assets tab.">⚠ not on show\'s Assets tab</div>' : ''}</td>
         <td style="white-space:nowrap">${esc(t.requested_date || '')} ${esc(t.requested_time || '')}</td>
-        <td style="white-space:nowrap">${t.tuning_date ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}${t.tuning_end ? '–' + esc(t.tuning_end) : ''}` : '—'}</td>
+        <td style="white-space:nowrap">${t.tuning_date ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}` : '—'}</td>
         <td>${esc(t.vendor) || '—'}</td>
         <td class="num">${t.cost === null || t.cost === undefined ? '—' : '$' + Number(t.cost).toFixed(2)}${t.paperwork_filename ? `<div class="sub"><a href="/shows/${t.show_id}/external-rentals/${t.er_id}/pdf" target="_blank" title="${esc(t.paperwork_filename)}">📄 PDF</a></div>` : ''}</td>
         <td class="sub">${esc(t.requested_by_name || '')}</td>
         <td><div style="display:flex;flex-direction:column;gap:4px;align-items:stretch">
-          ${t.status === 'requested' ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptQuick(${t.id},'sent')">Sent to vendor</button>` : ''}
+          ${t.status === 'requested' ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptQuick(${t.id},'scheduled')" title="Sent to the vendor">Mark scheduled</button>` : ''}
           ${t.status === 'scheduled' ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptQuick(${t.id},'completed')">Completed</button>` : ''}
           <button type="button" class="btn btn-xs btn-primary" onclick="ptOpen(${t.id})">Manage</button>
         </div></td>
@@ -195,9 +235,9 @@
   }));
   document.getElementById('piano-search').addEventListener('input', render);
 
-  const F = {status: 'pt-status', vendor: 'pt-vendor',
+  const F = {status: 'pt-status',
              requested_date: 'pt-req-date', requested_time: 'pt-req-time', tuning_date: 'pt-date',
-             tuning_start: 'pt-start', tuning_end: 'pt-end', notes: 'pt-notes', manager_notes: 'pt-mgr-notes'};
+             tuning_start: 'pt-start', notes: 'pt-notes', manager_notes: 'pt-mgr-notes'};
 
   window.ptOpen = function(id) {
     const t = _rows.find(x => x.id === id);
@@ -223,6 +263,19 @@
     pick.dataset.onShow = t.piano_on_show === false ? '0' : '1';
     text.value = t.piano || '';
     ptPickWarn();
+    const vsel = document.getElementById('pt-vendor');
+    const vopts = _vendors.slice();
+    // An archived vendor (or a 3.9 free-text one) stays visible on its tuning.
+    if (t.piano_vendor_id && !vopts.some(v => v.id === t.piano_vendor_id)) {
+      vopts.push({id: t.piano_vendor_id, name: t.vendor || `Vendor #${t.piano_vendor_id}`, typical_price: null});
+    }
+    vsel.innerHTML = '<option value="">— Select vendor —</option>' + vopts.map(v =>
+      `<option value="${v.id}" data-price="${v.typical_price === null || v.typical_price === undefined ? '' : v.typical_price}">${esc(v.name)}${v.typical_price != null ? ' — $' + Number(v.typical_price).toFixed(2) : ''}</option>`).join('');
+    vsel.value = t.piano_vendor_id ? String(t.piano_vendor_id) : '';
+    document.getElementById('pt-vendor-legacy') && document.getElementById('pt-vendor-legacy').remove();
+    if (!t.piano_vendor_id && t.vendor) {
+      vsel.insertAdjacentHTML('afterend', `<div id="pt-vendor-legacy" class="text-dim" style="font-size:11px;margin-top:3px">Was: ${esc(t.vendor)}</div>`);
+    }
     _ptPaperRender(t);
     document.getElementById('pt-paper').value = '';
     document.getElementById('pt-cost').value = t.cost === null || t.cost === undefined ? '' : Number(t.cost).toFixed(2);
@@ -267,6 +320,12 @@
     if (t) { t.paperwork_filename = null; _ptPaperRender(t); }
     load();
   };
+  // A picked vendor's typical price fills an empty cost (never overwrites).
+  window.ptVendorPicked = function() {
+    const opt = document.getElementById('pt-vendor').selectedOptions[0];
+    const cost = document.getElementById('pt-cost');
+    if (opt && opt.dataset.price && !cost.value.trim()) cost.value = Number(opt.dataset.price).toFixed(2);
+  };
   window.ptClose = function() { document.getElementById('pt-modal').style.display = 'none'; };
 
   async function put(id, payload) {
@@ -281,6 +340,7 @@
     const payload = {};
     Object.entries(F).forEach(([k, el]) => { payload[k] = document.getElementById(el).value; });
     payload.cost = document.getElementById('pt-cost').value;
+    payload.piano_vendor_id = document.getElementById('pt-vendor').value || null;
     if (_pianos.length) payload.piano_asset_type_id = document.getElementById('pt-pick').value || null;
     else payload.piano = document.getElementById('pt-piano').value.trim();
     // Status untouched → let the server move an open request to Scheduled
@@ -294,6 +354,62 @@
     try {
       if (await put(id, payload)) { ptClose(); load(); }
     } finally { btn.disabled = false; }
+  };
+
+  // ── Vendors ──
+  let _pvAll = [];
+  async function pvLoad() {
+    const body = document.getElementById('pv-body');
+    const r = await fetch('/api/piano-vendors', {headers: H});
+    if (!r.ok) { body.innerHTML = '<tr><td colspan="5" style="color:#e53e3e">Couldn\'t load vendors.</td></tr>'; return; }
+    _pvAll = (await r.json()).vendors || [];
+    body.innerHTML = _pvAll.length ? _pvAll.map(v => `
+      <tr${v.is_active ? '' : ' class="pv-archived"'}>
+        <td>${esc(v.name)}${v.is_active ? '' : ' <span class="text-dim" style="font-size:10px">(archived)</span>'}</td>
+        <td class="num">${v.typical_price === null ? '—' : '$' + Number(v.typical_price).toFixed(2)}</td>
+        <td class="sub">${esc(v.contact)}</td>
+        <td class="sub">${esc(v.notes)}</td>
+        <td style="white-space:nowrap">
+          <button type="button" class="btn btn-xs btn-ghost" onclick="pvEdit(${v.id})">Edit</button>
+          <button type="button" class="btn btn-xs btn-ghost" onclick="pvArchive(${v.id}, ${v.is_active ? 0 : 1})">${v.is_active ? 'Archive' : 'Restore'}</button>
+        </td>
+      </tr>`).join('') : '<tr><td colspan="5" class="text-dim">No vendors yet — add one below.</td></tr>';
+  }
+  window.pvOpen = function() { pvEdit(null); document.getElementById('pv-modal').style.display = 'flex'; pvLoad(); };
+  window.pvClose = function() { document.getElementById('pv-modal').style.display = 'none'; load(); };
+  window.pvEdit = function(id) {
+    const v = id ? _pvAll.find(x => x.id === id) : null;
+    document.getElementById('pv-id').value = v ? v.id : '';
+    document.getElementById('pv-name').value = v ? v.name : '';
+    document.getElementById('pv-price').value = v && v.typical_price !== null ? Number(v.typical_price).toFixed(2) : '';
+    document.getElementById('pv-contact').value = v ? v.contact : '';
+    document.getElementById('pv-notes').value = v ? v.notes : '';
+    document.getElementById('pv-form-title').textContent = v ? 'EDIT VENDOR — NAME *' : 'ADD VENDOR — NAME *';
+    document.getElementById('pv-save').textContent = v ? 'Save vendor' : 'Add vendor';
+    document.getElementById('pv-cancel-edit').style.display = v ? '' : 'none';
+  };
+  window.pvSave = async function() {
+    const id = document.getElementById('pv-id').value;
+    const payload = {name: document.getElementById('pv-name').value.trim(),
+                     typical_price: document.getElementById('pv-price').value,
+                     contact: document.getElementById('pv-contact').value,
+                     notes: document.getElementById('pv-notes').value};
+    if (!payload.name) { alert('Vendor name is required.'); return; }
+    const btn = document.getElementById('pv-save');
+    btn.disabled = true;
+    try {
+      const r = await fetch(id ? `/api/piano-vendors/${id}` : '/api/piano-vendors',
+                            {method: id ? 'PUT' : 'POST', headers: H, body: JSON.stringify(payload)});
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { alert(d.error || 'Could not save the vendor.'); return; }
+      pvEdit(null);
+      pvLoad();
+    } finally { btn.disabled = false; }
+  };
+  window.pvArchive = async function(id, active) {
+    const r = await fetch(`/api/piano-vendors/${id}`, {method: 'PUT', headers: H, body: JSON.stringify({is_active: active})});
+    if (!r.ok) { alert('Could not update the vendor.'); return; }
+    pvLoad();
   };
 
   window.ptQuick = async function(id, status) {
