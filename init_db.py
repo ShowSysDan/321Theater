@@ -545,6 +545,7 @@ CREATE TABLE IF NOT EXISTS piano_tunings (
     status         TEXT NOT NULL DEFAULT 'requested',
     location       TEXT DEFAULT '',
     piano          TEXT DEFAULT '',
+    piano_asset_type_id INTEGER DEFAULT NULL,
     requested_date DATE DEFAULT NULL,
     requested_time TEXT DEFAULT '',
     notes          TEXT DEFAULT '',
@@ -1321,7 +1322,8 @@ CREATE TABLE IF NOT EXISTS show_external_rentals (
     s3_key       TEXT DEFAULT NULL,
     content_sha256 TEXT DEFAULT NULL,
     sort_order   INTEGER DEFAULT 0,
-    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    piano_tuning_id INTEGER DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_show_external_rentals_show ON show_external_rentals(show_id);
 
@@ -1984,6 +1986,10 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".show_assets ADD COLUMN IF NOT EXISTS rate_company TEXT DEFAULT NULL',
         # Piano Tuning's production-schedule row — 3.9.0
         f'ALTER TABLE "{app_schema}".schedule_rows ADD COLUMN IF NOT EXISTS piano_tuning_id INTEGER DEFAULT NULL',
+        # Piano picked from the asset list (Piano category) — 3.9.1
+        f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS piano_asset_type_id INTEGER DEFAULT NULL',
+        # A tuning's charge + paperwork = a linked external rental — 3.9.1
+        f'ALTER TABLE "{app_schema}".show_external_rentals ADD COLUMN IF NOT EXISTS piano_tuning_id INTEGER DEFAULT NULL',
     ]
 
     shared_alters = [
@@ -2029,6 +2035,12 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
     # PG_SCHEMA and have nothing to upgrade.
     settle_is_new = ((app_schema, 'shows') in cat['tables']
                      and (app_schema, 'shows', 'labor_settled_at') not in cat['cols'])
+    # 3.9.1: costed 3.9.0 piano tunings get their external-rental line once,
+    # in the transaction that first adds show_external_rentals.piano_tuning_id.
+    piano_er_is_new = ((app_schema, 'show_external_rentals') in cat['tables']
+                       and (app_schema, 'piano_tunings') in cat['tables']
+                       and (app_schema, 'show_external_rentals', 'piano_tuning_id')
+                       not in cat['cols'])
     n = 0
     for sql in app_alters + shared_alters:
         if 'INSERT INTO' in sql and 'show_labor_billable_items' in sql:
@@ -2048,6 +2060,23 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
 
     if settle_is_new:
         _settle_now_upgrade(cur, app_schema)
+    if piano_er_is_new:
+        cur.execute('SAVEPOINT _piano_er')
+        try:
+            cur.execute(f'''
+                INSERT INTO "{app_schema}".show_external_rentals
+                    (show_id, description, cost, pdf_filename, sort_order, piano_tuning_id)
+                SELECT t.show_id,
+                       'Piano tuning' || CASE WHEN COALESCE(t.piano, '') <> ''
+                                              THEN ' — ' || t.piano ELSE '' END
+                       || COALESCE(' (' || COALESCE(t.tuning_date, t.requested_date)::text || ')', ''),
+                       t.cost, '', 1000 + t.id, t.id
+                FROM "{app_schema}".piano_tunings t
+                WHERE t.status <> 'cancelled' AND t.cost IS NOT NULL''')
+            cur.execute('RELEASE SAVEPOINT _piano_er')
+        except Exception as e:
+            cur.execute('ROLLBACK TO SAVEPOINT _piano_er')
+            print(f"[migrate_pg] piano external-rental backfill warning: {e}")
 
     # Data backfills. Each runs in its own SAVEPOINT so one failure can't
     # silently abort the rest of the migration transaction, and each only

@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.9.0'
+APP_VERSION = '3.10.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -19233,10 +19233,12 @@ def _compute_asset_snapshot_hash(db, show_id):
         FROM show_assets
         WHERE show_id = %s
     """, (show_id,)).fetchall()
+    # Piano Tuning lines (3.9.1) are the piano manager's, not gear the asset
+    # approver signs off on — they never reset asset approval.
     externals = db.execute("""
         SELECT description, cost, pdf_filename
         FROM show_external_rentals
-        WHERE show_id = %s
+        WHERE show_id = %s AND piano_tuning_id IS NULL
     """, (show_id,)).fetchall()
     asset_tuples = sorted(
         (
@@ -20153,11 +20155,14 @@ def external_rental_update(show_id, er_id):
     replace the attached PDF. Sent as multipart/form-data so a new PDF can be
     uploaded; if no file is attached the existing PDF is preserved."""
     db = get_db()
-    row = db.execute('SELECT id, s3_key FROM show_external_rentals WHERE id=%s AND show_id=%s',
-                     (er_id, show_id)).fetchone()
+    row = db.execute('SELECT id, s3_key, piano_tuning_id FROM show_external_rentals '
+                     'WHERE id=%s AND show_id=%s', (er_id, show_id)).fetchone()
     if not row:
         db.close()
         return jsonify({'error': 'Not found'}), 404
+    if row['piano_tuning_id']:
+        db.close()
+        return jsonify({'error': _PIANO_ER_LOCKED}), 409
 
     description = (request.form.get('description') or '').strip()
     if not description:
@@ -20225,8 +20230,11 @@ def external_rental_update(show_id, er_id):
 @show_advance_editor_required
 def external_rental_delete(show_id, er_id):
     db = get_db()
-    row = db.execute('SELECT s3_key FROM show_external_rentals WHERE id=%s AND show_id=%s',
-                     (er_id, show_id)).fetchone()
+    row = db.execute('SELECT s3_key, piano_tuning_id FROM show_external_rentals '
+                     'WHERE id=%s AND show_id=%s', (er_id, show_id)).fetchone()
+    if row and row['piano_tuning_id']:
+        db.close()
+        return jsonify({'error': _PIANO_ER_LOCKED}), 409
     if row and row['s3_key']:
         try:
             s3_storage.delete_file(row['s3_key'])
@@ -20345,7 +20353,7 @@ def asset_approvals():
         """, (show_ids,)).fetchall():
             assets_by_show.setdefault(r['show_id'], []).append(r)
         for r in db.execute("""
-            SELECT show_id, id, description, cost, pdf_filename,
+            SELECT show_id, id, description, cost, pdf_filename, piano_tuning_id,
                    (pdf_data IS NOT NULL OR s3_key IS NOT NULL) AS has_pdf
             FROM show_external_rentals WHERE show_id = ANY(%s) ORDER BY sort_order, id
         """, (show_ids,)).fetchall():
@@ -21529,11 +21537,11 @@ def _fetch_external_rental_pdfs(db, show_id):
 
 
 
-def _fetch_show_assets_and_externals(db, show_id, include_piano=False):
+def _fetch_show_assets_and_externals(db, show_id):
     """Assets + external rentals for a show's invoices, with subtotals.
     Shared by the asset invoice and the final (post-show) invoice so the
-    two stay in lock-step. include_piano (Final / Combined Invoice — the
-    settlement) adds costed piano tunings as external-cost lines."""
+    two stay in lock-step. Piano tunings arrive as their linked external
+    rental lines (3.9.1)."""
     assets = db.execute("""
         SELECT sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end, sa.notes,
                at.name as type_name, at.manufacturer, at.model,
@@ -21552,8 +21560,6 @@ def _fetch_show_assets_and_externals(db, show_id, include_piano=False):
     """, (show_id,)).fetchall()
     assets_list = [dict(a) for a in assets]
     ext_list    = [dict(e) for e in external_rentals]
-    if include_piano:
-        ext_list += _piano_invoice_lines(db, show_id)
     assets_subtotal   = sum((a['locked_price'] or 0) * a['quantity'] for a in assets_list)
     external_subtotal = sum(e['cost'] or 0 for e in ext_list)
     return assets_list, ext_list, assets_subtotal, external_subtotal
@@ -21740,7 +21746,7 @@ def show_post_invoice(show_id):
             abort(404)
 
         assets_list, ext_list, assets_subtotal, external_subtotal = \
-            _fetch_show_assets_and_externals(db, show_id, include_piano=True)
+            _fetch_show_assets_and_externals(db, show_id)
         performance_company = _show_performance_company(db, show_id)
 
         # Final Invoice bills ACTUAL labor recorded on the Post-Show tab
@@ -21903,7 +21909,7 @@ def combined_invoice_pdf():
     for sid in ids:
         show = by_id[sid]
         assets_list, ext_list, assets_subtotal, external_subtotal = \
-            _fetch_show_assets_and_externals(db, sid, include_piano=True)
+            _fetch_show_assets_and_externals(db, sid)
         # Same rule as the single-show Final Invoice: actual labor once the
         # show is settled (Settle Now), otherwise none — flagged on the page.
         if sid in unsettled:
@@ -22024,7 +22030,10 @@ PIANO_STATUS_LABELS = {
     'completed': 'Completed', 'cancelled': 'Cancelled',
 }
 # Fields the requesting PM may edit while the request is still 'requested'.
-_PIANO_REQUEST_FIELDS = ('location', 'piano', 'requested_date', 'requested_time', 'notes')
+# No location (3.9.1): a tuning is always on the stage. `piano` is the
+# picked asset type's name (free text only when no Piano category exists).
+_PIANO_REQUEST_FIELDS = ('piano_asset_type_id', 'piano', 'requested_date',
+                         'requested_time', 'notes')
 # Fields only the piano manager edits.
 _PIANO_MANAGER_FIELDS = ('vendor', 'tuning_date', 'tuning_start', 'tuning_end',
                          'cost', 'manager_notes')
@@ -22032,6 +22041,62 @@ _PIANO_MANAGER_FIELDS = ('vendor', 'tuning_date', 'tuning_start', 'tuning_end',
 
 def _piano_module_on():
     return module_enabled('piano_tuning')
+
+
+def _piano_asset_types(db):
+    """[{id, name}] — the pianos a request can pick: live (not retired, not
+    system/package) asset types in any asset category named like 'Piano'.
+    Child types read 'Parent › Child'."""
+    rows = db.execute("""
+        SELECT t.id, t.name, p.name AS parent_name
+        FROM asset_types t
+        JOIN asset_categories c ON c.id = t.category_id
+        LEFT JOIN asset_types p ON p.id = t.parent_type_id
+        WHERE c.name ILIKE %s AND COALESCE(t.is_retired, 0) = 0
+          AND COALESCE(t.is_system, 0) = 0 AND COALESCE(t.is_package, 0) = 0
+        ORDER BY c.sort_order, c.name, COALESCE(p.sort_order, t.sort_order),
+                 COALESCE(p.name, t.name), t.parent_type_id NULLS FIRST, t.sort_order, t.name
+    """, ('%piano%',)).fetchall()
+    return [{'id': r['id'],
+             'name': f"{r['parent_name']} › {r['name']}" if r['parent_name'] else r['name']}
+            for r in rows]
+
+
+def _piano_booked(db, show_ids):
+    """{(show_id, asset_type_id)} of every type on these shows' Assets tabs,
+    booked directly or as a component of a booked system/package."""
+    ids = sorted({int(i) for i in show_ids if i is not None})
+    if not ids:
+        return set()
+    rows = db.execute("""
+        SELECT sa.show_id, sa.asset_type_id AS tid FROM show_assets sa
+        WHERE sa.show_id = ANY(%s)
+        UNION
+        SELECT sa.show_id, m.component_type_id FROM show_assets sa
+        JOIN asset_type_system_members m ON m.system_type_id = sa.asset_type_id
+        WHERE sa.show_id = ANY(%s)
+    """, (ids, ids)).fetchall()
+    return {(r['show_id'], r['tid']) for r in rows}
+
+
+def _piano_resolve(db, vals, require):
+    """Turn a submitted piano_asset_type_id into the stored piano name.
+    Returns an error string or None. With pianos in the asset list a pick is
+    required (when `require`, or when the field was submitted); with none,
+    free-text `piano` is kept as typed."""
+    pianos = _piano_asset_types(db)
+    if not pianos:
+        vals.pop('piano_asset_type_id', None)
+        return None
+    vals.pop('piano', None)
+    if 'piano_asset_type_id' not in vals and not require:
+        return None
+    pick = vals.get('piano_asset_type_id')
+    match = next((p for p in pianos if p['id'] == pick), None)
+    if not match:
+        return 'Pick the piano from the list.'
+    vals['piano'] = match['name']
+    return None
 
 
 def _piano_out(r):
@@ -22051,9 +22116,7 @@ def _piano_schedule_text(t):
     """(description, notes) of a tuning's production-schedule row."""
     piano = (t['piano'] or '').strip()
     desc = f'Piano Tuning — {piano}' if piano else 'Piano Tuning'
-    notes = ' · '.join(x for x in ((t['location'] or '').strip(),
-                                   (t['vendor'] or '').strip()) if x)
-    return desc, notes
+    return desc, (t['vendor'] or '').strip()
 
 
 def _hhmm_minutes(v):
@@ -22074,7 +22137,7 @@ def _sync_piano_schedule_rows(db, show_id):
     browser — so a schedule tab open since before the tuning was scheduled
     can't drop the row. Caller commits."""
     want = {t['id']: t for t in db.execute(
-        "SELECT id, tuning_date, tuning_start, tuning_end, piano, location, vendor "
+        "SELECT id, tuning_date, tuning_start, tuning_end, piano, vendor "
         "FROM piano_tunings WHERE show_id=%s AND tuning_date IS NOT NULL "
         "AND status <> 'cancelled'", (show_id,)).fetchall()}
     seen = set()
@@ -22128,19 +22191,55 @@ def _sync_piano_schedule_rows(db, show_id):
              desc, notes, tid))
 
 
-def _piano_invoice_lines(db, show_id):
-    """Piano tunings billed on the Final / Combined Invoice: every tuning with
-    a cost that isn't cancelled, as External Assets & Costs lines."""
-    out = []
-    for r in db.execute(
-            "SELECT piano, tuning_date, requested_date, cost FROM piano_tunings "
-            "WHERE show_id=%s AND status <> 'cancelled' AND cost IS NOT NULL "
-            "ORDER BY COALESCE(tuning_date, requested_date), id", (show_id,)).fetchall():
-        d = _as_date(r['tuning_date']) or _as_date(r['requested_date'])
-        piano = (r['piano'] or '').strip()
-        desc = 'Piano tuning' + (f' — {piano}' if piano else '') + (f' ({d.isoformat()})' if d else '')
-        out.append({'description': desc, 'cost': float(r['cost'] or 0), 'pdf_filename': ''})
-    return out
+_PIANO_ER_LOCKED = ('This line comes from Piano Tuning — the piano tuning manager '
+                    'changes its cost and paperwork on the Piano Tuning page.')
+
+
+def _piano_er_description(t):
+    d = _as_date(t['tuning_date']) or _as_date(t['requested_date'])
+    piano = (t['piano'] or '').strip()
+    return 'Piano tuning' + (f' — {piano}' if piano else '') + (f' ({d.isoformat()})' if d else '')
+
+
+def _sync_piano_external_rental(db, tid):
+    """Keep tuning `tid`'s linked show_external_rentals line (3.9.1): it
+    exists while the tuning isn't cancelled and has a cost or paperwork, so
+    the charge shows on the Assets tab, the Asset Estimate and the Final /
+    Combined Invoice like any external rental (paperwork PDF appended).
+    Cancelling removes the line and its paperwork. Caller commits. Returns
+    the line id or None."""
+    t = db.execute('SELECT id, show_id, status, piano, tuning_date, requested_date, cost '
+                   'FROM piano_tunings WHERE id=%s', (tid,)).fetchone()
+    er = db.execute('SELECT id, s3_key, pdf_filename FROM show_external_rentals '
+                    'WHERE piano_tuning_id=%s ORDER BY id', (tid,)).fetchall()
+    keep = er[0] if er else None
+    extra = er[1:]
+    want = bool(t) and t['status'] != 'cancelled' and (
+        t['cost'] is not None or bool(keep and keep['pdf_filename']))
+    if not want and keep:
+        extra = er
+        keep = None
+    for r in extra:
+        if r['s3_key']:
+            try:
+                s3_storage.delete_file(r['s3_key'])
+            except Exception as e:
+                syslog_logger.error(f"S3_DELETE_FAILED table=show_external_rentals "
+                                    f"id={r['id']} piano_tuning={tid} error={e}")
+        db.execute('DELETE FROM show_external_rentals WHERE id=%s', (r['id'],))
+    if not want:
+        return None
+    desc, cost = _piano_er_description(t), float(t['cost'] or 0)
+    if keep:
+        db.execute('UPDATE show_external_rentals SET show_id=%s, description=%s, cost=%s '
+                   'WHERE id=%s', (t['show_id'], desc, cost, keep['id']))
+        return keep['id']
+    order = db.execute('SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM show_external_rentals '
+                       'WHERE show_id=%s', (t['show_id'],)).fetchone()['n']
+    return db.execute(
+        'INSERT INTO show_external_rentals (show_id, description, cost, pdf_filename, '
+        'sort_order, piano_tuning_id) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id',
+        (t['show_id'], desc, cost, '', order, tid)).fetchone()['id']
 
 
 def _piano_manager_emails(db, exclude_user_id=None):
@@ -22185,6 +22284,11 @@ def _piano_clean(data, fields):
                 except ValueError:
                     return None, f'Invalid date for {k.replace("_", " ")}.'
             out[k] = v or None
+        elif k == 'piano_asset_type_id':
+            try:
+                out[k] = int(v) if v not in (None, '') else None
+            except (TypeError, ValueError):
+                return None, 'Pick the piano from the list.'
         elif k in ('requested_time', 'tuning_start', 'tuning_end'):
             out[k] = _normalize_perf_time(str(v or ''))[:20]
         elif k == 'cost':
@@ -22205,20 +22309,18 @@ def _piano_clean(data, fields):
     return out, None
 
 
-def _piano_defaults(db, show_id):
-    """Pre-fill for a new request from the show + its advance sheet."""
-    show = db.execute('SELECT venue, show_date, load_in_date FROM shows WHERE id=%s',
-                      (show_id,)).fetchone()
-    adv = {r['field_key']: (r['field_value'] or '') for r in db.execute(
-        "SELECT field_key, field_value FROM advance_data WHERE show_id=%s "
-        "AND field_key IN ('backline_piano_notes', 'backline_piano')", (show_id,)).fetchall()}
+def _piano_defaults(db, show_id, pianos, booked):
+    """Pre-fill for a new request: the first piano already on the show's
+    Assets tab, and the first performance date."""
+    show = db.execute('SELECT show_date FROM shows WHERE id=%s', (show_id,)).fetchone()
+    on_show = next((p['id'] for p in pianos if (show_id, p['id']) in booked), None)
     first = db.execute('SELECT MIN(perf_date) AS d FROM show_performances '
                        'WHERE show_id=%s AND perf_date IS NOT NULL', (show_id,)).fetchone()
     d = _as_date(first['d']) if first else None
     d = d or (_as_date(show['show_date']) if show else None)
     return {
-        'location': (show['venue'] if show else '') or '',
-        'piano': adv.get('backline_piano_notes', '').strip(),
+        'piano_asset_type_id': on_show,
+        'piano': '',
         'requested_date': d.isoformat() if d else '',
         'requested_time': '',
         'notes': '',
@@ -22233,21 +22335,27 @@ def show_piano_tunings(show_id):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'error': 'Access denied'}), 403
     db = get_db()
-    rows = db.execute("""
-        SELECT t.*, u.display_name AS requested_by_name, u.username AS requested_by_username
+    rows = db.execute(f"""
+        SELECT t.*, u.display_name AS requested_by_name, u.username AS requested_by_username,
+               {_PIANO_ER_COLS}
         FROM piano_tunings t LEFT JOIN users u ON u.id = t.requested_by
         WHERE t.show_id = %s ORDER BY t.created_at, t.id
     """, (show_id,)).fetchall()
     days = {d['date_key'] for d in _build_schedule_days(db, show_id)[1]}
-    defaults = _piano_defaults(db, show_id)
+    pianos = _piano_asset_types(db)
+    booked = _piano_booked(db, [show_id])
+    defaults = _piano_defaults(db, show_id, pianos, booked)
     db.close()
     out = []
     for r in rows:
         d = _piano_out(r)
         d['requested_by_name'] = r['requested_by_name'] or r['requested_by_username'] or ''
         d['on_schedule'] = bool(d['tuning_date'] and d['tuning_date'] in days)
+        d['piano_on_show'] = ((show_id, r['piano_asset_type_id']) in booked
+                              if r['piano_asset_type_id'] else None)
         out.append(d)
     return jsonify({'tunings': out, 'defaults': defaults,
+                    'pianos': [dict(p, on_show=(show_id, p['id']) in booked) for p in pianos],
                     'can_manage': _is_piano_manager(),
                     'statuses': [{'key': k, 'label': PIANO_STATUS_LABELS[k]}
                                  for k in PIANO_STATUSES]})
@@ -22269,13 +22377,20 @@ def show_piano_tuning_create(show_id):
     if not show:
         db.close()
         return jsonify({'error': 'Show not found'}), 404
+    err = _piano_resolve(db, vals, require=True)
+    if err:
+        db.close()
+        return jsonify({'error': err}), 400
     tid = db.execute("""
-        INSERT INTO piano_tunings (show_id, status, location, piano, requested_date,
-                                   requested_time, notes, requested_by, updated_by)
+        INSERT INTO piano_tunings (show_id, status, piano, piano_asset_type_id,
+                                   requested_date, requested_time, notes,
+                                   requested_by, updated_by)
         VALUES (%s, 'requested', %s, %s, %s, %s, %s, %s, %s) RETURNING id
-    """, (show_id, vals.get('location', ''), vals.get('piano', ''),
+    """, (show_id, vals.get('piano', ''), vals.get('piano_asset_type_id'),
           vals.get('requested_date'), vals.get('requested_time', ''),
           vals.get('notes', ''), session['user_id'], session['user_id'])).fetchone()['id']
+    pid = vals.get('piano_asset_type_id')
+    not_on_show = bool(pid) and (show_id, pid) not in _piano_booked(db, [show_id])
     log_audit(db, 'PIANO_TUNING_REQUEST', 'piano_tuning', tid, show_id=show_id,
               detail=f"date={vals.get('requested_date')} piano={vals.get('piano', '')!r}")
     recipients = _piano_manager_emails(db, exclude_user_id=session['user_id'])
@@ -22293,9 +22408,9 @@ def show_piano_tuning_create(show_id):
         f'3·2·1→THEATER: Piano Tuning Request — {show["name"]}',
         f'{who} requested a piano tuning.\n\n'
         f'Show: {show["name"]}\n'
-        f'Location: {vals.get("location") or "—"}\n'
         f'Piano: {vals.get("piano") or "—"}\n'
-        f'Needed: {vals.get("requested_date")} {vals.get("requested_time") or ""}\n'
+        + ('  (not on the show\'s Assets tab yet)\n' if not_on_show else '')
+        + f'Needed: {vals.get("requested_date")} {vals.get("requested_time") or ""}\n'
         f'Notes: {vals.get("notes") or "—"}\n\n'
         + (f'Piano Tuning list:\n{link}\n' if link else ''))
     return jsonify({'success': True, 'id': tid}), 201
@@ -22334,6 +22449,8 @@ def piano_tuning_update(tid):
             db.close()
             return jsonify({'error': 'Only the piano tuning manager can change that.'}), 403
     vals, err = _piano_clean(data, _PIANO_REQUEST_FIELDS + (_PIANO_MANAGER_FIELDS if manager else ()))
+    if not err:
+        err = _piano_resolve(db, vals, require=False)
     if err:
         db.close()
         return jsonify({'error': err}), 400
@@ -22364,6 +22481,7 @@ def piano_tuning_update(tid):
     params.append(tid)
     db.execute(f"UPDATE piano_tunings SET {', '.join(sets)} WHERE id=%s", params)
     _sync_piano_schedule_rows(db, show_id)
+    _sync_piano_external_rental(db, tid)
     db.execute('UPDATE shows SET updated_at=CURRENT_TIMESTAMP WHERE id=%s', (show_id,))
     changed = sorted(k for k in vals if str(vals[k] or '') != str(_piano_out(cur).get(k) or ''))
     log_audit(db, 'PIANO_TUNING_EDIT', 'piano_tuning', tid, show_id=show_id,
@@ -22390,7 +22508,6 @@ def piano_tuning_update(tid):
             f'Your piano tuning request for {cur["show_name"]} is scheduled.\n\n'
             f'When: {when}\n'
             f'Piano: {r["piano"] or "—"}\n'
-            f'Location: {r["location"] or "—"}\n'
             + (f'Vendor: {r["vendor"]}\n' if r['vendor'] else '')
             + '\nIt has been added to the show\'s production schedule.\n')
     return jsonify({'success': True, 'tuning': _piano_out(row)})
@@ -22423,7 +22540,7 @@ def piano_tunings_list():
     rows = db.execute(f"""
         SELECT t.*, s.name AS show_name, s.venue AS show_venue, s.status AS show_status,
                u.display_name AS requested_by_name, u.username AS requested_by_username,
-               {_ADV_PM_SQL} AS production_manager
+               {_ADV_PM_SQL} AS production_manager, {_PIANO_ER_COLS}
         FROM piano_tunings t
         JOIN shows s ON s.id = t.show_id
         LEFT JOIN users u ON u.id = t.requested_by
@@ -22432,13 +22549,118 @@ def piano_tunings_list():
     """, params).fetchall()
     counts = {r['status']: r['n'] for r in db.execute(
         'SELECT status, COUNT(*) AS n FROM piano_tunings GROUP BY status').fetchall()}
+    booked = _piano_booked(db, [r['show_id'] for r in rows])
+    pianos = _piano_asset_types(db)
     db.close()
     out = []
     for r in rows:
         d = _piano_out(r)
         d['requested_by_name'] = r['requested_by_name'] or r['requested_by_username'] or ''
+        d['piano_on_show'] = ((r['show_id'], r['piano_asset_type_id']) in booked
+                              if r['piano_asset_type_id'] else None)
         out.append(d)
-    return jsonify({'tunings': out, 'counts': counts})
+    return jsonify({'tunings': out, 'counts': counts, 'pianos': pianos})
+
+
+# The tuning's linked external-rental line: its id + paperwork file name.
+_PIANO_ER_COLS = ("(SELECT er.id FROM show_external_rentals er WHERE er.piano_tuning_id = t.id "
+                  "ORDER BY er.id LIMIT 1) AS er_id, "
+                  "(SELECT er.pdf_filename FROM show_external_rentals er "
+                  "WHERE er.piano_tuning_id = t.id ORDER BY er.id LIMIT 1) AS paperwork_filename")
+
+
+@app.route('/piano-tunings/<int:tid>/paperwork', methods=['POST'])
+@piano_manager_required
+def piano_tuning_paperwork_upload(tid):
+    """Attach the vendor paperwork (PDF) to a tuning. It lives on the
+    tuning's external-rental line, so it shows on the show's Assets tab and
+    is appended to the Asset Estimate / Final / Combined Invoice PDFs."""
+    if not _piano_module_on():
+        abort(404)
+    f = request.files.get('pdf')
+    if not f or not f.filename:
+        return jsonify({'error': 'Choose a PDF to upload.'}), 400
+    data = f.read()
+    if not data.startswith(b'%PDF'):
+        return jsonify({'error': 'Paperwork must be a PDF.'}), 400
+    filename = secure_filename(f.filename) or 'piano_tuning.pdf'
+    db = get_db()
+    t = db.execute('SELECT id, show_id, status, cost FROM piano_tunings WHERE id=%s FOR UPDATE',
+                   (tid,)).fetchone()
+    if not t:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+    if t['status'] == 'cancelled':
+        db.close()
+        return jsonify({'error': 'This tuning is cancelled.'}), 409
+    er = db.execute('SELECT id, s3_key FROM show_external_rentals WHERE piano_tuning_id=%s '
+                    'ORDER BY id LIMIT 1', (tid,)).fetchone()
+    if er:
+        er_id, old_key = er['id'], er['s3_key']
+    else:
+        er_id = db.execute(
+            'INSERT INTO show_external_rentals (show_id, description, cost, pdf_filename, '
+            'sort_order, piano_tuning_id) VALUES (%s, %s, %s, %s, '
+            '(SELECT COALESCE(MAX(sort_order), 0) + 1 FROM show_external_rentals WHERE show_id=%s), %s) '
+            'RETURNING id',
+            (t['show_id'], 'Piano tuning', float(t['cost'] or 0), filename,
+             t['show_id'], tid)).fetchone()['id']
+        old_key = None
+    sha = file_store.sha256_hex(data)
+    s3_key = None
+    if s3_storage.is_configured():
+        try:
+            s3_key = f"external-rentals/{er_id}/{filename}"
+            s3_storage.upload_file(s3_key, data, 'application/pdf')
+        except Exception as e:
+            s3_key = None
+            syslog_logger.warning(f"S3_UPLOAD_FAILED table=show_external_rentals id={er_id} "
+                                  f"piano_tuning={tid} error={e}")
+    keep_db = s3_key is None or file_store.keep_db_copy()
+    db.execute('UPDATE show_external_rentals SET pdf_data=%s, pdf_filename=%s, s3_key=%s, '
+               'content_sha256=%s WHERE id=%s',
+               (data if keep_db else None, filename, s3_key, sha, er_id))
+    if old_key and old_key != s3_key:
+        try:
+            s3_storage.delete_file(old_key)
+        except Exception as e:
+            app.logger.warning(f'S3 delete of old piano paperwork {old_key} failed: {e}')
+    _sync_piano_external_rental(db, tid)
+    log_audit(db, 'PIANO_TUNING_PAPERWORK', 'piano_tuning', tid, show_id=t['show_id'],
+              detail=f'file={filename}')
+    db.commit()
+    db.close()
+    syslog_logger.info(f"PIANO_TUNING_PAPERWORK id={tid} show_id={t['show_id']} "
+                       f"file={filename!r} by={session.get('username')}")
+    return jsonify({'success': True, 'er_id': er_id, 'paperwork_filename': filename})
+
+
+@app.route('/piano-tunings/<int:tid>/paperwork', methods=['DELETE'])
+@piano_manager_required
+def piano_tuning_paperwork_remove(tid):
+    if not _piano_module_on():
+        abort(404)
+    db = get_db()
+    er = db.execute('SELECT er.id, er.s3_key, t.show_id FROM show_external_rentals er '
+                    'JOIN piano_tunings t ON t.id = er.piano_tuning_id '
+                    'WHERE er.piano_tuning_id=%s ORDER BY er.id LIMIT 1', (tid,)).fetchone()
+    if not er:
+        db.close()
+        return jsonify({'success': True})
+    if er['s3_key']:
+        try:
+            s3_storage.delete_file(er['s3_key'])
+        except Exception as e:
+            syslog_logger.error(f"S3_DELETE_FAILED table=show_external_rentals id={er['id']} "
+                                f"piano_tuning={tid} error={e}")
+    db.execute("UPDATE show_external_rentals SET pdf_data=NULL, pdf_filename='', s3_key=NULL, "
+               "content_sha256=NULL WHERE id=%s", (er['id'],))
+    _sync_piano_external_rental(db, tid)
+    log_audit(db, 'PIANO_TUNING_PAPERWORK_REMOVE', 'piano_tuning', tid, show_id=er['show_id'])
+    db.commit()
+    db.close()
+    syslog_logger.info(f"PIANO_TUNING_PAPERWORK_REMOVE id={tid} by={session.get('username')}")
+    return jsonify({'success': True})
 
 
 _ADV_PM_SQL = ("(SELECT field_value FROM advance_data WHERE show_id = s.id "

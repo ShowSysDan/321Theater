@@ -530,12 +530,12 @@
       <input type="hidden" id="piano-edit-id">
       <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px">
         <div class="field-group" style="grid-column:span 2">
-          <label class="field-label">EVENT / SHOW LOCATION</label>
-          <input type="text" id="piano-location" class="field-input" maxlength="300" placeholder="e.g. Walt Disney Theater — stage">
-        </div>
-        <div class="field-group" style="grid-column:span 2">
-          <label class="field-label">PIANO</label>
-          <input type="text" id="piano-piano" class="field-input" maxlength="300" placeholder="e.g. Steinway D (house)">
+          <label class="field-label">PIANO *</label>
+          {# Pianos come from the Asset Manager's Piano category; free text
+             only when that category doesn't exist. #}
+          <select id="piano-pick" class="field-input" onchange="_pianoPickWarn()"></select>
+          <input type="text" id="piano-piano" class="field-input" maxlength="300" placeholder="e.g. Steinway D (house)" style="display:none">
+          <div id="piano-pick-warn" class="piano-pick-warn" style="display:none"></div>
         </div>
         <div class="field-group">
           <label class="field-label">NEEDED ON *</label>
@@ -563,7 +563,7 @@
 (function() {
   const SHOW_ID = {{ show.id }};
   const CAN_EDIT = {{ 'true' if can_edit_advance else 'false' }};
-  let _tunings = [], _defaults = {}, _canManage = false;
+  let _tunings = [], _defaults = {}, _canManage = false, _pianos = [];
   const H = {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'};
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const money = v => (v === null || v === undefined) ? '' : `$${Number(v).toFixed(2)}`;
@@ -576,6 +576,7 @@
       if (!r.ok) throw new Error(r.status);
       const d = await r.json();
       _tunings = d.tunings || []; _defaults = d.defaults || {}; _canManage = !!d.can_manage;
+      _pianos = d.pianos || [];
     } catch (e) {
       host.innerHTML = '<p style="font-size:12px;color:#e53e3e;margin:0">Couldn\'t load piano tunings.</p>';
       return;
@@ -586,7 +587,7 @@
       return;
     }
     host.innerHTML = `<div style="overflow-x:auto"><table class="data-table piano-table">
-      <thead><tr><th>Status</th><th>Piano</th><th>Location</th><th>Needed</th><th>Scheduled</th><th class="num">Cost</th><th></th></tr></thead>
+      <thead><tr><th>Status</th><th>Piano</th><th>Needed</th><th>Scheduled</th><th class="num">Cost</th><th></th></tr></thead>
       <tbody>${_tunings.map(t => {
         const sched = t.tuning_date
           ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}${t.tuning_end ? '–' + esc(t.tuning_end) : ''}`
@@ -595,14 +596,13 @@
         const mine = CAN_EDIT && t.status === 'requested';
         return `<tr>
           <td><span class="piano-status piano-status-${esc(t.status)}">${esc(t.status_label)}</span></td>
-          <td>${esc(t.piano) || '—'}${t.vendor ? `<div class="text-dim" style="font-size:10px">Vendor: ${esc(t.vendor)}</div>` : ''}</td>
-          <td>${esc(t.location) || '—'}</td>
+          <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? ` <span class="piano-warn" title="Add this piano on the Assets tab so it's reserved for the show.">⚠ not on Assets tab</span>` : ''}${t.vendor ? `<div class="text-dim" style="font-size:10px">Vendor: ${esc(t.vendor)}</div>` : ''}</td>
           <td style="white-space:nowrap">${esc(t.requested_date || '')} ${esc(t.requested_time || '')}</td>
           <td style="white-space:nowrap">${sched}</td>
-          <td class="num">${money(t.cost) || '—'}</td>
+          <td class="num">${money(t.cost) || '—'}${t.paperwork_filename ? `<div style="font-size:10px"><a href="/shows/${SHOW_ID}/external-rentals/${t.er_id}/pdf" target="_blank">📄 Paperwork</a></div>` : ''}</td>
           <td style="white-space:nowrap">${mine ? `<button type="button" class="btn btn-xs btn-ghost" onclick="openPianoRequest(${t.id})">Edit</button>
             <button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="cancelPianoRequest(${t.id})">Cancel</button>` : ''}</td>
-        </tr>${t.notes ? `<tr class="piano-notes-row"><td></td><td colspan="6" class="text-dim" style="font-size:11px;white-space:pre-wrap">${esc(t.notes)}</td></tr>` : ''}`;
+        </tr>${t.notes ? `<tr class="piano-notes-row"><td></td><td colspan="5" class="text-dim" style="font-size:11px;white-space:pre-wrap">${esc(t.notes)}</td></tr>` : ''}`;
       }).join('')}</tbody></table></div>`;
   }
   window.loadPianoTunings = loadPiano;
@@ -613,24 +613,49 @@
     document.getElementById('piano-edit-id').value = t ? t.id : '';
     document.getElementById('piano-modal-title').textContent = t ? 'Edit Piano Tuning Request' : 'Request Piano Tuning';
     document.getElementById('piano-save-btn').textContent = t ? 'Save' : 'Send Request';
-    document.getElementById('piano-location').value = v.location || '';
-    document.getElementById('piano-piano').value = v.piano || '';
+    const pick = document.getElementById('piano-pick');
+    const text = document.getElementById('piano-piano');
+    const usePick = _pianos.length > 0;
+    pick.style.display = usePick ? '' : 'none';
+    text.style.display = usePick ? 'none' : '';
+    const opts = _pianos.slice();
+    // A request saved before its piano left the list keeps showing it.
+    if (v.piano_asset_type_id && !opts.some(p => p.id === v.piano_asset_type_id)) {
+      opts.push({id: v.piano_asset_type_id, name: v.piano || `Piano #${v.piano_asset_type_id}`, on_show: v.piano_on_show});
+    }
+    pick.innerHTML = '<option value="">— Select piano —</option>' + opts.map(p =>
+      `<option value="${p.id}" data-on-show="${p.on_show ? 1 : 0}">${esc(p.name)}${p.on_show ? ' (on this show)' : ''}</option>`).join('');
+    pick.value = v.piano_asset_type_id ? String(v.piano_asset_type_id) : '';
+    text.value = v.piano || '';
+    _pianoPickWarn();
     document.getElementById('piano-req-date').value = v.requested_date || '';
     document.getElementById('piano-req-time').value = v.requested_time || '';
     document.getElementById('piano-notes').value = v.notes || '';
     document.getElementById('piano-modal').style.display = 'flex';
+  };
+  // Warn (not block) when the picked piano isn't booked on the Assets tab.
+  window._pianoPickWarn = function() {
+    const pick = document.getElementById('piano-pick');
+    const warn = document.getElementById('piano-pick-warn');
+    const opt = pick.selectedOptions[0];
+    const missing = _pianos.length && pick.value && opt && opt.dataset.onShow !== '1';
+    warn.style.display = missing ? '' : 'none';
+    warn.textContent = missing
+      ? `⚠ ${opt.textContent} isn't on this show's Assets tab yet — add it there so the piano is reserved for the show.`
+      : '';
   };
   window.closePianoModal = function() { document.getElementById('piano-modal').style.display = 'none'; };
 
   window.savePianoRequest = async function() {
     const id = document.getElementById('piano-edit-id').value;
     const payload = {
-      location: document.getElementById('piano-location').value.trim(),
+      piano_asset_type_id: document.getElementById('piano-pick').value || null,
       piano: document.getElementById('piano-piano').value.trim(),
       requested_date: document.getElementById('piano-req-date').value,
       requested_time: document.getElementById('piano-req-time').value.trim(),
       notes: document.getElementById('piano-notes').value.trim(),
     };
+    if (_pianos.length && !payload.piano_asset_type_id) { alert('Pick the piano.'); return; }
     if (!payload.requested_date) { alert('Pick the date the piano needs tuning.'); return; }
     const btn = document.getElementById('piano-save-btn');
     btn.disabled = true;
@@ -1645,6 +1670,8 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     _perfCompany = data.performance_company || '';
     renderAssets(data.assets || [], data.external_rentals || []);
     renderApprovalBadge(data.approval || {approved: false});
+    // The Piano Tuning panel warns about pianos not on the Assets tab.
+    if (window.loadPianoTunings) window.loadPianoTunings();
   };
 
   function renderApprovalBadge(appr) {
@@ -1761,9 +1788,10 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           <td>${esc(er.description)}</td>
           <td>$${Number(er.cost).toFixed(2)}</td>
           <td>${er.pdf_filename ? `<a href="/shows/${SHOW_ID}/external-rentals/${er.id}/pdf" target="_blank" style="font-size:11px">View PDF</a>` : '—'}</td>
-          ${IS_ADMIN ? `<td style="white-space:nowrap">
-            <button class="btn btn-xs btn-ghost" onclick="editExternalRental(${esc(JSON.stringify(er))})" title="Edit">✎</button>
-            <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="removeExternalRental(${er.id})" title="Remove">✕</button>
+          ${IS_ADMIN ? `<td style="white-space:nowrap">${er.piano_tuning_id
+            ? `<span class="piano-er-tag" title="From Piano Tuning — the piano tuning manager sets its cost and paperwork">🎹 Piano Tuning</span>`
+            : `<button class="btn btn-xs btn-ghost" onclick="editExternalRental(${esc(JSON.stringify(er))})" title="Edit">✎</button>
+            <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="removeExternalRental(${er.id})" title="Remove">✕</button>`}
           </td>` : ''}
         `;
         erTbody.appendChild(tr);

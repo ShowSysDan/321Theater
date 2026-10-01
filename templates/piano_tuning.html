@@ -22,7 +22,7 @@
     {% endfor %}
     <button type="button" class="btn btn-sm btn-ghost" data-status="all">All</button>
   </div>
-  <input type="text" id="piano-search" class="field-input field-input-sm" placeholder="Search show, piano, location, vendor…" autocomplete="off">
+  <input type="text" id="piano-search" class="field-input field-input-sm" placeholder="Search show, piano, vendor, PM…" autocomplete="off">
 </div>
 
 <div class="form-section">
@@ -32,7 +32,7 @@
         <tr>
           <th>Status</th>
           <th>Show</th>
-          <th>Piano / Location</th>
+          <th>Piano</th>
           <th>Needed</th>
           <th>Scheduled</th>
           <th>Vendor</th>
@@ -68,12 +68,10 @@
           <input type="text" id="pt-vendor" class="field-input" maxlength="300">
         </div>
         <div class="field-group" style="grid-column:span 2">
-          <label class="field-label">EVENT / SHOW LOCATION</label>
-          <input type="text" id="pt-location" class="field-input" maxlength="300">
-        </div>
-        <div class="field-group" style="grid-column:span 2">
           <label class="field-label">PIANO</label>
-          <input type="text" id="pt-piano" class="field-input" maxlength="300">
+          <select id="pt-pick" class="field-input" onchange="ptPickWarn()"></select>
+          <input type="text" id="pt-piano" class="field-input" maxlength="300" style="display:none">
+          <div id="pt-pick-warn" class="piano-pick-warn" style="display:none"></div>
         </div>
         <div class="field-group">
           <label class="field-label">NEEDED ON</label>
@@ -93,9 +91,13 @@
         </div>
         <div class="field-group">
           <label class="field-label">COST ($)</label>
-          <input type="text" id="pt-cost" class="field-input" inputmode="decimal" placeholder="Billed on the Final Invoice">
+          <input type="text" id="pt-cost" class="field-input" inputmode="decimal" placeholder="Shows on the show's Assets tab">
         </div>
-        <div class="field-group"></div>
+        <div class="field-group">
+          <label class="field-label">PAPERWORK (PDF)</label>
+          <div id="pt-paper-current" style="font-size:12px;margin-bottom:4px"></div>
+          <input type="file" id="pt-paper" accept="application/pdf,.pdf" class="field-input" onchange="ptUploadPaper()">
+        </div>
         <div class="field-group" style="grid-column:span 2">
           <label class="field-label">REQUEST NOTES (from the PM)</label>
           <textarea id="pt-notes" class="field-input field-textarea" rows="2" maxlength="4000"></textarea>
@@ -105,7 +107,7 @@
           <textarea id="pt-mgr-notes" class="field-input field-textarea" rows="2" maxlength="4000" placeholder="Vendor confirmation, PO number…"></textarea>
         </div>
       </div>
-      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">Setting the tuning date moves an open request to <strong>Scheduled</strong> and emails the requester. Cancelling removes the schedule row and keeps the cost off the invoice.</p>
+      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">Setting the tuning date moves an open request to <strong>Scheduled</strong> and emails the requester. The cost and paperwork appear right away as an external rental on the show's Assets tab (and its Asset Estimate / Final Invoice, with the PDF attached). Cancelling removes the schedule row, the charge and the paperwork.</p>
     </div>
     <div class="modal-footer">
       <a id="pt-show-link" class="btn btn-ghost" href="#" style="margin-right:auto">Open show →</a>
@@ -128,7 +130,7 @@
 (function() {
   const H = {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'};
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  let _status = 'open', _rows = [], _seq = 0;
+  let _status = 'open', _rows = [], _seq = 0, _pianos = [];
 
   async function load() {
     const seq = ++_seq;
@@ -144,6 +146,7 @@
     }
     if (seq !== _seq) return;
     _rows = d.tunings || [];
+    _pianos = d.pianos || [];
     const c = d.counts || {};
     document.querySelectorAll('.piano-count').forEach(el => {
       const k = el.dataset.count;
@@ -157,7 +160,7 @@
     const body = document.getElementById('piano-list-body');
     const q = (document.getElementById('piano-search').value || '').trim().toLowerCase();
     const rows = !q ? _rows : _rows.filter(t =>
-      [t.show_name, t.piano, t.location, t.vendor, t.production_manager, t.requested_by_name]
+      [t.show_name, t.piano, t.vendor, t.production_manager, t.requested_by_name]
         .some(v => String(v || '').toLowerCase().includes(q)));
     if (!rows.length) {
       body.innerHTML = `<tr><td colspan="9" class="text-dim">${_rows.length ? 'No tunings match your search.' : 'No piano tunings here.'}</td></tr>`;
@@ -168,11 +171,11 @@
         <td><span class="piano-status piano-status-${esc(t.status)}">${esc(t.status_label)}</span></td>
         <td><a href="/shows/${t.show_id}?tab=advance">${esc(t.show_name)}</a>
           <div class="sub">${esc(t.show_venue || '')}${t.production_manager ? ' · PM ' + esc(t.production_manager) : ''}</div></td>
-        <td>${esc(t.piano) || '—'}<div class="sub">${esc(t.location || '')}</div></td>
+        <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? '<div class="piano-warn" style="margin-left:0" title="The show hasn\'t added this piano on its Assets tab.">⚠ not on show\'s Assets tab</div>' : ''}</td>
         <td style="white-space:nowrap">${esc(t.requested_date || '')} ${esc(t.requested_time || '')}</td>
         <td style="white-space:nowrap">${t.tuning_date ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}${t.tuning_end ? '–' + esc(t.tuning_end) : ''}` : '—'}</td>
         <td>${esc(t.vendor) || '—'}</td>
-        <td class="num">${t.cost === null || t.cost === undefined ? '—' : '$' + Number(t.cost).toFixed(2)}</td>
+        <td class="num">${t.cost === null || t.cost === undefined ? '—' : '$' + Number(t.cost).toFixed(2)}${t.paperwork_filename ? `<div class="sub"><a href="/shows/${t.show_id}/external-rentals/${t.er_id}/pdf" target="_blank" title="${esc(t.paperwork_filename)}">📄 PDF</a></div>` : ''}</td>
         <td class="sub">${esc(t.requested_by_name || '')}</td>
         <td><div style="display:flex;flex-direction:column;gap:4px;align-items:stretch">
           ${t.status === 'requested' ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptQuick(${t.id},'sent')">Sent to vendor</button>` : ''}
@@ -192,7 +195,7 @@
   }));
   document.getElementById('piano-search').addEventListener('input', render);
 
-  const F = {status: 'pt-status', vendor: 'pt-vendor', location: 'pt-location', piano: 'pt-piano',
+  const F = {status: 'pt-status', vendor: 'pt-vendor',
              requested_date: 'pt-req-date', requested_time: 'pt-req-time', tuning_date: 'pt-date',
              tuning_start: 'pt-start', tuning_end: 'pt-end', notes: 'pt-notes', manager_notes: 'pt-mgr-notes'};
 
@@ -205,9 +208,64 @@
       `${t.show_name}${t.show_venue ? ' · ' + t.show_venue : ''}${t.requested_by_name ? ' · requested by ' + t.requested_by_name : ''}`;
     document.getElementById('pt-show-link').href = `/shows/${t.show_id}?tab=schedule`;
     Object.entries(F).forEach(([k, el]) => { document.getElementById(el).value = t[k] || ''; });
+    const pick = document.getElementById('pt-pick'), text = document.getElementById('pt-piano');
+    const usePick = _pianos.length > 0;
+    pick.style.display = usePick ? '' : 'none';
+    text.style.display = usePick ? 'none' : '';
+    const opts = _pianos.slice();
+    if (t.piano_asset_type_id && !opts.some(p => p.id === t.piano_asset_type_id)) {
+      opts.push({id: t.piano_asset_type_id, name: t.piano || `Piano #${t.piano_asset_type_id}`});
+    }
+    pick.innerHTML = '<option value="">— Select piano —</option>' +
+      opts.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+    pick.value = t.piano_asset_type_id ? String(t.piano_asset_type_id) : '';
+    pick.dataset.orig = pick.value;
+    pick.dataset.onShow = t.piano_on_show === false ? '0' : '1';
+    text.value = t.piano || '';
+    ptPickWarn();
+    _ptPaperRender(t);
+    document.getElementById('pt-paper').value = '';
     document.getElementById('pt-cost').value = t.cost === null || t.cost === undefined ? '' : Number(t.cost).toFixed(2);
     document.getElementById('pt-status').dataset.orig = t.status;
     document.getElementById('pt-modal').style.display = 'flex';
+  };
+  // The on-show check is per show, so it's only known for the saved pick.
+  window.ptPickWarn = function() {
+    const pick = document.getElementById('pt-pick'), warn = document.getElementById('pt-pick-warn');
+    const missing = _pianos.length && pick.value && pick.value === pick.dataset.orig && pick.dataset.onShow === '0';
+    warn.style.display = missing ? '' : 'none';
+    warn.textContent = missing ? "⚠ This piano isn't on the show's Assets tab — ask the PM to add it so it's reserved." : '';
+  };
+  function _ptPaperRender(t) {
+    const host = document.getElementById('pt-paper-current');
+    host.innerHTML = t.paperwork_filename
+      ? `<a href="/shows/${t.show_id}/external-rentals/${t.er_id}/pdf" target="_blank">📄 ${esc(t.paperwork_filename)}</a>
+         <button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="ptRemovePaper()">Remove</button>`
+      : '<span class="text-dim">None attached</span>';
+  }
+  // Paperwork saves immediately (its own endpoint), separate from Save.
+  window.ptUploadPaper = async function() {
+    const id = document.getElementById('pt-id').value;
+    const inp = document.getElementById('pt-paper');
+    if (!inp.files[0]) return;
+    const fd = new FormData();
+    fd.append('pdf', inp.files[0]);
+    const r = await fetch(`/piano-tunings/${id}/paperwork`, {method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest'}, body: fd});
+    const d = await r.json().catch(() => ({}));
+    inp.value = '';
+    if (!r.ok) { alert(d.error || 'Upload failed.'); return; }
+    const t = _rows.find(x => x.id == id);
+    if (t) { t.er_id = d.er_id; t.paperwork_filename = d.paperwork_filename; _ptPaperRender(t); }
+    load();
+  };
+  window.ptRemovePaper = async function() {
+    if (!confirm('Remove the paperwork from this tuning?')) return;
+    const id = document.getElementById('pt-id').value;
+    const r = await fetch(`/piano-tunings/${id}/paperwork`, {method: 'DELETE', headers: H});
+    if (!r.ok) { alert('Could not remove the paperwork.'); return; }
+    const t = _rows.find(x => x.id == id);
+    if (t) { t.paperwork_filename = null; _ptPaperRender(t); }
+    load();
   };
   window.ptClose = function() { document.getElementById('pt-modal').style.display = 'none'; };
 
@@ -223,9 +281,14 @@
     const payload = {};
     Object.entries(F).forEach(([k, el]) => { payload[k] = document.getElementById(el).value; });
     payload.cost = document.getElementById('pt-cost').value;
+    if (_pianos.length) payload.piano_asset_type_id = document.getElementById('pt-pick').value || null;
+    else payload.piano = document.getElementById('pt-piano').value.trim();
     // Status untouched → let the server move an open request to Scheduled
     // when a tuning date is set.
     if (payload.status === document.getElementById('pt-status').dataset.orig) delete payload.status;
+    const cur = _rows.find(x => x.id == id);
+    if (payload.status === 'cancelled' && cur && cur.paperwork_filename
+        && !confirm('Cancelling also removes its charge and the attached paperwork from the show. Continue?')) return;
     const btn = document.getElementById('pt-save');
     btn.disabled = true;
     try {

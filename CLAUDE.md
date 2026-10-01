@@ -773,9 +773,20 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   rebuilds the schedule wholesale, so without it a stale tab drops the row.
   The editor renders them read-only (`.piano-sched-row`, `data-piano-id`);
   copy-day / template-replace skip them.
-- Costs bill only on the settlement (Final + Combined Invoice) through
-  `_fetch_show_assets_and_externals(..., include_piano=True)`, as external
-  lines; never on the Asset Estimate. Cancelled = never billed.
+- Piano = an asset type in a category named like 'Piano'
+  (`_piano_asset_types`; stored as `piano_asset_type_id` + name snapshot in
+  `piano`); free text only when no such category exists. No location field
+  (always the stage). "Not on Assets tab" warning = `_piano_booked()` (direct
+  line or system component) — a warning, never a block.
+- Cost + paperwork (3.10.0) live on ONE linked `show_external_rentals` row
+  (`piano_tuning_id`), kept by `_sync_piano_external_rental()` (exists while
+  not cancelled and cost or PDF present; cancel deletes it + its file). So it
+  shows on the Assets tab / Asset Estimate / Final / Combined Invoice like any
+  external rental — never add a second billing path. The external-rental
+  edit/delete routes 409 on these rows, and they're excluded from
+  `_compute_asset_snapshot_hash` (piano charges don't reset asset approval).
+  Paperwork uploads (`/piano-tunings/<id>/paperwork`) go to that row via
+  S3/DB like other rental PDFs.
 
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.
