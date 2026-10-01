@@ -264,3 +264,6 @@ html.mobile-view .piano-toolbar #piano-search { max-width: none; }
 /* TEST_MODE frame (3.12.0): on phones the header already carries the TEST
    badge and both edges hold fixed chrome, so keep just the red frame. */
 html.mobile-view .test-mode-frame span { display: none; }
+
+/* Light glass refresh (3.12.1): the same soft lift + top highlight. */
+html.mobile-view .m-header { box-shadow: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -1px 0 rgba(255,255,255,.05), 0 4px 16px -4px rgba(0,0,0,.4); }

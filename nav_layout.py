@@ -73,7 +73,7 @@ NAV_CATALOG = [
      'audience': 'asset_manager',
      'icon': '<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/>'},
     {'key': 'asset_approvals', 'label': 'Approvals', 'endpoint': 'asset_approvals',
-     'active': ('asset_approvals',), 'audience': 'asset_manager', 'badge': True,
+     'active': ('asset_approvals',), 'audience': 'asset_manager', 'badge': 'approvals',
      'icon': '<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/>'},
     # Reports (3.12.0) are their own section, not an asset tool. Replaces the
     # old 'asset_reports' item (its saved-layout entry is dropped; the new
@@ -85,7 +85,7 @@ NAV_CATALOG = [
      'active': ('assets_retired',), 'audience': 'asset_manager',
      'icon': '<circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/>'},
     {'key': 'piano_tuning', 'label': 'Piano Tuning', 'endpoint': 'piano_tuning_page',
-     'active': ('piano_tuning_page',), 'audience': 'piano_manager',
+     'active': ('piano_tuning_page',), 'audience': 'piano_manager', 'badge': 'piano',
      'icon': '<path d="M3 5h18v14H3z"/><path d="M8 5v8"/><path d="M12 5v8"/><path d="M16 5v8"/><path d="M6.5 13h3"/><path d="M14.5 13h3"/><path d="M8 13v6"/><path d="M16 13v6"/><path d="M12 13v6"/>'},
     {'key': 'settings', 'label': 'Settings', 'endpoint': 'settings',
      'active': ('settings',), 'audience': 'all', 'required': True,
@@ -246,6 +246,7 @@ def resolve(layout, audience_ok, endpoint):
             'icon': item['icon'],
             'indent': bool(e.get('indent')),
             'active': active,
-            'badge': bool(item.get('badge')),
+            # Named count badge (base.html polls one endpoint per name).
+            'badge': item.get('badge') or None,
         })
     return out

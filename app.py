@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.12.0'
+APP_VERSION = '3.13.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -5494,10 +5494,11 @@ def _render_show_board(mine=False):
             out.append(d)
         return out
 
-    if mine:
-        archived = []
+    # Archived shows live on their own page (/shows/archived, 3.12.1); Home
+    # only shows how many there are on the "Archived" button.
+    archived_count = 0 if mine else len(archived)
+    archived = []
     active = _attach_perfs(active)
-    archived = _attach_perfs(archived)
 
     # PAST badge (3.6.0): an active show whose last date has gone by stays on
     # the dashboard through the auto-archive grace period — say so on its card
@@ -5627,6 +5628,46 @@ def _render_show_board(mine=False):
                            home_layout=home_layout,
                            home_density=home_density,
                            my_shows=mine,
+                           archived_count=archived_count,
+                           user=get_current_user())
+
+
+@app.route('/shows/archived')
+@login_required
+def archived_shows_page():
+    """Every archived show, newest first, with search / date / venue filters
+    and Restore (+ Delete for admins) — moved off Home in 3.12.1 so the board
+    doesn't end in a long scroll."""
+    accessible = get_accessible_shows(session['user_id'])
+    _eff = """COALESCE(s.show_date,
+        (SELECT MIN(perf_date) FROM show_performances WHERE show_id=s.id AND perf_date IS NOT NULL))"""
+    where, params = ["s.status = 'archived'"], []
+    if accessible is not None:
+        if not accessible:
+            where.append('FALSE')
+        else:
+            where.append(f"s.id IN ({','.join(['%s'] * len(accessible))})")
+            params += list(accessible)
+    db = get_db()
+    rows = db.execute(f"""
+        SELECT s.id, s.name, s.venue, s.is_test, s.show_mode, {_eff} AS show_date,
+               (SELECT field_value FROM advance_data WHERE show_id = s.id
+                 AND field_key = 'performance_company') AS company
+        FROM shows s WHERE {' AND '.join(where)}
+        ORDER BY {_eff} DESC NULLS LAST, s.id DESC
+    """, params).fetchall()
+    db.close()
+    shows = []
+    for r in rows:
+        d = dict(r)
+        sd = _as_date(d['show_date'])
+        d['show_date'] = sd.isoformat() if sd else None
+        d['venue'] = (d['venue'] or '').strip()
+        shows.append(d)
+    venues = sorted({s['venue'] or 'Unassigned' for s in shows},
+                    key=lambda v: (v == 'Unassigned', v.lower()))
+    return render_template('archived_shows.html', shows=shows, venues=venues,
+                           restricted=session.get('is_restricted', False),
                            user=get_current_user())
 
 
@@ -22599,6 +22640,37 @@ def piano_tuning_update(tid):
             + (f'Vendor: {r["vendor"]}\n' if r['vendor'] else '')
             + ('\nIt has been added to the show\'s production schedule.\n' if when else ''))
     return jsonify({'success': True, 'tuning': _piano_out(row)})
+
+
+@app.route('/api/piano-tunings/pending-count')
+@piano_manager_required
+def piano_tunings_pending_count():
+    """Nav badge: tunings waiting on the piano manager — new requests not yet
+    scheduled, plus open cancellation requests. `urgent` = those needed
+    within PIANO_URGENT_DAYS. Cheap (one aggregate), polled once a minute."""
+    if not _piano_module_on():
+        return jsonify({'pending': 0, 'requested': 0, 'cancel_requests': 0, 'urgent': 0,
+                        'urgent_days': PIANO_URGENT_DAYS})
+    db = get_db()
+    r = db.execute("""
+        SELECT COUNT(*) FILTER (WHERE t.status = 'requested') AS requested,
+               COUNT(*) FILTER (WHERE t.cancel_requested_at IS NOT NULL
+                                  AND t.status IN ('requested', 'scheduled')) AS cancels,
+               COUNT(*) FILTER (WHERE (t.status = 'requested'
+                                       OR (t.cancel_requested_at IS NOT NULL AND t.status = 'scheduled'))
+                                  AND COALESCE(t.tuning_date, t.requested_date) <= CURRENT_DATE + %s) AS urgent,
+               COUNT(*) FILTER (WHERE t.status = 'requested'
+                                   OR (t.cancel_requested_at IS NOT NULL AND t.status = 'scheduled')) AS pending
+        FROM piano_tunings t JOIN shows s ON s.id = t.show_id
+        WHERE COALESCE(s.status, 'active') = 'active'
+    """, (PIANO_URGENT_DAYS,)).fetchone()
+    db.close()
+    return jsonify({'pending': r['pending'] or 0, 'requested': r['requested'] or 0,
+                    'cancel_requests': r['cancels'] or 0, 'urgent': r['urgent'] or 0,
+                    'urgent_days': PIANO_URGENT_DAYS})
+
+
+PIANO_URGENT_DAYS = 7
 
 
 @app.route('/piano-tuning')

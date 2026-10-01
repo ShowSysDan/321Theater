@@ -835,6 +835,19 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
 - TEST_MODE: `html.test-mode` + `.test-mode-frame` (base.html, style.css;
   label hidden on mobile). Keep it `pointer-events: none`.
 
+## Archived shows page + nav badges + glass layer (3.13.0)
+- Home (`_render_show_board`) no longer renders archived cards — only
+  `archived_count` for the **Archived** button; `/shows/archived`
+  (`archived_shows_page`, `archived_shows.html`) is the archive with its own
+  client-side search/date/venue filters and Restore/Delete forms.
+- Nav badges are NAMED: catalog `'badge': 'approvals' | 'piano'` → base.html
+  renders `#nav-<name>-badge` and a poller per name
+  (`/api/asset-approvals/pending-count`, `/api/piano-tunings/pending-count`).
+  Keep each count endpoint one cheap aggregate (polled every 60 s per tab).
+- The "Light glass refresh" block at the END of style.css (+ one m-header rule
+  in mobile.css) is the only place the WebRetriever2-style tokens
+  (`--hl`, `--lift`, `--lift-hover`) live; the bigger restyle comes later.
+
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.
 At the end of any change that touches code/config, **state plainly which
