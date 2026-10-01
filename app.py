@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.7.0'
+APP_VERSION = '3.8.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -17781,7 +17781,8 @@ def asset_types_admin_list():
                ac.name as category_name,
                pt.name as parent_name,
                (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id) as item_count,
-               (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id AND ai.status = 'retired') as retired_item_count
+               (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id AND ai.status = 'retired') as retired_item_count,
+               (SELECT COUNT(*) FROM asset_company_rates cr WHERE cr.asset_type_id = at.id) as company_rate_count
         FROM asset_types at
         JOIN asset_categories ac ON ac.id = at.category_id
         LEFT JOIN asset_types pt ON pt.id = at.parent_type_id
@@ -17830,6 +17831,12 @@ def asset_type_add():
         1 if data.get('allow_unit_selection') else 0,
         max_order + 1,
     )).fetchone()['id']
+    if data.get('company_rates'):
+        err = _save_company_rates(db, _new_id, data.get('company_rates'))
+        if err:
+            db.rollback()
+            db.close()
+            return jsonify({'error': err}), 400
     db.commit()
     row = db.execute('SELECT * FROM asset_types WHERE id=%s', (_new_id,)).fetchone()
     log_audit(db, 'ASSET_TYPE_ADD', 'asset_type', row['id'], detail=name)
@@ -17877,11 +17884,81 @@ def asset_type_edit(type_id):
         1 if data.get('allow_unit_selection') else 0,
         type_id,
     ))
+    if 'company_rates' in data:
+        err = _save_company_rates(db, type_id, data.get('company_rates'))
+        if err:
+            db.rollback()
+            db.close()
+            return jsonify({'error': err}), 400
     db.commit()
     log_audit(db, 'ASSET_TYPE_EDIT', 'asset_type', type_id, detail=name)
     db.commit()
     db.close()
     return jsonify({'success': True})
+
+
+def _save_company_rates(db, type_id, rates):
+    """Replace this asset type's Performance Company special rates with
+    `rates` ([{company, rental_cost, weekly_rate}]). Returns an error string
+    or None. Doesn't commit. Existing show lines keep their locked prices."""
+    if not isinstance(rates, list):
+        return 'company_rates must be a list'
+    clean, seen = [], set()
+    for r in rates:
+        if not isinstance(r, dict):
+            continue
+        company = ' '.join(str(r.get('company') or '').split())
+        if not company:
+            continue
+        if _company_key(company) in seen:
+            return f'"{company}" is listed twice.'
+        seen.add(_company_key(company))
+        try:
+            daily = float(r.get('rental_cost') or 0)
+            weekly = float(r.get('weekly_rate') or 0)
+        except (TypeError, ValueError):
+            return f'Invalid rate for "{company}".'
+        if daily < 0 or weekly < 0:
+            return f'Rates for "{company}" can\'t be negative.'
+        clean.append((company, daily, weekly))
+    before = {r['company']: (float(r['rental_cost'] or 0), float(r['weekly_rate'] or 0))
+              for r in db.execute('SELECT company, rental_cost, weekly_rate '
+                                  'FROM asset_company_rates WHERE asset_type_id=%s',
+                                  (type_id,)).fetchall()}
+    after = {c: (d, w) for c, d, w in clean}
+    if before == after:
+        return None
+    db.execute('DELETE FROM asset_company_rates WHERE asset_type_id=%s', (type_id,))
+    for company, daily, weekly in clean:
+        db.execute('INSERT INTO asset_company_rates '
+                   '(asset_type_id, company, rental_cost, weekly_rate, updated_by) '
+                   'VALUES (%s,%s,%s,%s,%s)',
+                   (type_id, company, daily, weekly, session.get('user_id')))
+    log_audit(db, 'ASSET_COMPANY_RATES', 'asset_type', type_id,
+              detail='; '.join(f'{c}: {d:.2f}/day {w:.2f}/wk' for c, d, w in clean)
+              or 'cleared')
+    syslog_logger.info(f"ASSET_COMPANY_RATES type_id={type_id} count={len(clean)} "
+                       f"by={session.get('username')}")
+    return None
+
+
+@app.route('/settings/asset-company-rates', methods=['GET'])
+@asset_manager_required
+def asset_company_rates_get():
+    """Company list (the Performance Company dropdown's options) plus, with
+    ?type_id=, that asset type's special rates — for the item-type modal."""
+    db = get_db()
+    companies = _performance_company_options(db)
+    rates = []
+    tid = request.args.get('type_id', type=int)
+    if tid:
+        rates = [{'company': r['company'], 'rental_cost': float(r['rental_cost'] or 0),
+                  'weekly_rate': float(r['weekly_rate'] or 0)}
+                 for r in db.execute('SELECT company, rental_cost, weekly_rate '
+                                     'FROM asset_company_rates WHERE asset_type_id=%s '
+                                     'ORDER BY company', (tid,)).fetchall()]
+    db.close()
+    return jsonify({'companies': companies, 'rates': rates})
 
 
 @app.route('/settings/asset-types/bulk-hide-from-pm', methods=['POST'])
@@ -18745,6 +18822,79 @@ def _compute_locked_price(daily_rate, weekly_rate, rental_start, rental_end,
     return daily * days
 
 
+def _company_key(name):
+    """Comparison form of a Performance Company name (case/space-insensitive)."""
+    return ' '.join(str(name or '').split()).lower()
+
+
+def _performance_company_options(db):
+    """Companies an asset manager can attach special rates to: the options of
+    the advance form's `performance_company` dropdown (strings or
+    {'value': …} dicts), plus any company that already has rates (so rates
+    for an option later removed from the dropdown stay visible/editable)."""
+    out, seen = [], set()
+
+    def _add(v):
+        v = ' '.join(str(v or '').split())
+        k = v.lower()
+        if v and v not in ('—', '-') and k not in seen:
+            seen.add(k)
+            out.append(v)
+
+    ff = db.execute("SELECT options_json FROM form_fields "
+                    "WHERE field_key='performance_company'").fetchone()
+    if ff and ff['options_json']:
+        try:
+            for o in json.loads(ff['options_json']) or []:
+                _add(o.get('value') if isinstance(o, dict) else o)
+        except (ValueError, TypeError, AttributeError):
+            pass
+    for r in db.execute('SELECT DISTINCT company FROM asset_company_rates '
+                        'ORDER BY company').fetchall():
+        _add(r['company'])
+    return out
+
+
+def _show_company_rates(db, show_id):
+    """(company, {asset_type_id: {'company','daily','weekly'}}) for the show's
+    Performance Company — the special rate card that replaces the standard
+    rental_cost / weekly_rate when a line is priced (3.8.0). ('', {}) when
+    the show has no company or the company has no special rates."""
+    company = (_show_performance_company(db, show_id) or '').strip()
+    if not company:
+        return '', {}
+    rows = db.execute(
+        "SELECT asset_type_id, company, rental_cost, weekly_rate "
+        "FROM asset_company_rates "
+        "WHERE LOWER(REGEXP_REPLACE(TRIM(company), '\\s+', ' ', 'g')) = %s",
+        (_company_key(company),)).fetchall()
+    return company, {r['asset_type_id']: {'company': r['company'],
+                                          'daily': float(r['rental_cost'] or 0),
+                                          'weekly': float(r['weekly_rate'] or 0)}
+                     for r in rows}
+
+
+def _price_asset_line(db, show_id, type_row, asset_type_id, rental_start,
+                      rental_end, rates=None):
+    """Rate-card price for one unit on this show: the Performance Company's
+    special rate when the type has one, else the standard rate card.
+    Returns (unit_price, rate_company or None). type_row needs rental_cost,
+    weekly_rate, is_consumable. `rates` = a prefetched _show_company_rates()
+    map, to price many lines with one lookup."""
+    if rates is None:
+        rates = _show_company_rates(db, show_id)[1]
+    cr = rates.get(int(asset_type_id)) if asset_type_id is not None else None
+    if cr:
+        return (_compute_locked_price(cr['daily'], cr['weekly'], rental_start,
+                                      rental_end,
+                                      is_consumable=type_row['is_consumable']),
+                cr['company'])
+    return (_compute_locked_price(type_row['rental_cost'], type_row['weekly_rate'],
+                                  rental_start, rental_end,
+                                  is_consumable=type_row['is_consumable']),
+            None)
+
+
 def _find_overbooked_types(db):
     """
     Scan every trackable asset type and report any that are overbooked on at
@@ -19199,7 +19349,8 @@ def show_assets_list(show_id):
 
     rows = db.execute("""
         SELECT sa.*, at.name as type_name, at.is_consumable, at.manufacturer, at.model,
-               at.rental_cost as current_price, at.allow_unit_selection,
+               at.rental_cost as current_price, at.weekly_rate as current_weekly_rate,
+               at.allow_unit_selection,
                ac.name as category_name,
                ai.barcode as unit_barcode, ai.status as unit_status
         FROM show_assets sa
@@ -19233,6 +19384,7 @@ def show_assets_list(show_id):
     # Attach per-line availability info so the UI can flag overbooked rows.
     # One batched lookup per distinct rental window (lines usually share the
     # show's window) instead of 4–6 queries per line.
+    company, company_rates = _show_company_rates(db, show_id)
     by_window = {}
     for r in rows:
         by_window.setdefault((r['rental_start'], r['rental_end']), set()).add(r['asset_type_id'])
@@ -19254,12 +19406,23 @@ def show_assets_list(show_id):
             and av.get('available') is not None
             and av.get('available') < 0
         )
+        # Company-rate drift (3.8.0): the line was priced for a different
+        # Performance Company than the show has now (or for none).
+        cr = company_rates.get(r['asset_type_id'])
+        d['_rate_mismatch'] = (
+            _company_key(r['rate_company']) != _company_key(cr['company'] if cr else '')
+            and not _asset_line_hand_priced(db, r, r['current_price'],
+                                            r['current_weekly_rate'], r['is_consumable']))
         assets_out.append(d)
 
     win_start, win_end = _show_rental_window(db, show_id)
     db.close()
     return jsonify({
         'assets': assets_out,
+        # Performance Company special rates for the add-asset preview:
+        # {asset_type_id: {company, daily, weekly}}.
+        'performance_company': company,
+        'company_rates': {str(k): v for k, v in company_rates.items()},
         'external_rentals': [dict(r) for r in ext_rows],
         'approval': approval,
         # Allowed rental bounds for the date editors (show load-in → load-out).
@@ -19346,15 +19509,28 @@ def show_asset_add(show_id):
         or session.get('is_content_admin')
         or session.get('is_asset_manager')
     )
-    if is_price_authority and data.get('locked_price') is not None:
-        locked_price = float(data['locked_price'])
-    elif type_row:
-        locked_price = _compute_locked_price(
+    # Performance Company special rates (3.8.0): the rate-card price is the
+    # company's rate when this type has one. An approver's typed price is an
+    # override only when it differs from the STANDARD price — a client that
+    # just echoed the standard rate (a preview not yet aware of the company
+    # rate) must not knock the line off the company rate.
+    rate_company = None
+    if type_row:
+        locked_price, rate_company = _price_asset_line(
+            db, show_id, type_row, asset_type_id, rental_start, rental_end)
+        standard_price = _compute_locked_price(
             type_row['rental_cost'], type_row['weekly_rate'], rental_start, rental_end,
-            is_consumable=type_row['is_consumable']
-        )
+            is_consumable=type_row['is_consumable'])
     else:
-        locked_price = 0.0
+        locked_price, standard_price = 0.0, 0.0
+    if is_price_authority and data.get('locked_price') is not None:
+        try:
+            typed = float(data['locked_price'])
+        except (TypeError, ValueError):
+            typed = None
+        if typed is not None and round(typed, 2) != round(locked_price, 2) and (
+                rate_company is None or round(typed, 2) != round(standard_price, 2)):
+            locked_price, rate_company = typed, None
 
     # is_hidden is a per-line visibility toggle the user controls from the
     # show's Assets tab. We no longer auto-hide based on hide_from_pm —
@@ -19407,11 +19583,13 @@ def show_asset_add(show_id):
     _new_id = db.execute("""
         INSERT INTO show_assets
           (show_id, asset_type_id, asset_item_id, quantity, rental_start, rental_end,
-           locked_price, original_locked_price, is_hidden, notes, added_by)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+           locked_price, original_locked_price, is_hidden, notes, added_by,
+           rate_company)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (show_id, asset_type_id, asset_item_id, quantity, rental_start, rental_end,
           locked_price, locked_price, is_hidden,
-          (data.get('notes') or '').strip(), session['user_id'])).fetchone()['id']
+          (data.get('notes') or '').strip(), session['user_id'],
+          rate_company)).fetchone()['id']
     db.commit()
     row = db.execute('SELECT * FROM show_assets WHERE id=%s', (_new_id,)).fetchone()
 
@@ -19525,16 +19703,17 @@ def show_asset_edit(show_id, sa_id):
         or _as_date(rental_end) != _as_date(existing['rental_end']))
     locked_price = existing['locked_price']
     original_locked_price = existing['original_locked_price']
+    rate_company = existing.get('rate_company')
     repriced = False
     if window_changed:
         rate_row = db.execute(
             'SELECT rental_cost, weekly_rate, is_consumable '
             'FROM asset_types WHERE id=%s', (existing['asset_type_id'],)).fetchone()
         if rate_row:
-            new_price = _compute_locked_price(
-                rate_row['rental_cost'], rate_row['weekly_rate'],
-                rental_start, rental_end,
-                is_consumable=rate_row['is_consumable'])
+            # Re-lock on the show's CURRENT rate card (company rate if any).
+            new_price, rate_company = _price_asset_line(
+                db, show_id, rate_row, existing['asset_type_id'],
+                rental_start, rental_end)
             repriced = round(float(locked_price or 0), 2) != round(new_price, 2)
             locked_price = new_price
             original_locked_price = new_price
@@ -19628,10 +19807,11 @@ def show_asset_edit(show_id, sa_id):
 
     db.execute("""
         UPDATE show_assets SET quantity=%s, rental_start=%s, rental_end=%s,
-               is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s
+               is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s,
+               rate_company=%s
         WHERE id=%s AND show_id=%s
     """, (quantity, rental_start, rental_end, is_hidden, notes,
-          locked_price, original_locked_price, sa_id, show_id))
+          locked_price, original_locked_price, rate_company, sa_id, show_id))
     db.commit()
 
     # Post-commit verification — see show_asset_add for rationale. If a
@@ -19643,12 +19823,13 @@ def show_asset_edit(show_id, sa_id):
             and post_avail['available'] < 0):
         db.execute("""
             UPDATE show_assets SET quantity=%s, rental_start=%s, rental_end=%s,
-                   is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s
+                   is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s,
+                   rate_company=%s
             WHERE id=%s AND show_id=%s
         """, (existing['quantity'], existing['rental_start'], existing['rental_end'],
               existing['is_hidden'], existing['notes'],
               existing['locked_price'], existing['original_locked_price'],
-              sa_id, show_id))
+              existing.get('rate_company'), sa_id, show_id))
         db.commit()
         type_name_row = db.execute(
             'SELECT name FROM asset_types WHERE id=%s', (existing['asset_type_id'],)
@@ -19677,12 +19858,13 @@ def show_asset_edit(show_id, sa_id):
         if post_shortages:
             db.execute("""
                 UPDATE show_assets SET quantity=%s, rental_start=%s, rental_end=%s,
-                       is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s
+                       is_hidden=%s, notes=%s, locked_price=%s, original_locked_price=%s,
+                       rate_company=%s
                 WHERE id=%s AND show_id=%s
             """, (existing['quantity'], existing['rental_start'], existing['rental_end'],
                   existing['is_hidden'], existing['notes'],
                   existing['locked_price'], existing['original_locked_price'],
-                  sa_id, show_id))
+                  existing.get('rate_company'), sa_id, show_id))
             db.commit()
             sys_name = edit_type['name'] or f"System #{existing['asset_type_id']}"
             syslog_logger.warning(
@@ -19730,6 +19912,77 @@ def show_asset_remove(show_id, sa_id):
     syslog_logger.info(f"ASSET_REMOVED_FROM_SHOW show_id={show_id} sa_id={sa_id} by={session.get('username')}")
     db.close()
     return jsonify({'success': True})
+
+
+def _asset_line_hand_priced(db, r, std_daily, std_weekly, is_consumable):
+    """True when a show_assets line `r` carries a hand-set price: changed
+    since add (locked != original), or not what its own rate card (its
+    rate_company's special rate, else the standard one passed in) gives for
+    its window — an approver's price typed at add time is stored as the
+    original too. Company re-pricing leaves these alone (3.8.0)."""
+    locked = round(float(r['locked_price'] or 0), 2)
+    if (r['original_locked_price'] is not None
+            and locked != round(float(r['original_locked_price']), 2)):
+        return True
+    if r['rate_company']:
+        own = db.execute(
+            "SELECT rental_cost, weekly_rate FROM asset_company_rates "
+            "WHERE asset_type_id=%s AND company=%s",
+            (r['asset_type_id'], r['rate_company'])).fetchone()
+        if not own:
+            return True  # its company rate was since removed — can't tell
+        daily, weekly = own['rental_cost'], own['weekly_rate']
+    else:
+        daily, weekly = std_daily, std_weekly
+    return locked != round(_compute_locked_price(
+        daily, weekly, r['rental_start'], r['rental_end'],
+        is_consumable=is_consumable), 2)
+
+
+@app.route('/shows/<int:show_id>/assets/apply-company-rates', methods=['POST'])
+@show_advance_editor_required
+def show_assets_apply_company_rates(show_id):
+    """Re-price this show's lines that were priced for a different Performance
+    Company than the show has now (or for none) onto the CURRENT rate card —
+    the company's special rate where the type has one, else standard (3.8.0).
+    Lines already on the right rate card are untouched; hand-priced lines
+    (see below) are left alone and counted. Standard catalog price changes
+    still never reach lines on the right rate card."""
+    db = get_db()
+    company, rates = _show_company_rates(db, show_id)
+    rows = db.execute("""
+        SELECT sa.id, sa.asset_type_id, sa.rental_start, sa.rental_end,
+               sa.locked_price, sa.original_locked_price, sa.rate_company,
+               at.rental_cost, at.weekly_rate, at.is_consumable
+        FROM show_assets sa JOIN asset_types at ON at.id = sa.asset_type_id
+        WHERE sa.show_id = %s FOR UPDATE OF sa
+    """, (show_id,)).fetchall()
+    changed, skipped_override = 0, 0
+    for r in rows:
+        cr = rates.get(r['asset_type_id'])
+        if _company_key(r['rate_company']) == _company_key(cr['company'] if cr else ''):
+            continue
+        if _asset_line_hand_priced(db, r, r['rental_cost'], r['weekly_rate'],
+                                   r['is_consumable']):
+            skipped_override += 1
+            continue
+        price, rc = _price_asset_line(db, show_id, r, r['asset_type_id'],
+                                      r['rental_start'], r['rental_end'], rates)
+        db.execute('UPDATE show_assets SET locked_price=%s, original_locked_price=%s, '
+                   'rate_company=%s WHERE id=%s', (price, price, rc, r['id']))
+        log_audit(db, 'ASSET_COMPANY_REPRICE', 'show_asset', r['id'], show_id=show_id,
+                  detail=f"old={float(r['locked_price'] or 0):.2f} new={price:.2f} "
+                         f"rate={rc or 'standard'}")
+        changed += 1
+    if changed:
+        _reset_asset_approval(db, show_id, 'asset_company_repriced')
+    db.commit()
+    db.close()
+    syslog_logger.info(f"ASSET_COMPANY_REPRICE show_id={show_id} company={company!r} "
+                       f"changed={changed} skipped_override={skipped_override} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'changed': changed,
+                    'skipped_override': skipped_override, 'company': company})
 
 
 @app.route('/shows/<int:show_id>/assets/<int:sa_id>/reset-price', methods=['POST'])

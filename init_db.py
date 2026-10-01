@@ -1263,7 +1263,20 @@ CREATE TABLE IF NOT EXISTS show_assets (
     is_hidden      INTEGER DEFAULT 0,
     notes          TEXT DEFAULT '',
     added_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    rate_company   TEXT DEFAULT NULL
+);
+
+-- Special asset rates per Performance Company (3.8.0). company holds the
+-- advance field's dropdown value, matched case/space-insensitively.
+CREATE TABLE IF NOT EXISTS asset_company_rates (
+    asset_type_id INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
+    company       TEXT NOT NULL,
+    rental_cost   DOUBLE PRECISION DEFAULT 0.0,
+    weekly_rate   DOUBLE PRECISION DEFAULT 0.0,
+    updated_by    INTEGER,
+    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (asset_type_id, company)
 );
 
 CREATE TABLE IF NOT EXISTS show_external_rentals (
@@ -1935,6 +1948,8 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         # "Settle Now" — post-show labor settled explicitly — 3.6.0
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS labor_settled_at TIMESTAMP DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS labor_settled_by INTEGER',
+        # Performance Company special asset rates — 3.8.0
+        f'ALTER TABLE "{app_schema}".show_assets ADD COLUMN IF NOT EXISTS rate_company TEXT DEFAULT NULL',
     ]
 
     shared_alters = [

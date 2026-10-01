@@ -228,6 +228,23 @@
             Leave the daily rate at 0 to bill purely by the week (rounded up).
           </div>
         </div>
+        {# Performance Company special rates (3.8.0) — a show whose advance
+           "Performance Company" matches one of these is priced at that row's
+           rates instead of the standard ones above. #}
+        <div class="field-group" id="type-company-rates-group" style="grid-column:span 2;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">
+            <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim)">COMPANY RATES</div>
+            <button type="button" class="btn btn-xs btn-ghost" onclick="addCompanyRateRow()">+ Add company rate</button>
+          </div>
+          <div id="type-company-rates"></div>
+          <div id="type-company-rates-empty" style="font-size:11px;color:var(--text-dim);line-height:1.4">
+            No special rates. Shows use the standard rates above.
+          </div>
+          <div style="font-size:10.5px;color:var(--text-dim);margin-top:6px;line-height:1.4">
+            When a show's <strong>Performance Company</strong> (Advance Sheet) matches, assets added to it are priced at that company's rates — same day/week math as above.
+            Assets already on a show keep their price until someone presses <em>Re-price</em> on the show's Assets tab.
+          </div>
+        </div>
         <div class="field-group">
           <label class="field-label">RESERVE COUNT (spares)</label>
           <input type="number" id="type-reserve" class="field-input" value="0" min="0">
@@ -770,6 +787,9 @@ window.showSystemDetail = async function(typeId) {
     : (t.weekly_rate
         ? `$${Number(t.rental_cost||0).toFixed(2)}/day · $${Number(t.weekly_rate).toFixed(2)}/wk`
         : `$${Number(t.rental_cost||0).toFixed(2)}/day`);
+  const companyRateLabel = t.company_rate_count
+    ? ` <span title="Special rates for ${t.company_rate_count} Performance Compan${t.company_rate_count === 1 ? 'y' : 'ies'} — Edit to view" style="font-size:10px;color:var(--text-dim);font-weight:400">+ ${t.company_rate_count} company rate${t.company_rate_count === 1 ? '' : 's'}</span>`
+    : '';
   const detail = document.getElementById('systems-detail');
   detail.style.display = 'flex';
   detail.style.flexDirection = 'column';
@@ -777,7 +797,7 @@ window.showSystemDetail = async function(typeId) {
     <div style="padding:16px;border-bottom:1px solid var(--border);flex-shrink:0">
       <div style="font-size:15px;font-weight:600;line-height:1.3">${esc(t.name)}${badge}${retiredBadge}</div>
       ${brandModel ? `<div style="font-size:12px;color:var(--text-dim);margin-top:3px">${esc(brandModel)}</div>` : ''}
-      <div style="font-size:12px;color:var(--accent);margin-top:4px;font-weight:500">${rateLabel}</div>
+      <div style="font-size:12px;color:var(--accent);margin-top:4px;font-weight:500">${rateLabel}${companyRateLabel}</div>
       <div style="margin-top:10px">
         <button class="btn btn-sm btn-ghost" onclick="openTypeModal(${t.id});_sysDetailTypeId=${t.id}">Edit</button>
       </div>
@@ -1083,6 +1103,9 @@ window.selectType = async function(typeId, opts) {
     : (t.weekly_rate
         ? `$${Number(t.rental_cost||0).toFixed(2)}/day · $${Number(t.weekly_rate).toFixed(2)}/wk`
         : `$${Number(t.rental_cost||0).toFixed(2)}/day`);
+  const companyRateLabel = t.company_rate_count
+    ? ` <span title="Special rates for ${t.company_rate_count} Performance Compan${t.company_rate_count === 1 ? 'y' : 'ies'} — Edit to view" style="font-size:10px;color:var(--text-dim);font-weight:400">+ ${t.company_rate_count} company rate${t.company_rate_count === 1 ? '' : 's'}</span>`
+    : '';
 
   const hdrName = t.name.length > 24 ? t.name.slice(0,24)+'…' : t.name;
   document.getElementById('detail-col-hdr').textContent = hdrName;
@@ -1167,7 +1190,7 @@ window.selectType = async function(typeId, opts) {
         <div style="flex:1;min-width:0">
           <div style="font-size:15px;font-weight:600;line-height:1.3">${esc(t.name)}${kitBadge}${retiredBadge}</div>
           ${brandModel ? `<div style="font-size:12px;color:var(--text-dim);margin-top:3px">${esc(brandModel)}</div>` : ''}
-          <div style="font-size:12px;color:var(--accent);margin-top:4px;font-weight:500">${rateLabel}</div>
+          <div style="font-size:12px;color:var(--accent);margin-top:4px;font-weight:500">${rateLabel}${companyRateLabel}</div>
           ${t.storage_location ? `<div style="font-size:11px;color:var(--text-dim);margin-top:2px">📦 ${esc(t.storage_location)}</div>` : ''}
         </div>
       </div>
@@ -2030,10 +2053,76 @@ window.openTypeModal = async function(id, defaultCatId) {
     document.getElementById('type-photo').value = '';
   }
   onConsumableChange();  // sync the cost-field label / weekly visibility
+  _loadCompanyRates(id);
   document.getElementById('type-modal').style.display = 'flex';
   setTimeout(() => document.getElementById('type-name').focus(), 80);
 };
 window.closeTypeModal = function() { document.getElementById('type-modal').style.display = 'none'; };
+
+// ── Performance Company special rates (3.8.0) ───────────────────────────────
+// Companies come from the advance form's Performance Company dropdown, so
+// nothing is typed here and the names always match what PMs pick.
+let _companyOptions = [];
+let _companyRatesSeq = 0;
+async function _loadCompanyRates(typeId) {
+  const seq = ++_companyRatesSeq;
+  const host = document.getElementById('type-company-rates');
+  host.innerHTML = '';
+  host.dataset.loadFailed = '1';  // until loaded: a Save must not send []
+  _syncCompanyRatesEmpty();
+  try {
+    const r = await fetch('/settings/asset-company-rates' + (typeId ? `?type_id=${encodeURIComponent(typeId)}` : ''),
+                          {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+    const d = await r.json();
+    if (seq !== _companyRatesSeq) return;  // a newer modal open won
+    _companyOptions = d.companies || [];
+    (d.rates || []).forEach(rt => addCompanyRateRow(rt));
+  } catch (e) {
+    host.innerHTML = '<div style="font-size:11px;color:#e53e3e">Couldn\'t load company rates.</div>';
+    host.dataset.loadFailed = '1';
+    return;
+  }
+  delete host.dataset.loadFailed;
+  _syncCompanyRatesEmpty();
+}
+window._syncCompanyRatesEmpty = function() {
+  const n = document.querySelectorAll('#type-company-rates .company-rate-row').length;
+  document.getElementById('type-company-rates-empty').style.display = n ? 'none' : '';
+};
+window.addCompanyRateRow = function(rt) {
+  rt = rt || {company: '', rental_cost: 0, weekly_rate: 0};
+  const host = document.getElementById('type-company-rates');
+  if (!_companyOptions.length && !rt.company) {
+    alert('No Performance Companies to pick from. Add options to the Performance Company dropdown on the advance form (Settings → Form Fields) first.');
+    return;
+  }
+  const opts = _companyOptions.slice();
+  if (rt.company && !opts.includes(rt.company)) opts.push(rt.company);
+  const isConsumable = document.getElementById('type-consumable').checked;
+  const row = document.createElement('div');
+  row.className = 'company-rate-row';
+  row.style.cssText = 'display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) minmax(0,1fr) auto;gap:6px;align-items:end;margin-bottom:6px';
+  row.innerHTML = `
+    <label style="font-size:10px;color:var(--text-dim)">COMPANY
+      <select class="field-input field-input-sm cr-company">
+        <option value="">— Select —</option>
+        ${opts.map(c => `<option value="${esc(c)}"${c === rt.company ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+      </select></label>
+    <label style="font-size:10px;color:var(--text-dim)"><span class="cr-daily-label">${isConsumable ? '$/ITEM' : '$/DAY'}</span>
+      <input type="number" class="field-input field-input-sm cr-daily" min="0" step="0.01" value="${Number(rt.rental_cost || 0).toFixed(2)}"></label>
+    <label style="font-size:10px;color:var(--text-dim);${isConsumable ? 'visibility:hidden' : ''}" class="cr-weekly-wrap">$/WEEK
+      <input type="number" class="field-input field-input-sm cr-weekly" min="0" step="0.01" value="${Number(rt.weekly_rate || 0).toFixed(2)}"></label>
+    <button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" title="Remove" onclick="this.closest('.company-rate-row').remove();_syncCompanyRatesEmpty()">✕</button>`;
+  host.appendChild(row);
+  _syncCompanyRatesEmpty();
+};
+function _collectCompanyRates() {
+  return Array.from(document.querySelectorAll('#type-company-rates .company-rate-row')).map(row => ({
+    company: row.querySelector('.cr-company').value,
+    rental_cost: parseFloat(row.querySelector('.cr-daily').value) || 0,
+    weekly_rate: parseFloat(row.querySelector('.cr-weekly').value) || 0,
+  })).filter(r => r.company);
+}
 
 window.onTypeClassChange = function() {
   // System and Package are mutually exclusive
@@ -2054,6 +2143,10 @@ window.onConsumableChange = function() {
     isConsumable ? 'PER-UNIT COST ($/item)' : 'DAILY RATE ($/day)';
   document.getElementById('type-weekly-group').style.display =
     isConsumable ? 'none' : '';
+  document.querySelectorAll('#type-company-rates .company-rate-row').forEach(row => {
+    row.querySelector('.cr-daily-label').textContent = isConsumable ? '$/ITEM' : '$/DAY';
+    row.querySelector('.cr-weekly-wrap').style.visibility = isConsumable ? 'hidden' : '';
+  });
 };
 
 window.saveType = async function() {
@@ -2077,6 +2170,11 @@ window.saveType = async function() {
     hide_from_pm: document.getElementById('type-hide-from-pm').checked,
     allow_unit_selection: document.getElementById('type-allow-unit-selection').checked,
   };
+  // Only send company rates when they loaded — a failed load must never
+  // be saved back as "no rates" (that would delete them).
+  if (!document.getElementById('type-company-rates').dataset.loadFailed) {
+    payload.company_rates = _collectCompanyRates();
+  }
   if (!payload.name || !payload.category_id) { alert('Name and category required'); return; }
   const url = id ? `/settings/asset-types/${id}` : '/settings/asset-types';
   const r = await fetch(url, {method: id?'PUT':'POST', headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify(payload)});

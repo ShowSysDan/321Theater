@@ -888,6 +888,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li><strong>+ Add Asset</strong> — search the catalog, optionally pin a specific unit, set quantity and rental dates. Availability is checked live; overbooking is blocked.</li>
         <li><strong>Unit price is read-only here</strong> — it comes from the rate card; only the Approvals portal can override it per show.</li>
+        <li><strong>Company rates</strong> — if the show's <em>Performance Company</em> (Advance Sheet) has special rates in the Asset Manager, those are used and the line shows a <strong>COMPANY RATE</strong> tag. Change the company later and a banner offers to <strong>Re-price</strong> the lines priced for the old one (hand-set approver prices are left alone).</li>
         <li><strong>+ External Rental</strong> — description, cost, optional rental PDF.</li>
         <li>The <strong>approval badge</strong> shows whether an asset manager has approved this list; any change resets approval.</li>
         <li><strong>Asset Estimate PDF</strong> button and a running total in the header.</li>
@@ -1034,6 +1035,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li>Search types/manufacturers/models; sort by name, units, or cost.</li>
         <li>Type details: daily/weekly rates, reserve (spare) count, supplier, photo, storage location, <strong>📅 Calendar</strong> of per-day availability, and the unit list (barcodes, add units, remove-from-service with reason, unit logs).</li>
+        <li><strong>Company Rates</strong> (Edit type) — special day/week rates per <em>Performance Company</em>, picked from the advance form's Performance Company dropdown. A show with that company is priced at them; the type's card shows "+ N company rates".</li>
         <li><strong>Bulk: Hide from Advance Picker</strong> — mass-toggle which types show up in the show-page asset search.</li>
         <li><strong>⚠ Overbooked</strong> appears when demand exceeds usable units anywhere.</li>
         <li><strong>Systems &amp; Packages</strong> — bundles of component types with per-component quantities.</li>
