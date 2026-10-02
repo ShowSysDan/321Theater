@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.16.1'
+APP_VERSION = '3.16.2'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -7508,11 +7508,13 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
     try:
         rental_rows = db.execute("""
             SELECT sa.quantity, sa.notes, sa.rental_start, sa.rental_end,
+                   sa.asset_item_id, ai.barcode AS unit_barcode,
                    at.name AS type_name, at.manufacturer, at.model,
                    ac.id AS category_id, ac.name AS category_name
             FROM show_assets sa
             JOIN asset_types at ON at.id = sa.asset_type_id
             JOIN asset_categories ac ON ac.id = at.category_id
+            LEFT JOIN asset_items ai ON ai.id = sa.asset_item_id
             WHERE sa.show_id = %s AND sa.is_hidden = 0
             ORDER BY ac.sort_order, ac.name, at.name
         """, (show_id,)).fetchall()
@@ -19565,11 +19567,13 @@ def assets_availability_bulk():
         for a in db.execute("""
             SELECT sa.show_id AS _show_id,
                    sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end,
+                   sa.asset_item_id, ai.barcode AS unit_barcode,
                    at.name as type_name, at.manufacturer,
                    ac.name as category_name
             FROM show_assets sa
             JOIN asset_types at ON at.id = sa.asset_type_id
             JOIN asset_categories ac ON ac.id = at.category_id
+            LEFT JOIN asset_items ai ON ai.id = sa.asset_item_id
             WHERE sa.show_id = ANY(%s) AND sa.is_hidden = 0
             ORDER BY ac.name, at.name, sa.id
         """, ([sr['id'] for sr in shows_raw],)).fetchall():
@@ -19663,7 +19667,7 @@ def _compute_asset_snapshot_hash(db, show_id):
     """
     assets = db.execute("""
         SELECT asset_type_id, quantity, rental_start, rental_end,
-               locked_price, is_hidden
+               locked_price, is_hidden, asset_item_id
         FROM show_assets
         WHERE show_id = %s
     """, (show_id,)).fetchall()
@@ -19682,7 +19686,11 @@ def _compute_asset_snapshot_hash(db, show_id):
             str(r['rental_end'] or ''),
             round(float(r['locked_price'] or 0.0), 2),
             1 if r['is_hidden'] else 0,
-        )
+        # The pinned unit (3.16.2) is part of what's approved: pinning or
+        # swapping a unit must send the show back for approval. Only pinned
+        # lines carry it, so unpinned lines hash exactly as before 3.16.2 and
+        # existing approvals aren't disturbed.
+        ) + ((int(r['asset_item_id']),) if r['asset_item_id'] else ())
         for r in assets
     )
     external_tuples = sorted(
@@ -20817,10 +20825,12 @@ def asset_approvals():
             SELECT sa.*, at.name AS type_name, at.manufacturer, at.model,
                    ac.name AS category_name,
                    at.rental_cost AS catalog_daily_rate,
-                   at.weekly_rate AS catalog_weekly_rate
+                   at.weekly_rate AS catalog_weekly_rate,
+                   ai.barcode AS unit_barcode
             FROM show_assets sa
             JOIN asset_types at ON at.id = sa.asset_type_id
             JOIN asset_categories ac ON ac.id = at.category_id
+            LEFT JOIN asset_items ai ON ai.id = sa.asset_item_id
             WHERE sa.show_id = ANY(%s) AND sa.is_hidden = 0
             ORDER BY ac.name, at.name, sa.created_at, sa.id
         """, (show_ids,)).fetchall():
@@ -22023,11 +22033,13 @@ def _fetch_show_assets_and_externals(db, show_id):
     rental lines (3.9.1)."""
     assets = db.execute("""
         SELECT sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end, sa.notes,
+               sa.asset_item_id, ai.barcode AS unit_barcode,
                at.name as type_name, at.manufacturer, at.model,
                ac.name as category_name
         FROM show_assets sa
         JOIN asset_types at ON at.id = sa.asset_type_id
         JOIN asset_categories ac ON ac.id = at.category_id
+        LEFT JOIN asset_items ai ON ai.id = sa.asset_item_id
         WHERE sa.show_id = %s AND sa.is_hidden = 0
         ORDER BY ac.sort_order, at.name
     """, (show_id,)).fetchall()
@@ -25172,6 +25184,7 @@ def api_dashboard_reservation_timeline():
     rows = db.execute("""
         SELECT sa.show_id, sa.quantity,
                sa.rental_start, sa.rental_end,
+               sa.asset_item_id, ai.barcode AS unit_barcode,
                s.name AS show_name, s.status AS show_status,
                s.load_in_date, s.show_date, s.load_out_date,
                at.id AS type_id, at.name AS type_name,
@@ -25182,6 +25195,7 @@ def api_dashboard_reservation_timeline():
         JOIN shows s            ON s.id = sa.show_id
         JOIN asset_types at     ON at.id = sa.asset_type_id
         JOIN asset_categories ac ON ac.id = at.category_id
+        LEFT JOIN asset_items ai ON ai.id = sa.asset_item_id
         WHERE sa.is_hidden = 0 AND s.status != 'archived'
           AND COALESCE(s.is_test, 0) = 0
         ORDER BY ac.sort_order, ac.name, at.sort_order, at.name
@@ -25218,6 +25232,7 @@ def api_dashboard_reservation_timeline():
             'show_id':   r['show_id'],
             'show_name': r['show_name'],
             'quantity':  r['quantity'] or 1,
+            'unit':      (r['unit_barcode'] or f"#{r['asset_item_id']}") if r['asset_item_id'] else None,
             'start':     start.isoformat(),
             'end':       end.isoformat(),
         })
@@ -26462,6 +26477,7 @@ _RPT_PDF = {
         ('Rental lines', 'rows', [('show_name', 'Show', 't'), ('show_date', 'Date', 't'),
                                   ('venue', 'Venue', 't'), ('performance_company', 'Arts Group', 't'),
                                   ('category_name', 'Category', 't'), ('type_name', 'Item', 't'),
+                                  ('unit', 'Unit', 't'),
                                   ('quantity', 'Qty', 'i'), ('locked_price', 'Unit price', 'm'),
                                   ('line_total', 'Line total', 'm')])]),
     'labor': ('Labor & Techs', 'report_labor', [
@@ -26673,6 +26689,7 @@ def asset_reports_data():
 
     rows = db.execute(f"""
         SELECT sa.id, sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end,
+               sa.asset_item_id, ai.barcode AS unit_barcode,
                at.id as asset_type_id, at.name as type_name, at.manufacturer, at.model,
                ac.id as category_id, ac.name as category_name,
                s.id as show_id, s.name as show_name, s.show_date, s.venue,
@@ -26683,6 +26700,7 @@ def asset_reports_data():
         JOIN asset_types at ON at.id = sa.asset_type_id
         JOIN asset_categories ac ON ac.id = at.category_id
         JOIN shows s ON s.id = sa.show_id
+        LEFT JOIN asset_items ai ON ai.id = sa.asset_item_id
         {where_sql}
         ORDER BY s.show_date DESC NULLS LAST, ac.name, at.name
     """, params).fetchall()
@@ -26691,7 +26709,8 @@ def asset_reports_data():
     db.close()
     return jsonify({
         # ISO dates for the table and the CSV export (was HTTP-date text).
-        'rows': [_normalize_row_dates(dict(r)) for r in rows],
+        'rows': [_normalize_row_dates({**dict(r), 'unit': (r['unit_barcode'] or f"#{r['asset_item_id']}")
+                                       if r['asset_item_id'] else ''}) for r in rows],
         'total_revenue': total_revenue,
         'count': len(rows),
     })

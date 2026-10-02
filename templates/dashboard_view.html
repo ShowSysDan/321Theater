@@ -667,7 +667,7 @@ function renderByShow(data) {
     for (const item of show.assets || []) {
       html += `<tr>
         <td class="text-dim">${escHtml(item.category_name)}</td>
-        <td>${escHtml(item.type_name)}</td>
+        <td>${escHtml(item.type_name)}${item.asset_item_id ? ` <span class="text-dim" style="font-size:11px">· Unit ${escHtml(item.unit_barcode || ('#' + item.asset_item_id))}</span>` : ''}</td>
         <td>${item.quantity}</td>
         <td>$${parseFloat(item.locked_price||0).toFixed(2)}</td>
         <td>$${(parseFloat(item.locked_price||0)*item.quantity).toFixed(2)}</td>
@@ -1311,10 +1311,10 @@ function drawTimeline(idx) {
         const width = (p.ei - p.si + 1) * dayWidth;
         const top   = PAD + p.lane * LANE_H;
         const color = tlColor(p.r.show_id);
-        const tip = `${p.r.show_name} — qty ${p.r.quantity} · ${p.r.start} → ${p.r.end}`;
+        const tip = `${p.r.show_name} — qty ${p.r.quantity}${p.r.unit ? ' · unit ' + p.r.unit : ''} · ${p.r.start} → ${p.r.end}`;
         html += `<a class="tl-bar" href="/shows/${p.r.show_id}" title="${escHtml(tip)}"
           style="left:${left}px;width:${width}px;top:${top}px;background:${color}">`
-          + `${escHtml(p.r.show_name)} <span class="tl-qty">×${p.r.quantity}</span></a>`;
+          + `${escHtml(p.r.show_name)} <span class="tl-qty">${p.r.unit ? escHtml(p.r.unit) : '×' + p.r.quantity}</span></a>`;
       }
       html += '</div></div>';
     }

@@ -212,6 +212,7 @@
               <td class="qty">{{ r.quantity }}×</td>
               <td>
                 {{ r.type_name }}
+                {% if r.asset_item_id %}<span class="meta"> · Unit {{ r.unit_barcode or ('#' ~ r.asset_item_id) }}</span>{% endif %}
                 {% if r.model %}<span class="meta"> · {{ r.model }}</span>{% endif %}
                 {% if r.notes %}<span class="meta"> — {{ r.notes }}</span>{% endif %}
               </td>

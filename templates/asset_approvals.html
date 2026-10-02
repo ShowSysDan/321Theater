@@ -283,7 +283,7 @@
         {% set is_override = (orig_price is not none) and ((a.locked_price|float) != (orig_price|float)) %}
         <tr data-sa-id="{{ a.id }}" data-qty="{{ a.quantity or 1 }}">
           <td class="text-dim">{{ a.category_name }}</td>
-          <td>{{ a.type_name }}{% if a.manufacturer or a.model %}<br><span class="text-dim" style="font-size:10px">{{ a.manufacturer }} {{ a.model }}</span>{% endif %}</td>
+          <td>{{ a.type_name }}{% if a.asset_item_id %} <span class="unit-pin-badge" title="Pinned to this specific unit">UNIT {{ a.unit_barcode or ('#' ~ a.asset_item_id) }}</span>{% endif %}{% if a.manufacturer or a.model %}<br><span class="text-dim" style="font-size:10px">{{ a.manufacturer }} {{ a.model }}</span>{% endif %}</td>
           <td style="text-align:right">{{ a.quantity or 1 }}</td>
           <td class="text-dim" style="white-space:nowrap">
             <input type="date" class="field-input appr-date-input" data-field="rental_start"
