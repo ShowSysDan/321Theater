@@ -7,31 +7,40 @@
 {% block title %}{{ 'My Shows' if my_shows else 'Home' }} — 3·2·1→Theater{% endblock %}
 
 {% block content %}
-<div class="page-header">
-  <div>
-    {% if my_shows %}
-    <h1 class="page-title">My Shows</h1>
-    <p class="page-sub">{{ active_shows|length }} active show{{ '' if active_shows|length == 1 else 's' }} where you're the production manager or a covering PM</p>
-    {% else %}
-    <h1 class="page-title">Shows</h1>
-    <p class="page-sub">{{ active_shows|length }} active · <a href="{{ url_for('archived_shows_page') }}">{{ archived_count }} archived</a></p>
-    {% endif %}
-  </div>
-  {% if not my_shows %}
-  <div style="display:flex;gap:8px;align-items:center">
-    <a href="{{ url_for('archived_shows_page') }}" class="btn btn-ghost" title="Archived shows — search, restore">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
-      Archived{% if archived_count %} ({{ archived_count }}){% endif %}
-    </a>
-    {% if not restricted %}
-    <a href="{{ url_for('new_show') }}" class="btn btn-primary">
+{# Frosted page header (3.15.0): pins to the top while the board scrolls under
+   it. Title tile + context line, Active / Archived tabs with counts. #}
+{% set _on_boards = today_shows|length %}
+<header class="phead">
+  <div class="phead-row">
+    <div class="phead-title">
+      <span class="phead-tile" aria-hidden="true">
+        {% if my_shows %}
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M16 3l1.5 1.5L20 2"/></svg>
+        {% else %}
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a3 3 0 010 6v2a2 2 0 002 2h16a2 2 0 002-2v-2a3 3 0 010-6V7a2 2 0 00-2-2H4a2 2 0 00-2 2z"/><path d="M13 5v2M13 11v2M13 17v2"/></svg>
+        {% endif %}
+      </span>
+      <div>
+        <h1 class="page-title">{{ 'My Shows' if my_shows else 'Shows' }}</h1>
+        <p class="phead-context">{{ today_label }}{% if _on_boards %} · <span class="mono">{{ _on_boards }}</span> on the boards today{% endif %}{% if my_shows %} · where you're the PM or a covering PM{% endif %}</p>
+      </div>
+    </div>
+    {% if not my_shows and not restricted %}
+    <a href="{{ url_for('new_show') }}" class="btn btn-primary phead-cta">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       New Show
     </a>
     {% endif %}
   </div>
+  {% if not my_shows %}
+  <nav class="phead-tabs" role="tablist" aria-label="Show lists">
+    <a class="phead-tab" role="tab" aria-selected="true" href="{{ url_for('dashboard') }}">Active <span class="count">{{ active_shows|length }}</span></a>
+    <a class="phead-tab" role="tab" aria-selected="false" href="{{ url_for('archived_shows_page') }}">Archived <span class="count">{{ archived_count }}</span></a>
+  </nav>
+  {% else %}
+  <div class="phead-tabs" aria-hidden="true"><span class="phead-tab" aria-selected="true">Active <span class="count">{{ active_shows|length }}</span></span></div>
   {% endif %}
-</div>
+</header>
 
 {# MOTD / site-message banners are rendered globally by base.html's
    #site-msg-container (loaded via /api/messages). Rendering them here too
@@ -69,12 +78,12 @@
           <span>{% if t.pm %}{{ t.pm }}{% else %}<em class="today-card-empty">No PM</em>{% endif %}</span>
         </div>
         {% if t.perf_times %}
-        <div class="today-card-row" title="Performance times">
+        <div class="today-card-row time" title="Performance times">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><polygon points="5 3 19 12 5 21 5 3"/></svg>
           <span>{% for pt in t.perf_times %}{{ pt | hhmm }}{% if not loop.last %}, {% endif %}{% endfor %}</span>
         </div>
         {% endif %}
-        <div class="today-card-row" title="Crew calls">
+        <div class="today-card-row{{ ' time' if t.crew_calls else ' mute' }}" title="Crew calls">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
           <span>
             {% if t.crew_calls %}

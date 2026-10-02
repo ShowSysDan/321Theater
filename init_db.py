@@ -1624,6 +1624,42 @@ CREATE TABLE IF NOT EXISTS perf_slow_queries (
 );
 CREATE INDEX IF NOT EXISTS idx_perf_slow_queries_at ON perf_slow_queries(occurred_at);
 
+-- Hourly rollups (3.14.0): same additive upsert as perf_page_stats, keyed by
+-- hour too, so one day can be viewed hour by hour / narrowed to a time
+-- window. Kept 90 days.
+CREATE TABLE IF NOT EXISTS perf_hourly_stats (
+    id SERIAL PRIMARY KEY,
+    stat_date DATE NOT NULL,
+    stat_hour INTEGER NOT NULL,
+    endpoint TEXT NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    total_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    min_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    max_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    db_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    db_query_count INTEGER NOT NULL DEFAULT 0,
+    db_max_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    UNIQUE(stat_date, stat_hour, endpoint)
+);
+
+-- Live request feed (3.14.0): individual requests, captured ONLY while an
+-- admin has Settings -> Performance -> Live open (app_setting
+-- perf_live_until, Python-clock epoch seconds). Kept 2 days.
+CREATE TABLE IF NOT EXISTS perf_request_log (
+    id BIGSERIAL PRIMARY KEY,
+    occurred_at TIMESTAMP NOT NULL,
+    endpoint TEXT DEFAULT '',
+    method TEXT DEFAULT '',
+    path TEXT DEFAULT '',
+    status INTEGER DEFAULT 0,
+    total_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    db_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+    db_queries INTEGER NOT NULL DEFAULT 0,
+    username TEXT DEFAULT '',
+    worker TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_perf_request_log_at ON perf_request_log(occurred_at);
+
 -- File storage migration runs (file_store.py, 3.1.0) -- one row per
 -- S3 <-> PostgreSQL copy / verify run started from Settings -> System ->
 -- Database -> File Redundancy. Progress lives here (not in worker memory) so

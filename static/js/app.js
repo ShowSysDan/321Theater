@@ -2701,19 +2701,35 @@ function toggleSidebar() {
   else if (mq.addListener) mq.addListener(apply);
 })();
 
-function toggleTheme() {
-  const html    = document.documentElement;
-  const current = html.getAttribute('data-theme') || 'dark';
-  const next    = current === 'dark' ? 'light' : 'dark';
-  html.setAttribute('data-theme', next);
+const _AUTO_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 000 18z" fill="currentColor"/></svg>`;
+const _THEME_TITLES = {dark: 'Theme: Dark — click for Light', light: 'Theme: Light — click for Auto (follow this device)',
+                       auto: 'Theme: Auto (follows this device) — click for Dark'};
+// Theme preference cycles Dark → Light → Auto (3.15.0). "auto" follows the
+// OS (prefers-color-scheme, applied by the head script in base.html); the
+// choice is saved to the account so it follows the user.
+function _themeIcon(pref) {
   const btn = document.getElementById('theme-toggle-btn');
-  if (btn) btn.innerHTML = next === 'dark' ? _SUN_SVG : _MOON_SVG;
+  if (!btn) return;
+  btn.innerHTML = pref === 'auto' ? _AUTO_SVG : (pref === 'dark' ? _SUN_SVG : _MOON_SVG);
+  btn.title = _THEME_TITLES[pref] || _THEME_TITLES.dark;
+  btn.setAttribute('aria-label', btn.title);
+}
+function toggleTheme() {
+  const html = document.documentElement;
+  const pref = html.dataset.themePref || html.getAttribute('data-theme') || 'dark';
+  const next = pref === 'dark' ? 'light' : pref === 'light' ? 'auto' : 'dark';
+  html.dataset.themePref = next;
+  html.setAttribute('data-theme', next === 'auto'
+    ? (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+    : next);
+  _themeIcon(next);
   fetch('/account/theme', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({theme: next}),
   }).catch(() => {});
 }
+document.addEventListener('DOMContentLoaded', () => _themeIcon(document.documentElement.dataset.themePref || 'dark'));
 
 /* ═══════════════════════════════════════════════════════════════
    NOTIFICATION BELL
@@ -2759,6 +2775,11 @@ async function refreshNotifBadge() {
   } catch (e) { /* ignore — offline / not authenticated */ }
 }
 
+const _NOTIF_KIND_LABELS = {
+  asset_approval: 'Asset approval', piano_tuning: 'Piano tuning',
+  field_alert: 'Advance change', no_labor_alert: 'Labor', mention: 'Mention', system: 'System',
+};
+
 async function _loadNotifPanel() {
   const list = document.getElementById('notif-panel-list');
   if (!list) return;
@@ -2778,7 +2799,7 @@ async function _loadNotifPanel() {
         const inner = `
           <div class="notif-item-title">${titleHtml}</div>
           ${bodyHtml}
-          <div class="notif-item-meta">${_escNotif(t)} · ${_escNotif(n.kind)}</div>
+          <div class="notif-item-meta">${_escNotif(t)} · ${_escNotif(_NOTIF_KIND_LABELS[n.kind] || n.kind)}</div>
         `;
         if (n.link_url) {
           return `<a href="${_escNotif(n.link_url)}" class="${cls}" data-nid="${n.id}" onclick="markNotifRead(${n.id})">${inner}</a>`;

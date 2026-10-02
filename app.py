@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.13.0'
+APP_VERSION = '3.15.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1174,12 +1174,26 @@ _PERF_SLOW_PER_REQUEST = 10      # max slow-query rows recorded per request
 _PERF_DEFAULT_SLOW_MS = 100.0
 
 _perf_lock = threading.Lock()
-_perf_pages = {}                 # (date_iso, endpoint) → accumulator dict
+_perf_pages = {}                 # (date_iso, hour, endpoint) → accumulator dict
 _perf_slow = []                  # buffered perf_slow_queries rows
 _perf_last_flush = time.time()
 # Settings snapshot, refreshed once per flush so the per-query hot path never
 # reads the DB. Until the first refresh we collect with the defaults below.
 _perf_conf = {'enabled': True, 'slow_ms': _PERF_DEFAULT_SLOW_MS}
+
+# Live request feed (3.14.0). Off unless an admin has the Live view open:
+# that page renews app_setting perf_live_until (epoch seconds, Python clock)
+# every minute and it lapses on its own. Each worker re-reads the setting at
+# most every _PERF_LIVE_CHECK s and, while live, buffers finished requests
+# and writes them out every _PERF_LIVE_FLUSH s (one executemany).
+_PERF_LIVE_CHECK = 5.0
+_PERF_LIVE_FLUSH = 2.0
+_PERF_LIVE_BUFFER_MAX = 500
+_PERF_LIVE_TTL = 600             # seconds a Live-view renewal keeps capture on
+_PERF_LIVE_SKIP = frozenset(('static', 'performance_live_feed', 'performance_live_control'))
+_perf_live = {'until': 0.0, 'checked': 0.0, 'flushed': time.time()}
+_perf_live_buf = []
+_PERF_WORKER = f"{socket.gethostname()}:{os.getpid()}"
 
 
 def _perf_record_query(sql, duration_s):
@@ -1258,7 +1272,11 @@ def _perf_flush(pages, slow_rows):
     except Exception:
         return
     try:
-        for (stat_date, endpoint), r in pages.items():
+        for (stat_date, stat_hour, endpoint), r in pages.items():
+            db.execute(_PERF_HOURLY_UPSERT_SQL, (
+                stat_date, stat_hour, endpoint, r['count'], r['total_ms'], r['min_ms'],
+                r['max_ms'], r['db_ms'], r['db_count'], r['db_max_ms']))
+        for (stat_date, endpoint), r in _perf_rollup_daily(pages).items():
             db.execute(_PERF_UPSERT_SQL, (
                 stat_date, endpoint,
                 r['count'], r['total_ms'], r['min_ms'], r['max_ms'],
@@ -1275,6 +1293,81 @@ def _perf_flush(pages, slow_rows):
         app.logger.warning(f'perf stats flush failed: {e}')
     finally:
         db.close()
+
+
+_PERF_HOURLY_UPSERT_SQL = """
+    INSERT INTO perf_hourly_stats
+        (stat_date, stat_hour, endpoint, request_count, total_ms, min_ms, max_ms,
+         db_ms, db_query_count, db_max_ms)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (stat_date, stat_hour, endpoint) DO UPDATE SET
+        request_count  = perf_hourly_stats.request_count + excluded.request_count,
+        total_ms       = perf_hourly_stats.total_ms + excluded.total_ms,
+        min_ms         = LEAST(perf_hourly_stats.min_ms, excluded.min_ms),
+        max_ms         = GREATEST(perf_hourly_stats.max_ms, excluded.max_ms),
+        db_ms          = perf_hourly_stats.db_ms + excluded.db_ms,
+        db_query_count = perf_hourly_stats.db_query_count + excluded.db_query_count,
+        db_max_ms      = GREATEST(perf_hourly_stats.db_max_ms, excluded.db_max_ms)
+"""
+
+
+def _perf_rollup_daily(pages):
+    """(date, hour, endpoint) buffer → (date, endpoint) daily accumulators."""
+    daily = {}
+    for (d, _h, ep), r in pages.items():
+        a = daily.get((d, ep))
+        if a is None:
+            daily[(d, ep)] = dict(r)
+            continue
+        a['count'] += r['count']
+        a['total_ms'] += r['total_ms']
+        a['min_ms'] = min(a['min_ms'], r['min_ms'])
+        a['max_ms'] = max(a['max_ms'], r['max_ms'])
+        a['db_ms'] += r['db_ms']
+        a['db_count'] += r['db_count']
+        a['db_max_ms'] = max(a['db_max_ms'], r['db_max_ms'])
+        if r['slow_ms'] > a['slow_ms']:
+            for k in ('slow_ms', 'slow_sql', 'slow_path', 'slow_at'):
+                a[k] = r[k]
+    return daily
+
+
+def _perf_live_flush(rows):
+    """Write buffered live-feed requests. Never raises; an outage drops them."""
+    if not rows:
+        return
+    try:
+        db = get_db()
+    except Exception:
+        return
+    try:
+        db.executemany(
+            'INSERT INTO perf_request_log (occurred_at, endpoint, method, path, status, '
+            'total_ms, db_ms, db_queries, username, worker) '
+            'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)', rows)
+        db.commit()
+    except Exception as e:
+        app.logger.warning(f'perf live flush failed: {e}')
+    finally:
+        db.close()
+
+
+def _perf_live_on():
+    """Is live capture on? Re-reads perf_live_until at most every few seconds."""
+    now = time.time()
+    if now - _perf_live['checked'] >= _PERF_LIVE_CHECK:
+        _perf_live['checked'] = now
+        try:
+            _perf_live['until'] = float(get_app_setting('perf_live_until', '0') or 0)
+        except (TypeError, ValueError):
+            _perf_live['until'] = 0.0
+    return now < _perf_live['until']
+
+
+@app.after_request
+def _perf_note_status(response):
+    g._perf_status = response.status_code
+    return response
 
 
 @app.teardown_request
@@ -1298,7 +1391,24 @@ def _perf_finish_request(exc=None):
         slow = getattr(g, '_perf_slow', None)
         now = datetime.now()
         path = request.path[:200]
-        key = (date.today().isoformat(), endpoint)
+        key = (now.date().isoformat(), now.hour, endpoint)
+        live_rows = None
+        # The feed's own polls aren't recorded, but they still push out this
+        # worker's buffer, so a quiet worker's last requests don't sit unseen.
+        if _perf_live_on() or _perf_live_buf:
+            with _perf_lock:
+                if (endpoint not in _PERF_LIVE_SKIP and now.timestamp() < _perf_live['until']
+                        and len(_perf_live_buf) < _PERF_LIVE_BUFFER_MAX):
+                    _perf_live_buf.append((
+                        now, endpoint, request.method, path,
+                        int(getattr(g, '_perf_status', 0) or 0), total_ms, db_ms, db_count,
+                        (session.get('username') or '')[:80], _PERF_WORKER))
+                if _perf_live_buf and time.time() - _perf_live['flushed'] >= _PERF_LIVE_FLUSH:
+                    _perf_live['flushed'] = time.time()
+                    live_rows = list(_perf_live_buf)
+                    _perf_live_buf.clear()
+        if live_rows:
+            _perf_live_flush(live_rows)
 
         flush_pages = flush_slow = None
         with _perf_lock:
@@ -2484,6 +2594,11 @@ def _hourly_maintenance_work():
                    ((date.today() - timedelta(days=1095)).isoformat(),))
         db.execute('DELETE FROM perf_slow_queries WHERE occurred_at < %s',
                    (datetime.now() - timedelta(days=90),))
+        # 3.14.0: hourly rollups 90 days, the live request feed 2 days.
+        db.execute('DELETE FROM perf_hourly_stats WHERE stat_date < %s',
+                   ((date.today() - timedelta(days=90)).isoformat(),))
+        db.execute('DELETE FROM perf_request_log WHERE occurred_at < %s',
+                   (datetime.now() - timedelta(days=2),))
         db.commit()
         # Sessions that died unnoticed (logout-less departures, the login
         # sid-rotation orphans). SESSION_EXPIRED in the session loader covers
@@ -4160,6 +4275,54 @@ def create_notification(db, user_id, title, body='', link_url=None,
         app.logger.warning(f'create_notification failed for user {user_id}: {e}')
 
 
+def notify_users(db, user_ids, title, body='', link_url=None, kind='system',
+                 show_id=None, coalesce_key=None):
+    """In-app notification to several users (3.14.0). Caller owns the commit;
+    never raises. With coalesce_key, a user's still-UNREAD notification of the
+    same kind + show + key is refreshed (title/body/time) instead of stacking
+    a new one per edit — e.g. ten asset edits read as one "gear changed" item.
+    The key rides in field_key (that column's original use is field alerts)."""
+    ids = sorted({int(u) for u in user_ids if u})
+    if not ids:
+        return
+    try:
+        done = set()
+        if coalesce_key:
+            ph = ','.join(['%s'] * len(ids))
+            done = {r['user_id'] for r in db.execute(
+                f"""UPDATE notifications SET title=%s, body=%s, link_url=%s,
+                           created_at=CURRENT_TIMESTAMP
+                     WHERE user_id IN ({ph}) AND kind=%s AND read_at IS NULL
+                       AND show_id IS NOT DISTINCT FROM %s AND field_key=%s
+                 RETURNING user_id""",
+                (title or '', body or '', link_url, *ids, kind, show_id, coalesce_key)).fetchall()}
+        rows = [(u, kind, title or '', body or '', link_url, show_id, coalesce_key)
+                for u in ids if u not in done]
+        if rows:
+            db.executemany(
+                'INSERT INTO notifications (user_id, kind, title, body, link_url, show_id, field_key) '
+                'VALUES (%s,%s,%s,%s,%s,%s,%s)', rows)
+    except Exception as e:
+        app.logger.warning(f'notify_users failed ({kind}): {e}')
+
+
+def _role_user_ids(db, flag, exclude_user_id=None):
+    """Active users holding a 321Theater manager flag (`is_asset_manager` /
+    `is_piano_manager`); when nobody holds it, the admins (who can do the
+    job anyway). For in-app notifications — no email needed."""
+    assert flag in ('is_asset_manager', 'is_piano_manager')
+    q = ("SELECT id FROM users WHERE {} AND COALESCE(is_locked, 0) = 0 "
+         "AND COALESCE(pending_approval, 0) = 0")
+    try:
+        ids = [r['id'] for r in db.execute(q.format(f'{flag} = 1')).fetchall()]
+        if not ids:
+            ids = [r['id'] for r in db.execute(q.format("role = 'admin'")).fetchall()]
+    except Exception as e:
+        app.logger.warning(f'_role_user_ids({flag}) failed: {e}')
+        return []
+    return [i for i in ids if i != exclude_user_id]
+
+
 # Debounce window: a pending alert is only sent if no further edits have
 # arrived within this many minutes. Matches the "10-min job, 5-min quiet"
 # product decision.
@@ -5624,12 +5787,24 @@ def _render_show_board(mine=False):
                            venue_groups=venue_groups,
                            today_shows=today_shows,
                            today_iso=today_iso,
+                           today_label=_long_day_label(date.today()),
                            restricted=restricted,
                            home_layout=home_layout,
                            home_density=home_density,
                            my_shows=mine,
                            archived_count=archived_count,
                            user=get_current_user())
+
+
+_EN_DAYS = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+_EN_MONTHS = ('January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+              'September', 'October', 'November', 'December')
+
+
+def _long_day_label(d):
+    """'Thursday, October 1' — English names on purpose (strftime %A/%B are
+    locale-bound, same reason the syslog header avoids %b)."""
+    return f'{_EN_DAYS[d.weekday()]}, {_EN_MONTHS[d.month - 1]} {d.day}'
 
 
 @app.route('/shows/archived')
@@ -5649,6 +5824,10 @@ def archived_shows_page():
             where.append(f"s.id IN ({','.join(['%s'] * len(accessible))})")
             params += list(accessible)
     db = get_db()
+    # Count for the header's Active tab — the same access filter, active shows.
+    active_count = db.execute(
+        f"SELECT COUNT(*) AS n FROM shows s WHERE "
+        f"{' AND '.join(['s.status = %s'] + where[1:])}", ['active'] + params).fetchone()['n']
     rows = db.execute(f"""
         SELECT s.id, s.name, s.venue, s.is_test, s.show_mode, {_eff} AS show_date,
                (SELECT field_value FROM advance_data WHERE show_id = s.id
@@ -5667,6 +5846,7 @@ def archived_shows_page():
     venues = sorted({s['venue'] or 'Unassigned' for s in shows},
                     key=lambda v: (v == 'Unassigned', v.lower()))
     return render_template('archived_shows.html', shows=shows, venues=venues,
+                           active_count=active_count,
                            restricted=session.get('is_restricted', False),
                            user=get_current_user())
 
@@ -9240,37 +9420,94 @@ def audit_log_view():
     )
 
 
+def _perf_parse_date(v, default=None):
+    try:
+        return date.fromisoformat((v or '').strip()[:10])
+    except ValueError:
+        return default
+
+
+def _perf_parse_hour(v, default):
+    try:
+        return max(0, min(23, int(v)))
+    except (TypeError, ValueError):
+        return default
+
+
 @app.route('/admin/performance')
 @admin_required
 def performance_view():
-    """Admin page: per-page response-time and DB-time stats over a period.
+    """Admin page: per-page response-time and DB-time stats.
 
-    Reads the perf_page_stats daily rollups (written by the collector near
-    _perf_flush) and aggregates per endpoint in Python — trivial at this
-    table's size (one row per page per day)."""
-    try:
-        days = max(1, min(1095, int(request.args.get('days', 30))))
-    except (TypeError, ValueError):
-        days = 30
-    cutoff_date = (date.today() - timedelta(days=days - 1)).isoformat()
+    Three views (3.14.0):
+      history (default) — perf_page_stats daily rollups over ?days= or a
+                          custom ?from=&to= range; trend = one bar per day.
+      day               — perf_hourly_stats for ?date= between ?h_from=/?h_to=
+                          hours; trend = one bar per hour.
+      live              — the page polls /admin/performance/live/feed.
+    Aggregation is in Python — trivial at these tables' sizes."""
+    view = request.args.get('view', 'history')
+    if view not in ('history', 'day', 'live'):
+        view = 'history'
+    today = date.today()
+    days = None
+    d_from = _perf_parse_date(request.args.get('from'))
+    d_to = _perf_parse_date(request.args.get('to'))
+    day = _perf_parse_date(request.args.get('date'), today)
+    h_from = _perf_parse_hour(request.args.get('h_from'), 0)
+    h_to = _perf_parse_hour(request.args.get('h_to'), 23)
+    if h_to < h_from:
+        h_from, h_to = h_to, h_from
+    if view == 'day':
+        win_start = datetime.combine(day, datetime.min.time()).replace(hour=h_from)
+        win_end = datetime.combine(day, datetime.min.time()).replace(hour=h_to) + timedelta(hours=1)
+    else:
+        if d_from or d_to:
+            d_from = d_from or (d_to or today) - timedelta(days=29)
+            d_to = d_to or today
+            if d_to < d_from:
+                d_from, d_to = d_to, d_from
+        else:
+            try:
+                days = max(1, min(1095, int(request.args.get('days', 30))))
+            except (TypeError, ValueError):
+                days = 30
+            d_from, d_to = today - timedelta(days=days - 1), today
+        win_start = datetime.combine(d_from, datetime.min.time())
+        win_end = datetime.combine(d_to, datetime.min.time()) + timedelta(days=1)
 
     db = get_db()
     try:
-        rows = db.execute(
-            'SELECT stat_date, endpoint, request_count, total_ms, min_ms, max_ms, '
-            '       db_ms, db_query_count, db_max_ms, slow_sql, slow_ms, slow_path, slow_at '
-            'FROM perf_page_stats WHERE stat_date >= %s ORDER BY stat_date',
-            (cutoff_date,)).fetchall()
+        if view == 'day':
+            rows = db.execute(
+                'SELECT stat_hour AS bucket, endpoint, request_count, total_ms, min_ms, max_ms, '
+                '       db_ms, db_query_count, db_max_ms '
+                'FROM perf_hourly_stats WHERE stat_date = %s AND stat_hour BETWEEN %s AND %s',
+                (day, h_from, h_to)).fetchall()
+            # The hourly table has no per-row slowest query; take each page's
+            # slowest from the individual slow-query log in the same window.
+            page_slow = db.execute(
+                'SELECT DISTINCT ON (endpoint) endpoint, duration_ms, sql_text, path, occurred_at '
+                'FROM perf_slow_queries WHERE occurred_at >= %s AND occurred_at < %s '
+                'ORDER BY endpoint, duration_ms DESC', (win_start, win_end)).fetchall()
+        else:
+            rows = db.execute(
+                'SELECT stat_date AS bucket, endpoint, request_count, total_ms, min_ms, max_ms, '
+                '       db_ms, db_query_count, db_max_ms, slow_sql, slow_ms, slow_path, slow_at '
+                'FROM perf_page_stats WHERE stat_date BETWEEN %s AND %s',
+                (d_from, d_to)).fetchall()
+            page_slow = []
         slow_queries = db.execute(
             'SELECT occurred_at, endpoint, path, duration_ms, sql_text '
-            'FROM perf_slow_queries WHERE occurred_at >= %s '
+            'FROM perf_slow_queries WHERE occurred_at >= %s AND occurred_at < %s '
             'ORDER BY duration_ms DESC LIMIT 25',
-            (datetime.now() - timedelta(days=days),)).fetchall()
+            (win_start, win_end)).fetchall()
+        live_until = float(get_app_setting('perf_live_until', '0') or 0)
     finally:
         db.close()
 
-    pages = {}   # endpoint → aggregate
-    daily = {}   # date_iso → {'requests', 'total_ms', 'db_ms'}
+    pages = {}    # endpoint → aggregate
+    buckets = {}  # date_iso or hour → {'requests', 'total_ms', 'db_ms'}
     for r in rows:
         p = pages.setdefault(r['endpoint'], {
             'endpoint': r['endpoint'], 'requests': 0, 'total_ms': 0.0,
@@ -9285,16 +9522,23 @@ def performance_view():
         p['db_ms'] += r['db_ms']
         p['db_queries'] += r['db_query_count']
         p['db_max_ms'] = max(p['db_max_ms'], r['db_max_ms'])
-        if r['slow_ms'] and r['slow_ms'] > p['slow_ms']:
+        if view != 'day' and r['slow_ms'] and r['slow_ms'] > p['slow_ms']:
             p['slow_ms'] = r['slow_ms']
             p['slow_sql'] = r['slow_sql'] or ''
             p['slow_path'] = r['slow_path'] or ''
             p['slow_at'] = str(r['slow_at'] or '')[:19]
-        d = daily.setdefault(str(r['stat_date'])[:10],
-                             {'requests': 0, 'total_ms': 0.0, 'db_ms': 0.0})
-        d['requests'] += r['request_count']
-        d['total_ms'] += r['total_ms']
-        d['db_ms'] += r['db_ms']
+        key = r['bucket'] if view == 'day' else str(r['bucket'])[:10]
+        b = buckets.setdefault(key, {'requests': 0, 'total_ms': 0.0, 'db_ms': 0.0})
+        b['requests'] += r['request_count']
+        b['total_ms'] += r['total_ms']
+        b['db_ms'] += r['db_ms']
+    for q in page_slow:
+        p = pages.get(q['endpoint'])
+        if p:
+            p['slow_ms'] = q['duration_ms'] or 0.0
+            p['slow_sql'] = q['sql_text'] or ''
+            p['slow_path'] = q['path'] or ''
+            p['slow_at'] = str(q['occurred_at'] or '')[:19]
 
     for p in pages.values():
         n = p['requests'] or 1
@@ -9306,11 +9550,20 @@ def performance_view():
     page_list = sorted(pages.values(), key=lambda p: p['total_ms'], reverse=True)
 
     trend = []
-    for day in sorted(daily):
-        d = daily[day]
-        n = d['requests'] or 1
-        trend.append({'date': day, 'requests': d['requests'],
-                      'avg_ms': d['total_ms'] / n, 'avg_db_ms': d['db_ms'] / n})
+    if view == 'day':
+        # Every hour in the window gets a slot, so quiet hours read as gaps.
+        for h in range(h_from, h_to + 1):
+            b = buckets.get(h, {'requests': 0, 'total_ms': 0.0, 'db_ms': 0.0})
+            n = b['requests'] or 1
+            trend.append({'date': f'{h:02d}:00', 'requests': b['requests'],
+                          'avg_ms': b['total_ms'] / n if b['requests'] else 0.0,
+                          'avg_db_ms': b['db_ms'] / n if b['requests'] else 0.0})
+    else:
+        for k in sorted(buckets):
+            b = buckets[k]
+            n = b['requests'] or 1
+            trend.append({'date': k, 'requests': b['requests'],
+                          'avg_ms': b['total_ms'] / n, 'avg_db_ms': b['db_ms'] / n})
 
     total_requests = sum(p['requests'] for p in page_list)
     sum_total_ms = sum(p['total_ms'] for p in page_list)
@@ -9331,14 +9584,126 @@ def performance_view():
     } for q in slow_queries]
 
     return render_template('performance.html',
+        view=view,
         days=days,
+        d_from=d_from.isoformat() if view != 'day' else '',
+        d_to=d_to.isoformat() if view != 'day' else '',
+        day=day.isoformat(),
+        h_from=h_from, h_to=h_to,
+        today=today.isoformat(),
         pages=page_list,
         trend=trend,
         summary=summary,
         slow_queries=slow_list,
         slow_threshold_ms=_perf_conf['slow_ms'],
+        live_on=live_until > time.time(),
+        live_ttl=_PERF_LIVE_TTL,
         user=get_current_user(),
     )
+
+
+@app.route('/admin/performance/live/control', methods=['POST'])
+@admin_required
+def performance_live_control():
+    """Start (or renew) / stop live request capture. Capture lapses on its own
+    _PERF_LIVE_TTL s after the last renewal, so a closed Live tab can't leave
+    every worker writing a row per request forever."""
+    data = request.get_json(silent=True) or {}
+    on = bool(data.get('on'))
+    until = time.time() + _PERF_LIVE_TTL if on else 0.0
+    db = get_db()
+    try:
+        prev = db.execute("SELECT value FROM app_settings WHERE key='perf_live_until'").fetchone()
+        db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) '
+                   'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+                   ('perf_live_until', f'{until:.0f}'))
+        db.commit()
+    finally:
+        db.close()
+    was_on = bool(prev) and float(prev['value'] or 0) > time.time()
+    _perf_live['until'] = until          # this worker sees it at once
+    _perf_live['checked'] = time.time()
+    if was_on != on:
+        syslog_logger.info(f"PERF_LIVE {'START' if on else 'STOP'} by={session.get('username')}")
+    return jsonify({'success': True, 'on': on, 'until': until})
+
+
+@app.route('/admin/performance/live/feed')
+@admin_required
+def performance_live_feed():
+    """Requests captured since ?after=<id> (oldest first, max 200). With no
+    cursor, the latest 100 — the page's first fill."""
+    try:
+        after = int(request.args.get('after', 0) or 0)
+    except (TypeError, ValueError):
+        after = 0
+    db = get_db()
+    try:
+        cols = ('SELECT id, occurred_at::timestamptz AS occurred_at, endpoint, method, path, '
+                'status, total_ms, db_ms, db_queries, username, worker FROM perf_request_log ')
+        if after > 0:
+            rows = db.execute(cols + 'WHERE id > %s ORDER BY id LIMIT 200', (after,)).fetchall()
+        else:
+            rows = list(reversed(db.execute(cols + 'ORDER BY id DESC LIMIT 100').fetchall()))
+        until = float(get_app_setting('perf_live_until', '0') or 0)
+    finally:
+        db.close()
+    return jsonify({
+        'on': until > time.time(),
+        'until': until,
+        'rows': [{
+            'id': r['id'], 'at': _ts_out(r['occurred_at']), 'endpoint': r['endpoint'],
+            'method': r['method'], 'path': r['path'], 'status': r['status'],
+            'total_ms': round(r['total_ms'] or 0, 1), 'db_ms': round(r['db_ms'] or 0, 1),
+            'db_queries': r['db_queries'], 'username': r['username'] or '',
+            'worker': r['worker'] or '',
+        } for r in rows],
+    })
+
+
+@app.route('/admin/performance/reset', methods=['POST'])
+@admin_required
+def performance_reset():
+    """Delete collected performance stats — everything, or a date range
+    (inclusive). Covers the daily + hourly rollups, slow queries and the live
+    log. Already-buffered (unflushed) stats from the last minute still land."""
+    data = request.get_json(silent=True) or {}
+    scope = data.get('scope')
+    if scope == 'all':
+        d_from = d_to = None
+    elif scope == 'range':
+        d_from = _perf_parse_date(data.get('from'))
+        d_to = _perf_parse_date(data.get('to'))
+        if not d_from or not d_to:
+            return jsonify({'success': False, 'error': 'Pick a from and to date.'}), 400
+        if d_to < d_from:
+            d_from, d_to = d_to, d_from
+    else:
+        return jsonify({'success': False, 'error': 'Unknown scope.'}), 400
+    counts = {}
+    db = get_db()
+    try:
+        if d_from is None:
+            for t in ('perf_page_stats', 'perf_hourly_stats', 'perf_slow_queries', 'perf_request_log'):
+                counts[t] = db.execute(f'DELETE FROM {t}').rowcount
+        else:
+            start = datetime.combine(d_from, datetime.min.time())
+            end = datetime.combine(d_to, datetime.min.time()) + timedelta(days=1)
+            counts['perf_page_stats'] = db.execute(
+                'DELETE FROM perf_page_stats WHERE stat_date BETWEEN %s AND %s', (d_from, d_to)).rowcount
+            counts['perf_hourly_stats'] = db.execute(
+                'DELETE FROM perf_hourly_stats WHERE stat_date BETWEEN %s AND %s', (d_from, d_to)).rowcount
+            for t in ('perf_slow_queries', 'perf_request_log'):
+                counts[t] = db.execute(
+                    f'DELETE FROM {t} WHERE occurred_at >= %s AND occurred_at < %s', (start, end)).rowcount
+        rng = 'all' if d_from is None else f'{d_from}..{d_to}'
+        log_audit(db, 'PERF_STATS_RESET', 'setting', None,
+                  detail=f"range={rng} " + ' '.join(f'{k}={v}' for k, v in counts.items()))
+        db.commit()
+    finally:
+        db.close()
+    syslog_logger.info(f"PERF_STATS_RESET range={rng} rows={sum(counts.values())} by={session.get('username')}")
+    return jsonify({'success': True, 'deleted': counts})
 
 
 @app.route('/admin/audit/<int:log_id>/undo', methods=['POST'])
@@ -9823,8 +10188,8 @@ def add_user():
     is_readonly = 1 if request.form.get('is_readonly') else 0
     db = get_db()
     try:
-        cur = db.execute("""INSERT INTO users (username, password_hash, display_name, role, email, is_readonly)
-                      VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+        cur = db.execute("""INSERT INTO users (username, password_hash, display_name, role, email, is_readonly, theme)
+                      VALUES (%s, %s, %s, %s, %s, %s, 'auto') RETURNING id""",
                    (username, generate_password_hash(password), display, role, email, is_readonly))
         new_uid = cur.fetchone()['id']
         log_audit(db, 'USER_CREATE', 'user', new_uid, detail=f'{username} role={role}')
@@ -10097,7 +10462,7 @@ def set_view_mode():
 def set_theme():
     data = request.get_json(force=True) or {}
     theme = data.get('theme', 'dark')
-    if theme not in ('dark', 'light'):
+    if theme not in ('dark', 'light', 'auto'):   # auto = follow the OS (3.15.0)
         theme = 'dark'
     db = get_db()
     db.execute('UPDATE users SET theme=%s WHERE id=%s', (theme, session['user_id']))
@@ -19325,6 +19690,35 @@ def _compute_asset_snapshot_hash(db, show_id):
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
+_ASSET_CHANGE_LABELS = {
+    'asset_added': 'gear added', 'asset_edited': 'gear line changed',
+    'asset_removed': 'gear removed', 'asset_company_repriced': 'lines re-priced to company rates',
+    'asset_price_reset': 'a price was reset', 'asset_visibility_toggled': 'a line was hidden/shown',
+    'external_rental_added': 'external rental added',
+    'external_rental_updated': 'external rental changed',
+    'external_rental_removed': 'external rental removed',
+}
+
+
+def _notify_asset_change(db, show_id, row, reason, reapproval):
+    """In-app bell notification for asset managers when a show's gear changes
+    while it isn't (or stops being) approved. ONE unread item per show, kept
+    fresh as edits continue (coalesced), linking to the show's Assets tab.
+    Demo/test shows are skipped; the actor never notifies themself."""
+    if row['is_test']:
+        return
+    name = row['name'] or f'Show #{show_id}'
+    who = session.get('display_name') or session.get('username') or 'Someone'
+    what = _ASSET_CHANGE_LABELS.get(reason, reason)
+    notify_users(
+        db, _role_user_ids(db, 'is_asset_manager', exclude_user_id=session.get('user_id')),
+        title=(f'Assets need re-approval — {name}' if reapproval
+               else f'Gear request waiting for approval — {name}'),
+        body=f'Latest: {what} by {who}.',
+        link_url=f'/shows/{show_id}?tab=assets', kind='asset_approval',
+        show_id=show_id, coalesce_key='asset_approval')
+
+
 def _reset_asset_approval(db, show_id, reason):
     """Reconcile the approval flag against the canonical asset state.
 
@@ -19348,13 +19742,15 @@ def _reset_asset_approval(db, show_id, reason):
     Manual unapprove clears the snapshot to truly revoke approval.
     """
     row = db.execute(
-        'SELECT s.assets_approved, s.assets_approval_snapshot, s.name '
+        'SELECT s.assets_approved, s.assets_approval_snapshot, s.name, s.is_test '
         'FROM shows s WHERE s.id=%s', (show_id,)
     ).fetchone()
     if not row:
         return
     stored = row['assets_approval_snapshot']
     if not stored:
+        if not row['assets_approved']:
+            _notify_asset_change(db, show_id, row, reason, reapproval=False)
         return
     current = _compute_asset_snapshot_hash(db, show_id)
     was_approved = bool(row['assets_approved'])
@@ -19368,6 +19764,7 @@ def _reset_asset_approval(db, show_id, reason):
         log_audit(db, 'ASSET_APPROVAL_RESTORED', 'show', show_id, show_id=show_id,
                   detail=f'reason={reason}')
         return
+    _notify_asset_change(db, show_id, row, reason, reapproval=True)
     if not was_approved:
         return
     db.execute(
@@ -20527,6 +20924,9 @@ def show_assets_approve(show_id):
          WHERE id=%s
     """, (session['user_id'], snapshot, show_id))
     log_audit(db, 'ASSET_APPROVAL_GRANTED', 'show', show_id, show_id=show_id)
+    # The "waiting for approval" bell items are done — for every manager.
+    db.execute("UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE show_id=%s "
+               "AND kind='asset_approval' AND read_at IS NULL", (show_id,))
     db.commit()
     me = db.execute('SELECT display_name, username FROM users WHERE id=%s',
                     (session['user_id'],)).fetchone()
@@ -22337,6 +22737,29 @@ def _piano_manager_emails(db, exclude_user_id=None):
     return out
 
 
+def _piano_bell(db, tid, show_id, show_name, title, body, *, to_managers=True,
+                user_id=None):
+    """In-app bell notification for a piano tuning (3.14.0). Managers get one
+    coalesced item per tuning linking to /piano-tuning?open=<id>; a requester
+    gets one per tuning linking to the show's piano panel."""
+    if to_managers:
+        notify_users(db, _role_user_ids(db, 'is_piano_manager',
+                                        exclude_user_id=session.get('user_id')),
+                     title=f'{title} — {show_name}', body=body,
+                     link_url=f'/piano-tuning?open={tid}', kind='piano_tuning',
+                     show_id=show_id, coalesce_key=f'piano:{tid}')
+    elif user_id and user_id != session.get('user_id'):
+        notify_users(db, [user_id], title=f'{title} — {show_name}', body=body,
+                     link_url=f'/shows/{show_id}?tab=advance#piano-tuning-section',
+                     kind='piano_tuning', show_id=show_id, coalesce_key=f'piano_req:{tid}')
+
+
+def _piano_bell_done(db, tid):
+    """The manager acted on this tuning — clear the managers' unread item."""
+    db.execute("UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE kind='piano_tuning' "
+               "AND field_key=%s AND read_at IS NULL", (f'piano:{tid}',))
+
+
 def _piano_notify(recipients, subject, body):
     """Fire-and-forget: SMTP latency never holds up the request."""
     if not recipients:
@@ -22484,6 +22907,10 @@ def show_piano_tuning_create(show_id):
     log_audit(db, 'PIANO_TUNING_REQUEST', 'piano_tuning', tid, show_id=show_id,
               detail=f"date={vals.get('requested_date')} piano={vals.get('piano', '')!r}")
     recipients = _piano_manager_emails(db, exclude_user_id=session['user_id'])
+    _piano_bell(db, tid, show_id, show['name'], 'Piano tuning requested',
+                f"{vals.get('piano') or 'Piano'} · needed {vals.get('requested_date')} "
+                f"{vals.get('requested_time') or ''}".strip()
+                + (' · not on the Assets tab yet' if not_on_show else ''))
     db.commit()
     db.close()
     syslog_logger.info(f"PIANO_TUNING_REQUEST id={tid} show_id={show_id} "
@@ -22617,6 +23044,27 @@ def piano_tuning_update(tid):
                        for k in ('tuning_date', 'tuning_start'))
     notify = status == 'scheduled' and (cur['status'] != 'scheduled' or
                                         (when_changed and tuning_date))
+    if manager:
+        if status != cur['status']:
+            _piano_bell_done(db, tid)
+            if status in ('scheduled', 'completed', 'cancelled') and cur['requested_by']:
+                when = f"{tuning_date or ''} {vals.get('tuning_start', cur['tuning_start']) or ''}".strip()
+                _piano_bell(db, tid, show_id, cur['show_name'],
+                            {'scheduled': 'Piano tuning scheduled', 'completed': 'Piano tuning completed',
+                             'cancelled': 'Piano tuning cancelled'}[status],
+                            f"{cur['piano'] or 'Piano'}" + (f' · {when}' if when and status != 'cancelled' else ''),
+                            to_managers=False, user_id=cur['requested_by'])
+        elif when_changed and tuning_date and status == 'scheduled' and cur['requested_by']:
+            _piano_bell(db, tid, show_id, cur['show_name'], 'Piano tuning moved',
+                        f"{cur['piano'] or 'Piano'} · {tuning_date} "
+                        f"{vals.get('tuning_start', cur['tuning_start']) or ''}".strip(),
+                        to_managers=False, user_id=cur['requested_by'])
+    elif changed or status != cur['status']:
+        _piano_bell(db, tid, show_id, cur['show_name'],
+                    'Piano tuning request withdrawn' if status == 'cancelled'
+                    else 'Piano tuning request changed',
+                    f"{vals.get('piano', cur['piano']) or 'Piano'} · changed: "
+                    f"{', '.join(changed) or 'status'}")
     requester = None
     if notify and cur['requested_by'] and cur['requested_by'] != session['user_id']:
         requester = db.execute(
@@ -22865,6 +23313,8 @@ def piano_tuning_cancel_request(tid):
         log_audit(db, 'PIANO_TUNING_CANCEL_REQUEST', 'piano_tuning', tid,
                   show_id=t['show_id'], detail=note[:200])
         recipients = _piano_manager_emails(db, exclude_user_id=session['user_id'])
+        _piano_bell(db, tid, t['show_id'], t['show_name'], 'Cancellation requested',
+                    f"{t['piano'] or 'Piano'}" + (f' · {note[:140]}' if note else ''))
         db.commit()
         db.close()
         syslog_logger.info(f"PIANO_TUNING_CANCEL_REQUEST id={tid} show_id={t['show_id']} "
@@ -22898,6 +23348,14 @@ def piano_tuning_cancel_request(tid):
                "cancel_request_note='' WHERE id=%s", (tid,))
     log_audit(db, 'PIANO_TUNING_CANCEL_DECLINED' if declined else 'PIANO_TUNING_CANCEL_WITHDRAWN',
               'piano_tuning', tid, show_id=t['show_id'])
+    if declined:
+        _piano_bell_done(db, tid)
+        _piano_bell(db, tid, t['show_id'], t['show_name'], 'Cancellation declined',
+                    f"{t['piano'] or 'Piano'} — the tuning is still on.",
+                    to_managers=False, user_id=asker)
+    else:
+        _piano_bell(db, tid, t['show_id'], t['show_name'], 'Cancellation request withdrawn',
+                    f"{t['piano'] or 'Piano'} — the tuning stays on.")
     asker_email = None
     if declined and asker:
         r = db.execute("SELECT email FROM users WHERE id=%s AND COALESCE(is_locked, 0) = 0 "
@@ -23394,8 +23852,8 @@ def approve_registration(reg_id):
         return jsonify({'error': 'Not found'}), 404
     try:
         db.execute("""
-            INSERT INTO users (username, display_name, email, password_hash, role, email_confirmed)
-            VALUES (%s,%s,%s,%s,%s,1)
+            INSERT INTO users (username, display_name, email, password_hash, role, email_confirmed, theme)
+            VALUES (%s,%s,%s,%s,%s,1,'auto')
         """, (reg['username'], reg['display_name'] or reg['username'],
               reg['email'], reg['password_hash'], role))
         db.commit()
@@ -25033,10 +25491,66 @@ def _report_shows(db):
                         'company': (r['company'] or '').strip(), 'company_key': key,
                         'settled': bool(r['labor_settled_at'])}
     if out:
+        keep = _report_drill_show_ids(db, list(out))
+        if keep is not None:
+            out = {sid: v for sid, v in out.items() if sid in keep}
+    if out:
         # Pre-3.6.0 settlement marker counts as settled too.
         for sid in set(out) - set(_unsettled_show_ids(db, list(out))):
             out[sid]['settled'] = True
     return out
+
+
+def _report_drill():
+    """The drill-down filters (3.14.0) — each narrows the show set:
+    show (one show), has_type (booked this asset type — a group counts its
+    child types — directly or as a system/package component), has_category,
+    position (a labor request or settlement line in this job position), tech
+    (crew member scheduled on, or "Worked by" on, the show)."""
+    def _i(k):
+        try:
+            v = int(request.args.get(k) or 0)
+        except (TypeError, ValueError):
+            return None
+        return v if v > 0 else None
+    return {k: _i(k) for k in ('show', 'has_type', 'has_category', 'position', 'tech')}
+
+
+def _report_drill_show_ids(db, ids):
+    """Set of show ids (within `ids`) passing the drill filters, or None when
+    no drill filter is set."""
+    f = _report_drill()
+    if not any(f.values()):
+        return None
+    keep = set(ids)
+    if f['show']:
+        keep &= {f['show']}
+    if keep and (f['has_type'] or f['has_category']):
+        if f['has_type']:
+            cond, arg = ('t.id = ANY(%s)', [f['has_type']] + [r['id'] for r in db.execute(
+                'SELECT id FROM asset_types WHERE parent_type_id = %s', (f['has_type'],)).fetchall()])
+        else:
+            cond, arg = 't.category_id = %s', f['has_category']
+        keep &= {r['show_id'] for r in db.execute(f"""
+            SELECT sa.show_id FROM show_assets sa JOIN asset_types t ON t.id = sa.asset_type_id
+             WHERE sa.show_id = ANY(%s) AND sa.is_hidden = 0 AND {cond}
+            UNION
+            SELECT sa.show_id FROM show_assets sa
+              JOIN asset_type_system_members m ON m.system_type_id = sa.asset_type_id
+              JOIN asset_types t ON t.id = m.component_type_id
+             WHERE sa.show_id = ANY(%s) AND sa.is_hidden = 0 AND {cond}""",
+            (list(keep), arg, list(keep), arg)).fetchall()}
+    if keep and f['position']:
+        keep &= {r['show_id'] for r in db.execute(
+            'SELECT show_id FROM labor_requests WHERE show_id = ANY(%s) AND position_id = %s '
+            'UNION SELECT show_id FROM post_show_labor WHERE show_id = ANY(%s) AND position_id = %s',
+            (list(keep), f['position'], list(keep), f['position'])).fetchall()}
+    if keep and f['tech']:
+        keep &= {r['show_id'] for r in db.execute(
+            'SELECT show_id FROM labor_requests WHERE show_id = ANY(%s) AND scheduled_crew_member_id = %s '
+            'UNION SELECT show_id FROM post_show_labor WHERE show_id = ANY(%s) AND crew_member_id = %s',
+            (list(keep), f['tech'], list(keep), f['tech'])).fetchall()}
+    return keep
 
 
 def _report_company_names(db):
@@ -25104,9 +25618,18 @@ def reports_page():
         'SELECT id, name FROM asset_categories ORDER BY sort_order, name').fetchall()]
     asset_types = [dict(r) for r in db.execute(
         'SELECT id, name, category_id FROM asset_types WHERE is_retired=0 ORDER BY name').fetchall()]
+    positions = [dict(r) for r in db.execute(
+        'SELECT id, name FROM job_positions ORDER BY name').fetchall()] if _can_report_labor() else []
+    techs = [dict(r) for r in db.execute(
+        'SELECT id, name FROM crew_members ORDER BY name').fetchall()] if _can_report_labor() else []
+    shows = [{'id': r['id'], 'name': r['name'], 'date': _as_date(r['d']).isoformat() if r['d'] else ''}
+             for r in db.execute(
+                 "SELECT id, name, COALESCE(show_date, load_in_date) AS d FROM shows "
+                 "WHERE COALESCE(is_test, 0) = 0 ORDER BY d DESC NULLS LAST, id DESC LIMIT 3000").fetchall()]
     db.close()
     return render_template('reports.html', venues=venues, companies=companies,
                            asset_categories=asset_categories, asset_types=asset_types,
+                           positions=positions, techs=techs, shows=shows,
                            can_assets=_can_report_assets(), can_labor=_can_report_labor(),
                            can_piano=_can_report_piano(), user=get_current_user())
 
@@ -25157,7 +25680,11 @@ def report_overview():
     for v in venues:
         for k in ('assets', 'external', 'labor', 'piano'):
             v[k] = round(v[k], 2)
-    return jsonify({'totals': totals, 'by_venue': venues,
+    show_list = sorted(({'id': s['id'], 'name': s['name'], 'date': s['date'], 'venue': s['venue'],
+                         'company': s['company'], 'status': s['status'] or 'active',
+                         'settled': s['settled']} for s in shows.values()),
+                       key=lambda s: s['date'] or '', reverse=True)
+    return jsonify({'totals': totals, 'by_venue': venues, 'shows': show_list,
                     'by_month': [{'month': k, 'shows': by_month[k]} for k in sorted(by_month)],
                     'by_status': by_status,
                     'show': {'assets': _can_report_assets(), 'labor': _can_report_labor(),
@@ -25555,6 +26082,522 @@ def report_piano():
                     'months': [months[k] for k in sorted(months)]})
 
 
+def _report_line_filter():
+    """(position_id, crew_id) — the drill filters that also apply per LINE on
+    the line-level labor reports."""
+    f = _report_drill()
+    return f['position'], f['tech']
+
+
+def _hm_minutes(v):
+    """'HH:MM' / 'HHMM' → minutes after midnight, or None."""
+    v = _normalize_perf_time(v)
+    if not v:
+        return None
+    try:
+        h, m = v.split(':')[:2]
+        return int(h) * 60 + int(m)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _span_minutes(a, b):
+    """Length of a start→end span in minutes (crossing midnight ok), or None."""
+    x, y = _hm_minutes(a), _hm_minutes(b)
+    if x is None or y is None:
+        return None
+    return (y - x) % 1440
+
+
+_REPORT_LINE_CAP = 5000
+
+
+@app.route('/api/reports/labor-lines')
+@reports_required
+def report_labor_lines():
+    """Every labor line on the filtered shows — one row per requested shift,
+    with the scheduled tech and, once settled, the settlement line's times,
+    hours and "Worked by"; plus settlement-only lines (added hours / lines
+    added at settlement). Answers e.g. "who was the video tech on shows that
+    had projector X" (position + has_type filters)."""
+    denied = _report_need(_can_report_labor)
+    if denied:
+        return denied
+    pos_f, tech_f = _report_line_filter()
+    db = get_db()
+    shows = _report_shows(db)
+    ids = list(shows)
+    rows = []
+    if ids:
+        settled = {r['source_request_id']: r for r in db.execute("""
+            SELECT psl.source_request_id, psl.in_time, psl.out_time, psl.break_start,
+                   psl.break_end, psl.break2_start, psl.break2_end, psl.crew_member_id,
+                   cm.name AS worked_by
+              FROM post_show_labor psl LEFT JOIN crew_members cm ON cm.id = psl.crew_member_id
+             WHERE psl.show_id = ANY(%s) AND psl.source_request_id IS NOT NULL""",
+            (ids,)).fetchall()}
+        for r in db.execute("""
+            SELECT lr.id, lr.show_id, lr.work_date, lr.position_id, lr.in_time, lr.out_time,
+                   lr.break_start, lr.break_end, lr.break2_start, lr.break2_end,
+                   COALESCE(lr.is_training_shift, 0) AS training, lr.scheduled_crew_member_id,
+                   lr.requested_name, jp.name AS position, cm.name AS tech
+              FROM labor_requests lr
+              LEFT JOIN job_positions jp ON jp.id = lr.position_id
+              LEFT JOIN crew_members cm ON cm.id = lr.scheduled_crew_member_id
+             WHERE lr.show_id = ANY(%s)
+             ORDER BY lr.work_date, lr.sort_order, lr.id""", (ids,)).fetchall():
+            st = settled.get(r['id'])
+            if pos_f and r['position_id'] != pos_f:
+                continue
+            if tech_f and r['scheduled_crew_member_id'] != tech_f and \
+                    not (st and st['crew_member_id'] == tech_f):
+                continue
+            sh = shows[r['show_id']]
+            row = {'show_id': r['show_id'], 'show': sh['name'], 'company': sh['company'],
+                   'venue': sh['venue'], 'date': _as_date(r['work_date']).isoformat()
+                   if r['work_date'] else sh['date'],
+                   'position': r['position'] or '(No position)',
+                   'tech': r['tech'] or '', 'requested_name': r['requested_name'] or '',
+                   'sched': f"{r['in_time'] or ''}–{r['out_time'] or ''}".strip('–'),
+                   'sched_hours': round(_calc_hours(r['in_time'], r['out_time'], r['break_start'],
+                                                    r['break_end'], r['break2_start'],
+                                                    r['break2_end']), 2),
+                   'training': bool(r['training']), 'worked_by': '', 'actual': '',
+                   'actual_hours': None,
+                   'state': 'training' if r['training'] else ('scheduled' if r['tech'] else 'unfilled')}
+            if st:
+                row['worked_by'] = st['worked_by'] or ''
+                row['actual'] = f"{st['in_time'] or ''}–{st['out_time'] or ''}".strip('–')
+                row['actual_hours'] = round(_calc_hours(
+                    st['in_time'], st['out_time'], st['break_start'], st['break_end'],
+                    st['break2_start'], st['break2_end']), 2)
+                row['state'] = 'settled'
+            rows.append(row)
+        # Settlement lines with no request behind them (added at settlement).
+        for r in db.execute("""
+            SELECT psl.show_id, psl.work_date, psl.position_id, psl.in_time, psl.out_time,
+                   psl.break_start, psl.break_end, psl.break2_start, psl.break2_end,
+                   psl.is_added_hours, psl.manual_hours, psl.crew_member_id,
+                   jp.name AS position, cm.name AS worked_by
+              FROM post_show_labor psl
+              LEFT JOIN job_positions jp ON jp.id = psl.position_id
+              LEFT JOIN crew_members cm ON cm.id = psl.crew_member_id
+             WHERE psl.show_id = ANY(%s) AND psl.source_request_id IS NULL""", (ids,)).fetchall():
+            if (pos_f and r['position_id'] != pos_f) or (tech_f and r['crew_member_id'] != tech_f):
+                continue
+            sh = shows[r['show_id']]
+            hrs = (float(r['manual_hours'] or 0) if r['is_added_hours'] else
+                   _calc_hours(r['in_time'], r['out_time'], r['break_start'], r['break_end'],
+                               r['break2_start'], r['break2_end']))
+            rows.append({'show_id': r['show_id'], 'show': sh['name'], 'company': sh['company'],
+                         'venue': sh['venue'], 'date': _as_date(r['work_date']).isoformat()
+                         if r['work_date'] else sh['date'],
+                         'position': r['position'] or '(No position)', 'tech': '',
+                         'requested_name': '', 'sched': '', 'sched_hours': None,
+                         'training': False, 'worked_by': r['worked_by'] or '',
+                         'actual': '' if r['is_added_hours'] else
+                         f"{r['in_time'] or ''}–{r['out_time'] or ''}".strip('–'),
+                         'actual_hours': round(hrs, 2),
+                         'state': 'added hours' if r['is_added_hours'] else 'added at settlement'})
+    db.close()
+    rows.sort(key=lambda x: (x['date'] or '', x['show'], x['position']))
+    truncated = len(rows) > _REPORT_LINE_CAP
+    rows = rows[:_REPORT_LINE_CAP]
+    techs = {x['worked_by'] or x['tech'] for x in rows} - {''}
+    return jsonify({'lines': rows, 'truncated': truncated, 'totals': {
+        'lines': len(rows), 'shows': len({x['show_id'] for x in rows}), 'techs': len(techs),
+        'sched_hours': round(sum(x['sched_hours'] or 0 for x in rows if not x['training']), 2),
+        'actual_hours': round(sum(x['actual_hours'] or 0 for x in rows), 2),
+        'unfilled': sum(1 for x in rows if x['state'] == 'unfilled')}})
+
+
+@app.route('/api/reports/breaks')
+@reports_required
+def report_breaks():
+    """Meal-break exceptions on SETTLED shifts: the settlement line's lunch vs
+    the lunch that was scheduled (the sched_* snapshot taken at Settle Now).
+    Kinds: not taken (scheduled, blank on settlement), shorter / longer (by at
+    least ?min_diff= minutes, default 5), added (none scheduled), moved (same
+    length, start ≥ 30 min off). Shifts with no actual in/out are skipped —
+    that's a no-show, not a break exception."""
+    denied = _report_need(_can_report_labor)
+    if denied:
+        return denied
+    try:
+        min_diff = max(1, min(120, int(request.args.get('min_diff', 5))))
+    except (TypeError, ValueError):
+        min_diff = 5
+    pos_f, tech_f = _report_line_filter()
+    db = get_db()
+    shows = _report_shows(db)
+    ids = list(shows)
+    out = []
+    lines_checked = 0
+    if ids:
+        for r in db.execute("""
+            SELECT psl.id, psl.show_id, psl.work_date, psl.position_id, psl.crew_member_id,
+                   psl.sched_crew_name, psl.in_time, psl.out_time,
+                   psl.sched_break_start, psl.sched_break_end, psl.sched_break2_start,
+                   psl.sched_break2_end, psl.break_start, psl.break_end, psl.break2_start,
+                   psl.break2_end, jp.name AS position, cm.name AS worked_by
+              FROM post_show_labor psl
+              LEFT JOIN job_positions jp ON jp.id = psl.position_id
+              LEFT JOIN crew_members cm ON cm.id = psl.crew_member_id
+              LEFT JOIN labor_requests lr ON lr.id = psl.source_request_id
+             WHERE psl.show_id = ANY(%s) AND COALESCE(psl.is_added_hours, 0) = 0
+               AND COALESCE(lr.is_training_shift, 0) = 0
+             ORDER BY psl.work_date, psl.id""", (ids,)).fetchall():
+            if (pos_f and r['position_id'] != pos_f) or (tech_f and r['crew_member_id'] != tech_f):
+                continue
+            if _hm_minutes(r['in_time']) is None or _hm_minutes(r['out_time']) is None:
+                continue
+            lines_checked += 1
+            for n, (ss, se, a_s, a_e) in enumerate((
+                    ('sched_break_start', 'sched_break_end', 'break_start', 'break_end'),
+                    ('sched_break2_start', 'sched_break2_end', 'break2_start', 'break2_end')), 1):
+                sched = _span_minutes(r[ss], r[se])
+                act = _span_minutes(r[a_s], r[a_e])
+                kind = None
+                if sched and not act:
+                    kind = 'Not taken'
+                elif act and not sched:
+                    kind = 'Added'
+                elif sched and act:
+                    if act - sched <= -min_diff:
+                        kind = 'Shorter'
+                    elif act - sched >= min_diff:
+                        kind = 'Longer'
+                    else:
+                        shift = abs(_hm_minutes(r[a_s]) - _hm_minutes(r[ss]))
+                        if min(shift, 1440 - shift) >= 30:
+                            kind = 'Moved'
+                if not kind:
+                    continue
+                sh = shows[r['show_id']]
+                out.append({
+                    'show_id': r['show_id'], 'show': sh['name'], 'company': sh['company'],
+                    'date': _as_date(r['work_date']).isoformat() if r['work_date'] else sh['date'],
+                    'position': r['position'] or '(No position)',
+                    'tech': r['worked_by'] or r['sched_crew_name'] or '',
+                    'lunch': n, 'kind': kind,
+                    'scheduled': f"{r[ss]}–{r[se]}" if sched else '',
+                    'sched_min': sched or 0,
+                    'actual': f"{r[a_s]}–{r[a_e]}" if act else '',
+                    'actual_min': act or 0,
+                    'diff_min': (act or 0) - (sched or 0)})
+    db.close()
+
+    def _group(key):
+        g = {}
+        for x in out:
+            b = g.setdefault(x[key], {key: x[key], 'exceptions': 0, 'not_taken': 0,
+                                      'shorter': 0, 'longer': 0, 'net_min': 0})
+            b['exceptions'] += 1
+            b['not_taken'] += x['kind'] == 'Not taken'
+            b['shorter'] += x['kind'] == 'Shorter'
+            b['longer'] += x['kind'] == 'Longer'
+            b['net_min'] += x['diff_min']
+        return sorted(g.values(), key=lambda b: (-b['exceptions'], str(b[key])))
+    kinds = {}
+    for x in out:
+        kinds[x['kind']] = kinds.get(x['kind'], 0) + 1
+    return jsonify({'exceptions': out, 'by_tech': _group('tech'),
+                    'by_position': _group('position'), 'by_show': _group('show'),
+                    'kinds': kinds, 'lines_checked': lines_checked, 'min_diff': min_diff})
+
+
+@app.route('/api/reports/variance')
+@reports_required
+def report_variance():
+    """Labor estimate vs settlement for SETTLED shows: the live estimate
+    (_calc_labor_cost_for_show over today's labor requests) against the
+    Final Invoice labor (_calc_post_show_labor_cost). Both engines, never a
+    re-derivation. Biggest increases first."""
+    denied = _report_need(_can_report_labor)
+    if denied:
+        return denied
+    db = get_db()
+    shows = {sid: s for sid, s in _report_shows(db).items() if s['settled']}
+    ids = list(shows)
+    est_hours, act_hours, added = {}, {}, {}
+    if ids:
+        for r in db.execute("""
+            SELECT show_id, in_time, out_time, break_start, break_end, break2_start, break2_end
+              FROM labor_requests WHERE show_id = ANY(%s) AND COALESCE(is_training_shift, 0) = 0""",
+                (ids,)).fetchall():
+            est_hours[r['show_id']] = est_hours.get(r['show_id'], 0.0) + _calc_hours(
+                r['in_time'], r['out_time'], r['break_start'], r['break_end'],
+                r['break2_start'], r['break2_end'])
+        for r in db.execute("""
+            SELECT psl.show_id, psl.in_time, psl.out_time, psl.break_start, psl.break_end,
+                   psl.break2_start, psl.break2_end, psl.is_added_hours, psl.manual_hours,
+                   psl.source_request_id
+              FROM post_show_labor psl LEFT JOIN labor_requests lr ON lr.id = psl.source_request_id
+             WHERE psl.show_id = ANY(%s) AND COALESCE(lr.is_training_shift, 0) = 0""",
+                (ids,)).fetchall():
+            h = (float(r['manual_hours'] or 0) if r['is_added_hours'] else
+                 _calc_hours(r['in_time'], r['out_time'], r['break_start'], r['break_end'],
+                             r['break2_start'], r['break2_end']))
+            act_hours[r['show_id']] = act_hours.get(r['show_id'], 0.0) + h
+            if r['is_added_hours'] or not r['source_request_id']:
+                added[r['show_id']] = added.get(r['show_id'], 0) + 1
+    out = []
+    for sid, sh in shows.items():
+        try:
+            est = float(_calc_labor_cost_for_show(db, sid)[1] or 0)
+            act = float(_calc_post_show_labor_cost(db, sid)[1] or 0)
+        except Exception as e:
+            app.logger.warning(f'variance report failed for show {sid}: {e}')
+            continue
+        diff = round(act - est, 2)
+        out.append({'show_id': sid, 'show': sh['name'], 'date': sh['date'], 'venue': sh['venue'],
+                    'company': sh['company'], 'estimate': round(est, 2), 'settled': round(act, 2),
+                    'diff': diff, 'diff_pct': round(100.0 * diff / est, 1) if est else None,
+                    'est_hours': round(est_hours.get(sid, 0.0), 2),
+                    'act_hours': round(act_hours.get(sid, 0.0), 2),
+                    'hours_diff': round(act_hours.get(sid, 0.0) - est_hours.get(sid, 0.0), 2),
+                    'added_lines': added.get(sid, 0)})
+    db.close()
+    out.sort(key=lambda x: (-x['diff'], x['show']))
+    up = [x for x in out if x['diff'] > 0.005]
+    down = [x for x in out if x['diff'] < -0.005]
+    return jsonify({'shows': out, 'totals': {
+        'shows': len(out), 'over': len(up), 'under': len(down),
+        'estimate': round(sum(x['estimate'] for x in out), 2),
+        'settled': round(sum(x['settled'] for x in out), 2),
+        'diff': round(sum(x['diff'] for x in out), 2)}})
+
+
+# ── Report PDFs (3.14.0) ─────────────────────────────────────────────────────
+# GET /reports/pdf?report=<key>&<the same filters> renders a tab (or a
+# drill-down) server-side from the SAME JSON view the page uses, so a PDF can
+# never disagree with the screen. Each spec: title, data view, cards (label,
+# path, fmt) and tables (title, rows key, [(key, label, fmt)]).
+# fmt: t text · i integer · m money · h hours · p percent · b yes/no.
+
+def _rpt_fmt(v, f):
+    if v is None or v == '':
+        return '—'
+    try:
+        if f == 'm':
+            return f"{'-' if float(v) < 0 else ''}${abs(float(v)):,.2f}"
+        if f == 'i':
+            return f'{int(round(float(v))):,}'
+        if f == 'h':
+            return f'{float(v):,.2f}'
+        if f == 'p':
+            return f'{float(v):,.1f}%'
+        if f == 'b':
+            return 'Yes' if v else 'No'
+    except (TypeError, ValueError):
+        pass
+    return str(v)
+
+
+_RPT_SHOW_COLS = [('name', 'Show', 't'), ('date', 'Date', 't'), ('venue', 'Venue', 't'),
+                  ('company', 'Arts Group', 't'), ('status', 'Status', 't'),
+                  ('settled', 'Labor settled', 'b')]
+_RPT_PDF = {
+    'overview': ('Overview', 'report_overview', [
+        ('Shows', 'totals.shows', 'i'), ('Labor settled', 'totals.settled', 'i'),
+        ('Asset rentals', 'totals.assets', 'm'), ('External costs', 'totals.external', 'm'),
+        ('Labor billed (settled)', 'totals.labor', 'm'), ('Piano tunings', 'totals.piano', 'm')], [
+        ('By venue', 'by_venue', [('venue', 'Venue', 't'), ('shows', 'Shows', 'i'),
+                                  ('assets', 'Assets', 'm'), ('external', 'External', 'm'),
+                                  ('labor', 'Labor (settled)', 'm'), ('piano', 'Piano', 'm')]),
+        ('Shows by month', 'by_month', [('month', 'Month', 't'), ('shows', 'Shows', 'i')]),
+        ('Matching shows', 'shows', _RPT_SHOW_COLS)]),
+    'groups': ('Arts Groups', 'report_arts_groups', [], [
+        ('Arts Groups', 'groups', [('name', 'Arts Group', 't'), ('shows', 'Shows', 'i'),
+                                   ('rental_shows', 'Shows w/ rentals', 'i'),
+                                   ('lines', 'Rental lines', 'i'), ('units', 'Units', 'i'),
+                                   ('unit_days', 'Unit-days', 'i'), ('assets', 'Assets', 'm'),
+                                   ('external', 'External', 'm'), ('piano', 'Piano', 'm'),
+                                   ('labor', 'Labor (settled)', 'm'), ('total', 'Total', 'm'),
+                                   ('last_date', 'Last show', 't')])]),
+    'group_detail': ('Arts Group detail', 'report_arts_group_detail', [], [
+        ('Items rented', 'types', [('type', 'Item', 't'), ('category', 'Category', 't'),
+                                   ('lines', 'Times rented', 'i'), ('shows', 'Shows', 'i'),
+                                   ('units', 'Units', 'i'), ('unit_days', 'Unit-days', 'i'),
+                                   ('company_rate_lines', 'At company rate', 'i'),
+                                   ('revenue', 'Revenue', 'm')]),
+        ('Shows', 'shows', [('name', 'Show', 't'), ('date', 'Date', 't'), ('venue', 'Venue', 't'),
+                            ('status', 'Status', 't'), ('lines', 'Rental lines', 'i'),
+                            ('assets', 'Assets', 'm')])]),
+    'assets': ('Asset usage', 'report_asset_types', [], [
+        ('Asset usage by item', 'types', [('type', 'Item', 't'), ('category', 'Category', 't'),
+                                          ('lines', 'Times rented', 'i'), ('shows', 'Shows', 'i'),
+                                          ('companies', 'Arts Groups', 'i'), ('units', 'Units out', 'i'),
+                                          ('unit_days', 'Unit-days', 'i'),
+                                          ('units_owned', 'Units owned', 'i'),
+                                          ('utilization', 'Utilization', 'p'),
+                                          ('revenue', 'Revenue', 'm'), ('last_used', 'Last used', 't')])]),
+    'asset_units': ('Asset units', 'report_asset_units', [
+        ('Pool bookings', 'pooled.lines', 'i'), ('Pool unit-days', 'pooled.unit_days', 'i')], [
+        ('Individual units', 'units', [('barcode', 'Unit / barcode', 't'), ('status', 'Status', 't'),
+                                       ('condition', 'Condition', 't'),
+                                       ('year_purchased', 'Year', 't'),
+                                       ('bookings', 'Pinned bookings', 'i'),
+                                       ('unit_days', 'Pinned days', 'i'),
+                                       ('last_show', 'Last show', 't'), ('last_date', 'Last date', 't'),
+                                       ('maintenance', 'Maintenance', 'i'), ('logs', 'Log entries', 'i')])]),
+    'rentals': ('Rental lines', 'asset_reports_data', [
+        ('Revenue', 'total_revenue', 'm'), ('Line items', 'count', 'i')], [
+        ('Rental lines', 'rows', [('show_name', 'Show', 't'), ('show_date', 'Date', 't'),
+                                  ('venue', 'Venue', 't'), ('performance_company', 'Arts Group', 't'),
+                                  ('category_name', 'Category', 't'), ('type_name', 'Item', 't'),
+                                  ('quantity', 'Qty', 'i'), ('locked_price', 'Unit price', 'm'),
+                                  ('line_total', 'Line total', 'm')])]),
+    'labor': ('Labor & Techs', 'report_labor', [
+        ('Shifts requested', 'totals.shifts', 'i'), ('Filled', 'totals.filled', 'i'),
+        ('Requested hours', 'totals.hours', 'h'), ('Unfilled upcoming', 'unfilled_upcoming', 'i')], [
+        ('Technicians', 'techs', [('name', 'Technician', 't'), ('level', 'Level', 't'),
+                                  ('shows', 'Shows', 'i'), ('sched_shifts', 'Sched. shifts', 'i'),
+                                  ('sched_hours', 'Sched. hrs', 'h'),
+                                  ('actual_shifts', 'Settled shifts', 'i'),
+                                  ('actual_hours', 'Worked hrs', 'h'),
+                                  ('training_shifts', 'Training', 'i'),
+                                  ('overhead_shifts', 'Overhead shifts', 'i'),
+                                  ('overhead_hours', 'Overhead hrs', 'h'),
+                                  ('last_date', 'Last booked', 't')]),
+        ('Positions', 'positions', [('position', 'Position', 't'), ('requested', 'Requested', 'i'),
+                                    ('filled', 'Filled', 'i'), ('fill_rate', 'Fill rate', 'p'),
+                                    ('hours', 'Requested hrs', 'h')])]),
+    'lines': ('Labor lines', 'report_labor_lines', [
+        ('Lines', 'totals.lines', 'i'), ('Shows', 'totals.shows', 'i'), ('Techs', 'totals.techs', 'i'),
+        ('Scheduled hrs', 'totals.sched_hours', 'h'), ('Worked hrs', 'totals.actual_hours', 'h'),
+        ('Unfilled', 'totals.unfilled', 'i')], [
+        ('Labor lines', 'lines', [('date', 'Date', 't'), ('show', 'Show', 't'),
+                                  ('position', 'Position', 't'), ('tech', 'Scheduled tech', 't'),
+                                  ('sched', 'Scheduled', 't'), ('sched_hours', 'Sched. hrs', 'h'),
+                                  ('worked_by', 'Worked by', 't'), ('actual', 'Actual', 't'),
+                                  ('actual_hours', 'Worked hrs', 'h'), ('state', 'Status', 't')])]),
+    'breaks': ('Break exceptions', 'report_breaks', [
+        ('Settled shifts checked', 'lines_checked', 'i'), ('Not taken', 'kinds.Not taken', 'i'),
+        ('Shorter', 'kinds.Shorter', 'i'), ('Longer', 'kinds.Longer', 'i'),
+        ('Added', 'kinds.Added', 'i'), ('Moved', 'kinds.Moved', 'i')], [
+        ('Exceptions', 'exceptions', [('date', 'Date', 't'), ('show', 'Show', 't'),
+                                      ('position', 'Position', 't'), ('tech', 'Tech', 't'),
+                                      ('lunch', 'Lunch', 'i'), ('kind', 'Exception', 't'),
+                                      ('scheduled', 'Scheduled', 't'), ('sched_min', 'Sched. min', 'i'),
+                                      ('actual', 'Actual', 't'), ('actual_min', 'Actual min', 'i'),
+                                      ('diff_min', 'Diff (min)', 'i')]),
+        ('By technician', 'by_tech', [('tech', 'Tech', 't'), ('exceptions', 'Exceptions', 'i'),
+                                      ('not_taken', 'Not taken', 'i'), ('shorter', 'Shorter', 'i'),
+                                      ('longer', 'Longer', 'i'), ('net_min', 'Net minutes', 'i')]),
+        ('By position', 'by_position', [('position', 'Position', 't'),
+                                        ('exceptions', 'Exceptions', 'i'),
+                                        ('not_taken', 'Not taken', 'i'), ('shorter', 'Shorter', 'i'),
+                                        ('longer', 'Longer', 'i'), ('net_min', 'Net minutes', 'i')])]),
+    'variance': ('Labor estimate vs settlement', 'report_variance', [
+        ('Settled shows', 'totals.shows', 'i'), ('Over estimate', 'totals.over', 'i'),
+        ('Under estimate', 'totals.under', 'i'), ('Estimated', 'totals.estimate', 'm'),
+        ('Settled', 'totals.settled', 'm'), ('Difference', 'totals.diff', 'm')], [
+        ('By show', 'shows', [('show', 'Show', 't'), ('date', 'Date', 't'),
+                              ('company', 'Arts Group', 't'), ('estimate', 'Estimate', 'm'),
+                              ('settled', 'Settled', 'm'), ('diff', 'Difference', 'm'),
+                              ('diff_pct', 'Diff %', 'p'), ('est_hours', 'Est. hrs', 'h'),
+                              ('act_hours', 'Worked hrs', 'h'), ('hours_diff', 'Hrs diff', 'h'),
+                              ('added_lines', 'Added lines', 'i')])]),
+    'piano': ('Piano tuning', 'report_piano', [
+        ('Tunings', 'totals.tunings', 'i'), ('Open', 'totals.open', 'i'),
+        ('Completed', 'totals.completed', 'i'), ('Cancelled', 'totals.cancelled', 'i'),
+        ('Cost (not cancelled)', 'totals.cost', 'm')], [
+        ('By vendor', 'vendors', [('vendor', 'Vendor', 't'), ('tunings', 'Tunings', 'i'),
+                                  ('completed', 'Completed', 'i'), ('cancelled', 'Cancelled', 'i'),
+                                  ('cost', 'Cost', 'm'), ('avg_cost', 'Avg cost', 'm')]),
+        ('Trend by month', 'months', [('month', 'Month', 't'), ('tunings', 'Tunings', 'i'),
+                                      ('cancelled', 'Cancelled', 'i'), ('cost', 'Cost', 'm'),
+                                      ('avg_cost', 'Avg cost', 'm')]),
+        ('By Arts Group', 'groups', [('group', 'Arts Group', 't'), ('tunings', 'Tunings', 'i'),
+                                     ('cost', 'Cost', 'm'), ('avg_cost', 'Avg cost', 'm')]),
+        ('By who requested', 'requesters', [('requester', 'Requested by', 't'),
+                                            ('tunings', 'Tunings', 'i'), ('cost', 'Cost', 'm')]),
+        ('By piano', 'pianos', [('piano', 'Piano', 't'), ('tunings', 'Tunings', 'i'),
+                                ('cost', 'Cost', 'm'), ('last_date', 'Last tuning', 't')])]),
+}
+_RPT_PDF_ROW_CAP = 3000
+
+
+def _rpt_path(d, path):
+    for k in path.split('.'):
+        if not isinstance(d, dict):
+            return None
+        d = d.get(k)
+    return d
+
+
+def _rpt_filter_summary(db):
+    """Human-readable lines for the filters in the query string."""
+    a = request.args
+    out = []
+    if a.get('from') or a.get('to'):
+        out.append(f"Dates: {a.get('from') or 'any'} – {a.get('to') or 'any'}")
+    for k, label in (('venue', 'Venue'), ('company', 'Arts Group')):
+        if a.get(k):
+            out.append(f'{label}: {a.get(k)[:120]}')
+    f = _report_drill()
+    lookups = (('show', 'Show', 'shows'), ('has_type', 'Has item', 'asset_types'),
+               ('type_id', 'Item', 'asset_types'),
+               ('has_category', 'Has category', 'asset_categories'),
+               ('position', 'Position', 'job_positions'), ('tech', 'Technician', 'crew_members'))
+    for k, label, table in lookups:
+        v = f.get(k) if k in f else request.args.get(k, type=int)
+        if v:
+            r = db.execute(f'SELECT name FROM {table} WHERE id=%s', (v,)).fetchone()
+            out.append(f"{label}: {r['name'] if r else '#' + str(v)}")
+    if a.get('min_diff'):
+        out.append(f"Break difference ≥ {a.get('min_diff')[:4]} min")
+    return out or ['All shows (no filters)']
+
+
+@app.route('/reports/pdf')
+@reports_required
+def report_pdf():
+    key = request.args.get('report', '')
+    spec = _RPT_PDF.get(key)
+    if not spec:
+        abort(404)
+    title, view, card_spec, table_spec = spec
+    resp = app.view_functions[view]()
+    if isinstance(resp, tuple) or getattr(resp, 'status_code', 200) != 200:
+        return resp            # the view's own 403 / 400
+    data = resp.get_json() or {}
+    if key == 'group_detail':
+        title = f"Arts Group — {(request.args.get('group_name') or request.args.get('group') or '(No company)')[:120]}"
+    elif key == 'asset_units' and request.args.get('type_name'):
+        title = f"Asset units — {request.args.get('type_name')[:120]}"
+    cards = [(label, _rpt_fmt(_rpt_path(data, path), f)) for label, path, f in card_spec
+             if _rpt_path(data, path) is not None]
+    tables = []
+    for t_title, rows_key, cols in table_spec:
+        rows = data.get(rows_key) or []
+        tables.append({'title': t_title, 'total': len(rows),
+                       'cols': [(label, f in 'imhp') for _k, label, f in cols],
+                       'rows': [[_rpt_fmt(r.get(k), f) for k, _l, f in cols]
+                                for r in rows[:_RPT_PDF_ROW_CAP]]})
+    db = get_db()
+    try:
+        filters = _rpt_filter_summary(db)
+        logo = get_app_setting('logo_data', '')
+    finally:
+        db.close()
+    me = get_current_user()
+    html = render_template('pdf/report_pdf.html', title=title, cards=cards, tables=tables,
+                           filters=filters, row_cap=_RPT_PDF_ROW_CAP, logo=logo,
+                           generated=datetime.now().strftime('%Y-%m-%d %H:%M'),
+                           generated_by=(me or {}).get('display_name') or session.get('username'),
+                           landscape=any(len(t['cols']) > 7 for t in tables))
+    from weasyprint import HTML as WP_HTML
+    pdf = WP_HTML(string=html).write_pdf(font_config=_wp_font_config())
+    syslog_logger.info(f"REPORT_PDF report={key} by={session.get('username')}")
+    resp = make_response(pdf)
+    resp.headers['Content-Type'] = 'application/pdf'
+    resp.headers['Content-Disposition'] = (
+        f'inline; filename="report_{key}_{date.today().isoformat()}.pdf"')
+    return resp
+
+
 @app.route('/reports/assets')
 @asset_manager_required
 def asset_reports():
@@ -25605,6 +26648,10 @@ def asset_reports_data():
     if date_to:
         where.append("COALESCE(s.show_date, '0001-01-01') <= %s")
         params.append(date_to)
+
+    if any(_report_drill().values()):
+        where.append("s.id = ANY(%s)")
+        params.append(list(_report_shows(db)) or [0])
 
     where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
 
