@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.14.0'
+APP_VERSION = '3.15.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -5787,12 +5787,24 @@ def _render_show_board(mine=False):
                            venue_groups=venue_groups,
                            today_shows=today_shows,
                            today_iso=today_iso,
+                           today_label=_long_day_label(date.today()),
                            restricted=restricted,
                            home_layout=home_layout,
                            home_density=home_density,
                            my_shows=mine,
                            archived_count=archived_count,
                            user=get_current_user())
+
+
+_EN_DAYS = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+_EN_MONTHS = ('January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+              'September', 'October', 'November', 'December')
+
+
+def _long_day_label(d):
+    """'Thursday, October 1' — English names on purpose (strftime %A/%B are
+    locale-bound, same reason the syslog header avoids %b)."""
+    return f'{_EN_DAYS[d.weekday()]}, {_EN_MONTHS[d.month - 1]} {d.day}'
 
 
 @app.route('/shows/archived')
@@ -5812,6 +5824,10 @@ def archived_shows_page():
             where.append(f"s.id IN ({','.join(['%s'] * len(accessible))})")
             params += list(accessible)
     db = get_db()
+    # Count for the header's Active tab — the same access filter, active shows.
+    active_count = db.execute(
+        f"SELECT COUNT(*) AS n FROM shows s WHERE "
+        f"{' AND '.join(['s.status = %s'] + where[1:])}", ['active'] + params).fetchone()['n']
     rows = db.execute(f"""
         SELECT s.id, s.name, s.venue, s.is_test, s.show_mode, {_eff} AS show_date,
                (SELECT field_value FROM advance_data WHERE show_id = s.id
@@ -5830,6 +5846,7 @@ def archived_shows_page():
     venues = sorted({s['venue'] or 'Unassigned' for s in shows},
                     key=lambda v: (v == 'Unassigned', v.lower()))
     return render_template('archived_shows.html', shows=shows, venues=venues,
+                           active_count=active_count,
                            restricted=session.get('is_restricted', False),
                            user=get_current_user())
 
@@ -10171,8 +10188,8 @@ def add_user():
     is_readonly = 1 if request.form.get('is_readonly') else 0
     db = get_db()
     try:
-        cur = db.execute("""INSERT INTO users (username, password_hash, display_name, role, email, is_readonly)
-                      VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+        cur = db.execute("""INSERT INTO users (username, password_hash, display_name, role, email, is_readonly, theme)
+                      VALUES (%s, %s, %s, %s, %s, %s, 'auto') RETURNING id""",
                    (username, generate_password_hash(password), display, role, email, is_readonly))
         new_uid = cur.fetchone()['id']
         log_audit(db, 'USER_CREATE', 'user', new_uid, detail=f'{username} role={role}')
@@ -10445,7 +10462,7 @@ def set_view_mode():
 def set_theme():
     data = request.get_json(force=True) or {}
     theme = data.get('theme', 'dark')
-    if theme not in ('dark', 'light'):
+    if theme not in ('dark', 'light', 'auto'):   # auto = follow the OS (3.15.0)
         theme = 'dark'
     db = get_db()
     db.execute('UPDATE users SET theme=%s WHERE id=%s', (theme, session['user_id']))
@@ -23835,8 +23852,8 @@ def approve_registration(reg_id):
         return jsonify({'error': 'Not found'}), 404
     try:
         db.execute("""
-            INSERT INTO users (username, display_name, email, password_hash, role, email_confirmed)
-            VALUES (%s,%s,%s,%s,%s,1)
+            INSERT INTO users (username, display_name, email, password_hash, role, email_confirmed, theme)
+            VALUES (%s,%s,%s,%s,%s,1,'auto')
         """, (reg['username'], reg['display_name'] or reg['username'],
               reg['email'], reg['password_hash'], role))
         db.commit()

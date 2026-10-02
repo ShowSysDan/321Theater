@@ -4,7 +4,29 @@
    Brand: Navy #194980 · Orange #F57F20 · Red-Orange #F04E23
 ================================================================ */
 
-@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+/* Fonts are bundled (static/fonts/, SIL OFL — see the OFL-*.txt files): the
+   app makes no request to Google Fonts or any CDN. Poppins (brand font) ships
+   only Regular 400 + SemiBold 600; JetBrains Mono is one variable file. Each
+   in a Latin + Latin-Extended subset (unicode-range), as Google served them.
+   Never used by the PDF templates (see CLAUDE.md → WeasyPrint font config). */
+@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 400; font-display: swap;
+  src: url('/static/fonts/poppins-latin-400-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 400; font-display: swap;
+  src: url('/static/fonts/poppins-latin-ext-400-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF; }
+@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 600; font-display: swap;
+  src: url('/static/fonts/poppins-latin-600-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 600; font-display: swap;
+  src: url('/static/fonts/poppins-latin-ext-600-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF; }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 100 800; font-display: swap;
+  src: url('/static/fonts/jetbrains-mono-latin-wght-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 100 800; font-display: swap;
+  src: url('/static/fonts/jetbrains-mono-latin-ext-wght-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF; }
 
 :root {
   --bg:          #141414;
@@ -29,9 +51,9 @@
   --border-light:#3a3a3a;
   --sidebar-w:   267px;
 
-  --font-main:  'Poppins', sans-serif;
-  --font-cond:  'Poppins', sans-serif;
-  --font-mono:  'JetBrains Mono', monospace;
+  --font-main:  'Poppins', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-cond:  'Poppins', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono:  'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --radius:     6px;
   --radius-lg:  10px;
 }
@@ -2103,50 +2125,238 @@ html[data-theme="light"] .modal-card { box-shadow: var(--hl), 0 24px 70px rgba(0
 .sidebar { box-shadow: 2px 0 14px rgba(0,0,0,.22), inset -1px 0 0 rgba(255,255,255,.07), inset 0 1px 0 rgba(255,255,255,.08); }
 .data-table thead th { background-image: linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,0)); }
 
-/* ── WebRetriever2 colour layer (3.14.0) ──────────────────────────────────
-   Step two toward the WR2 look, still subtle: a faint fixed "aurora" behind
-   the surfaces (orange top-right, blue bottom-left — the brand accent plus
-   one cool tone), a top sheen on raised surfaces, a glowing gradient
-   underline on active tabs, a lit section icon, and recessed inputs. Uses
-   only --accent + two literal tints; layout, spacing and palette unchanged. */
-body {
-  background:
-    radial-gradient(1100px 540px at 88% -12%, rgba(245,127,32,.075), transparent 60%),
-    radial-gradient(900px 560px at -10% 108%, rgba(59,130,246,.06), transparent 60%),
-    var(--bg);
-  background-attachment: fixed;
+/* ══ UI refresh (3.15.0) — "321 Theater UI refresh — change guide" ═════════
+   Brand blue + layout kept; depth comes from tone shifts, hairlines and ONE
+   texture (grain behind the content). Orange marks action: New Show, the
+   active nav bar, the active tab, time icons. Mono for data (dates, counts,
+   section labels, times); Poppins 600 for headings/UI labels, 400 for body.
+   The sidebar never reads the content tokens below — its blue gradient is
+   the brand value and stays exactly as defined in .sidebar above, in both
+   themes. Replaces 3.14.0's aurora / glowing tab layer. */
+:root {
+  --bg:           #17181b;   /* page */
+  --bg-card:      #1e1f23;   /* cards, search field */
+  --bg-card-hover:#24262b;
+  --bg-surface:   #24262b;
+  --bg-hover:     #2a2c31;
+  --text:         #e8e9ec;   /* body */
+  --ink:          #ffffff;   /* headings */
+  --text-dim:     #9a9ea7;   /* subtitles */
+  --text-muted:   #7d818a;   /* "No crew calls" */
+  --border:       rgba(255,255,255,.08);
+  --border-light: rgba(255,255,255,.14);
+  --line-strong:  rgba(255,255,255,.18);
+  --orange-text:  #F08A3C;   /* orange used as text / icons */
+  --orange-soft:  #F5A262;
+  --glass:        rgba(34,36,42,.72);
+  --glass-line:   rgba(255,255,255,.09);
+  --card-shadow-hover: 0 10px 24px -14px rgba(0,0,0,.8);
+  --side-cast:    10px 0 28px -12px rgba(0,0,0,.65);
+  --grain-img:    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)' opacity='0.06'/%3E%3C/svg%3E");
 }
-html[data-theme="light"] body {
-  background:
-    radial-gradient(1100px 540px at 88% -12%, rgba(208,104,16,.06), transparent 60%),
-    radial-gradient(900px 560px at -10% 108%, rgba(59,130,246,.05), transparent 60%),
-    var(--bg);
-  background-attachment: fixed;
+html[data-theme="light"] {
+  --bg:           #f3f4f6;
+  --bg-card:      #ffffff;
+  --bg-card-hover:#ffffff;
+  --bg-surface:   #eef0f3;
+  --bg-hover:     #e7e9ed;
+  --text:         #2b2f36;
+  --ink:          #14161a;
+  --text-dim:     #5b616b;
+  --text-muted:   #6b7079;
+  --border:       rgba(15,23,42,.09);
+  --border-light: rgba(15,23,42,.16);
+  --line-strong:  rgba(15,23,42,.18);
+  --orange-text:  #B85A12;   /* darker so it passes 4.5:1 on white */
+  --orange-soft:  #B85A12;
+  --glass:        rgba(255,255,255,.72);
+  --glass-line:   rgba(15,23,42,.09);
+  --card-shadow-hover: 0 10px 24px -14px rgba(15,23,42,.25);
+  --side-cast:    10px 0 28px -14px rgba(15,23,42,.22);
+  --grain-img:    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)' opacity='0.04'/%3E%3C/svg%3E");
 }
-.form-section, .rpt-card, .perf-tile, .today-box {
-  background-image: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,0) 55%);
+
+/* Page: flat grey + the one texture. The sidebar paints its own blue over
+   it, so the grain only ever shows behind the content. */
+body { background-color: var(--bg); background-image: var(--grain-img); }
+html[data-theme="light"] body { background-blend-mode: multiply; }
+.main-content { padding-top: 28px; }
+h1, h2, h3, .page-title, .btn, .tab-btn, .rpt-tab, .perf-view { font-weight: 600; }
+.page-title { color: var(--ink); }
+
+/* ── Sidebar shell: seam + inner highlight + short cast shadow; recessed
+   logo strip and footer. Background untouched (brand). */
+.sidebar {
+  border-right: 1px solid rgba(0,0,0,.45);
+  box-shadow: inset -1px 0 0 rgba(255,255,255,.12), var(--side-cast);
 }
-html[data-theme="light"] .form-section, html[data-theme="light"] .rpt-card,
-html[data-theme="light"] .perf-tile, html[data-theme="light"] .today-box {
-  background-image: linear-gradient(180deg, rgba(255,255,255,.45), rgba(255,255,255,0) 55%);
+.sidebar-brand { background: rgba(0,0,0,.16); border-bottom: 1px solid rgba(255,255,255,.12); margin-bottom: 10px; }
+.sidebar-footer { background: rgba(0,0,0,.16); border-top: 1px solid rgba(255,255,255,.12); }
+.sidebar-footer .theme-toggle-btn, .sidebar-footer .logout-btn {
+  width: 36px; height: 36px; padding: 0; align-items: center; justify-content: center;
+  border-radius: 8px; color: rgba(255,255,255,.72);
 }
-.section-icon { text-shadow: 0 0 10px rgba(245,127,32,.45); }
-.tab-btn.active, .rpt-tab.active, .perf-view.active {
-  text-shadow: 0 0 14px rgba(245,127,32,.4);
-  background-image: linear-gradient(180deg, transparent 35%, rgba(245,127,32,.08));
-  border-bottom-color: transparent !important;
-  position: relative;
+.sidebar-footer .theme-toggle-btn:hover, .sidebar-footer .logout-btn:hover { background: rgba(255,255,255,.12); color: #fff; }
+.sidebar-footer .logout-btn[title="Logout"]:hover { background: rgba(240,78,35,.22); color: #fff; }
+.sidebar-footer-row { gap: 2px; }
+.sidebar-footer .user-avatar { background: var(--accent); }
+.sidebar-footer .app-version { font-family: var(--font-mono); color: rgba(255,255,255,.6) !important; }
+/* Search: recessed field with a "/" shortcut hint */
+.gs-input-row {
+  background: rgba(0,0,0,.22); border: 1px solid rgba(0,0,0,.25);
+  box-shadow: inset 0 1px 3px rgba(0,0,0,.35), 0 1px 0 rgba(255,255,255,.08);
 }
-.tab-btn.active::after, .rpt-tab.active::after, .perf-view.active::after {
-  content: ''; position: absolute; left: 10px; right: 10px; bottom: -1px; height: 2px;
-  border-radius: 2px; background: linear-gradient(90deg, var(--accent), #f5b342);
-  box-shadow: 0 0 10px rgba(245,127,32,.6);
+.gs-kbd {
+  font: 600 11px/1 var(--font-mono); color: rgba(255,255,255,.6); padding: 3px 6px; margin-right: 2px;
+  border: 1px solid rgba(255,255,255,.22); border-radius: 5px; background: rgba(255,255,255,.06); flex-shrink: 0;
 }
-html[data-theme="light"] .tab-btn.active, html[data-theme="light"] .rpt-tab.active,
-html[data-theme="light"] .perf-view.active { text-shadow: none; }
-html:not([data-theme="light"]) .field-input { box-shadow: inset 0 1px 3px rgba(0,0,0,.35); }
-.nav-approvals-badge, .notif-bell-badge { box-shadow: 0 0 10px rgba(229,62,62,.45); }
-@media (prefers-reduced-motion: no-preference) {
-  .show-card { transition: box-shadow .15s, transform .15s; }
-  .show-card:hover { transform: translateY(-1px); }
+.gs-input-row:focus-within .gs-kbd { display: none; }
+
+/* ── Nav links: tiles. The icon (the link's <svg>) is itself the tile. */
+.sidebar-nav { padding: 0 14px; }
+.nav-item {
+  position: relative; gap: 12px; min-height: 44px; padding: 4px 10px !important; margin-bottom: 2px;
+  border-radius: 10px; color: rgba(255,255,255,.82); font-size: 15px; font-weight: 600;
+  transition: background .15s, color .15s;
 }
+.nav-item > svg {
+  width: 32px; height: 32px; padding: 7px; box-sizing: border-box; border-radius: 8px;
+  background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.1);
+  transition: background .15s, color .15s;
+}
+.nav-item::after {     /* chevron that slides in on hover */
+  content: ""; width: 7px; height: 7px; margin-left: auto; margin-right: 4px; flex-shrink: 0;
+  border-right: 1.8px solid currentColor; border-top: 1.8px solid currentColor;
+  transform: translateX(-4px) rotate(45deg); opacity: 0; transition: opacity .15s, transform .15s;
+}
+.nav-item .nav-approvals-badge { margin-left: auto; }
+.nav-item:has(.nav-approvals-badge:not([hidden]))::after { margin-left: 8px; }
+.nav-item:hover { background: rgba(255,255,255,.08); color: #fff; text-decoration: none; }
+.nav-item:hover > svg { background: rgba(255,255,255,.15); }
+.nav-item:hover::after { opacity: .6; transform: translateX(0) rotate(45deg); }
+.nav-item.active { background: rgba(255,255,255,.14); color: #fff; box-shadow: inset 0 0 0 1px rgba(255,255,255,.14); }
+.nav-item.active > svg { background: #fff; border-color: #fff; color: var(--brand-navy); }
+.nav-item.active::before {
+  content: ""; position: absolute; left: -14px; top: 10px; bottom: 10px; width: 4px;
+  border-radius: 0 4px 4px 0; background: #F08A3C;
+}
+.nav-item:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.nav-section-label, .sidebar-nav.compact .nav-section-label {
+  display: flex; align-items: center; gap: 10px; margin: 22px 10px 8px; padding: 0;
+  font: 600 11px/1 var(--font-mono); letter-spacing: .14em; color: rgba(255,255,255,.7);
+}
+.nav-section-label::after { content: ""; flex: 1; height: 1px; background: rgba(255,255,255,.14); }
+.sidebar-nav.compact .nav-item { padding-top: 2px !important; padding-bottom: 2px !important; min-height: 40px; }
+/* Sub-items: indented under the parent, curved tree connector, 28 px tile */
+.nav-item.sub { margin-left: 26px; padding-left: 22px !important; min-height: 40px; font-size: 14px; }
+.nav-item.sub > svg { width: 28px; height: 28px; padding: 6px; }
+.nav-item.sub::before {
+  content: ""; position: absolute; left: 0; top: -8px; height: 28px; width: 14px;
+  border-left: 1px solid rgba(255,255,255,.22); border-bottom: 1px solid rgba(255,255,255,.22);
+  border-radius: 0 0 0 8px; background: none; bottom: auto;
+}
+/* Icon rail (collapsed / narrow): tiles only */
+html.sidebar-collapsed .sidebar-nav, html.force-rail .sidebar-nav { padding: 0 8px; }
+html.sidebar-collapsed .nav-item, html.force-rail .nav-item { padding: 4px 0 !important; justify-content: center; }
+html.sidebar-collapsed .nav-item::after, html.force-rail .nav-item::after { display: none; }
+html.sidebar-collapsed .nav-item.sub, html.force-rail .nav-item.sub { margin-left: 0; padding-left: 0 !important; }
+html.sidebar-collapsed .nav-item.sub::before, html.force-rail .nav-item.sub::before { display: none; }
+html.sidebar-collapsed .nav-item.active::before, html.force-rail .nav-item.active::before { left: -8px; }
+html.sidebar-collapsed .sidebar-nav .nav-section-label, html.force-rail .sidebar-nav .nav-section-label { display: none; }
+html.sidebar-collapsed .sidebar-footer-row, html.force-rail .sidebar-footer-row { flex-direction: column; gap: 4px; }
+
+/* ── Frosted page header (Shows / My Shows / Archived) */
+.phead {
+  position: sticky; top: 0; z-index: 5;
+  margin: -28px -48px 22px; padding: 24px 48px 0;   /* bleeds to the column edges: matches .main-content padding */
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(16px) saturate(140%); backdrop-filter: blur(16px) saturate(140%);
+  border-bottom: 1px solid var(--glass-line);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 12px 24px -18px rgba(0,0,0,.7);
+}
+html[data-theme="light"] .phead { box-shadow: 0 12px 24px -18px rgba(15,23,42,.25); }
+.phead-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.phead-title { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.phead-tile {
+  width: 52px; height: 52px; border-radius: 12px; flex-shrink: 0; display: grid; place-items: center;
+  background: var(--brand-navy); color: #fff; box-shadow: inset 0 1px 0 rgba(255,255,255,.18), 0 6px 14px -8px rgba(0,0,0,.6);
+}
+.phead-tile svg { width: 26px; height: 26px; }
+.phead .page-title { font-size: 34px; line-height: 1.1; letter-spacing: 0; }
+.phead-context { margin: 4px 0 0; font-size: 14px; color: var(--text-dim); }
+.mono { font-family: var(--font-mono); }
+.phead-cta { white-space: nowrap; flex-shrink: 0; height: 46px; padding: 0 20px; border-radius: 10px; font-size: 14.5px;
+  box-shadow: inset 0 -2px 0 rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.25), 0 6px 16px -8px rgba(232,130,47,.7); }
+.phead-tabs { display: flex; gap: 28px; margin-top: 18px; }
+.phead-tab {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 2px 12px;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  color: var(--text-dim); font: 600 15px var(--font-main); text-decoration: none !important;
+}
+.phead-tab:hover { color: var(--ink); }
+.phead-tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+.phead-tab .count { font: 600 12px var(--font-mono); padding: 3px 7px; border-radius: 999px;
+  background: rgba(255,255,255,.08); color: #b9bcc4; }
+html[data-theme="light"] .phead-tab .count { background: rgba(15,23,42,.07); color: var(--text-dim); }
+.phead-tab[aria-selected="true"] .count { background: rgba(232,130,47,.18); color: var(--orange-soft); }
+
+/* ── Tabs everywhere: plain orange underline (no glow) */
+.tab-btn.active, .rpt-tab.active, .perf-view.active { color: var(--ink); border-bottom-color: var(--accent); text-shadow: none; background-image: none; }
+
+/* ── Cards: flat, lift on hover; no coloured left edges (status = tags) */
+.show-card, .today-card {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; box-shadow: none;
+  transition: transform .15s, border-color .15s, background .15s, box-shadow .15s;
+}
+.show-card, .show-card.show-card-event, .today-card.today-card-event { border-left: 1px solid var(--border); }
+.show-card:hover, .today-card:hover {
+  transform: translateY(-2px); background: var(--bg-card-hover); border-color: var(--line-strong);
+  box-shadow: var(--card-shadow-hover);
+}
+.show-card:focus-visible, .today-card:focus-visible { outline: 2px solid #F08A3C; outline-offset: 2px; }
+.show-card-name, .today-card-name { color: var(--ink); }
+.show-card-dates div { font-family: var(--font-mono); font-size: 12px; color: var(--text-dim); }
+.today-card-row { font-size: 14px; color: #b9bcc4; gap: 10px; }
+html[data-theme="light"] .today-card-row { color: #4b515b; }
+.today-card-row.time { font: 500 15px var(--font-mono); color: var(--ink); }
+.today-card-row.time svg { color: var(--orange-text); }
+.today-card-row.mute, .today-card-row.mute .today-card-empty { font-style: italic; color: var(--text-muted); }
+.today-card-empty { font-size: inherit; }
+/* Happening Today: a flat panel with the orange border line, orange title */
+.today-box { background: var(--bg-card); border: 1px solid var(--border); border-left: 4px solid var(--accent);
+  border-radius: 10px; box-shadow: none; }
+.today-box::before { display: none; }
+.today-box-title { color: var(--orange-text); }
+.today-box .today-card { background: var(--bg); }
+html[data-theme="light"] .today-box .today-card { background: #fff; }
+.venue-col-count { font-family: var(--font-mono); }
+/* Venue chips */
+.venue-pill:not(.active) { background: rgba(255,255,255,.04); border-color: rgba(255,255,255,.10); }
+.venue-pill.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* ── Light mode: tinted tag chips, dark text on 14% tints */
+html[data-theme="light"] .today-card-tag.tag-show-day      { background: var(--accent); color: #fff; }
+html[data-theme="light"] .today-card-tag.tag-performance   { background: rgba(29,79,168,.14); color: #1d4fa8; }
+html[data-theme="light"] .today-card-tag.tag-load-in       { background: rgba(31,122,61,.14); color: #1f7a3d; }
+html[data-theme="light"] .today-card-tag.tag-load-out      { background: rgba(180,35,24,.14); color: #b42318; }
+html[data-theme="light"] .today-card-tag.tag-in-production { background: rgba(138,90,0,.14); color: #8a5a00; }
+html[data-theme="light"] .today-card-tag.tag-event, html[data-theme="light"] .event-badge { background: rgba(15,118,110,.14); color: #0f766e; }
+html[data-theme="light"] .main-content a:not([class]) { color: var(--orange-text); }
+
+@media (prefers-reduced-motion: reduce) {
+  .show-card:hover, .today-card:hover { transform: none; }
+  .nav-item::after { transition: none; }
+}
+/* The sidebar is the same in both themes: give it its own text/line tokens
+   so footer bits written against the content tokens (view-as select, version,
+   licence, search) stay white-on-blue in light mode too. */
+.sidebar {
+  --text: #ffffff; --text-dim: rgba(255,255,255,.66); --text-muted: rgba(255,255,255,.5);
+  --border: rgba(255,255,255,.14); --border-light: rgba(255,255,255,.2);
+  --bg-card: rgba(0,0,0,.22); --bg-surface: rgba(0,0,0,.22); --bg-hover: rgba(255,255,255,.08);
+}
+.sidebar .gs-input { color: #fff; background: transparent; }
+.sidebar .view-as-select { background-color: rgba(0,0,0,.22); }
+.sidebar .view-as-select option { background: #1e1f23; color: #e8e9ec; }
+.sidebar-user .user-info { min-width: 0; overflow: hidden; }
+html[data-theme="light"] .venue-pill:not(.active) { background: #fff; border-color: rgba(15,23,42,.12); }

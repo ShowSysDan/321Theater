@@ -875,11 +875,36 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   (`/api/asset-approvals/pending-count`, `/api/piano-tunings/pending-count`).
   Keep each count endpoint one cheap aggregate (polled every 60 s per tab).
 - The "Light glass refresh" block near the END of style.css (+ one m-header
-  rule in mobile.css) is the only place the WebRetriever2-style tokens
-  (`--hl`, `--lift`, `--lift-hover`) live; the "WebRetriever2 colour layer"
-  block after it (3.14.0: body aurora, surface sheen, active-tab glow
-  underline via `::after`) is step two. Keep WR2 styling in those blocks;
-  the bigger restyle comes later.
+  rule in mobile.css) holds the `--hl` / `--lift` tokens; the 3.14.0
+  "WebRetriever2 colour layer" was REPLACED in 3.15.0 by the UI refresh
+  block below (the guide allows one texture only).
+
+## UI refresh (3.15.0) — the change guide's rules
+- All of it lives in the "UI refresh (3.15.0)" block at the END of style.css
+  (+ a short block at the end of mobile.css). Content tokens there: `--bg`
+  #17181b / `--bg-card` / `--ink` / `--text` / `--text-dim` / `--orange-text`
+  / `--glass` / `--grain-img`, with light values on `html[data-theme="light"]`.
+- **Never change the sidebar blue** (the `.sidebar` gradient) — same in both
+  themes. `.sidebar` re-declares the text/line tokens for itself, so nothing
+  in it may read the content colours; light mode only changes the content.
+- **One texture only:** the grain (an SVG feTurbulence data-URI on `body`,
+  covered by the sidebar). No aurora, glows or gradients on surfaces.
+- Orange = action (New Show, active nav bar, active tab, time icons). Orange
+  as TEXT in light mode is `--orange-text` (#B85A12, 4.5:1), never the fill.
+- Nav tiles are CSS-only: the link's own `<svg>` is the tile, `::after` the
+  chevron, `.active::before` the orange bar, `.sub::before` the tree
+  connector. Keep `aria-current="page"` beside every `active` class.
+- **Fonts are bundled** in `static/fonts/` (Poppins 400 + 600, JetBrains Mono
+  variable; Latin + Latin-Ext woff2, OFL files alongside). Never add a Google
+  Fonts / CDN link back. No Poppins 500/700 file ships — the browser maps them
+  to 400/600. These @font-face rules are web-only; PDF templates still use no
+  @font-face (see the WeasyPrint font-config rule).
+- `.phead` (dashboard, My Shows, archived) is sticky with negative margins
+  that MUST equal `.main-content`'s padding (28px 48px desktop, 14px 12px
+  phones — mobile.css), and on phones sits below the fixed m-header.
+- Theme: `users.theme` = dark | light | auto. Auto is resolved before first
+  paint by the head script in base.html (`data-theme-pref`) and follows the
+  OS live; the toggle cycles dark → light → auto. New accounts get 'auto'.
 
 ## In-app notifications (bell) for managers (3.14.0)
 - `notify_users(db, user_ids, ..., coalesce_key=)` (caller commits, never

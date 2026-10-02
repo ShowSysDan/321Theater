@@ -4,15 +4,18 @@
   MIT Licensed — see LICENSE for details.
 #}
 <!DOCTYPE html>
-<html lang="en" data-theme="{{ user.theme if user else 'dark' }}"{% if is_mobile_view or test_mode %} class="{{ 'mobile-view' if is_mobile_view }}{{ ' test-mode' if test_mode }}"{% endif %}>
+{% set _tpref = (user.theme if user and user.theme in ('dark', 'light', 'auto') else ('auto' if not user or not user.theme else 'dark')) %}
+<html lang="en" data-theme="{{ _tpref if _tpref != 'auto' else 'dark' }}" data-theme-pref="{{ _tpref }}"{% if is_mobile_view or test_mode %} class="{{ 'mobile-view' if is_mobile_view }}{{ ' test-mode' if test_mode }}"{% endif %}>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>{% if test_mode %}[TEST] {% endif %}{% block title %}3·2·1→Theater{% endblock %}</title>
+  {# Theme "auto" (3.15.0): follow the OS before first paint, and live. #}
+  <script>(function(){var h=document.documentElement;if(h.dataset.themePref!=='auto'||!window.matchMedia)return;var m=matchMedia('(prefers-color-scheme: light)');function a(){if(h.dataset.themePref==='auto')h.setAttribute('data-theme',m.matches?'light':'dark');}a();if(m.addEventListener)m.addEventListener('change',a);})();</script>
   <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  {# Bundled fonts (no outside requests) — preload the two Poppins weights every page uses. #}
+  <link rel="preload" href="{{ url_for('static', filename='fonts/poppins-latin-400-normal.woff2') }}" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="{{ url_for('static', filename='fonts/poppins-latin-600-normal.woff2') }}" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   {% if is_mobile_view %}
   {# MOBILE VIEW: mobile.css restyles the SAME templates for phones (iPhone
@@ -163,6 +166,7 @@
                autocomplete="off" spellcheck="false"
                oninput="_gsOnInput()" onfocus="_gsOpen()" onkeydown="_gsKey(event)">
         <button id="gs-clear" class="gs-clear" style="display:none" onclick="_gsClear()" tabindex="-1">×</button>
+        <kbd class="gs-kbd" title="Press / to search" aria-hidden="true">/</kbd>
       </div>
     </div>
     <!-- Results panel (fixed, floats right of sidebar) -->
@@ -175,23 +179,23 @@
       {% if session.get('is_document_viewer') %}
       {# Document viewers only get the documents page — everything else is
          off-limits, and the @before_request gate would redirect anyway. #}
-      <a href="{{ url_for('viewer_home') }}" class="nav-item {% if request.endpoint in ['viewer_home','viewer_show'] %}active{% endif %}">
+      <a href="{{ url_for('viewer_home') }}" class="nav-item {% if request.endpoint in ['viewer_home','viewer_show'] %}active{% endif %}"{% if request.endpoint in ['viewer_home','viewer_show'] %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg>
         Documents
       </a>
       {% if session.get('viewer_show_calendar') %}
-      <a href="{{ url_for('viewer_calendar') }}" class="nav-item {% if request.endpoint == 'viewer_calendar' %}active{% endif %}">
+      <a href="{{ url_for('viewer_calendar') }}" class="nav-item {% if request.endpoint == 'viewer_calendar' %}active{% endif %}"{% if request.endpoint == 'viewer_calendar' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
         Show Calendar
       </a>
       {% endif %}
       {% if session.get('viewer_labor_overview') %}
-      <a href="{{ url_for('labor_overview') }}" class="nav-item {% if request.endpoint == 'labor_overview' %}active{% endif %}">
+      <a href="{{ url_for('labor_overview') }}" class="nav-item {% if request.endpoint == 'labor_overview' %}active{% endif %}"{% if request.endpoint == 'labor_overview' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
         Labor Overview
       </a>
       {% endif %}
-      <a href="{{ url_for('viewer_account') }}" class="nav-item {% if request.endpoint == 'viewer_account' %}active{% endif %}">
+      <a href="{{ url_for('viewer_account') }}" class="nav-item {% if request.endpoint == 'viewer_account' %}active{% endif %}"{% if request.endpoint == 'viewer_account' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
         My Account
       </a>
@@ -200,42 +204,42 @@
         Log out
       </a>
       {% else %}
-      <a href="{{ url_for('dashboard') }}" class="nav-item {% if request.endpoint == 'dashboard' %}active{% endif %}">
+      <a href="{{ url_for('dashboard') }}" class="nav-item {% if request.endpoint == 'dashboard' %}active{% endif %}"{% if request.endpoint == 'dashboard' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
         Home
       </a>
-      <a href="{{ url_for('my_shows') }}" class="nav-item {% if request.endpoint == 'my_shows' %}active{% endif %}">
+      <a href="{{ url_for('my_shows') }}" class="nav-item {% if request.endpoint == 'my_shows' %}active{% endif %}"{% if request.endpoint == 'my_shows' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M16 3l1.5 1.5L20 2"/></svg>
         My Shows
       </a>
 
       {% if request.endpoint in ['show_page'] and show is defined %}
       <div class="nav-section-label">CURRENT SHOW</div>
-      <a href="{{ url_for('show_page', show_id=show.id, tab='advance') }}" class="nav-item sub {% if tab == 'advance' %}active{% endif %}">
+      <a href="{{ url_for('show_page', show_id=show.id, tab='advance') }}" class="nav-item sub {% if tab == 'advance' %}active{% endif %}"{% if tab == 'advance' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>
         Advance Sheet
       </a>
-      <a href="{{ url_for('show_page', show_id=show.id, tab='schedule') }}" class="nav-item sub {% if tab == 'schedule' %}active{% endif %}">
+      <a href="{{ url_for('show_page', show_id=show.id, tab='schedule') }}" class="nav-item sub {% if tab == 'schedule' %}active{% endif %}"{% if tab == 'schedule' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
         Production Schedule
       </a>
-      <a href="{{ url_for('show_page', show_id=show.id, tab='staffing') }}" class="nav-item sub {% if tab == 'staffing' %}active{% endif %}">
+      <a href="{{ url_for('show_page', show_id=show.id, tab='staffing') }}" class="nav-item sub {% if tab == 'staffing' %}active{% endif %}"{% if tab == 'staffing' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
         Labor Requests
       </a>
-      <a href="{{ url_for('show_page', show_id=show.id, tab='assets') }}" class="nav-item sub {% if tab == 'assets' %}active{% endif %}">
+      <a href="{{ url_for('show_page', show_id=show.id, tab='assets') }}" class="nav-item sub {% if tab == 'assets' %}active{% endif %}"{% if tab == 'assets' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/></svg>
         Assets
       </a>
-      <a href="{{ url_for('show_page', show_id=show.id, tab='postnotes') }}" class="nav-item sub {% if tab == 'postnotes' %}active{% endif %}">
+      <a href="{{ url_for('show_page', show_id=show.id, tab='postnotes') }}" class="nav-item sub {% if tab == 'postnotes' %}active{% endif %}"{% if tab == 'postnotes' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
         Post Show
       </a>
-      <a href="{{ url_for('show_page', show_id=show.id, tab='comments') }}" class="nav-item sub {% if tab == 'comments' %}active{% endif %}">
+      <a href="{{ url_for('show_page', show_id=show.id, tab='comments') }}" class="nav-item sub {% if tab == 'comments' %}active{% endif %}"{% if tab == 'comments' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
         Comments
       </a>
-      <a href="{{ url_for('show_page', show_id=show.id, tab='export') }}" class="nav-item sub {% if tab == 'export' %}active{% endif %}">
+      <a href="{{ url_for('show_page', show_id=show.id, tab='export') }}" class="nav-item sub {% if tab == 'export' %}active{% endif %}"{% if tab == 'export' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         Export & Files
       </a>
@@ -249,7 +253,7 @@
       {% if entry.type == 'section' %}
       <div class="nav-section-label">{{ entry.label }}</div>
       {% else %}
-      <a href="{{ url_for(entry.endpoint) }}" class="nav-item{% if entry.indent %} sub{% endif %}{% if entry.active %} active{% endif %}"{% if entry.badge %} id="nav-{{ entry.badge }}-link"{% endif %}>
+      <a href="{{ url_for(entry.endpoint) }}" class="nav-item{% if entry.indent %} sub{% endif %}{% if entry.active %} active{% endif %}"{% if entry.active %} aria-current="page"{% endif %}{% if entry.badge %} id="nav-{{ entry.badge }}-link"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">{{ entry.icon|safe }}</svg>
         {{ entry.label }}
         {% if entry.badge %}<span id="nav-{{ entry.badge }}-badge" class="nav-approvals-badge" hidden></span>{% endif %}
@@ -299,7 +303,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
           <span id="notif-bell-badge" class="notif-bell-badge" hidden>0</span>
         </button>
-        <button class="theme-toggle-btn" id="theme-toggle-btn" onclick="toggleTheme()" title="Toggle light / dark mode">
+        <button class="theme-toggle-btn" id="theme-toggle-btn" onclick="toggleTheme()" title="Theme: Dark / Light / Auto">
           {% if user.theme == 'light' %}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/></svg>
           {% else %}
@@ -733,6 +737,16 @@ function _gsShowContact(contact) {
   modal.style.display = 'flex';
 }
 
+// "/" anywhere (outside a text field) jumps to the sidebar search (3.15.0).
+document.addEventListener('keydown', (e) => {
+  if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+  const t = e.target;
+  if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+  const gi = document.getElementById('gs-input');
+  if (!gi || !gi.offsetParent) return;
+  e.preventDefault();
+  gi.focus();
+});
 function _gsKey(e) {
   const panel = document.getElementById('gs-panel');
   if (panel.style.display === 'none') return;
@@ -825,7 +839,8 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li><strong>Happening Today</strong> — appears when there's activity today, with auto tags like Load-In, Performance, Load-Out.</li>
         <li><strong>New Show</strong> — creates a show from just a name; dates, venue and everything else are filled in on its Advance Sheet.</li>
-        <li><strong>Search</strong> — filters the active shows by name or venue. Archived shows have their own page: the <strong>Archived</strong> button next to New Show (with its own search, dates and venue filter, plus Restore).</li>
+        <li><strong>Search</strong> — filters the active shows by name or venue. Archived shows have their own page: the <strong>Archived</strong> tab under the title (with its own search, dates and venue filter, plus Restore). Press <strong>/</strong> anywhere to jump to the sidebar search.</li>
+        <li>The sun button in the sidebar footer cycles the theme <strong>Dark → Light → Auto</strong>. Auto follows your device's setting.</li>
         <li><strong>Date pickers</strong> — narrow the board by show date.</li>
         <li><strong>Venue pills</strong> — every venue shows by default (<strong>All venues</strong> lit). Click a venue to show <em>only</em> that venue; click more to add them, click a lit one to drop it, or <strong>All venues</strong> to reset. The archived list follows the pick too.</li>
         <li><strong>Layout / density</strong> — Columns vs Stacked, Normal vs Slim; saved to your account instantly.</li>

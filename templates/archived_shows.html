@@ -7,13 +7,23 @@
 {% block title %}Archived Shows — 3·2·1→Theater{% endblock %}
 
 {% block content %}
-<div class="page-header">
-  <div>
-    <a href="{{ url_for('dashboard') }}" class="back-link">← Home</a>
-    <h1 class="page-title">Archived Shows</h1>
-    <p class="page-sub"><span id="arch-visible">{{ shows|length }}</span> of {{ shows|length }} archived show{{ '' if shows|length == 1 else 's' }}, newest first. Shows archive themselves a few days after their last date; Restore brings one back to Home.</p>
+<header class="phead">
+  <div class="phead-row">
+    <div class="phead-title">
+      <span class="phead-tile" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+      </span>
+      <div>
+        <h1 class="page-title">Shows</h1>
+        <p class="phead-context"><span id="arch-visible" class="mono">{{ shows|length }}</span> of <span class="mono">{{ shows|length }}</span> archived, newest first · they archive a few days after their last date; Restore brings one back</p>
+      </div>
+    </div>
   </div>
-</div>
+  <nav class="phead-tabs" role="tablist" aria-label="Show lists">
+    <a class="phead-tab" role="tab" aria-selected="false" href="{{ url_for('dashboard') }}">Active <span class="count">{{ active_count }}</span></a>
+    <a class="phead-tab" role="tab" aria-selected="true" href="{{ url_for('archived_shows_page') }}">Archived <span class="count">{{ shows|length }}</span></a>
+  </nav>
+</header>
 
 {% if shows %}
 <div class="dash-toolbar">
