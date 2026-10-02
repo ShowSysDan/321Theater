@@ -2180,7 +2180,6 @@ html[data-theme="light"] {
    it, so the grain only ever shows behind the content. */
 body { background-color: var(--bg); background-image: var(--grain-img); }
 html[data-theme="light"] body { background-blend-mode: multiply; }
-.main-content { padding-top: 28px; }
 h1, h2, h3, .page-title, .btn, .tab-btn, .rpt-tab, .perf-view { font-weight: 600; }
 .page-title { color: var(--ink); }
 
@@ -2247,34 +2246,64 @@ h1, h2, h3, .page-title, .btn, .tab-btn, .rpt-tab, .perf-view { font-weight: 600
 }
 .nav-section-label::after { content: ""; flex: 1; height: 1px; background: rgba(255,255,255,.14); }
 .sidebar-nav.compact .nav-item { padding-top: 2px !important; padding-bottom: 2px !important; min-height: 40px; }
-/* Sub-items: indented under the parent, curved tree connector, 28 px tile */
-.nav-item.sub { margin-left: 26px; padding-left: 22px !important; min-height: 40px; font-size: 14px; }
-.nav-item.sub > svg { width: 28px; height: 28px; padding: 6px; }
-.nav-item.sub::before {
-  content: ""; position: absolute; left: 0; top: -8px; height: 28px; width: 14px;
-  border-left: 1px solid rgba(255,255,255,.22); border-bottom: 1px solid rgba(255,255,255,.22);
-  border-radius: 0 0 0 8px; background: none; bottom: auto;
+/* Sub-items: indented under the parent, tree connector, 28 px tile. The
+   connector is the row's ::before, drawn just OUTSIDE the row (so the row's
+   rounded corners can't clip it): a vertical rule the full row height with
+   an elbow to the row, and on the last row of a run a curved └ that stops
+   at the elbow. Rows touch (margin 0), so the rule is continuous however
+   tall a row gets (wrapped labels). On sub rows this replaces the orange
+   active bar — the white tile + highlight mark the active one. */
+.sidebar-nav .nav-item.sub {
+  margin: 0 0 0 30px; padding-left: 10px !important; min-height: 40px; font-size: 14px; line-height: 1.25;
 }
+.sidebar-nav .nav-item.sub::before {
+  content: ""; position: absolute; left: -12px; top: 0; bottom: 0; width: 12px;
+  border-left: 1px solid rgba(255,255,255,.24); border-radius: 0;
+  background: linear-gradient(rgba(255,255,255,.24), rgba(255,255,255,.24)) 0 50% / 100% 1px no-repeat;
+}
+.sidebar-nav .nav-item.sub:not(:has(+ .nav-item.sub)) { margin-bottom: 2px; }
+.sidebar-nav .nav-item.sub:not(:has(+ .nav-item.sub))::before {
+  bottom: 50%; background: none; border-bottom: 1px solid rgba(255,255,255,.24); border-bottom-left-radius: 7px;
+}
+.sidebar-nav .nav-item.sub > svg { width: 28px; height: 28px; padding: 6px; }
 /* Icon rail (collapsed / narrow): tiles only */
 html.sidebar-collapsed .sidebar-nav, html.force-rail .sidebar-nav { padding: 0 8px; }
 html.sidebar-collapsed .nav-item, html.force-rail .nav-item { padding: 4px 0 !important; justify-content: center; }
 html.sidebar-collapsed .nav-item::after, html.force-rail .nav-item::after { display: none; }
 html.sidebar-collapsed .nav-item.sub, html.force-rail .nav-item.sub { margin-left: 0; padding-left: 0 !important; }
-html.sidebar-collapsed .nav-item.sub::before, html.force-rail .nav-item.sub::before { display: none; }
+html.sidebar-collapsed .sidebar-nav .nav-item.sub, html.force-rail .sidebar-nav .nav-item.sub { margin-left: 0; }
+html.sidebar-collapsed .sidebar-nav .nav-item.sub::before, html.force-rail .sidebar-nav .nav-item.sub::before { display: none; }
 html.sidebar-collapsed .nav-item.active::before, html.force-rail .nav-item.active::before { left: -8px; }
 html.sidebar-collapsed .sidebar-nav .nav-section-label, html.force-rail .sidebar-nav .nav-section-label { display: none; }
 html.sidebar-collapsed .sidebar-footer-row, html.force-rail .sidebar-footer-row { flex-direction: column; gap: 4px; }
 
 /* ── Frosted page header (Shows / My Shows / Archived) */
-.phead {
+/* Every page's header is this bar (3.15.0): the Shows pages use .phead
+   (title tile + tabs), all other pages their existing .page-header. The
+   column has NO top padding so the bar sits flush at the top; it bleeds
+   sideways by the column's 48 px side padding (keep these in step). */
+.main-content { padding-top: 0; }
+.main-content > .flash-container { margin-top: 18px; }
+.main-content > #site-msg-container:not(:empty) { padding-top: 16px; }
+.main-content > #site-msg-container + :not(.page-header):not(.phead):not(style):not(script):not(template) { margin-top: 28px; }
+.phead, .page-header {
   position: sticky; top: 0; z-index: 5;
-  margin: -28px -48px 22px; padding: 24px 48px 0;   /* bleeds to the column edges: matches .main-content padding */
-  background: var(--glass);
+  margin: 0 -48px 22px; padding: 24px 48px 0;
+  /* The tint + bottom hairline are painted by border-image so they can run
+     past the column's max-width to the window's right edge (outset 100vw):
+     outsets never create scrollable overflow, so no horizontal scrollbar. */
+  background: transparent;
+  border-image: linear-gradient(to top, transparent, var(--phead-shade) 12px, var(--glass-line) 12px,
+      var(--glass-line) 13px, var(--glass) 13px) fill 0 / 0 / 0 100vw 12px 0;   /* + 12px soft shade below */
   -webkit-backdrop-filter: blur(16px) saturate(140%); backdrop-filter: blur(16px) saturate(140%);
-  border-bottom: 1px solid var(--glass-line);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 12px 24px -18px rgba(0,0,0,.7);
+  border-bottom: 1px solid transparent;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
+  --phead-shade: rgba(0,0,0,.22);
 }
-html[data-theme="light"] .phead { box-shadow: 0 12px 24px -18px rgba(15,23,42,.25); }
+html[data-theme="light"] .phead, html[data-theme="light"] .page-header { box-shadow: none; --phead-shade: rgba(15,23,42,.06); }
+.page-header { padding-bottom: 18px; margin-bottom: 24px; align-items: center; }
+.page-header .page-title { font-size: 30px; line-height: 1.15; letter-spacing: 0; }
+.page-header .back-link { margin-bottom: 2px; }
 .phead-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .phead-title { display: flex; align-items: center; gap: 16px; min-width: 0; }
 .phead-tile {
