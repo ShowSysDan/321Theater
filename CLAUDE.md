@@ -772,6 +772,13 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   computed price AND (on a company-rated line) from the standard price — a
   client echoing the standard rate must not knock a line off its company
   rate. The approvals add preview must mirror `_compute_locked_price`.
+- **Pinned units (3.16.2):** any surface that lists show gear must show the
+  pinned unit (`sa.asset_item_id` + `LEFT JOIN asset_items ai` →
+  `unit_barcode`, label `Unit <barcode>` / `#id`): Assets tab, Approvals,
+  asset/final/combined invoice + advance PDFs, dashboards, Rental Lines.
+  `_compute_asset_snapshot_hash` appends the unit id ONLY for pinned lines,
+  so unpinned lines hash as before — keep it that way (changing every
+  tuple would un-approve every show on its next edit).
 - Company changes never silently re-price: the Assets tab offers Re-price
   (`…/assets/apply-company-rates`) for lines whose `rate_company` doesn't
   match, skipping hand-priced lines (`_asset_line_hand_priced`).

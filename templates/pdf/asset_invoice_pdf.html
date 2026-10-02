@@ -92,7 +92,7 @@
       <tr>
         <td class="text-dim">{{ a.category_name }}</td>
         <td>
-          <strong>{{ a.type_name }}</strong>
+          <strong>{{ a.type_name }}</strong>{% if a.asset_item_id %}<br><span class=\"text-dim\">Unit {{ a.unit_barcode or ('#' ~ a.asset_item_id) }}</span>{% endif %}
           {% if a.model %}<br><span class="text-dim">{{ a.model }}</span>{% endif %}
           {% if a.notes %}<br><span class="text-dim">{{ a.notes }}</span>{% endif %}
         </td>
