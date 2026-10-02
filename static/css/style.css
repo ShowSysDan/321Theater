@@ -2389,3 +2389,9 @@ html[data-theme="light"] .main-content a:not([class]) { color: var(--orange-text
 .sidebar .view-as-select option { background: #1e1f23; color: #e8e9ec; }
 .sidebar-user .user-info { min-width: 0; overflow: hidden; }
 html[data-theme="light"] .venue-pill:not(.active) { background: #fff; border-color: rgba(15,23,42,.12); }
+/* Footer (3.15.2): the user's name gets the full width on its own line; the
+   four buttons (bell, theme, help, logout) sit in a row underneath. */
+.sidebar-footer-row { flex-wrap: wrap; justify-content: space-around; row-gap: 6px; }
+.sidebar-footer-row > .sidebar-user { flex: 1 0 100%; }
+html.sidebar-collapsed .sidebar-footer-row, html.force-rail .sidebar-footer-row { flex-wrap: nowrap; }
+html.sidebar-collapsed .sidebar-footer-row > .sidebar-user, html.force-rail .sidebar-footer-row > .sidebar-user { flex: 0 0 auto; }
