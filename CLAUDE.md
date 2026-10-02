@@ -972,6 +972,17 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   `piano_req:<tid>` linking to `#piano-tuning-section` on the show.
 - Link URLs are relative paths (no url_for — keeps it usable from jobs).
 
+## Sidebar nav placement + footer (3.18.1)
+- Piano Tuning sits under Dashboards in SYSTEM (`nav_layout.DEFAULT_ENTRIES`).
+  Saved layouts (`nav_layout` app_setting) override defaults, so a one-time
+  migration (marker `nav_piano_moved:<app_schema>`) used
+  `nav_layout.move_item_after()`; it never re-runs over an admin's arrangement.
+  Reuse that helper + a new marker for any future default move.
+- Footer = view-as select, user row + buttons, then ONE `.sidebar-meta` line
+  (version · TEST · Mobile/Desktop site). The licence text lives in the version
+  tooltip (login page still shows it). The rail shows the `.rail-only`
+  TEST INSTANCE tag instead; keep the footer to these three rows.
+
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.
 At the end of any change that touches code/config, **state plainly which
