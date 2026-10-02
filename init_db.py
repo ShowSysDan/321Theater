@@ -211,6 +211,8 @@ FORM_FIELDS_SEED = [
     ('backline_section', 'backline_own_gear_list', 'GEAR LIST',                 'textarea', 60, None, None, 'backline_own_gear=Yes', None, 'List tour gear...', 'full', 0),
     ('backline_section', 'backline_rental_needed', 'RENTAL GEAR NEEDED?',       'yes_no',   70, None, None, None, None, '', 'half', 0),
     ('backline_section', 'backline_notes',         'BACKLINE NOTES',            'textarea', 80, None, None, None, None, 'Backline notes...', 'full', 1),
+    # Piano Tuning request panel (3.16.0) — a field type, so admins can move it.
+    ('backline_section', 'piano_tuning_requests',  'PIANO TUNING',              'piano_tuning', 90, None, None, None, None, '', 'full', 0),
 
     # ── Stage & Props ─────────────────────────────────────────────────────────
     ('stage_props', 'stage_plot',              'STAGE PLOT?',               'yes_no',   10, None, None, None, None, '', 'half', 0),
@@ -2155,6 +2157,31 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
     _backfill('piano tuning sent→scheduled', f"""
         UPDATE "{app_schema}".piano_tunings SET status = 'scheduled'
         WHERE status = 'sent'""")
+
+    # 3.16.0: the Piano Tuning panel became the 'piano_tuning' form field
+    # type. Until then it was forced in after the Backline section, so ONCE
+    # per install put a field where it used to sit (end of Backline, else the
+    # last section). Gated on a marker — never re-added after an admin
+    # deletes it — and checked in Python first so a normal start takes no
+    # lock at all. Fresh installs get it from FORM_FIELDS_SEED.
+    _pt_marker = f'piano_tuning_field_seeded:{app_schema}'
+    cur.execute(f'SELECT 1 FROM "{shared_schema}".app_settings WHERE key = %s', (_pt_marker,))
+    if cur.fetchone() is None:
+        _backfill('piano tuning form field', f"""
+            WITH sec AS (SELECT id FROM "{app_schema}".form_sections
+                          ORDER BY (section_key = 'backline_section') DESC, sort_order DESC, id DESC
+                          LIMIT 1)
+            INSERT INTO "{app_schema}".form_fields
+                (section_id, field_key, label, field_type, sort_order, width_hint)
+            SELECT sec.id, 'piano_tuning_requests', 'PIANO TUNING', 'piano_tuning',
+                   COALESCE((SELECT MAX(f.sort_order) FROM "{app_schema}".form_fields f
+                              WHERE f.section_id = sec.id), 0) + 10, 'full'
+              FROM sec
+             WHERE NOT EXISTS (SELECT 1 FROM "{app_schema}".form_fields
+                                WHERE field_type = 'piano_tuning' OR field_key = 'piano_tuning_requests')""")
+        _backfill('piano tuning field marker', f"""
+            INSERT INTO "{shared_schema}".app_settings (key, value) VALUES (%s, '1')
+            ON CONFLICT (key) DO NOTHING""", (_pt_marker,))
 
     # original_locked_price for legacy show_assets rows that pre-date the
     # column (new rows always set it, so this is a no-op on current data).

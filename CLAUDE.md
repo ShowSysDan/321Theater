@@ -825,6 +825,16 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   retired/legacy values survive a Save). Non-managers never get
   manager_notes / sent_by / updated_by from the show endpoint. Piano rows are
   locked on the rental routes only while the module is on.
+- **The show-page panel is the `piano_tuning` FORM FIELD TYPE (3.16.0)** —
+  rendered by `render_adv_field()` (show.html) via the `piano_tuning_panel()`
+  macro wherever the field sits; never re-add a hard-coded placement. One per
+  form: the add/edit routes refuse a second, and the template renders only
+  the first (`_piano_ns`; the panel's ids/JS are single-instance — keep
+  `#piano-tuning-section`, notifications deep-link to it). Screen only:
+  skipped by advance_pdf.html and the change-alert query. The upgrade seeds
+  one field ONCE (marker `piano_tuning_field_seeded:<app_schema>` in shared
+  app_settings) at the end of backline_section; FORM_FIELDS_SEED has it for
+  fresh installs.
 - Cancellation request (3.11.0): once the manager is on it, a PM only ASKS
   (`/piano-tunings/<id>/cancel-request` POST; DELETE = withdraw / manager
   decline) — `cancel_pending` = flag set and status requested/scheduled. The

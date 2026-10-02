@@ -141,7 +141,7 @@
         {% for field in section.fields %}
           {# The 'notes' field type is screen-only (instructions / links shown
              while editing). Never include it in the printed advance. #}
-          {% if field.field_type != 'notes' and layout.field_visible(skey, field.field_key) and not field.hide_from_pdf %}
+          {% if field.field_type not in ('notes', 'piano_tuning') and layout.field_visible(skey, field.field_key) and not field.hide_from_pdf %}
             {% set val = d.get(field.field_key, '')|string|trim %}
             {% if field.field_type == 'yes_no' %}
               {# Only 'Yes' counts as printable content for yes/no — '-', No,

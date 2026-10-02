@@ -28,7 +28,7 @@
 {% endmacro %}
 
 {# ─── Dynamic field renderer ─────────────────────────────────────────────── #}
-{% macro render_adv_field(field) %}
+{% macro render_adv_field(field, pns=None) %}
 {% set span = 'span 12' if field.width_hint == 'full'
               else ('span 4' if field.width_hint == 'third'
               else ('span 3' if field.width_hint == 'quarter'
@@ -49,6 +49,17 @@
     {% if field.label %}<div class="adv-notes-label">{{ field.label }}</div>{% endif %}
     <div class="adv-notes-body">{{ (field.notes_content or '') | autolink | safe }}</div>
   </div>
+
+{% elif field.field_type == 'piano_tuning' %}
+  {# 'piano_tuning' field type (3.16.0): the whole Piano Tuning request panel,
+     placed wherever an admin puts this field in Settings → Form Fields.
+     Screen only (never on the advance PDF, no value of its own). Renders
+     nothing while the module is off, and only the FIRST such field on the
+     form shows it (the panel's ids/JS are single-instance). #}
+  {% if piano_tuning_enabled and pns is not none and not pns.done %}
+    {% set pns.done = True %}
+    {{ piano_tuning_panel(field.label or 'Piano Tuning', field.conditional_show_when, field.help_text) }}
+  {% endif %}
 
 {% elif field.field_type == 'pdf_form' %}
   {# 'pdf_form' field type: button that opens a popup with the bound PDF
@@ -473,13 +484,15 @@
     </div>
   </div>
 
-{% macro piano_tuning_panel() %}
-  {# ── Piano Tuning (3.9.0) — requests for this show. Only buttons live
-     inside #advance-form (no inputs), so nothing here triggers the advance
-     autosave; the request dialog is outside the form. #}
-  <div class="form-section" id="piano-tuning-section">
-    <div class="form-section-header">
-      <span class="section-icon">🎹</span> PIANO TUNING
+{% macro piano_tuning_panel(label='Piano Tuning', show_when=None, help=None) %}
+  {# ── Piano Tuning (3.9.0; a form field type since 3.16.0) — requests for
+     this show. Only buttons live inside #advance-form (no inputs), so
+     nothing here triggers the advance autosave; the request dialog is
+     outside the form. #}
+  <div class="adv-piano-block adv-field-wrapper" id="piano-tuning-section" style="grid-column:span 12"
+       {% if show_when %}data-show-when="{{ show_when }}"{% endif %}>
+    <div class="adv-piano-head">
+      <div class="adv-piano-label"><span aria-hidden="true">🎹</span> {{ label }}</div>
       <div style="display:flex;gap:6px;align-items:center;margin-left:auto">
         <a href="{{ url_for('piano_tuning_page') }}" id="piano-manage-link" class="btn btn-sm btn-ghost" style="display:none">Piano Tuning list →</a>
         {% if can_edit_advance %}
@@ -487,9 +500,8 @@
         {% endif %}
       </div>
     </div>
-    <div class="form-section-body">
-      <div id="piano-tuning-list"><p class="text-dim" style="font-size:12px;margin:0">Loading…</p></div>
-    </div>
+    {% if help %}<p class="field-hint" style="margin:0 0 8px">{{ help }}</p>{% endif %}
+    <div id="piano-tuning-list"><p class="text-dim" style="font-size:12px;margin:0">Loading…</p></div>
   </div>
 {% endmacro %}
   {% set _piano_ns = namespace(done=False) %}
@@ -505,16 +517,11 @@
     </div>
     <div class="form-section-body adv-form-grid">
       {% for field in section.fields %}
-        {{ render_adv_field(field) }}
+        {{ render_adv_field(field, _piano_ns) }}
       {% endfor %}
     </div>
   </div>
-  {% if piano_tuning_enabled and section.section_key == 'backline_section' and not _piano_ns.done %}
-    {% set _piano_ns.done = True %}
-    {{ piano_tuning_panel() }}
-  {% endif %}
   {% endfor %}
-  {% if piano_tuning_enabled and not _piano_ns.done %}{{ piano_tuning_panel() }}{% endif %}
 
 </form>
 

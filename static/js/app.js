@@ -2158,7 +2158,7 @@ function _toggleFieldTypeOptions(type) {
   if (pdfGroup) pdfGroup.style.display = (type === 'pdf_form') ? '' : 'none';
   // Alerts apply to single-value fields; 'notes' has no value, and 'pdf_form'
   // is a multi-field document that would otherwise fire alerts on every key.
-  if (alertGroup) alertGroup.style.display = (type === 'notes' || type === 'pdf_form') ? 'none' : '';
+  if (alertGroup) alertGroup.style.display = (type === 'notes' || type === 'pdf_form' || type === 'piano_tuning') ? 'none' : '';
   if (type === 'pdf_form') _populatePdfTemplatePicker();
 }
 
