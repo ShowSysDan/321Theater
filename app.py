@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.18.1'
+APP_VERSION = '3.18.2'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -19759,6 +19759,8 @@ def _reset_asset_approval(db, show_id, reason):
     column existed) are not auto-managed; manual approval is required.
     Manual unapprove clears the snapshot to truly revoke approval.
     """
+    # A pinned unit names the piano on its tuning's schedule row (3.18.2).
+    _piano_schedule_refresh(db, show_id)
     row = db.execute(
         'SELECT s.assets_approved, s.assets_approval_snapshot, s.name, s.is_test '
         'FROM shows s WHERE s.id=%s', (show_id,)
@@ -22674,11 +22676,53 @@ def _piano_out(r):
     return d
 
 
-def _piano_schedule_text(t):
-    """(description, notes) of a tuning's production-schedule row."""
+def _piano_schedule_text(t, pinned=None):
+    """(description, notes) of a tuning's production-schedule row. A tuning
+    that names its unit already carries the S/N in its `piano` snapshot. One
+    left at "Any unit" takes the S/N(s) pinned for that model on the show's
+    Assets tab (`pinned` = {asset_type_id: [label, …]}, _piano_show_pins), so
+    the schedule always says WHICH piano gets tuned (3.18.2)."""
     piano = (t['piano'] or '').strip()
+    if piano and not t['piano_asset_item_id'] and pinned:
+        labels = pinned.get(t['piano_asset_type_id']) or []
+        if labels:
+            piano += ' · ' + ', '.join(labels)
     desc = f'Piano Tuning — {piano}' if piano else 'Piano Tuning'
     return desc, (t['vendor'] or '').strip()
+
+
+def _piano_show_pins(db, show_id):
+    """{asset_type_id: ['S/N …', …]} — units pinned on the show's Assets tab."""
+    out = {}
+    for r in db.execute(
+            'SELECT DISTINCT sa.asset_type_id, ai.id, ai.barcode FROM show_assets sa '
+            'JOIN asset_items ai ON ai.id = sa.asset_item_id '
+            'WHERE sa.show_id=%s ORDER BY ai.barcode, ai.id', (show_id,)).fetchall():
+        out.setdefault(r['asset_type_id'], []).append(_piano_unit_label(r))
+    return out
+
+
+_PIANO_SCHED_SQL = (
+    "SELECT id, tuning_date, tuning_start, piano, vendor, piano_asset_type_id, "
+    "piano_asset_item_id FROM piano_tunings WHERE show_id=%s AND tuning_date IS NOT NULL "
+    "AND status <> 'cancelled' ORDER BY tuning_date, tuning_start, id")
+
+
+def _piano_schedule_refresh(db, show_id):
+    """After a gear change (from _reset_asset_approval, which every gear write
+    path calls): re-sync the show's piano schedule rows when their text no
+    longer matches — e.g. a unit was just pinned on the Assets tab. Cheap
+    no-op for shows without piano rows. Caller commits."""
+    have = {r['piano_tuning_id']: r['description'] for r in db.execute(
+        'SELECT piano_tuning_id, description FROM schedule_rows '
+        'WHERE show_id=%s AND piano_tuning_id IS NOT NULL', (show_id,)).fetchall()}
+    if not have:
+        return
+    pins = _piano_show_pins(db, show_id)
+    want = db.execute(_PIANO_SCHED_SQL, (show_id,)).fetchall()
+    if len(want) != len(have) or any(
+            have.get(t['id']) != _piano_schedule_text(t, pins)[0] for t in want):
+        _sync_piano_schedule_rows(db, show_id)
 
 
 def _hhmm_minutes(v):
@@ -22702,11 +22746,8 @@ def _sync_piano_schedule_rows(db, show_id):
     # Serialize with any other sync / schedule save on this show, or two
     # concurrent delete+insert rounds could each leave a row behind.
     db.execute('SELECT 1 FROM shows WHERE id=%s FOR UPDATE', (show_id,))
-    want = db.execute(
-        "SELECT id, tuning_date, tuning_start, piano, vendor "
-        "FROM piano_tunings WHERE show_id=%s AND tuning_date IS NOT NULL "
-        "AND status <> 'cancelled' ORDER BY tuning_date, tuning_start, id",
-        (show_id,)).fetchall()
+    want = db.execute(_PIANO_SCHED_SQL, (show_id,)).fetchall()
+    pins = _piano_show_pins(db, show_id) if want else {}
     db.execute('DELETE FROM schedule_rows WHERE show_id=%s AND piano_tuning_id IS NOT NULL',
                (show_id,))
     for t in want:
@@ -22736,7 +22777,7 @@ def _sync_piano_schedule_rows(db, show_id):
                                  (show_id,)).fetchone()['n']
         db.execute('UPDATE schedule_rows SET sort_order = sort_order + 1 '
                    'WHERE show_id=%s AND sort_order >= %s', (show_id, pos))
-        desc, notes = _piano_schedule_text(t)
+        desc, notes = _piano_schedule_text(t, pins)
         db.execute(
             'INSERT INTO schedule_rows (show_id, perf_id, day_date, sort_order, '
             'start_time, end_time, description, notes, piano_tuning_id) '

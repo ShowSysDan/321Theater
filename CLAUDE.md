@@ -843,6 +843,10 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   `_piano_on_show()` (True / False / None / 'other_unit' via
   `_piano_pinned()`); the PM booking pins the unit only when the type allows
   unit selection.
+  Schedule row (3.18.2): a tuning at "Any unit" appends the S/N(s) pinned
+  for its model on the show (`_piano_show_pins` → `_piano_schedule_text`);
+  `_reset_asset_approval` calls `_piano_schedule_refresh` so a pin change
+  re-syncs the row (no-op when the text already matches).
 - **House tunings (3.18.0):** `piano_tunings.show_id` NULL = a show-less
   tuning (maintenance…; `purpose`), created by the manager via
   `POST /api/piano-tunings`. They NEVER get a schedule row or an
