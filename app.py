@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.15.2'
+APP_VERSION = '3.16.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -4156,7 +4156,7 @@ def _stage_field_alerts(db, show_id, data, prev_values, actor_user_id):
               FROM form_fields
              WHERE field_key IN ({placeholders})
                AND (alert_departments IS NOT NULL OR alert_contact_ids IS NOT NULL)
-               AND field_type != 'notes'""",
+               AND field_type NOT IN ('notes', 'piano_tuning')""",
         tuple(keys)
     ).fetchall()
     if not alert_rows:
@@ -10550,6 +10550,11 @@ def add_form_field():
     options_json = json.dumps(options) if options else None
 
     db = get_db()
+    if data.get('field_type') == 'piano_tuning' and db.execute(
+            "SELECT 1 FROM form_fields WHERE field_type='piano_tuning'").fetchone():
+        db.close()
+        return jsonify({'success': False, 'error': 'The form already has a Piano Tuning field — '
+                        'move that one instead (only one panel can show).'}), 400
     # Put it at the end of the section
     max_order = db.execute(
         'SELECT MAX(sort_order) FROM form_fields WHERE section_id=%s', (section_id,)
@@ -10607,6 +10612,11 @@ def edit_form_field(fid):
     options = _normalize_field_options(data.get('options', []))
     options_json = json.dumps(options) if options else None
     db = get_db()
+    if data.get('field_type') == 'piano_tuning' and db.execute(
+            "SELECT 1 FROM form_fields WHERE field_type='piano_tuning' AND id <> %s", (fid,)).fetchone():
+        db.close()
+        return jsonify({'success': False, 'error': 'The form already has a Piano Tuning field — '
+                        'only one panel can show.'}), 400
     before = _snapshot_row(db, 'form_fields', fid)
     alert_depts = data.get('alert_departments') or []
     alert_contacts = data.get('alert_contact_ids') or []
