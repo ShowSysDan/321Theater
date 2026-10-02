@@ -667,6 +667,7 @@
         {key: 'bookings', label: 'Pinned bookings', num: true}, {key: 'unit_days', label: 'Pinned days', num: true},
         {key: 'last_show', label: 'Last show', sub: r => esc(r.last_date || '')},
         {key: 'maintenance', label: 'Maintenance', num: true}, {key: 'logs', label: 'Log entries', num: true},
+        ...(d.units.some(u => u.tunings) ? [{key: 'tunings', label: 'Piano tunings', num: true}, {key: 'last_tuned', label: 'Last tuned'}] : []),
       ], d.units, {sortKey: 'bookings', note: 'A booking counts against a unit only when that unit was picked on the show. Bookings from the general pool are counted above, not per unit.'}), ['asset_units', {type_id: t.type_id, type_name: t.type}]);
     } catch (e) { modal(t.type, `<p style="color:#e53e3e">${esc(e.message)}</p>`); }
   }

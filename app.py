@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.16.2'
+APP_VERSION = '3.17.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -22526,8 +22526,8 @@ PIANO_STATUS_LABELS = {
 # Fields the requesting PM may edit while the request is still 'requested'.
 # No location (3.9.1): a tuning is always on the stage. `piano` is the
 # picked asset type's name (free text only when no Piano category exists).
-_PIANO_REQUEST_FIELDS = ('piano_asset_type_id', 'piano', 'requested_date',
-                         'requested_time', 'notes')
+_PIANO_REQUEST_FIELDS = ('piano_asset_type_id', 'piano_asset_item_id', 'piano',
+                         'requested_date', 'requested_time', 'notes')
 # Fields only the piano manager edits.
 # Only a start time (3.10.2): tuning_end is no longer set or shown.
 _PIANO_MANAGER_FIELDS = ('piano_vendor_id', 'tuning_date', 'tuning_start',
@@ -22545,7 +22545,7 @@ def _piano_asset_types(db):
     like 'Piano'. A group that has types under it is a heading, not a
     bookable piano, so it's left out (3.10.4)."""
     rows = db.execute("""
-        SELECT t.id, t.name, p.name AS parent_name
+        SELECT t.id, t.name, t.allow_unit_selection, p.name AS parent_name
         FROM asset_types t
         JOIN asset_categories c ON c.id = t.category_id
         LEFT JOIN asset_types p ON p.id = t.parent_type_id
@@ -22556,7 +22556,47 @@ def _piano_asset_types(db):
                           WHERE ch.parent_type_id = t.id AND COALESCE(ch.is_retired, 0) = 0)
         ORDER BY c.sort_order, c.name, t.sort_order, t.name
     """, ('%piano%', '%piano%')).fetchall()
-    return [{'id': r['id'], 'name': r['name']} for r in rows]
+    # Each piano's individual units (3.17.0) — a tuning can name the exact
+    # instrument (S/N = the unit's barcode), not just the model.
+    units = {}
+    if rows:
+        for u in db.execute("""
+            SELECT id, asset_type_id, barcode, status FROM asset_items
+            WHERE asset_type_id = ANY(%s) AND COALESCE(status, '') <> 'retired'
+            ORDER BY sort_order, barcode, id""", ([r['id'] for r in rows],)).fetchall():
+            units.setdefault(u['asset_type_id'], []).append(
+                {'id': u['id'], 'label': _piano_unit_label(u), 'status': u['status'] or ''})
+    return [{'id': r['id'], 'name': r['name'], 'allow_unit_selection': bool(r['allow_unit_selection']),
+             'units': units.get(r['id'], [])} for r in rows]
+
+
+def _piano_unit_label(u):
+    """How a piano unit reads everywhere: its S/N (barcode), else #id."""
+    bc = (u['barcode'] or '').strip() if u else ''
+    return f'S/N {bc}' if bc else (f"unit #{u['id']}" if u else '')
+
+
+def _piano_pinned(db, show_ids):
+    """{(show_id, asset_item_id)} — units pinned on these shows' Assets tabs."""
+    ids = sorted({int(i) for i in show_ids if i is not None})
+    if not ids:
+        return set()
+    return {(r['show_id'], r['asset_item_id']) for r in db.execute(
+        'SELECT show_id, asset_item_id FROM show_assets '
+        'WHERE show_id = ANY(%s) AND asset_item_id IS NOT NULL', (ids,)).fetchall()}
+
+
+def _piano_on_show(show_id, type_id, unit_id, booked, pinned):
+    """Is the tuning's piano reserved on the show? True / False / None (no
+    piano picked) / 'other_unit' — the model is booked, but not the specific
+    unit this tuning names (pool booking or a different S/N)."""
+    if not type_id:
+        return None
+    if unit_id:
+        if (show_id, unit_id) in pinned:
+            return True
+        return 'other_unit' if (show_id, type_id) in booked else False
+    return (show_id, type_id) in booked
 
 
 def _piano_booked(db, show_ids):
@@ -22576,23 +22616,41 @@ def _piano_booked(db, show_ids):
     return {(r['show_id'], r['tid']) for r in rows}
 
 
-def _piano_resolve(db, vals, require):
-    """Turn a submitted piano_asset_type_id into the stored piano name.
-    Returns an error string or None. With pianos in the asset list a pick is
-    required (when `require`, or when the field was submitted); with none,
-    free-text `piano` is kept as typed."""
+def _piano_resolve(db, vals, require, cur=None):
+    """Turn a submitted piano_asset_type_id (+ optional piano_asset_item_id,
+    the specific unit / S/N, 3.17.0) into the stored piano name snapshot,
+    e.g. "Steinway Model D · S/N 607504". Returns an error string or None.
+    With pianos in the asset list a model pick is required (when `require`,
+    or when the field was submitted); with none, free-text `piano` is kept
+    as typed. `cur` (the stored row) supplies whichever half wasn't sent."""
     pianos = _piano_asset_types(db)
     if not pianos:
         vals.pop('piano_asset_type_id', None)
+        vals.pop('piano_asset_item_id', None)
         return None
     vals.pop('piano', None)
-    if 'piano_asset_type_id' not in vals and not require:
+    has_t, has_u = 'piano_asset_type_id' in vals, 'piano_asset_item_id' in vals
+    if not has_t and not has_u and not require:
         return None
-    pick = vals.get('piano_asset_type_id')
-    match = next((p for p in pianos if p['id'] == pick), None)
-    if not match:
-        return 'Pick the piano from the list.'
-    vals['piano'] = match['name']
+    tid = vals.get('piano_asset_type_id') if has_t else (cur['piano_asset_type_id'] if cur else None)
+    match = next((p for p in pianos if p['id'] == tid), None)
+    if has_t or require:
+        if not match:
+            return 'Pick the piano from the list.'
+        tname = match['name']
+    else:
+        # Only the unit changed; the stored model may since have been retired.
+        row = db.execute('SELECT name FROM asset_types WHERE id=%s', (tid,)).fetchone()
+        tname = row['name'] if row else ((cur['piano'] or '').split(' · ')[0] if cur else '')
+    uid = vals.get('piano_asset_item_id') if has_u else (cur['piano_asset_item_id'] if cur else None)
+    unit = None
+    if uid:
+        unit = db.execute('SELECT id, asset_type_id, barcode, status FROM asset_items WHERE id=%s',
+                          (uid,)).fetchone()
+        stored = bool(cur) and uid == cur['piano_asset_item_id'] and not has_t
+        if not stored and (not unit or unit['asset_type_id'] != tid or unit['status'] == 'retired'):
+            return "Pick the piano's unit (S/N) from the list."
+    vals['piano'] = tname + (f' · {_piano_unit_label(unit)}' if unit else '')
     return None
 
 
@@ -22818,12 +22876,13 @@ def _piano_clean(data, fields):
                 except ValueError:
                     return None, f'Invalid date for {k.replace("_", " ")}.'
             out[k] = v or None
-        elif k in ('piano_asset_type_id', 'piano_vendor_id'):
+        elif k in ('piano_asset_type_id', 'piano_asset_item_id', 'piano_vendor_id'):
             try:
                 out[k] = int(v) if v not in (None, '') else None
             except (TypeError, ValueError):
-                return None, ('Pick the piano from the list.' if k == 'piano_asset_type_id'
-                              else 'Pick the vendor from the list.')
+                return None, {'piano_asset_type_id': 'Pick the piano from the list.',
+                              'piano_asset_item_id': "Pick the piano's unit (S/N) from the list."
+                              }.get(k, 'Pick the vendor from the list.')
         elif k in ('requested_time', 'tuning_start'):
             out[k] = _normalize_perf_time(str(v or ''))[:20]
         elif k == 'cost':
@@ -22844,17 +22903,21 @@ def _piano_clean(data, fields):
     return out, None
 
 
-def _piano_defaults(db, show_id, pianos, booked):
+def _piano_defaults(db, show_id, pianos, booked, pinned=frozenset()):
     """Pre-fill for a new request: the first piano already on the show's
-    Assets tab, and the first performance date."""
+    Assets tab (and its unit, when one is pinned there), and the first
+    performance date."""
     show = db.execute('SELECT show_date FROM shows WHERE id=%s', (show_id,)).fetchone()
     on_show = next((p['id'] for p in pianos if (show_id, p['id']) in booked), None)
+    unit = next((u['id'] for p in pianos if p['id'] == on_show for u in p['units']
+                 if (show_id, u['id']) in pinned), None)
     first = db.execute('SELECT MIN(perf_date) AS d FROM show_performances '
                        'WHERE show_id=%s AND perf_date IS NOT NULL', (show_id,)).fetchone()
     d = _as_date(first['d']) if first else None
     d = d or (_as_date(show['show_date']) if show else None)
     return {
         'piano_asset_type_id': on_show,
+        'piano_asset_item_id': unit,
         'piano': '',
         'requested_date': d.isoformat() if d else '',
         'requested_time': '',
@@ -22880,15 +22943,16 @@ def show_piano_tunings(show_id):
     manager = _is_piano_manager()
     pianos = _piano_asset_types(db)
     booked = _piano_booked(db, [show_id])
-    defaults = _piano_defaults(db, show_id, pianos, booked)
+    pinned = _piano_pinned(db, [show_id])
+    defaults = _piano_defaults(db, show_id, pianos, booked, pinned)
     db.close()
     out = []
     for r in rows:
         d = _piano_out(r)
         d['requested_by_name'] = r['requested_by_name'] or r['requested_by_username'] or ''
         d['on_schedule'] = bool(d['tuning_date'] and d['tuning_date'] in days)
-        d['piano_on_show'] = ((show_id, r['piano_asset_type_id']) in booked
-                              if r['piano_asset_type_id'] else None)
+        d['piano_on_show'] = _piano_on_show(show_id, r['piano_asset_type_id'],
+                                            r['piano_asset_item_id'], booked, pinned)
         if not manager:
             # Manager-only working notes / who-did-what stay on /piano-tuning.
             for k in ('manager_notes', 'sent_by', 'updated_by', 'requested_by',
@@ -22896,7 +22960,9 @@ def show_piano_tunings(show_id):
                 d.pop(k, None)
         out.append(d)
     return jsonify({'tunings': out, 'defaults': defaults,
-                    'pianos': [dict(p, on_show=(show_id, p['id']) in booked) for p in pianos],
+                    'pianos': [dict(p, on_show=(show_id, p['id']) in booked,
+                                    units=[dict(u, on_show=(show_id, u['id']) in pinned)
+                                           for u in p['units']]) for p in pianos],
                     'can_manage': manager,
                     'statuses': [{'key': k, 'label': PIANO_STATUS_LABELS[k]}
                                  for k in PIANO_STATUSES]})
@@ -22924,14 +22990,16 @@ def show_piano_tuning_create(show_id):
         return jsonify({'error': err}), 400
     tid = db.execute("""
         INSERT INTO piano_tunings (show_id, status, piano, piano_asset_type_id,
-                                   requested_date, requested_time, notes,
+                                   piano_asset_item_id, requested_date, requested_time, notes,
                                    requested_by, updated_by)
-        VALUES (%s, 'requested', %s, %s, %s, %s, %s, %s, %s) RETURNING id
+        VALUES (%s, 'requested', %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
     """, (show_id, vals.get('piano', ''), vals.get('piano_asset_type_id'),
+          vals.get('piano_asset_item_id'),
           vals.get('requested_date'), vals.get('requested_time', ''),
           vals.get('notes', ''), session['user_id'], session['user_id'])).fetchone()['id']
     pid = vals.get('piano_asset_type_id')
-    not_on_show = bool(pid) and (show_id, pid) not in _piano_booked(db, [show_id])
+    not_on_show = _piano_on_show(show_id, pid, vals.get('piano_asset_item_id'),
+                                 _piano_booked(db, [show_id]), _piano_pinned(db, [show_id])) is False
     log_audit(db, 'PIANO_TUNING_REQUEST', 'piano_tuning', tid, show_id=show_id,
               detail=f"date={vals.get('requested_date')} piano={vals.get('piano', '')!r}")
     recipients = _piano_manager_emails(db, exclude_user_id=session['user_id'])
@@ -23008,12 +23076,20 @@ def piano_tuning_update(tid):
     # The piano / vendor already stored is accepted as-is (it may since have
     # been retired, re-categorised or archived, or be a 3.9 free-text value):
     # only a CHANGED pick is validated, so Save never fails or wipes it.
-    if not err and 'piano_asset_type_id' in vals and (
-            vals['piano_asset_type_id'] == cur['piano_asset_type_id']):
-        vals.pop('piano_asset_type_id')
-        vals.pop('piano', None)
     if not err:
-        err = _piano_resolve(db, vals, require=False)
+        # A new model clears the unit unless one was sent with it; an
+        # unchanged model / unit is dropped so it isn't re-validated.
+        t_chg = 'piano_asset_type_id' in vals and vals['piano_asset_type_id'] != cur['piano_asset_type_id']
+        if t_chg and 'piano_asset_item_id' not in vals:
+            vals['piano_asset_item_id'] = None
+        u_chg = 'piano_asset_item_id' in vals and vals['piano_asset_item_id'] != cur['piano_asset_item_id']
+        if 'piano_asset_type_id' in vals and not t_chg:
+            vals.pop('piano_asset_type_id')
+            vals.pop('piano', None)
+        if 'piano_asset_item_id' in vals and not u_chg:
+            vals.pop('piano_asset_item_id')
+    if not err:
+        err = _piano_resolve(db, vals, require=False, cur=cur)
     if not err and 'piano_vendor_id' in vals and (
             vals['piano_vendor_id'] == cur['piano_vendor_id']):
         vals.pop('piano_vendor_id')
@@ -23186,6 +23262,7 @@ def piano_tunings_list():
     counts = {r['status']: r['n'] for r in db.execute(
         'SELECT status, COUNT(*) AS n FROM piano_tunings GROUP BY status').fetchall()}
     booked = _piano_booked(db, [r['show_id'] for r in rows])
+    pinned = _piano_pinned(db, [r['show_id'] for r in rows])
     pianos = _piano_asset_types(db)
     vendors = _piano_vendor_list(db)
     db.close()
@@ -23193,8 +23270,8 @@ def piano_tunings_list():
     for r in rows:
         d = _piano_out(r)
         d['requested_by_name'] = r['requested_by_name'] or r['requested_by_username'] or ''
-        d['piano_on_show'] = ((r['show_id'], r['piano_asset_type_id']) in booked
-                              if r['piano_asset_type_id'] else None)
+        d['piano_on_show'] = _piano_on_show(r['show_id'], r['piano_asset_type_id'],
+                                            r['piano_asset_item_id'], booked, pinned)
         out.append(d)
     return jsonify({'tunings': out, 'counts': counts, 'pianos': pianos,
                     'vendors': vendors})
@@ -25890,7 +25967,7 @@ def report_asset_units():
     db = get_db()
     shows = _report_shows(db)
     items = {r['id']: {**dict(r), 'bookings': 0, 'unit_days': 0, 'last_show': None,
-                       'last_date': None}
+                       'last_date': None, 'tunings': 0, 'last_tuned': None}
              for r in db.execute("""
                  SELECT ai.id, ai.barcode, ai.status, ai.condition, ai.year_purchased,
                         (SELECT COUNT(*) FROM asset_maintenance m WHERE m.asset_item_id = ai.id) AS maintenance,
@@ -25898,6 +25975,19 @@ def report_asset_units():
                  FROM asset_items ai WHERE ai.asset_type_id = %s
                  ORDER BY ai.sort_order, ai.barcode, ai.id""", (tid,)).fetchall()}
     pooled = {'lines': 0, 'units': 0, 'unit_days': 0}
+    # Piano tunings per unit (3.17.0): how often each instrument was tuned
+    # and when last — not cancelled, any show (a tuning history, not a
+    # booking count, so the show filters don't narrow it).
+    if module_enabled('piano_tuning') and items:
+        for t in db.execute("""
+            SELECT piano_asset_item_id AS uid, COUNT(*) AS n,
+                   MAX(COALESCE(tuning_date, requested_date)) AS last
+            FROM piano_tunings WHERE piano_asset_item_id = ANY(%s) AND status <> 'cancelled'
+            GROUP BY piano_asset_item_id""", (list(items),)).fetchall():
+            it = items.get(t['uid'])
+            if it:
+                it['tunings'] = t['n']
+                it['last_tuned'] = _as_date(t['last']).isoformat() if t['last'] else None
     for r in _report_asset_lines(db, list(shows)):
         if r['asset_type_id'] != tid:
             continue
@@ -26471,7 +26561,8 @@ _RPT_PDF = {
                                        ('bookings', 'Pinned bookings', 'i'),
                                        ('unit_days', 'Pinned days', 'i'),
                                        ('last_show', 'Last show', 't'), ('last_date', 'Last date', 't'),
-                                       ('maintenance', 'Maintenance', 'i'), ('logs', 'Log entries', 'i')])]),
+                                       ('maintenance', 'Maintenance', 'i'), ('logs', 'Log entries', 'i'),
+                                       ('tunings', 'Tunings', 'i'), ('last_tuned', 'Last tuned', 't')])]),
     'rentals': ('Rental lines', 'asset_reports_data', [
         ('Revenue', 'total_revenue', 'm'), ('Line items', 'count', 'i')], [
         ('Rental lines', 'rows', [('show_name', 'Show', 't'), ('show_date', 'Date', 't'),

@@ -548,6 +548,7 @@ CREATE TABLE IF NOT EXISTS piano_tunings (
     location       TEXT DEFAULT '',
     piano          TEXT DEFAULT '',
     piano_asset_type_id INTEGER DEFAULT NULL,
+    piano_asset_item_id INTEGER DEFAULT NULL,
     piano_vendor_id INTEGER DEFAULT NULL,
     cancel_requested_at TIMESTAMP DEFAULT NULL,
     cancel_requested_by INTEGER DEFAULT NULL,
@@ -2049,6 +2050,8 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'CREATE INDEX IF NOT EXISTS idx_show_external_rentals_piano ON "{app_schema}".show_external_rentals(piano_tuning_id)',
         # Piano tuning vendor list — 3.10.2
         f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS piano_vendor_id INTEGER DEFAULT NULL',
+        # 3.17.0: the specific piano unit (S/N) — unit-aware tunings.
+        f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS piano_asset_item_id INTEGER DEFAULT NULL',
         # PM "Request cancellation" — 3.10.4
         f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMP DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS cancel_requested_by INTEGER DEFAULT NULL',

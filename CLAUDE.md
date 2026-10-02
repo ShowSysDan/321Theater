@@ -832,6 +832,17 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   retired/legacy values survive a Save). Non-managers never get
   manager_notes / sent_by / updated_by from the show endpoint. Piano rows are
   locked on the rental routes only while the module is on.
+- **Unit-aware (3.17.0):** `piano_tunings.piano_asset_item_id` = the exact
+  unit (S/N = the unit's barcode, `_piano_unit_label`). `_piano_asset_types`
+  returns each model's live `units` + `allow_unit_selection`;
+  `_piano_resolve(db, vals, require, cur)` validates the unit belongs to the
+  model and writes the name snapshot `"<model> · S/N <barcode>"` — every
+  display (schedule row, external-rental line, emails, lists, reports) reads
+  that snapshot, so don't add per-surface unit lookups. A model change clears
+  the unit; an unchanged stored unit is accepted unvalidated. On-show check =
+  `_piano_on_show()` (True / False / None / 'other_unit' via
+  `_piano_pinned()`); the PM booking pins the unit only when the type allows
+  unit selection.
 - **The show-page panel is the `piano_tuning` FORM FIELD TYPE (3.16.0)** —
   rendered by `render_adv_field()` (show.html) via the `piano_tuning_panel()`
   macro wherever the field sits; never re-add a hard-coded placement. One per

@@ -540,7 +540,11 @@
           <label class="field-label">PIANO *</label>
           {# Pianos come from the Asset Manager's Piano category; free text
              only when that category doesn't exist. #}
-          <select id="piano-pick" class="field-input" onchange="_pianoPickWarn()"></select>
+          <select id="piano-pick" class="field-input" onchange="_pianoFillUnits(); _pianoPickWarn()"></select>
+          <div id="piano-unit-row" style="display:none;margin-top:6px">
+            <label class="field-label" for="piano-unit">UNIT (S/N)</label>
+            <select id="piano-unit" class="field-input" onchange="_pianoPickWarn()"></select>
+          </div>
           <input type="text" id="piano-piano" class="field-input" maxlength="300" placeholder="e.g. Steinway D (house)" style="display:none">
           <div id="piano-pick-warn" class="piano-pick-warn" style="display:none"></div>
         </div>
@@ -610,7 +614,7 @@
         const open = t.status === 'requested' || t.status === 'scheduled';
         return `<tr>
           <td><span class="piano-status piano-status-${esc(t.status)}">${esc(t.status_label)}</span></td>
-          <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? ` <span class="piano-warn" title="Add this piano on the Assets tab so it's reserved for the show.">⚠ not on Assets tab</span>` : ''}${t.vendor ? `<div class="text-dim" style="font-size:10px">Vendor: ${esc(t.vendor)}</div>` : ''}</td>
+          <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? ` <span class="piano-warn" title="Add this piano on the Assets tab so it's reserved for the show.">⚠ not on Assets tab</span>` : ''}${t.piano_on_show === 'other_unit' && t.status !== 'cancelled' ? ` <span class="piano-warn" title="The Assets tab books this model, but not this specific unit (S/N). Pin the unit on the Assets tab.">⚠ unit not pinned on Assets tab</span>` : ''}${t.vendor ? `<div class="text-dim" style="font-size:10px">Vendor: ${esc(t.vendor)}</div>` : ''}</td>
           <td style="white-space:nowrap">${esc(t.requested_date || '')} ${esc(t.requested_time || '')}</td>
           <td style="white-space:nowrap">${sched}</td>
           <td class="num">${money(t.cost) || '—'}${t.paperwork_filename ? `<div style="font-size:10px"><a href="/shows/${SHOW_ID}/external-rentals/${t.er_id}/pdf" target="_blank">📄 Paperwork</a></div>` : ''}</td>
@@ -645,22 +649,50 @@
       `<option value="${p.id}" data-on-show="${p.on_show ? 1 : 0}">${esc(p.name)}${p.on_show ? ' (on this show)' : ''}</option>`).join('');
     pick.value = v.piano_asset_type_id ? String(v.piano_asset_type_id) : '';
     text.value = v.piano || '';
+    _pianoFillUnits(v.piano_asset_item_id, v.piano);
     _pianoPickWarn();
     document.getElementById('piano-req-date').value = v.requested_date || '';
     document.getElementById('piano-req-time').value = v.requested_time || '';
     document.getElementById('piano-notes').value = v.notes || '';
     document.getElementById('piano-modal').style.display = 'flex';
   };
-  // Warn (not block) when the picked piano isn't booked on the Assets tab.
+  // Unit (S/N) picker (3.17.0): the picked model's individual units.
+  // `keep` = a stored unit id, shown even if it has since left the list.
+  window._pianoFillUnits = function(keep, storedName) {
+    const pick = document.getElementById('piano-pick');
+    const row = document.getElementById('piano-unit-row'), sel = document.getElementById('piano-unit');
+    const p = _pianos.find(x => String(x.id) === pick.value);
+    const units = (p && p.units) ? p.units.slice() : [];
+    if (keep && !units.some(u => u.id === keep)) {
+      const lbl = (storedName || '').split(' · ')[1] || `unit #${keep}`;
+      units.push({id: keep, label: lbl, status: '', on_show: false});
+    }
+    row.style.display = units.length ? '' : 'none';
+    sel.innerHTML = '<option value="">Any unit (not specific)</option>' + units.map(u =>
+      `<option value="${u.id}" data-on-show="${u.on_show ? 1 : 0}">${esc(u.label)}${u.status && u.status !== 'available' ? ' — ' + esc(u.status) : ''}${u.on_show ? ' (on this show)' : ''}</option>`).join('');
+    sel.value = keep && units.some(u => u.id === keep) ? String(keep) : '';
+  };
+  // Warn (not block) when the picked piano — or the picked unit — isn't
+  // booked on the Assets tab.
   window._pianoPickWarn = function() {
     const pick = document.getElementById('piano-pick');
     const warn = document.getElementById('piano-pick-warn');
     const opt = pick.selectedOptions[0];
-    const missing = _pianos.length && pick.value && opt && opt.dataset.onShow !== '1';
-    warn.style.display = missing ? '' : 'none';
-    warn.textContent = missing
-      ? `${opt.textContent} isn't on this show's Assets yet — it will be added (show dates) when you send this, and goes through asset approval like any gear.`
-      : '';
+    const usel = document.getElementById('piano-unit'), uopt = usel.selectedOptions[0];
+    const unitPicked = !!usel.value && document.getElementById('piano-unit-row').style.display !== 'none';
+    const p = _pianos.find(x => String(x.id) === pick.value);
+    const typeMissing = _pianos.length && pick.value && opt && opt.dataset.onShow !== '1';
+    const unitMissing = !typeMissing && unitPicked && uopt && uopt.dataset.onShow !== '1';
+    let msg = '';
+    if (typeMissing) {
+      msg = `${opt.textContent} isn't on this show's Assets yet — it will be added (show dates)`
+        + (unitPicked && p && p.allow_unit_selection ? `, pinned to ${uopt.textContent},` : '')
+        + ' when you send this, and goes through asset approval like any gear.';
+    } else if (unitMissing) {
+      msg = `This show has a ${opt.textContent.replace(' (on this show)', '')} on its Assets tab, but not ${uopt.textContent} — ask the asset manager to pin that unit so the right instrument is reserved.`;
+    }
+    warn.style.display = msg ? '' : 'none';
+    warn.textContent = msg;
   };
   window.closePianoModal = function() { document.getElementById('piano-modal').style.display = 'none'; };
 
@@ -668,6 +700,8 @@
     const id = document.getElementById('piano-edit-id').value;
     const payload = {
       piano_asset_type_id: document.getElementById('piano-pick').value || null,
+      piano_asset_item_id: (document.getElementById('piano-unit-row').style.display !== 'none'
+                            && document.getElementById('piano-unit').value) || null,
       piano: document.getElementById('piano-piano').value.trim(),
       requested_date: document.getElementById('piano-req-date').value,
       requested_time: document.getElementById('piano-req-time').value.trim(),
@@ -688,8 +722,12 @@
       // through the normal asset path (availability, rate card, asset approval).
       // Only after success, so a refused request never books a piano.
       if (_pianos.length && payload.piano_asset_type_id && opt && opt.dataset.onShow !== '1') {
+        // Book the exact unit when one was picked and the item allows it.
+        const p = _pianos.find(x => String(x.id) === String(payload.piano_asset_type_id));
+        const booking = {asset_type_id: parseInt(payload.piano_asset_type_id, 10), quantity: 1};
+        if (payload.piano_asset_item_id && p && p.allow_unit_selection) booking.asset_item_id = parseInt(payload.piano_asset_item_id, 10);
         const ar = await fetch(`/shows/${SHOW_ID}/assets`, {method: 'POST', headers: H,
-          body: JSON.stringify({asset_type_id: parseInt(payload.piano_asset_type_id, 10), quantity: 1})});
+          body: JSON.stringify(booking)});
         const ad = await ar.json().catch(() => ({}));
         if (!ar.ok) alert(`Request sent, but ${opt.textContent} couldn't be added to this show's Assets: ${ad.error || 'error'}. Add it on the Assets tab.`);
         else if (window.loadAssetsTab) window.loadAssetsTab();
