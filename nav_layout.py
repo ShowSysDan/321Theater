@@ -99,6 +99,9 @@ _BY_KEY = {item['key']: item for item in NAV_CATALOG}
 DEFAULT_ENTRIES = [
     {'type': 'section', 'label': 'SYSTEM'},
     {'type': 'item', 'key': 'dashboards', 'label': '', 'indent': False, 'hidden': False},
+    # Piano Tuning sits up top with Dashboards (3.18.1) — it's a working
+    # page, not a setting.
+    {'type': 'item', 'key': 'piano_tuning', 'label': '', 'indent': False, 'hidden': False},
     {'type': 'section', 'label': 'LABOR'},
     {'type': 'item', 'key': 'crew_tracker', 'label': '', 'indent': False, 'hidden': False},
     {'type': 'item', 'key': 'labor_overview', 'label': '', 'indent': False, 'hidden': False},
@@ -110,8 +113,6 @@ DEFAULT_ENTRIES = [
     {'type': 'item', 'key': 'assets_retired', 'label': '', 'indent': True, 'hidden': False},
     {'type': 'section', 'label': 'REPORTS'},
     {'type': 'item', 'key': 'reports', 'label': '', 'indent': False, 'hidden': False},
-    {'type': 'section', 'label': 'SERVICES'},
-    {'type': 'item', 'key': 'piano_tuning', 'label': '', 'indent': False, 'hidden': False},
     {'type': 'section', 'label': 'SETTINGS'},
     {'type': 'item', 'key': 'settings', 'label': '', 'indent': False, 'hidden': False},
     {'type': 'item', 'key': 'combined_invoice', 'label': '', 'indent': True, 'hidden': False},
@@ -250,3 +251,38 @@ def resolve(layout, audience_ok, endpoint):
             'badge': item.get('badge') or None,
         })
     return out
+
+
+def move_item_after(raw, key, after_key, drop_empty_sections=('SERVICES',)):
+    """One-time layout fix-up (3.18.1): move item `key` to right after
+    `after_key` in a SAVED layout JSON, and drop any listed section left
+    empty by the move. Returns the new JSON, or None when nothing changed
+    (unparseable, either key missing, or already in place)."""
+    try:
+        data = json.loads(raw)
+        entries = data['entries']
+    except Exception:
+        return None
+    idx = next((i for i, e in enumerate(entries)
+                if isinstance(e, dict) and e.get('type') == 'item' and e.get('key') == key), None)
+    if idx is None:
+        return None
+    item = entries.pop(idx)
+    tgt = next((i for i, e in enumerate(entries)
+                if isinstance(e, dict) and e.get('type') == 'item' and e.get('key') == after_key), None)
+    if tgt is None:
+        return None
+    if tgt + 1 == idx:            # already right after it
+        return None
+    item['indent'] = False
+    entries.insert(tgt + 1, item)
+    cleaned = []
+    for i, e in enumerate(entries):
+        if (isinstance(e, dict) and e.get('type') == 'section'
+                and str(e.get('label', '')).strip().upper() in drop_empty_sections):
+            nxt = entries[i + 1] if i + 1 < len(entries) else None
+            if nxt is None or (isinstance(nxt, dict) and nxt.get('type') == 'section'):
+                continue
+        cleaned.append(e)
+    data['entries'] = cleaned
+    return json.dumps(data)

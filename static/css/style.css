@@ -2412,3 +2412,20 @@ html[data-theme="light"] .venue-pill:not(.active) { background: #fff; border-col
 .sidebar-footer-row > .sidebar-user { flex: 1 0 100%; }
 html.sidebar-collapsed .sidebar-footer-row, html.force-rail .sidebar-footer-row { flex-wrap: nowrap; }
 html.sidebar-collapsed .sidebar-footer-row > .sidebar-user, html.force-rail .sidebar-footer-row > .sidebar-user { flex: 0 0 auto; }
+
+/* Compact sidebar footer (3.18.1): role select without its label, the user
+   row, then ONE meta line (version · TEST · site-mode); licence in the
+   version tooltip. */
+.sidebar-footer { padding: 10px 12px; gap: 6px; }
+.sidebar-footer .view-as-select { padding-top: 4px; padding-bottom: 4px; }
+.sidebar-footer .user-avatar { width: 30px; height: 30px; font-size: 13px; }
+.sidebar-footer .theme-toggle-btn, .sidebar-footer .logout-btn { width: 34px; height: 30px; }
+.sidebar-footer-row { row-gap: 2px; }
+.sidebar-meta { display: flex; align-items: center; justify-content: center; gap: 6px; flex-wrap: wrap;
+  font-size: 10px; line-height: 1.2; color: rgba(255,255,255,.6); }
+.sidebar-meta .app-version { font-family: var(--font-mono); cursor: help; }
+.sidebar-meta .view-mode-link { font-size: 10px; padding: 0; text-decoration: none; }
+.sidebar-meta .view-mode-link:hover { text-decoration: underline; }
+.sidebar-meta-sep { opacity: .5; }
+.sidebar-meta-test { font-size: 9px !important; padding: 1px 5px !important; }
+.sidebar-footer > .rail-only { display: none; }

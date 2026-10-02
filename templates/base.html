@@ -271,10 +271,9 @@
           ↩ RETURN TO ADMIN
         </button>
         {% else %}
-        <label for="view-as-select" style="display:block;font-size:9px;color:var(--text-dim);margin-bottom:4px;letter-spacing:.06em;text-align:center">VIEW SITE AS</label>
-        <select id="view-as-select" class="view-as-select"
+        <select id="view-as-select" class="view-as-select" aria-label="View site as"
                 onchange="if(this.value){setViewAs(this.value)}">
-          <option value="">Select a role…</option>
+          <option value="">View site as…</option>
           <option value="staff">Staff</option>
           <option value="user">Regular User</option>
           <option value="readonly">Read-only</option>
@@ -317,21 +316,20 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
         </a>
       </div>
-      <div class="app-version" style="font-size:10px;color:var(--text-dim);text-align:center;letter-spacing:.04em">v{{ app_version }}</div>
+      {# One compact meta line (3.18.1): version · TEST · site-mode switch.
+         The licence notice lives in the version's tooltip (and on the
+         sign-in page), so it no longer takes two lines of the footer. #}
+      <div class="sidebar-meta">
+        <span class="app-version" title="3·2·1→Theater v{{ app_version }} — © Dr. Phillips Center for the Performing Arts · MIT Licensed · portions © Thauma Systems, LLC">v{{ app_version }}</span>
+        {% if test_mode %}<span class="test-instance-badge sidebar-meta-test" title="TEST_MODE is on in this server's .env: not clustered, email only to admins, leader-only background jobs off">TEST</span>{% endif %}
+        <span class="sidebar-meta-sep" aria-hidden="true">·</span>
+        <button type="button" class="view-mode-link" onclick="setSiteMode('{{ 'desktop' if is_mobile_view else 'mobile' }}')">{{ 'Desktop site' if is_mobile_view else 'Mobile site' }}</button>
+        {% if view_mode_forced %}<button type="button" class="view-mode-link" onclick="setSiteMode('auto')" title="Clear the forced mode and follow device auto-detection">(auto)</button>{% endif %}
+      </div>
       {% if test_mode %}
-      <div class="sidebar-test-flag" style="text-align:center;margin-top:3px"><span class="test-instance-badge" title="TEST_MODE is on in this server's .env: not clustered, email only to admins, leader-only background jobs off">TEST INSTANCE</span></div>
+      {# Icon rail only: the meta line is hidden there, this short tag stays. #}
+      <div class="sidebar-test-flag rail-only" style="text-align:center"><span class="test-instance-badge" title="TEST_MODE is on in this server's .env">TEST INSTANCE</span></div>
       {% endif %}
-      <div style="text-align:center;margin-top:2px">
-        <button type="button" class="view-mode-link" onclick="setSiteMode('{{ 'desktop' if is_mobile_view else 'mobile' }}')">
-          {{ 'Switch to desktop site' if is_mobile_view else 'Switch to mobile site' }}
-        </button>
-        {% if view_mode_forced %}
-        <button type="button" class="view-mode-link" onclick="setSiteMode('auto')" title="Clear the forced mode and follow device auto-detection">(auto)</button>
-        {% endif %}
-      </div>
-      <div class="app-license" style="font-size:9px;color:var(--text-dim);text-align:center;letter-spacing:normal;line-height:1.4;opacity:.75;margin-top:2px">
-        © Dr. Phillips Center for the Performing Arts<br>MIT Licensed · portions © Thauma Systems, LLC
-      </div>
     </div>
   </aside>
 

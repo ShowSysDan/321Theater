@@ -2190,6 +2190,28 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
             INSERT INTO "{shared_schema}".app_settings (key, value) VALUES (%s, '1')
             ON CONFLICT (key) DO NOTHING""", (_pt_marker,))
 
+    # 3.18.1: Piano Tuning moved up under Dashboards in the default sidebar.
+    # A layout saved in the Sidebar Editor overrides the default, so move it
+    # there too — ONCE (marker), so a later re-arrangement by an admin sticks.
+    _nav_marker = f'nav_piano_moved:{app_schema}'
+    cur.execute(f'SELECT 1 FROM "{shared_schema}".app_settings WHERE key = %s', (_nav_marker,))
+    if cur.fetchone() is None:
+        try:
+            import nav_layout as _nl
+            cur.execute(f'SELECT value FROM "{shared_schema}".app_settings WHERE key = %s',
+                        (_nl.NAV_SETTING_KEY,))
+            _row = cur.fetchone()
+            _new = _nl.move_item_after(_row[0], 'piano_tuning', 'dashboards') if _row and _row[0] else None
+            if _new:
+                _backfill('nav: piano under dashboards', f'''
+                    UPDATE "{shared_schema}".app_settings SET value = %s WHERE key = %s''',
+                          (_new, _nl.NAV_SETTING_KEY))
+        except Exception as e:
+            print(f"[migrate_pg] nav piano move skipped: {e}")
+        _backfill('nav piano marker', f'''
+            INSERT INTO "{shared_schema}".app_settings (key, value) VALUES (%s, '1')
+            ON CONFLICT (key) DO NOTHING''', (_nav_marker,))
+
     # original_locked_price for legacy show_assets rows that pre-date the
     # column (new rows always set it, so this is a no-op on current data).
     _backfill('original_locked_price', f"""
