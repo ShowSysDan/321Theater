@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.17.0'
+APP_VERSION = '3.18.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -22531,7 +22531,10 @@ _PIANO_REQUEST_FIELDS = ('piano_asset_type_id', 'piano_asset_item_id', 'piano',
 # Fields only the piano manager edits.
 # Only a start time (3.10.2): tuning_end is no longer set or shown.
 _PIANO_MANAGER_FIELDS = ('piano_vendor_id', 'tuning_date', 'tuning_start',
-                         'cost', 'manager_notes')
+                         'cost', 'manager_notes', 'purpose')
+# House tunings (3.18.0): no show — maintenance, rehearsal, recording… The
+# piano manager's own: no schedule row, no show charge, no PM cancel flow.
+PIANO_HOUSE_PURPOSES = ('Maintenance', 'Rehearsal', 'Recording', 'Event', 'Seasonal', 'Other')
 
 
 def _piano_module_on():
@@ -22589,8 +22592,9 @@ def _piano_pinned(db, show_ids):
 def _piano_on_show(show_id, type_id, unit_id, booked, pinned):
     """Is the tuning's piano reserved on the show? True / False / None (no
     piano picked) / 'other_unit' — the model is booked, but not the specific
-    unit this tuning names (pool booking or a different S/N)."""
-    if not type_id:
+    unit this tuning names (pool booking or a different S/N). House tunings
+    (no show) have nothing to be booked on → None."""
+    if not type_id or show_id is None:
         return None
     if unit_id:
         if (show_id, unit_id) in pinned:
@@ -22772,7 +22776,7 @@ def _sync_piano_external_rental(db, tid, s3_deletes):
                     'WHERE piano_tuning_id=%s ORDER BY id', (tid,)).fetchall()
     keep = er[0] if er else None
     extra = er[1:]
-    want = bool(t) and t['status'] != 'cancelled' and (
+    want = bool(t) and t['show_id'] is not None and t['status'] != 'cancelled' and (
         t['cost'] is not None or bool(keep and keep['pdf_filename']))
     if not want and keep:
         extra = er
@@ -23039,15 +23043,16 @@ def piano_tuning_update(tid):
         abort(404)
     data = request.get_json(force=True) or {}
     db = get_db()
-    cur = db.execute('SELECT t.*, s.name AS show_name FROM piano_tunings t '
-                     'JOIN shows s ON s.id = t.show_id WHERE t.id=%s FOR UPDATE OF t',
-                     (tid,)).fetchone()
+    cur = db.execute("SELECT t.*, COALESCE(s.name, 'House piano tuning') AS show_name "
+                     'FROM piano_tunings t LEFT JOIN shows s ON s.id = t.show_id '
+                     'WHERE t.id=%s FOR UPDATE OF t', (tid,)).fetchone()
     if not cur:
         db.close()
         return jsonify({'error': 'Not found'}), 404
     show_id = cur['show_id']
     manager = _is_piano_manager()
-    editor = (not session.get('is_readonly') and not session.get('is_restricted')
+    editor = (show_id is not None and not session.get('is_readonly')
+              and not session.get('is_restricted')
               and can_access_show(session['user_id'], show_id))
     def _denied(reason, msg, code):
         syslog_logger.warning(f"PIANO_TUNING_DENIED id={tid} show_id={show_id} reason={reason} "
@@ -23134,10 +23139,11 @@ def piano_tuning_update(tid):
         sets += ['sent_at=NULL', 'sent_by=NULL']
     params.append(tid)
     db.execute(f"UPDATE piano_tunings SET {', '.join(sets)} WHERE id=%s", params)
-    _sync_piano_schedule_rows(db, show_id)
     s3_deletes = []
-    _sync_piano_external_rental(db, tid, s3_deletes)
-    db.execute('UPDATE shows SET updated_at=CURRENT_TIMESTAMP WHERE id=%s', (show_id,))
+    if show_id is not None:      # house tunings have no schedule row / charge
+        _sync_piano_schedule_rows(db, show_id)
+        _sync_piano_external_rental(db, tid, s3_deletes)
+        db.execute('UPDATE shows SET updated_at=CURRENT_TIMESTAMP WHERE id=%s', (show_id,))
     changed = sorted(k for k in vals if str(vals[k] or '') != str(_piano_out(cur).get(k) or ''))
     log_audit(db, 'PIANO_TUNING_EDIT', 'piano_tuning', tid, show_id=show_id,
               detail=f"status={cur['status']}->{status} changed={','.join(changed) or '-'}")
@@ -23213,8 +23219,8 @@ def piano_tunings_pending_count():
                                   AND COALESCE(t.tuning_date, t.requested_date) <= CURRENT_DATE + %s) AS urgent,
                COUNT(*) FILTER (WHERE t.status = 'requested'
                                    OR (t.cancel_requested_at IS NOT NULL AND t.status = 'scheduled')) AS pending
-        FROM piano_tunings t JOIN shows s ON s.id = t.show_id
-        WHERE COALESCE(s.status, 'active') = 'active'
+        FROM piano_tunings t LEFT JOIN shows s ON s.id = t.show_id
+        WHERE t.show_id IS NULL OR COALESCE(s.status, 'active') = 'active'
     """, (PIANO_URGENT_DAYS,)).fetchone()
     db.close()
     return jsonify({'pending': r['pending'] or 0, 'requested': r['requested'] or 0,
@@ -23254,7 +23260,7 @@ def piano_tunings_list():
                u.display_name AS requested_by_name, u.username AS requested_by_username,
                {_ADV_PM_SQL} AS production_manager, {_PIANO_ER_COLS}
         FROM piano_tunings t
-        JOIN shows s ON s.id = t.show_id
+        LEFT JOIN shows s ON s.id = t.show_id
         LEFT JOIN users u ON u.id = t.requested_by
         {('WHERE ' + ' AND '.join(where)) if where else ''}
         ORDER BY COALESCE(t.tuning_date, t.requested_date) NULLS LAST, t.id
@@ -23274,7 +23280,63 @@ def piano_tunings_list():
                                             r['piano_asset_item_id'], booked, pinned)
         out.append(d)
     return jsonify({'tunings': out, 'counts': counts, 'pianos': pianos,
-                    'vendors': vendors})
+                    'vendors': vendors, 'purposes': list(PIANO_HOUSE_PURPOSES)})
+
+
+@app.route('/api/piano-tunings', methods=['POST'])
+@piano_manager_required
+def piano_tuning_house_create():
+    """A HOUSE tuning (3.18.0): a piano tuned for a non-show need —
+    maintenance, a rehearsal, a recording… No show, so no schedule row and
+    no show charge; its cost is reported under Piano Tuning reports."""
+    if not _piano_module_on():
+        abort(404)
+    data = request.get_json(force=True) or {}
+    vals, err = _piano_clean(data, _PIANO_REQUEST_FIELDS + _PIANO_MANAGER_FIELDS)
+    if err:
+        return jsonify({'error': err}), 400
+    if not vals.get('tuning_date'):
+        return jsonify({'error': 'Pick the tuning date.'}), 400
+    status = data.get('status') or 'scheduled'
+    if status not in ('requested', 'scheduled', 'completed'):
+        return jsonify({'error': 'Unknown status'}), 400
+    vals['purpose'] = (vals.get('purpose') or '').strip() or 'Maintenance'
+    db = get_db()
+    err = _piano_resolve(db, vals, require=True)
+    if not err and vals.get('piano_vendor_id'):
+        v = db.execute('SELECT name FROM piano_vendors WHERE id=%s',
+                       (vals['piano_vendor_id'],)).fetchone()
+        if not v:
+            err = 'Pick the vendor from the list.'
+        else:
+            vals['vendor'] = v['name']
+    if err:
+        db.close()
+        return jsonify({'error': err}), 400
+    me = session['user_id']
+    tid = db.execute("""
+        INSERT INTO piano_tunings (show_id, status, purpose, piano, piano_asset_type_id,
+            piano_asset_item_id, requested_date, requested_time, tuning_date, tuning_start,
+            piano_vendor_id, vendor, cost, notes, manager_notes, requested_by, updated_by,
+            sent_at, sent_by, completed_at)
+        VALUES (NULL, %s, %s, %s, %s, %s, %s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                CASE WHEN %s IN ('scheduled', 'completed') THEN CURRENT_TIMESTAMP END,
+                CASE WHEN %s IN ('scheduled', 'completed') THEN %s END,
+                CASE WHEN %s = 'completed' THEN CURRENT_TIMESTAMP END)
+        RETURNING id""",
+        (status, vals['purpose'], vals.get('piano', ''), vals.get('piano_asset_type_id'),
+         vals.get('piano_asset_item_id'), vals['tuning_date'], vals['tuning_date'],
+         vals.get('tuning_start', ''), vals.get('piano_vendor_id'), vals.get('vendor', ''),
+         vals.get('cost'), vals.get('notes', ''), vals.get('manager_notes', ''), me, me,
+         status, status, me, status)).fetchone()['id']
+    log_audit(db, 'PIANO_TUNING_HOUSE_ADD', 'piano_tuning', tid,
+              detail=f"purpose={vals['purpose']!r} piano={vals.get('piano', '')!r} "
+                     f"date={vals['tuning_date']}")
+    db.commit()
+    db.close()
+    syslog_logger.info(f"PIANO_TUNING_HOUSE_ADD id={tid} purpose={vals['purpose']!r} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'id': tid}), 201
 
 
 def _piano_vendor_list(db, include_inactive=False):
@@ -23396,6 +23458,7 @@ def piano_tuning_cancel_request(tid):
                    (tid,)).fetchone()
     if not t:
         db.close()
+        # A house tuning (no show) has no PM to ask — the manager cancels it.
         return jsonify({'error': 'Not found'}), 404
     manager = _is_piano_manager()
     editor = (not session.get('is_readonly') and not session.get('is_restricted')
@@ -23510,6 +23573,10 @@ def piano_tuning_paperwork_upload(tid):
     if t['status'] == 'cancelled':
         db.close()
         return jsonify({'error': 'This tuning is cancelled.'}), 409
+    if t['show_id'] is None:
+        db.close()
+        return jsonify({'error': "A house tuning has no show to attach paperwork to — "
+                                 "note the invoice number in Manager notes."}), 409
     er = db.execute('SELECT id, s3_key FROM show_external_rentals WHERE piano_tuning_id=%s '
                     'ORDER BY id LIMIT 1', (tid,)).fetchone()
     if er:
@@ -26008,6 +26075,94 @@ def report_asset_units():
     return jsonify({'units': list(items.values()), 'pooled': pooled})
 
 
+@app.route('/api/reports/item-shows')
+@reports_required
+def report_item_shows():
+    """Item History (3.18.0): every show that rented one item — a type (a
+    group counts its child items), optionally one specific unit. Direct
+    lines, plus (whole type only) lines that booked a system/package
+    containing it. Honours the shared date / venue / Arts Group / drill
+    filters via _report_shows()."""
+    denied = _report_need(_can_report_assets)
+    if denied:
+        return denied
+    tid = request.args.get('type_id', type=int)
+    uid = request.args.get('unit_id', type=int)
+    if not tid:
+        return jsonify({'error': 'Pick an item.'}), 400
+    db = get_db()
+    t = db.execute('SELECT id, name FROM asset_types WHERE id=%s', (tid,)).fetchone()
+    if not t:
+        db.close()
+        return jsonify({'error': 'Item not found.'}), 404
+    type_ids = [tid] + [r['id'] for r in db.execute(
+        'SELECT id FROM asset_types WHERE parent_type_id = %s', (tid,)).fetchall()]
+    shows = _report_shows(db)
+    ids = list(shows) or [0]
+    unit_sql, unit_args = ('AND sa.asset_item_id = %s', [uid]) if uid else ('', [])
+    rows = [dict(r) for r in db.execute(f"""
+        SELECT sa.show_id, sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end,
+               sa.asset_item_id, ai.barcode AS unit_barcode, at.name AS type_name,
+               NULL::text AS via_system
+        FROM show_assets sa
+        JOIN asset_types at ON at.id = sa.asset_type_id
+        LEFT JOIN asset_items ai ON ai.id = sa.asset_item_id
+        WHERE sa.show_id = ANY(%s) AND sa.asset_type_id = ANY(%s) AND sa.is_hidden = 0 {unit_sql}
+    """, [ids, type_ids] + unit_args).fetchall()]
+    if not uid:
+        # Inside a booked system/package: priced on the system line, so no $ here.
+        rows += [dict(r) for r in db.execute("""
+            SELECT sa.show_id, sa.quantity * COALESCE(m.quantity, 1) AS quantity,
+                   NULL::double precision AS locked_price, sa.rental_start, sa.rental_end,
+                   NULL::integer AS asset_item_id, NULL::text AS unit_barcode,
+                   ct.name AS type_name, sys.name AS via_system
+            FROM show_assets sa
+            JOIN asset_type_system_members m ON m.system_type_id = sa.asset_type_id
+            JOIN asset_types sys ON sys.id = sa.asset_type_id
+            JOIN asset_types ct ON ct.id = m.component_type_id
+            WHERE sa.show_id = ANY(%s) AND m.component_type_id = ANY(%s) AND sa.is_hidden = 0
+        """, (ids, type_ids)).fetchall()]
+    unit_label = None
+    if uid:
+        u = db.execute('SELECT id, barcode FROM asset_items WHERE id=%s', (uid,)).fetchone()
+        unit_label = ((u['barcode'] or '').strip() or f'#{uid}') if u else f'#{uid}'
+    db.close()
+    out = []
+    for r in rows:
+        sh = shows.get(r['show_id'])
+        if not sh:
+            continue
+        qty = int(r['quantity'] or 1)
+        price = float(r['locked_price']) if r['locked_price'] is not None else None
+        out.append({
+            'show_id': sh['id'], 'show': sh['name'], 'date': sh['date'], 'venue': sh['venue'],
+            'company': sh['company'], 'status': sh['status'] or 'active',
+            'item': r['type_name'],
+            'unit': ((r['unit_barcode'] or '').strip() or f"#{r['asset_item_id']}")
+                    if r['asset_item_id'] else '',
+            'via': r['via_system'] or '',
+            'rental_start': _as_date(r['rental_start']).isoformat() if r['rental_start'] else '',
+            'rental_end': _as_date(r['rental_end']).isoformat() if r['rental_end'] else '',
+            'days': _rental_days(r['rental_start'], r['rental_end']),
+            'quantity': qty, 'price': price,
+            'total': round(price * qty, 2) if price is not None else None})
+    out.sort(key=lambda x: (x['date'] or '', x['show']), reverse=True)
+    companies = {}
+    for x in out:
+        k = x['company'] or '(No company)'
+        c = companies.setdefault(k, {'company': k, 'shows': set(), 'lines': 0, 'units': 0, 'revenue': 0.0})
+        c['shows'].add(x['show_id']); c['lines'] += 1; c['units'] += x['quantity']
+        c['revenue'] += x['total'] or 0
+    by_company = sorted(({**c, 'shows': len(c['shows']), 'revenue': round(c['revenue'], 2)}
+                         for c in companies.values()), key=lambda c: (-c['shows'], c['company']))
+    return jsonify({'item': t['name'], 'unit': unit_label, 'lines': out, 'by_company': by_company,
+                    'totals': {'shows': len({x['show_id'] for x in out}), 'lines': len(out),
+                               'units': sum(x['quantity'] for x in out),
+                               'unit_days': sum(x['quantity'] * x['days'] for x in out),
+                               'revenue': round(sum(x['total'] or 0 for x in out), 2),
+                               'last': out[0]['date'] if out else None}})
+
+
 @app.route('/api/reports/labor')
 @reports_required
 def report_labor():
@@ -26135,9 +26290,22 @@ def report_piano():
     shows = _report_shows(db)
     rows = db.execute("""
         SELECT t.show_id, t.status, t.piano, t.vendor, t.cost, t.tuning_date,
-               t.requested_date, COALESCE(u.display_name, u.username, '') AS requester
+               t.requested_date, t.purpose, COALESCE(u.display_name, u.username, '') AS requester
         FROM piano_tunings t LEFT JOIN users u ON u.id = t.requested_by
         WHERE t.show_id = ANY(%s)""", (list(shows) or [0],)).fetchall()
+    # House tunings (3.18.0, no show) count by their own date — but only
+    # when no show-only filter (venue, Arts Group, drill-downs) is set.
+    d_from, d_to, venue, company = _report_filters()
+    if not venue and not company and not any(_report_drill().values()):
+        for r in db.execute("""
+            SELECT t.show_id, t.status, t.piano, t.vendor, t.cost, t.tuning_date,
+                   t.requested_date, t.purpose, COALESCE(u.display_name, u.username, '') AS requester
+            FROM piano_tunings t LEFT JOIN users u ON u.id = t.requested_by
+            WHERE t.show_id IS NULL""").fetchall():
+            d = _as_date(r['tuning_date']) or _as_date(r['requested_date'])
+            if (d_from and (not d or d < d_from)) or (d_to and (not d or d > d_to)):
+                continue
+            rows.append(r)
     names = _report_company_names(db)
     db.close()
     vendors, pianos, groups, people, months = {}, {}, {}, {}, {}
@@ -26171,9 +26339,13 @@ def report_piano():
             v['cost'] += cost
             v['priced'] += 1
         sh = shows.get(r['show_id']) or {}
-        gk = sh.get('company_key') or ''
-        _bump(groups, gk, 'group', names.get(gk) or sh.get('company') or '(No company)',
-              live, cost, r['cost'] is not None, st)
+        if r['show_id'] is None:
+            gk, glabel = '__house__', f"House — {(r['purpose'] or 'Maintenance')}"
+            gk += glabel
+        else:
+            gk = sh.get('company_key') or ''
+            glabel = names.get(gk) or sh.get('company') or '(No company)'
+        _bump(groups, gk, 'group', glabel, live, cost, r['cost'] is not None, st)
         _bump(people, r['requester'] or '(unknown)', 'requester', r['requester'] or '(unknown)',
               live, cost, r['cost'] is not None, st)
         d = _as_date(r['tuning_date']) or _as_date(r['requested_date'])
@@ -26563,6 +26735,19 @@ _RPT_PDF = {
                                        ('last_show', 'Last show', 't'), ('last_date', 'Last date', 't'),
                                        ('maintenance', 'Maintenance', 'i'), ('logs', 'Log entries', 'i'),
                                        ('tunings', 'Tunings', 'i'), ('last_tuned', 'Last tuned', 't')])]),
+    'items': ('Item history', 'report_item_shows', [
+        ('Shows', 'totals.shows', 'i'), ('Rental lines', 'totals.lines', 'i'),
+        ('Units out', 'totals.units', 'i'), ('Unit-days', 'totals.unit_days', 'i'),
+        ('Revenue', 'totals.revenue', 'm'), ('Last show', 'totals.last', 't')], [
+        ('Every show that rented it', 'lines', [('date', 'Show date', 't'), ('show', 'Show', 't'),
+                                                ('company', 'Arts Group', 't'), ('venue', 'Venue', 't'),
+                                                ('item', 'Item', 't'), ('unit', 'Unit', 't'),
+                                                ('via', 'Via system', 't'),
+                                                ('rental_start', 'From', 't'), ('rental_end', 'To', 't'),
+                                                ('quantity', 'Qty', 'i'), ('total', 'Line total', 'm')]),
+        ('By Arts Group', 'by_company', [('company', 'Arts Group', 't'), ('shows', 'Shows', 'i'),
+                                         ('lines', 'Lines', 'i'), ('units', 'Units', 'i'),
+                                         ('revenue', 'Revenue', 'm')])]),
     'rentals': ('Rental lines', 'asset_reports_data', [
         ('Revenue', 'total_revenue', 'm'), ('Line items', 'count', 'i')], [
         ('Rental lines', 'rows', [('show_name', 'Show', 't'), ('show_date', 'Date', 't'),
@@ -26688,6 +26873,8 @@ def report_pdf():
     data = resp.get_json() or {}
     if key == 'group_detail':
         title = f"Arts Group — {(request.args.get('group_name') or request.args.get('group') or '(No company)')[:120]}"
+    elif key == 'items' and data.get('item'):
+        title = f"Item history — {data['item']}" + (f" · Unit {data['unit']}" if data.get('unit') else '')
     elif key == 'asset_units' and request.args.get('type_name'):
         title = f"Asset units — {request.args.get('type_name')[:120]}"
     cards = [(label, _rpt_fmt(_rpt_path(data, path), f)) for label, path, f in card_spec

@@ -843,6 +843,14 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   `_piano_on_show()` (True / False / None / 'other_unit' via
   `_piano_pinned()`); the PM booking pins the unit only when the type allows
   unit selection.
+- **House tunings (3.18.0):** `piano_tunings.show_id` NULL = a show-less
+  tuning (maintenance…; `purpose`), created by the manager via
+  `POST /api/piano-tunings`. They NEVER get a schedule row or an
+  external-rental charge (the update route skips both syncs when show_id is
+  NULL; `_sync_piano_external_rental` requires a show), no PM edit or
+  cancel-request, no paperwork upload. Lists/counts use LEFT JOIN shows;
+  `_piano_on_show` returns None. Reports → Piano include them by their own
+  date only when no venue/company/drill filter is set.
 - **The show-page panel is the `piano_tuning` FORM FIELD TYPE (3.16.0)** —
   rendered by `render_adv_field()` (show.html) via the `piano_tuning_panel()`
   macro wherever the field sits; never re-add a hard-coded placement. One per
@@ -879,6 +887,10 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   system/package components), so every tab honours them; Rental Lines adds
   `s.id = ANY(...)` when any is set. Labor Lines / Break Exceptions also
   apply position + tech per LINE (`_report_line_filter`).
+- **Item History (3.18.0)** `/api/reports/item-shows?type_id=&unit_id=`
+  (assets gate, `items` in `_RPT_PDF`): direct lines of the type (+ child
+  types of a group) and, without a unit, system/package component lines
+  (no $ — priced on the system line); filtered by `_report_shows()`.
 - Break Exceptions compare `post_show_labor.sched_break*` (snapshot at
   Settle Now) with the actual `break*`; Estimate vs Settlement calls both
   billing engines (`_calc_labor_cost_for_show` vs

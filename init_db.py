@@ -543,7 +543,8 @@ CREATE INDEX IF NOT EXISTS idx_schedule_rows_show ON schedule_rows(show_id);
 -- Combined Invoice).
 CREATE TABLE IF NOT EXISTS piano_tunings (
     id             SERIAL PRIMARY KEY,
-    show_id        INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    show_id        INTEGER REFERENCES shows(id) ON DELETE CASCADE,
+    purpose        TEXT DEFAULT '',
     status         TEXT NOT NULL DEFAULT 'requested',
     location       TEXT DEFAULT '',
     piano          TEXT DEFAULT '',
@@ -2050,6 +2051,9 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'CREATE INDEX IF NOT EXISTS idx_show_external_rentals_piano ON "{app_schema}".show_external_rentals(piano_tuning_id)',
         # Piano tuning vendor list — 3.10.2
         f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS piano_vendor_id INTEGER DEFAULT NULL',
+        # 3.18.0: house tunings (maintenance etc.) have no show.
+        f'ALTER TABLE "{app_schema}".piano_tunings ALTER COLUMN show_id DROP NOT NULL',
+        f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS purpose TEXT DEFAULT \'\'',
         # 3.17.0: the specific piano unit (S/N) — unit-aware tunings.
         f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS piano_asset_item_id INTEGER DEFAULT NULL',
         # PM "Request cancellation" — 3.10.4
