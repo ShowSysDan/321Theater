@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.16.0'
+APP_VERSION = '3.16.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -19953,7 +19953,13 @@ def show_assets_list(show_id):
 @show_advance_editor_required
 def show_asset_add(show_id):
     data = request.get_json() or {}
-    asset_type_id = data.get('asset_type_id')
+    # The Add dialog reads the type id from a hidden <input>, so it arrives as
+    # a STRING — coerce it, or the pinned-unit check below compared the
+    # unit's int asset_type_id against '17' and refused every unit (3.16.1).
+    try:
+        asset_type_id = int(data.get('asset_type_id') or 0) or None
+    except (TypeError, ValueError):
+        asset_type_id = None
     quantity = int(data.get('quantity') or 1)
     asset_item_id_raw = data.get('asset_item_id')
     try:

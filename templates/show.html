@@ -2174,7 +2174,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
   window.submitAddAsset = async function() {
     if (_addAssetInFlight) return;
     const submitBtn = document.getElementById('asset-add-submit-btn');
-    const typeId = document.getElementById('asset-add-type-id').value;
+    const typeId = parseInt(document.getElementById('asset-add-type-id').value, 10);
     const unitSel = document.getElementById('asset-add-unit');
     const pinnedUnitId = unitSel && unitSel.value ? parseInt(unitSel.value, 10) : null;
     let qty = parseInt(document.getElementById('asset-add-qty').value) || 1;
