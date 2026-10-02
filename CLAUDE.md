@@ -892,16 +892,24 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
 - Orange = action (New Show, active nav bar, active tab, time icons). Orange
   as TEXT in light mode is `--orange-text` (#B85A12, 4.5:1), never the fill.
 - Nav tiles are CSS-only: the link's own `<svg>` is the tile, `::after` the
-  chevron, `.active::before` the orange bar, `.sub::before` the tree
-  connector. Keep `aria-current="page"` beside every `active` class.
+  chevron, `.active::before` the orange bar (not on sub rows), `.sub::before`
+  the tree connector. Keep `aria-current="page"` beside every `active` class.
 - **Fonts are bundled** in `static/fonts/` (Poppins 400 + 600, JetBrains Mono
   variable; Latin + Latin-Ext woff2, OFL files alongside). Never add a Google
   Fonts / CDN link back. No Poppins 500/700 file ships — the browser maps them
   to 400/600. These @font-face rules are web-only; PDF templates still use no
   @font-face (see the WeasyPrint font-config rule).
-- `.phead` (dashboard, My Shows, archived) is sticky with negative margins
-  that MUST equal `.main-content`'s padding (28px 48px desktop, 14px 12px
-  phones — mobile.css), and on phones sits below the fixed m-header.
+- The header bar = `.phead` (dashboard, My Shows, archived: title tile +
+  tabs) and every other page's `.page-header` (3.15.1), sticky at top 0.
+  `.main-content` has NO top padding; the bar's side margins (-48px desktop,
+  -12px phones) MUST equal the column's side padding. Its tint + hairline +
+  shade are a `border-image` with a 100vw right outset, so it reaches the
+  window edge past the column max-width without scroll overflow — keep the
+  background transparent (a background would double the tint). On phones
+  only `.phead` pins (under the m-header); `.page-header` scrolls.
+- Sidebar sub-item connectors are `.nav-item.sub::before`, drawn OUTSIDE the
+  row (rounded corners clipped the old in-row lines); rows touch (margin 0)
+  and the last of a run uses `:not(:has(+ .nav-item.sub))` for the └.
 - Theme: `users.theme` = dark | light | auto. Auto is resolved before first
   paint by the head script in base.html (`data-theme-pref`) and follows the
   OS live; the toggle cycles dark → light → auto. New accounts get 'auto'.
