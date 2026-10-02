@@ -107,6 +107,7 @@
   {% if can_assets %}
   <button type="button" class="rpt-tab" data-tab="groups">Arts Groups</button>
   <button type="button" class="rpt-tab" data-tab="assets">Assets</button>
+  <button type="button" class="rpt-tab" data-tab="items">Item History</button>
   <button type="button" class="rpt-tab" data-tab="rentals">Rental Lines</button>
   {% endif %}
   {% if can_labor %}<button type="button" class="rpt-tab" data-tab="labor">Labor &amp; Techs</button>
@@ -119,6 +120,28 @@
 <div id="rpt-body">
   <div class="rpt-loading text-dim">Loading…</div>
 </div>
+
+{# Item History (3.18.0): pick one item (a group counts its child items),
+   optionally one unit — every show that rented it. #}
+<template id="rpt-items-filters">
+  <div class="rpt-subfilters">
+    <div class="field-group" style="min-width:260px">
+      <label class="field-label">ITEM</label>
+      <select id="ri-type" class="field-input" onchange="rptItemTypeChanged()">
+        <option value="">— Pick an item —</option>
+        {% for cat in asset_categories %}
+        <optgroup label="{{ cat.name }}">
+          {% for t in asset_types if t.category_id == cat.id %}<option value="{{ t.id }}">{{ t.name }}</option>{% endfor %}
+        </optgroup>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field-group" style="min-width:200px">
+      <label class="field-label">UNIT (OPTIONAL)</label>
+      <select id="ri-unit" class="field-input" onchange="rptLoad()"><option value="">All units</option></select>
+    </div>
+  </div>
+</template>
 
 {# Rental Lines keeps its own category / type filters. #}
 <template id="rpt-rentals-filters">
@@ -250,7 +273,26 @@
     el.addEventListener('input', () => { if (!el.value) { moreCount(); rptLoad(); } });
   })();
   // ── PDF: the server renders the same JSON this tab shows ──
-  const PDF_KEY = {overview: 'overview', groups: 'groups', assets: 'assets', rentals: 'rentals',
+  // Item History selection — kept across reloads of the tab and in the URL.
+  const _q0 = new URLSearchParams(location.search);
+  const _item = {type: _q0.get('item') || '', unit: _q0.get('unit') || ''};
+  function _itemUrl() {
+    try {
+      const u = new URL(location.href);
+      ['item', 'unit'].forEach(k => { const v = _item[k === 'item' ? 'type' : 'unit']; if (v) u.searchParams.set(k, v); else u.searchParams.delete(k); });
+      history.replaceState(null, '', u);
+    } catch (e) {}
+  }
+  window.rptItemTypeChanged = function() {
+    _item.type = _val('ri-type'); _item.unit = '';
+    rptLoad();
+  };
+  window.rptOpenItem = function(typeId, unitId) {
+    _item.type = String(typeId || ''); _item.unit = String(unitId || '');
+    rptCloseModal();
+    setTab('items');
+  };
+  const PDF_KEY = {items: 'items', overview: 'overview', groups: 'groups', assets: 'assets', rentals: 'rentals',
                    labor: 'labor', lines: 'lines', breaks: 'breaks', variance: 'variance', piano: 'piano'};
   function openPdf(report, extra) {
     window.open('/reports/pdf?' + params(Object.assign({report}, extra || {})), '_blank', 'noopener');
@@ -261,6 +303,10 @@
       extra.asset_category_id = _val('rr-category'); extra.asset_type_id = _val('rr-type');
     }
     if (_tab === 'breaks') extra.min_diff = _val('rb-min');
+    if (_tab === 'items') {
+      if (!_item.type) { alert('Pick an item first.'); return; }
+      extra.type_id = _item.type; extra.unit_id = _item.unit;
+    }
     openPdf(PDF_KEY[_tab], extra);
   };
   function preset(kind) {
@@ -444,6 +490,49 @@
       ]) + table('t-types', 'Asset usage by item', cols, d.types, {sortKey: 'lines', onRow: assetUnits,
         rowClass: r => r.lines ? '' : 'rpt-idle',
         note: 'Click an item for its individual units. ' + (d.range_days ? `Utilization = unit-days booked ÷ (units owned × ${d.range_days} days in range).` : 'Pick a From and To date to see utilization.') + ' Dimmed rows were never rented in the range.'});
+    },
+    async items() {
+      const head = document.getElementById('rpt-items-filters').innerHTML;
+      if (!_item.unit && _val('ri-unit')) _item.unit = _val('ri-unit');
+      setTimeout(() => {
+        const t = document.getElementById('ri-type'); if (t) t.value = _item.type;
+      });
+      _itemUrl();
+      if (!_item.type) return head + '<div class="rpt-loading text-dim">Pick an item to see every show that rented it — a hazer, a piano, any item. Pick a group to include all the items under it; add a unit to follow one specific instrument / barcode.</div>';
+      const [d, u] = await Promise.all([
+        get('/api/reports/item-shows?' + params({type_id: _item.type, unit_id: _item.unit})),
+        get('/api/reports/asset-units?' + params({type_id: _item.type})).catch(() => ({units: []})),
+      ]);
+      setTimeout(() => {
+        const t = document.getElementById('ri-type'); if (t) t.value = _item.type;
+        const us = document.getElementById('ri-unit');
+        if (us) {
+          us.innerHTML = '<option value="">All units</option>' + (u.units || []).map(x =>
+            `<option value="${x.id}">${esc(x.barcode || ('#' + x.id))}${x.status && x.status !== 'available' ? ' — ' + esc(x.status) : ''}</option>`).join('');
+          us.value = _item.unit;
+          us.onchange = () => { _item.unit = us.value; rptLoad(); };
+        }
+      });
+      const t = d.totals;
+      return head + cards([
+        [num(t.shows), 'Shows'], [num(t.lines), 'Rental lines'], [num(t.units), 'Units out'],
+        [num(t.unit_days), 'Unit-days'], [money(t.revenue), 'Revenue'], [esc(t.last || '—'), 'Last show'],
+      ]) + table('t-items', `Every show that rented ${d.item}${d.unit ? ' · unit ' + d.unit : ''}`, [
+        {key: 'date', label: 'Show date'},
+        {key: 'show', label: 'Show', fmt: (v, r) => showLink(v, r.show_id), sub: r => esc(r.venue || '')},
+        {key: 'company', label: 'Arts Group'},
+        {key: 'item', label: 'Item', sub: r => r.via ? 'in ' + esc(r.via) : ''},
+        {key: 'unit', label: 'Unit'},
+        {key: 'rental_start', label: 'From'}, {key: 'rental_end', label: 'To'},
+        {key: 'quantity', label: 'Qty', num: true},
+        {key: 'total', label: 'Line total', num: true, fmt: v => v == null ? '<span class="sub">in system</span>' : money(v), csv: r => r.total == null ? '' : r.total},
+      ], d.lines, {sortKey: 'date',
+        note: 'Direct rental lines' + (d.unit ? ' with this unit picked' : ', plus lines that booked a system/package containing it (priced on the system line)') + '. The date, venue, Arts Group and More filters above still apply.'})
+        + table('t-items-co', 'By Arts Group', [
+          {key: 'company', label: 'Arts Group'}, {key: 'shows', label: 'Shows', num: true},
+          {key: 'lines', label: 'Lines', num: true}, {key: 'units', label: 'Units', num: true},
+          {key: 'revenue', label: 'Revenue', num: true, fmt: money},
+        ], d.by_company, {sortKey: 'shows'});
     },
     async rentals() {
       const extra = {asset_category_id: (document.getElementById('rr-category') || {}).value || '',
@@ -667,7 +756,11 @@
         {key: 'bookings', label: 'Pinned bookings', num: true}, {key: 'unit_days', label: 'Pinned days', num: true},
         {key: 'last_show', label: 'Last show', sub: r => esc(r.last_date || '')},
         {key: 'maintenance', label: 'Maintenance', num: true}, {key: 'logs', label: 'Log entries', num: true},
-      ], d.units, {sortKey: 'bookings', note: 'A booking counts against a unit only when that unit was picked on the show. Bookings from the general pool are counted above, not per unit.'}), ['asset_units', {type_id: t.type_id, type_name: t.type}]);
+        ...(d.units.some(u => u.tunings) ? [{key: 'tunings', label: 'Piano tunings', num: true}, {key: 'last_tuned', label: 'Last tuned'}] : []),
+      ], d.units, {sortKey: 'bookings', onRow: x => rptOpenItem(t.type_id, x.id),
+        note: 'Click a unit for every show it went out on. A booking counts against a unit only when that unit was picked on the show. Bookings from the general pool are counted above, not per unit.'})
+        + `<p style="margin:10px 0 0"><button type="button" class="btn btn-sm btn-primary" onclick="rptOpenItem(${Number(t.type_id)}, '')">Every show that rented ${esc(t.type)} →</button></p>`,
+        ['asset_units', {type_id: t.type_id, type_name: t.type}]);
     } catch (e) { modal(t.type, `<p style="color:#e53e3e">${esc(e.message)}</p>`); }
   }
 

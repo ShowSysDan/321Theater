@@ -10,10 +10,11 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">Piano Tuning</h1>
-    <p class="page-sub">Every tuning requested from a show page. Schedule it with a vendor, set the tuning time (it goes onto the show's production schedule) and the cost (it shows on the show's Assets tab and invoices).</p>
+    <p class="page-sub">Every tuning requested from a show page. Schedule it with a vendor, set the tuning time (it goes onto the show's production schedule) and the cost (it shows on the show's Assets tab and invoices). <strong>Add House Tuning</strong> logs a tuning that isn't for a show: maintenance, a rehearsal, a recording.</p>
   </div>
   <div class="header-actions">
     <button type="button" class="btn btn-ghost btn-sm" onclick="pvOpen()">Vendors</button>
+    <button type="button" class="btn btn-primary btn-sm" onclick="ptOpenHouse()">+ Add House Tuning</button>
   </div>
 </div>
 
@@ -60,6 +61,11 @@
       <input type="hidden" id="pt-id">
       <div id="pt-show" style="font-size:12px;color:var(--text-dim);margin-bottom:10px"></div>
       <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field-group" id="pt-purpose-row" style="display:none;grid-column:span 2">
+          <label class="field-label" for="pt-purpose">PURPOSE (HOUSE TUNING)</label>
+          <input type="text" id="pt-purpose" class="field-input" list="pt-purposes" maxlength="300" placeholder="Maintenance">
+          <datalist id="pt-purposes"></datalist>
+        </div>
         <div class="field-group">
           <label class="field-label">STATUS</label>
           <select id="pt-status" class="field-input">
@@ -72,7 +78,11 @@
         </div>
         <div class="field-group" style="grid-column:span 2">
           <label class="field-label">PIANO</label>
-          <select id="pt-pick" class="field-input" onchange="ptPickWarn()"></select>
+          <select id="pt-pick" class="field-input" onchange="ptFillUnits(); ptPickWarn()"></select>
+          <div id="pt-unit-row" style="display:none;margin-top:6px">
+            <label class="field-label" for="pt-unit">UNIT (S/N)</label>
+            <select id="pt-unit" class="field-input" onchange="ptPickWarn()"></select>
+          </div>
           <input type="text" id="pt-piano" class="field-input" maxlength="300" style="display:none">
           <div id="pt-pick-warn" class="piano-pick-warn" style="display:none"></div>
         </div>
@@ -85,7 +95,7 @@
           <input type="text" id="pt-req-time" class="field-input" maxlength="5" placeholder="14:00">
         </div>
         <div class="field-group" style="grid-column:span 2;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px">
-          <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim);margin-bottom:8px">TUNING TIME — goes on the show's production schedule</div>
+          <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim);margin-bottom:8px">TUNING TIME<span class="pt-show-only"> — goes on the show's production schedule</span></div>
           <div style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:8px">
             <label style="font-size:10px;color:var(--text-dim)">DATE<input type="date" id="pt-date" class="field-input"></label>
             <label style="font-size:10px;color:var(--text-dim)">START<input type="text" id="pt-start" class="field-input" maxlength="5" placeholder="09:00"></label>
@@ -95,13 +105,13 @@
           <label class="field-label">COST ($)</label>
           <input type="text" id="pt-cost" class="field-input" inputmode="decimal" placeholder="Vendor's typical price fills in">
         </div>
-        <div class="field-group">
+        <div class="field-group" id="pt-paper-group">
           <label class="field-label">PAPERWORK (PDF)</label>
           <div id="pt-paper-current" style="font-size:12px;margin-bottom:4px"></div>
           <input type="file" id="pt-paper" accept="application/pdf,.pdf" class="field-input" onchange="ptUploadPaper()">
         </div>
         <div class="field-group" style="grid-column:span 2">
-          <label class="field-label">REQUEST NOTES (from the PM)</label>
+          <label class="field-label">NOTES<span class="pt-show-only"> (request notes from the PM)</span></label>
           <textarea id="pt-notes" class="field-input field-textarea" rows="2" maxlength="4000"></textarea>
         </div>
         <div class="field-group" style="grid-column:span 2">
@@ -109,7 +119,7 @@
           <textarea id="pt-mgr-notes" class="field-input field-textarea" rows="2" maxlength="4000" placeholder="Vendor confirmation, PO number…"></textarea>
         </div>
       </div>
-      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45"><strong>Scheduled</strong> = sent to the vendor. Setting the tuning date also marks it Scheduled; the requester is emailed when it's scheduled and when the time changes. The cost and paperwork appear right away as an external rental on the show's Assets tab (and its Asset Estimate / Final Invoice, with the PDF attached). Cancelling removes the schedule row, the charge and the paperwork.</p>
+      <p class="text-dim pt-show-only" style="font-size:11px;margin:8px 0 0;line-height:1.45"><strong>Scheduled</strong> = sent to the vendor. Setting the tuning date also marks it Scheduled; the requester is emailed when it's scheduled and when the time changes. The cost and paperwork appear right away as an external rental on the show's Assets tab (and its Asset Estimate / Final Invoice, with the PDF attached). Cancelling removes the schedule row, the charge and the paperwork.</p>
     </div>
     <div class="modal-footer">
       <a id="pt-show-link" class="btn btn-ghost" href="#" style="margin-right:auto">Open show →</a>
@@ -187,6 +197,7 @@
     _rows = d.tunings || [];
     _pianos = d.pianos || [];
     _vendors = d.vendors || [];
+    document.getElementById('pt-purposes').innerHTML = (d.purposes || []).map(p => `<option value="${esc(p)}">`).join('');
     const c = d.counts || {};
     document.querySelectorAll('.piano-count').forEach(el => {
       const k = el.dataset.count;
@@ -200,7 +211,7 @@
     const body = document.getElementById('piano-list-body');
     const q = (document.getElementById('piano-search').value || '').trim().toLowerCase();
     const rows = !q ? _rows : _rows.filter(t =>
-      [t.show_name, t.piano, t.vendor, t.production_manager, t.requested_by_name]
+      [t.show_name, t.piano, t.vendor, t.production_manager, t.requested_by_name, t.purpose, t.show_id ? '' : 'house']
         .some(v => String(v || '').toLowerCase().includes(q)));
     if (!rows.length) {
       body.innerHTML = `<tr><td colspan="9" class="text-dim">${_rows.length ? 'No tunings match your search.' : 'No piano tunings here.'}</td></tr>`;
@@ -209,9 +220,10 @@
     body.innerHTML = rows.map(t => `
       <tr>
         <td><span class="piano-status piano-status-${esc(t.status)}">${esc(t.status_label)}</span>${t.cancel_pending ? `<div class="piano-cancel-flag" style="margin-top:4px" title="${esc(t.cancel_request_note || '')}">⚠ Cancellation requested</div>${t.cancel_request_note ? `<div class="sub" style="white-space:pre-wrap;max-width:180px">${esc(t.cancel_request_note)}</div>` : ''}` : ''}</td>
-        <td><a href="/shows/${t.show_id}?tab=advance">${esc(t.show_name)}</a>
-          <div class="sub">${esc(t.show_venue || '')}${t.production_manager ? ' · PM ' + esc(t.production_manager) : ''}</div></td>
-        <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? '<div class="piano-warn" style="margin-left:0" title="The show hasn\'t added this piano on its Assets tab.">⚠ not on show\'s Assets tab</div>' : ''}</td>
+        <td>${t.show_id ? `<a href="/shows/${t.show_id}?tab=advance">${esc(t.show_name)}</a>
+          <div class="sub">${esc(t.show_venue || '')}${t.production_manager ? ' · PM ' + esc(t.production_manager) : ''}</div>`
+          : `<span class="piano-house-tag" title="Not tied to a show">🏠 House</span> ${esc(t.purpose || 'Maintenance')}`}</td>
+        <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? '<div class="piano-warn" style="margin-left:0" title="The show hasn\'t added this piano on its Assets tab.">⚠ not on show\'s Assets tab</div>' : ''}${t.piano_on_show === 'other_unit' && t.status !== 'cancelled' ? '<div class="piano-warn" style="margin-left:0" title="The show books this model, but not this specific unit.">⚠ unit not pinned on Assets tab</div>' : ''}</td>
         <td style="white-space:nowrap">${esc(t.requested_date || '')} ${esc(t.requested_time || '')}</td>
         <td style="white-space:nowrap">${t.tuning_date ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}` : '—'}</td>
         <td>${esc(t.vendor) || '—'}</td>
@@ -248,7 +260,8 @@
     document.getElementById('pt-title').textContent = `Piano Tuning #${t.id}`;
     document.getElementById('pt-show').textContent =
       `${t.show_name}${t.show_venue ? ' · ' + t.show_venue : ''}${t.requested_by_name ? ' · requested by ' + t.requested_by_name : ''}`;
-    document.getElementById('pt-show-link').href = `/shows/${t.show_id}?tab=schedule`;
+    _ptHouseMode(!t.show_id, t);
+    document.getElementById('pt-show-link').href = t.show_id ? `/shows/${t.show_id}?tab=schedule` : '#';
     Object.entries(F).forEach(([k, el]) => { document.getElementById(el).value = t[k] || ''; });
     const pick = document.getElementById('pt-pick'), text = document.getElementById('pt-piano');
     const usePick = _pianos.length > 0;
@@ -262,8 +275,10 @@
       opts.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
     pick.value = t.piano_asset_type_id ? String(t.piano_asset_type_id) : '';
     pick.dataset.orig = pick.value;
-    pick.dataset.onShow = t.piano_on_show === false ? '0' : '1';
+    pick.dataset.onShow = t.piano_on_show === false ? '0' : (t.piano_on_show === 'other_unit' ? 'unit' : '1');
     text.value = t.piano || '';
+    ptFillUnits(t.piano_asset_item_id, t.piano);
+    document.getElementById('pt-unit').dataset.orig = document.getElementById('pt-unit').value;
     ptPickWarn();
     const vsel = document.getElementById('pt-vendor');
     const vopts = _vendors.slice();
@@ -284,12 +299,31 @@
     document.getElementById('pt-status').dataset.orig = t.status;
     document.getElementById('pt-modal').style.display = 'flex';
   };
+  // Unit (S/N) picker (3.17.0) for the picked model.
+  window.ptFillUnits = function(keep, storedName) {
+    const pick = document.getElementById('pt-pick');
+    const row = document.getElementById('pt-unit-row'), sel = document.getElementById('pt-unit');
+    const p = _pianos.find(x => String(x.id) === pick.value);
+    const units = (p && p.units) ? p.units.slice() : [];
+    if (keep && !units.some(u => u.id === keep)) {
+      units.push({id: keep, label: (storedName || '').split(' · ')[1] || `unit #${keep}`, status: ''});
+    }
+    row.style.display = units.length ? '' : 'none';
+    sel.innerHTML = '<option value="">Any unit (not specific)</option>' + units.map(u =>
+      `<option value="${u.id}">${esc(u.label)}${u.status && u.status !== 'available' ? ' — ' + esc(u.status) : ''}</option>`).join('');
+    sel.value = keep && units.some(u => u.id === keep) ? String(keep) : '';
+  };
   // The on-show check is per show, so it's only known for the saved pick.
   window.ptPickWarn = function() {
     const pick = document.getElementById('pt-pick'), warn = document.getElementById('pt-pick-warn');
-    const missing = _pianos.length && pick.value && pick.value === pick.dataset.orig && pick.dataset.onShow === '0';
-    warn.style.display = missing ? '' : 'none';
-    warn.textContent = missing ? "⚠ This piano isn't on the show's Assets tab — ask the PM to add it so it's reserved." : '';
+    const usel = document.getElementById('pt-unit');
+    const saved = _pianos.length && pick.value && pick.value === pick.dataset.orig && usel.value === (usel.dataset.orig || '');
+    const msg = !saved ? ''
+      : pick.dataset.onShow === '0' ? "⚠ This piano isn't on the show's Assets tab — ask the PM to add it so it's reserved."
+      : pick.dataset.onShow === 'unit' ? "⚠ The show books this model, but this unit (S/N) isn't pinned on its Assets tab — pin it so the right instrument is reserved."
+      : '';
+    warn.style.display = msg ? '' : 'none';
+    warn.textContent = msg;
   };
   function _ptPaperRender(t) {
     const host = document.getElementById('pt-paper-current');
@@ -337,14 +371,74 @@
     return true;
   }
 
+  // House tunings (3.18.0): no show — purpose instead, no paperwork upload
+  // (that lives on a show's charge line), no "needed on" request date.
+  function _ptHouseMode(on, t) {
+    document.getElementById('pt-purpose-row').style.display = on ? '' : 'none';
+    document.getElementById('pt-purpose').value = on ? ((t && t.purpose) || 'Maintenance') : '';
+    document.getElementById('pt-paper-group').style.display = on ? 'none' : '';
+    document.getElementById('pt-show-link').style.display = on ? 'none' : '';
+    document.querySelectorAll('#pt-modal .pt-show-only').forEach(el => { el.style.display = on ? 'none' : ''; });
+    ['pt-req-date', 'pt-req-time'].forEach(id => {
+      const g = document.getElementById(id).closest('.field-group');
+      if (g) g.style.display = on ? 'none' : '';
+    });
+    if (on && t) document.getElementById('pt-show').textContent =
+      `House tuning — not tied to a show${t.requested_by_name ? ' · added by ' + t.requested_by_name : ''}`;
+  }
+  window.ptOpenHouse = function() {
+    document.getElementById('pt-id').value = '';
+    document.getElementById('pt-title').textContent = 'Add House Tuning';
+    document.getElementById('pt-show').textContent = 'Not tied to a show — maintenance, a rehearsal, a recording… It stays off every show\'s schedule and invoices; its cost counts in Reports → Piano Tuning.';
+    Object.values(F).forEach(el => { document.getElementById(el).value = ''; });
+    document.getElementById('pt-status').value = 'scheduled';
+    document.getElementById('pt-status').dataset.orig = '';
+    document.getElementById('pt-cost').value = '';
+    const pick = document.getElementById('pt-pick');
+    pick.style.display = _pianos.length ? '' : 'none';
+    document.getElementById('pt-piano').style.display = _pianos.length ? 'none' : '';
+    document.getElementById('pt-piano').value = '';
+    pick.innerHTML = '<option value="">— Select piano —</option>' + _pianos.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+    pick.value = ''; pick.dataset.orig = ''; pick.dataset.onShow = '1';
+    ptFillUnits(null, '');
+    document.getElementById('pt-unit').dataset.orig = '';
+    const vsel = document.getElementById('pt-vendor');
+    vsel.innerHTML = '<option value="">— Select vendor —</option>' + _vendors.map(v =>
+      `<option value="${v.id}" data-price="${v.typical_price == null ? '' : v.typical_price}">${esc(v.name)}${v.typical_price != null ? ' — $' + Number(v.typical_price).toFixed(2) : ''}</option>`).join('');
+    document.getElementById('pt-vendor-legacy') && document.getElementById('pt-vendor-legacy').remove();
+    ptPickWarn();
+    _ptHouseMode(true, null);
+    document.getElementById('pt-date').value = localTodayIso();
+    document.getElementById('pt-modal').style.display = 'flex';
+  };
   window.ptSave = async function() {
     const id = document.getElementById('pt-id').value;
+    const house = document.getElementById('pt-purpose-row').style.display !== 'none';
     const payload = {};
     Object.entries(F).forEach(([k, el]) => { payload[k] = document.getElementById(el).value; });
     payload.cost = document.getElementById('pt-cost').value;
     payload.piano_vendor_id = document.getElementById('pt-vendor').value || null;
-    if (_pianos.length) payload.piano_asset_type_id = document.getElementById('pt-pick').value || null;
+    if (_pianos.length) {
+      payload.piano_asset_type_id = document.getElementById('pt-pick').value || null;
+      payload.piano_asset_item_id = (document.getElementById('pt-unit-row').style.display !== 'none'
+                                     && document.getElementById('pt-unit').value) || null;
+    }
     else payload.piano = document.getElementById('pt-piano').value.trim();
+    if (house) payload.purpose = document.getElementById('pt-purpose').value.trim();
+    if (!id) {           // new house tuning
+      delete payload.requested_date; delete payload.requested_time;
+      if (_pianos.length && !payload.piano_asset_type_id) { alert('Pick the piano.'); return; }
+      if (!payload.tuning_date) { alert('Pick the tuning date.'); return; }
+      const btn = document.getElementById('pt-save');
+      btn.disabled = true;
+      try {
+        const r = await fetch('/api/piano-tunings', {method: 'POST', headers: H, body: JSON.stringify(payload)});
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { alert(d.error || 'Could not add the tuning.'); return; }
+        ptClose(); load();
+      } finally { btn.disabled = false; }
+      return;
+    }
     // Status untouched → let the server move an open request to Scheduled
     // when a tuning date is set.
     if (payload.status === document.getElementById('pt-status').dataset.orig) delete payload.status;
