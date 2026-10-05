@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `3.18.3`**
+**Current version: `3.18.4`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,7 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `3.18.4` — **Slightly bigger grain on the page background.** Following 3.18.3, the grain's specks are now a touch larger, so the texture reads as grain instead of a faint haze. The noise frequency went from 0.85 to 0.65 in both themes; strength stays at 10% dark / 7% light. Nothing else changed. Deploy: main app only.
 - `3.18.3` — **A little more grain on the page background.** The fine monochrome grain behind the content (the one texture from the 3.15.0 refresh) was hard to see on most screens. It is now stronger: 10% in dark mode (was 6%) and 7% in light mode (was 4%, still multiplied). It is the same texture and size; only its strength changed. The sidebar blue still covers it, and cards, tables and dialogs are unchanged. Deploy: main app only.
 - `3.18.2` — **Fix: the production schedule's piano tuning row now names the pinned piano (S/N).** A tuning left at *Any unit* showed only the model on the production schedule (e.g. "Piano Tuning — Steinway Model D"), even when the show's Assets tab had a specific unit pinned. Everyone reading the schedule couldn't tell which instrument was being tuned. The row now adds the S/N pinned for that model on the show ("Piano Tuning — Steinway Model D · S/N 607504"; several pinned units are listed, comma-separated). The schedule row updates itself when a unit is pinned, swapped or removed on the Assets tab. A tuning that names its own unit keeps showing that unit. The schedule tab and the schedule PDF both read the row, so both now show it. Deploy: main app only.
 - `3.18.1` — **Piano Tuning moves up under Dashboards, and a slimmer sidebar footer.** **Navigation:** Piano Tuning isn't a setting, so it now sits in SYSTEM right under **Dashboards**, near the top, instead of in its own section at the bottom. A sidebar that was arranged in Settings → Navigation is moved once on the first start (keeping any custom label; the emptied Services section is dropped). After that, an admin's arrangement is never changed again. **Footer:** cut from seven rows to three. The *View site as* label is gone (the dropdown says "View site as…" itself). The name/role row and the four buttons are a bit tighter. Version, the TEST tag and the Mobile/Desktop site switch share one small line. The copyright/licence text moved into the version's tooltip (it is still on the sign-in page). The collapsed rail keeps its TEST INSTANCE tag. Deploy: main app only.
