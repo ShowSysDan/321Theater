@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `3.18.4`**
+**Current version: `3.18.5`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,7 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `3.18.5` — **Show cards get a small drop shadow.** Since the 3.15.0 refresh, the Shows board (show cards on Home, My Shows and Archived, the Happening Today cards and the Happening Today panel) was flat until hovered, while every other content panel (show-page sections, Settings panels, report cards) already had a soft shadow. The board now uses that same small shadow at rest, so all content surfaces match and the cards stand off the grain the way the sidebar does. Hover still lifts the card further with a bigger shadow. The shadow is easiest to see in light mode; in dark mode it is faint, and the lighter card colour and border do most of the work. Deploy: main app only.
 - `3.18.4` — **Slightly bigger grain on the page background.** Following 3.18.3, the grain's specks are now a touch larger, so the texture reads as grain instead of a faint haze. The noise frequency went from 0.85 to 0.65 in both themes; strength stays at 10% dark / 7% light. Nothing else changed. Deploy: main app only.
 - `3.18.3` — **A little more grain on the page background.** The fine monochrome grain behind the content (the one texture from the 3.15.0 refresh) was hard to see on most screens. It is now stronger: 10% in dark mode (was 6%) and 7% in light mode (was 4%, still multiplied). It is the same texture and size; only its strength changed. The sidebar blue still covers it, and cards, tables and dialogs are unchanged. Deploy: main app only.
 - `3.18.2` — **Fix: the production schedule's piano tuning row now names the pinned piano (S/N).** A tuning left at *Any unit* showed only the model on the production schedule (e.g. "Piano Tuning — Steinway Model D"), even when the show's Assets tab had a specific unit pinned. Everyone reading the schedule couldn't tell which instrument was being tuned. The row now adds the S/N pinned for that model on the show ("Piano Tuning — Steinway Model D · S/N 607504"; several pinned units are listed, comma-separated). The schedule row updates itself when a unit is pinned, swapped or removed on the Assets tab. A tuning that names its own unit keeps showing that unit. The schedule tab and the schedule PDF both read the row, so both now show it. Deploy: main app only.

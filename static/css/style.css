@@ -2167,7 +2167,6 @@ html[data-theme="light"] .modal-card { box-shadow: var(--hl), 0 24px 70px rgba(0
   --orange-soft:  #F5A262;
   --glass:        rgba(34,36,42,.72);
   --glass-line:   rgba(255,255,255,.09);
-  --card-shadow-hover: 0 10px 24px -14px rgba(0,0,0,.8);
   --side-cast:    10px 0 28px -12px rgba(0,0,0,.65);
   --grain-img:    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)' opacity='0.10'/%3E%3C/svg%3E");
 }
@@ -2188,7 +2187,6 @@ html[data-theme="light"] {
   --orange-soft:  #B85A12;
   --glass:        rgba(255,255,255,.72);
   --glass-line:   rgba(15,23,42,.09);
-  --card-shadow-hover: 0 10px 24px -14px rgba(15,23,42,.25);
   --side-cast:    10px 0 28px -14px rgba(15,23,42,.22);
   --grain-img:    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)' opacity='0.07'/%3E%3C/svg%3E");
 }
@@ -2349,15 +2347,16 @@ html[data-theme="light"] .phead-tab .count { background: rgba(15,23,42,.07); col
 /* ── Tabs everywhere: plain orange underline (no glow) */
 .tab-btn.active, .rpt-tab.active, .perf-view.active { color: var(--ink); border-bottom-color: var(--accent); text-shadow: none; background-image: none; }
 
-/* ── Cards: flat, lift on hover; no coloured left edges (status = tags) */
+/* ── Cards: small resting shadow (the --lift every content panel uses,
+   3.18.5), a bigger lift on hover; no coloured left edges (status = tags) */
 .show-card, .today-card {
-  background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; box-shadow: none;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--hl), var(--lift);
   transition: transform .15s, border-color .15s, background .15s, box-shadow .15s;
 }
 .show-card, .show-card.show-card-event, .today-card.today-card-event { border-left: 1px solid var(--border); }
 .show-card:hover, .today-card:hover {
   transform: translateY(-2px); background: var(--bg-card-hover); border-color: var(--line-strong);
-  box-shadow: var(--card-shadow-hover);
+  box-shadow: var(--hl), var(--lift-hover);
 }
 .show-card:focus-visible, .today-card:focus-visible { outline: 2px solid #F08A3C; outline-offset: 2px; }
 .show-card-name, .today-card-name { color: var(--ink); }
@@ -2368,9 +2367,9 @@ html[data-theme="light"] .today-card-row { color: #4b515b; }
 .today-card-row.time svg { color: var(--orange-text); }
 .today-card-row.mute, .today-card-row.mute .today-card-empty { font-style: italic; color: var(--text-muted); }
 .today-card-empty { font-size: inherit; }
-/* Happening Today: a flat panel with the orange border line, orange title */
+/* Happening Today: a panel with the orange border line, orange title */
 .today-box { background: var(--bg-card); border: 1px solid var(--border); border-left: 4px solid var(--accent);
-  border-radius: 10px; box-shadow: none; }
+  border-radius: 10px; box-shadow: var(--hl), var(--lift); }
 .today-box::before { display: none; }
 .today-box-title { color: var(--orange-text); }
 .today-box .today-card { background: var(--bg); }
