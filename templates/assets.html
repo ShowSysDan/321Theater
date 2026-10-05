@@ -221,111 +221,136 @@
 
 {# Asset Type Modal #}
 <div id="type-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeTypeModal()">
-  <div class="modal-card" style="max-width:560px;max-height:90vh;overflow-y:auto">
+  {# Item type editor (3.19.1): two columns — what it is on the left, what it
+     costs on the right — with a fixed header/footer and a scrolling body.
+     Element ids are what openTypeModal / saveType read; keep them. #}
+  <div class="modal-card te-card">
     <div class="modal-header">
       <span id="type-modal-title">New Item Type</span>
-      <button onclick="closeTypeModal()" class="modal-close">×</button>
+      <button type="button" onclick="closeTypeModal()" class="modal-close">×</button>
     </div>
-    <div class="modal-body">
+    <div class="modal-body te-body">
       <input type="hidden" id="type-edit-id">
-      <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px">
-        <div class="field-group" style="grid-column:span 2">
-          <label class="field-label">ITEM NAME *</label>
-          <input type="text" id="type-name" class="field-input" placeholder="e.g. Laser Projector">
-        </div>
-        <div class="field-group">
-          <label class="field-label">CATEGORY *</label>
-          <select id="type-category" class="field-input"><option value="">— Select —</option></select>
-        </div>
-        <div class="field-group">
-          <label class="field-label">PARENT TYPE (optional)</label>
-          <select id="type-parent" class="field-input"><option value="">— None —</option></select>
-        </div>
-        <div class="field-group">
-          <label class="field-label">MANUFACTURER</label>
-          <input type="text" id="type-manufacturer" class="field-input" placeholder="e.g. Christie">
-        </div>
-        <div class="field-group">
-          <label class="field-label">MODEL</label>
-          <input type="text" id="type-model" class="field-input" placeholder="e.g. Crimson+3DLP">
-        </div>
-        <div class="field-group">
-          <label class="field-label">STORAGE LOCATION</label>
-          <select id="type-location" class="field-input"><option value="">— None —</option></select>
-        </div>
-        <div class="field-group">
-          <label class="field-label" id="type-cost-label">DAILY RATE ($/day)</label>
-          <input type="number" id="type-cost" class="field-input" value="0" min="0" step="0.01">
-        </div>
-        <div class="field-group" id="type-weekly-group">
-          <label class="field-label">WEEKLY RATE ($/week)</label>
-          <input type="number" id="type-weekly-cost" class="field-input" value="0" min="0" step="0.01">
-          <div style="font-size:10.5px;color:var(--text-dim);margin-top:4px;line-height:1.4">
-            Whole weeks bill at this rate; leftover days bill daily but never exceed one week.
-            Leave the daily rate at 0 to bill purely by the week (rounded up).
-          </div>
-        </div>
-        {# Performance Company special rates (3.8.0) — a show whose advance
-           "Performance Company" matches one of these is priced at that row's
-           rates instead of the standard ones above. #}
-        <div class="field-group" id="type-company-rates-group" style="grid-column:span 2;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">
-            <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim)">COMPANY RATES</div>
-            <button type="button" class="btn btn-xs btn-ghost" onclick="addCompanyRateRow()">+ Add company rate</button>
-          </div>
-          <div id="type-company-rates"></div>
-          <div id="type-company-rates-empty" style="font-size:11px;color:var(--text-dim);line-height:1.4">
-            No special rates. Shows use the standard rates above.
-          </div>
-          <div style="font-size:10.5px;color:var(--text-dim);margin-top:6px;line-height:1.4">
-            When a show's <strong>Performance Company</strong> (Advance Sheet) matches, assets added to it are priced at that company's rates — same day/week math as above.
-            <strong>From / Through</strong> months limit when a rate applies (blank = open-ended), by the line's rental start — so a contracted rate can be entered ahead of time; one company can have several periods that don't overlap.
-            Assets already on a show keep their price until someone presses <em>Re-price</em> on the show's Assets tab.
-          </div>
-        </div>
-        <div class="field-group">
-          <label class="field-label">RESERVE COUNT (spares)</label>
-          <input type="number" id="type-reserve" class="field-input" value="0" min="0">
-        </div>
-        <div class="field-group">
-          <label class="field-label">SUPPLIER / VENDOR</label>
-          <input type="text" id="type-supplier-name" class="field-input" placeholder="e.g. B&H Photo">
-        </div>
-        <div class="field-group">
-          <label class="field-label">SUPPLIER CONTACT</label>
-          <input type="text" id="type-supplier-contact" class="field-input" placeholder="Phone, email, rep name…">
-        </div>
-        <div class="field-group" style="grid-column:span 2;display:flex;gap:20px;align-items:center">
-          <label class="checkbox-label"><input type="checkbox" id="type-consumable" onchange="onConsumableChange()"> Consumable item</label>
-          <label class="checkbox-label"><input type="checkbox" id="type-track-qty" checked> Track by quantity</label>
-          <label class="checkbox-label"><input type="checkbox" id="type-allow-unit-selection"> Allow unit selection <span style="font-size:10px;color:var(--text-dim)">(PM can pin a specific unit, e.g. by model number)</span></label>
-        </div>
-        <div class="field-group" style="grid-column:span 2;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px">
-          <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim);margin-bottom:8px">TYPE CLASSIFICATION</div>
-          <div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap">
-            <label class="checkbox-label"><input type="checkbox" id="type-is-system" onchange="onTypeClassChange()"> System <span style="font-size:10px;color:var(--text-dim)">(contains component types)</span></label>
-            <label class="checkbox-label"><input type="checkbox" id="type-is-package" onchange="onTypeClassChange()"> Package <span style="font-size:10px;color:var(--text-dim)">(bundle / quote line)</span></label>
-            <label class="checkbox-label"><input type="checkbox" id="type-hide-from-pm"> Hide from advance picker <span style="font-size:10px;color:var(--text-dim)">(only asset managers can add this to a show — line stays fully visible once added)</span></label>
-          </div>
-        </div>
-        <div class="field-group" style="grid-column:span 2">
-          <label class="field-label">PHOTO</label>
-          <input type="file" id="type-photo" class="field-input" accept="image/*">
-          <div id="type-photo-preview" style="margin-top:6px"></div>
-          <div id="type-photo-progress-wrap" style="display:none;margin-top:6px">
-            <div style="background:var(--bg-hover);border-radius:4px;height:6px;overflow:hidden">
-              <div id="type-photo-progress-bar" style="background:var(--accent);height:100%;width:0%;transition:width 0.2s"></div>
+      <div class="te-cols">
+        <div class="te-col">
+          <section class="te-section">
+            <h3 class="te-title">Details</h3>
+            <div class="te-grid">
+              <div class="field-group te-span">
+                <label class="field-label" for="type-name">Item name <span class="te-req">*</span></label>
+                <input type="text" id="type-name" class="field-input" placeholder="e.g. Laser Projector">
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="type-category">Category <span class="te-req">*</span></label>
+                <select id="type-category" class="field-input"><option value="">— Select —</option></select>
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="type-parent">Parent type <span class="te-opt">optional</span></label>
+                <select id="type-parent" class="field-input"><option value="">— None —</option></select>
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="type-manufacturer">Manufacturer</label>
+                <input type="text" id="type-manufacturer" class="field-input" placeholder="e.g. Christie">
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="type-model">Model</label>
+                <input type="text" id="type-model" class="field-input" placeholder="e.g. Crimson+3DLP">
+              </div>
             </div>
-            <span id="type-photo-progress-label" style="font-size:11px;color:var(--text-muted);margin-top:4px;display:block;text-align:center">Uploading photo…</span>
-          </div>
+          </section>
+
+          <section class="te-section">
+            <h3 class="te-title">Inventory &amp; supplier</h3>
+            <div class="te-grid">
+              <div class="field-group">
+                <label class="field-label" for="type-location">Storage location</label>
+                <select id="type-location" class="field-input"><option value="">— None —</option></select>
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="type-reserve">Reserve count <span class="te-opt">spares held back</span></label>
+                <input type="number" id="type-reserve" class="field-input" value="0" min="0">
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="type-supplier-name">Supplier / vendor</label>
+                <input type="text" id="type-supplier-name" class="field-input" placeholder="e.g. B&amp;H Photo">
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="type-supplier-contact">Supplier contact</label>
+                <input type="text" id="type-supplier-contact" class="field-input" placeholder="Phone, email, rep name…">
+              </div>
+            </div>
+          </section>
+
+          <section class="te-section">
+            <h3 class="te-title">Options</h3>
+            <div class="te-checks">
+              <label class="te-check"><input type="checkbox" id="type-consumable" onchange="onConsumableChange()">
+                <span><strong>Consumable</strong><small>Billed once per item (used up), not per day or week.</small></span></label>
+              <label class="te-check"><input type="checkbox" id="type-track-qty" checked>
+                <span><strong>Track by quantity</strong><small>Count units for availability and overbooking.</small></span></label>
+              <label class="te-check"><input type="checkbox" id="type-allow-unit-selection">
+                <span><strong>Allow unit selection</strong><small>A PM can pin a specific unit (e.g. by serial number).</small></span></label>
+              <label class="te-check"><input type="checkbox" id="type-is-system" onchange="onTypeClassChange()">
+                <span><strong>System</strong><small>Contains component types.</small></span></label>
+              <label class="te-check"><input type="checkbox" id="type-is-package" onchange="onTypeClassChange()">
+                <span><strong>Package</strong><small>A bundle / quote line.</small></span></label>
+              <label class="te-check"><input type="checkbox" id="type-hide-from-pm">
+                <span><strong>Hide from advance picker</strong><small>Only asset managers can add it to a show; once added the line is fully visible.</small></span></label>
+            </div>
+          </section>
+
+          <section class="te-section">
+            <h3 class="te-title">Photo</h3>
+            <div class="te-photo">
+              <div id="type-photo-preview"></div>
+              <input type="file" id="type-photo" class="field-input" accept="image/*">
+            </div>
+            <div id="type-photo-progress-wrap" style="display:none;margin-top:8px">
+              <div style="background:var(--bg-hover);border-radius:4px;height:6px;overflow:hidden">
+                <div id="type-photo-progress-bar" style="background:var(--accent);height:100%;width:0%;transition:width 0.2s"></div>
+              </div>
+              <span id="type-photo-progress-label" style="font-size:12px;color:var(--text-muted);margin-top:4px;display:block;text-align:center">Uploading photo…</span>
+            </div>
+          </section>
+        </div>
+
+        <div class="te-col">
+          <section class="te-section">
+            <h3 class="te-title">Standard pricing</h3>
+            <div class="te-grid">
+              <div class="field-group">
+                <label class="field-label" id="type-cost-label" for="type-cost">Daily rate ($/day)</label>
+                <input type="number" id="type-cost" class="field-input" value="0" min="0" step="0.01">
+              </div>
+              <div class="field-group" id="type-weekly-group">
+                <label class="field-label" for="type-weekly-cost">Weekly rate ($/week)</label>
+                <input type="number" id="type-weekly-cost" class="field-input" value="0" min="0" step="0.01">
+              </div>
+            </div>
+            <p class="te-help" id="type-weekly-help">Whole weeks bill at the weekly rate; leftover days bill daily but never more than one week. Leave the daily rate at 0 to bill purely by the week (rounded up).</p>
+          </section>
+
+          {# Performance Company special rates (3.8.0) — a show whose advance
+             "Performance Company" matches one of these is priced at that row's
+             rates instead of the standard ones above. #}
+          <section class="te-section" id="type-company-rates-group">
+            <div class="te-title-row">
+              <h3 class="te-title">Company rates</h3>
+              <button type="button" class="btn btn-sm btn-ghost" onclick="addCompanyRateRow()">+ Add company rate</button>
+            </div>
+            <p class="te-help" style="margin-top:0">When a show's <strong>Performance Company</strong> (Advance Sheet) matches, items added to it use that company's rates — same day/week math. <strong>From / Through</strong> limit when a rate applies, by the line's rental start (blank = open-ended), so a contracted rate can go in early. A company can have several periods that don't overlap.</p>
+            <div id="type-company-rates"></div>
+            <div id="type-company-rates-empty" class="te-empty">No special rates — shows use the standard pricing.</div>
+            <p class="te-help">Items already on a show keep their price until someone presses <em>Re-price</em> on the show's Assets tab.</p>
+          </section>
         </div>
       </div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
-        <button id="type-retire-btn" class="btn btn-ghost" style="color:#FC814A;display:none" onclick="retireTypeFromModal()">Retire This Type…</button>
-        <div style="display:flex;gap:8px;margin-left:auto">
-          <button class="btn btn-ghost" onclick="closeTypeModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="saveType()">Save</button>
-        </div>
+    </div>
+    <div class="te-footer">
+      <button type="button" id="type-retire-btn" class="btn btn-ghost" style="color:#FC814A;display:none" onclick="retireTypeFromModal()">Retire This Type…</button>
+      <div style="display:flex;gap:8px;margin-left:auto">
+        <button type="button" class="btn btn-ghost" onclick="closeTypeModal()">Cancel</button>
+        <button type="button" class="btn btn-primary" onclick="saveType()">Save</button>
       </div>
     </div>
   </div>
@@ -407,6 +432,43 @@
 </div>
 
 <style>
+/* ── Item type editor (3.19.1) ── */
+.te-card { width: 1060px; max-width: 96vw; max-height: 92vh; display: flex; flex-direction: column; }
+.te-body { overflow-y: auto; flex: 1; min-height: 0; padding: 18px 22px; }
+.te-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 18px; align-items: start; }
+.te-col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.te-section { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.te-title { margin: 0 0 12px; font-size: 14px; font-weight: 600; color: var(--text); }
+.te-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.te-title-row .te-title { margin: 0; }
+.te-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px 14px; }
+.te-span { grid-column: 1 / -1; }
+.te-card .field-label { font-family: inherit; font-size: 12.5px; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--text-dim); }
+.te-card .field-input { font-size: 14px; }
+.te-req { color: var(--accent); }
+.te-opt { font-size: 11.5px; color: var(--text-muted); font-weight: 400; margin-left: 4px; }
+.te-help { font-size: 12.5px; line-height: 1.5; color: var(--text-dim); margin: 10px 0 0; }
+.te-empty { font-size: 13px; color: var(--text-dim); padding: 10px 0 2px; }
+.te-checks { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px 14px; }
+.te-check { display: flex; align-items: flex-start; gap: 9px; cursor: pointer; font-size: 13.5px; color: var(--text); }
+.te-check input { accent-color: var(--accent); width: 16px; height: 16px; margin: 2px 0 0; flex-shrink: 0; }
+.te-check strong { font-weight: 600; display: block; }
+.te-check small { display: block; font-size: 12px; line-height: 1.4; color: var(--text-dim); margin-top: 1px; }
+.te-photo { display: flex; align-items: center; gap: 12px; }
+.te-photo #type-photo-preview:empty { display: none; }
+.te-photo .field-input { flex: 1; min-width: 0; }
+.te-footer { display: flex; align-items: center; gap: 8px; padding: 12px 22px; border-top: 1px solid var(--border); background: var(--bg-card); flex-shrink: 0; }
+/* One company rate = one small card: company + remove, rates, months. */
+.company-rate-row { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-top: 10px; background: var(--bg-card); }
+.cr-head { display: flex; align-items: flex-end; gap: 8px; }
+.cr-head .cr-field { flex: 1; min-width: 0; }
+.cr-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 10px; margin-top: 8px; }
+.cr-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-dim); }
+.cr-field .field-input { font-size: 14px; }
+.cr-remove { color: #e53e3e; margin-bottom: 2px; }
+@media (max-width: 860px) {
+  .te-cols { grid-template-columns: minmax(0, 1fr); }
+}
 .finder-browser {
   display: flex;
   height: calc(100vh - 210px);
@@ -2208,24 +2270,27 @@ window.addCompanyRateRow = function(rt) {
   const isConsumable = document.getElementById('type-consumable').checked;
   const row = document.createElement('div');
   row.className = 'company-rate-row';
-  row.style.cssText = 'display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) minmax(0,1fr) auto;gap:6px;align-items:end;margin-bottom:8px;padding-bottom:8px;border-bottom:1px dashed var(--border)';
   // Effective months (3.19.0): blank = open-ended. A rate applies to lines
   // whose rental STARTS inside it, so a contracted rate can go in early.
   row.innerHTML = `
-    <label style="font-size:10px;color:var(--text-dim)">COMPANY
-      <select class="field-input field-input-sm cr-company">
-        <option value="">— Select —</option>
-        ${opts.map(c => `<option value="${esc(c)}"${c === rt.company ? ' selected' : ''}>${esc(c)}</option>`).join('')}
-      </select></label>
-    <label style="font-size:10px;color:var(--text-dim)"><span class="cr-daily-label">${isConsumable ? '$/ITEM' : '$/DAY'}</span>
-      <input type="number" class="field-input field-input-sm cr-daily" min="0" step="0.01" value="${Number(rt.rental_cost || 0).toFixed(2)}"></label>
-    <label style="font-size:10px;color:var(--text-dim);${isConsumable ? 'visibility:hidden' : ''}" class="cr-weekly-wrap">$/WEEK
-      <input type="number" class="field-input field-input-sm cr-weekly" min="0" step="0.01" value="${Number(rt.weekly_rate || 0).toFixed(2)}"></label>
-    <button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" title="Remove" onclick="this.closest('.company-rate-row').remove();_syncCompanyRatesEmpty()">✕</button>
-    <label style="font-size:10px;color:var(--text-dim)">FROM (month)
-      <input type="month" class="field-input field-input-sm cr-start" placeholder="YYYY-MM" value="${esc(rt.start_month || '')}" title="First month this rate applies — blank = no start"></label>
-    <label style="font-size:10px;color:var(--text-dim);grid-column:span 2">THROUGH (month)
-      <input type="month" class="field-input field-input-sm cr-end" placeholder="YYYY-MM" value="${esc(rt.end_month || '')}" title="Last month this rate applies — blank = ongoing"></label>`;
+    <div class="cr-head">
+      <label class="cr-field">Company
+        <select class="field-input cr-company">
+          <option value="">— Select —</option>
+          ${opts.map(c => `<option value="${esc(c)}"${c === rt.company ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+        </select></label>
+      <button type="button" class="btn btn-sm btn-ghost cr-remove" title="Remove this rate" onclick="this.closest('.company-rate-row').remove();_syncCompanyRatesEmpty()">Remove</button>
+    </div>
+    <div class="cr-pair">
+      <label class="cr-field"><span class="cr-daily-label">${isConsumable ? 'Per item ($)' : 'Daily rate ($/day)'}</span>
+        <input type="number" class="field-input cr-daily" min="0" step="0.01" value="${Number(rt.rental_cost || 0).toFixed(2)}"></label>
+      <label class="cr-field cr-weekly-wrap" style="${isConsumable ? 'visibility:hidden' : ''}">Weekly rate ($/week)
+        <input type="number" class="field-input cr-weekly" min="0" step="0.01" value="${Number(rt.weekly_rate || 0).toFixed(2)}"></label>
+      <label class="cr-field">From (month)
+        <input type="month" class="field-input cr-start" placeholder="YYYY-MM" value="${esc(rt.start_month || '')}" title="First month this rate applies — blank = no start"></label>
+      <label class="cr-field">Through (month)
+        <input type="month" class="field-input cr-end" placeholder="YYYY-MM" value="${esc(rt.end_month || '')}" title="Last month this rate applies — blank = ongoing"></label>
+    </div>`;
   host.appendChild(row);
   _syncCompanyRatesEmpty();
 };
@@ -2255,11 +2320,13 @@ window.onTypeClassChange = function() {
 window.onConsumableChange = function() {
   const isConsumable = document.getElementById('type-consumable').checked;
   document.getElementById('type-cost-label').textContent =
-    isConsumable ? 'PER-UNIT COST ($/item)' : 'DAILY RATE ($/day)';
+    isConsumable ? 'Per-unit cost ($/item)' : 'Daily rate ($/day)';
   document.getElementById('type-weekly-group').style.display =
     isConsumable ? 'none' : '';
+  const wkHelp = document.getElementById('type-weekly-help');
+  if (wkHelp) wkHelp.style.display = isConsumable ? 'none' : '';
   document.querySelectorAll('#type-company-rates .company-rate-row').forEach(row => {
-    row.querySelector('.cr-daily-label').textContent = isConsumable ? '$/ITEM' : '$/DAY';
+    row.querySelector('.cr-daily-label').textContent = isConsumable ? 'Per item ($)' : 'Daily rate ($/day)';
     row.querySelector('.cr-weekly-wrap').style.visibility = isConsumable ? 'hidden' : '';
   });
 };

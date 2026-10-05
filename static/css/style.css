@@ -102,13 +102,14 @@ a:hover { text-decoration: underline; }
 .sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 22px 18px 18px;
+  gap: 10px;
+  padding: 20px 10px 18px 16px;
   border-bottom: 1px solid rgba(255,255,255,0.1);
   margin-bottom: 8px;
 }
 .sidebar-brand .brand-name { color: #fff; }
 .sidebar-brand .brand-sub  { color: rgba(255,255,255,0.55); }
+.sidebar-brand > div { min-width: 0; white-space: nowrap; }
 .brand-icon {
   flex-shrink: 0;
   display: block;
@@ -168,7 +169,7 @@ a:hover { text-decoration: underline; }
 .logout-btn svg { width: 16px; height: 16px; }
 
 /* ── Collapsible sidebar (icon rail) ──────────────────────────────────
-   Toggled via the chevron at the top of the sidebar (state persisted in
+   Toggled via the chevron in the logo row (state persisted in
    localStorage as `sidebar_collapsed`) and also forced on narrow viewports
    (≤900px, via the `force-rail` class set in app.js) so the sidebar shrinks to
    an icon-only rail instead of vanishing entirely. The freed width flows to
@@ -176,7 +177,7 @@ a:hover { text-decoration: underline; }
    .form-section-body.no-pad below), so nothing is clipped off the right edge. */
 .sidebar-collapse-btn {
   display: flex; align-items: center; justify-content: center;
-  margin: 0 10px 6px auto; width: 28px; height: 24px;
+  margin: 0 0 0 auto; width: 24px; height: 24px;
   background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
   border-radius: 5px; color: rgba(255,255,255,0.6); cursor: pointer;
   transition: all 0.15s; flex-shrink: 0;
@@ -184,7 +185,7 @@ a:hover { text-decoration: underline; }
 .sidebar-collapse-btn:hover { background: rgba(255,255,255,0.14); color: #fff; }
 html.sidebar-collapsed, html.force-rail { --sidebar-w: 66px; }
 html.sidebar-collapsed .sidebar-brand,
-html.force-rail .sidebar-brand { justify-content: center; padding: 18px 4px 14px; gap: 0; }
+html.force-rail .sidebar-brand { flex-direction: column; justify-content: center; padding: 16px 4px 12px; gap: 10px; }
 html.sidebar-collapsed .sidebar-brand > div,
 html.force-rail .sidebar-brand > div,
 html.sidebar-collapsed .nav-section-label,
@@ -202,7 +203,7 @@ html.force-rail .sidebar-footer { padding: 12px 6px; }
 html.sidebar-collapsed .sidebar-footer-row,
 html.force-rail .sidebar-footer-row { flex-wrap: wrap; justify-content: center; gap: 6px; }
 html.sidebar-collapsed .sidebar-collapse-btn,
-html.force-rail .sidebar-collapse-btn { margin: 0 auto 6px; }
+html.force-rail .sidebar-collapse-btn { margin: 0; }
 html.sidebar-collapsed .sidebar-collapse-btn svg,
 html.force-rail .sidebar-collapse-btn svg { transform: rotate(180deg); }
 /* TEST_MODE marker stays visible on the rail, shortened to "TEST". */

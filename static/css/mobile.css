@@ -192,6 +192,13 @@ html.mobile-view .comments-container {
    help modal. */
 html.mobile-view .modal-overlay { z-index: 1400; }
 html.mobile-view #help-modal { z-index: 1400 !important; }
+/* Asset Manager item editor (3.19.1): one column on phones */
+html.mobile-view .te-cols,
+html.mobile-view .te-grid,
+html.mobile-view .te-checks { grid-template-columns: minmax(0, 1fr); }
+html.mobile-view .te-body { padding: 12px; }
+html.mobile-view .te-section { padding: 12px; }
+html.mobile-view .te-footer { padding: 10px 12px; }
 html.mobile-view .modal-card {
   width: auto !important;
   max-width: calc(100vw - 20px) !important;

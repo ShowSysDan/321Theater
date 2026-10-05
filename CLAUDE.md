@@ -1001,6 +1001,9 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   migration (marker `nav_piano_moved:<app_schema>`) used
   `nav_layout.move_item_after()`; it never re-runs over an admin's arrangement.
   Reuse that helper + a new marker for any future default move.
+- The collapse caret (`#sidebar-collapse-btn`) lives INSIDE `.sidebar-brand`
+  (3.19.1; under the logo on the rail, hidden on mobile). The brand text is
+  `nowrap` — keep the caret small or the tagline overflows.
 - Footer = view-as select, user row + buttons, then ONE `.sidebar-meta` line
   (version · TEST · Mobile/Desktop site). The licence text lives in the version
   tooltip (login page still shows it). The rail shows the `.rail-only`
