@@ -353,7 +353,7 @@
   <button class="tab-btn {% if tab == 'schedule' %}active{% endif %}" onclick="switchTab('schedule')">Production Schedule</button>
   <button class="tab-btn {% if tab == 'staffing' %}active{% endif %}" onclick="switchTab('staffing')">Labor Requests</button>
   {% if security_signin_enabled %}
-  <button class="tab-btn {% if tab == 'security' %}active{% endif %}" onclick="switchTab('security')">Security</button>
+  <button class="tab-btn {% if tab == 'security' %}active{% endif %}" onclick="switchTab('security')">Sign-In Sheet</button>
   {% endif %}
   <button class="tab-btn {% if tab == 'assets' %}active{% endif %}" onclick="switchTab('assets')">Assets</button>
   <button class="tab-btn {% if tab == 'postnotes' %}active{% endif %}" onclick="switchTab('postnotes')">Post Show</button>
@@ -2854,7 +2854,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         </div>
         <h3 class="export-card-title">Security Sign-In Sheet</h3>
       </div>
-      <p class="export-card-desc">Personnel sign-in sheet for the security desk — names are managed on this show's <strong>Security</strong> tab.</p>
+      <p class="export-card-desc">Personnel sign-in sheet for the security desk — names are managed on this show's <strong>Sign-In Sheet</strong> tab.</p>
       <div class="export-card-foot">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a href="{{ url_for('security_signin_pdf', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Export PDF</a>

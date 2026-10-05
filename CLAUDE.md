@@ -462,7 +462,8 @@ apps. For a 321Theater access change, use this app's own flags instead
   key `security_signin`, default ON). Sandboxed like Prism/Snapshots: one
   `register(app, **deps)` call, owns only `security_signin_names` (included
   in show merge moves, FK-cascade delete, snapshot per-show restore). Editor
-  UI = show page **Security tab** (show.html `tab-security` pane, between
+  UI = show page **Sign-In Sheet tab** (labelled "Security" until 3.19.2;
+  key/pane id/`?tab=` stay `security`) (show.html `tab-security` pane, between
   Labor Requests and Assets; also in base.html's mobile `m-showtabs`), which
   only talks to the module's JSON endpoints (`/shows/<id>/security/*`);
   paste + CSV import share ONE server parser (`…/security/parse`). The PDF

@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `3.19.1`**
+**Current version: `3.19.2`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,7 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `3.19.2` — **The show page's "Security" tab is now called "Sign-In Sheet".** That's what it holds (the security desk's sign-in sheet), and "Security" read like a permissions page. The new name shows on the desktop tab bar, the phone tab strip, the Export & Files card's note and the tab's Help title. Only the label changed: links and bookmarks with `?tab=security` (and the old `/shows/<id>/security` redirect) still open it, and the module is still Settings → System → Modules → Security Sign-In Sheets. Deploy: main app only.
 - `3.19.1` — **Roomier item editor; sidebar caret moves up by the logo.** **Asset Manager → item → Edit** was one narrow 480px column about 1,900px tall, with 10–11px all-caps labels. It is now a wider two-column dialog: **Details**, **Inventory & supplier**, **Options** and **Photo** on the left, **Standard pricing** and **Company rates** on the right. Labels are larger, in sentence case, and each option checkbox has a one-line explanation under it. Each company rate is its own small card (company + Remove, day/week rates, From/Through months). The title bar and the Retire / Cancel / Save bar stay put while the middle scrolls. It drops to one column in narrow windows and on phones. Nothing about what's saved changed. **Sidebar:** with the search gone, the collapse caret now sits in the logo row (under the logo on the icon rail), so the nav starts about 30px higher. Deploy: main app only.
 - `3.19.0` — **Completed piano tunings go into the piano's service record; company rates get effective months and their own list; the sidebar search is gone.** **Piano service record:** marking a tuning **Completed** (the list's *Completed* button, the Manage dialog, or a house tuning added as completed) now adds a **Service** entry to that piano unit's log (Asset Manager → the unit → **Log** tab), dated the tuning date, e.g. *Piano tuning #42 — Nutcracker · Acme Piano · $185.00* (house tunings read *House: Maintenance*). The unit is the S/N the tuning names; at *Any unit* it is the one unit of that model pinned on the show, or the model's only unit. If it can't tell which piano was tuned, the Manage dialog says so (⚠ pick the unit and Save to log it); when it is logged, the dialog says which S/N's record holds it. The entry follows the tuning: changing the unit, date, vendor or cost later updates it, and re-opening or cancelling the tuning removes it. On upgrade, tunings already completed are logged once the same way. New column `asset_logs.piano_tuning_id`; syslog `PIANO_SERVICE_LOG action=added|updated|removed`. **Company rate periods:** each Performance Company rate on an asset (Asset Manager → item → Edit → Company Rates) now has optional **From** and **Through** months (blank = open-ended). A rate applies to show lines whose rental **starts** inside its period, so a contracted rate can be entered before it takes effect, and one company can have several periods on one item as long as they don't overlap (Save refuses overlaps and an end before the start). Adding or re-dating a line picks the period for its start date, the show page's and Approvals' add previews do the same, and *Re-price* on the Assets tab uses it too. Existing rates become open-ended, so nothing is re-priced by the upgrade. `asset_company_rates` is now keyed by a new `id` (the old item + company key is swapped once at startup) with `start_month` / `end_month`. **Company Rates list:** a new **Company Rates** button in the Asset Manager header lists every item with special company pricing (company, item, company vs standard rate, period and whether it is current, upcoming or expired), filterable by company, period status and text; click an item to open it, or **Edit** for its rates. **Download CSV** exports the filtered list (syslog `ASSET_COMPANY_RATES_EXPORT`). **Sidebar search removed:** the search box under the logo (and the phone tab bar's Search button, the **/** and **Ctrl+K** shortcuts, and its `/api/search` endpoint) is gone. Every page keeps its own search/filter. Deploy: main app only (the schema changes apply on restart).
 - `3.18.5` — **Show cards get a small drop shadow.** Since the 3.15.0 refresh, the Shows board (show cards on Home, My Shows and Archived, the Happening Today cards and the Happening Today panel) was flat until hovered, while every other content panel (show-page sections, Settings panels, report cards) already had a soft shadow. The board now uses that same small shadow at rest, so all content surfaces match and the cards stand off the grain the way the sidebar does. Hover still lifts the card further with a bigger shadow. The shadow is easiest to see in light mode; in dark mode it is faint, and the lighter card colour and border do most of the work. Deploy: main app only.
@@ -407,7 +408,7 @@ Show-specific comment thread with `@mention` autocomplete. Visible to all author
 | Export PDF (postnotes tab) | Generates Post-Show Notes PDF |
 | Final Invoice PDF | Generates the post-show billing invoice (internal & external assets + actual labor + costs). Also available on the Post Show tab. Until the show's labor is settled (Post Show → **Settle Now**) it bills no labor, says "Labor not settled yet", and the card shows a warning. To bill several shows on one invoice, use Combined Invoice in the sidebar (under Settings) — its show list tags unsettled shows **NOT SETTLED** |
 | Generate Pre-Show Estimate | Generates a combined **labor + asset estimate/quote** PDF — the client-facing counterpart to the Final Invoice, produced before anything is scheduled. Labor uses position special rates or the highest standard tech rate; assets use reserved quantities and locked prices |
-| Security Sign-In Sheet | Exports the sign-in sheet PDF for the security desk; names are managed on the show's **Security** tab (see [Security Sign-In Sheet](#security-sign-in-sheet)). Card and tab only appear while the module is enabled in Settings → System → Modules |
+| Security Sign-In Sheet | Exports the sign-in sheet PDF for the security desk; names are managed on the show's **Sign-In Sheet** tab (see [Security Sign-In Sheet](#security-sign-in-sheet)). Card and tab only appear while the module is enabled in Settings → System → Modules |
 | ↓ Download (history) | Re-downloads a previously generated PDF |
 
 PDFs are stored in S3 (SeaweedFS) when it's configured, otherwise in the database — use the **↓ Download** button in Export History to re-download without generating a new version.
@@ -427,7 +428,7 @@ and **Time In** columns, plus eight blank "Additional personnel" walk-up rows
 for anyone who wasn't on the list. On a long list the column header repeats on
 every printed page.
 
-It lives on the show page as the **Security** tab (between Labor Requests and
+It lives on the show page as the **Sign-In Sheet** tab (between Labor Requests and
 Assets, on the mobile tab strip too). The **Export & Files** tab keeps a
 Security Sign-In Sheet card whose **Export PDF** button prints the currently
 saved list directly and whose **Edit Names** button jumps to the tab.
@@ -450,7 +451,7 @@ saved list directly and whose **Edit Names** button jumps to the tab.
    "Unsaved changes" note and a `Save *` marker show whenever the list on
    screen differs from what's saved. The PDF always prints the **saved** list —
    exporting with unsaved edits pops a warning first.
-5. Click **Export PDF** (top of the Security tab, or from the Export & Files card) and print.
+5. Click **Export PDF** (top of the Sign-In Sheet tab, or from the Export & Files card) and print.
 
 **Permissions:** anyone with access to the show can edit the list; read-only
 and restricted users can view and export but not edit. Every save is
