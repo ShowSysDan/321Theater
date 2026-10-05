@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.18.5'
+APP_VERSION = '3.19.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -11925,128 +11925,6 @@ def download_backup(kind, filename):
 
 # ─── API ──────────────────────────────────────────────────────────────────────
 
-_gs_rate_limit = limiter.limit("200 per minute") if (_limiter_available and limiter) else (lambda f: f)
-
-
-@app.route('/api/search')
-@login_required
-@_gs_rate_limit
-def global_search():
-    """Universal search across shows, contacts, asset types, and asset items."""
-    q = (request.args.get('q') or '').strip()
-    if len(q) < 2 or len(q) > 255:
-        return jsonify([])
-
-    db = get_db()
-    results = []
-    like = f'%{q}%'
-    is_admin = session.get('user_role') == 'admin'
-
-    try:
-        # ── Shows ────────────────────────────────────────────────────────────
-        # ILIKE: case-insensitive, as users expect (plain LIKE was only
-        # case-insensitive on SQLite). show_date is a DATE column, so it needs
-        # an explicit text cast (`date LIKE text` has no operator).
-        accessible = get_accessible_shows(session['user_id'])  # None=all, []=none, list=ids
-        if accessible != []:
-            if accessible is None:
-                show_rows = db.execute("""
-                    SELECT id, name, show_date, venue, performance_company, status
-                    FROM shows
-                    WHERE name ILIKE %s OR venue ILIKE %s OR performance_company ILIKE %s
-                       OR CAST(show_date AS TEXT) ILIKE %s
-                    ORDER BY show_date DESC NULLS LAST LIMIT 6
-                """, (like, like, like, like)).fetchall()
-            else:
-                placeholders = ','.join(['%s'] * len(accessible))
-                show_rows = db.execute(f"""
-                    SELECT id, name, show_date, venue, performance_company, status
-                    FROM shows
-                    WHERE id IN ({placeholders})
-                      AND (name ILIKE %s OR venue ILIKE %s OR performance_company ILIKE %s
-                           OR CAST(show_date AS TEXT) ILIKE %s)
-                    ORDER BY show_date DESC NULLS LAST LIMIT 6
-                """, (*accessible, like, like, like, like)).fetchall()
-            for r in show_rows:
-                # PG returns date objects — joinable text only
-                date_str = str(r['show_date']) if r['show_date'] else None
-                sub_parts = [p for p in [date_str, r['venue'], r['performance_company']] if p]
-                results.append({
-                    'type': 'show',
-                    'icon': '🎭',
-                    'label': r['name'],
-                    'sub': '  ·  '.join(sub_parts),
-                    'url': f"/shows/{r['id']}",
-                    'status': r['status'],
-                })
-
-        # ── Contacts ────────────────────────────────────────────────────────
-        contact_rows = db.execute("""
-            SELECT id, name, title, department, email, phone
-            FROM contacts
-            WHERE name ILIKE %s OR department ILIKE %s OR email ILIKE %s OR phone ILIKE %s OR title ILIKE %s
-            ORDER BY department, name LIMIT 5
-        """, (like, like, like, like, like)).fetchall()
-        for r in contact_rows:
-            sub_parts = [p for p in [r['department'], r['title'], r['email']] if p]
-            results.append({
-                'type': 'contact',
-                'icon': '👤',
-                'label': r['name'],
-                'sub': '  ·  '.join(sub_parts),
-                'url': None,  # contacts don't have their own page; sub-label carries the info
-            })
-
-        # ── Asset Types (admin only) ─────────────────────────────────────────
-        if is_admin:
-            type_rows = db.execute("""
-                SELECT at.id, at.name, at.manufacturer, at.model, ac.name as cat_name,
-                       at.storage_location, at.is_retired
-                FROM asset_types at
-                JOIN asset_categories ac ON ac.id = at.category_id
-                WHERE at.name ILIKE %s OR at.manufacturer ILIKE %s OR at.model ILIKE %s
-                ORDER BY at.is_retired, at.name LIMIT 5
-            """, (like, like, like)).fetchall()
-            for r in type_rows:
-                label_parts = [p for p in [r['manufacturer'], r['model']] if p]
-                sub_parts = [r['cat_name']] + ([r['storage_location']] if r['storage_location'] else [])
-                results.append({
-                    'type': 'asset_type',
-                    'icon': '◈',
-                    'label': r['name'] + (f" — {' '.join(label_parts)}" if label_parts else ''),
-                    'sub': '  ·  '.join(sub_parts) + ('  ·  RETIRED' if r['is_retired'] else ''),
-                    'url': '/assets',
-                    'retired': bool(r['is_retired']),
-                })
-
-            # ── Asset Items / Barcodes (leading-zero tolerant) ──────────────
-            # Strip leading zeros from stored barcodes and compare with stripped query
-            norm_q = q.lstrip('0') or '0'
-            item_rows = db.execute("""
-                SELECT ai.id, ai.barcode, ai.status, ai.condition,
-                       at.name as type_name, at.id as type_id, ac.name as cat_name
-                FROM asset_items ai
-                JOIN asset_types at ON at.id = ai.asset_type_id
-                JOIN asset_categories ac ON ac.id = at.category_id
-                WHERE ai.barcode ILIKE %s
-                   OR ltrim(ai.barcode, '0') = %s
-                   OR ai.barcode = %s
-                ORDER BY ai.status, ai.id LIMIT 5
-            """, (like, norm_q, q)).fetchall()
-            for r in item_rows:
-                results.append({
-                    'type': 'asset_item',
-                    'icon': '🔖',
-                    'label': f"Unit #{r['id']}" + (f" — {r['barcode']}" if r['barcode'] else ''),
-                    'sub': f"{r['type_name']}  ·  {r['cat_name']}  ·  {r['status']}",
-                    'url': '/assets',
-                    'status': r['status'],
-                })
-    finally:
-        db.close()
-    return jsonify(results)
-
-
 @app.route('/api/contacts')
 @login_required
 def api_contacts():
@@ -18263,7 +18141,7 @@ def asset_types_admin_list():
                pt.name as parent_name,
                (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id) as item_count,
                (SELECT COUNT(*) FROM asset_items ai WHERE ai.asset_type_id = at.id AND ai.status = 'retired') as retired_item_count,
-               (SELECT COUNT(*) FROM asset_company_rates cr WHERE cr.asset_type_id = at.id) as company_rate_count
+               (SELECT COUNT(DISTINCT LOWER(cr.company)) FROM asset_company_rates cr WHERE cr.asset_type_id = at.id) as company_rate_count
         FROM asset_types at
         JOIN asset_categories ac ON ac.id = at.category_id
         LEFT JOIN asset_types pt ON pt.id = at.parent_type_id
@@ -18378,22 +18256,59 @@ def asset_type_edit(type_id):
     return jsonify({'success': True})
 
 
+def _rate_month(v):
+    """A company-rate period bound → the 1st of its month, or None (open).
+    Takes 'YYYY-MM' (what <input type=month> sends), 'YYYY-MM-DD' or
+    'MM/YYYY'. Raises ValueError on anything else."""
+    v = str(v or '').strip()
+    if not v:
+        return None
+    m = re.match(r'^(\d{4})-(\d{1,2})(?:-\d{1,2})?$', v)
+    if m:
+        y, mo = int(m.group(1)), int(m.group(2))
+    else:
+        m = re.match(r'^(\d{1,2})/(\d{4})$', v)
+        if not m:
+            raise ValueError(v)
+        y, mo = int(m.group(2)), int(m.group(1))
+    if not 1900 <= y <= 2999:
+        raise ValueError(v)
+    return date(y, mo, 1)
+
+
+def _month_last_day(d):
+    """Last day of d's month (a period's end_month runs through it)."""
+    nxt = date(d.year + (d.month == 12), d.month % 12 + 1, 1)
+    return nxt - timedelta(days=1)
+
+
+def _rate_period_label(start, end):
+    """'Jul 2026 – Jun 2027' / 'Dec 2026' / 'from Jul 2026' / 'through
+    Jun 2027' / ''. English month names (not locale-bound %b)."""
+    f = lambda d: f"{('Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec')[d.month - 1]} {d.year}"
+    if start and end:
+        return f(start) if (start.year, start.month) == (end.year, end.month) else f'{f(start)} – {f(end)}'
+    if start:
+        return f'from {f(start)}'
+    return f'through {f(end)}' if end else ''
+
+
 def _save_company_rates(db, type_id, rates):
     """Replace this asset type's Performance Company special rates with
-    `rates` ([{company, rental_cost, weekly_rate}]). Returns an error string
+    `rates` ([{company, rental_cost, weekly_rate, start_month, end_month}]).
+    Periods (3.19.0): start/end are months ('YYYY-MM', blank = open); a
+    company may hold several per type as long as they don't overlap, so a
+    contracted rate can be entered before it starts. Returns an error string
     or None. Doesn't commit. Existing show lines keep their locked prices."""
     if not isinstance(rates, list):
         return 'company_rates must be a list'
-    clean, seen = [], set()
+    clean, periods = [], {}
     for r in rates:
         if not isinstance(r, dict):
             continue
         company = ' '.join(str(r.get('company') or '').split())
         if not company:
             continue
-        if _company_key(company) in seen:
-            return f'"{company}" is listed twice.'
-        seen.add(_company_key(company))
         try:
             daily = float(r.get('rental_cost') or 0)
             weekly = float(r.get('weekly_rate') or 0)
@@ -18401,23 +18316,38 @@ def _save_company_rates(db, type_id, rates):
             return f'Invalid rate for "{company}".'
         if daily < 0 or weekly < 0:
             return f'Rates for "{company}" can\'t be negative.'
-        clean.append((company, daily, weekly))
-    before = {r['company']: (float(r['rental_cost'] or 0), float(r['weekly_rate'] or 0))
-              for r in db.execute('SELECT company, rental_cost, weekly_rate '
-                                  'FROM asset_company_rates WHERE asset_type_id=%s',
-                                  (type_id,)).fetchall()}
-    after = {c: (d, w) for c, d, w in clean}
-    if before == after:
+        try:
+            start = _rate_month(r.get('start_month'))
+            end = _rate_month(r.get('end_month'))
+        except ValueError:
+            return f'Invalid month for "{company}" — use the month picker (YYYY-MM).'
+        if start and end and end < start:
+            return f'"{company}": the end month is before the start month.'
+        lo, hi = start or date.min, _month_last_day(end) if end else date.max
+        for olo, ohi in periods.get(_company_key(company), ()):
+            if lo <= ohi and olo <= hi:
+                return (f'"{company}" has overlapping rate periods — give each one '
+                        f'its own months (leave a month blank for open-ended).')
+        periods.setdefault(_company_key(company), []).append((lo, hi))
+        clean.append((company, daily, weekly, start, end))
+    key = lambda c: (c[0], c[3] or date.min, c[4] or date.max, c[1], c[2])
+    before = sorted(((r['company'], float(r['rental_cost'] or 0), float(r['weekly_rate'] or 0),
+                      _as_date(r['start_month']), _as_date(r['end_month']))
+                     for r in db.execute('SELECT company, rental_cost, weekly_rate, start_month, '
+                                         'end_month FROM asset_company_rates WHERE asset_type_id=%s',
+                                         (type_id,)).fetchall()), key=key)
+    if before == sorted(clean, key=key):
         return None
     db.execute('DELETE FROM asset_company_rates WHERE asset_type_id=%s', (type_id,))
-    for company, daily, weekly in clean:
+    for company, daily, weekly, start, end in clean:
         db.execute('INSERT INTO asset_company_rates '
-                   '(asset_type_id, company, rental_cost, weekly_rate, updated_by) '
-                   'VALUES (%s,%s,%s,%s,%s)',
-                   (type_id, company, daily, weekly, session.get('user_id')))
+                   '(asset_type_id, company, rental_cost, weekly_rate, start_month, end_month, '
+                   'updated_by) VALUES (%s,%s,%s,%s,%s,%s,%s)',
+                   (type_id, company, daily, weekly, start, end, session.get('user_id')))
     log_audit(db, 'ASSET_COMPANY_RATES', 'asset_type', type_id,
-              detail='; '.join(f'{c}: {d:.2f}/day {w:.2f}/wk' for c, d, w in clean)
-              or 'cleared')
+              detail='; '.join(f'{c}: {d:.2f}/day {w:.2f}/wk'
+                               + (f' ({_rate_period_label(a, b)})' if a or b else '')
+                               for c, d, w, a, b in clean) or 'cleared')
     syslog_logger.info(f"ASSET_COMPANY_RATES type_id={type_id} count={len(clean)} "
                        f"by={session.get('username')}")
     return None
@@ -18434,12 +18364,99 @@ def asset_company_rates_get():
     tid = request.args.get('type_id', type=int)
     if tid:
         rates = [{'company': r['company'], 'rental_cost': float(r['rental_cost'] or 0),
-                  'weekly_rate': float(r['weekly_rate'] or 0)}
-                 for r in db.execute('SELECT company, rental_cost, weekly_rate '
+                  'weekly_rate': float(r['weekly_rate'] or 0),
+                  'start_month': r['start_month'].strftime('%Y-%m') if r['start_month'] else '',
+                  'end_month': r['end_month'].strftime('%Y-%m') if r['end_month'] else ''}
+                 for r in db.execute('SELECT company, rental_cost, weekly_rate, start_month, end_month '
                                      'FROM asset_company_rates WHERE asset_type_id=%s '
-                                     'ORDER BY company', (tid,)).fetchall()]
+                                     'ORDER BY company, start_month NULLS FIRST', (tid,)).fetchall()]
     db.close()
     return jsonify({'companies': companies, 'rates': rates})
+
+
+def _all_company_rate_rows():
+    """Every Performance Company special rate across all asset types, with
+    each period's status today: current / upcoming / expired (3.19.0)."""
+    db = get_db()
+    rows = db.execute("""
+        SELECT cr.id, cr.asset_type_id, cr.company, cr.rental_cost, cr.weekly_rate,
+               cr.start_month, cr.end_month,
+               t.name AS type_name, t.rental_cost AS std_daily, t.weekly_rate AS std_weekly,
+               t.is_consumable, COALESCE(t.is_retired, 0) AS is_retired,
+               c.name AS category_name, p.name AS parent_name
+        FROM asset_company_rates cr
+        JOIN asset_types t ON t.id = cr.asset_type_id
+        LEFT JOIN asset_categories c ON c.id = t.category_id
+        LEFT JOIN asset_types p ON p.id = t.parent_type_id
+        ORDER BY LOWER(cr.company), c.sort_order, c.name, t.name, cr.start_month NULLS FIRST
+    """).fetchall()
+    db.close()
+    today = date.today()
+    out = []
+    for r in rows:
+        card = _company_rate_card(r)
+        status = ('upcoming' if card['start'] and today < card['start']
+                  else 'expired' if card['end'] and today > card['end'] else 'current')
+        out.append({
+            'id': r['id'], 'asset_type_id': r['asset_type_id'], 'company': r['company'],
+            'type_name': r['type_name'], 'parent_name': r['parent_name'] or '',
+            'category_name': r['category_name'] or '',
+            'is_consumable': bool(r['is_consumable']), 'is_retired': bool(r['is_retired']),
+            'rental_cost': card['daily'], 'weekly_rate': card['weekly'],
+            'std_daily': float(r['std_daily'] or 0), 'std_weekly': float(r['std_weekly'] or 0),
+            'start_month': r['start_month'].strftime('%Y-%m') if r['start_month'] else '',
+            'end_month': r['end_month'].strftime('%Y-%m') if r['end_month'] else '',
+            'period': _rate_period_label(_as_date(r['start_month']), _as_date(r['end_month']))
+                      or 'Always',
+            'status': status,
+        })
+    return out
+
+
+@app.route('/settings/asset-company-rates/all', methods=['GET'])
+@asset_manager_required
+def asset_company_rates_all():
+    """The Asset Manager's Company Rates list (3.19.0)."""
+    return jsonify({'rates': _all_company_rate_rows()})
+
+
+@app.route('/settings/asset-company-rates/export', methods=['GET'])
+@asset_manager_required
+def asset_company_rates_export():
+    """CSV of the Company Rates list, narrowed by the list's own filters:
+    ?company= (exact) &status= (current|upcoming|expired|active = not
+    expired) &q= (asset / group / category / company text)."""
+    company = request.args.get('company', '')
+    status = request.args.get('status', '')
+    q = (request.args.get('q') or '').strip().lower()
+    rows = [r for r in _all_company_rate_rows()
+            if (not company or r['company'] == company)
+            and (not status or (r['status'] != 'expired' if status == 'active' else r['status'] == status))
+            and (not q or q in ' '.join((r['type_name'], r['parent_name'], r['category_name'],
+                                         r['company'])).lower())]
+
+    def cell(v):
+        v = '' if v is None else str(v)
+        return "'" + v if v[:1] in ('=', '+', '-', '@', '\t', '\r') else v   # no spreadsheet formulas
+
+    import csv as _csv
+    import io as _io
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(['Company', 'Asset', 'Group', 'Category', 'Company daily / item', 'Company weekly',
+                'Standard daily / item', 'Standard weekly', 'From', 'Through', 'Status'])
+    for r in rows:
+        w.writerow([cell(x) for x in (
+            r['company'], r['type_name'], r['parent_name'], r['category_name'],
+            f"{r['rental_cost']:.2f}", '' if r['is_consumable'] else f"{r['weekly_rate']:.2f}",
+            f"{r['std_daily']:.2f}", '' if r['is_consumable'] else f"{r['std_weekly']:.2f}",
+            r['start_month'], r['end_month'], r['status'].capitalize())])
+    syslog_logger.info(f"ASSET_COMPANY_RATES_EXPORT rows={len(rows)} by={session.get('username')}")
+    resp = make_response(buf.getvalue())
+    resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+    resp.headers['Content-Disposition'] = (f'attachment; filename=company-rates-'
+                                           f'{date.today().isoformat()}.csv')
+    return resp
 
 
 @app.route('/settings/asset-types/bulk-hide-from-pm', methods=['POST'])
@@ -19342,34 +19359,61 @@ def _performance_company_options(db):
 
 
 def _show_company_rates(db, show_id):
-    """(company, {asset_type_id: {'company','daily','weekly'}}) for the show's
-    Performance Company — the special rate card that replaces the standard
-    rental_cost / weekly_rate when a line is priced (3.8.0). ('', {}) when
-    the show has no company or the company has no special rates."""
+    """(company, {asset_type_id: [card, …]}) for the show's Performance
+    Company — the special rate cards that replace the standard rental_cost /
+    weekly_rate when a line is priced (3.8.0). A card is {'company', 'daily',
+    'weekly', 'start', 'end'}; start/end (3.19.0) are dates (end = its
+    month's last day) or None = open. Pick one with _company_rate_on().
+    ('', {}) when the show has no company or it has no special rates."""
     company = (_show_performance_company(db, show_id) or '').strip()
     if not company:
         return '', {}
     rows = db.execute(
-        "SELECT asset_type_id, company, rental_cost, weekly_rate "
+        "SELECT asset_type_id, company, rental_cost, weekly_rate, start_month, end_month "
         "FROM asset_company_rates "
-        "WHERE LOWER(REGEXP_REPLACE(TRIM(company), '\\s+', ' ', 'g')) = %s",
+        "WHERE LOWER(REGEXP_REPLACE(TRIM(company), '\\s+', ' ', 'g')) = %s "
+        "ORDER BY start_month NULLS FIRST",
         (_company_key(company),)).fetchall()
-    return company, {r['asset_type_id']: {'company': r['company'],
-                                          'daily': float(r['rental_cost'] or 0),
-                                          'weekly': float(r['weekly_rate'] or 0)}
-                     for r in rows}
+    out = {}
+    for r in rows:
+        out.setdefault(r['asset_type_id'], []).append(_company_rate_card(r))
+    return company, out
+
+
+def _company_rate_card(r):
+    end = _as_date(r['end_month'])
+    return {'company': r['company'], 'daily': float(r['rental_cost'] or 0),
+            'weekly': float(r['weekly_rate'] or 0), 'start': _as_date(r['start_month']),
+            'end': _month_last_day(end) if end else None}
+
+
+def _company_rate_on(cards, on):
+    """The card in effect on `on` — a line's rental start (today when
+    unset) — or None: a rate applies to lines that START inside its period."""
+    d = _as_date(on) or date.today()
+    for c in cards or ():
+        if (c['start'] is None or c['start'] <= d) and (c['end'] is None or d <= c['end']):
+            return c
+    return None
+
+
+def _company_rate_json(c):
+    return {**c, 'start': c['start'].isoformat() if c['start'] else None,
+            'end': c['end'].isoformat() if c['end'] else None}
 
 
 def _price_asset_line(db, show_id, type_row, asset_type_id, rental_start,
                       rental_end, rates=None):
     """Rate-card price for one unit on this show: the Performance Company's
-    special rate when the type has one, else the standard rate card.
-    Returns (unit_price, rate_company or None). type_row needs rental_cost,
-    weekly_rate, is_consumable. `rates` = a prefetched _show_company_rates()
-    map, to price many lines with one lookup."""
+    special rate when the type has one in effect on the line's rental start,
+    else the standard rate card. Returns (unit_price, rate_company or None).
+    type_row needs rental_cost, weekly_rate, is_consumable. `rates` = a
+    prefetched _show_company_rates() map, to price many lines with one
+    lookup."""
     if rates is None:
         rates = _show_company_rates(db, show_id)[1]
-    cr = rates.get(int(asset_type_id)) if asset_type_id is not None else None
+    cr = (_company_rate_on(rates.get(int(asset_type_id)), rental_start)
+          if asset_type_id is not None else None)
     if cr:
         return (_compute_locked_price(cr['daily'], cr['weekly'], rental_start,
                                       rental_end,
@@ -19935,8 +19979,9 @@ def show_assets_list(show_id):
             and av.get('available') < 0
         )
         # Company-rate drift (3.8.0): the line was priced for a different
-        # Performance Company than the show has now (or for none).
-        cr = company_rates.get(r['asset_type_id'])
+        # Performance Company than the show has now (or for none) — by the
+        # card in effect on its rental start (3.19.0).
+        cr = _company_rate_on(company_rates.get(r['asset_type_id']), r['rental_start'])
         d['_rate_mismatch'] = (
             _company_key(r['rate_company']) != _company_key(cr['company'] if cr else '')
             and not _asset_line_hand_priced(db, r, r['current_price'],
@@ -19945,12 +19990,17 @@ def show_assets_list(show_id):
 
     win_start, win_end = _show_rental_window(db, show_id)
     db.close()
+    on_default = {k: _company_rate_on(v, win_start) for k, v in company_rates.items()}
     return jsonify({
         'assets': assets_out,
         # Performance Company special rates for the add-asset preview:
-        # {asset_type_id: {company, daily, weekly}}.
+        # {asset_type_id: {company, daily, weekly, start, end}} — the card in
+        # effect on the default rental start; company_rate_periods has every
+        # dated card, [{…}], for a start date picked in the modal (3.19.0).
         'performance_company': company,
-        'company_rates': {str(k): v for k, v in company_rates.items()},
+        'company_rates': {str(k): _company_rate_json(v) for k, v in on_default.items() if v},
+        'company_rate_periods': {str(k): [_company_rate_json(c) for c in v]
+                                 for k, v in company_rates.items()},
         'external_rentals': [dict(r) for r in ext_rows],
         'approval': approval,
         # Allowed rental bounds for the date editors (show load-in → load-out).
@@ -20459,13 +20509,13 @@ def _asset_line_hand_priced(db, r, std_daily, std_weekly, is_consumable):
             and locked != round(float(r['original_locked_price']), 2)):
         return True
     if r['rate_company']:
-        own = db.execute(
-            "SELECT rental_cost, weekly_rate FROM asset_company_rates "
-            "WHERE asset_type_id=%s AND company=%s",
-            (r['asset_type_id'], r['rate_company'])).fetchone()
+        own = _company_rate_on([_company_rate_card(c) for c in db.execute(
+            "SELECT company, rental_cost, weekly_rate, start_month, end_month "
+            "FROM asset_company_rates WHERE asset_type_id=%s AND company=%s",
+            (r['asset_type_id'], r['rate_company'])).fetchall()], r['rental_start'])
         if not own:
             return True  # its company rate was since removed — can't tell
-        daily, weekly = own['rental_cost'], own['weekly_rate']
+        daily, weekly = own['daily'], own['weekly']
     else:
         daily, weekly = std_daily, std_weekly
     return locked != round(_compute_locked_price(
@@ -20493,7 +20543,7 @@ def show_assets_apply_company_rates(show_id):
     """, (show_id,)).fetchall()
     changed, skipped_override = 0, 0
     for r in rows:
-        cr = rates.get(r['asset_type_id'])
+        cr = _company_rate_on(rates.get(r['asset_type_id']), r['rental_start'])
         if _company_key(r['rate_company']) == _company_key(cr['company'] if cr else ''):
             continue
         if _asset_line_hand_priced(db, r, r['rental_cost'], r['weekly_rate'],
@@ -22851,6 +22901,91 @@ def _piano_s3_cleanup(keys, tid):
                                 f"piano_tuning={tid} error={e}")
 
 
+def _piano_service_unit(db, t, keep_item_id=None):
+    """The piano unit (asset_items.id) a completed tuning's Service entry
+    goes on: the unit the tuning names; else the ONE unit of its model
+    pinned on the show's Assets tab; else the model's only live unit; else
+    the unit an earlier entry already sits on, while it's still that model.
+    None = we can't tell which instrument was tuned, so no entry. The
+    one-time backfill in init_db.py mirrors the first three rules."""
+    if t['piano_asset_item_id']:
+        r = db.execute('SELECT id FROM asset_items WHERE id=%s',
+                       (t['piano_asset_item_id'],)).fetchone()
+        if r:
+            return r['id']
+    type_id = t['piano_asset_type_id']
+    if not type_id:
+        return None
+    if t['show_id'] is not None:
+        pins = db.execute(
+            'SELECT DISTINCT asset_item_id FROM show_assets WHERE show_id=%s '
+            'AND asset_type_id=%s AND asset_item_id IS NOT NULL',
+            (t['show_id'], type_id)).fetchall()
+        if len(pins) == 1:
+            return pins[0]['asset_item_id']
+    units = db.execute("SELECT id FROM asset_items WHERE asset_type_id=%s "
+                       "AND COALESCE(status, '') <> 'retired' LIMIT 2", (type_id,)).fetchall()
+    if len(units) == 1:
+        return units[0]['id']
+    if keep_item_id:
+        r = db.execute('SELECT id FROM asset_items WHERE id=%s AND asset_type_id=%s',
+                       (keep_item_id, type_id)).fetchone()
+        if r:
+            return r['id']
+    return None
+
+
+def _piano_service_body(t):
+    """The Service entry's text — kept in step with init_db's backfill."""
+    who = (f"House: {t['purpose'] or 'Maintenance'}" if t['show_id'] is None
+           else (t['show_name'] or f"Show #{t['show_id']}"))
+    body = f"Piano tuning #{t['id']} — {who}"
+    if t['vendor']:
+        body += f" · {t['vendor']}"
+    if t['cost'] is not None:
+        body += f" · ${float(t['cost']):,.2f}"
+    return body
+
+
+def _sync_piano_service_log(db, tid, user_id):
+    """Keep tuning `tid`'s entry in its piano unit's service record (3.19.0):
+    the unit's Log tab under Assets (asset_logs, type 'service', linked by
+    asset_logs.piano_tuning_id). One entry while the tuning is Completed and
+    _piano_service_unit can tell which unit was tuned; none otherwise, so
+    re-opening or cancelling removes it. Later saves move/rewrite it (unit,
+    date = the tuning date, text) and keep its author. Caller commits.
+    Returns (action, asset_item_id), action 'added' / 'updated' / 'removed'
+    or None when nothing changed."""
+    t = db.execute(
+        'SELECT t.id, t.show_id, t.status, t.purpose, t.vendor, t.cost, t.tuning_date, '
+        't.completed_at, t.requested_date, t.piano_asset_type_id, t.piano_asset_item_id, '
+        's.name AS show_name FROM piano_tunings t LEFT JOIN shows s ON s.id = t.show_id '
+        'WHERE t.id=%s', (tid,)).fetchone()
+    logs = db.execute('SELECT id, asset_item_id, log_date, body FROM asset_logs '
+                      'WHERE piano_tuning_id=%s ORDER BY id', (tid,)).fetchall()
+    keep = logs[0] if logs else None
+    unit = None
+    if t and t['status'] == 'completed':
+        unit = _piano_service_unit(db, t, keep['asset_item_id'] if keep else None)
+    for r in (logs if unit is None else logs[1:]):
+        db.execute('DELETE FROM asset_logs WHERE id=%s', (r['id'],))
+    if unit is None:
+        return ('removed', keep['asset_item_id']) if keep else (None, None)
+    log_date = (_as_date(t['tuning_date']) or _as_date(t['completed_at'])
+                or _as_date(t['requested_date']) or date.today())
+    body = _piano_service_body(t)
+    if keep:
+        if (keep['asset_item_id'], _as_date(keep['log_date']), keep['body']) == (unit, log_date, body):
+            return None, unit
+        db.execute('UPDATE asset_logs SET asset_item_id=%s, log_date=%s, body=%s WHERE id=%s',
+                   (unit, log_date, body, keep['id']))
+        return 'updated', unit
+    db.execute("INSERT INTO asset_logs (asset_item_id, user_id, log_date, log_type, body, "
+               "piano_tuning_id) VALUES (%s, %s, %s, 'service', %s, %s)",
+               (unit, user_id, log_date, body, tid))
+    return 'added', unit
+
+
 def _piano_manager_emails(db, exclude_user_id=None):
     rows = db.execute(
         "SELECT id, email FROM users WHERE is_piano_manager = 1 "
@@ -23185,6 +23320,7 @@ def piano_tuning_update(tid):
         _sync_piano_schedule_rows(db, show_id)
         _sync_piano_external_rental(db, tid, s3_deletes)
         db.execute('UPDATE shows SET updated_at=CURRENT_TIMESTAMP WHERE id=%s', (show_id,))
+    svc_action, svc_item = _sync_piano_service_log(db, tid, session['user_id'])
     changed = sorted(k for k in vals if str(vals[k] or '') != str(_piano_out(cur).get(k) or ''))
     log_audit(db, 'PIANO_TUNING_EDIT', 'piano_tuning', tid, show_id=show_id,
               detail=f"status={cur['status']}->{status} changed={','.join(changed) or '-'}")
@@ -23227,6 +23363,9 @@ def piano_tuning_update(tid):
     db.close()
     syslog_logger.info(f"PIANO_TUNING_EDIT id={tid} show_id={show_id} "
                        f"status={cur['status']}->{status} by={session.get('username')}")
+    if svc_action:
+        syslog_logger.info(f"PIANO_SERVICE_LOG id={tid} action={svc_action} item_id={svc_item} "
+                           f"by={session.get('username')}")
     if requester:
         r = _piano_out(row)
         when = f"{r['tuning_date'] or ''} {r['tuning_start'] or ''}".strip()
@@ -23299,10 +23438,15 @@ def piano_tunings_list():
     rows = db.execute(f"""
         SELECT t.*, s.name AS show_name, s.venue AS show_venue, s.status AS show_status,
                u.display_name AS requested_by_name, u.username AS requested_by_username,
-               {_ADV_PM_SQL} AS production_manager, {_PIANO_ER_COLS}
+               {_ADV_PM_SQL} AS production_manager, {_PIANO_ER_COLS},
+               svc.asset_item_id AS svc_item_id, svc.barcode AS svc_barcode
         FROM piano_tunings t
         LEFT JOIN shows s ON s.id = t.show_id
         LEFT JOIN users u ON u.id = t.requested_by
+        LEFT JOIN LATERAL (
+            SELECT al.asset_item_id, ai.barcode FROM asset_logs al
+            JOIN asset_items ai ON ai.id = al.asset_item_id
+            WHERE al.piano_tuning_id = t.id ORDER BY al.id LIMIT 1) svc ON TRUE
         {('WHERE ' + ' AND '.join(where)) if where else ''}
         ORDER BY COALESCE(t.tuning_date, t.requested_date) NULLS LAST, t.id
     """, params).fetchall()
@@ -23319,6 +23463,11 @@ def piano_tunings_list():
         d['requested_by_name'] = r['requested_by_name'] or r['requested_by_username'] or ''
         d['piano_on_show'] = _piano_on_show(r['show_id'], r['piano_asset_type_id'],
                                             r['piano_asset_item_id'], booked, pinned)
+        # The unit whose service record (Assets → unit → Log) holds it.
+        d.pop('svc_item_id', None)
+        d.pop('svc_barcode', None)
+        d['service_log_unit'] = (_piano_unit_label({'id': r['svc_item_id'], 'barcode': r['svc_barcode']})
+                                 if r['svc_item_id'] else None)
         out.append(d)
     return jsonify({'tunings': out, 'counts': counts, 'pianos': pianos,
                     'vendors': vendors, 'purposes': list(PIANO_HOUSE_PURPOSES)})
@@ -23373,10 +23522,14 @@ def piano_tuning_house_create():
     log_audit(db, 'PIANO_TUNING_HOUSE_ADD', 'piano_tuning', tid,
               detail=f"purpose={vals['purpose']!r} piano={vals.get('piano', '')!r} "
                      f"date={vals['tuning_date']}")
+    svc_action, svc_item = _sync_piano_service_log(db, tid, me)
     db.commit()
     db.close()
     syslog_logger.info(f"PIANO_TUNING_HOUSE_ADD id={tid} purpose={vals['purpose']!r} "
                        f"by={session.get('username')}")
+    if svc_action:
+        syslog_logger.info(f"PIANO_SERVICE_LOG id={tid} action={svc_action} item_id={svc_item} "
+                           f"by={session.get('username')}")
     return jsonify({'success': True, 'id': tid}), 201
 
 

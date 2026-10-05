@@ -6,7 +6,7 @@
 
 ## Version Numbering
 
-**Current version: `3.18.5`**
+**Current version: `3.19.0`**
 
 This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 
@@ -26,6 +26,7 @@ This project uses **semantic versioning**: `MAJOR.MINOR.PATCH`
 > - Always commit the version bump in the same commit as the feature/fix
 
 Version history:
+- `3.19.0` — **Completed piano tunings go into the piano's service record; company rates get effective months and their own list; the sidebar search is gone.** **Piano service record:** marking a tuning **Completed** (the list's *Completed* button, the Manage dialog, or a house tuning added as completed) now adds a **Service** entry to that piano unit's log (Asset Manager → the unit → **Log** tab), dated the tuning date, e.g. *Piano tuning #42 — Nutcracker · Acme Piano · $185.00* (house tunings read *House: Maintenance*). The unit is the S/N the tuning names; at *Any unit* it is the one unit of that model pinned on the show, or the model's only unit. If it can't tell which piano was tuned, the Manage dialog says so (⚠ pick the unit and Save to log it); when it is logged, the dialog says which S/N's record holds it. The entry follows the tuning: changing the unit, date, vendor or cost later updates it, and re-opening or cancelling the tuning removes it. On upgrade, tunings already completed are logged once the same way. New column `asset_logs.piano_tuning_id`; syslog `PIANO_SERVICE_LOG action=added|updated|removed`. **Company rate periods:** each Performance Company rate on an asset (Asset Manager → item → Edit → Company Rates) now has optional **From** and **Through** months (blank = open-ended). A rate applies to show lines whose rental **starts** inside its period, so a contracted rate can be entered before it takes effect, and one company can have several periods on one item as long as they don't overlap (Save refuses overlaps and an end before the start). Adding or re-dating a line picks the period for its start date, the show page's and Approvals' add previews do the same, and *Re-price* on the Assets tab uses it too. Existing rates become open-ended, so nothing is re-priced by the upgrade. `asset_company_rates` is now keyed by a new `id` (the old item + company key is swapped once at startup) with `start_month` / `end_month`. **Company Rates list:** a new **Company Rates** button in the Asset Manager header lists every item with special company pricing (company, item, company vs standard rate, period and whether it is current, upcoming or expired), filterable by company, period status and text; click an item to open it, or **Edit** for its rates. **Download CSV** exports the filtered list (syslog `ASSET_COMPANY_RATES_EXPORT`). **Sidebar search removed:** the search box under the logo (and the phone tab bar's Search button, the **/** and **Ctrl+K** shortcuts, and its `/api/search` endpoint) is gone. Every page keeps its own search/filter. Deploy: main app only (the schema changes apply on restart).
 - `3.18.5` — **Show cards get a small drop shadow.** Since the 3.15.0 refresh, the Shows board (show cards on Home, My Shows and Archived, the Happening Today cards and the Happening Today panel) was flat until hovered, while every other content panel (show-page sections, Settings panels, report cards) already had a soft shadow. The board now uses that same small shadow at rest, so all content surfaces match and the cards stand off the grain the way the sidebar does. Hover still lifts the card further with a bigger shadow. The shadow is easiest to see in light mode; in dark mode it is faint, and the lighter card colour and border do most of the work. Deploy: main app only.
 - `3.18.4` — **Slightly bigger grain on the page background.** Following 3.18.3, the grain's specks are now a touch larger, so the texture reads as grain instead of a faint haze. The noise frequency went from 0.85 to 0.65 in both themes; strength stays at 10% dark / 7% light. Nothing else changed. Deploy: main app only.
 - `3.18.3` — **A little more grain on the page background.** The fine monochrome grain behind the content (the one texture from the 3.15.0 refresh) was hard to see on most screens. It is now stronger: 10% in dark mode (was 6%) and 7% in light mode (was 4%, still multiplied). It is the same texture and size; only its strength changed. The sidebar blue still covers it, and cards, tables and dialogs are unchanged. Deploy: main app only.
@@ -150,7 +151,6 @@ Version history:
 3. [First Login](#first-login)
 4. [User Guide](#user-guide)
    - [Dashboard](#dashboard)
-   - [Global Search](#global-search)
    - [Advance Sheet](#advance-sheet)
    - [Production Schedule](#production-schedule)
    - [Post-Show Notes](#post-show-notes)
@@ -286,15 +286,6 @@ Lists all active and archived shows. Click a show to open it. **New Show** creat
 **Venue filter:** every venue shows by default (the **All venues** pill is lit). Click a venue pill to show **only** that venue; click more pills to add venues, click a lit pill to drop it, or click **All venues** to go back to everything. The archived list (and its count) follows the pick too, and it combines with the search box and date range.
 
 **PAST badge:** a show whose last date — its last performance or load-out, whichever is later — has gone by stays on the board marked **PAST**; hover the badge for the day it will move to the archive. See [Show Archiving](#show-archiving).
-
-### Global Search
-
-A persistent search box lives in the left sidebar (below the logo). Press **/** or **Ctrl+K** from anywhere to focus it.
-
-- Searches **shows** (by name, venue, company, date — respects your show access permissions), **contacts** (name, department, email, title), **asset types** (name, manufacturer, model — admin only), and **asset barcodes** (admin only, with leading-zero tolerance)
-- Results appear in a grouped panel with match highlighting
-- Keyboard navigation: **↑ / ↓** to move, **Enter** to open, **Escape** to close
-- Minimum 2 characters to trigger, maximum 255 characters
 
 ### Advance Sheet
 

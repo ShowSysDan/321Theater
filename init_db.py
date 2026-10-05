@@ -1290,7 +1290,8 @@ CREATE TABLE IF NOT EXISTS asset_logs (
     log_date      DATE NOT NULL,
     log_type      TEXT NOT NULL DEFAULT 'note',
     body          TEXT NOT NULL DEFAULT '',
-    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    piano_tuning_id INTEGER DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS asset_maintenance (
@@ -1323,15 +1324,22 @@ CREATE TABLE IF NOT EXISTS show_assets (
 
 -- Special asset rates per Performance Company (3.8.0). company holds the
 -- advance field's dropdown value, matched case/space-insensitively.
+-- 3.19.0: each row is in effect for a month range (start_month / end_month
+-- = the 1st of the month, NULL = open; end runs to that month's last day),
+-- so one company can hold several non-overlapping periods per type (a
+-- contract rate entered ahead of time). Keyed by id since then.
 CREATE TABLE IF NOT EXISTS asset_company_rates (
+    id            SERIAL PRIMARY KEY,
     asset_type_id INTEGER NOT NULL REFERENCES asset_types(id) ON DELETE CASCADE,
     company       TEXT NOT NULL,
     rental_cost   DOUBLE PRECISION DEFAULT 0.0,
     weekly_rate   DOUBLE PRECISION DEFAULT 0.0,
+    start_month   DATE DEFAULT NULL,
+    end_month     DATE DEFAULT NULL,
     updated_by    INTEGER,
-    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (asset_type_id, company)
+    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_asset_company_rates_type ON asset_company_rates(asset_type_id);
 
 CREATE TABLE IF NOT EXISTS show_external_rentals (
     id           SERIAL PRIMARY KEY,
@@ -2042,6 +2050,11 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS labor_settled_by INTEGER',
         # Performance Company special asset rates — 3.8.0
         f'ALTER TABLE "{app_schema}".show_assets ADD COLUMN IF NOT EXISTS rate_company TEXT DEFAULT NULL',
+        # Company rates get effective month ranges + an id key — 3.19.0
+        # (the old (type, company) primary key is swapped below).
+        f'ALTER TABLE "{app_schema}".asset_company_rates ADD COLUMN IF NOT EXISTS id SERIAL',
+        f'ALTER TABLE "{app_schema}".asset_company_rates ADD COLUMN IF NOT EXISTS start_month DATE DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".asset_company_rates ADD COLUMN IF NOT EXISTS end_month DATE DEFAULT NULL',
         # Piano Tuning's production-schedule row — 3.9.0
         f'ALTER TABLE "{app_schema}".schedule_rows ADD COLUMN IF NOT EXISTS piano_tuning_id INTEGER DEFAULT NULL',
         # Piano picked from the asset list (Piano category) — 3.9.1
@@ -2060,6 +2073,9 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMP DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS cancel_requested_by INTEGER DEFAULT NULL',
         f"ALTER TABLE \"{app_schema}\".piano_tunings ADD COLUMN IF NOT EXISTS cancel_request_note TEXT DEFAULT ''",
+        # A completed tuning's Service entry in the unit's log — 3.19.0
+        f'ALTER TABLE "{app_schema}".asset_logs ADD COLUMN IF NOT EXISTS piano_tuning_id INTEGER DEFAULT NULL',
+        f'CREATE INDEX IF NOT EXISTS idx_asset_logs_piano ON "{app_schema}".asset_logs(piano_tuning_id)',
     ]
 
     shared_alters = [
@@ -2111,6 +2127,12 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
                        and (app_schema, 'piano_tunings') in cat['tables']
                        and (app_schema, 'show_external_rentals', 'piano_tuning_id')
                        not in cat['cols'])
+    # 3.19.0: tunings already completed get their Service entry in the
+    # piano unit's log once, in the transaction that first adds
+    # asset_logs.piano_tuning_id (the app keeps it in step after that).
+    piano_log_is_new = ((app_schema, 'asset_logs') in cat['tables']
+                        and (app_schema, 'piano_tunings') in cat['tables']
+                        and (app_schema, 'asset_logs', 'piano_tuning_id') not in cat['cols'])
     n = 0
     for sql in app_alters + shared_alters:
         if 'INSERT INTO' in sql and 'show_labor_billable_items' in sql:
@@ -2147,6 +2169,70 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         except Exception as e:
             cur.execute('ROLLBACK TO SAVEPOINT _piano_er')
             print(f"[migrate_pg] piano external-rental backfill warning: {e}")
+    # 3.19.0: asset_company_rates is keyed by id (one company may hold
+    # several dated periods per type). Upgrades still carry the 3.8.0
+    # (asset_type_id, company) primary key: swap it once. A catalog read
+    # first, so a normal start takes no lock.
+    cur.execute("""
+        SELECT c.conname, ARRAY(SELECT a.attname::text FROM pg_attribute a
+                                WHERE a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+                                ORDER BY a.attname) AS cols
+        FROM pg_constraint c
+        WHERE c.conrelid = to_regclass(%s) AND c.contype = 'p'""",
+                (f'"{app_schema}".asset_company_rates',))
+    _pk = cur.fetchone()
+    if _pk is not None and list(_pk[1]) != ['id']:
+        cur.execute('SAVEPOINT _acr_pk')
+        try:
+            cur.execute(f'ALTER TABLE "{app_schema}".asset_company_rates '
+                        f'DROP CONSTRAINT "{_pk[0]}"')
+            cur.execute(f'ALTER TABLE "{app_schema}".asset_company_rates ADD PRIMARY KEY (id)')
+            cur.execute('RELEASE SAVEPOINT _acr_pk')
+        except Exception as e:
+            cur.execute('ROLLBACK TO SAVEPOINT _acr_pk')
+            print(f"[migrate_pg] company-rate primary key warning: {e}")
+    if piano_log_is_new:
+        # Mirrors app.py's _piano_service_unit (the unit the tuning names,
+        # else the one unit of its model pinned on the show, else the
+        # model's only unit) and _piano_service_body.
+        cur.execute('SAVEPOINT _piano_log')
+        try:
+            cur.execute(f'''
+                INSERT INTO "{app_schema}".asset_logs
+                    (asset_item_id, user_id, log_date, log_type, body, piano_tuning_id)
+                SELECT c.unit_id,
+                       (SELECT u.id FROM "{shared_schema}".users u WHERE u.id = c.updated_by),
+                       COALESCE(c.tuning_date, c.completed_at::date, c.requested_date, CURRENT_DATE),
+                       'service',
+                       'Piano tuning #' || c.id || ' — '
+                       || CASE WHEN c.show_id IS NULL
+                               THEN 'House: ' || COALESCE(NULLIF(c.purpose, ''), 'Maintenance')
+                               ELSE COALESCE(c.show_name, 'Show #' || c.show_id) END
+                       || CASE WHEN COALESCE(c.vendor, '') <> '' THEN ' · ' || c.vendor ELSE '' END
+                       || CASE WHEN c.cost IS NOT NULL
+                               THEN ' · $' || to_char(c.cost, 'FM999,999,990.00') ELSE '' END,
+                       c.id
+                FROM (
+                    SELECT t.*, s.name AS show_name, COALESCE(
+                        (SELECT ai.id FROM "{app_schema}".asset_items ai
+                          WHERE ai.id = t.piano_asset_item_id),
+                        (SELECT MIN(sa.asset_item_id) FROM "{app_schema}".show_assets sa
+                          WHERE sa.show_id = t.show_id AND sa.asset_type_id = t.piano_asset_type_id
+                            AND sa.asset_item_id IS NOT NULL
+                         HAVING COUNT(DISTINCT sa.asset_item_id) = 1),
+                        (SELECT MIN(ai.id) FROM "{app_schema}".asset_items ai
+                          WHERE ai.asset_type_id = t.piano_asset_type_id
+                            AND COALESCE(ai.status, '') <> 'retired'
+                         HAVING COUNT(*) = 1)) AS unit_id
+                    FROM "{app_schema}".piano_tunings t
+                    LEFT JOIN "{app_schema}".shows s ON s.id = t.show_id
+                    WHERE t.status = 'completed'
+                ) c
+                WHERE c.unit_id IS NOT NULL''')
+            cur.execute('RELEASE SAVEPOINT _piano_log')
+        except Exception as e:
+            cur.execute('ROLLBACK TO SAVEPOINT _piano_log')
+            print(f"[migrate_pg] piano service-log backfill warning: {e}")
 
     # Data backfills. Each runs in its own SAVEPOINT so one failure can't
     # silently abort the rest of the migration transaction, and each only
