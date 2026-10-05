@@ -2689,7 +2689,7 @@ function toggleSidebar() {
 }
 (function _initSidebarRail() {
   // Mobile view replaces the sidebar with a slide-in drawer (mobile.css) —
-  // never apply the icon-rail there, it would hide the drawer's search/labels.
+  // never apply the icon-rail there, it would hide the drawer's labels.
   if (document.documentElement.classList.contains('mobile-view')) return;
   if (!window.matchMedia) return;
   const mq = window.matchMedia('(max-width: 900px)');

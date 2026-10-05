@@ -147,13 +147,12 @@
         <div class="brand-name">3·2·1→THEATER</div>
         <div class="brand-sub">Advance to stage in 3-2-1</div>
       </div>
+      <!-- Collapse / expand toggle (icon rail) — in the logo row (3.19.1) -->
+      <button type="button" class="sidebar-collapse-btn" id="sidebar-collapse-btn"
+              onclick="toggleSidebar()" title="Collapse / expand sidebar" aria-label="Collapse or expand sidebar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
     </div>
-
-    <!-- Collapse / expand toggle (icon rail) -->
-    <button type="button" class="sidebar-collapse-btn" id="sidebar-collapse-btn"
-            onclick="toggleSidebar()" title="Collapse / expand sidebar" aria-label="Collapse or expand sidebar">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="15 18 9 12 15 6"/></svg>
-    </button>
 
     <nav class="sidebar-nav{% if nav_density == 'compact' %} compact{% endif %}">
       {% if session.get('is_document_viewer') %}
