@@ -111,7 +111,7 @@
     <a href="{{ url_for('show_page', show_id=show.id, tab='schedule') }}" class="{% if tab == 'schedule' %}active{% endif %}">Schedule</a>
     <a href="{{ url_for('show_page', show_id=show.id, tab='staffing') }}" class="{% if tab == 'staffing' %}active{% endif %}">Labor</a>
     {% if security_signin_enabled %}
-    <a href="{{ url_for('show_page', show_id=show.id, tab='security') }}" class="{% if tab == 'security' %}active{% endif %}">Security</a>
+    <a href="{{ url_for('show_page', show_id=show.id, tab='security') }}" class="{% if tab == 'security' %}active{% endif %}">Sign-In Sheet</a>
     {% endif %}
     <a href="{{ url_for('show_page', show_id=show.id, tab='assets') }}" class="{% if tab == 'assets' %}active{% endif %}">Assets</a>
     <a href="{{ url_for('show_page', show_id=show.id, tab='postnotes') }}" class="{% if tab == 'postnotes' %}active{% endif %}">Post Show</a>
@@ -596,7 +596,7 @@ const _HELP_PAGES = {
     `
   },
   show_security: {
-    title: 'Show — Security Sign-In Sheet',
+    title: 'Show — Sign-In Sheet',
     html: `
       <p>The printed sheet that sits at the security desk on show day.</p>
       <ul style="${_HELP_UL}">
