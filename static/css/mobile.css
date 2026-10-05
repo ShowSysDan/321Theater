@@ -123,12 +123,6 @@ html.mobile-view.m-drawer-open .m-backdrop { opacity: 1; pointer-events: auto; }
 /* Comfortable touch targets inside the drawer */
 html.mobile-view .nav-item { padding: 13px 16px; font-size: 15px; }
 
-/* Global-search results panel: full-width sheet above the drawer */
-html.mobile-view .gs-panel {
-  left: 8px; right: 8px; width: auto;
-  max-height: 55vh; z-index: 1300;
-}
-
 /* Notification panel opens from the drawer bell — keep it above the drawer */
 html.mobile-view .notif-panel {
   left: 8px; right: 8px; width: auto; z-index: 1300;
@@ -143,7 +137,6 @@ html.mobile-view .field-input,
 html.mobile-view .field-input-sm,
 html.mobile-view .sched-cell,
 html.mobile-view .labor-field,
-html.mobile-view .gs-input,
 html.mobile-view .comment-input-area textarea { font-size: 16px !important; }
 html.mobile-view .field-input { padding: 11px 12px; }
 /* Comment delete is hover-revealed on desktop — always reachable on touch */
@@ -196,10 +189,9 @@ html.mobile-view .comments-container {
 /* ── Modals: near-full-width cards, never taller than the visible viewport ─ */
 /* Desktop overlay z-indexes (400–1000) sit under the mobile chrome (1100) —
    lift every overlay above it. !important beats the inline z-index on the
-   help/contact modals. */
+   help modal. */
 html.mobile-view .modal-overlay { z-index: 1400; }
-html.mobile-view #help-modal,
-html.mobile-view #gs-contact-modal { z-index: 1400 !important; }
+html.mobile-view #help-modal { z-index: 1400 !important; }
 html.mobile-view .modal-card {
   width: auto !important;
   max-width: calc(100vw - 20px) !important;

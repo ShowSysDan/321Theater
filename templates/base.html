@@ -155,26 +155,6 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="15 18 9 12 15 6"/></svg>
     </button>
 
-    {# Global search hits /api/search, which the document-viewer gate blocks —
-       so hide it for viewers. They get an on-page filter on /viewer instead. #}
-    {% if not session.get('is_document_viewer') %}
-    <!-- Global Search -->
-    <div class="gs-wrap" id="gs-wrap">
-      <div class="gs-input-row">
-        <svg class="gs-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
-        <input id="gs-input" class="gs-input" type="text" placeholder="Search shows, assets, barcodes…"
-               autocomplete="off" spellcheck="false"
-               oninput="_gsOnInput()" onfocus="_gsOpen()" onkeydown="_gsKey(event)">
-        <button id="gs-clear" class="gs-clear" style="display:none" onclick="_gsClear()" tabindex="-1">×</button>
-        <kbd class="gs-kbd" title="Press / to search" aria-hidden="true">/</kbd>
-      </div>
-    </div>
-    <!-- Results panel (fixed, floats right of sidebar) -->
-    <div id="gs-panel" class="gs-panel" style="display:none">
-      <div id="gs-results"></div>
-    </div>
-    {% endif %}
-
     <nav class="sidebar-nav{% if nav_density == 'compact' %} compact{% endif %}">
       {% if session.get('is_document_viewer') %}
       {# Document viewers only get the documents page — everything else is
@@ -404,12 +384,6 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
       <span>Home</span>
     </a>
-    {% if not session.get('is_document_viewer') %}
-    <button type="button" class="m-tab" onclick="mOpenSearch()">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
-      <span>Search</span>
-    </button>
-    {% endif %}
     <button type="button" class="m-tab" onclick="mToggleDrawer()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       <span>Menu</span>
@@ -422,105 +396,10 @@
   {% block auth_content %}{% endblock %}
 {% endif %}
 
-{# Contact Detail Popup — triggered from global search #}
-<div id="gs-contact-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:400;align-items:center;justify-content:center" onclick="if(event.target===this)this.style.display='none'">
-  <div class="modal-card" style="max-width:380px;width:90vw">
-    <div class="modal-header">
-      <span>Contact</span>
-      <button onclick="document.getElementById('gs-contact-modal').style.display='none'" class="modal-close">×</button>
-    </div>
-    <div class="modal-body">
-      <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px">
-        <div style="width:48px;height:48px;border-radius:50%;background:rgba(245,127,32,.15);border:1px solid rgba(245,127,32,.3);display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">👤</div>
-        <div id="gs-contact-name" style="font-size:16px;font-weight:600"></div>
-      </div>
-      <div id="gs-contact-details"></div>
-    </div>
-  </div>
-</div>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 {% block scripts %}{% endblock %}
 <div id="save-toast" class="save-toast"></div>
 <style>
-/* ── Global search ───────────────────────────────────────────────── */
-.gs-wrap {
-  margin: 4px 10px 8px;
-  position: relative;
-}
-.gs-input-row {
-  display: flex;
-  align-items: center;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0 8px;
-  gap: 6px;
-  transition: border-color .15s;
-}
-.gs-input-row:focus-within {
-  border-color: var(--accent, #F57F20);
-  box-shadow: 0 0 0 2px rgba(245,127,32,.12);
-}
-.gs-icon { width:13px;height:13px;flex-shrink:0;color:var(--text-dim);opacity:.7 }
-.gs-input {
-  flex: 1;
-  background: none;
-  border: none;
-  outline: none;
-  font-size: 12px;
-  color: var(--text);
-  padding: 7px 0;
-  min-width: 0;
-}
-.gs-input::placeholder { color: var(--text-dim); opacity: .6 }
-.gs-clear {
-  background: none; border: none; cursor: pointer;
-  color: var(--text-dim); font-size: 15px; padding: 0 2px; line-height: 1;
-}
-.gs-panel {
-  position: fixed;
-  left: calc(var(--sidebar-w, 256px) + 10px);
-  top: 60px; /* overridden dynamically by _gsPositionPanel() */
-  width: 420px;
-  max-height: 80vh;
-  overflow-y: auto;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 32px rgba(0,0,0,.55);
-  z-index: 300;
-  padding: 8px 0;
-}
-.gs-group-label {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: .08em;
-  color: var(--text-dim);
-  padding: 6px 14px 3px;
-  text-transform: uppercase;
-}
-.gs-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 14px;
-  cursor: pointer;
-  text-decoration: none;
-  color: var(--text);
-  transition: background .1s;
-  border-radius: 4px;
-  margin: 0 4px;
-}
-.gs-item:hover, .gs-item.active {
-  background: rgba(245,127,32,.1);
-}
-.gs-item-icon { font-size: 14px; flex-shrink: 0; opacity: .8; width: 18px; text-align: center }
-.gs-item-body { flex: 1; min-width: 0 }
-.gs-item-label { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-.gs-item-sub   { font-size: 10px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px }
-.gs-retired .gs-item-label { text-decoration: line-through; opacity: .6 }
-.gs-empty { padding: 20px 14px; font-size: 12px; color: var(--text-dim); text-align: center }
-.gs-separator { border: none; border-top: 1px solid var(--border); margin: 4px 0 }
 .view-as-select {
   width:100%;font-size:11px;padding:5px 26px 5px 8px;background:var(--surface);
   border:1px solid var(--border);color:var(--text-dim);border-radius:4px;
@@ -584,10 +463,6 @@ async function setSiteMode(mode) {
 // Drawer controls (mobile chrome — no-ops on desktop, nothing has the class).
 function mToggleDrawer() { document.documentElement.classList.toggle('m-drawer-open'); }
 function mCloseDrawer()  { document.documentElement.classList.remove('m-drawer-open'); }
-function mOpenSearch() {
-  document.documentElement.classList.add('m-drawer-open');
-  setTimeout(() => document.getElementById('gs-input')?.focus(), 250);
-}
 if (document.documentElement.classList.contains('mobile-view')) {
   document.addEventListener('keydown', e => { if (e.key === 'Escape') mCloseDrawer(); });
   // Any sidebar navigation click closes the drawer so the next page doesn't
@@ -621,196 +496,6 @@ async function resetViewAs() {
   await fetch('/admin/view-as/reset', {method:'POST'});
   location.reload();
 }
-
-// ── Global Search ─────────────────────────────────────────────────────────────
-let _gsTimer = null;
-let _gsActiveIdx = -1;
-let _gsItems = [];
-
-function _gsOnInput() {
-  const q = document.getElementById('gs-input').value;
-  document.getElementById('gs-clear').style.display = q ? '' : 'none';
-  clearTimeout(_gsTimer);
-  if (q.trim().length < 2) { _gsHidePanel(); return; }
-  _gsTimer = setTimeout(() => _gsFetch(q.trim()), 280);
-}
-
-function _gsPositionPanel() {
-  const input = document.getElementById('gs-input');
-  const panel = document.getElementById('gs-panel');
-  if (!input || !panel) return;
-  const rect = input.getBoundingClientRect();
-  panel.style.top = (rect.bottom + 6) + 'px';
-}
-
-async function _gsFetch(q) {
-  try {
-    const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-    if (!r.ok) { _gsShowError(); return; }
-    const data = await r.json();
-    if (Array.isArray(data)) { _gsPositionPanel(); _gsRender(data, q); }
-  } catch (_) { _gsShowError(); }
-}
-
-// A server/network failure used to fail silently — the panel just never
-// opened, which made a broken /api/search look like a dead search box.
-function _gsShowError() {
-  _gsActiveIdx = -1;
-  _gsItems = [];
-  _gsPositionPanel();
-  document.getElementById('gs-results').innerHTML =
-    '<div class="gs-empty">Search isn’t responding (server error). Try again — if it persists, check the server logs.</div>';
-  document.getElementById('gs-panel').style.display = '';
-}
-
-function _gsRender(results, q) {
-  const panel = document.getElementById('gs-panel');
-  const container = document.getElementById('gs-results');
-  _gsActiveIdx = -1;
-  _gsItems = [];
-
-  if (!results.length) {
-    container.innerHTML = `<div class="gs-empty">No results for "<strong>${_gsEsc(q)}</strong>"</div>`;
-    panel.style.display = '';
-    return;
-  }
-
-  // Group by type
-  const groups = {};
-  const order = ['show','contact','asset_type','asset_item'];
-  const groupLabels = {show:'Shows', contact:'Contacts', asset_type:'Asset Types', asset_item:'Units / Barcodes'};
-  results.forEach(r => { (groups[r.type] = groups[r.type] || []).push(r); });
-
-  let html = '';
-  let first = true;
-  order.filter(k => groups[k]).forEach(key => {
-    if (!first) html += '<hr class="gs-separator">';
-    first = false;
-    html += `<div class="gs-group-label">${groupLabels[key]}</div>`;
-    groups[key].forEach(item => {
-      const idx = _gsItems.length;
-      _gsItems.push(item);
-      const href = item.url ? `href="${item.url}"` : '';
-      const tag = item.url ? 'a' : 'div';
-      const retiredCls = item.retired ? ' gs-retired' : '';
-      html += `<${tag} ${href} class="gs-item${retiredCls}" data-idx="${idx}" onmousedown="_gsNavigate(event,${idx})">
-        <span class="gs-item-icon">${item.icon}</span>
-        <span class="gs-item-body">
-          <div class="gs-item-label">${_gsHighlight(item.label, q)}</div>
-          ${item.sub ? `<div class="gs-item-sub">${_gsEsc(item.sub)}</div>` : ''}
-        </span>
-      </${tag}>`;
-    });
-  });
-
-  container.innerHTML = html;
-  panel.style.display = '';
-}
-
-function _gsNavigate(e, idx) {
-  e.preventDefault();
-  const item = _gsItems[idx];
-  if (item && item.url) {
-    window.location.href = item.url;
-  } else if (item && item.type === 'contact') {
-    _gsShowContact(item);
-  }
-  _gsHidePanel();
-}
-
-function _gsShowContact(contact) {
-  const modal = document.getElementById('gs-contact-modal');
-  document.getElementById('gs-contact-name').textContent = contact.label || '';
-  // Parse sub-label: "Department  ·  Title  ·  email@..."
-  const parts = (contact.sub || '').split(/\s+·\s+/).map(s => s.trim()).filter(Boolean);
-  let html = '';
-  parts.forEach(p => {
-    const isEmail = p.includes('@');
-    html += `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
-      <span style="font-size:11px;color:var(--text-dim);min-width:70px">${isEmail ? 'Email' : (html === '' ? 'Dept / Title' : '')}</span>
-      <span style="font-size:13px">${isEmail ? `<a href="mailto:${_gsEsc(p)}" style="color:var(--accent)">${_gsEsc(p)}</a>` : _gsEsc(p)}</span>
-    </div>`;
-  });
-  document.getElementById('gs-contact-details').innerHTML = html || '<span style="color:var(--text-dim);font-size:12px">No additional details</span>';
-  modal.style.display = 'flex';
-}
-
-// "/" anywhere (outside a text field) jumps to the sidebar search (3.15.0).
-document.addEventListener('keydown', (e) => {
-  if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
-  const t = e.target;
-  if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
-  const gi = document.getElementById('gs-input');
-  if (!gi || !gi.offsetParent) return;
-  e.preventDefault();
-  gi.focus();
-});
-function _gsKey(e) {
-  const panel = document.getElementById('gs-panel');
-  if (panel.style.display === 'none') return;
-  if (e.key === 'Escape') { _gsClear(); return; }
-  if (e.key === 'ArrowDown') { e.preventDefault(); _gsMoveCursor(1); }
-  if (e.key === 'ArrowUp')   { e.preventDefault(); _gsMoveCursor(-1); }
-  if (e.key === 'Enter') {
-    const active = _gsItems[_gsActiveIdx];
-    if (active && active.url) { window.location.href = active.url; _gsHidePanel(); }
-  }
-}
-
-function _gsMoveCursor(dir) {
-  const items = document.querySelectorAll('.gs-item');
-  if (!items.length) return;
-  items.forEach(el => el.classList.remove('active'));
-  _gsActiveIdx = Math.max(0, Math.min(_gsItems.length - 1, _gsActiveIdx + dir));
-  items[_gsActiveIdx]?.classList.add('active');
-  items[_gsActiveIdx]?.scrollIntoView({block:'nearest'});
-}
-
-function _gsOpen() {
-  const q = document.getElementById('gs-input').value.trim();
-  if (q.length >= 2 && document.getElementById('gs-results').innerHTML) {
-    document.getElementById('gs-panel').style.display = '';
-  }
-}
-
-function _gsHidePanel() {
-  document.getElementById('gs-panel').style.display = 'none';
-  _gsActiveIdx = -1;
-}
-
-function _gsClear() {
-  document.getElementById('gs-input').value = '';
-  document.getElementById('gs-clear').style.display = 'none';
-  _gsHidePanel();
-}
-
-function _gsEsc(s) {
-  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
-function _gsHighlight(text, q) {
-  const safe = _gsEsc(text);
-  if (!q) return safe;
-  const re = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
-  return safe.replace(re, '<mark style="background:rgba(245,127,32,.3);border-radius:2px;padding:0 1px">$1</mark>');
-}
-
-// Close panel when clicking outside
-document.addEventListener('mousedown', e => {
-  const panel = document.getElementById('gs-panel');
-  const wrap  = document.getElementById('gs-wrap');
-  if (panel && wrap && !panel.contains(e.target) && !wrap.contains(e.target)) {
-    _gsHidePanel();
-  }
-});
-
-// Keyboard shortcut: / or Ctrl+K focuses search
-document.addEventListener('keydown', e => {
-  if ((e.key === '/' || (e.ctrlKey && e.key === 'k')) && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
-    e.preventDefault();
-    document.getElementById('gs-input')?.focus();
-  }
-});
 </script>
 {# ── Help Modal ──────────────────────────────────────────────────────────── #}
 <div id="help-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:500;align-items:flex-start;justify-content:flex-end" onclick="if(event.target===this)closeHelp()">
@@ -837,7 +522,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li><strong>Happening Today</strong> — appears when there's activity today, with auto tags like Load-In, Performance, Load-Out.</li>
         <li><strong>New Show</strong> — creates a show from just a name; dates, venue and everything else are filled in on its Advance Sheet.</li>
-        <li><strong>Search</strong> — filters the active shows by name or venue. Archived shows have their own page: the <strong>Archived</strong> tab under the title (with its own search, dates and venue filter, plus Restore). Press <strong>/</strong> anywhere to jump to the sidebar search.</li>
+        <li><strong>Search</strong> — filters the active shows by name or venue. Archived shows have their own page: the <strong>Archived</strong> tab under the title (with its own search, dates and venue filter, plus Restore).</li>
         <li>The sun button in the sidebar footer cycles the theme <strong>Dark → Light → Auto</strong>. Auto follows your device's setting.</li>
         <li><strong>Date pickers</strong> — narrow the board by show date.</li>
         <li><strong>Venue pills</strong> — every venue shows by default (<strong>All venues</strong> lit). Click a venue to show <em>only</em> that venue; click more to add them, click a lit one to drop it, or <strong>All venues</strong> to reset. The archived list follows the pick too.</li>
@@ -1343,7 +1028,6 @@ function openHelp() {
     page = {
       title: '3·2·1→Theater Help',
       html: `<p>Use the sidebar to navigate between Shows, Settings, and more.</p>
-             <p>Press <kbd style="background:var(--bg-surface);border:1px solid var(--border);border-radius:3px;padding:1px 5px;font-size:11px">/</kbd> or <kbd style="background:var(--bg-surface);border:1px solid var(--border);border-radius:3px;padding:1px 5px;font-size:11px">Ctrl+K</kbd> to open global search anywhere.</p>
              <p>The "Switch to mobile/desktop site" link at the bottom of the sidebar flips between the phone and desktop layouts.</p>`
     };
   }

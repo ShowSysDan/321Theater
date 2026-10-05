@@ -838,7 +838,14 @@ async function selectApprAssetType(typeId, label, price, weeklyRate, isSystem, i
   let cr = null;
   try {
     const rr = await fetch(`/shows/${_apprCurrentShowId}/assets`, {headers: {'X-Requested-With': 'XMLHttpRequest'}});
-    if (rr.ok) cr = ((await rr.json()).company_rates || {})[String(typeId)] || null;
+    if (rr.ok) {
+      const ad = await rr.json();
+      // The card in effect on the line's start date (3.19.0 periods).
+      const cards = (ad.company_rate_periods || {})[String(typeId)];
+      const d = _apprDefaultStart || localTodayIso();
+      cr = cards ? (cards.find(c => (!c.start || c.start <= d) && (!c.end || d <= c.end)) || null)
+                 : ((ad.company_rates || {})[String(typeId)] || null);
+    }
   } catch (e) {}
   const dailyRate = Number(cr ? cr.daily : price) || 0;
   const wkRate    = Number(cr ? cr.weekly : weeklyRate) || 0;

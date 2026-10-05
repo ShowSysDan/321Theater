@@ -20,6 +20,7 @@
     <a href="/assets/retired" class="btn btn-ghost btn-sm">Retired Archive</a>
     <a href="/assets/db-tools" class="btn btn-ghost btn-sm" title="Raw row access: fix limbo types, duplicates, and broken references the finder can't reach">DB Tools</a>
     <button class="btn btn-ghost btn-sm" onclick="openWarehouseModal()">Warehouse Locations</button>
+    <button class="btn btn-ghost btn-sm" onclick="openCompanyRatesList()" title="Every asset with special Performance Company pricing">Company Rates</button>
     <button id="overbooked-btn" class="btn btn-ghost btn-sm" onclick="openOverbookedModal()" style="display:none">⚠ Overbooked</button>
     <button class="btn btn-primary" onclick="openCategoryModal()">+ New Category</button>
   </div>
@@ -38,6 +39,42 @@
       </p>
       <div id="overbooked-list">
         <p style="color:var(--text-dim);font-size:12px">Loading…</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Company Rates list (3.19.0): every special company rate, all types ── #}
+<div id="company-rates-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeCompanyRatesList()">
+  <div class="modal-card" style="width:980px;max-width:94vw;max-height:90vh;display:flex;flex-direction:column">
+    <div class="modal-header">
+      <span>Company Rates</span>
+      <button type="button" onclick="closeCompanyRatesList()" class="modal-close">×</button>
+    </div>
+    <div class="modal-body" style="overflow:auto">
+      <p style="color:var(--text-dim);font-size:12px;margin:0 0 10px">
+        Every asset with special Performance Company pricing. A rate applies to show lines whose rental starts inside its period. Edit opens the asset's rates.
+      </p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+        <select id="crl-company" class="field-input field-input-sm" style="width:auto;min-width:160px" onchange="renderCompanyRatesList()"></select>
+        <select id="crl-status" class="field-input field-input-sm" style="width:auto" onchange="renderCompanyRatesList()">
+          <option value="">All periods</option>
+          <option value="current" selected>Current</option>
+          <option value="upcoming">Upcoming</option>
+          <option value="expired">Expired</option>
+          <option value="active">Current + upcoming</option>
+        </select>
+        <input type="text" id="crl-search" class="field-input field-input-sm" style="flex:1 1 180px;min-width:140px" placeholder="Search asset or category…" oninput="renderCompanyRatesList()" autocomplete="off">
+        <span id="crl-count" style="font-size:11px;color:var(--text-dim)"></span>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="downloadCompanyRatesCsv()">Download CSV</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="data-table" style="width:100%;font-size:12px">
+          <thead><tr>
+            <th>Company</th><th>Asset</th><th>Company rate</th><th>Standard</th><th>Period</th><th>Status</th><th></th>
+          </tr></thead>
+          <tbody id="crl-body"><tr><td colspan="7" style="color:var(--text-dim)">Loading…</td></tr></tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -242,6 +279,7 @@
           </div>
           <div style="font-size:10.5px;color:var(--text-dim);margin-top:6px;line-height:1.4">
             When a show's <strong>Performance Company</strong> (Advance Sheet) matches, assets added to it are priced at that company's rates — same day/week math as above.
+            <strong>From / Through</strong> months limit when a rate applies (blank = open-ended), by the line's rental start — so a contracted rate can be entered ahead of time; one company can have several periods that don't overlap.
             Assets already on a show keep their price until someone presses <em>Re-price</em> on the show's Assets tab.
           </div>
         </div>
@@ -1427,6 +1465,75 @@ async function refreshOverbookedBadge() {
   } catch(_) {}
 }
 
+// ── Company Rates list (3.19.0) ─────────────────────────────────────────────
+let _crlRows = [];
+const _crlStatusLabel = {current: 'Current', upcoming: 'Upcoming', expired: 'Expired'};
+const _crlStatusColor = {current: '#38a169', upcoming: '#3182ce', expired: 'var(--text-dim)'};
+function _crlRate(daily, weekly, consumable) {
+  const m = v => '$' + Number(v || 0).toFixed(2);
+  if (consumable) return `${m(daily)}/item`;
+  return weekly > 0 ? `${m(daily)}/day · ${m(weekly)}/wk` : `${m(daily)}/day`;
+}
+function _crlFiltered() {
+  const co = document.getElementById('crl-company').value;
+  const st = document.getElementById('crl-status').value;
+  const q = (document.getElementById('crl-search').value || '').trim().toLowerCase();
+  return _crlRows.filter(r =>
+    (!co || r.company === co)
+    && (!st || (st === 'active' ? r.status !== 'expired' : r.status === st))
+    && (!q || [r.type_name, r.parent_name, r.category_name, r.company].join(' ').toLowerCase().includes(q)));
+}
+window.openCompanyRatesList = async function() {
+  document.getElementById('company-rates-modal').style.display = 'flex';
+  const body = document.getElementById('crl-body');
+  body.innerHTML = '<tr><td colspan="7" style="color:var(--text-dim)">Loading…</td></tr>';
+  try {
+    const r = await fetch('/settings/asset-company-rates/all', {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+    if (!r.ok) throw new Error(r.status);
+    _crlRows = (await r.json()).rates || [];
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="7" style="color:#e53e3e">Couldn\'t load company rates.</td></tr>';
+    return;
+  }
+  const sel = document.getElementById('crl-company');
+  const keep = sel.value;
+  const companies = [...new Set(_crlRows.map(r => r.company))];
+  sel.innerHTML = '<option value="">All companies</option>' +
+    companies.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  sel.value = companies.includes(keep) ? keep : '';
+  renderCompanyRatesList();
+};
+window.closeCompanyRatesList = function() { document.getElementById('company-rates-modal').style.display = 'none'; };
+window.renderCompanyRatesList = function() {
+  const rows = _crlFiltered();
+  document.getElementById('crl-count').textContent = `${rows.length} of ${_crlRows.length}`;
+  const body = document.getElementById('crl-body');
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="7" style="color:var(--text-dim);text-align:center;padding:18px">${_crlRows.length ? 'No rates match these filters.' : 'No assets have special company pricing yet. Add rates from an asset type\'s Edit dialog.'}</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map(r => `
+    <tr${r.status === 'expired' ? ' style="opacity:.6"' : ''}>
+      <td>${esc(r.company)}</td>
+      <td><a href="javascript:void(0)" onclick="closeCompanyRatesList();selectType(${r.asset_type_id})" style="color:var(--fg);font-weight:500;text-decoration:none">${esc(r.type_name)}</a>${r.is_retired ? ' <span style="font-size:10px;color:var(--text-dim)">(retired)</span>' : ''}
+        <div style="font-size:10px;color:var(--text-dim)">${esc([r.category_name, r.parent_name].filter(Boolean).join(' › '))}</div></td>
+      <td style="white-space:nowrap;font-weight:600">${_crlRate(r.rental_cost, r.weekly_rate, r.is_consumable)}</td>
+      <td style="white-space:nowrap;color:var(--text-dim)">${_crlRate(r.std_daily, r.std_weekly, r.is_consumable)}</td>
+      <td style="white-space:nowrap">${esc(r.period)}</td>
+      <td><span style="font-size:11px;font-weight:600;color:${_crlStatusColor[r.status]}">${_crlStatusLabel[r.status] || esc(r.status)}</span></td>
+      <td><button type="button" class="btn btn-xs btn-ghost" onclick="closeCompanyRatesList();openTypeModal(${r.asset_type_id})">Edit</button></td>
+    </tr>`).join('');
+};
+window.downloadCompanyRatesCsv = function() {
+  // Server-side export (syslogged), narrowed by the same filters as the list.
+  const p = new URLSearchParams({
+    company: document.getElementById('crl-company').value,
+    status: document.getElementById('crl-status').value,
+    q: (document.getElementById('crl-search').value || '').trim(),
+  });
+  window.location.href = `/settings/asset-company-rates/export?${p}`;
+};
+
 window.openOverbookedModal = async function() {
   const modal = document.getElementById('overbooked-modal');
   const listEl = document.getElementById('overbooked-list');
@@ -2090,7 +2197,7 @@ window._syncCompanyRatesEmpty = function() {
   document.getElementById('type-company-rates-empty').style.display = n ? 'none' : '';
 };
 window.addCompanyRateRow = function(rt) {
-  rt = rt || {company: '', rental_cost: 0, weekly_rate: 0};
+  rt = rt || {company: '', rental_cost: 0, weekly_rate: 0, start_month: '', end_month: ''};
   const host = document.getElementById('type-company-rates');
   if (!_companyOptions.length && !rt.company) {
     alert('No Performance Companies to pick from. Add them under Settings → Arts Groups first.');
@@ -2101,7 +2208,9 @@ window.addCompanyRateRow = function(rt) {
   const isConsumable = document.getElementById('type-consumable').checked;
   const row = document.createElement('div');
   row.className = 'company-rate-row';
-  row.style.cssText = 'display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) minmax(0,1fr) auto;gap:6px;align-items:end;margin-bottom:6px';
+  row.style.cssText = 'display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) minmax(0,1fr) auto;gap:6px;align-items:end;margin-bottom:8px;padding-bottom:8px;border-bottom:1px dashed var(--border)';
+  // Effective months (3.19.0): blank = open-ended. A rate applies to lines
+  // whose rental STARTS inside it, so a contracted rate can go in early.
   row.innerHTML = `
     <label style="font-size:10px;color:var(--text-dim)">COMPANY
       <select class="field-input field-input-sm cr-company">
@@ -2112,7 +2221,11 @@ window.addCompanyRateRow = function(rt) {
       <input type="number" class="field-input field-input-sm cr-daily" min="0" step="0.01" value="${Number(rt.rental_cost || 0).toFixed(2)}"></label>
     <label style="font-size:10px;color:var(--text-dim);${isConsumable ? 'visibility:hidden' : ''}" class="cr-weekly-wrap">$/WEEK
       <input type="number" class="field-input field-input-sm cr-weekly" min="0" step="0.01" value="${Number(rt.weekly_rate || 0).toFixed(2)}"></label>
-    <button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" title="Remove" onclick="this.closest('.company-rate-row').remove();_syncCompanyRatesEmpty()">✕</button>`;
+    <button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" title="Remove" onclick="this.closest('.company-rate-row').remove();_syncCompanyRatesEmpty()">✕</button>
+    <label style="font-size:10px;color:var(--text-dim)">FROM (month)
+      <input type="month" class="field-input field-input-sm cr-start" placeholder="YYYY-MM" value="${esc(rt.start_month || '')}" title="First month this rate applies — blank = no start"></label>
+    <label style="font-size:10px;color:var(--text-dim);grid-column:span 2">THROUGH (month)
+      <input type="month" class="field-input field-input-sm cr-end" placeholder="YYYY-MM" value="${esc(rt.end_month || '')}" title="Last month this rate applies — blank = ongoing"></label>`;
   host.appendChild(row);
   _syncCompanyRatesEmpty();
 };
@@ -2121,6 +2234,8 @@ function _collectCompanyRates() {
     company: row.querySelector('.cr-company').value,
     rental_cost: parseFloat(row.querySelector('.cr-daily').value) || 0,
     weekly_rate: parseFloat(row.querySelector('.cr-weekly').value) || 0,
+    start_month: row.querySelector('.cr-start').value.trim(),
+    end_month: row.querySelector('.cr-end').value.trim(),
   })).filter(r => r.company);
 }
 

@@ -1655,9 +1655,18 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
   let _availFetchSeq = 0;
   let _currentAssetRate = {daily: 0, weekly: 0, isConsumable: false};
   // Performance Company special rates (3.8.0) — {type_id: {company, daily,
-  // weekly}} for this show's company, from GET /shows/<id>/assets.
+  // weekly}} for this show's company, from GET /shows/<id>/assets: the card
+  // in effect on the default rental start. _companyRatePeriods (3.19.0) has
+  // every dated card per type; a line takes the one its START falls in.
   let _companyRates = {};
+  let _companyRatePeriods = null;
   let _perfCompany = '';
+  function _companyRateOn(typeId, iso) {
+    if (!_companyRatePeriods) return _companyRates[String(typeId)] || null;
+    const d = iso || localTodayIso();
+    return (_companyRatePeriods[String(typeId)] || [])
+      .find(c => (!c.start || c.start <= d) && (!c.end || d <= c.end)) || null;
+  }
 
   // Smart-cap rate-card math — mirrors _compute_locked_price() in app.py so the
   // add-asset preview matches what the server will lock in. Returns the per-unit
@@ -1709,6 +1718,18 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     const r = _currentAssetRate || {daily: 0, weekly: 0, isConsumable: false};
     const start = document.getElementById('asset-add-start')?.value || '';
     const end   = document.getElementById('asset-add-end')?.value   || '';
+    // The company card is the one in effect on the rental start (3.19.0),
+    // so moving the start can switch rate period.
+    if (r.typeId != null) {
+      const cr = _companyRateOn(r.typeId, start);
+      r.daily = Number(cr ? cr.daily : r.stdDaily) || 0;
+      r.weekly = Number(cr ? cr.weekly : r.stdWeekly) || 0;
+      const rateNote = document.getElementById('asset-add-rate-note');
+      if (rateNote) {
+        rateNote.textContent = cr ? `${cr.company} company rate` : '';
+        rateNote.style.display = cr ? '' : 'none';
+      }
+    }
     const qty   = parseInt(document.getElementById('asset-add-qty')?.value, 10) || 1;
     const b = _assetPriceBreakdown(r.daily, r.weekly, start, end, r.isConsumable, qty);
     const priceEl = document.getElementById('asset-add-price');
@@ -1751,6 +1772,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     const data = await r.json();
     _assetRentalWindow = data.rental_window || {start: null, end: null};
     _companyRates = data.company_rates || {};
+    _companyRatePeriods = data.company_rate_periods || null;
     _perfCompany = data.performance_company || '';
     renderAssets(data.assets || [], data.external_rentals || []);
     renderApprovalBadge(data.approval || {approved: false});
@@ -2039,17 +2061,14 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
     // Remember this type's rate card so the price + breakdown can recompute
     // live as the dates / quantity change (see _recalcAssetPrice).
-    const cr = _companyRates[String(typeId)];
+    // (_recalcAssetPrice picks the company card for the start date.)
     _currentAssetRate = {
-      daily:       Number(cr ? cr.daily  : price)      || 0,
-      weekly:      Number(cr ? cr.weekly : weeklyRate) || 0,
+      typeId,
+      stdDaily:    Number(price)      || 0,
+      stdWeekly:   Number(weeklyRate) || 0,
+      daily: 0, weekly: 0,
       isConsumable: !!isConsumable,
     };
-    const rateNote = document.getElementById('asset-add-rate-note');
-    if (rateNote) {
-      rateNote.textContent = cr ? `${cr.company} company rate` : '';
-      rateNote.style.display = cr ? '' : 'none';
-    }
     _recalcAssetPrice();
 
     closeAssetSearch();

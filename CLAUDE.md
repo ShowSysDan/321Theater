@@ -782,6 +782,17 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
 - Company changes never silently re-price: the Assets tab offers Re-price
   (`…/assets/apply-company-rates`) for lines whose `rate_company` doesn't
   match, skipping hand-priced lines (`_asset_line_hand_priced`).
+- **Rate periods (3.19.0):** `asset_company_rates` is keyed by `id` with
+  `start_month` / `end_month` (1st of the month, NULL = open; end runs to
+  that month's last day). One company may hold several NON-overlapping
+  periods per type (`_save_company_rates` refuses overlaps). A line takes the
+  card in effect on its RENTAL START — always via `_company_rate_on(cards,
+  date)` over `_show_company_rates()`'s `{type: [cards]}`; never index a
+  single card per type. The show-assets JSON keeps `company_rates` (card on
+  the default rental start, for old tabs) and adds `company_rate_periods`
+  (show.html / asset_approvals.html pick by start date). Asset Manager →
+  **Company Rates** lists every rate (`/settings/asset-company-rates/all`,
+  CSV `…/export`, syslog ASSET_COMPANY_RATES_EXPORT).
 
 ## Piano Tuning module (3.9.0)
 - Optional module `piano_tuning` (APP_MODULES). `piano_tunings` table; the
@@ -865,6 +876,14 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   one field ONCE (marker `piano_tuning_field_seeded:<app_schema>` in shared
   app_settings) at the end of backline_section; FORM_FIELDS_SEED has it for
   fresh installs.
+- **Service record (3.19.0):** a COMPLETED tuning owns one `asset_logs` row
+  (type 'service', `asset_logs.piano_tuning_id`) on the unit that was tuned —
+  `_sync_piano_service_log()` is its only writer (piano update route + house
+  create): explicit unit → the one pinned unit of the model on the show →
+  the model's only live unit → the unit an earlier entry sits on. None →
+  no entry (the Manage dialog warns). Leaving 'completed' removes it; edits
+  rewrite unit/date/text. init_db's one-time backfill mirrors the first
+  three rules and `_piano_service_body`. Syslog PIANO_SERVICE_LOG.
 - Cancellation request (3.11.0): once the manager is on it, a PM only ASKS
   (`/piano-tunings/<id>/cancel-request` POST; DELETE = withdraw / manager
   decline) — `cancel_pending` = flag set and status requested/scheduled. The

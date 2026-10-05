@@ -10,7 +10,7 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">Piano Tuning</h1>
-    <p class="page-sub">Every tuning requested from a show page. Schedule it with a vendor, set the tuning time (it goes onto the show's production schedule) and the cost (it shows on the show's Assets tab and invoices). <strong>Add House Tuning</strong> logs a tuning that isn't for a show: maintenance, a rehearsal, a recording.</p>
+    <p class="page-sub">Every tuning requested from a show page. Schedule it with a vendor, set the tuning time (it goes onto the show's production schedule) and the cost (it shows on the show's Assets tab and invoices). <strong>Add House Tuning</strong> logs a tuning that isn't for a show: maintenance, a rehearsal, a recording. A <strong>Completed</strong> tuning is added to the piano unit's service record (Assets → unit → Log).</p>
   </div>
   <div class="header-actions">
     <button type="button" class="btn btn-ghost btn-sm" onclick="pvOpen()">Vendors</button>
@@ -60,6 +60,7 @@
     <div class="modal-body">
       <input type="hidden" id="pt-id">
       <div id="pt-show" style="font-size:12px;color:var(--text-dim);margin-bottom:10px"></div>
+      <div id="pt-svc" class="pt-svc" style="display:none"></div>
       <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px">
         <div class="field-group" id="pt-purpose-row" style="display:none;grid-column:span 2">
           <label class="field-label" for="pt-purpose">PURPOSE (HOUSE TUNING)</label>
@@ -173,6 +174,8 @@
 .piano-table .sub { font-size: 11px; color: var(--text-dim); }
 .pv-archived td { opacity: .55; }
 .pv-form { border-top: 1px solid var(--border); margin-top: 10px; }
+.pt-svc { font-size: 12px; margin: -4px 0 10px; color: var(--text-dim); }
+.pt-svc.pt-svc-missing { color: #d97706; }
 </style>
 
 <script>
@@ -294,6 +297,7 @@
       vsel.insertAdjacentHTML('afterend', `<div id="pt-vendor-legacy" class="text-dim" style="font-size:11px;margin-top:3px">Was: ${esc(t.vendor)}</div>`);
     }
     _ptPaperRender(t);
+    _ptSvcRender(t);
     document.getElementById('pt-paper').value = '';
     document.getElementById('pt-cost').value = t.cost === null || t.cost === undefined ? '' : Number(t.cost).toFixed(2);
     document.getElementById('pt-status').dataset.orig = t.status;
@@ -331,6 +335,17 @@
       ? `<a href="/shows/${t.show_id}/external-rentals/${t.er_id}/pdf" target="_blank">📄 ${esc(t.paperwork_filename)}</a>
          <button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="ptRemovePaper()">Remove</button>`
       : '<span class="text-dim">None attached</span>';
+  }
+  // A completed tuning's entry in the unit's service record (3.19.0).
+  function _ptSvcRender(t) {
+    const el = document.getElementById('pt-svc');
+    const missing = t && t.status === 'completed' && !t.service_log_unit && _pianos.length > 0;
+    el.className = 'pt-svc' + (missing ? ' pt-svc-missing' : '');
+    el.textContent = !t || t.status !== 'completed' ? ''
+      : t.service_log_unit ? `🔧 Logged in the service record of ${t.service_log_unit} (Assets → unit → Log).`
+      : missing ? "⚠ Not in a service record — pick the unit (S/N) that was tuned and Save to log it."
+      : '';
+    el.style.display = el.textContent ? '' : 'none';
   }
   // Paperwork saves immediately (its own endpoint), separate from Save.
   window.ptUploadPaper = async function() {
@@ -407,6 +422,7 @@
       `<option value="${v.id}" data-price="${v.typical_price == null ? '' : v.typical_price}">${esc(v.name)}${v.typical_price != null ? ' — $' + Number(v.typical_price).toFixed(2) : ''}</option>`).join('');
     document.getElementById('pt-vendor-legacy') && document.getElementById('pt-vendor-legacy').remove();
     ptPickWarn();
+    _ptSvcRender(null);
     _ptHouseMode(true, null);
     document.getElementById('pt-date').value = localTodayIso();
     document.getElementById('pt-modal').style.display = 'flex';
