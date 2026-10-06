@@ -47,7 +47,7 @@
 
 <div id="arch-list" class="show-grid archived">
   {% for s in shows %}
-  <div class="show-card archived" data-search="{{ (s.name ~ ' ' ~ (s.venue or '') ~ ' ' ~ (s.company or ''))|lower }}"
+  <div class="show-card archived{% if s.show_mode == 'event' %} show-card-event{% endif %}" data-search="{{ (s.name ~ ' ' ~ (s.venue or '') ~ ' ' ~ (s.company or ''))|lower }}"
        data-date="{{ s.show_date or '' }}" data-venue="{{ s.venue or 'Unassigned' }}">
     <a class="show-card-link-overlay" href="{{ url_for('show_page', show_id=s.id, tab='advance') }}"></a>
     <div class="show-card-name">{{ s.name }}{% if s.is_test %} <span class="test-instance-badge" style="font-size:9px">TEST</span>{% endif %}</div>

@@ -150,7 +150,7 @@
     </div>
     <div class="venue-col-body">
       {% for s in shows %}
-      <a class="show-card{% if s.is_test %} show-card-test{% endif %}{% if s.show_mode == 'event' %} show-card-event{% endif %}" href="{{ url_for('show_page', show_id=s.id, tab='advance') }}"
+      <a class="show-card{% if s.is_test %} show-card-test{% endif %}{% if s.show_mode == 'event' %} show-card-event{% endif %}{% if s.is_past %} show-card-past{% endif %}" href="{{ url_for('show_page', show_id=s.id, tab='advance') }}"
          data-search="{{ (s.name ~ ' ' ~ (s.venue or ''))|lower }}" data-date="{{ s.show_date or '' }}"
          data-is-test="{{ '1' if s.is_test else '0' }}">
         <div class="show-card-name">
@@ -203,7 +203,7 @@
   </button>
   <div id="archived-list" class="show-grid archived hidden" style="margin-top:12px">
     {% for s in archived_shows %}
-    <div class="show-card archived" data-search="{{ (s.name ~ ' ' ~ (s.venue or ''))|lower }}" data-date="{{ s.show_date or '' }}"
+    <div class="show-card archived{% if s.show_mode == 'event' %} show-card-event{% endif %}" data-search="{{ (s.name ~ ' ' ~ (s.venue or ''))|lower }}" data-date="{{ s.show_date or '' }}"
          data-venue="{{ (s.venue or '')|trim or 'Unassigned' }}">
       <a class="show-card-link-overlay" href="{{ url_for('show_page', show_id=s.id, tab='advance') }}"></a>
       <div class="show-card-name">{{ s.name }}</div>
