@@ -41,6 +41,8 @@
   --blue:        #4A9EFF;
   --event:       #14B8A6;   /* teal – Event-mode accent (distinct from blue/training + purple/test) */
   --event-dim:   #0F8A7E;
+  --past:        #94A3B8;   /* slate – dates gone by, waiting to auto-archive (3.19.3) */
+  --past-dim:    #64748B;
   --green:       #22C55E;
   --red:         #EF4444;
   --yellow:      #EAB308;
@@ -819,17 +821,17 @@ html[data-theme="light"] select.field-input {
 /* ── Past-Show Badge (3.6.0) ─────────────────────────────────────────
    An active show whose last date has gone by stays on the dashboard for the
    auto-archive grace period (Settings → Shows); the badge says so, and its
-   tooltip gives the day it archives. */
+   tooltip gives the day it archives. Since 3.19.3 it is a slate tag like
+   the EVENT one, and the card's left flag turns the same slate (below). */
 .past-badge {
   display: inline-block;
   font-size: 9px;
   font-weight: 700;
-  padding: 0 5px;
+  padding: 1px 5px;
   border-radius: 3px;
   letter-spacing: .06em;
-  background: rgba(148,163,184,.16);
-  border: 1px solid rgba(148,163,184,.45);
-  color: var(--text-dim);
+  background: rgba(148,163,184,.2);
+  color: var(--past);
   margin-left: 6px;
   vertical-align: middle;
 }
@@ -856,10 +858,16 @@ html[data-theme="light"] select.field-input {
   --accent: var(--event);
   --accent-dim: var(--event-dim);
 }
+/* Past (3.19.3): a show OR event whose dates have gone by, still active for
+   the auto-archive grace days, flags slate. Declared after the event rule so
+   past wins on a past event (its EVENT tag still says what it is). */
+.show-card.show-card-past {
+  --accent: var(--past);
+  --accent-dim: var(--past-dim);
+}
 .today-card.today-card-event {
   --accent: var(--event);
   --accent-dim: var(--event-dim);
-  border-left: 3px solid var(--event-dim);
 }
 .today-card-tag.tag-event {
   background: rgba(20,184,166,.2); color: var(--event);
@@ -1264,11 +1272,15 @@ input[type=checkbox].oh-check:disabled {
 .field-msg-error   { background: rgba(239,68,68,.1);  color: var(--red);   border: 1px solid rgba(239,68,68,.3);  }
 
 /* ── Login Page ──────────────────────────────────────────────────── */
-.login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--bg); background-image: radial-gradient(ellipse at 60% 30%, rgba(245,127,32,0.06) 0%, transparent 60%); }
-.login-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 40px; width: 360px; }
-.login-brand { text-align: center; margin-bottom: 28px; }
-.login-brand h1 { font-family: var(--font-cond); font-size: 22px; font-weight: 700; color: var(--text); letter-spacing: 0.1em; margin: 10px 0 4px; }
-.login-brand p { font-size: 12px; color: var(--text-muted); }
+/* Sign-in pages (login, register, forgot / forced password), 3.19.3: the
+   main app's look. No background of their own, so the page is the same flat
+   grey + grain as every other page (body); the form is one centred card
+   with the cards' soft shadow (--hl / --lift-hover, the glass block below). */
+.login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 32px 16px; }
+.login-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 36px 40px 28px; width: 380px; max-width: 100%; box-shadow: var(--hl), var(--lift-hover); }
+.login-brand { text-align: center; margin-bottom: 24px; padding-bottom: 22px; border-bottom: 1px solid var(--border); }
+.login-brand h1 { font-family: var(--font-main); font-size: 22px; font-weight: 600; color: var(--ink); letter-spacing: 0.1em; margin: 10px 0 6px; }
+.login-brand p { font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim); }
 .login-form { display: flex; flex-direction: column; gap: 14px; }
 .login-footer { text-align: center; font-size: 11px; color: var(--text-muted); margin-top: 20px; }
 /* TEST_MODE install marker (sidebar footer, login card, mobile header). */
@@ -1594,6 +1606,8 @@ html[data-theme="light"] {
   --blue:        #1d6ed8;
   --event:       #0d9488;   /* teal – Event-mode accent (light theme) */
   --event-dim:   #0a7268;
+  --past:        #475569;   /* slate – past show/event (light theme) */
+  --past-dim:    #94A3B8;
   --green:       #16a34a;
   --red:         #dc2626;
   --yellow:      #ca8a04;
@@ -1656,9 +1670,6 @@ html[data-theme="light"] select option {
 }
 html[data-theme="light"] .modal-overlay {
   background: rgba(0,0,0,.4);
-}
-html[data-theme="light"] .login-page {
-  background-image: radial-gradient(ellipse at 60% 30%, rgba(184,114,20,.06) 0%, transparent 60%);
 }
 
 /* ── Dark Mode Toggle Button ──────────────────────────────────────── */
@@ -2337,15 +2348,18 @@ html[data-theme="light"] .phead-tab .count { background: rgba(15,23,42,.07); col
 .tab-btn.active, .rpt-tab.active, .perf-view.active { color: var(--ink); border-bottom-color: var(--accent); text-shadow: none; background-image: none; }
 
 /* ── Cards: small resting shadow (the --lift every content panel uses,
-   3.18.5), a bigger lift on hover; no coloured left edges (status = tags) */
+   3.18.5), a bigger lift on hover. The colour flag is back (3.19.3): a 3px
+   left edge in the card's --accent-dim, full --accent on hover — orange =
+   show, teal = event, slate = past (the .show-card-event / -past rules swap
+   --accent for the card). Same on the Happening Today cards. */
 .show-card, .today-card {
   background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--hl), var(--lift);
   transition: transform .15s, border-color .15s, background .15s, box-shadow .15s;
 }
-.show-card, .show-card.show-card-event, .today-card.today-card-event { border-left: 1px solid var(--border); }
+.show-card, .today-card { border-left: 3px solid var(--accent-dim); }
 .show-card:hover, .today-card:hover {
   transform: translateY(-2px); background: var(--bg-card-hover); border-color: var(--line-strong);
-  box-shadow: var(--hl), var(--lift-hover);
+  border-left-color: var(--accent); box-shadow: var(--hl), var(--lift-hover);
 }
 .show-card:focus-visible, .today-card:focus-visible { outline: 2px solid #F08A3C; outline-offset: 2px; }
 .show-card-name, .today-card-name { color: var(--ink); }

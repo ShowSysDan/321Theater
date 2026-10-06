@@ -974,6 +974,16 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
 - Sidebar sub-item connectors are `.nav-item.sub::before`, drawn OUTSIDE the
   row (rounded corners clipped the old in-row lines); rows touch (margin 0)
   and the last of a run uses `:not(:has(+ .nav-item.sub))` for the └.
+- **Card colour flags (3.19.3, the user asked for them back):** show/today
+  cards carry a 3px left edge in the card's `--accent-dim` (→ `--accent` on
+  hover): orange = show, teal = event (`.show-card-event` /
+  `.today-card-event`), slate = past (`.show-card-past` from `s.is_past`,
+  `--past` / `--past-dim`; declared after the event rule so past wins). The
+  colour comes ONLY from those `--accent` swaps — don't re-add per-state
+  border rules, and don't remove the flags as "status = tags".
+- **Sign-in pages** (`.login-page` / `.login-card`: login, register, forgot,
+  forced change) paint no background of their own — the body's grey + grain
+  shows — and the card uses `var(--hl), var(--lift-hover)`. No glow.
 - Theme: `users.theme` = dark | light | auto. Auto is resolved before first
   paint by the head script in base.html (`data-theme-pref`) and follows the
   OS live; the toggle cycles dark → light → auto. New accounts get 'auto'.
