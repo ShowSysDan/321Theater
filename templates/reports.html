@@ -10,7 +10,7 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">Reports</h1>
-    <p class="page-sub">Shows, Arts Groups, gear, labor and piano tunings — one filter for every tab, drill down with More filters, and PDF any tab. Test/demo shows are left out.</p>
+    <p class="page-sub">Shows, advance answers, Arts Groups, gear, labor and piano tunings — one filter for every tab, drill down with More filters, and PDF any tab. Test/demo shows are left out.</p>
   </div>
 </div>
 
@@ -104,6 +104,7 @@
 
 <div class="rpt-tabs" role="tablist">
   <button type="button" class="rpt-tab" data-tab="overview">Overview</button>
+  <button type="button" class="rpt-tab" data-tab="advance">Advance Fields</button>
   {% if can_assets %}
   <button type="button" class="rpt-tab" data-tab="groups">Arts Groups</button>
   <button type="button" class="rpt-tab" data-tab="assets">Assets</button>
@@ -140,6 +141,41 @@
       <label class="field-label">UNIT (OPTIONAL)</label>
       <select id="ri-unit" class="field-input" onchange="rptLoad()"><option value="">All units</option></select>
     </div>
+  </div>
+</template>
+
+{# Advance Fields (3.20.0): one advance form field across every filtered
+   show — e.g. Runner = Yes at one venue for a date range. #}
+<template id="rpt-advance-filters">
+  <div class="rpt-subfilters">
+    <div class="field-group" style="min-width:260px">
+      <label class="field-label">ADVANCE FIELD</label>
+      <select id="ra-field" class="field-input">
+        <option value="">— Pick a field —</option>
+        {% for sec_label, sec_fields in adv_sections %}
+        <optgroup label="{{ sec_label }}">
+          {% for f in sec_fields %}<option value="{{ f.key }}">{{ f.label }}</option>{% endfor %}
+        </optgroup>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field-group">
+      <label class="field-label">ANSWER</label>
+      <select id="ra-answer" class="field-input"><option value="">Any answer</option></select>
+    </div>
+    <div class="field-group">
+      <label class="field-label">ANSWER CONTAINS</label>
+      <input type="text" id="ra-q" class="field-input" placeholder="Any text" autocomplete="off">
+    </div>
+    <div class="field-group">
+      <label class="field-label">SHOWS</label>
+      <select id="ra-include" class="field-input">
+        <option value="answered">With an answer</option>
+        <option value="all">All (answered or not)</option>
+        <option value="blank">Not answered</option>
+      </select>
+    </div>
+    <button type="button" class="btn btn-sm btn-ghost" onclick="rptAdvApply()">Apply</button>
   </div>
 </template>
 
@@ -292,7 +328,29 @@
     rptCloseModal();
     setTab('items');
   };
-  const PDF_KEY = {items: 'items', overview: 'overview', groups: 'groups', assets: 'assets', rentals: 'rentals',
+  // Advance Fields selection — kept across reloads of the tab and in the URL.
+  const _adv = {field: _q0.get('field') || '', answer: _q0.get('answer') || '',
+                q: _q0.get('q') || '', include: _q0.get('include') || 'answered'};
+  function _advUrl() {
+    try {
+      const u = new URL(location.href);
+      ['field', 'answer', 'q', 'include'].forEach(k => {
+        if (_adv[k] && !(k === 'include' && _adv[k] === 'answered')) u.searchParams.set(k, _adv[k]);
+        else u.searchParams.delete(k);
+      });
+      history.replaceState(null, '', u);
+    } catch (e) {}
+  }
+  const _advParams = () => ({field: _adv.field, answer: _adv.answer, q: _adv.q,
+                             include: _adv.include === 'answered' ? '' : _adv.include});
+  window.rptAdvApply = function() {
+    const f = _val('ra-field');
+    if (f !== _adv.field) _adv.answer = '';     // a new field's answers differ
+    else _adv.answer = _val('ra-answer');
+    _adv.field = f; _adv.q = _val('ra-q').trim(); _adv.include = _val('ra-include') || 'answered';
+    rptLoad();
+  };
+  const PDF_KEY = {advance: 'advance', items: 'items', overview: 'overview', groups: 'groups', assets: 'assets', rentals: 'rentals',
                    labor: 'labor', lines: 'lines', breaks: 'breaks', variance: 'variance', piano: 'piano'};
   function openPdf(report, extra) {
     window.open('/reports/pdf?' + params(Object.assign({report}, extra || {})), '_blank', 'noopener');
@@ -303,6 +361,10 @@
       extra.asset_category_id = _val('rr-category'); extra.asset_type_id = _val('rr-type');
     }
     if (_tab === 'breaks') extra.min_diff = _val('rb-min');
+    if (_tab === 'advance') {
+      if (!_adv.field) { alert('Pick an advance field first.'); return; }
+      Object.assign(extra, _advParams());
+    }
     if (_tab === 'items') {
       if (!_item.type) { alert('Pick an item first.'); return; }
       extra.type_id = _item.type; extra.unit_id = _item.unit;
@@ -490,6 +552,56 @@
       ]) + table('t-types', 'Asset usage by item', cols, d.types, {sortKey: 'lines', onRow: assetUnits,
         rowClass: r => r.lines ? '' : 'rpt-idle',
         note: 'Click an item for its individual units. ' + (d.range_days ? `Utilization = unit-days booked ÷ (units owned × ${d.range_days} days in range).` : 'Pick a From and To date to see utilization.') + ' Dimmed rows were never rented in the range.'});
+    },
+    async advance() {
+      const head = document.getElementById('rpt-advance-filters').innerHTML;
+      _advUrl();
+      const restore = (opts) => setTimeout(() => {
+        const f = document.getElementById('ra-field'); if (!f) return;
+        f.value = _adv.field;
+        f.onchange = () => rptAdvApply();
+        const a = document.getElementById('ra-answer');
+        a.innerHTML = '<option value="">Any answer</option>' + (opts || []).map(o =>
+          `<option value="${esc(o.value)}">${esc(o.value)}${o.shows != null ? ` (${o.shows})` : ''}</option>`).join('');
+        a.value = _adv.answer;
+        a.onchange = () => rptAdvApply();
+        document.getElementById('ra-include').value = _adv.include;
+        document.getElementById('ra-include').onchange = () => rptAdvApply();
+        const q = document.getElementById('ra-q');
+        q.value = _adv.q;
+        q.onkeydown = e => { if (e.key === 'Enter') rptAdvApply(); };
+      });
+      if (!_adv.field) {
+        restore([]);
+        return head + '<div class="rpt-loading text-dim">Pick an advance form field to see what every show answered — e.g. <em>Runner</em>, then a venue and date range above, and <em>Answer</em> = Yes for every show that asked for one.</div>';
+      }
+      const d = await get('/api/reports/advance-field?' + params(_advParams()));
+      // Answer list = the field's own options, then anything else shows typed.
+      const seen = {};
+      d.values.forEach(v => { seen[v.value.toLowerCase()] = v; });
+      const opts = d.field.options.map(o => ({value: o, shows: (seen[o.toLowerCase()] || {}).shows || 0}));
+      const have = new Set(d.field.options.map(o => o.toLowerCase()));
+      d.values.filter(v => !have.has(v.value.toLowerCase())).slice(0, 200).forEach(v => opts.push(v));
+      if (_adv.answer && !opts.some(o => o.value.toLowerCase() === _adv.answer.toLowerCase())) opts.push({value: _adv.answer, shows: 0});
+      restore(opts);
+      const t = d.totals;
+      const what = _adv.include === 'blank' ? 'with no answer' : _adv.include === 'all' ? '' : 'with an answer';
+      return head + cards([
+        [num(t.shows), 'Shows in filter'], [num(t.answered), 'Answered'],
+        [num(t.blank), 'Not answered'], [num(t.matching), 'Listed below'],
+      ]) + table('t-adv', `${d.field.label} — ${d.field.section}`, [
+        {key: 'date', label: 'Date'},
+        {key: 'name', label: 'Show', fmt: (v, r) => showLink(v, r.id)},
+        {key: 'venue', label: 'Venue'},
+        {key: 'company', label: 'Arts Group'},
+        {key: 'value', label: 'Answer', fmt: v => v ? esc(v).replace(/\n/g, '<br>') : '<span class="sub">—</span>'},
+        {key: 'updated', label: 'Last edited', fmt: v => v ? esc(localIsoDate(parseServerTime(v))) : '—',
+         csv: r => r.updated ? localIsoDate(parseServerTime(r.updated)) : ''},
+      ], d.rows, {sortKey: 'date',
+        note: `Shows ${_adv.answer ? `answering “${esc(_adv.answer)}”` : what}${_adv.q ? ` containing “${esc(_adv.q)}”` : ''}. Date, venue, Arts Group and More filters above apply. A multi-select matches when the answer is one of its picks; a yes/no left on “—” counts as not answered.`})
+        + (d.values.length ? table('t-adv-values', 'Answers', [
+          {key: 'value', label: 'Answer'}, {key: 'shows', label: 'Shows', num: true},
+        ], d.values, {sortKey: 'shows', note: 'Every answer given across the shows in the filter (ignores the Answer / contains pickers).'}) : '');
     },
     async items() {
       const head = document.getElementById('rpt-items-filters').innerHTML;

@@ -919,6 +919,12 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   Settle Now) with the actual `break*`; Estimate vs Settlement calls both
   billing engines (`_calc_labor_cost_for_show` vs
   `_calc_post_show_labor_cost`) — never re-derive either.
+- **Advance Fields (3.20.0)** `/api/reports/advance-field?field=&answer=&q=&include=`
+  (any Reports user, `advance` in `_RPT_PDF`): one form field's value per
+  `_report_shows()` show. `_report_adv_values()` is the one decoder of
+  stored values (multi-select JSON list, checkbox 'true', yes/no '-' =
+  unanswered); `_RPT_ADV_SKIP_TYPES` (notes/piano/pdf_form/file_upload) are
+  never offered.
 - **PDFs:** `GET /reports/pdf?report=<key>&<filters>` calls the tab's own
   JSON view function (`app.view_functions[...]`, same request args, so its
   gate applies) and renders `templates/pdf/report_pdf.html` from the
