@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.19.3'
+APP_VERSION = '3.20.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -25995,10 +25995,15 @@ def reports_page():
              for r in db.execute(
                  "SELECT id, name, COALESCE(show_date, load_in_date) AS d FROM shows "
                  "WHERE COALESCE(is_test, 0) = 0 ORDER BY d DESC NULLS LAST, id DESC LIMIT 3000").fetchall()]
+    adv_sections = []           # [(section label, [{key, label}])] in form order
+    for r in _report_adv_fields(db):
+        if not adv_sections or adv_sections[-1][0] != r['section']:
+            adv_sections.append((r['section'], []))
+        adv_sections[-1][1].append({'key': r['field_key'], 'label': r['label'] or r['field_key']})
     db.close()
     return render_template('reports.html', venues=venues, companies=companies,
                            asset_categories=asset_categories, asset_types=asset_types,
-                           positions=positions, techs=techs, shows=shows,
+                           positions=positions, techs=techs, shows=shows, adv_sections=adv_sections,
                            can_assets=_can_report_assets(), can_labor=_can_report_labor(),
                            can_piano=_can_report_piano(), user=get_current_user())
 
@@ -26569,6 +26574,114 @@ def report_piano():
                     'months': [months[k] for k in sorted(months)]})
 
 
+# ── Advance Fields report (3.20.0) ─────────────────────────────────────────
+# One advance form field across every show the filters select — e.g. the
+# "Runner" field: which shows at this venue asked for one in this date range.
+# Screen-only / file field types have no value worth listing.
+_RPT_ADV_SKIP_TYPES = ('notes', 'piano_tuning', 'pdf_form', 'file_upload')
+
+
+def _report_adv_fields(db):
+    """Reportable advance fields in form order, with their section label."""
+    return db.execute("""
+        SELECT f.field_key, f.label, f.field_type, f.allow_multi, f.options_json,
+               s.label AS section
+        FROM form_fields f JOIN form_sections s ON s.id = f.section_id
+        WHERE f.field_type <> ALL(%s)
+        ORDER BY s.sort_order, s.id, f.sort_order, f.id""",
+        (list(_RPT_ADV_SKIP_TYPES),)).fetchall()
+
+
+def _report_adv_values(ftype, allow_multi, raw):
+    """A stored advance value → list of display answers ([] = not answered).
+    Multi-selects store a JSON list; checkboxes 'true'; an unpicked yes/no
+    '-' (elsewhere '-' is an explicit N/A)."""
+    v = (raw or '').strip()
+    if not v:
+        return []
+    if ftype == 'checkbox':
+        return ['Checked'] if v == 'true' else []
+    if v == '-':
+        return [] if ftype == 'yes_no' else ['N/A']
+    if ftype == 'select' and allow_multi:
+        try:
+            vals = json.loads(v)
+        except ValueError:
+            return [v]
+        if not isinstance(vals, list):
+            return [str(vals)]
+        return [str(x).strip() for x in vals if str(x).strip()]
+    return [v]
+
+
+@app.route('/api/reports/advance-field')
+@reports_required
+def report_advance_field():
+    """Every filtered show's answer to one advance field. `answer` keeps only
+    shows with that answer (a multi-select matches when it's one of the
+    picks), `q` only answers containing the text, `include` = answered
+    (default) | all | blank."""
+    key = (request.args.get('field') or '').strip()
+    db = get_db()
+    try:
+        f = next((r for r in _report_adv_fields(db) if r['field_key'] == key), None)
+        if not f:
+            return jsonify({'error': 'Pick an advance field.'}), 400
+        shows = _report_shows(db)
+        stored = {r['show_id']: r for r in db.execute(
+            'SELECT show_id, field_value, updated_at::timestamptz AS updated_at FROM advance_data '
+            'WHERE field_key = %s AND show_id = ANY(%s)', (key, list(shows) or [0])).fetchall()}
+    finally:
+        db.close()
+    options = []
+    if f['field_type'] == 'yes_no':
+        options = ['Yes', 'No']
+    elif f['field_type'] == 'checkbox':
+        options = ['Checked']
+    elif f['options_json']:
+        try:
+            for o in json.loads(f['options_json']) or []:
+                o = o.get('value') if isinstance(o, dict) else o
+                if o is not None and str(o).strip():
+                    options.append(str(o).strip())
+        except (ValueError, TypeError, AttributeError):
+            pass
+    answer = (request.args.get('answer') or '').strip().lower()
+    q = (request.args.get('q') or '').strip().lower()
+    include = request.args.get('include') or 'answered'
+    counts, rows = {}, []
+    answered = 0
+    for sid, s in shows.items():
+        r = stored.get(sid)
+        vals = _report_adv_values(f['field_type'], f['allow_multi'], r['field_value'] if r else '')
+        if vals:
+            answered += 1
+        for v in vals:
+            counts[v] = counts.get(v, 0) + 1
+        if include == 'blank':
+            if vals:
+                continue
+        elif include != 'all' and not vals:
+            continue
+        if answer and answer not in (v.lower() for v in vals):
+            continue
+        if q and not any(q in v.lower() for v in vals):
+            continue
+        rows.append({'id': sid, 'name': s['name'], 'date': s['date'], 'venue': s['venue'],
+                     'company': s['company'], 'status': s['status'] or 'active',
+                     'value': ', '.join(vals),
+                     'updated': _ts_out(r['updated_at']) if r and vals else None})
+    rows.sort(key=lambda x: (x['date'] or '', x['name'] or ''))
+    return jsonify({
+        'field': {'key': f['field_key'], 'label': f['label'], 'type': f['field_type'],
+                  'section': f['section'], 'multi': bool(f['allow_multi']), 'options': options},
+        'totals': {'shows': len(shows), 'answered': answered, 'blank': len(shows) - answered,
+                   'matching': len(rows)},
+        'values': sorted(({'value': k, 'shows': n} for k, n in counts.items()),
+                         key=lambda x: (-x['shows'], x['value'].lower())),
+        'rows': rows})
+
+
 def _report_line_filter():
     """(position_id, crew_id) — the drill filters that also apply per LINE on
     the line-level labor reports."""
@@ -27001,6 +27114,12 @@ _RPT_PDF = {
                               ('diff_pct', 'Diff %', 'p'), ('est_hours', 'Est. hrs', 'h'),
                               ('act_hours', 'Worked hrs', 'h'), ('hours_diff', 'Hrs diff', 'h'),
                               ('added_lines', 'Added lines', 'i')])]),
+    'advance': ('Advance field', 'report_advance_field', [
+        ('Shows in filter', 'totals.shows', 'i'), ('Answered', 'totals.answered', 'i'),
+        ('Not answered', 'totals.blank', 'i'), ('Listed', 'totals.matching', 'i')], [
+        ('Shows', 'rows', [('date', 'Date', 't'), ('name', 'Show', 't'), ('venue', 'Venue', 't'),
+                           ('company', 'Arts Group', 't'), ('value', 'Answer', 't')]),
+        ('Answers', 'values', [('value', 'Answer', 't'), ('shows', 'Shows', 'i')])]),
     'piano': ('Piano tuning', 'report_piano', [
         ('Tunings', 'totals.tunings', 'i'), ('Open', 'totals.open', 'i'),
         ('Completed', 'totals.completed', 'i'), ('Cancelled', 'totals.cancelled', 'i'),
@@ -27048,6 +27167,13 @@ def _rpt_filter_summary(db):
         if v:
             r = db.execute(f'SELECT name FROM {table} WHERE id=%s', (v,)).fetchone()
             out.append(f"{label}: {r['name'] if r else '#' + str(v)}")
+    if a.get('report') == 'advance':
+        if a.get('answer'):
+            out.append(f"Answer: {a.get('answer')[:120]}")
+        if a.get('q'):
+            out.append(f"Answer contains: {a.get('q')[:120]}")
+        out.append({'all': 'Every show (answered or not)', 'blank': 'Shows with no answer'}
+                   .get(a.get('include'), 'Shows with an answer'))
     if a.get('min_diff'):
         out.append(f"Break difference ≥ {a.get('min_diff')[:4]} min")
     return out or ['All shows (no filters)']
@@ -27069,6 +27195,8 @@ def report_pdf():
         title = f"Arts Group — {(request.args.get('group_name') or request.args.get('group') or '(No company)')[:120]}"
     elif key == 'items' and data.get('item'):
         title = f"Item history — {data['item']}" + (f" · Unit {data['unit']}" if data.get('unit') else '')
+    elif key == 'advance' and data.get('field'):
+        title = f"Advance field — {data['field']['label']}"
     elif key == 'asset_units' and request.args.get('type_name'):
         title = f"Asset units — {request.args.get('type_name')[:120]}"
     cards = [(label, _rpt_fmt(_rpt_path(data, path), f)) for label, path, f in card_spec
