@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.20.0'
+APP_VERSION = '3.20.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -19103,6 +19103,33 @@ def _get_asset_availability(db, asset_type_id, start_date=None, end_date=None):
         int(asset_type_id))
 
 
+def _peak_daily_demand(rows, start_date=None, end_date=None):
+    """Highest total quantity booked on any single day of [start, end]
+    (rental dates inclusive). Rows without both dates, or a call without a
+    window, fall back to the plain sum — there is no day to compare on."""
+    ws, we = _as_date(start_date), _as_date(end_date)
+    if not (ws and we):
+        return sum(r['quantity'] or 0 for r in rows)
+    delta = {}
+    undated = 0
+    for r in rows:
+        rs, re_ = _as_date(r['rental_start']), _as_date(r['rental_end'])
+        if not (rs and re_):
+            undated += r['quantity'] or 0
+            continue
+        rs, re_ = max(rs, ws), min(re_, we)
+        if rs > re_:
+            continue
+        delta[rs] = delta.get(rs, 0) + (r['quantity'] or 0)
+        nxt = re_ + timedelta(days=1)
+        delta[nxt] = delta.get(nxt, 0) - (r['quantity'] or 0)
+    peak = current = 0
+    for d in sorted(delta):
+        current += delta[d]
+        peak = max(peak, current)
+    return peak + undated
+
+
 def _get_asset_availability_many(db, type_ids, start_date=None, end_date=None):
     """_get_asset_availability for many types over ONE date window, in at
     most 5 queries whatever the number of types: {type_id: result} (types
@@ -19172,7 +19199,11 @@ def _get_asset_availability_many(db, type_ids, start_date=None, end_date=None):
         # the per-unit logic below ignores them.
         shows = demand.get(t, [])
 
-        total_reserved = sum(r['quantity'] for r in shows)
+        # Units in use = the PEAK day's demand inside the window, not the sum
+        # of every overlapping line: one unit booked on the 27th and another
+        # on the 28th is 1 in use for a 26th–29th window, not 2 (summing made
+        # a free unit read as allocated and blocked the add).
+        total_reserved = _peak_daily_demand(shows, start_date, end_date)
         available = total_items - in_maintenance - reserve_count - total_reserved
 
         booked_item_ids = {r['asset_item_id'] for r in shows if r['asset_item_id']}
@@ -20124,11 +20155,18 @@ def show_asset_add(show_id):
     # that may want to add a line pre-hidden, otherwise default to visible.
     is_hidden = 1 if data.get('is_hidden') else 0
 
+    # Availability override: an approver (same roles as the Approvals page)
+    # may knowingly overbook from the Approvals add dialog, which sends
+    # override_availability after its warning + confirm. It skips the count
+    # checks only — a pinned unit's double-booking is still refused above.
+    override_avail = bool(data.get('override_availability')) and bool(is_price_authority)
+
     # Server-side availability enforcement. Counts all existing show_assets for
     # this type in the requested date range (the requesting show may have none
     # yet, or may already hold lines from earlier requests this same click-burst
     # fired in parallel) and rejects if this new line would push it negative.
-    pre_avail = _get_asset_availability(db, asset_type_id, rental_start, rental_end)
+    pre_avail = (None if override_avail else
+                 _get_asset_availability(db, asset_type_id, rental_start, rental_end))
     if pre_avail and not pre_avail.get('unlimited'):
         remaining = pre_avail.get('available')
         if remaining is not None and remaining - quantity < 0:
@@ -20149,7 +20187,7 @@ def show_asset_add(show_id):
     # quantity from that component type's GLOBAL inventory. Reject the add if any
     # component is short for the requested window. (The direct check above is
     # skipped for systems because their own availability is unlimited.)
-    if type_row and (type_row['is_system'] or type_row['is_package']):
+    if type_row and (type_row['is_system'] or type_row['is_package']) and not override_avail:
         shortages = _system_component_shortages(db, asset_type_id, quantity, rental_start, rental_end)
         if shortages:
             sys_name = type_row['name'] or f'System #{asset_type_id}'
@@ -20181,7 +20219,8 @@ def show_asset_add(show_id):
     # writers (from different sessions) can both pass it and both insert. After
     # committing, re-read the now-visible state and roll back if we caused an
     # over-allocation.
-    post_avail = _get_asset_availability(db, asset_type_id, rental_start, rental_end)
+    post_avail = (None if override_avail else
+                  _get_asset_availability(db, asset_type_id, rental_start, rental_end))
     if (post_avail and not post_avail.get('unlimited')
             and post_avail.get('available') is not None
             and post_avail['available'] < 0):
@@ -20206,7 +20245,7 @@ def show_asset_add(show_id):
     # adders each see the other's draw and at least one rolls back. Passing
     # back_out_system_qty=quantity reduces the test to "did a component go
     # negative?" (mirrors the direct-asset guard above).
-    if type_row and (type_row['is_system'] or type_row['is_package']):
+    if type_row and (type_row['is_system'] or type_row['is_package']) and not override_avail:
         post_shortages = _system_component_shortages(
             db, asset_type_id, quantity, rental_start, rental_end,
             back_out_system_qty=quantity
@@ -20230,6 +20269,11 @@ def show_asset_add(show_id):
     audit_detail = f'type_id={asset_type_id} qty={quantity}'
     if asset_item_id is not None:
         audit_detail += f' unit_id={asset_item_id}'
+    if override_avail:
+        audit_detail += ' availability_override=1'
+        syslog_logger.warning(
+            f"ASSET_AVAILABILITY_OVERRIDE show_id={show_id} type_id={asset_type_id} "
+            f"qty={quantity} by={session.get('username')}")
     log_audit(db, 'ASSET_ADDED_TO_SHOW', 'show_asset', row['id'], show_id=show_id,
               detail=audit_detail)
     _reset_asset_approval(db, show_id, 'asset_added')
