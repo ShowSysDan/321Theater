@@ -1002,11 +1002,17 @@ async function submitApprAsset() {
   const end    = document.getElementById('appr-add-end').value;
   const notes  = document.getElementById('appr-add-notes').value;
 
+  // The overbook warning is showing → this add is a deliberate override.
+  const warn = document.getElementById('appr-overbook-warning');
+  const overriding = !!(warn && warn.style.display !== 'none');
+  if (overriding && !confirm('This will overbook the asset for these dates. Add it anyway?')) return;
+
   const btn = document.getElementById('appr-add-submit-btn');
   btn.disabled = true;
   const payload = {asset_type_id: typeId, quantity: qty, locked_price: price,
                    rental_start: start, rental_end: end, notes};
   if (pinnedUnitId) payload.asset_item_id = pinnedUnitId;
+  if (overriding) payload.override_availability = true;
   const r = await fetch(`/shows/${showId}/assets`, {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
