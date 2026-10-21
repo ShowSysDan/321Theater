@@ -809,7 +809,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.20.1'
+APP_VERSION = '3.21.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -22614,9 +22614,14 @@ def combined_invoice_pdf():
 # 'Sent to vendor' and 'Scheduled' are one step (3.10.2): Scheduled = handed
 # to the vendor; the tuning date/time may follow. Old 'sent' rows were
 # migrated to 'scheduled'; a submitted 'sent' is read as 'scheduled'.
-PIANO_STATUSES = ('requested', 'scheduled', 'completed', 'cancelled')
+# 'seen' (3.20.1) = the manager has seen the request and is on it, nothing
+# booked yet — tells the requester it isn't sitting unread. It behaves like
+# 'requested' for the PM (still editable / cancellable until the manager
+# sets vendor, cost or paperwork) but no longer counts on the nav badge.
+PIANO_STATUSES = ('requested', 'seen', 'scheduled', 'completed', 'cancelled')
+PIANO_OPEN_STATUSES = ('requested', 'seen', 'scheduled')
 PIANO_STATUS_LABELS = {
-    'requested': 'Requested', 'scheduled': 'Scheduled',
+    'requested': 'Requested', 'seen': 'Seen / In progress', 'scheduled': 'Scheduled',
     'completed': 'Completed', 'cancelled': 'Cancelled',
 }
 # Fields the requesting PM may edit while the request is still 'requested'.
@@ -22685,18 +22690,65 @@ def _piano_pinned(db, show_ids):
         'WHERE show_id = ANY(%s) AND asset_item_id IS NOT NULL', (ids,)).fetchall()}
 
 
-def _piano_on_show(show_id, type_id, unit_id, booked, pinned):
+def _piano_on_show(show_id, type_id, unit_id, booked, pinned, unpinnable=frozenset()):
     """Is the tuning's piano reserved on the show? True / False / None (no
     piano picked) / 'other_unit' — the model is booked, but not the specific
     unit this tuning names (pool booking or a different S/N). House tunings
-    (no show) have nothing to be booked on → None."""
+    (no show) have nothing to be booked on → None. A model in `unpinnable`
+    (its type doesn't allow unit selection, so no line can name a unit) is
+    reserved once the model is booked — never 'other_unit' (3.20.1)."""
     if not type_id or show_id is None:
         return None
-    if unit_id:
+    if unit_id and type_id not in unpinnable:
         if (show_id, unit_id) in pinned:
             return True
         return 'other_unit' if (show_id, type_id) in booked else False
     return (show_id, type_id) in booked
+
+
+def _piano_pin_unit(db, show_id, type_id, unit_id):
+    """Carry a tuning's unit (S/N) onto the show's Assets line (3.20.1).
+    The request form books a model that isn't on the show yet WITH its unit,
+    but when the model is already booked (added earlier, a unit picked or
+    changed later, or set by the manager) nothing named the unit, and the
+    manager saw "unit not pinned on Assets tab". This pins the unit on the
+    show's ONE unpinned single-quantity line of that model, under the same
+    rules as a pinned add: the type allows unit selection, the unit is
+    bookable and not booked by another line over that line's dates. It
+    never books or adds a line (the PM's ordinary asset add does that) and
+    leaves anything ambiguous to the asset manager. Caller commits; returns
+    the show_assets id pinned, or None."""
+    if show_id is None or not type_id or not unit_id:
+        return None
+    if db.execute('SELECT 1 FROM show_assets WHERE show_id=%s AND asset_item_id=%s',
+                  (show_id, unit_id)).fetchone():
+        return None                              # already pinned here
+    unit = db.execute("""
+        SELECT ai.status, at.allow_unit_selection FROM asset_items ai
+        JOIN asset_types at ON at.id = ai.asset_type_id
+        WHERE ai.id=%s AND ai.asset_type_id=%s""", (unit_id, type_id)).fetchone()
+    if not unit or not unit['allow_unit_selection'] or unit['status'] in ('retired', 'maintenance'):
+        return None
+    pool = db.execute("""
+        SELECT id, rental_start, rental_end FROM show_assets
+        WHERE show_id=%s AND asset_type_id=%s AND asset_item_id IS NULL AND quantity = 1
+        FOR UPDATE""", (show_id, type_id)).fetchall()
+    if len(pool) != 1:
+        return None
+    line = pool[0]
+    if db.execute("""
+        SELECT 1 FROM show_assets WHERE asset_item_id=%s AND id <> %s
+          AND rental_end >= %s AND rental_start <= %s""",
+            (unit_id, line['id'], line['rental_start'], line['rental_end'])).fetchone():
+        return None                              # unit booked elsewhere then
+    db.execute('UPDATE show_assets SET asset_item_id=%s WHERE id=%s AND asset_item_id IS NULL',
+               (unit_id, line['id']))
+    log_audit(db, 'ASSET_SHOW_EDIT', 'show_asset', line['id'], show_id=show_id,
+              detail=f'pinned_unit_id={unit_id} (piano tuning)')
+    _reset_asset_approval(db, show_id, 'asset_edited')
+    syslog_logger.info(f"PIANO_UNIT_PINNED show_id={show_id} sa_id={line['id']} "
+                       f"unit_id={unit_id} by={session.get('username') if has_request_context() else '-'}")
+    return line['id']
 
 
 def _piano_booked(db, show_ids):
@@ -22764,7 +22816,7 @@ def _piano_out(r):
             d[k] = _ts_out(d[k])
     # An open cancellation request (3.10.4) — moot once cancelled/completed.
     d['cancel_pending'] = bool(d.get('cancel_requested_at')) and d.get('status') in (
-        'requested', 'scheduled')
+        PIANO_OPEN_STATUSES)
     d['cost'] = float(d['cost']) if d.get('cost') is not None else None
     d['status_label'] = PIANO_STATUS_LABELS.get(d.get('status'), d.get('status'))
     return d
@@ -23169,6 +23221,7 @@ def show_piano_tunings(show_id):
     booked = _piano_booked(db, [show_id])
     pinned = _piano_pinned(db, [show_id])
     defaults = _piano_defaults(db, show_id, pianos, booked, pinned)
+    unpinnable = {p['id'] for p in pianos if not p['allow_unit_selection']}
     db.close()
     out = []
     for r in rows:
@@ -23176,7 +23229,7 @@ def show_piano_tunings(show_id):
         d['requested_by_name'] = r['requested_by_name'] or r['requested_by_username'] or ''
         d['on_schedule'] = bool(d['tuning_date'] and d['tuning_date'] in days)
         d['piano_on_show'] = _piano_on_show(show_id, r['piano_asset_type_id'],
-                                            r['piano_asset_item_id'], booked, pinned)
+                                            r['piano_asset_item_id'], booked, pinned, unpinnable)
         if not manager:
             # Manager-only working notes / who-did-what stay on /piano-tuning.
             for k in ('manager_notes', 'sent_by', 'updated_by', 'requested_by',
@@ -23222,6 +23275,7 @@ def show_piano_tuning_create(show_id):
           vals.get('requested_date'), vals.get('requested_time', ''),
           vals.get('notes', ''), session['user_id'], session['user_id'])).fetchone()['id']
     pid = vals.get('piano_asset_type_id')
+    _piano_pin_unit(db, show_id, pid, vals.get('piano_asset_item_id'))
     not_on_show = _piano_on_show(show_id, pid, vals.get('piano_asset_item_id'),
                                  _piano_booked(db, [show_id]), _piano_pinned(db, [show_id])) is False
     log_audit(db, 'PIANO_TUNING_REQUEST', 'piano_tuning', tid, show_id=show_id,
@@ -23282,7 +23336,7 @@ def piano_tuning_update(tid):
     if not manager:
         if not editor:
             return _denied('no_access', 'Access denied', 403)
-        if cur['status'] != 'requested':
+        if cur['status'] not in ('requested', 'seen'):
             return _denied('not_requested', 'This request is already with the piano tuning '
                                             'manager — use Request cancellation, or ask them '
                                             'to change it.', 409)
@@ -23335,6 +23389,8 @@ def piano_tuning_update(tid):
     status = data.get('status', cur['status'])
     if status == 'sent':
         status = 'scheduled'
+    if not manager and status == 'requested':
+        status = cur['status']      # a PM's edit keeps 'seen'
     if status not in PIANO_STATUSES:
         db.close()
         return jsonify({'error': 'Unknown status'}), 400
@@ -23343,7 +23399,7 @@ def piano_tuning_update(tid):
         return jsonify({'error': 'Pick the date the piano needs tuning.'}), 400
     # The manager putting a tuning date in moves a request to Scheduled.
     tuning_date = vals['tuning_date'] if 'tuning_date' in vals else cur['tuning_date']
-    if manager and tuning_date and status == 'requested' and 'status' not in data:
+    if manager and tuning_date and status in ('requested', 'seen') and 'status' not in data:
         status = 'scheduled'
     sets = [f'{k}=%s' for k in vals] + ['status=%s', 'updated_by=%s',
                                         'updated_at=CURRENT_TIMESTAMP']
@@ -23355,11 +23411,17 @@ def piano_tuning_update(tid):
         sets.append('completed_at=CURRENT_TIMESTAMP')
     elif status != 'completed' and cur['completed_at']:
         sets.append('completed_at=NULL')
-    if status == 'requested' and cur['sent_at']:
+    if status in ('requested', 'seen') and cur['sent_at']:
         sets += ['sent_at=NULL', 'sent_by=NULL']
     params.append(tid)
     db.execute(f"UPDATE piano_tunings SET {', '.join(sets)} WHERE id=%s", params)
     s3_deletes = []
+    if show_id is not None and status != 'cancelled':
+        # Every save carries the tuning's S/N onto the show's Assets line
+        # when it can, so re-saving also fixes an older unpinned request.
+        _piano_pin_unit(db, show_id,
+                        vals.get('piano_asset_type_id', cur['piano_asset_type_id']),
+                        vals.get('piano_asset_item_id', cur['piano_asset_item_id']))
     if show_id is not None:      # house tunings have no schedule row / charge
         _sync_piano_schedule_rows(db, show_id)
         _sync_piano_external_rental(db, tid, s3_deletes)
@@ -23378,12 +23440,13 @@ def piano_tuning_update(tid):
     if manager:
         if status != cur['status']:
             _piano_bell_done(db, tid)
-            if status in ('scheduled', 'completed', 'cancelled') and cur['requested_by']:
+            if status in ('seen', 'scheduled', 'completed', 'cancelled') and cur['requested_by']:
                 when = f"{tuning_date or ''} {vals.get('tuning_start', cur['tuning_start']) or ''}".strip()
                 _piano_bell(db, tid, show_id, cur['show_name'],
-                            {'scheduled': 'Piano tuning scheduled', 'completed': 'Piano tuning completed',
+                            {'seen': 'Piano tuning request seen — in progress',
+                             'scheduled': 'Piano tuning scheduled', 'completed': 'Piano tuning completed',
                              'cancelled': 'Piano tuning cancelled'}[status],
-                            f"{cur['piano'] or 'Piano'}" + (f' · {when}' if when and status != 'cancelled' else ''),
+                            f"{cur['piano'] or 'Piano'}" + (f' · {when}' if when and status not in ('seen', 'cancelled') else ''),
                             to_managers=False, user_id=cur['requested_by'])
         elif when_changed and tuning_date and status == 'scheduled' and cur['requested_by']:
             _piano_bell(db, tid, show_id, cur['show_name'], 'Piano tuning moved',
@@ -23437,12 +23500,12 @@ def piano_tunings_pending_count():
     r = db.execute("""
         SELECT COUNT(*) FILTER (WHERE t.status = 'requested') AS requested,
                COUNT(*) FILTER (WHERE t.cancel_requested_at IS NOT NULL
-                                  AND t.status IN ('requested', 'scheduled')) AS cancels,
+                                  AND t.status IN ('requested', 'seen', 'scheduled')) AS cancels,
                COUNT(*) FILTER (WHERE (t.status = 'requested'
-                                       OR (t.cancel_requested_at IS NOT NULL AND t.status = 'scheduled'))
+                                       OR (t.cancel_requested_at IS NOT NULL AND t.status IN ('seen', 'scheduled')))
                                   AND COALESCE(t.tuning_date, t.requested_date) <= CURRENT_DATE + %s) AS urgent,
                COUNT(*) FILTER (WHERE t.status = 'requested'
-                                   OR (t.cancel_requested_at IS NOT NULL AND t.status = 'scheduled')) AS pending
+                                   OR (t.cancel_requested_at IS NOT NULL AND t.status IN ('seen', 'scheduled'))) AS pending
         FROM piano_tunings t LEFT JOIN shows s ON s.id = t.show_id
         WHERE t.show_id IS NULL OR COALESCE(s.status, 'active') = 'active'
     """, (PIANO_URGENT_DAYS,)).fetchone()
@@ -23474,7 +23537,7 @@ def piano_tunings_list():
     status = request.args.get('status', 'open')
     where, params = [], []
     if status == 'open':
-        where.append("t.status IN ('requested', 'scheduled')")
+        where.append("t.status IN ('requested', 'seen', 'scheduled')")
     elif status in PIANO_STATUSES:
         where.append('t.status = %s')
         params.append(status)
@@ -23500,13 +23563,14 @@ def piano_tunings_list():
     pinned = _piano_pinned(db, [r['show_id'] for r in rows])
     pianos = _piano_asset_types(db)
     vendors = _piano_vendor_list(db)
+    unpinnable = {p['id'] for p in pianos if not p['allow_unit_selection']}
     db.close()
     out = []
     for r in rows:
         d = _piano_out(r)
         d['requested_by_name'] = r['requested_by_name'] or r['requested_by_username'] or ''
         d['piano_on_show'] = _piano_on_show(r['show_id'], r['piano_asset_type_id'],
-                                            r['piano_asset_item_id'], booked, pinned)
+                                            r['piano_asset_item_id'], booked, pinned, unpinnable)
         # The unit whose service record (Assets → unit → Log) holds it.
         d.pop('svc_item_id', None)
         d.pop('svc_barcode', None)
@@ -23706,7 +23770,7 @@ def piano_tuning_cancel_request(tid):
                               f"by={session.get('username')}")
         db.close()
         return jsonify({'error': 'Access denied'}), 403
-    if t['status'] not in ('requested', 'scheduled'):
+    if t['status'] not in PIANO_OPEN_STATUSES:
         db.close()
         return jsonify({'error': 'This tuning is already ' + PIANO_STATUS_LABELS.get(
             t['status'], t['status']).lower() + '.'}), 409
