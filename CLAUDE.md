@@ -1056,8 +1056,11 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
 - **`sensitive: True` in error_context = body never stored, never
   resendable** — sign-in codes, password reset, email confirm. Any new email
   carrying a credential/link token MUST set it.
-- Bodies purge after `email_body_retention_days` (default 60) in
+- Bodies purge after `email_body_retention_days` (default 60; picker
+  `EMAIL_RETENTION_CHOICES`, `POST /settings/email-retention`) in
   `_hourly_maintenance_work` (DB clock: `created_at < NOW() - …`).
+  **`email_outbox_log` rows are kept forever** (3.23.1, the user's call):
+  no clear button, no retention trim — don't add one without being asked.
 - Resend = `POST /settings/email-messages/<mid>/resend` (admin) → a normal
   `_send_email` with `message_id` + `resend_of`, so it's logged/audited like
   any send. Failure reasons: `_email_error_explain(code, msg)` rules table;

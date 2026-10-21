@@ -810,7 +810,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.23.0'
+APP_VERSION = '3.23.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -13816,6 +13816,7 @@ def email_outbox_log_list():
         'failures':  int(counts['failures'] or 0),
         'purposes':  [{'key': p, 'label': _EMAIL_PURPOSE_LABELS.get(p, p)} for p in purposes],
         'retention_days': _email_body_retention_days(),
+        'retention_choices': list(EMAIL_RETENTION_CHOICES),
     })
 
 
@@ -13940,18 +13941,33 @@ def email_message_resend(mid):
                     'explain': None if ok else _email_error_explain('', message)})
 
 
-@app.route('/settings/email-log/clear', methods=['POST'])
+# The send history is kept forever (3.23.1): the old "Clear log" route that
+# wiped email_outbox_log is gone. Only stored message CONTENT expires, after
+# email_body_retention_days (_hourly_maintenance_work).
+EMAIL_RETENTION_CHOICES = (30, 60, 90, 180, 365)
+
+
+@app.route('/settings/email-retention', methods=['POST'])
 @admin_required
-def email_outbox_log_clear():
-    """Wipe the outbox log. Errors and PDF send logs are NOT touched."""
+def email_retention_save():
+    """How long stored email content (for preview / resend) is kept.
+    Body: {"days": one of EMAIL_RETENTION_CHOICES}. The log rows never expire."""
+    try:
+        days = int((request.get_json(force=True) or {}).get('days'))
+    except (TypeError, ValueError):
+        days = 0
+    if days not in EMAIL_RETENTION_CHOICES:
+        return jsonify({'error': 'Pick one of the listed periods.'}), 400
     db = get_db()
-    db.execute('DELETE FROM email_outbox_log')
-    db.commit()
-    log_audit(db, 'EMAIL_LOG_CLEARED', 'setting', None)
+    old = get_app_setting('email_body_retention_days', '60')
+    db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) '
+               'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+               ('email_body_retention_days', str(days)))
+    log_audit(db, 'EMAIL_RETENTION_CHANGED', 'setting', None, detail=f'{old}->{days} days')
     db.commit()
     db.close()
-    syslog_logger.info(f"EMAIL_LOG_CLEARED by={session.get('username')}")
-    return jsonify({'success': True})
+    syslog_logger.info(f"EMAIL_RETENTION_CHANGED days={days} by={session.get('username')}")
+    return jsonify({'success': True, 'days': days})
 
 
 # ─── Email Error Log ──────────────────────────────────────────────────────────

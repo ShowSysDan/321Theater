@@ -1919,16 +1919,17 @@
             style="font-size:10px;padding:1px 6px;border-radius:999px;background:var(--bg-hover);color:var(--text-dim);border:1px solid var(--border)"></span>
       <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
         <button class="btn btn-sm btn-ghost" onclick="loadEmailLog()">Refresh</button>
-        <button class="btn btn-sm btn-danger-ghost" onclick="clearEmailLog()"
-                title="Permanently delete every row in this log">Clear log</button>
       </div>
     </div>
     <div class="form-section-body no-pad">
       <p class="text-dim text-sm" style="padding:10px 14px 0">
-        One row per recipient of every email the app sends. Search by address or subject,
-        click a row to see the message, why a send failed, and to resend it.
-        Message content is kept <span id="email-log-retention">60</span> days
-        (sign-in codes and password/confirmation links are never kept).
+        One row per recipient of every email the app sends — this history is kept for good.
+        Search by address or subject, click a row to see the message, why a send failed,
+        and to resend it. The message itself (for preview and resend) is kept for
+        <select id="email-log-retention" class="field-input field-input-sm" style="width:auto;display:inline-block"
+                onchange="saveEmailRetention(this.value)" title="After this, the content is deleted; the log row stays">
+          <option value="60">60 days</option>
+        </select>, then deleted (sign-in codes and password/confirmation links are never kept).
       </p>
       <div class="email-log-filters">
         <input type="search" id="email-log-q" class="field-input field-input-sm"
@@ -5186,7 +5187,13 @@ async function loadEmailLog(more) {
     _emailLogRows = more ? _emailLogRows.concat(d.rows || []) : (d.rows || []);
     if (summary) summary.textContent = `${d.total} match · ${d.successes} delivered · ${d.failures} failed`;
     const ret = document.getElementById('email-log-retention');
-    if (ret && d.retention_days) ret.textContent = d.retention_days;
+    if (ret && d.retention_days && document.activeElement !== ret) {
+      const opts = Array.from(new Set((d.retention_choices || []).concat([d.retention_days])))
+        .sort((a, b) => a - b);
+      ret.innerHTML = opts.map(n => `<option value="${n | 0}">${n >= 365 && n % 365 === 0
+        ? (n / 365) + ' year' + (n === 365 ? '' : 's') : n + ' days'}</option>`).join('');
+      ret.value = String(d.retention_days);
+    }
     const sel = document.getElementById('email-log-purpose');
     if (sel && d.purposes) {
       const cur = sel.value;
@@ -5354,12 +5361,13 @@ async function resendEmail(mid, logId) {
   } finally { btn.disabled = false; }
 }
 
-async function clearEmailLog() {
-  if (!confirm('Permanently delete every row in this email activity log?')) return;
-  const r = await fetch('/settings/email-log/clear', { method: 'POST' });
-  if (!r.ok) { showSaveToast('✗ Clear failed', 'error'); return; }
-  showSaveToast('✓ Email log cleared');
-  loadEmailLog();
+async function saveEmailRetention(days) {
+  const r = await fetch('/settings/email-retention', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({days: parseInt(days, 10)})});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { showSaveToast('✗ ' + (d.error || 'Could not save'), 'error'); loadEmailLog(); return; }
+  showSaveToast(`✓ Email content now kept ${d.days} days`);
 }
 
 if (document.getElementById('email-log-tbody')) {
