@@ -810,7 +810,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.24.0'
+APP_VERSION = '3.25.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -4894,6 +4894,8 @@ _UNDO_ACTIONS = {
     'CREW_MEMBER_ADD':          ('crew_member', 'create'),
     'CREW_MEMBER_EDIT':         ('crew_member', 'update'),
     'CREW_MEMBER_DELETE':       ('crew_member', 'delete'),
+    'CREW_MEMBER_ARCHIVE':      ('crew_member', 'update'),
+    'CREW_MEMBER_RESTORE':      ('crew_member', 'update'),
     'WAREHOUSE_LOC_ADD':        ('warehouse_location', 'create'),
     'WAREHOUSE_LOC_EDIT':       ('warehouse_location', 'update'),
     'WAREHOUSE_LOC_DELETE':     ('warehouse_location', 'delete'),
@@ -6804,10 +6806,10 @@ def get_comments(show_id):
     rows = db.execute("""
         SELECT sc.id, sc.body, sc.created_at::timestamptz AS created_at,
                sc.edited_at::timestamptz AS edited_at, sc.deleted_at::timestamptz AS deleted_at,
-               u.display_name, u.username, u.id as uid,
+               u.display_name, u.username, u.id as uid, sc.author_name,
                du.display_name as deleted_by_name, du.username as deleted_by_username
         FROM show_comments sc
-        JOIN users u ON sc.user_id = u.id
+        LEFT JOIN users u ON sc.user_id = u.id
         LEFT JOIN users du ON sc.deleted_by = du.id
         WHERE sc.show_id = %s AND (sc.deleted_at IS NULL OR %s)
         ORDER BY sc.created_at ASC
@@ -6815,7 +6817,8 @@ def get_comments(show_id):
     db.close()
     result = []
     for r in rows:
-        author = r['display_name'] or r['username']
+        # A deleted account's comments keep the name stamped at deletion.
+        author = r['display_name'] or r['username'] or r['author_name'] or 'Former user'
         entry = {
             'id':          r['id'],
             'body':        r['body'],
@@ -6825,7 +6828,7 @@ def get_comments(show_id):
             'author':      author,
             'author_id':   r['uid'],
             'initials':    ''.join(w[0].upper() for w in author.split()[:2]),
-            'is_own':      r['uid'] == session['user_id'],
+            'is_own':      r['uid'] is not None and r['uid'] == session['user_id'],
         }
         if is_admin and r['deleted_at']:
             entry['deleted_by'] = r['deleted_by_name'] or r['deleted_by_username'] or 'Unknown'
@@ -6848,8 +6851,10 @@ def post_comment(show_id):
         return jsonify({'success': False, 'error': 'Comment too long (max 2000 chars).'}), 400
     db = get_db()
     cur = db.execute(
-        'INSERT INTO show_comments (show_id, user_id, body) VALUES (%s, %s, %s) RETURNING id',
-        (show_id, session['user_id'], body)
+        'INSERT INTO show_comments (show_id, user_id, author_name, body) '
+        "SELECT %s, u.id, COALESCE(NULLIF(u.display_name, ''), u.username), %s "
+        'FROM users u WHERE u.id = %s RETURNING id',
+        (show_id, body, session['user_id'])
     )
     cid = cur.fetchone()['id']
     log_audit(db, 'COMMENT_POST', 'comment', cid, show_id=show_id,
@@ -10119,7 +10124,7 @@ def settings():
         '''SELECT cm.*, prl.name as level_name, prl.hourly_rate as level_rate
            FROM crew_members cm
            LEFT JOIN pay_rate_levels prl ON prl.id = cm.rate_level_id
-           ORDER BY LOWER(cm.name)'''
+           ORDER BY COALESCE(cm.is_archived, 0), LOWER(cm.name)'''
     ).fetchall()] if _can_manage_crew else []
     pay_rate_levels = [dict(r) for r in db3.execute(
         'SELECT * FROM pay_rate_levels ORDER BY sort_order, name'
@@ -10538,6 +10543,13 @@ def delete_user(uid):
     db.execute('UPDATE shows SET created_by=NULL WHERE created_by=%s', (uid,))
     db.execute('UPDATE shows SET last_saved_by=NULL WHERE last_saved_by=%s', (uid,))
     db.execute('UPDATE export_log SET exported_by=NULL WHERE exported_by=%s', (uid,))
+    # Show comments outlive the account (3.25.0): stamp the author's current
+    # name on them and unlink, so archived shows still read "who said what".
+    db.execute("""UPDATE show_comments
+                     SET author_name = COALESCE(NULLIF(u.display_name, ''), u.username),
+                         user_id = NULL
+                    FROM users u
+                   WHERE u.id = %s AND show_comments.user_id = u.id""", (uid,))
     db.execute('DELETE FROM users WHERE id=%s', (uid,))
     db.commit(); db.close()
     syslog_logger.info(f"USER_DELETE user_id={uid} by={session.get('username')}")
@@ -16575,7 +16587,7 @@ def api_labor_scheduler_update(rid):
     data = request.get_json(force=True) or {}
     db = get_db()
     row = db.execute(
-        'SELECT show_id FROM labor_requests WHERE id=%s', (rid,)
+        'SELECT show_id, scheduled_crew_member_id FROM labor_requests WHERE id=%s', (rid,)
     ).fetchone()
     if not row:
         db.close()
@@ -16605,6 +16617,10 @@ def api_labor_scheduler_update(rid):
     if 'scheduled_crew_member_id' in data:
         cmid = data.get('scheduled_crew_member_id')
         cmid = int(cmid) if cmid else None
+        refusal = _archived_crew_refusal(db, cmid, row['scheduled_crew_member_id'])
+        if refusal:
+            db.close()
+            return jsonify({'success': False, 'error': refusal}), 409
         updates.append('scheduled_crew_member_id=%s')
         params.append(cmid)
         detail_parts.append(f"crew_id={cmid}")
@@ -17582,6 +17598,10 @@ def api_overhead_request_update(rid):
     if 'scheduled_crew_member_id' in data:
         cmid = data.get('scheduled_crew_member_id')
         cmid = int(cmid) if cmid else None
+        refusal = _archived_crew_refusal(db, cmid, row['scheduled_crew_member_id'])
+        if refusal:
+            db.close()
+            return jsonify({'success': False, 'error': refusal}), 409
         updates.append('scheduled_crew_member_id=%s'); params.append(cmid)
         updates.append('scheduled_by=%s'); params.append(session['user_id'])
         updates.append('scheduled_at=CURRENT_TIMESTAMP')
@@ -18033,7 +18053,7 @@ def crew_tracker():
 
     # Crew members — alphabetical (case-insensitive); sort_order is legacy.
     members = db.execute(
-        'SELECT * FROM crew_members ORDER BY LOWER(name)'
+        'SELECT * FROM crew_members ORDER BY COALESCE(is_archived, 0), LOWER(name)'
     ).fetchall()
 
     # Qualifications — capture status per (crew_member_id, position_id) so the
@@ -18163,7 +18183,7 @@ def api_crew_members():
         SELECT cm.*, prl.name as level_name, prl.hourly_rate as level_rate
         FROM crew_members cm
         LEFT JOIN pay_rate_levels prl ON prl.id = cm.rate_level_id
-        ORDER BY LOWER(cm.name)
+        ORDER BY COALESCE(cm.is_archived, 0), LOWER(cm.name)
     """).fetchall()
     # Only fully qualified (status 2) counts here — in-training rows (status 1)
     # must not offer someone as qualified in the schedule / labor request pickers.
@@ -18242,11 +18262,76 @@ def edit_crew_member(mid):
     })
 
 
+def _crew_work_history(db, mid):
+    """Number of labor lines (show schedule, settlement, overhead) that name
+    this technician. Any history means archive, never delete."""
+    return db.execute("""
+        SELECT (SELECT COUNT(*) FROM labor_requests WHERE scheduled_crew_member_id = %s)
+             + (SELECT COUNT(*) FROM post_show_labor WHERE crew_member_id = %s)
+             + (SELECT COUNT(*) FROM overhead_labor_requests WHERE scheduled_crew_member_id = %s)
+    """, (mid, mid, mid)).fetchone()[0]
+
+
+def _archived_crew_refusal(db, cmid, current=None):
+    """Error text when a schedule write would newly assign an archived
+    technician (keeping the one a line already has is fine), else None."""
+    if not cmid or cmid == current:
+        return None
+    row = db.execute('SELECT name, is_archived FROM crew_members WHERE id=%s',
+                     (cmid,)).fetchone()
+    if row and row['is_archived']:
+        return (f"{row['name']} is archived. Restore them under Settings → "
+                "Technicians to schedule them again.")
+    return None
+
+
+@app.route('/settings/crew-members/<int:mid>/archive', methods=['POST'])
+@scheduler_required
+def archive_crew_member(mid):
+    """Archive (or with {"restore": true} restore) a technician. Archived
+    technicians keep their skills, notes and every shift that names them;
+    they only leave the scheduling pickers and the active lists."""
+    restore = bool((request.get_json(silent=True) or {}).get('restore'))
+    db = get_db()
+    before = _snapshot_row(db, 'crew_members', mid)
+    if not before:
+        db.close()
+        return jsonify({'success': False, 'error': 'Technician not found.'}), 404
+    if restore:
+        db.execute('UPDATE crew_members SET is_archived=0, archived_at=NULL WHERE id=%s', (mid,))
+    else:
+        db.execute('UPDATE crew_members SET is_archived=1, archived_at=CURRENT_TIMESTAMP '
+                   'WHERE id=%s', (mid,))
+    action = 'CREW_MEMBER_RESTORE' if restore else 'CREW_MEMBER_ARCHIVE'
+    log_audit(db, action, 'crew_member', mid, detail=before['name'], before=before,
+              after=_snapshot_row(db, 'crew_members', mid))
+    db.commit()
+    db.close()
+    syslog_logger.info(f"TECHNICIAN_{'RESTORE' if restore else 'ARCHIVE'} id={mid} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'archived': not restore})
+
+
 @app.route('/settings/crew-members/<int:mid>/delete', methods=['POST'])
 @scheduler_required
 def delete_crew_member(mid):
+    """Permanently delete a technician — only one that was never on a
+    labor line (e.g. a typo). Anyone with work history must be archived, so
+    past shows and reports keep their name and their skills stay on file."""
     db = get_db()
     before = _snapshot_row(db, 'crew_members', mid)
+    if not before:
+        db.close()
+        return jsonify({'success': False, 'error': 'Technician not found.'}), 404
+    used = _crew_work_history(db, mid)
+    if used:
+        db.close()
+        syslog_logger.info(f"TECHNICIAN_DELETE_REFUSED id={mid} lines={used} "
+                           f"by={session.get('username')}")
+        return jsonify({'success': False,
+                        'error': f"{before['name']} is on {used} labor line(s), so they can't "
+                                 "be deleted. Archive them instead: their skills and work "
+                                 "history stay available."}), 409
     db.execute('DELETE FROM crew_members WHERE id=%s', (mid,))
     log_audit(db, 'CREW_MEMBER_DELETE', 'crew_member', mid, before=before)
     db.commit()
@@ -26134,7 +26219,8 @@ def api_dashboard_skills_summary():
     if not _dashboard_data_access_ok():
         abort(403)
     db = get_db()
-    total_crew = db.execute('SELECT COUNT(*) FROM crew_members').fetchone()[0]
+    total_crew = db.execute(
+        'SELECT COUNT(*) FROM crew_members WHERE COALESCE(is_archived, 0) = 0').fetchone()[0]
     cats = db.execute("""
         SELECT pc.id, pc.name
         FROM position_categories pc
@@ -26148,6 +26234,8 @@ def api_dashboard_skills_summary():
             FROM job_positions jp
             LEFT JOIN crew_qualifications cq ON cq.position_id = jp.id
                  AND COALESCE(cq.status, 2) = 2
+                 AND cq.crew_member_id IN (SELECT id FROM crew_members
+                                            WHERE COALESCE(is_archived, 0) = 0)
             WHERE jp.category_id = %s
             GROUP BY jp.id
             ORDER BY jp.sort_order, jp.id
@@ -26760,7 +26848,9 @@ def reports_page():
     positions = [dict(r) for r in db.execute(
         'SELECT id, name FROM job_positions ORDER BY name').fetchall()] if _can_report_labor() else []
     techs = [dict(r) for r in db.execute(
-        'SELECT id, name FROM crew_members ORDER BY name').fetchall()] if _can_report_labor() else []
+        "SELECT id, name || CASE WHEN COALESCE(is_archived, 0) = 1 THEN ' (archived)' ELSE '' END "
+        'AS name FROM crew_members ORDER BY COALESCE(is_archived, 0), name').fetchall()] \
+        if _can_report_labor() else []
     shows = [{'id': r['id'], 'name': r['name'], 'date': _as_date(r['d']).isoformat() if r['d'] else ''}
              for r in db.execute(
                  "SELECT id, name, COALESCE(show_date, load_in_date) AS d FROM shows "
@@ -27150,7 +27240,9 @@ def report_labor():
                        'training_shifts': 0, 'actual_shifts': 0, 'actual_hours': 0.0,
                        'overhead_shifts': 0, 'overhead_hours': 0.0, 'last_date': None}
              for r in db.execute("""
-                 SELECT cm.id, cm.name, pl.name AS level FROM crew_members cm
+                 SELECT cm.id, cm.name || CASE WHEN COALESCE(cm.is_archived, 0) = 1
+                                               THEN ' (archived)' ELSE '' END AS name,
+                        pl.name AS level FROM crew_members cm
                  LEFT JOIN pay_rate_levels pl ON pl.id = cm.rate_level_id""").fetchall()}
     positions, unfilled_upcoming = {}, 0
     today = date.today()

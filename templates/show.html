@@ -3612,7 +3612,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     anyOpt.value = '';
     anyOpt.textContent = '— Any technician —';
     selectEl.appendChild(anyOpt);
-    const crew = _crewMembers || [];
+    const crew = crewForPicker(_crewMembers, m => m.name === selectedName);
 
     if (positionId && crew.length) {
       const qualified = crew.filter(m => (m.qualifications || []).includes(positionId));
@@ -3622,7 +3622,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         og.label = 'Qualified';
         qualified.forEach(m => {
           const opt = document.createElement('option');
-          opt.value = m.name; opt.textContent = m.name;
+          opt.value = m.name; opt.textContent = crewLabel(m);
           if (m.name === selectedName) opt.selected = true;
           og.appendChild(opt);
         });
@@ -3633,7 +3633,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         og.label = 'Others';
         others.forEach(m => {
           const opt = document.createElement('option');
-          opt.value = m.name; opt.textContent = m.name;
+          opt.value = m.name; opt.textContent = crewLabel(m);
           if (m.name === selectedName) opt.selected = true;
           og.appendChild(opt);
         });
@@ -3642,7 +3642,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     } else {
       crew.forEach(m => {
         const opt = document.createElement('option');
-        opt.value = m.name; opt.textContent = m.name;
+        opt.value = m.name; opt.textContent = crewLabel(m);
         if (m.name === selectedName) opt.selected = true;
         selectEl.appendChild(opt);
       });
@@ -5077,12 +5077,22 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     const blank = document.createElement('option');
     blank.value = ''; blank.textContent = blankLabel || '— technician —';
     sel.appendChild(blank);
+    // Settling a past show may name someone archived since, so archived
+    // technicians stay pickable here, grouped last.
+    let archivedGroup = null;
     (_psCrewList || []).forEach(m => {
       const o = document.createElement('option');
       o.value = m.id; o.textContent = m.name;
       if (selectedId && Number(selectedId) === m.id) o.selected = true;
-      sel.appendChild(o);
+      if (m.is_archived) {
+        if (!archivedGroup) {
+          archivedGroup = document.createElement('optgroup');
+          archivedGroup.label = 'Archived';
+        }
+        archivedGroup.appendChild(o);
+      } else sel.appendChild(o);
     });
+    if (archivedGroup) sel.appendChild(archivedGroup);
   }
 
   async function openAddHoursForm() {

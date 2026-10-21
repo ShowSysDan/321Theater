@@ -1473,7 +1473,8 @@
   <div class="form-section">
     <div class="form-section-header">
       <span class="section-icon">◈</span> TECHNICIANS
-      <span class="section-count ml-auto text-dim">{{ crew_members_list|length }} technicians</span>
+      {% set archived_crew = crew_members_list|selectattr('is_archived')|list %}
+      <span class="section-count ml-auto text-dim">{{ crew_members_list|length - archived_crew|length }} technicians{% if archived_crew %} · {{ archived_crew|length }} archived{% endif %}</span>
     </div>
     <div class="form-section-body" style="border-bottom:1px solid var(--border)">
       <h3 class="sub-section-label">ADD TECHNICIAN</h3>
@@ -1490,19 +1491,31 @@
       <div id="crew-msg" class="field-msg" style="display:none;margin-top:6px"></div>
     </div>
     <div class="form-section-body no-pad">
+      <p class="text-dim text-sm" style="margin:10px 16px">
+        <strong>Archive</strong> a technician who has left: they drop out of the scheduling pickers but keep their
+        skills (Skill Tracker → Archived) and stay on every past show and in Reports. Only a technician who never
+        worked a shift can be deleted.
+        {% if archived_crew %}<label style="display:inline-flex;align-items:center;gap:4px;margin-left:6px;white-space:nowrap">
+          <input type="checkbox" id="crew-show-archived" onchange="toggleArchivedCrew(this.checked)"> Show archived ({{ archived_crew|length }})</label>{% endif %}
+      </p>
       <table class="data-table">
-        <thead><tr><th>NAME</th><th>RATE LEVEL</th><th style="width:80px">ACTIONS</th></tr></thead>
+        <thead><tr><th>NAME</th><th>RATE LEVEL</th><th style="width:150px">ACTIONS</th></tr></thead>
         <tbody id="crew-tbody">
           {% for m in crew_members_list %}
-          <tr data-mid="{{ m.id }}" data-rate-level-id="{{ m.rate_level_id or '' }}">
-            <td id="crew-name-{{ m.id }}">{{ m.name }}</td>
+          <tr data-mid="{{ m.id }}" data-rate-level-id="{{ m.rate_level_id or '' }}"{% if m.is_archived %} class="crew-archived-row" style="display:none"{% endif %}>
+            <td><span id="crew-name-{{ m.id }}">{{ m.name }}</span>{% if m.is_archived %} <span class="crew-archived-tag">ARCHIVED</span>{% endif %}</td>
             <td id="crew-level-{{ m.id }}" class="text-dim">
               {% if m.level_name %}{{ m.level_name }} <span class="mono" style="font-size:10px">(${{ '%.2f' | format(m.level_rate) }}/hr)</span>{% else %}—{% endif %}
             </td>
             <td>
               <div class="action-btns">
-                <button class="btn btn-xs btn-ghost" onclick="editCrewMember(this)">✎</button>
-                <button class="btn btn-xs btn-danger-ghost" onclick="deleteCrewMember({{ m.id }})">×</button>
+                <button class="btn btn-xs btn-ghost" onclick="editCrewMember(this)" title="Edit">✎</button>
+                {% if m.is_archived %}
+                <button class="btn btn-xs btn-ghost" onclick="archiveCrewMember({{ m.id }}, true)" title="Return to the active list">Restore</button>
+                <button class="btn btn-xs btn-danger-ghost" onclick="deleteCrewMember({{ m.id }})" title="Delete permanently (only if they never worked a shift)">×</button>
+                {% else %}
+                <button class="btn btn-xs btn-ghost" onclick="archiveCrewMember({{ m.id }}, false)" title="Archive: keeps skills and work history">Archive</button>
+                {% endif %}
               </div>
             </td>
           </tr>
@@ -4660,11 +4673,12 @@ async function addCrewMember() {
     document.getElementById('crew-empty')?.remove();
     const levelLabel = d.level_name ? `${d.level_name} <span class="mono" style="font-size:10px">($${parseFloat(d.level_rate||0).toFixed(2)}/hr)</span>` : '—';
     const tr = document.createElement('tr'); tr.dataset.mid = d.id; tr.dataset.rateLevelId = d.rate_level_id || '';
-    tr.innerHTML = `<td id="crew-name-${d.id}">${_esc(d.name)}</td>
+    tr.innerHTML = `<td><span id="crew-name-${d.id}">${_esc(d.name)}</span></td>
       <td id="crew-level-${d.id}" class="text-dim">${levelLabel}</td>
       <td><div class="action-btns">
-        <button class="btn btn-xs btn-ghost" onclick="editCrewMember(this)">✎</button>
-        <button class="btn btn-xs btn-danger-ghost" onclick="deleteCrewMember(${d.id})">×</button>
+        <button class="btn btn-xs btn-ghost" onclick="editCrewMember(this)" title="Edit">✎</button>
+        <button class="btn btn-xs btn-ghost" onclick="archiveCrewMember(${d.id}, false)" title="Archive: keeps skills and work history">Archive</button>
+        <button class="btn btn-xs btn-danger-ghost" onclick="deleteCrewMember(${d.id})" title="Delete a mistaken entry (only if they never worked a shift)">×</button>
       </div></td>`;
     document.getElementById('crew-tbody').appendChild(tr);
   } else {
@@ -4739,8 +4753,24 @@ function editCrewMember(btn) {
   inp.focus(); inp.select();
 }
 
+async function archiveCrewMember(mid, restore) {
+  if (!restore && !confirm('Archive this technician?\n\nThey leave the scheduling pickers. Their skills, notes and every shift they worked are kept, and they stay in Reports. You can restore them at any time.')) return;
+  const r = await fetch(`/settings/crew-members/${mid}/archive`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({restore: !!restore})
+  });
+  const d = await r.json();
+  if (d.success) location.reload();
+  else alert(d.error || 'Error updating technician.');
+}
+
+function toggleArchivedCrew(show) {
+  document.querySelectorAll('#crew-tbody tr.crew-archived-row')
+    .forEach(tr => { tr.style.display = show ? '' : 'none'; });
+}
+
 async function deleteCrewMember(mid) {
-  if (!confirm('Remove this technician? Their skill qualifications will also be removed.')) return;
+  if (!confirm('Permanently delete this technician and their skill qualifications?\n\nOnly possible for someone who never worked a shift — otherwise use Archive.')) return;
   const r = await fetch(`/settings/crew-members/${mid}/delete`, {method: 'POST'});
   const d = await r.json();
   if (d.success) {

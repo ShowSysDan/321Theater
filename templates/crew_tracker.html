@@ -361,8 +361,9 @@
 </div>
 {% else %}
 
+{% set archived_count = members|selectattr('is_archived')|list|length %}
 <div class="tracker-toolbar">
-  <span class="text-dim tracker-count" id="tracker-count">{{ members|length }} technicians &nbsp;·&nbsp; {{ all_positions|length }} positions</span>
+  <span class="text-dim tracker-count" id="tracker-count">{{ members|length - archived_count }} technicians &nbsp;·&nbsp; {{ all_positions|length }} positions</span>
   <button class="btn btn-ghost btn-sm" onclick="sortCrewAlpha(false)">Sort A–Z</button>
   <button class="btn btn-ghost btn-sm" onclick="sortCrewAlpha(true)">Sort Z–A</button>
   <button class="btn btn-ghost btn-sm" onclick="sortCrewByCategory()">Sort by Category</button>
@@ -371,6 +372,13 @@
     <option value="show">Show positions only</option>
     <option value="training">Training / classes only</option>
   </select>
+  {% if archived_count %}
+  <select id="status-filter" class="field-input field-input-sm" style="width:auto" onchange="_applyRowFilters()" title="Archived technicians keep their skills on file (read-only)">
+    <option value="active">Active technicians</option>
+    <option value="archived">Archived ({{ archived_count }})</option>
+    <option value="all">All technicians</option>
+  </select>
+  {% endif %}
   <select id="skill-filter" class="field-input field-input-sm" style="width:auto;min-width:160px" onchange="filterBySkill(this.value)">
     <option value="">— Show all skills —</option>
     {% for cat in categories %}{% if cat.positions %}
@@ -420,11 +428,11 @@
   </thead>
   <tbody id="crew-tbody">
     {% for m in members %}
-    <tr data-mid="{{ m.id }}" data-name="{{ m.name|lower }}" data-quals='{{ m.qualifications|tojson }}' data-statuses='{{ m.qualification_status|tojson }}' data-notes="{{ m.training_notes|e }}">
+    <tr data-mid="{{ m.id }}" data-name="{{ m.name|lower }}" data-quals='{{ m.qualifications|tojson }}' data-statuses='{{ m.qualification_status|tojson }}' data-notes="{{ m.training_notes|e }}" data-archived="{{ '1' if m.is_archived else '0' }}"{% if m.is_archived %} class="crew-archived-row" style="display:none"{% endif %}>
       <td class="name-col crew-name-cell">
         <div class="crew-actions">
-          <span>{{ m.name }}</span>
-          {% if can_edit %}
+          <span>{{ m.name }}{% if m.is_archived %} <span class="crew-archived-tag" title="Archived — skills kept on file, read-only. Restore under Settings → Technicians.">ARCHIVED</span>{% endif %}</span>
+          {% if can_edit and not m.is_archived %}
           <button class="btn btn-xs btn-ghost"
                   data-name="{{ m.name }}"
                   onclick="openEditModal(this)"
@@ -676,7 +684,14 @@ function sortCrewAlpha(reverse) {
   rows.forEach(r => tbody.appendChild(r));
 }
 
-const TOTAL_MEMBERS = {{ members|length }};
+function _statusMode() {
+  return document.getElementById('status-filter')?.value || 'active';
+}
+function _statusMatch(tr) {
+  const mode = _statusMode();
+  if (mode === 'all') return true;
+  return (tr.dataset.archived === '1') === (mode === 'archived');
+}
 
 function _visiblePositionsCount() {
   let n = 0;
@@ -692,27 +707,32 @@ function _refreshCount() {
   const visiblePos = _visiblePositionsCount();
   const skillSel = document.getElementById('skill-filter');
   const posId = skillSel ? skillSel.value : '';
+  const rows = Array.from(document.querySelectorAll('#crew-tbody tr'));
+  const total = rows.filter(_statusMatch).length;
+  const label = {active: 'technicians', archived: 'archived', all: 'technicians in all'}[_statusMode()];
   if (posId) {
-    let visibleMembers = 0;
-    document.querySelectorAll('#crew-tbody tr').forEach(tr => {
-      if (tr.style.display !== 'none') visibleMembers++;
-    });
-    const posName = skillSel.selectedOptions[0]?.text || '';
-    countEl.innerHTML = `${visibleMembers} of ${TOTAL_MEMBERS} technicians qualified for <strong>${posName}</strong> &nbsp;·&nbsp; ${visiblePos} positions`;
+    const visibleMembers = rows.filter(tr => tr.style.display !== 'none').length;
+    const posName = _esc(skillSel.selectedOptions[0]?.text || '');
+    countEl.innerHTML = `${visibleMembers} of ${total} ${label} qualified for <strong>${posName}</strong> &nbsp;·&nbsp; ${visiblePos} positions`;
   } else {
-    countEl.innerHTML = `${TOTAL_MEMBERS} technicians &nbsp;·&nbsp; ${visiblePos} positions`;
+    countEl.innerHTML = `${total} ${label} &nbsp;·&nbsp; ${visiblePos} positions`;
   }
 }
 
 function filterBySkill(posId) {
-  const tbody = document.getElementById('crew-tbody');
-  tbody.querySelectorAll('tr').forEach(tr => {
-    if (!posId) {
-      tr.style.display = '';
-      return;
+  _applyRowFilters();
+}
+
+/* Row visibility = active/archived filter AND the skill filter. */
+function _applyRowFilters() {
+  const posId = document.getElementById('skill-filter')?.value || '';
+  document.querySelectorAll('#crew-tbody tr').forEach(tr => {
+    let show = _statusMatch(tr);
+    if (show && posId) {
+      const quals = JSON.parse(tr.dataset.quals || '[]');
+      show = quals.includes(parseInt(posId));
     }
-    const quals = JSON.parse(tr.dataset.quals || '[]');
-    tr.style.display = quals.includes(parseInt(posId)) ? '' : 'none';
+    tr.style.display = show ? '' : 'none';
   });
   _refreshCount();
 }

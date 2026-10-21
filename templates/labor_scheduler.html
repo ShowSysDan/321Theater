@@ -323,17 +323,18 @@
     anyOpt.value = '';
     anyOpt.textContent = '— Unassigned —';
     selectEl.appendChild(anyOpt);
-    if (!_crewMembers || !_crewMembers.length) return;
+    const crew = crewForPicker(_crewMembers, m => String(m.id) === String(selectedId));
+    if (!crew.length) return;
     if (positionId) {
-      const qualified = _crewMembers.filter(m => (m.qualifications || []).includes(positionId));
-      const others    = _crewMembers.filter(m => !(m.qualifications || []).includes(positionId));
+      const qualified = crew.filter(m => (m.qualifications || []).includes(positionId));
+      const others    = crew.filter(m => !(m.qualifications || []).includes(positionId));
       if (qualified.length) {
         const og = document.createElement('optgroup');
         og.label = 'Qualified';
         qualified.forEach(m => {
           const opt = document.createElement('option');
           opt.value = m.id;
-          opt.textContent = m.name;
+          opt.textContent = crewLabel(m);
           if (String(m.id) === String(selectedId)) opt.selected = true;
           og.appendChild(opt);
         });
@@ -345,17 +346,17 @@
         others.forEach(m => {
           const opt = document.createElement('option');
           opt.value = m.id;
-          opt.textContent = m.name;
+          opt.textContent = crewLabel(m);
           if (String(m.id) === String(selectedId)) opt.selected = true;
           og.appendChild(opt);
         });
         selectEl.appendChild(og);
       }
     } else {
-      _crewMembers.forEach(m => {
+      crew.forEach(m => {
         const opt = document.createElement('option');
         opt.value = m.id;
-        opt.textContent = m.name;
+        opt.textContent = crewLabel(m);
         if (String(m.id) === String(selectedId)) opt.selected = true;
         selectEl.appendChild(opt);
       });

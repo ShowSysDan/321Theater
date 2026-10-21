@@ -800,7 +800,8 @@ CREATE TABLE IF NOT EXISTS active_sessions (
 CREATE TABLE IF NOT EXISTS show_comments (
     id         SERIAL PRIMARY KEY,
     show_id    INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
-    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    author_name TEXT DEFAULT '',
     body       TEXT NOT NULL,
     deleted_at TIMESTAMP,
     deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -941,6 +942,8 @@ CREATE TABLE IF NOT EXISTS crew_members (
     rate_level_id  INTEGER REFERENCES pay_rate_levels(id) ON DELETE SET NULL,
     sort_order     INTEGER DEFAULT 0,
     training_notes TEXT DEFAULT '',
+    is_archived    INTEGER DEFAULT 0,
+    archived_at    TIMESTAMP DEFAULT NULL,
     created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -1942,6 +1945,10 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".job_positions ADD COLUMN IF NOT EXISTS is_training INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".crew_qualifications ADD COLUMN IF NOT EXISTS status INTEGER DEFAULT 2',
         f'ALTER TABLE "{app_schema}".crew_members ADD COLUMN IF NOT EXISTS training_notes TEXT DEFAULT \'\'',
+        # 3.25.0: technicians archive instead of being deleted, so their
+        # skills and the names on past shifts/reports survive.
+        f'ALTER TABLE "{app_schema}".crew_members ADD COLUMN IF NOT EXISTS is_archived INTEGER DEFAULT 0',
+        f'ALTER TABLE "{app_schema}".crew_members ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".labor_requests ADD COLUMN IF NOT EXISTS is_training_shift INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".overhead_labor_requests ADD COLUMN IF NOT EXISTS is_training_shift INTEGER DEFAULT 0',
         f'''CREATE TABLE IF NOT EXISTS "{app_schema}".show_labor_billable_items (
@@ -2042,6 +2049,9 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".show_comments ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP',
         f'ALTER TABLE "{app_schema}".show_comments ADD COLUMN IF NOT EXISTS deleted_by INTEGER',
         f'ALTER TABLE "{app_schema}".show_comments ADD COLUMN IF NOT EXISTS edited_at TIMESTAMP',
+        # 3.25.0: a comment outlives its author's account (FK swap below).
+        f"ALTER TABLE \"{app_schema}\".show_comments ADD COLUMN IF NOT EXISTS author_name TEXT DEFAULT ''",
+        f'ALTER TABLE "{app_schema}".show_comments ALTER COLUMN user_id DROP NOT NULL',
         f'ALTER TABLE "{app_schema}".contacts ADD COLUMN IF NOT EXISTS report_recipient INTEGER DEFAULT 0',
         f"ALTER TABLE \"{app_schema}\".asset_items ADD COLUMN IF NOT EXISTS condition TEXT DEFAULT 'good'",
         f'ALTER TABLE "{app_schema}".asset_items ADD COLUMN IF NOT EXISTS year_purchased INTEGER DEFAULT NULL',
@@ -2186,6 +2196,12 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
     approval_lines_is_new = ((app_schema, 'shows') in cat['tables']
                              and (app_schema, 'shows', 'assets_approval_lines')
                              not in cat['cols'])
+    # 3.25.0: one-time data steps, in the transaction that first adds
+    # show_comments.author_name / crew_members.is_archived.
+    comment_author_is_new = ((app_schema, 'show_comments') in cat['tables']
+                             and (app_schema, 'show_comments', 'author_name') not in cat['cols'])
+    crew_archive_is_new = ((app_schema, 'crew_members') in cat['tables']
+                           and (app_schema, 'crew_members', 'is_archived') not in cat['cols'])
     n = 0
     for sql in app_alters + shared_alters:
         if 'INSERT INTO' in sql and 'show_labor_billable_items' in sql:
@@ -2324,6 +2340,63 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
     _backfill('piano tuning sent→scheduled', f"""
         UPDATE "{app_schema}".piano_tunings SET status = 'scheduled'
         WHERE status = 'sent'""")
+
+    # 3.25.0: a show comment outlives its author's account. Name every
+    # existing comment once, then swap the user FK from CASCADE (deleting a
+    # user deleted all their comments) to SET NULL — catalog read first, so
+    # a normal start takes no lock.
+    if comment_author_is_new:
+        _backfill('comment author names', f"""
+            UPDATE "{app_schema}".show_comments sc
+               SET author_name = COALESCE(NULLIF(u.display_name, ''), u.username)
+              FROM "{shared_schema}".users u
+             WHERE u.id = sc.user_id AND COALESCE(sc.author_name, '') = ''""")
+    cur.execute("""
+        SELECT c.conname FROM pg_constraint c
+          JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+         WHERE c.conrelid = to_regclass(%s) AND c.contype = 'f'
+           AND a.attname = 'user_id' AND c.confdeltype = 'c'""",
+                (f'"{app_schema}".show_comments',))
+    for (_fk,) in cur.fetchall():
+        _backfill('comment author FK', f'''
+            ALTER TABLE "{app_schema}".show_comments DROP CONSTRAINT "{_fk}";
+            ALTER TABLE "{app_schema}".show_comments ADD CONSTRAINT "{_fk}"
+                FOREIGN KEY (user_id) REFERENCES "{shared_schema}".users(id) ON DELETE SET NULL''')
+
+    # 3.25.0: technicians deleted before archiving existed left their shifts
+    # pointing at a missing id (blank name on past shows and reports). Bring
+    # back each one still referenced by a labor line as an ARCHIVED
+    # technician — from the CREW_MEMBER_DELETE audit snapshot when there is
+    # one, else as "Removed technician #id". Their qualifications were
+    # cascade-deleted and can't be recovered.
+    if crew_archive_is_new:
+        _refs = f"""
+            SELECT scheduled_crew_member_id AS id FROM "{app_schema}".labor_requests
+            UNION SELECT crew_member_id FROM "{app_schema}".post_show_labor
+            UNION SELECT scheduled_crew_member_id FROM "{app_schema}".overhead_labor_requests"""
+        _backfill('archived technicians from audit', f"""
+            INSERT INTO "{app_schema}".crew_members
+                (id, name, rate_level_id, sort_order, training_notes, is_archived, archived_at)
+            SELECT DISTINCT ON (a.entity_id::int)
+                   a.entity_id::int,
+                   COALESCE(NULLIF(a.before_json::json->>'name', ''),
+                            'Removed technician #' || a.entity_id),
+                   (SELECT p.id FROM "{app_schema}".pay_rate_levels p
+                     WHERE p.id::text = a.before_json::json->>'rate_level_id'),
+                   0, COALESCE(a.before_json::json->>'training_notes', ''), 1, a.timestamp
+              FROM "{app_schema}".audit_log a
+             WHERE a.action = 'CREW_MEMBER_DELETE' AND a.before_json IS NOT NULL
+               AND a.entity_id ~ '^[0-9]{{1,9}}$'
+               AND a.entity_id::int IN ({_refs})
+               AND NOT EXISTS (SELECT 1 FROM "{app_schema}".crew_members c
+                                WHERE c.id = a.entity_id::int)
+             ORDER BY a.entity_id::int, a.id DESC""")
+        _backfill('archived technicians (no snapshot)', f"""
+            INSERT INTO "{app_schema}".crew_members (id, name, sort_order, is_archived, archived_at)
+            SELECT r.id, 'Removed technician #' || r.id, 0, 1, CURRENT_TIMESTAMP
+              FROM ({_refs}) r
+             WHERE r.id IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM "{app_schema}".crew_members c WHERE c.id = r.id)""")
 
     # 3.16.0: the Piano Tuning panel became the 'piano_tuning' form field
     # type. Until then it was forced in after the Backline section, so ONCE
