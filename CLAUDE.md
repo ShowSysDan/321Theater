@@ -1026,6 +1026,22 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   tooltip (login page still shows it). The rail shows the `.rail-only`
   TEST INSTANCE tag instead; keep the footer to these three rows.
 
+## System emails — one branded layout (3.22.0)
+- Build every email with `_mail(title, eyebrow=, intro=, facts=, blocks=,
+  button=, links=, note=)` → (text, html) — `email_layout.build()` underneath
+  (dependency-free; tables + inline styles + system fonts, no images, so
+  Outlook desktop/web/phone render it). Pass BOTH parts to `_send_email`.
+  A text-only send still gets wrapped by `_send_email` as a safety net, but
+  new emails should use `_mail`. Links via `_mail_url(path)` (public base
+  URL, else request host, else '' → dropped). `_show_mail_facts(db, id)` is
+  the standard show/dates/venue/PM block. Never put user text into
+  `{'html': …}` blocks unsanitized — every other block escapes.
+- Asset re-approval email diffs `shows.assets_approval_lines` (stored at
+  approve by `_asset_approval_state()`, cleared on revoke; init_db
+  backfilled approved shows once) against the gear now via
+  `_asset_state_diff()`. Keep the state shape in step with init_db's
+  backfill.
+
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.
 At the end of any change that touches code/config, **state plainly which

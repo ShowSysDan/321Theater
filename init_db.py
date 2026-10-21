@@ -1961,6 +1961,9 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approved_by INTEGER',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approved_at TIMESTAMP',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approval_snapshot TEXT',
+        # 3.22.0: the approved gear itself (JSON), so the re-approval email can
+        # say exactly what was added / removed / changed since approval.
+        f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approval_lines TEXT',
         f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS ai_hint TEXT DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS display_as TEXT DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS allow_multi INTEGER DEFAULT 0',
@@ -2133,6 +2136,14 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
     piano_log_is_new = ((app_schema, 'asset_logs') in cat['tables']
                         and (app_schema, 'piano_tunings') in cat['tables']
                         and (app_schema, 'asset_logs', 'piano_tuning_id') not in cat['cols'])
+    # 3.22.0: shows approved before assets_approval_lines existed record
+    # their current gear as the approved set once (an approved show's gear
+    # IS its approved state — any divergence clears assets_approved), in the
+    # transaction that first adds the column. Shape = app.py's
+    # _asset_approval_state().
+    approval_lines_is_new = ((app_schema, 'shows') in cat['tables']
+                             and (app_schema, 'shows', 'assets_approval_lines')
+                             not in cat['cols'])
     n = 0
     for sql in app_alters + shared_alters:
         if 'INSERT INTO' in sql and 'show_labor_billable_items' in sql:
@@ -2191,6 +2202,27 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         except Exception as e:
             cur.execute('ROLLBACK TO SAVEPOINT _acr_pk')
             print(f"[migrate_pg] company-rate primary key warning: {e}")
+    if approval_lines_is_new:
+        cur.execute('SAVEPOINT _appr_lines')
+        try:
+            cur.execute(f'''
+                UPDATE "{app_schema}".shows s SET assets_approval_lines = json_build_object(
+                  'a', COALESCE((SELECT json_agg(json_build_object(
+                          't', sa.asset_type_id, 'u', sa.asset_item_id, 'q', sa.quantity,
+                          's', sa.rental_start::text, 'e', sa.rental_end::text,
+                          'p', sa.locked_price, 'h', COALESCE(sa.is_hidden, 0)) ORDER BY sa.id)
+                        FROM "{app_schema}".show_assets sa WHERE sa.show_id = s.id), '[]'::json),
+                  'x', COALESCE((SELECT json_agg(json_build_object(
+                          'd', er.description, 'c', er.cost, 'f', COALESCE(er.pdf_filename, ''))
+                          ORDER BY er.id)
+                        FROM "{app_schema}".show_external_rentals er
+                        WHERE er.show_id = s.id AND er.piano_tuning_id IS NULL), '[]'::json)
+                )::text
+                WHERE s.assets_approved = 1 AND s.assets_approval_lines IS NULL''')
+            cur.execute('RELEASE SAVEPOINT _appr_lines')
+        except Exception as e:
+            cur.execute('ROLLBACK TO SAVEPOINT _appr_lines')
+            print(f"[migrate_pg] approval lines backfill warning: {e}")
     if piano_log_is_new:
         # Mirrors app.py's _piano_service_unit (the unit the tuning names,
         # else the one unit of its model pinned on the show, else the

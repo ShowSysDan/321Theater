@@ -61,6 +61,7 @@ import db_adapter
 from db_adapter import DBIntegrityError
 import s3_storage
 import pdf_layouts
+import email_layout
 import nav_layout
 import prism_module  # sandboxed Prism FM integration — wired up near the bottom
 import security_module  # security sign-in sheets — wired up near the bottom
@@ -809,7 +810,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.21.0'
+APP_VERSION = '3.22.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -3005,7 +3006,18 @@ def _send_email(subject, recipients, body_text=None, body_html=None,
     Suppressed recipients are written to email_outbox_log as not-sent and the
     call returns False when nobody is left, so no caller records a
     dedup/"sent" row for mail that never went.
+
+    Text-only callers (an admin's custom PDF-email template, anything not yet
+    given its own layout) still go out branded: the text is wrapped in
+    email_layout's card, as the HTML part beside the text part (3.22.0).
     """
+    if body_text and not body_html:
+        try:
+            body_html = email_layout.from_text(
+                body_text, title=re.sub(r'^\s*\[?3·2·1→THEATER\]?:?\s*', '', subject or '',
+                                        flags=re.I) or None)
+        except Exception as e:     # never let the dressing stop the send
+            app.logger.warning(f'email layout wrap failed: {e}')
     if TEST_MODE:
         allow = _test_mode_email_allowlist()
         kept = [r for r in (recipients or []) if (r or '').strip().lower() in allow]
@@ -3036,6 +3048,75 @@ def _send_email(subject, recipients, body_text=None, body_html=None,
                                    high_priority=high_priority)
     _log_outbox_send(recipients, subject, ok, msg, error_context)
     return ok, msg
+
+
+_MAIL_FOOTER = '3·2·1→Theater · Dr. Phillips Center for the Performing Arts'
+
+
+def _mail_url(path):
+    """Absolute link for an email: Settings' public base URL first, else the
+    request's own host; '' when neither is known (a job with no base URL),
+    so callers simply leave the link out."""
+    if not path:
+        return ''
+    if path.startswith(('http://', 'https://')):
+        return path
+    base = (get_app_setting('public_base_url', '') or '').rstrip('/')
+    if not base and has_request_context():
+        base = request.url_root.rstrip('/')
+    return base + path if base else ''
+
+
+def _mail(title, **kw):
+    """(text, html) for a system email in the branded layout (3.22.0).
+    Drops a button/link whose URL couldn't be made absolute."""
+    kw.setdefault('footer', _MAIL_FOOTER)
+    if kw.get('button') and not kw['button'][1]:
+        kw.pop('button')
+    kw['links'] = [(l, u) for l, u in kw.get('links') or () if u]
+    return email_layout.build(title, **kw)
+
+
+def _mail_value(v):
+    """An advance value for an email: a stored multi-select JSON list reads
+    as 'A, B'; checkbox 'true'/'false' as Yes/No."""
+    s = '' if v is None else str(v)
+    if s.startswith('['):
+        try:
+            lst = json.loads(s)
+            if isinstance(lst, list):
+                return ', '.join(str(x) for x in lst) or '(empty)'
+        except ValueError:
+            pass
+    return {'true': 'Yes', 'false': 'No'}.get(s, s)
+
+
+def _mail_date(v):
+    """'Mon, Oct 26, 2026' — or the raw value when it isn't a date."""
+    d = _as_date(v)
+    return f"{d.strftime('%a')}, {d.strftime('%b')} {d.day}, {d.year}" if d else (str(v) if v else '')
+
+
+def _mail_range(s, e):
+    ds, de = _as_date(s), _as_date(e)
+    if ds and de and ds != de:
+        if ds.year == de.year:
+            return f"{ds.strftime('%b')} {ds.day} – {de.strftime('%b')} {de.day}, {de.year}"
+        return f'{_mail_date(ds)} – {_mail_date(de)}'
+    return _mail_date(ds or de)
+
+
+def _show_mail_facts(db, show_id):
+    """The facts block every show email opens with: show, dates (load-in →
+    load-out, else performances / show date), venue, production manager."""
+    r = db.execute(f"""
+        SELECT s.id, s.name, s.venue, s.show_date, {_ADV_PM_SQL} AS pm
+        FROM shows s WHERE s.id=%s""", (show_id,)).fetchone()
+    if not r:
+        return [('Show', f'Show #{show_id}')]
+    start, end = _show_rental_window(db, show_id)
+    return [('Show', r['name']), ('Dates', _mail_range(start, end) or _mail_date(r['show_date'])),
+            ('Venue', r['venue'] or ''), ('PM', r['pm'] or '')]
 
 
 def _pdf_email_recipients(db, show_id, pdf_type):
@@ -3261,11 +3342,24 @@ def _send_pdf_email(show_id, pdf_type, triggered_by, exported_by_id=None, days_b
         body_line = (f'This {type_label} was generated and sent by {triggered_by} '
                      f'on {tmpl_ctx["sent_datetime"]}.')
 
+    # Branded body (3.22.0). The admin's custom body template (or the
+    # default sentence) is the message; the show facts + attachment note
+    # frame it. No link into the app: these go to outside contacts too.
+    facts = [('Show', _s(show_name)), ('Date', _mail_date(show_date)),
+             ('Venue', _s(venue)), ('PM', _s(pm_name))]
+    body_text, body_html = _mail(
+        f'{type_label} — {_s(show_name)}',
+        eyebrow=type_label,
+        facts=facts,
+        blocks=[{'text': body_line}],
+        note=f'📎 Attached: {filename} ({max(1, len(pdf_bytes) // 1024):,} KB)',
+        footer=f'Sent by {sender_display} · {_MAIL_FOOTER}')
+
     # Send email via configured provider (SMTP relay or direct MX)
     attachments = [{'filename': filename, 'data': pdf_bytes, 'mimetype': 'application/pdf'}]
     success, send_message = _send_email(
         subject=subject, recipients=recipients,
-        body_text=body_line, attachments=attachments,
+        body_text=body_text, body_html=body_html, attachments=attachments,
         error_context={
             'pdf_type':     pdf_type,
             'show_id':      show_id,
@@ -3704,9 +3798,9 @@ def run_no_labor_alerts():
                     body=f"Show is {when}. Add labor requests if crew is needed.",
                     link_url=link_path, kind='no_labor_alert', show_id=sid)
 
-            venue = f" · {item['venue']}" if item['venue'] else ''
-            digest_lines.append(
-                f"• {show_name} — {item['show_date']} ({when}){venue}\n    {link_url}")
+            digest_lines.append([(show_name, link_url if base_url else ''),
+                                 _mail_date(item['show_date']), when.capitalize(),
+                                 item['venue'] or ''])
 
             # Dedup log: the fired trigger plus any it supersedes, so neither
             # re-fires. recipient_count (filled in after the email) marks the
@@ -3719,15 +3813,17 @@ def run_no_labor_alerts():
         if emails and digest_lines:
             n = len(plan)
             subj = f"[3·2·1→Theater] {n} upcoming show{'s' if n != 1 else ''} with no labor requested"
-            body_text = (
-                f"{n} active show{'s are' if n != 1 else ' is'} approaching with no "
-                f"labor requested yet:\n\n"
-                + "\n".join(digest_lines)
-                + "\n\nPlease review staffing and add labor requests where crew is needed.\n"
-            )
+            body_text, body_html = _mail(
+                f"{n} upcoming show{'s' if n != 1 else ''} with no labor requested",
+                eyebrow='Labor scheduling', accent='#B45309',
+                intro=(f"{n} active show{'s are' if n != 1 else ' is'} coming up with no labor "
+                       f"requested yet. Review staffing and add labor requests where crew is needed."),
+                blocks=[{'table': {'columns': ['Show', 'Date', 'When', 'Venue'],
+                                   'rows': digest_lines}}],
+                button=('See every show with no labor', (base_url + '/labor-scheduler/no-labor') if base_url else ''))
             try:
                 ok, _msg = _send_email(
-                    subj, emails, body_text=body_text,
+                    subj, emails, body_text=body_text, body_html=body_html,
                     error_context={'pdf_type': 'no_labor_alert', 'show_id': None,
                                    'triggered_by': 'no_labor_alert_job',
                                    'purpose': 'no_labor_alert'})
@@ -4391,21 +4487,28 @@ def run_field_change_alerts():
         new_disp  = r['pending_value']      if r['pending_value']      not in (None, '') else '(empty)'
 
         subj = f"[{show_name}] {field_label} updated"
-        body_text = (
-            f"{field_label} was changed on the advance for {show_name}.\n\n"
-            f"Old value: {prev_disp}\n"
-            f"New value: {new_disp}\n\n"
-        )
-        link_path = url_for('show_page', show_id=r['show_id']) if r['show_id'] else None
-        link_url = (base_url + link_path) if (base_url and link_path) else (link_path or '')
-        if link_url:
-            body_text += f"Open the show: {link_url}\n"
+        link_path = f"/shows/{r['show_id']}?tab=advance" if r['show_id'] else None
+        link_url = (base_url + link_path) if (base_url and link_path) else ''
 
         # Send email (best-effort). Skip cleanly if no email recipients.
         if emails:
+            who = db.execute("SELECT COALESCE(NULLIF(display_name, ''), username) AS n "
+                             "FROM users WHERE id=%s", (r['pending_updated_by'],)).fetchone() \
+                if r['pending_updated_by'] else None
+            body_text, body_html = _mail(
+                f'{field_label} updated — {show_name}',
+                eyebrow='Advance change',
+                intro=f'{field_label} was changed on the advance for {show_name}.',
+                facts=(_show_mail_facts(db, r['show_id']) if r['show_id'] else
+                       [('Show', show_name)]) + [('Field', field_label),
+                                                 ('Changed by', who['n'] if who else '')],
+                blocks=[{'heading': 'Was', 'items': [_mail_value(prev_disp)], 'tone': 'removed'},
+                        {'heading': 'Now', 'items': [_mail_value(new_disp)], 'tone': 'added'}],
+                button=('Open the advance', link_url),
+                preheader=f'{field_label}: {_mail_value(new_disp)[:120]}')
             try:
                 _send_email(
-                    subj, emails, body_text=body_text,
+                    subj, emails, body_text=body_text, body_html=body_html,
                     error_context={'pdf_type': 'field_alert',
                                    'show_id': r['show_id'],
                                    'triggered_by': 'field_alert_job',
@@ -5107,33 +5210,15 @@ def _gateway_send_otp_email(to_addr, code):
     show up in the Settings → Email Send Errors panel."""
     subject = 'Your 3·2·1→Theater access code'
     mins = _GATEWAY_OTP_TTL_MIN
-    body = (
-        f'Your one-time access code for 3·2·1→Theater is:\n\n'
-        f'    {code}\n\n'
-        f'Enter this code on the access page to continue. For your security, '
-        f'it expires in {mins} minutes and can be used only once.\n\n'
-        f'If you did not request this code, you can disregard this message.\n\n'
-        f'— 3·2·1→Theater\n'
-        f'Dr. Phillips Center for the Performing Arts'
-    )
-    body_html = (
-        '<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;'
-        'max-width:480px;margin:0 auto;color:#1d2026">'
-        '<p style="font-size:15px;margin:0 0 18px">Your one-time access code for '
-        '<strong>3&middot;2&middot;1&rarr;Theater</strong> is:</p>'
-        f'<div style="font-size:32px;font-weight:700;letter-spacing:8px;text-align:center;'
-        f'padding:18px;background:#f6f7f9;border:1px solid #e3e6ea;border-radius:10px;'
-        f'color:#14161a">{code}</div>'
-        f'<p style="font-size:14px;color:#5f6672;margin:18px 0 0">Enter this code on the '
-        f'access page to continue. For your security, it expires in {mins} minutes and can '
-        f'be used only once.</p>'
-        '<p style="font-size:13px;color:#9aa0a6;margin:14px 0 0">If you did not request '
-        'this code, you can disregard this message.</p>'
-        '<hr style="border:none;border-top:1px solid #e3e6ea;margin:22px 0 12px">'
-        '<p style="font-size:12px;color:#9aa0a6;margin:0">3&middot;2&middot;1&rarr;Theater '
-        '&middot; Dr. Phillips Center for the Performing Arts</p>'
-        '</div>'
-    )
+    body, body_html = _mail(
+        'Your access code',
+        eyebrow='Sign-in',
+        intro='Your one-time access code for 3·2·1→Theater is:',
+        blocks=[{'code': code},
+                {'text': f'Enter this code on the access page to continue. For your security, '
+                         f'it expires in {mins} minutes and can be used only once.'}],
+        note='If you did not request this code, you can disregard this message.',
+        preheader=f'Your 3·2·1→Theater access code: {code}')
     def _bg():
         # _send_email writes failures to email_send_errors itself (with the
         # SMTP code) when given error_context — logging here too would
@@ -13456,7 +13541,17 @@ def test_email_provider():
     success, message = _send_email(
         subject='3·2·1→THEATER Email Test',
         recipients=[to_addr],
-        body_text='This is a test email from 3·2·1→THEATER to verify your email configuration.',
+        **dict(zip(('body_text', 'body_html'), _mail(
+            'Email test',
+            eyebrow='System',
+            intro='This is a test email from 3·2·1→THEATER to verify your email configuration. '
+                  'If it looks right here, system emails will too.',
+            facts=[('Provider', get_app_setting('email_provider', 'smtp')),
+                   ('Sent by', session.get('display_name') or session.get('username') or ''),
+                   ('Sent', datetime.now().strftime('%b %d, %Y %I:%M %p'))],
+            blocks=[{'heading': 'Sample change list', 'items': ['Added line'], 'tone': 'added'},
+                    {'items': ['Removed line'], 'tone': 'removed'}],
+            button=('Open 3·2·1→THEATER', _mail_url('/'))))),
         error_context={'pdf_type': 'test', 'purpose': 'test',
                        'triggered_by': session.get('user_id')},
     )
@@ -19699,7 +19794,7 @@ def _get_asset_notification_recipients(db, exclude_user_id=None):
     return out
 
 
-def _notify_asset_recipients(db, subject, body_text, exclude_user_id=None):
+def _notify_asset_recipients(db, subject, body_text, exclude_user_id=None, body_html=None):
     """Send a system notification to all asset-permission holders.
 
     The recipient lookup runs synchronously (DB connection is request-bound),
@@ -19719,7 +19814,7 @@ def _notify_asset_recipients(db, subject, body_text, exclude_user_id=None):
     def _send_all(rcpts, subj, body):
         for _name, _email in rcpts:
             try:
-                _send_simple_email(_email, subj, body)
+                _send_simple_email(_email, subj, body, body_html)
             except Exception as exc:
                 try:
                     app.logger.error(f'asset notify send to {_email} failed: {exc}')
@@ -19783,6 +19878,119 @@ def _compute_asset_snapshot_hash(db, show_id):
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
+def _asset_approval_state(db, show_id):
+    """The approval-relevant gear as data (3.22.0): {'a': asset lines,
+    'x': external rentals} — the same fields the approval hash covers.
+    Stored as shows.assets_approval_lines when a show is approved, so the
+    re-approval email can diff against it. init_db's one-time backfill
+    builds the same shape."""
+    a = [{'t': r['asset_type_id'], 'u': r['asset_item_id'], 'q': r['quantity'],
+          's': _iso_or_none(r['rental_start']), 'e': _iso_or_none(r['rental_end']),
+          'p': r['locked_price'], 'h': 1 if r['is_hidden'] else 0}
+         for r in db.execute("""
+            SELECT asset_type_id, asset_item_id, quantity, rental_start, rental_end,
+                   locked_price, is_hidden
+            FROM show_assets WHERE show_id=%s ORDER BY id""", (show_id,)).fetchall()]
+    x = [{'d': r['description'], 'c': r['cost'], 'f': r['pdf_filename'] or ''}
+         for r in db.execute("""
+            SELECT description, cost, pdf_filename FROM show_external_rentals
+            WHERE show_id=%s AND piano_tuning_id IS NULL ORDER BY id""", (show_id,)).fetchall()]
+    return {'a': a, 'x': x}
+
+
+def _iso_or_none(v):
+    d = _as_date(v)
+    return d.isoformat() if d else None
+
+
+def _asset_state_lines(db, state):
+    """Readable lines for an _asset_approval_state(): [(match_key, sig,
+    label, fields)], names resolved now (a renamed item reads by its new
+    name). match_key pairs a line with its own earlier version for
+    'changed'; sig is its full content."""
+    tids = {l['t'] for l in state.get('a') or [] if l.get('t')}
+    uids = {l['u'] for l in state.get('a') or [] if l.get('u')}
+    names = {r['id']: r['name'] for r in db.execute(
+        'SELECT id, name FROM asset_types WHERE id = ANY(%s)', (sorted(tids),)).fetchall()} if tids else {}
+    units = {r['id']: (r['barcode'] or f"#{r['id']}") for r in db.execute(
+        'SELECT id, barcode FROM asset_items WHERE id = ANY(%s)', (sorted(uids),)).fetchall()} if uids else {}
+    out = []
+    for l in state.get('a') or []:
+        name = names.get(l.get('t')) or f"Item #{l.get('t')}"
+        unit = f" · Unit {units.get(l['u'], '#' + str(l['u']))}" if l.get('u') else ''
+        price = round(float(l.get('p') or 0), 2)
+        f = {'name': name + unit, 'qty': int(l.get('q') or 0),
+             'dates': _mail_range(l.get('s'), l.get('e')), 'price': price,
+             'hidden': bool(l.get('h'))}
+        label = (f"{f['name']} ×{f['qty']} · {f['dates'] or 'no dates'} · ${price:,.2f}/unit"
+                 + (' (hidden)' if f['hidden'] else ''))
+        out.append((('a', l.get('t'), l.get('u')),
+                    ('a', l.get('t'), l.get('u'), f['qty'], l.get('s'), l.get('e'), price, f['hidden']),
+                    label, f))
+    for l in state.get('x') or []:
+        cost = round(float(l.get('c') or 0), 2)
+        f = {'name': f"External rental: {l.get('d') or '(no description)'}", 'cost': cost,
+             'pdf': l.get('f') or ''}
+        label = f"{f['name']} · ${cost:,.2f}" + (' · PDF attached' if f['pdf'] else '')
+        out.append((('x', l.get('d')), ('x', l.get('d'), cost, f['pdf']), label, f))
+    return out
+
+
+def _asset_state_diff(db, old, new):
+    """(added, removed, changed) readable lines between two approval states.
+    Identical lines cancel first; a leftover new line whose item (+ unit)
+    was also on the old side reads as 'changed' with what moved."""
+    old_l = _asset_state_lines(db, old)
+    new_l = _asset_state_lines(db, new)
+    for n in list(new_l):
+        m = next((o for o in old_l if o[1] == n[1]), None)
+        if m:
+            old_l.remove(m)
+            new_l.remove(n)
+    added, changed = [], []
+    for n in new_l:
+        m = next((o for o in old_l if o[0] == n[0]), None)
+        if not m:
+            added.append(n[2])
+            continue
+        old_l.remove(m)
+        a, b = m[3], n[3]
+        bits = []
+        if n[0][0] == 'a':
+            if a['qty'] != b['qty']:
+                bits.append(f"qty {a['qty']} → {b['qty']}")
+            if a['dates'] != b['dates']:
+                bits.append(f"dates {a['dates'] or '—'} → {b['dates'] or '—'}")
+            if a['price'] != b['price']:
+                bits.append(f"price ${a['price']:,.2f} → ${b['price']:,.2f}")
+            if a['hidden'] != b['hidden']:
+                bits.append('now hidden' if b['hidden'] else 'now shown')
+        else:
+            if a['cost'] != b['cost']:
+                bits.append(f"cost ${a['cost']:,.2f} → ${b['cost']:,.2f}")
+            if a['pdf'] != b['pdf']:
+                bits.append('PDF replaced' if a['pdf'] and b['pdf'] else
+                            'PDF added' if b['pdf'] else 'PDF removed')
+        changed.append(f"{b['name']}: {', '.join(bits) or 'changed'}")
+    return added, [o[2] for o in old_l], changed
+
+
+def _asset_state_table(db, state):
+    """Email table of a show's gear (approved list)."""
+    rows, total = [], 0.0
+    for _k, _s, _label, f in _asset_state_lines(db, state):
+        if 'qty' in f:
+            amt = f['qty'] * f['price']
+            rows.append([f['name'] + (' (hidden)' if f['hidden'] else ''), str(f['qty']),
+                         f['dates'], f'${amt:,.2f}'])
+        else:
+            amt = f['cost']
+            rows.append([f['name'], '', '', f'${amt:,.2f}'])
+        total += amt
+    return {'columns': ['Item', 'Qty', 'Dates', 'Amount'], 'rows': rows,
+            'align': ['l', 'r', 'l', 'r'], 'total': ['Total', '', '', f'${total:,.2f}']}
+
+
 _ASSET_CHANGE_LABELS = {
     'asset_added': 'gear added', 'asset_edited': 'gear line changed',
     'asset_removed': 'gear removed', 'asset_company_repriced': 'lines re-priced to company rates',
@@ -19837,8 +20045,10 @@ def _reset_asset_approval(db, show_id, reason):
     # A pinned unit names the piano on its tuning's schedule row (3.18.2).
     _piano_schedule_refresh(db, show_id)
     row = db.execute(
-        'SELECT s.assets_approved, s.assets_approval_snapshot, s.name, s.is_test '
-        'FROM shows s WHERE s.id=%s', (show_id,)
+        'SELECT s.assets_approved, s.assets_approval_snapshot, s.assets_approval_lines, '
+        's.assets_approved_at, s.name, s.is_test, '
+        "COALESCE(NULLIF(u.display_name, ''), u.username) AS approver "
+        'FROM shows s LEFT JOIN users u ON u.id = s.assets_approved_by WHERE s.id=%s', (show_id,)
     ).fetchone()
     if not row:
         return
@@ -19868,22 +20078,47 @@ def _reset_asset_approval(db, show_id, reason):
     log_audit(db, 'ASSET_APPROVAL_RESET', 'show', show_id, show_id=show_id,
               detail=f'reason={reason}')
     show_name = row['name'] or f'Show #{show_id}'
-    actor = session.get('display_name') or session.get('username') or 'Someone'
+    actor = (session.get('display_name') or session.get('username') or 'Someone'
+             ) if has_request_context() else 'System'
+    what = _ASSET_CHANGE_LABELS.get(reason, reason)
+    # What changed since approval (3.22.0): diff the approved gear stored at
+    # approval against the gear now. Shows approved before that was stored
+    # (and not backfilled) fall back to naming the kind of change.
+    blocks = []
     try:
-        approvals_url = url_for('asset_approvals', _external=True)
-    except Exception:
-        approvals_url = ''
-    body = (
-        f'Show "{show_name}" is now waiting for asset approval again.\n\n'
-        f'Trigger: {reason}\n'
-        f'Changed by: {actor}\n\n'
-        + (f'Review pending approvals:\n{approvals_url}\n' if approvals_url else '')
-    )
+        approved = json.loads(row['assets_approval_lines']) if row['assets_approval_lines'] else None
+    except (TypeError, ValueError):
+        approved = None
+    if approved is not None:
+        added, removed, changed = _asset_state_diff(db, approved, _asset_approval_state(db, show_id))
+        if added:
+            blocks.append({'heading': 'Added', 'items': added, 'tone': 'added'})
+        if removed:
+            blocks.append({'heading': 'Removed', 'items': removed, 'tone': 'removed'})
+        if changed:
+            blocks.append({'heading': 'Changed', 'items': changed, 'tone': 'changed'})
+    if not blocks:
+        blocks.append({'heading': 'What changed', 'items': [what[:1].upper() + what[1:]],
+                       'tone': 'changed'})
+    approved_at = _mail_date(row['assets_approved_at']) if row['assets_approved_at'] else ''
+    text, html = _mail(
+        f'Assets need re-approval — {show_name}',
+        eyebrow='Asset approval',
+        intro=(f'{actor} changed the gear on this show after it was approved, so it is '
+               f'waiting for asset approval again.'),
+        facts=_show_mail_facts(db, show_id) + [
+            ('Changed by', actor),
+            ('Was approved', ' by '.join(x for x in (approved_at, row['approver'] or '') if x))],
+        blocks=blocks,
+        button=('Review on Approvals', _mail_url('/assets/approvals')),
+        links=[('Open the show\'s Assets tab', _mail_url(f'/shows/{show_id}?tab=assets'))],
+        preheader=f'{show_name}: ' + '; '.join(
+            ', '.join(b['items'][:2]) for b in blocks)[:150])
     _notify_asset_recipients(
         db,
         f'3·2·1→THEATER: Show Waiting for Asset Approval — {show_name}',
-        body,
-        exclude_user_id=session.get('user_id'),
+        text, body_html=html,
+        exclude_user_id=session.get('user_id') if has_request_context() else None,
     )
 
 
@@ -21039,12 +21274,13 @@ def show_assets_approve(show_id):
         db.close()
         return jsonify({'error': 'Show not found'}), 404
     snapshot = _compute_asset_snapshot_hash(db, show_id)
+    approved_state = _asset_approval_state(db, show_id)
     db.execute("""
         UPDATE shows SET assets_approved=1, assets_approved_by=%s,
                assets_approved_at=CURRENT_TIMESTAMP,
-               assets_approval_snapshot=%s
+               assets_approval_snapshot=%s, assets_approval_lines=%s
          WHERE id=%s
-    """, (session['user_id'], snapshot, show_id))
+    """, (session['user_id'], snapshot, json.dumps(approved_state, default=str), show_id))
     log_audit(db, 'ASSET_APPROVAL_GRANTED', 'show', show_id, show_id=show_id)
     # The "waiting for approval" bell items are done — for every manager.
     db.execute("UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE show_id=%s "
@@ -21056,20 +21292,26 @@ def show_assets_approve(show_id):
     approved_at = db.execute('SELECT assets_approved_at FROM shows WHERE id=%s',
                              (show_id,)).fetchone()['assets_approved_at']
     show_name = row['name'] or f'Show #{show_id}'
-    try:
-        approvals_url = url_for('asset_approvals', _external=True)
-    except Exception:
-        approvals_url = ''
-    body = (
-        f'Show "{show_name}" has been marked as asset-approved.\n\n'
-        f'Approved by: {approver_name or "(unknown)"}\n'
-        f'Approved at: {approved_at}\n\n'
-        + (f'View approvals:\n{approvals_url}\n' if approvals_url else '')
-    )
+    table = _asset_state_table(db, approved_state)
+    n_lines = len(table['rows'])
+    text, html = _mail(
+        f'Assets approved — {show_name}',
+        eyebrow='Asset approval', accent='#15803D',
+        intro=f'{approver_name or "An approver"} approved the gear on this show.',
+        facts=_show_mail_facts(db, show_id) + [
+            ('Approved by', approver_name or '(unknown)'),
+            ('Approved', _mail_date(approved_at) + (
+                f" at {_as_dt(approved_at).strftime('%I:%M %p').lstrip('0')}"
+                if _as_dt(approved_at) else ''))],
+        blocks=[{'heading': f'Approved gear ({n_lines} line{"" if n_lines == 1 else "s"})',
+                 'table': table}] if n_lines else [
+                {'text': 'No gear lines — the approval covers an empty list.'}],
+        button=('Open the show\'s Assets tab', _mail_url(f'/shows/{show_id}?tab=assets')),
+        links=[('Approvals', _mail_url('/assets/approvals'))])
     _notify_asset_recipients(
         db,
         f'3·2·1→THEATER: Show Assets Approved — {show_name}',
-        body,
+        text, body_html=html,
         exclude_user_id=session.get('user_id'),
     )
     db.close()
@@ -21089,7 +21331,8 @@ def show_assets_unapprove(show_id):
         return jsonify({'error': 'Show not found'}), 404
     db.execute("""
         UPDATE shows SET assets_approved=0, assets_approved_by=NULL,
-               assets_approved_at=NULL, assets_approval_snapshot=NULL
+               assets_approved_at=NULL, assets_approval_snapshot=NULL,
+               assets_approval_lines=NULL
          WHERE id=%s
     """, (show_id,))
     log_audit(db, 'ASSET_APPROVAL_REVOKED', 'show', show_id, show_id=show_id)
@@ -23122,15 +23365,17 @@ def _piano_bell_done(db, tid):
                "AND field_key=%s AND read_at IS NULL", (f'piano:{tid}',))
 
 
-def _piano_notify(recipients, subject, body):
-    """Fire-and-forget: SMTP latency never holds up the request."""
+def _piano_notify(recipients, subject, mail):
+    """Fire-and-forget: SMTP latency never holds up the request. `mail` is
+    _mail()'s (text, html), or plain text."""
     if not recipients:
         return
+    body, html = mail if isinstance(mail, tuple) else (mail, None)
 
     def _bg():
         for addr in recipients:
             try:
-                _send_simple_email(addr, subject, body)
+                _send_simple_email(addr, subject, body, html)
             except Exception as exc:
                 app.logger.error(f'piano tuning notify to {addr} failed: {exc}')
     threading.Thread(target=_bg, daemon=True).start()
@@ -23281,6 +23526,7 @@ def show_piano_tuning_create(show_id):
     log_audit(db, 'PIANO_TUNING_REQUEST', 'piano_tuning', tid, show_id=show_id,
               detail=f"date={vals.get('requested_date')} piano={vals.get('piano', '')!r}")
     recipients = _piano_manager_emails(db, exclude_user_id=session['user_id'])
+    req_facts = _show_mail_facts(db, show_id)
     _piano_bell(db, tid, show_id, show['name'], 'Piano tuning requested',
                 f"{vals.get('piano') or 'Piano'} · needed {vals.get('requested_date')} "
                 f"{vals.get('requested_time') or ''}".strip()
@@ -23290,20 +23536,20 @@ def show_piano_tuning_create(show_id):
     syslog_logger.info(f"PIANO_TUNING_REQUEST id={tid} show_id={show_id} "
                        f"by={session.get('username')}")
     who = session.get('display_name') or session.get('username') or 'Someone'
-    try:
-        link = url_for('piano_tuning_page', _external=True)
-    except Exception:
-        link = ''
     _piano_notify(
         recipients,
         f'3·2·1→THEATER: Piano Tuning Request — {show["name"]}',
-        f'{who} requested a piano tuning.\n\n'
-        f'Show: {show["name"]}\n'
-        f'Piano: {vals.get("piano") or "—"}\n'
-        + ('  (not on the show\'s Assets tab yet)\n' if not_on_show else '')
-        + f'Needed: {vals.get("requested_date")} {vals.get("requested_time") or ""}\n'
-        f'Notes: {vals.get("notes") or "—"}\n\n'
-        + (f'Piano Tuning list:\n{link}\n' if link else ''))
+        _mail(f'Piano tuning requested — {show["name"]}',
+              eyebrow='Piano tuning', accent='#d97706',
+              intro=f'{who} requested a piano tuning.',
+              facts=req_facts + [
+                  ('Piano', (vals.get('piano') or '—')
+                   + (" (not on the show's Assets tab yet)" if not_on_show else '')),
+                  ('Needed', ' '.join(x for x in (_mail_date(vals.get('requested_date')),
+                                                  vals.get('requested_time') or '') if x)),
+                  ('Requested by', who)],
+              blocks=[{'heading': 'Notes', 'text': vals['notes']}] if vals.get('notes') else [],
+              button=('Open on the Piano Tuning list', _mail_url(f'/piano-tuning?open={tid}'))))
     return jsonify({'success': True, 'id': tid}), 201
 
 
@@ -23476,14 +23722,20 @@ def piano_tuning_update(tid):
     if requester:
         r = _piano_out(row)
         when = f"{r['tuning_date'] or ''} {r['tuning_start'] or ''}".strip()
+        when = ' '.join(x for x in (_mail_date(r['tuning_date']), r['tuning_start'] or '') if x)
         _piano_notify(
             [requester['email']],
             f'3·2·1→THEATER: Piano Tuning Scheduled — {cur["show_name"]}',
-            f'Your piano tuning request for {cur["show_name"]} is scheduled with the vendor.\n\n'
-            f'When: {when or "time to be confirmed"}\n'
-            f'Piano: {r["piano"] or "—"}\n'
-            + (f'Vendor: {r["vendor"]}\n' if r['vendor'] else '')
-            + ('\nIt has been added to the show\'s production schedule.\n' if when else ''))
+            _mail(f'Piano tuning scheduled — {cur["show_name"]}',
+                  eyebrow='Piano tuning', accent='#7c3aed',
+                  intro='Your piano tuning request is scheduled with the vendor.'
+                        + (" It is on the show's production schedule." if r['tuning_date'] else ''),
+                  facts=[('Show', cur['show_name']), ('When', when or 'Time to be confirmed'),
+                         ('Piano', r['piano'] or '—'), ('Vendor', r['vendor'] or ''),
+                         ('Needed', ' '.join(x for x in (_mail_date(r['requested_date']),
+                                                         r['requested_time'] or '') if x))],
+                  button=('Open the show', _mail_url(f'/shows/{show_id}?tab=advance#piano-tuning-section')
+                          if show_id else '')))
     return jsonify({'success': True, 'tuning': _piano_out(row)})
 
 
@@ -23789,24 +24041,20 @@ def piano_tuning_cancel_request(tid):
         db.close()
         syslog_logger.info(f"PIANO_TUNING_CANCEL_REQUEST id={tid} show_id={t['show_id']} "
                            f"by={session.get('username')}")
-        try:
-            link = url_for('piano_tuning_page', _external=True)
-        except Exception:
-            link = ''
-        when = f"{_as_date(t['tuning_date']).isoformat()} {t['tuning_start'] or ''}".strip() \
-            if t['tuning_date'] else 'not scheduled yet'
+        when = ' '.join(x for x in (_mail_date(t['tuning_date']), t['tuning_start'] or '') if x) \
+            if t['tuning_date'] else 'Not scheduled yet'
         _piano_notify(
             recipients,
             f'3·2·1→THEATER: Piano Tuning Cancellation Requested — {t["show_name"]}',
-            f'{who} asked to cancel a piano tuning.\n\n'
-            f'Show: {t["show_name"]}\n'
-            f'Piano: {t["piano"] or "—"}\n'
-            f'Tuning: {when}\n'
-            f'Vendor: {t["vendor"] or "—"}\n'
-            f'Reason: {note or "—"}\n\n'
-            'Cancel it with the vendor if you can, then mark it Cancelled — or decline '
-            'the request on the Piano Tuning list.\n'
-            + (f'\n{link}\n' if link else ''))
+            _mail(f'Cancellation requested — {t["show_name"]}',
+                  eyebrow='Piano tuning', accent='#B91C1C',
+                  intro=f'{who} asked to cancel a piano tuning.',
+                  facts=[('Show', t['show_name']), ('Piano', t['piano'] or '—'),
+                         ('Tuning', when), ('Vendor', t['vendor'] or '—')],
+                  blocks=[{'heading': 'Reason', 'text': note or '—'},
+                          {'text': 'Cancel it with the vendor if you can, then mark it '
+                                   'Cancelled — or decline the request on the Piano Tuning list.'}],
+                  button=('Open on the Piano Tuning list', _mail_url(f'/piano-tuning?open={tid}'))))
         return jsonify({'success': True})
     # DELETE — withdraw (asker / show editor) or decline (manager)
     if not t['cancel_requested_at']:
@@ -23839,8 +24087,18 @@ def piano_tuning_cancel_request(tid):
         _piano_notify(
             [asker_email],
             f'3·2·1→THEATER: Piano Tuning Will Go Ahead — {t["show_name"]}',
-            f'{who} could not cancel the piano tuning for {t["show_name"]} '
-            f'({t["piano"] or "piano"}), so it is still on. Contact them with questions.\n')
+            _mail(f'Piano tuning will go ahead — {t["show_name"]}',
+                  eyebrow='Piano tuning', accent='#7c3aed',
+                  intro=f'{who} could not cancel this piano tuning, so it is still on. '
+                        f'Contact them with any questions.',
+                  facts=[('Show', t['show_name']), ('Piano', t['piano'] or '—'),
+                         ('Tuning', ' '.join(x for x in (_mail_date(t['tuning_date']),
+                                                         t['tuning_start'] or '') if x)
+                          or 'Not scheduled yet'),
+                         ('Vendor', t['vendor'] or '')],
+                  button=('Open the show', _mail_url(
+                      f"/shows/{t['show_id']}?tab=advance#piano-tuning-section")
+                          if t['show_id'] else '')))
     return jsonify({'success': True})
 
 
@@ -24225,11 +24483,16 @@ def _register_route():
                         _send_simple_email_async(
                             email,
                             '3·2·1→THEATER: Confirm Your Email',
-                            f'Click the link to confirm your email address:\n{confirm_url}\n\nThis link expires in 24 hours.',
-                            f'<p>Click the link below to confirm your email address:</p>'
-                            f'<p><a href="{confirm_url}">{confirm_url}</a></p>'
-                            f'<p>This link expires in 24 hours.</p>'
-                        )
+                            *_mail('Confirm your email',
+                                   eyebrow='Your account',
+                                   intro=f'Hi {display_name or username}, confirm this email address to '
+                                         f'finish your 3·2·1→THEATER registration. An admin then '
+                                         f'approves the account before you can sign in.',
+                                   facts=[('Username', username)],
+                                   button=('Confirm my email', confirm_url),
+                                   note=f'The link expires in 24 hours. If the button doesn\'t work, '
+                                        f'paste this into your browser: {confirm_url}\n'
+                                        f'Didn\'t register? You can ignore this email.'))
                         syslog_logger.info(f'REGISTER_PENDING username={username} email={email}')
                         # Notify admins of new pending registration
                         try:
@@ -24245,9 +24508,15 @@ def _register_route():
                                 _send_simple_email_async(
                                     _adm['email'],
                                     '3\u00b72\u00b71\u2192THEATER: New Registration Pending',
-                                    f'A new account registration is awaiting your approval.\n\n'
-                                    f'Username: {username}\nDisplay name: {display_name or "(none)"}\nEmail: {email}\n\n'
-                                    f'Review and approve at:\n{_settings_url}',
+                                    *_mail('New registration pending',
+                                           eyebrow='Accounts',
+                                           intro='A new account registration is waiting for your approval. '
+                                                 'They still have to confirm their email address.',
+                                           facts=[('Username', username),
+                                                  ('Display name', display_name or '(none)'),
+                                                  ('Email', email),
+                                                  ('Requested', datetime.now().strftime('%b %d, %Y %I:%M %p'))],
+                                           button=('Review registrations', _settings_url)),
                                 )
                         except Exception:
                             pass
@@ -24345,7 +24614,12 @@ def approve_registration(reg_id):
         _send_simple_email_async(
             reg['email'],
             '3·2·1→THEATER: Account Approved',
-            f'Your account "{reg["username"]}" has been approved. You can now log in.',
+            *_mail('Your account is approved',
+                   eyebrow='Your account', accent='#15803D',
+                   intro=f'Welcome to 3·2·1→THEATER! Your account has been approved — you can '
+                         f'sign in now.',
+                   facts=[('Username', reg['username'])],
+                   button=('Sign in', _mail_url('/login'))),
         )
         syslog_logger.info(f'USER_APPROVED username={reg["username"]} role={role} by={session.get("username")}')
         db.close()
@@ -24366,7 +24640,11 @@ def deny_registration(reg_id):
         _send_simple_email_async(
             reg['email'],
             '3·2·1→THEATER: Registration Declined',
-            f'Your registration request for "{reg["username"]}" was not approved.',
+            *_mail('Registration not approved',
+                   eyebrow='Your account', accent='#6b7280',
+                   intro='Your registration request was not approved. If you think this is a '
+                         'mistake, contact your 3·2·1→THEATER administrator.',
+                   facts=[('Username', reg['username'])]),
         )
         syslog_logger.info(f'USER_DENIED username={reg["username"]} by={session.get("username")}')
     db.close()
@@ -24406,10 +24684,15 @@ def _forgot_password_route():
                 _send_simple_email_async(
                     user['email'],
                     '3·2·1→THEATER: Password Reset',
-                    f'Click the link below to reset your password (expires in 2 hours):\n{reset_url}\n\n'
-                    f'If you did not request this, ignore this email.',
-                    f'<p><a href="{reset_url}">{reset_url}</a></p>'
-                    f'<p>This link expires in 2 hours. If you did not request this, ignore this email.</p>'
+                    *_mail('Reset your password',
+                           eyebrow='Your account',
+                           intro=f'Someone (hopefully you) asked to reset the password for '
+                                 f'{user["username"]}. Use the button to choose a new one.',
+                           button=('Reset my password', reset_url),
+                           note=f'The link expires in 2 hours and works once. If the button '
+                                f'doesn\'t work, paste this into your browser: {reset_url}\n'
+                                f'Didn\'t ask for this? Ignore this email — your password stays '
+                                f'the same.')
                 )
                 syslog_logger.info(f'PASSWORD_RESET_REQUEST user={user["username"]}')
             db.close()
@@ -24881,50 +25164,26 @@ def _maint_banner_html(title_window, body_html):
 
 def _maint_email(kind, notice, message_html, sender):
     """(body_text, body_html) for a maintenance notice ('notice') or a
-    work-completed ('complete') email. Inline styles only — mail clients
-    drop <style> blocks."""
+    work-completed ('complete') email, in the shared branded layout
+    (3.22.0): amber eyebrow for a notice, green for complete."""
     complete = kind == 'complete'
-    accent = '#15803D' if complete else '#B45309'
-    label = 'MAINTENANCE COMPLETE' if complete else 'SCHEDULED MAINTENANCE'
-    title = notice['title'] or ''
     window = _maint_window_text(notice['window_start'], notice['window_end'])
     body = _maint_body_html(message_html)
     base_url = (get_app_setting('public_base_url', '') or '').rstrip('/')
-    esc = _html_mod.escape
-
-    html_parts = [
-        '<div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#1f2937">',
-        f'<div style="background:{accent};color:#ffffff;padding:12px 20px;border-radius:6px 6px 0 0;'
-        f'font-size:13px;font-weight:bold;letter-spacing:1px">{label}</div>',
-        '<div style="border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 6px 6px">',
-        f'<h2 style="margin:0 0 10px;font-size:20px">{esc(title)}</h2>',
-    ]
-    if window:
-        html_parts.append(
-            f'<p style="margin:0 0 16px;font-size:14px"><strong>'
-            f'{"Maintenance window" if complete else "When"}:</strong> {esc(window)}</p>')
+    blocks = []
     if body:
-        html_parts.append(f'<div style="font-size:14px;line-height:1.5">{body}</div>')
+        blocks.append({'html': body, 'text': _html_to_text(body)})
     if complete and notice['body_html']:
-        html_parts.append(
-            '<div style="margin-top:20px;padding-top:12px;border-top:1px solid #e5e7eb;'
-            'font-size:12px;color:#6b7280"><div style="font-weight:bold;margin-bottom:4px">'
-            f'Original notice</div>{_maint_body_html(notice["body_html"])}</div>')
-    html_parts.append('</div>')
-    footer = f'Sent by {esc(sender)} via 3·2·1→Theater'
-    if base_url:
-        footer += f' · <a href="{esc(base_url)}" style="color:#6b7280">{esc(base_url)}</a>'
-    html_parts.append(f'<p style="font-size:11px;color:#6b7280;margin-top:12px">{footer}</p></div>')
-
-    text_parts = [label, '', title]
-    if window:
-        text_parts.append(f'{"Maintenance window" if complete else "When"}: {window}')
-    if body:
-        text_parts += ['', _html_to_text(body)]
-    if complete and notice['body_html']:
-        text_parts += ['', 'Original notice:', _html_to_text(_maint_body_html(notice['body_html']))]
-    text_parts += ['', '--', f'Sent by {sender} via 3·2·1→Theater' + (f' · {base_url}' if base_url else '')]
-    return '\n'.join(text_parts), ''.join(html_parts)
+        orig = _maint_body_html(notice['body_html'])
+        blocks.append({'heading': 'Original notice', 'html': orig, 'text': _html_to_text(orig)})
+    return _mail(
+        notice['title'] or ('Maintenance complete' if complete else 'Scheduled maintenance'),
+        eyebrow='Maintenance complete' if complete else 'Scheduled maintenance',
+        accent='#15803D' if complete else '#B45309',
+        facts=[('Maintenance window' if complete else 'When', window)] if window else [],
+        blocks=blocks,
+        button=('Open 3·2·1→THEATER', base_url) if base_url and complete else None,
+        footer=f'Sent by {sender} via 3·2·1→Theater' + (f' · {base_url}' if base_url else ''))
 
 
 def _maint_send(subject, recipients, body_text, body_html, high_priority, purpose):
