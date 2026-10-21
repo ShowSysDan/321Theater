@@ -168,6 +168,7 @@ Version history:
    - [Labor Scheduler](#labor-scheduler)
    - [Assets Tab](#assets-tab)
    - [Asset Availability Dashboards](#asset-availability-dashboards)
+   - [Piano Tuning](#piano-tuning)
    - [Comments](#comments)
    - [Export & Files](#export--files)
    - [Security Sign-In Sheet](#security-sign-in-sheet)
@@ -201,6 +202,7 @@ Version history:
    - [Venue Branding (Logos & Paperwork Colors)](#venue-branding-logos--paperwork-colors)
    - [Upload Size Limit](#upload-size-limit)
    - [Email Settings](#email-settings)
+   - [Email Activity, Send Errors & Resend](#email-activity-send-errors--resend)
    - [AI Extraction (Ollama)](#ai-extraction-ollama)
    - [AI Session Concurrency](#ai-session-concurrency)
    - [Syslog Settings](#syslog-settings)
@@ -395,6 +397,10 @@ The **Assets** tab on every show allows content admins to:
 
 Availability is checked in real time when adding items. Items that are over-allocated or in maintenance show their status clearly.
 
+**How availability is counted (3.20.1):** for a rental window, *in use* is the highest number of units booked on any **single day** inside the window, not the sum of every booking that touches the window. With 2 projectors, one booked on the 27th and another on the 28th, a 26th–29th window still has 1 free, because no day has both out. *Available* = units owned − in maintenance − held in reserve − that busiest-day count. This rule applies everywhere: the add dialogs' stock line, the Assets tab's OVERBOOKED flags, System/Package component checks and the server's add/edit checks. It is the same rule the Asset Manager's overbooked scan uses. A **pinned unit** (a specific barcode/S/N) is different: if it is booked on any day of the window, it is unavailable for the whole window.
+
+**Overbooking on purpose:** only from the **Approvals** page. When an add would go negative, its dialog shows an *Availability Override* warning; **Add to Show** then asks for confirmation and books it anyway. Only admins, content admins and Asset Managers can do this. A pinned unit still can't be double-booked. Each override is noted on the audit entry (`availability_override=1`) and syslogged (`ASSET_AVAILABILITY_OVERRIDE`). From the show page an over-allocated add is always refused.
+
 ### Asset Availability Dashboards
 
 Access via **Dashboards** in the sidebar. Create personal or public availability views showing real-time asset status across your date range.
@@ -402,6 +408,26 @@ Access via **Dashboards** in the sidebar. Create personal or public availability
 - **Layouts:** Combined (all assets), By Category, or By Show
 - **Public dashboards** get a shareable URL (`/d/<slug>`) accessible without login — useful for tour managers and external clients
 - Each dashboard refreshes live from the `/api/assets/availability` endpoint
+
+### Piano Tuning
+
+An optional module (Settings → System → Modules, on by default). PMs request tunings from the show page; the **Piano Tuning manager** (admins, plus users with the Piano Tuning Manager permission) works them from **SYSTEM → Piano Tuning** (`/piano-tuning`).
+
+**Requesting (PMs):** the *Piano Tuning* panel sits wherever the `piano_tuning` field is placed on the advance form. **+ Request Tuning** asks for the piano (model, and optionally the exact unit / S/N), the date and time it's needed, and notes. If the model isn't on the show's Assets tab yet, sending the request books it there first, pinned to the chosen S/N when that item allows unit selection. It goes through the normal availability check, pricing and asset approval.
+
+**The S/N reaches the Assets tab (3.21.0):** every save of a tuning, by the PM or the manager, pins its unit on the show's Assets line for that model. It does that when there's exactly one unpinned single-quantity line of the model, the model allows unit selection, and the unit isn't in maintenance or booked elsewhere for that line's dates. Pinning resets asset approval like any line edit. Anything ambiguous is left to the asset manager, and *⚠ unit not pinned on Assets tab* stays until it's resolved. A model that doesn't allow unit selection never shows that warning.
+
+**Statuses:**
+
+| Status | Meaning |
+|---|---|
+| Requested | New; counts on the sidebar's Piano Tuning badge |
+| Seen / In progress | (3.21.0) The manager has seen it and is working on it, though nothing is booked yet. The requester gets a bell notice, and it leaves the badge |
+| Scheduled | Sent to the vendor. Setting a tuning date also moves a request here. The tuning gets one read-only row on the show's production schedule |
+| Completed | Done; adds a Service entry to that piano unit's log |
+| Cancelled | Removes the schedule row and the charge |
+
+While a request is *Requested* or *Seen*, the PM can still edit or cancel it, until the manager sets a vendor, cost or paperwork. After that the PM can only **Request cancellation**, which the manager accepts or declines. The manager's list has **Mark seen**, **Mark scheduled** and **Completed** buttons, and a **Manage** dialog for vendor, date and time, cost, paperwork and notes. The cost and paperwork bill as one *External Rentals* line on the show's invoices; asset approval never sees it. Managers can also add **house tunings** (maintenance, rehearsal… with no show), which get no schedule row and no show charge.
 
 ### Comments
 
@@ -473,7 +499,7 @@ endpoints disappear, but saved lists are kept and come back when re-enabled.
 
 ### Email
 
-Send production schedule PDFs to contacts directly from the app. Supports two delivery methods:
+Send production schedule PDFs to contacts directly from the app, and receive the app's system emails (asset approvals, piano tuning, advance change alerts, no-labor alerts, account emails, maintenance notices). Every email uses one branded layout (3.22.0): the blue header with the stagelight logo and 3·2·1→THEATER name, a label and title, a key-facts box and an orange button. It is built to look the same in Outlook desktop, Outlook on the web and phone mail apps, with a plain-text copy alongside. The asset re-approval email lists exactly which gear was **added**, **removed** or **changed** since the show was approved. Supports two delivery methods:
 
 - **SMTP relay** — send via a configured mail server (Gmail, Outlook, etc.)
 - **Direct MX delivery** — send directly to the recipient's mail server (no relay needed; requires DNS/MX access)
@@ -810,7 +836,7 @@ Notification kinds:
 - `field_alert`: a field with Change Alerts configured was updated on a show this user is associated with (via contact link).
 - `no_labor_alert`: a show coming up has no labor requested.
 - `asset_approval` (3.14.0): sent to Asset Managers (or the admins when nobody has that permission) when gear is requested or changed on a show that isn't approved, or loses its approval. There is one item per show, refreshed by further edits; it opens the show's Assets tab and clears for everyone when the show is approved.
-- `piano_tuning` (3.14.0): sent to Piano Tuning managers for a new request, a PM's change or withdrawal, or a cancellation request; it opens that tuning (`/piano-tuning?open=<id>`) and clears when the manager acts. The requester gets one when the tuning is scheduled, moved, completed or cancelled, or a cancellation is declined.
+- `piano_tuning` (3.14.0): sent to Piano Tuning managers for a new request, a PM's change or withdrawal, or a cancellation request; it opens that tuning (`/piano-tuning?open=<id>`) and clears when the manager acts. The requester gets one when the manager marks it *Seen / In progress* (3.21.0) and when the tuning is scheduled, moved, completed or cancelled, or a cancellation is declined.
 
 Coalescing: an unread notification with the same kind, show and key (`field_key`) is refreshed in place instead of a new one being added (`notify_users(..., coalesce_key=)`).
 
@@ -911,6 +937,21 @@ Settings → Email. Configure outbound email for sending schedule PDFs to contac
 | Display Name | Friendly name shown in the From field |
 
 The Email tab also hosts the automated-send schedules: **Advance Sheet** and **Production Schedule** auto-emails, the shared **send hour**, and **Labor — No-Request Alerts**. The labor alert warns schedulers (users with the Scheduler permission) about active shows that are approaching their date with **no labor requested yet**, so they can follow up. Configure an enable toggle plus up to two day-before windows (default 14 and 7 days out, the second is optional — 0 disables it). Each show alerts once per window — a single digest email to every scheduler with an address lists all the due shows (the breakdown), **and** each show also gets its own in-app notification linking to its Labor Requests — and a show that already has any labor requested is skipped. Alerts fire at the shared send hour; the same leader-gating and skip-when-PostgreSQL-is-unreachable safeguards as the PDF auto-emails apply, and each send writes a `NO_LABOR_ALERT_SENT` syslog line.
+
+### Email Activity, Send Errors & Resend
+
+Settings → Email (admin), two panels:
+
+**Email Activity** — one row per recipient of every email the app sends. This send history is **kept for good**; there is no clear button (3.23.1).
+- **Filters:** search recipient or subject, result (delivered / failed), type (Advance PDF, Production schedule PDF, Post-show PDF, Asset approval, Piano tuning, No-labor alert, Advance change alert, Account, Password reset, Email confirmation, Sign-in code, Maintenance, Email test), and a date range. Results load 100 at a time (**Load more**).
+- **Click a row** for details: recipient, time, type, show, who triggered it, and that address's history (*N logged · N failed · last delivered …*). **All emails to this address** filters the log to that recipient.
+- **Why it failed:** each failure gets a plain-English reason and what to do, with the server's raw error and SMTP code underneath. The reasons are: address rejected, mailbox full, rejected as spam or by policy, SMTP login failed, timed out, can't connect, TLS mismatch, direct delivery couldn't reach the domain, temporary failure, email not set up, or suppressed on a test server. If a server refuses some recipients of a send, only those are logged as failed, each with its own error.
+- **Preview + Resend:** the dialog shows the message as it was sent and lists its attachments. **Resend** sends the same subject, body and attachments again, to the original address or to a corrected or extra one. A resend is a new log row linked to the original (audit `EMAIL_RESEND`, syslog).
+- **Retention:** the message *content* used for preview and resend is kept for the period picked in the panel: 30, 60 (default), 90 or 180 days, or 1 year. After that the content is removed and the log row stays. **Sign-in codes, password-reset and email-confirmation emails are never stored or resendable**, because their content is a credential; have the person request a new one. Emails sent before 3.23.0 have no stored content.
+
+**Email Send Errors** — a to-do list of failed recipients with the same short reason, **✓ Reviewed**, **↻ Resend** (correct the address first) and **Clear reviewed**. Clearing only tidies this list; the sends stay in Email Activity.
+
+The **Send Test Email** button sends a sample in the branded layout, so you can check how emails look in your mail apps.
 
 ### AI Extraction (Ollama)
 
@@ -1023,6 +1064,7 @@ Current modules:
 | Module | Default | What it gates |
 |--------|---------|---------------|
 | Security Sign-In Sheets | On | The per-show personnel list + sign-in sheet PDF ([user guide](#security-sign-in-sheet)) |
+| Piano Tuning | On | Tuning requests, the manager's list, schedule rows and tuning charges ([user guide](#piano-tuning)) |
 
 This panel is the first step of gradually pulling app features out into
 sandboxed modules (each lives in its own Python file, wired into `app.py` by a
@@ -1316,6 +1358,7 @@ Checked in 3.2.2: nothing a user uploads is kept on an app server's local disk.
 | Venue paperwork colors, PDF designer + nav layouts, all settings (including the Prism token and GUI S3 config) | PostgreSQL (`venue_colors`, `app_settings`) |
 | Security sign-in CSV imports, AI Extract document uploads | Read in memory; only the result (names / field suggestions) is saved. The file itself is not kept |
 | Sessions | PostgreSQL (`app_sessions`) |
+| Sent emails (3.23.0) | PostgreSQL: the send log `email_outbox_log` (kept for good) and the message content `email_messages` + gzip'd `email_message_attachments` (removed after the Email Activity retention period; credential emails never stored) |
 | **Per-server local disk, on purpose:** `backups/` (hourly/daily `pg_dump`, updater `pre_update_*` archives), `.env` (and a not-yet-ported `db_config.ini`), `prism_bridge/node_modules/`, temp files (LibreOffice conversions, `/tmp` lock files; removed after use) | Local to each server. None of it is user data another instance needs |
 
 **Finishing the S3 → PostgreSQL move, so no file depends on S3:**
