@@ -204,7 +204,7 @@
     const c = d.counts || {};
     document.querySelectorAll('.piano-count').forEach(el => {
       const k = el.dataset.count;
-      const n = k === 'open' ? (c.requested || 0) + (c.scheduled || 0) : (c[k] || 0);
+      const n = k === 'open' ? (c.requested || 0) + (c.seen || 0) + (c.scheduled || 0) : (c[k] || 0);
       el.textContent = n ? `(${n})` : '';
     });
     render();
@@ -235,7 +235,8 @@
         <td><div style="display:flex;flex-direction:column;gap:4px;align-items:stretch">
           ${t.cancel_pending ? `<button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="ptCancelTuning(${t.id})">Cancel tuning</button>
             <button type="button" class="btn btn-xs btn-ghost" onclick="ptDeclineCancel(${t.id})" title="It can't be cancelled — the requester is emailed">Decline cancel</button>` : ''}
-          ${t.status === 'requested' ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptQuick(${t.id},'scheduled')" title="Sent to the vendor">Mark scheduled</button>` : ''}
+          ${t.status === 'requested' ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptQuick(${t.id},'seen')" title="Let the requester know you've seen it and are working on it">Mark seen</button>` : ''}
+          ${t.status === 'requested' || t.status === 'seen' ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptQuick(${t.id},'scheduled')" title="Sent to the vendor">Mark scheduled</button>` : ''}
           ${t.status === 'scheduled' ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptQuick(${t.id},'completed')">Completed</button>` : ''}
           <button type="button" class="btn btn-xs btn-primary" onclick="ptOpen(${t.id})">Manage</button>
         </div></td>
