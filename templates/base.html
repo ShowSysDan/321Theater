@@ -542,8 +542,8 @@ const _HELP_PAGES = {
     html: `
       <p>All pre-show information in one place. <strong>Edits auto-save</strong> about 1.5 s after you stop typing (Ctrl+S / Cmd+S or the Save button also work).</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Show Dates &amp; Times</strong> — one row per performance (24-hour times).</li>
-        <li><strong>Show Start / Show End</strong> — drives the schedule day list and asset rental pricing (weekly rate at 7+ days).</li>
+        <li><strong>Engagement</strong> — <strong>First Call</strong> to <strong>Final Out</strong>: the whole time in the building, from the first billed call through the end of load-out. Set it first; it drives the schedule and labor day lists and asset rental pricing (weekly rate at 7+ days).</li>
+        <li><strong>Show Dates &amp; Times</strong> — one row per performance (24-hour times); each must fall inside the engagement.</li>
         <li>Sections and fields are configured in Settings → Form Fields; some fields appear only when another field is set a certain way (each field's "Conditional show when" — several conditions can be combined with <code>&amp;&amp;</code>).</li>
         <li><strong>AI Extract</strong> (when enabled) — upload a rider/tech spec or pick an attachment; review the suggested values and apply the ones you want.</li>
         <li><strong>History</strong> — browse saved versions of the form and restore one.</li>
@@ -749,7 +749,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li>Adjust the FROM/TO window, use the presets, or page « Prev / Next » by the window's span.</li>
         <li>Each show card: <strong>✓ Approve / Unapprove</strong>, Open show, + Add Asset, + External Rental.</li>
-        <li>Inline edits: rental dates (bounded to the show's load-in→load-out) and the <strong>per-show unit-price override</strong> — this is the <em>only</em> place prices can be overridden; ↻ restores the captured rate-card price.</li>
+        <li>Inline edits: rental dates (bounded to the show's engagement, First Call → Final Out) and the <strong>per-show unit-price override</strong> — this is the <em>only</em> place prices can be overridden; ↻ restores the captured rate-card price.</li>
         <li>Past shows (violet) stay editable for last-second cost corrections.</li>
       </ul>
     `

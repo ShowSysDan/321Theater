@@ -810,7 +810,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.23.3'
+APP_VERSION = '3.24.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -9231,10 +9231,10 @@ _SHOW_MERGE_MOVE_LABELS = {
 # EAV). Merge "fill blanks" applies to these too.
 _ADVANCE_SCALAR_FIELDS = [
     ('performance_company', 'Performance Company'),
-    ('load_in_date',  'Show Start Date'),
-    ('load_in_time',  'Show Start Time'),
-    ('load_out_date', 'Show End Date'),
-    ('load_out_time', 'Show End Time'),
+    ('load_in_date',  'First Call Date'),
+    ('load_in_time',  'First Call Time'),
+    ('load_out_date', 'Final Out Date'),
+    ('load_out_time', 'Final Out Time'),
 ]
 
 
@@ -20552,9 +20552,9 @@ def _clean_rental_dates(db, show_id, rental_start, rental_end):
     if win_start and win_end:
         if (d_start and d_start < win_start) or (d_end and d_end > win_end):
             return None, None, (
-                f'Rental period must stay within the show dates '
+                f"Rental period must stay within the show's engagement "
                 f'{win_start.isoformat()} → {win_end.isoformat()} '
-                f'(load-in → load-out on the advance page).')
+                f'(First Call → Final Out on the advance page).')
     return (d_start.isoformat() if d_start else None,
             d_end.isoformat() if d_end else None,
             None)
