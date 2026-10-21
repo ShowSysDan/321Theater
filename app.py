@@ -810,7 +810,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.23.2'
+APP_VERSION = '3.23.3'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -2779,6 +2779,18 @@ def _build_mime_message(subject, from_addr, recipients, body_text=None,
     return msg
 
 
+def _smtp_tls_context():
+    """TLS context for the configured SMTP relay: verifies the server's
+    certificate chain and host name against the system CA bundle. smtplib's
+    starttls()/SMTP_SSL with no context encrypt but check NOTHING, so anyone
+    on the path could pose as the relay and collect the SMTP password and
+    every message (sign-in codes included) — that was the case until 3.23.3.
+    The direct-to-MX path stays opportunistic on purpose (port-25 MX hosts
+    commonly carry certs that don't match their name)."""
+    import ssl
+    return ssl.create_default_context()
+
+
 def _send_email_smtp(subject, recipients, body_text=None, body_html=None,
                      attachments=None, from_address=None, error_context=None,
                      high_priority=False):
@@ -2807,10 +2819,11 @@ def _send_email_smtp(subject, recipients, body_text=None, body_html=None,
         if use_tls:
             server = smtplib.SMTP(smtp_cfg['smtp_host'], port, timeout=15)
             server.ehlo()
-            server.starttls()
+            server.starttls(context=_smtp_tls_context())
             server.ehlo()
         else:
-            server = smtplib.SMTP_SSL(smtp_cfg['smtp_host'], port, timeout=15)
+            server = smtplib.SMTP_SSL(smtp_cfg['smtp_host'], port, timeout=15,
+                                      context=_smtp_tls_context())
         if smtp_cfg.get('smtp_user') and smtp_cfg.get('smtp_pass'):
             server.login(smtp_cfg['smtp_user'], smtp_cfg['smtp_pass'])
         # sendmail returns a dict of refused recipients for partial failures
@@ -2908,6 +2921,8 @@ def _send_email_direct(subject, recipients, body_text=None, body_html=None,
                                       local_hostname=ehlo_hostname)
                 server.ehlo(ehlo_hostname)
                 try:
+                    # Opportunistic, unverified TLS on purpose — see
+                    # _smtp_tls_context().
                     server.starttls()
                     server.ehlo(ehlo_hostname)
                 except smtplib.SMTPNotSupportedError:
@@ -13592,9 +13607,10 @@ def test_smtp_connection():
     try:
         if use_tls:
             server = smtplib.SMTP(host, port, timeout=10)
-            server.ehlo(); server.starttls(); server.ehlo()
+            server.ehlo(); server.starttls(context=_smtp_tls_context()); server.ehlo()
         else:
-            server = smtplib.SMTP_SSL(host, port, timeout=10)
+            server = smtplib.SMTP_SSL(host, port, timeout=10,
+                                      context=_smtp_tls_context())
         if user and password:
             server.login(user, password)
         if to_addr:
@@ -13700,6 +13716,12 @@ _EMAIL_ERROR_RULES = (
      'Couldn\'t connect to the mail server',
      'The SMTP host or port in Settings → Email can\'t be reached from this server. Check the '
      'host name, port and any firewall between them.'),
+    (r'CERTIFICATE_VERIFY_FAILED|certificate verify failed|hostname mismatch|doesn\'t match',
+     None, 'Mail server certificate not trusted',
+     'The mail server\'s certificate didn\'t check out, so nothing was sent. The SMTP host in '
+     'Settings → Email must be the name on its certificate (e.g. smtp.fastmail.com, not an IP '
+     'address or alias). If the host is right, update this server\'s CA certificates '
+     '(apt upgrade ca-certificates).'),
     (r'SSL|TLS|certificate|handshake|wrong version number', None, 'Secure connection failed',
      'The encrypted connection to the mail server failed. Port 587 uses STARTTLS (TLS on); '
      'port 465 uses SSL. Check the TLS setting matches the port.'),
