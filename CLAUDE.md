@@ -1032,7 +1032,10 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   (dependency-free; tables + inline styles + system fonts, no images, so
   Outlook desktop/web/phone render it). Pass BOTH parts to `_send_email`.
   A text-only send still gets wrapped by `_send_email` as a safety net, but
-  new emails should use `_mail`. Links via `_mail_url(path)` (public base
+  new emails should use `_mail`. The header logo is a cid: inline image
+  (`email_layout.LOGO_CID`, attached by `_build_mime_message` when the HTML
+  references it) — never a linked or data: image, and no web fonts
+  (Outlook drops them; a missing first font falls back to Times). Links via `_mail_url(path)` (public base
   URL, else request host, else '' → dropped). `_show_mail_facts(db, id)` is
   the standard show/dates/venue/PM block. Never put user text into
   `{'html': …}` blocks unsanitized — every other block escapes.
