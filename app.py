@@ -810,7 +810,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.23.1'
+APP_VERSION = '3.23.2'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -20464,10 +20464,10 @@ def _reset_asset_approval(db, show_id, reason):
                        'tone': 'changed'})
     approved_at = _mail_date(row['assets_approved_at']) if row['assets_approved_at'] else ''
     text, html = _mail(
-        f'Assets need re-approval — {show_name}',
+        f'Assets need approval — {show_name}',
         eyebrow='Asset approval',
         intro=(f'{actor} changed the gear on this show after it was approved, so it is '
-               f'waiting for asset approval again.'),
+               f'waiting for asset approval.'),
         facts=_show_mail_facts(db, show_id) + [
             ('Changed by', actor),
             ('Was approved', ' by '.join(x for x in (approved_at, row['approver'] or '') if x))],
