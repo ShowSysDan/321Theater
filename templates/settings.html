@@ -1490,19 +1490,28 @@
       <div id="crew-msg" class="field-msg" style="display:none;margin-top:6px"></div>
     </div>
     <div class="form-section-body no-pad">
+      <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;margin:10px 16px">
+        <p class="text-dim text-sm" style="margin:0;flex:1;min-width:220px">
+          <strong>Archive</strong> a technician who has left: they leave this list, the Skill Tracker and the
+          scheduling pickers, but stay on every past show and in Reports, and their skills are kept on the
+          archived page.
+        </p>
+        <a href="{{ url_for('archived_technicians_page') }}" class="btn btn-ghost btn-sm" style="flex-shrink:0">Archived technicians ({{ archived_crew_count }})</a>
+      </div>
       <table class="data-table">
-        <thead><tr><th>NAME</th><th>RATE LEVEL</th><th style="width:80px">ACTIONS</th></tr></thead>
+        <thead><tr><th>NAME</th><th>RATE LEVEL</th><th style="width:150px">ACTIONS</th></tr></thead>
         <tbody id="crew-tbody">
           {% for m in crew_members_list %}
           <tr data-mid="{{ m.id }}" data-rate-level-id="{{ m.rate_level_id or '' }}">
-            <td id="crew-name-{{ m.id }}">{{ m.name }}</td>
+            <td><span id="crew-name-{{ m.id }}">{{ m.name }}</span></td>
             <td id="crew-level-{{ m.id }}" class="text-dim">
               {% if m.level_name %}{{ m.level_name }} <span class="mono" style="font-size:10px">(${{ '%.2f' | format(m.level_rate) }}/hr)</span>{% else %}—{% endif %}
             </td>
             <td>
               <div class="action-btns">
-                <button class="btn btn-xs btn-ghost" onclick="editCrewMember(this)">✎</button>
-                <button class="btn btn-xs btn-danger-ghost" onclick="deleteCrewMember({{ m.id }})">×</button>
+                <button class="btn btn-xs btn-ghost" onclick="editCrewMember(this)" title="Edit">✎</button>
+                <button class="btn btn-xs btn-ghost" onclick="archiveCrewMember({{ m.id }})" title="Archive: keeps skills and work history">Archive</button>
+                <button class="btn btn-xs btn-danger-ghost" onclick="deleteCrewMember({{ m.id }})" title="Delete a mistaken entry (only if they never worked a shift)">×</button>
               </div>
             </td>
           </tr>
@@ -4660,11 +4669,12 @@ async function addCrewMember() {
     document.getElementById('crew-empty')?.remove();
     const levelLabel = d.level_name ? `${d.level_name} <span class="mono" style="font-size:10px">($${parseFloat(d.level_rate||0).toFixed(2)}/hr)</span>` : '—';
     const tr = document.createElement('tr'); tr.dataset.mid = d.id; tr.dataset.rateLevelId = d.rate_level_id || '';
-    tr.innerHTML = `<td id="crew-name-${d.id}">${_esc(d.name)}</td>
+    tr.innerHTML = `<td><span id="crew-name-${d.id}">${_esc(d.name)}</span></td>
       <td id="crew-level-${d.id}" class="text-dim">${levelLabel}</td>
       <td><div class="action-btns">
-        <button class="btn btn-xs btn-ghost" onclick="editCrewMember(this)">✎</button>
-        <button class="btn btn-xs btn-danger-ghost" onclick="deleteCrewMember(${d.id})">×</button>
+        <button class="btn btn-xs btn-ghost" onclick="editCrewMember(this)" title="Edit">✎</button>
+        <button class="btn btn-xs btn-ghost" onclick="archiveCrewMember(${d.id})" title="Archive: keeps skills and work history">Archive</button>
+        <button class="btn btn-xs btn-danger-ghost" onclick="deleteCrewMember(${d.id})" title="Delete a mistaken entry (only if they never worked a shift)">×</button>
       </div></td>`;
     document.getElementById('crew-tbody').appendChild(tr);
   } else {
@@ -4739,8 +4749,18 @@ function editCrewMember(btn) {
   inp.focus(); inp.select();
 }
 
+async function archiveCrewMember(mid) {
+  if (!confirm('Archive this technician?\n\nThey leave this list, the Skill Tracker and the scheduling pickers. Their skills, notes and every shift they worked are kept (Archived technicians), and they stay in Reports. You can restore them at any time.')) return;
+  const r = await fetch(`/settings/crew-members/${mid}/archive`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+  });
+  const d = await r.json();
+  if (d.success) location.reload();
+  else alert(d.error || 'Error archiving technician.');
+}
+
 async function deleteCrewMember(mid) {
-  if (!confirm('Remove this technician? Their skill qualifications will also be removed.')) return;
+  if (!confirm('Permanently delete this technician and their skill qualifications?\n\nOnly possible for someone who never worked a shift — otherwise use Archive.')) return;
   const r = await fetch(`/settings/crew-members/${mid}/delete`, {method: 'POST'});
   const d = await r.json();
   if (d.success) {

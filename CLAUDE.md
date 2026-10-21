@@ -318,6 +318,29 @@ apps. For a 321Theater access change, use this app's own flags instead
   Crew) stack each lunch's start (S) over its end (E) in one column per
   lunch; keep DOM/Tab order in that same sequence.
 
+## Technicians archive, comments outlive users (3.25.0) — keep history intact
+- `crew_members.is_archived` / `archived_at`: **Archive** (`POST
+  /settings/crew-members/<id>/archive`, `{"restore": true}` restores) is how a
+  technician is removed. Labor lines (`labor_requests.scheduled_crew_member_id`,
+  `post_show_labor.crew_member_id`, `overhead_labor_requests.scheduled_crew_member_id`)
+  have NO FK, and every name on a past shift/report/PDF is a JOIN to
+  crew_members — so a hard delete blanks history and cascades away the
+  qualifications. `…/delete` refuses (409) anyone `_crew_work_history()` finds.
+- Archived techs stay in `/api/crew-members` (flagged, sorted last); pickers
+  filter with app.js `crewForPicker(list, isSelected)` + `crewLabel()` (kept
+  only where the line already names them). Post-Show *Worked by* lists them
+  under an Archived group (settling a past show). Server schedule writes call
+  `_archived_crew_refusal()`. Reports include them as "Name (archived)";
+  skills coverage counts active only.
+- 3.25.1 (the user's call): archived techs are NOT listed in Settings →
+  Technicians or the Skill Tracker (both query active only). They live on
+  ONE page, `/settings/technicians/archived` (`archived_technicians_page`,
+  `@scheduler_required`): skills, notes, work history, Restore, Work history
+  (→ `/reports?tab=lines&tech=<id>`), Delete only with no shifts.
+- `show_comments.user_id` is `ON DELETE SET NULL` + `author_name` (stamped at
+  post and again by `delete_user`); readers LEFT JOIN users and fall back to
+  `author_name`. Never go back to CASCADE.
+
 ## Production schedule PDF is page-aware (3.6.0, 3.6.1)
 - `_fit_schedule_pdf()` lays the schedule out with WeasyPrint, reads which
   page every day/row landed on from the box tree (`<table data-sched-day>`,

@@ -311,6 +311,11 @@
   // ── PDF: the server renders the same JSON this tab shows ──
   // Item History selection — kept across reloads of the tab and in the URL.
   const _q0 = new URLSearchParams(location.search);
+  // ?tech=<id> (Archived Technicians → Work history) pre-selects the tech filter.
+  (function() {
+    const el = document.getElementById('rf-tech'), v = _q0.get('tech');
+    if (el && v && el.querySelector(`option[value="${CSS.escape(v)}"]`)) { el.value = v; moreCount(); }
+  })();
   const _item = {type: _q0.get('item') || '', unit: _q0.get('unit') || ''};
   function _itemUrl() {
     try {
@@ -876,8 +881,9 @@
     } catch (e) { modal(t.type, `<p style="color:#e53e3e">${esc(e.message)}</p>`); }
   }
 
-  // Default range: this calendar year (past and upcoming shows).
-  preset('year');
+  // Default range: this calendar year (past and upcoming shows); a
+  // technician's work-history link (?tech=) opens on all time.
+  preset(_q0.get('tech') ? 'all' : 'year');
   setTab(_tab);
 })();
 </script>

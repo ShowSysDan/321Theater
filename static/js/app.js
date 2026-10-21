@@ -3369,6 +3369,16 @@ async function showCommentVersions(cid) {
   }
 }
 
+/* Technician pickers (3.25.0): archived technicians are offered only where a
+   line already names them, labelled "(archived)", so past shifts keep
+   showing who worked them but nobody new gets scheduled to them. */
+function crewForPicker(list, isSelected) {
+  return (list || []).filter(m => !m.is_archived || isSelected(m));
+}
+function crewLabel(m) {
+  return m.name + (m.is_archived ? ' (archived)' : '');
+}
+
 function _esc(str) {
   return String(str)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')

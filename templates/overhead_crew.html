@@ -647,14 +647,15 @@
      the crew member's *name* as the value (matches show.html). */
   function buildRequestedTechSelect(selectEl, positionId, selectedName) {
     selectEl.innerHTML = '<option value="">— Select Tech —</option>';
-    if (!_crewMembers || !_crewMembers.length) return;
+    const crew = crewForPicker(_crewMembers, m => m.name === selectedName);
+    if (!crew.length) return;
     const addList = (label, list) => {
       if (!list.length) return;
       const og = document.createElement('optgroup');
       og.label = label;
       list.forEach(m => {
         const opt = document.createElement('option');
-        opt.value = m.name; opt.textContent = m.name;
+        opt.value = m.name; opt.textContent = crewLabel(m);
         if (m.name === selectedName) opt.selected = true;
         og.appendChild(opt);
       });
@@ -662,14 +663,14 @@
     };
     if (positionId) {
       const pid = parseInt(positionId) || null;
-      const qualified = _crewMembers.filter(m => (m.qualifications || []).includes(pid));
-      const others    = _crewMembers.filter(m => !(m.qualifications || []).includes(pid));
+      const qualified = crew.filter(m => (m.qualifications || []).includes(pid));
+      const others    = crew.filter(m => !(m.qualifications || []).includes(pid));
       addList('Qualified', qualified);
       addList('Others',    others);
     } else {
-      _crewMembers.forEach(m => {
+      crew.forEach(m => {
         const opt = document.createElement('option');
-        opt.value = m.name; opt.textContent = m.name;
+        opt.value = m.name; opt.textContent = crewLabel(m);
         if (m.name === selectedName) opt.selected = true;
         selectEl.appendChild(opt);
       });
