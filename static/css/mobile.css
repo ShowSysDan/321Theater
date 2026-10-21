@@ -285,3 +285,10 @@ html.mobile-view .phead-row { flex-wrap: nowrap; }
 html.mobile-view .phead-cta { height: 42px; padding: 0 14px; }
 html.mobile-view .phead-tabs { gap: 22px; margin-top: 12px; }
 html.mobile-view .today-card-row.time { font-size: 14px; }
+
+/* Settings → Email activity (3.23.0): filters stack, dialog preview shorter */
+html.mobile-view .email-log-filters { padding: 8px 10px; }
+html.mobile-view .email-log-filters > * { flex: 1 1 100%; }
+html.mobile-view .email-log-filters label input { flex: 1; }
+html.mobile-view .email-resend-row { flex-direction: column; }
+html.mobile-view .email-preview-frame { height: 380px; }

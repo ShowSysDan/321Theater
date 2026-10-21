@@ -2431,3 +2431,27 @@ html.sidebar-collapsed .sidebar-footer-row > .sidebar-user, html.force-rail .sid
 .sidebar-meta-sep { opacity: .5; }
 .sidebar-meta-test { font-size: 9px !important; padding: 1px 5px !important; }
 .sidebar-footer > .rail-only { display: none; }
+
+/* ── Settings → Email activity: filters + detail dialog (3.23.0) ── */
+.email-log-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px; }
+.email-log-filters #email-log-q { flex: 1 1 220px; min-width: 180px; }
+.email-log-filters select, .email-log-filters input[type="date"] { width: auto; }
+.email-log-filters label { display: inline-flex; align-items: center; gap: 4px; }
+.email-log-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; padding: 2px 4px 2px 8px;
+  border-radius: 999px; background: var(--bg-hover); border: 1px solid var(--border); }
+.email-log-chip button { border: 0; background: none; color: var(--text-dim); cursor: pointer; font-size: 14px; line-height: 1; }
+.email-log-row { cursor: pointer; }
+.email-log-row:hover td { background: var(--bg-hover); }
+.email-detail-status { padding: 10px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; }
+.email-detail-status.ok { background: rgba(72,187,120,.12); color: #2F855A; border: 1px solid rgba(72,187,120,.35); }
+.email-detail-status.bad { background: rgba(245,101,101,.10); color: var(--text); border: 1px solid rgba(245,101,101,.4); }
+.email-detail-status.bad strong { color: #E53E3E; }
+.email-detail-raw { margin-top: 6px; font-family: var(--font-mono, monospace); font-size: 11px; color: var(--text-dim); word-break: break-word; }
+.email-detail-facts { width: 100%; border-collapse: collapse; font-size: 12px; }
+.email-detail-facts th { text-align: left; font-weight: 500; color: var(--text-dim); padding: 4px 12px 4px 0; white-space: nowrap; vertical-align: top; width: 1%; }
+.email-detail-facts td { padding: 4px 0; word-break: break-word; }
+.email-detail-h { margin: 16px 0 6px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); }
+.email-detail-list { margin: 0; padding-left: 18px; font-size: 12px; }
+.email-resend-row { display: flex; gap: 8px; }
+.email-resend-row input { flex: 1; min-width: 0; }
+.email-preview-frame { width: 100%; height: 460px; border: 1px solid var(--border); border-radius: 8px; background: #eef0f3; }

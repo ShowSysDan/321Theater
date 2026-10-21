@@ -1045,6 +1045,24 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   `_asset_state_diff()`. Keep the state shape in step with init_db's
   backfill.
 
+## Email log, message store + resend (3.23.0)
+- `_send_email` stores every send in `email_messages` (+ gzip'd
+  `email_message_attachments`) via `_store_email_message()` BEFORE the
+  TEST_MODE tag, and its error_context gains `collector` / `message_id`
+  (both splatted into `_log_email_error`, which must keep accepting them).
+  The collector is how a partially refused send logs exactly the refused
+  recipients failed in `email_outbox_log` — keep both providers reporting
+  per-recipient refusals through `_log_email_error`.
+- **`sensitive: True` in error_context = body never stored, never
+  resendable** — sign-in codes, password reset, email confirm. Any new email
+  carrying a credential/link token MUST set it.
+- Bodies purge after `email_body_retention_days` (default 60) in
+  `_hourly_maintenance_work` (DB clock: `created_at < NOW() - …`).
+- Resend = `POST /settings/email-messages/<mid>/resend` (admin) → a normal
+  `_send_email` with `message_id` + `resend_of`, so it's logged/audited like
+  any send. Failure reasons: `_email_error_explain(code, msg)` rules table;
+  type labels: `_EMAIL_PURPOSE_LABELS` (add one for a new purpose).
+
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.
 At the end of any change that touches code/config, **state plainly which

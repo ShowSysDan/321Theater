@@ -810,7 +810,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.22.1'
+APP_VERSION = '3.23.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -2600,6 +2600,15 @@ def _hourly_maintenance_work():
                    ((date.today() - timedelta(days=90)).isoformat(),))
         db.execute('DELETE FROM perf_request_log WHERE occurred_at < %s',
                    (datetime.now() - timedelta(days=2),))
+        # 3.23.0: stored email bodies + attachments (for preview / resend)
+        # are kept email_body_retention_days; the log rows stay.
+        keep_days = _email_body_retention_days()
+        db.execute('DELETE FROM email_message_attachments WHERE message_id IN ('
+                   'SELECT id FROM email_messages WHERE body_purged_at IS NULL '
+                   'AND created_at < NOW() - %s * INTERVAL \'1 day\')', (keep_days,))
+        db.execute('UPDATE email_messages SET body_text=NULL, body_html=NULL, '
+                   'body_purged_at=NOW() WHERE body_purged_at IS NULL '
+                   'AND created_at < NOW() - %s * INTERVAL \'1 day\'', (keep_days,))
         db.commit()
         # Sessions that died unnoticed (logout-less departures, the login
         # sid-rotation orphans). SESSION_EXPIRED in the session loader covers
@@ -2621,7 +2630,8 @@ def _get_smtp_settings():
 
 def _log_email_error(recipients, subject, error, *,
                      pdf_type=None, show_id=None,
-                     triggered_by=None, smtp_code=None, purpose=None):
+                     triggered_by=None, smtp_code=None, purpose=None,
+                     collector=None, message_id=None, sensitive=None, resend_of=None):
     """Record one row per failed recipient in email_send_errors.
 
     `recipients` may be a list, a single string, or None (treated as one
@@ -2638,6 +2648,15 @@ def _log_email_error(recipients, subject, error, *,
         return
     err_str  = str(error)[:1000]
     code_str = str(smtp_code or '')[:50]
+    # _send_email's per-send collector (3.23.0): which recipients failed and
+    # why, so the outbox log marks exactly those rows failed (a partially
+    # refused send used to log every recipient as delivered).
+    if collector is not None:
+        for r in recipients:
+            collector[str(r).strip().lower()] = (err_str, code_str)
+    by_uid = triggered_by if isinstance(triggered_by, int) else None
+    if by_uid is not None:
+        triggered_by = None     # a user id (outbox convention) → username below
     if not triggered_by:
         # Callers in background threads have no request context — session
         # access raises RuntimeError there, which would replace the real
@@ -2651,15 +2670,18 @@ def _log_email_error(recipients, subject, error, *,
     pdf_str  = (pdf_type or purpose or '')[:50]
     try:
         db = get_db()
+        if by_uid is not None:
+            u = db.execute('SELECT username FROM users WHERE id=%s', (by_uid,)).fetchone()
+            by_str = (u['username'] if u else str(by_uid))[:100]
         for r in recipients:
             try:
                 db.execute("""
                     INSERT INTO email_send_errors
                         (recipient, subject, error_msg, smtp_code,
-                         pdf_type, show_id, triggered_by)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                         pdf_type, show_id, triggered_by, message_id)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                 """, (str(r)[:200], subj_str, err_str, code_str,
-                      pdf_str, show_id, by_str))
+                      pdf_str, show_id, by_str, message_id))
             except Exception:
                 pass
         db.commit()
@@ -2943,32 +2965,43 @@ def _send_email_direct(subject, recipients, body_text=None, body_html=None,
 
 def _log_outbox_send(recipients, subject, success, error_message, error_context):
     """Write one row per recipient into email_outbox_log so admins can audit
-    what's been sent. Best-effort — failures here must never block the send."""
+    what's been sent. Best-effort — failures here must never block the send.
+    A recipient the send's collector recorded as refused is logged failed
+    with ITS error + SMTP code even when the send as a whole succeeded."""
     try:
         purpose = ''
         triggered_by = None
-        if error_context:
-            purpose = error_context.get('pdf_type') or error_context.get('purpose') or ''
-            tb = error_context.get('triggered_by')
-            if isinstance(tb, int):
-                triggered_by = tb
+        ctx = error_context or {}
+        purpose = ctx.get('pdf_type') or ctx.get('purpose') or ''
+        tb = ctx.get('triggered_by')
+        if isinstance(tb, int):
+            triggered_by = tb
         if not triggered_by:
             try:
                 triggered_by = session.get('user_id')
             except Exception:
                 triggered_by = None
-        # Subject capped to keep the table compact; full body lives in mail server logs.
+        collector = ctx.get('collector') or {}
+        show_id = ctx.get('show_id') if isinstance(ctx.get('show_id'), int) else None
+        # Subject capped to keep the table compact; the body is in email_messages.
         subj = (subject or '')[:255]
         err  = (error_message or '')[:500]
         db = get_db()
         for r in recipients or []:
+            failed = collector.get((r or '').strip().lower())
+            ok = success and not failed
+            msg = (failed[0] if failed else err) if not ok else ''
+            code = failed[1] if failed else ''
             try:
                 db.execute(
                     "INSERT INTO email_outbox_log "
-                    "(recipient, subject, purpose, success, error_message, triggered_by) "
-                    "VALUES (%s,%s,%s,%s,%s,%s)",
+                    "(recipient, subject, purpose, success, error_message, triggered_by, "
+                    " message_id, smtp_code, show_id, resend_of) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     ((r or '')[:255], subj, (purpose or '')[:64],
-                     1 if success else 0, '' if success else err, triggered_by)
+                     1 if ok else 0, msg[:500], triggered_by,
+                     ctx.get('message_id'), (code or '')[:50], show_id,
+                     ctx.get('resend_of'))
                 )
             except Exception:
                 pass
@@ -2976,6 +3009,54 @@ def _log_outbox_send(recipients, subject, success, error_message, error_context)
         db.close()
     except Exception:
         pass
+
+
+def _email_body_retention_days():
+    try:
+        return max(1, min(int(get_app_setting('email_body_retention_days', '60') or 60), 3650))
+    except (TypeError, ValueError):
+        return 60
+
+
+def _store_email_message(subject, body_text, body_html, attachments, ctx, high_priority):
+    """Keep what was sent (3.23.0) so Settings → Email can preview and resend
+    it: one email_messages row per send, attachments gzip'd beside it.
+    `sensitive` sends (sign-in codes, password-reset / confirm links) keep
+    only the subject — their bodies are credentials. Best-effort: returns the
+    id or None, never raises (a storage hiccup must not stop the email)."""
+    try:
+        sensitive = bool(ctx.get('sensitive'))
+        purpose = (ctx.get('pdf_type') or ctx.get('purpose') or '')[:64]
+        show_id = ctx.get('show_id') if isinstance(ctx.get('show_id'), int) else None
+        db = get_db()
+        try:
+            mid = db.execute("""
+                INSERT INTO email_messages
+                    (subject, purpose, show_id, body_text, body_html, high_priority, sensitive)
+                VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id
+            """, ((subject or '')[:500], purpose, show_id,
+                  None if sensitive else body_text, None if sensitive else body_html,
+                  1 if high_priority else 0, 1 if sensitive else 0)).fetchone()['id']
+            if not sensitive:
+                for a in attachments or []:
+                    data = a.get('data') or b''
+                    db.execute("""
+                        INSERT INTO email_message_attachments
+                            (message_id, filename, mimetype, size_bytes, data_gz)
+                        VALUES (%s,%s,%s,%s,%s)
+                    """, (mid, (a.get('filename') or 'attachment')[:255],
+                          (a.get('mimetype') or 'application/octet-stream')[:100],
+                          len(data), gzip.compress(data)))
+            db.commit()
+            return mid
+        finally:
+            db.close()
+    except Exception as e:
+        try:
+            app.logger.warning(f'email message store failed: {e}')
+        except Exception:
+            pass
+        return None
 
 
 def _test_mode_email_allowlist():
@@ -3030,6 +3111,8 @@ def _send_email(subject, recipients, body_text=None, body_html=None,
     given its own layout) still go out branded: the text is wrapped in
     email_layout's card, as the HTML part beside the text part (3.22.0).
     """
+    ctx = dict(error_context or {})
+    ctx['collector'] = {}
     if body_text and not body_html:
         try:
             body_html = email_layout.from_text(
@@ -3037,6 +3120,10 @@ def _send_email(subject, recipients, body_text=None, body_html=None,
                                         flags=re.I) or None)
         except Exception as e:     # never let the dressing stop the send
             app.logger.warning(f'email layout wrap failed: {e}')
+    if not ctx.get('message_id'):
+        ctx['message_id'] = _store_email_message(subject, body_text, body_html,
+                                                 attachments, ctx, high_priority)
+    error_context = ctx
     if TEST_MODE:
         allow = _test_mode_email_allowlist()
         kept = [r for r in (recipients or []) if (r or '').strip().lower() in allow]
@@ -5242,7 +5329,7 @@ def _gateway_send_otp_email(to_addr, code):
         # _send_email writes failures to email_send_errors itself (with the
         # SMTP code) when given error_context — logging here too would
         # double-record every failure.
-        ctx = {'pdf_type': 'gateway_otp', 'triggered_by': 'gateway'}
+        ctx = {'pdf_type': 'gateway_otp', 'triggered_by': 'gateway', 'sensitive': True}
         try:
             _send_email(subject=subject, recipients=[to_addr],
                         body_text=body, body_html=body_html, error_context=ctx)
@@ -13577,48 +13664,280 @@ def test_email_provider():
     return jsonify({'success': success, 'message': message})
 
 
+# Plain-English reasons for a failed send (3.23.0): (title, what it means /
+# what to do). First match wins; matched on the SMTP code, then the text.
+_EMAIL_ERROR_RULES = (
+    (r'TEST MODE', None, 'Not sent — test server',
+     'This server runs in TEST_MODE, so it only emails admins. Nothing is wrong with the address.'),
+    (r'SMTP not configured', None, 'Email isn\'t set up',
+     'No SMTP server is configured. Fill in Settings → Email → provider settings, then resend.'),
+    (r'auth|535|534|530 5\.7\.0|Username and Password not accepted', ('535', '534', '530'),
+     'The mail server rejected our login',
+     'The SMTP username or password in Settings → Email is wrong or expired (or the account '
+     'needs an app password). Fix the login, send a test, then resend.'),
+    (r'quota|mailbox full|over quota|insufficient storage', ('552', '452'),
+     'Recipient\'s mailbox is full',
+     'Their mailbox has no room. They need to clear space; resending later usually works.'),
+    (r'user unknown|unknown user|no such user|does not exist|not exist|invalid recipient|'
+     r'recipient address rejected|address rejected|mailbox unavailable|5\.1\.1|5\.1\.0',
+     ('550', '551', '553'), 'The address was rejected',
+     'The recipient\'s mail server says this address doesn\'t exist or won\'t take mail. '
+     'Check the spelling on their contact / user record, then resend to the corrected address.'),
+    (r'spam|blocked|block list|blacklist|policy|SPF|DKIM|DMARC|reputation|5\.7\.', ('554', '571'),
+     'Rejected as spam or by policy',
+     'The receiving server refused the message on policy grounds (spam filter, SPF/DKIM/DMARC, '
+     'or our sending IP is blocked). This is usually for IT: check the sending domain\'s DNS '
+     'records, or use the SMTP relay instead of direct delivery.'),
+    (r'All MX hosts failed|No MX|NXDOMAIN|no answer|dns', None,
+     'Couldn\'t reach the recipient\'s mail servers',
+     'Direct delivery couldn\'t connect to any of the domain\'s mail servers. Many networks '
+     'block outbound port 25 — the SMTP relay provider is more reliable. Also check the domain '
+     'is spelled right.'),
+    (r'timed out|timeout', None, 'The mail server didn\'t answer in time',
+     'The connection timed out — a network or firewall problem, or the server is overloaded. '
+     'Resending later usually works; if it keeps happening, check the host and port.'),
+    (r'refused|unreachable|Name or service not known|getaddrinfo|nodename|No route', None,
+     'Couldn\'t connect to the mail server',
+     'The SMTP host or port in Settings → Email can\'t be reached from this server. Check the '
+     'host name, port and any firewall between them.'),
+    (r'SSL|TLS|certificate|handshake|wrong version number', None, 'Secure connection failed',
+     'The encrypted connection to the mail server failed. Port 587 uses STARTTLS (TLS on); '
+     'port 465 uses SSL. Check the TLS setting matches the port.'),
+    (r'', ('421', '450', '451'), 'Temporary failure',
+     'The receiving server asked us to try again later (greylisting or a busy server). '
+     'Resending in a few minutes usually works.'),
+)
+
+
+def _email_error_explain(code, msg):
+    """{'title', 'detail'} for a failed send, or None when it succeeded."""
+    code = str(code or '').strip()
+    text = str(msg or '')
+    if not code:
+        m = re.match(r'\s*\(?(\d{3})\b', text)
+        code = m.group(1) if m else ''
+    for pat, codes, title, detail in _EMAIL_ERROR_RULES:
+        if (codes and code in codes) or (pat and re.search(pat, text, re.I)):
+            return {'title': title, 'detail': detail}
+    if code.startswith('4'):
+        return {'title': 'Temporary failure', 'detail': _EMAIL_ERROR_RULES[-1][3]}
+    return {'title': 'Send failed',
+            'detail': 'The mail server reported an error (below). If the address looks right, '
+                      'try a resend; if it fails the same way, the raw error is what IT needs.'}
+
+
+_EMAIL_PURPOSE_LABELS = {
+    'advance': 'Advance PDF', 'schedule': 'Production schedule PDF', 'postnotes': 'Post-show PDF',
+    'asset_approval': 'Asset approval', 'piano_tuning': 'Piano tuning',
+    'no_labor_alert': 'No-labor alert', 'field_alert': 'Advance change alert',
+    'field_change_alert': 'Advance change alert', 'account': 'Account',
+    'password_reset': 'Password reset', 'email_confirm': 'Email confirmation',
+    'gateway_otp': 'Sign-in code', 'test': 'Email test',
+    'maintenance_notice': 'Maintenance notice', 'maintenance_complete': 'Maintenance complete',
+}
+
+
+def _email_log_filters(args):
+    """WHERE clause + params for the email activity log's filters:
+    q (recipient or subject contains), recipient (exact), status
+    (success|failed), purpose, from / to (YYYY-MM-DD, local server dates)."""
+    where, params = [], []
+    q = (args.get('q') or '').strip()
+    if q:
+        where.append('(l.recipient ILIKE %s OR l.subject ILIKE %s)')
+        like = '%' + q.replace('\\', '\\\\').replace('%', r'\%').replace('_', r'\_') + '%'
+        params += [like, like]
+    rcpt = (args.get('recipient') or '').strip().lower()
+    if rcpt:
+        where.append('lower(l.recipient) = %s')
+        params.append(rcpt)
+    status = (args.get('status') or 'all').lower()
+    if status == 'success':
+        where.append('l.success = 1')
+    elif status == 'failed':
+        where.append('l.success = 0')
+    purpose = (args.get('purpose') or '').strip()
+    if purpose:
+        where.append('l.purpose = %s')
+        params.append(purpose)
+    for key, op in (('from', '>='), ('to', '<')):
+        d = _as_date(args.get(key))
+        if d:
+            where.append(f'l.sent_at {op} %s')
+            params.append(d if key == 'from' else d + timedelta(days=1))
+    return (' WHERE ' + ' AND '.join(where)) if where else '', params
+
+
 @app.route('/settings/email-log', methods=['GET'])
 @admin_required
 def email_outbox_log_list():
-    """Return recent outgoing email activity (most recent first).
-
-    Query: ?status=all|success|failed (default all), ?limit=N (default 200)."""
-    status = (request.args.get('status') or 'all').lower()
+    """Outgoing email activity, most recent first, filtered (see
+    _email_log_filters) and paged (?offset=, ?limit= default 100)."""
     try:
-        limit = max(1, min(int(request.args.get('limit') or 200), 1000))
+        limit = max(1, min(int(request.args.get('limit') or 100), 500))
+        offset = max(0, int(request.args.get('offset') or 0))
     except ValueError:
-        limit = 200
+        limit, offset = 100, 0
+    where, params = _email_log_filters(request.args)
     db = get_db()
-    sql = """
+    rows = db.execute(f"""
         SELECT l.id, l.sent_at::timestamptz AS sent_at, l.recipient, l.subject, l.purpose,
-               l.success, l.error_message,
+               l.success, l.error_message, l.smtp_code, l.message_id, l.resend_of,
                u.username AS triggered_by_name,
-               u.display_name AS triggered_by_display
+               u.display_name AS triggered_by_display,
+               (m.id IS NOT NULL AND COALESCE(m.sensitive, 0) = 0
+                AND m.body_purged_at IS NULL) AS can_resend
         FROM email_outbox_log l
         LEFT JOIN users u ON u.id = l.triggered_by
-    """
-    params = []
-    if status == 'success':
-        sql += ' WHERE l.success = 1'
-    elif status == 'failed':
-        sql += ' WHERE l.success = 0'
-    sql += ' ORDER BY l.sent_at DESC, l.id DESC LIMIT %s'
-    params.append(limit)
-    rows = db.execute(sql, params).fetchall()
-    counts = db.execute("""
-        SELECT
-            COUNT(*) AS total,
-            SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) AS successes,
-            SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) AS failures
-        FROM email_outbox_log
-    """).fetchone()
+        LEFT JOIN email_messages m ON m.id = l.message_id
+        {where}
+        ORDER BY l.sent_at DESC, l.id DESC LIMIT %s OFFSET %s
+    """, params + [limit, offset]).fetchall()
+    counts = db.execute(f"""
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE l.success = 1) AS successes,
+               COUNT(*) FILTER (WHERE l.success = 0) AS failures
+        FROM email_outbox_log l {where}
+    """, params).fetchone()
+    purposes = [r['purpose'] for r in db.execute(
+        "SELECT DISTINCT purpose FROM email_outbox_log WHERE purpose <> '' ORDER BY purpose"
+    ).fetchall()]
     db.close()
+    out = []
+    for r in rows:
+        d = dict(r, sent_at=_ts_out(r['sent_at']))
+        d['purpose_label'] = _EMAIL_PURPOSE_LABELS.get(r['purpose'], r['purpose'])
+        d['explain'] = None if r['success'] else _email_error_explain(r['smtp_code'], r['error_message'])
+        out.append(d)
     return jsonify({
-        'rows': [dict(r, sent_at=_ts_out(r['sent_at'])) for r in rows],
+        'rows': out, 'offset': offset, 'limit': limit,
         'total':     int(counts['total'] or 0),
         'successes': int(counts['successes'] or 0),
         'failures':  int(counts['failures'] or 0),
+        'purposes':  [{'key': p, 'label': _EMAIL_PURPOSE_LABELS.get(p, p)} for p in purposes],
+        'retention_days': _email_body_retention_days(),
     })
+
+
+def _email_message_detail(db, mid):
+    """The stored message for the detail dialog: subject, bodies (HTML with
+    the cid: logo inlined so a browser can show it), attachments, and why
+    it can't be resent when it can't."""
+    m = db.execute("""
+        SELECT id, created_at::timestamptz AS created_at, subject, purpose, show_id,
+               body_text, body_html, sensitive, body_purged_at
+        FROM email_messages WHERE id=%s""", (mid,)).fetchone()
+    if not m:
+        return None
+    atts = [dict(a) for a in db.execute(
+        'SELECT id, filename, mimetype, size_bytes FROM email_message_attachments '
+        'WHERE message_id=%s ORDER BY id', (mid,)).fetchall()]
+    html = m['body_html'] or ''
+    logo = email_layout.logo_png()
+    if html and logo:
+        import base64
+        html = html.replace(f'cid:{email_layout.LOGO_CID}',
+                            'data:image/png;base64,' + base64.b64encode(logo).decode())
+    why_not = None
+    if m['sensitive']:
+        why_not = ('This email carried a sign-in code or a password/confirmation link, so its '
+                   'content was never kept and it can\'t be resent. Ask them to request a new one.')
+    elif m['body_purged_at']:
+        why_not = (f'The content was removed after {_email_body_retention_days()} days, '
+                   f'so it can\'t be resent.')
+    return {'id': m['id'], 'created_at': _ts_out(m['created_at']), 'subject': m['subject'],
+            'purpose': m['purpose'], 'show_id': m['show_id'],
+            'body_html': html, 'body_text': m['body_text'] or '',
+            'attachments': atts, 'can_resend': why_not is None, 'why_not_resend': why_not}
+
+
+@app.route('/settings/email-log/<int:log_id>', methods=['GET'])
+@admin_required
+def email_outbox_log_detail(log_id):
+    """One log row with its message, a plain-English failure reason, the
+    resends made from it and the recipient's other recent emails."""
+    db = get_db()
+    r = db.execute("""
+        SELECT l.*, l.sent_at::timestamptz AS sent_ts, s.name AS show_name,
+               COALESCE(NULLIF(u.display_name, ''), u.username) AS triggered_by_label
+        FROM email_outbox_log l
+        LEFT JOIN shows s ON s.id = l.show_id
+        LEFT JOIN users u ON u.id = l.triggered_by
+        WHERE l.id=%s""", (log_id,)).fetchone()
+    if not r:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+    msg = _email_message_detail(db, r['message_id']) if r['message_id'] else None
+    resends = [dict(x, sent_at=_ts_out(x['sent_at'])) for x in db.execute("""
+        SELECT l.id, l.sent_at::timestamptz AS sent_at, l.recipient, l.success, l.error_message,
+               COALESCE(NULLIF(u.display_name, ''), u.username) AS by
+        FROM email_outbox_log l LEFT JOIN users u ON u.id = l.triggered_by
+        WHERE l.resend_of=%s ORDER BY l.id""", (log_id,)).fetchall()]
+    stats = db.execute("""
+        SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE success = 0) AS failed,
+               (MAX(sent_at) FILTER (WHERE success = 1))::timestamptz AS last_ok
+        FROM email_outbox_log WHERE lower(recipient) = lower(%s)""", (r['recipient'],)).fetchone()
+    db.close()
+    return jsonify({
+        'id': r['id'], 'sent_at': _ts_out(r['sent_ts']), 'recipient': r['recipient'],
+        'subject': r['subject'], 'purpose': r['purpose'],
+        'purpose_label': _EMAIL_PURPOSE_LABELS.get(r['purpose'], r['purpose']),
+        'success': bool(r['success']), 'error_message': r['error_message'] or '',
+        'smtp_code': r['smtp_code'] or '',
+        'explain': None if r['success'] else _email_error_explain(r['smtp_code'], r['error_message']),
+        'show_id': r['show_id'], 'show_name': r['show_name'],
+        'triggered_by': r['triggered_by_label'] or 'System',
+        'resend_of': r['resend_of'], 'resends': resends,
+        'recipient_stats': {'total': stats['n'], 'failed': stats['failed'],
+                            'last_ok': _ts_out(stats['last_ok']) if stats['last_ok'] else None},
+        'message': msg,
+    })
+
+
+@app.route('/settings/email-messages/<int:mid>/resend', methods=['POST'])
+@admin_required
+def email_message_resend(mid):
+    """Resend a stored message to its original recipient or to corrected /
+    extra addresses. Body: {"to": "a@x, b@y", "log_id": <row it came from>}.
+    Same subject, bodies and attachments; logged as new rows (resend_of)."""
+    data = request.get_json(force=True) or {}
+    to = [t.strip() for t in re.split(r'[,;\s]+', str(data.get('to') or '')) if t.strip()]
+    bad = [t for t in to if not _EMAIL_ADDR_RE.match(t)]
+    if not to or bad:
+        return jsonify({'error': 'Enter valid email address(es)'
+                                 + (f": {', '.join(bad[:3])}" if bad else '.')}), 400
+    if len(to) > 20:
+        return jsonify({'error': 'Resend to at most 20 addresses at a time.'}), 400
+    try:
+        log_id = int(data['log_id']) if data.get('log_id') else None
+    except (TypeError, ValueError):
+        log_id = None
+    db = get_db()
+    m = db.execute('SELECT * FROM email_messages WHERE id=%s', (mid,)).fetchone()
+    if not m:
+        db.close()
+        return jsonify({'error': 'Message not found'}), 404
+    if m['sensitive'] or m['body_purged_at'] or not (m['body_text'] or m['body_html']):
+        db.close()
+        return jsonify({'error': 'This email\'s content wasn\'t kept, so it can\'t be resent.'}), 409
+    atts = [{'filename': a['filename'], 'mimetype': a['mimetype'],
+             'data': gzip.decompress(bytes(a['data_gz']))}
+            for a in db.execute('SELECT filename, mimetype, data_gz FROM email_message_attachments '
+                                'WHERE message_id=%s ORDER BY id', (mid,)).fetchall()]
+    log_audit(db, 'EMAIL_RESEND', 'email_message', mid, show_id=m['show_id'],
+              detail=f"to={','.join(to)[:300]} log_id={log_id or '-'}")
+    db.commit()
+    db.close()   # not held across the SMTP round-trip
+    ok, message = _send_email(
+        m['subject'], to, body_text=m['body_text'], body_html=m['body_html'],
+        attachments=atts or None, high_priority=bool(m['high_priority']),
+        error_context={'purpose': m['purpose'], 'show_id': m['show_id'],
+                       'triggered_by': session.get('user_id'),
+                       'message_id': mid, 'resend_of': log_id})
+    syslog_logger.info(f"EMAIL_RESEND message_id={mid} to={len(to)} ok={int(bool(ok))} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': bool(ok), 'message': message,
+                    'explain': None if ok else _email_error_explain('', message)})
 
 
 @app.route('/settings/email-log/clear', methods=['POST'])
@@ -13652,11 +13971,15 @@ def email_errors_list():
     sql = """
         SELECT e.id, e.sent_at, e.recipient, e.subject, e.error_msg, e.smtp_code,
                e.pdf_type, e.show_id, e.triggered_by, e.resolved, e.resolved_at,
+               e.message_id,
+               (m.id IS NOT NULL AND COALESCE(m.sensitive, 0) = 0
+                AND m.body_purged_at IS NULL) AS can_resend,
                s.name AS show_name,
                u.username AS resolved_by_name
         FROM email_send_errors e
         LEFT JOIN shows s ON s.id = e.show_id
         LEFT JOIN users u ON u.id = e.resolved_by
+        LEFT JOIN email_messages m ON m.id = e.message_id
     """
     params = []
     if status == 'unresolved':
@@ -13672,7 +13995,9 @@ def email_errors_list():
     """).fetchone()
     db.close()
     return jsonify({
-        'errors':     [_normalize_row_dates(dict(r)) for r in rows],
+        'errors':     [dict(_normalize_row_dates(dict(r)),
+                            explain=_email_error_explain(r['smtp_code'], r['error_msg']))
+                       for r in rows],
         'unresolved': (counts['unresolved'] if counts else 0) or 0,
         'total':      (counts['total']      if counts else 0) or 0,
     })
@@ -19813,7 +20138,8 @@ def _get_asset_notification_recipients(db, exclude_user_id=None):
     return out
 
 
-def _notify_asset_recipients(db, subject, body_text, exclude_user_id=None, body_html=None):
+def _notify_asset_recipients(db, subject, body_text, exclude_user_id=None, body_html=None,
+                             show_id=None):
     """Send a system notification to all asset-permission holders.
 
     The recipient lookup runs synchronously (DB connection is request-bound),
@@ -19829,11 +20155,12 @@ def _notify_asset_recipients(db, subject, body_text, exclude_user_id=None, body_
         return
     if not recipients:
         return
+    ctx = _with_actor({'purpose': 'asset_approval', 'show_id': show_id})
 
     def _send_all(rcpts, subj, body):
         for _name, _email in rcpts:
             try:
-                _send_simple_email(_email, subj, body, body_html)
+                _send_simple_email(_email, subj, body, body_html, ctx)
             except Exception as exc:
                 try:
                     app.logger.error(f'asset notify send to {_email} failed: {exc}')
@@ -20136,7 +20463,7 @@ def _reset_asset_approval(db, show_id, reason):
     _notify_asset_recipients(
         db,
         f'3·2·1→THEATER: Show Waiting for Asset Approval — {show_name}',
-        text, body_html=html,
+        text, body_html=html, show_id=show_id,
         exclude_user_id=session.get('user_id') if has_request_context() else None,
     )
 
@@ -21330,7 +21657,7 @@ def show_assets_approve(show_id):
     _notify_asset_recipients(
         db,
         f'3·2·1→THEATER: Show Assets Approved — {show_name}',
-        text, body_html=html,
+        text, body_html=html, show_id=show_id,
         exclude_user_id=session.get('user_id'),
     )
     db.close()
@@ -23390,11 +23717,12 @@ def _piano_notify(recipients, subject, mail):
     if not recipients:
         return
     body, html = mail if isinstance(mail, tuple) else (mail, None)
+    ctx = _with_actor({'purpose': 'piano_tuning'})
 
     def _bg():
         for addr in recipients:
             try:
-                _send_simple_email(addr, subject, body, html)
+                _send_simple_email(addr, subject, body, html, ctx)
             except Exception as exc:
                 app.logger.error(f'piano tuning notify to {addr} failed: {exc}')
     threading.Thread(target=_bg, daemon=True).start()
@@ -24422,15 +24750,27 @@ def detect_service():
 
 # ─── User Registration & Recovery ─────────────────────────────────────────────
 
-def _send_simple_email(to_addr, subject, body_text, body_html=None):
+def _with_actor(context):
+    """Copy of an email context carrying the signed-in user's id as
+    triggered_by — captured BEFORE a send moves to a background thread,
+    where there is no session to read."""
+    ctx = dict(context or {})
+    if 'triggered_by' not in ctx and has_request_context():
+        ctx['triggered_by'] = session.get('user_id')
+    return ctx
+
+
+def _send_simple_email(to_addr, subject, body_text, body_html=None, context=None):
     """Send a plain (single-recipient) email via the canonical _send_email
-    helper defined at the top of this file."""
+    helper defined at the top of this file. `context` = _send_email's
+    error_context (purpose for the email log, sensitive, triggered_by…)."""
     try:
         ok, msg = _send_email(
             subject=subject,
             recipients=[to_addr],
             body_text=body_text,
             body_html=body_html,
+            error_context=context,
         )
         if not ok:
             app.logger.error(f'Email send failed to {to_addr}: {msg}')
@@ -24440,14 +24780,16 @@ def _send_simple_email(to_addr, subject, body_text, body_html=None):
         return False
 
 
-def _send_simple_email_async(to_addr, subject, body_text, body_html=None):
+def _send_simple_email_async(to_addr, subject, body_text, body_html=None, context=None):
     """Fire-and-forget variant of _send_simple_email. Use from request handlers
     where we don't want SMTP latency to block the HTTP response (registration
     confirmation, password reset, approval/denial notices, etc.). Errors are
     swallowed and logged in the same way as _send_simple_email."""
+    context = _with_actor(context)
+
     def _bg():
         try:
-            _send_simple_email(to_addr, subject, body_text, body_html)
+            _send_simple_email(to_addr, subject, body_text, body_html, context)
         except Exception:
             pass
     threading.Thread(target=_bg, daemon=True).start()
@@ -24502,6 +24844,7 @@ def _register_route():
                         _send_simple_email_async(
                             email,
                             '3·2·1→THEATER: Confirm Your Email',
+                            context={'purpose': 'email_confirm', 'sensitive': True},
                             *_mail('Confirm your email',
                                    eyebrow='Your account',
                                    intro=f'Hi {display_name or username}, confirm this email address to '
@@ -24527,6 +24870,7 @@ def _register_route():
                                 _send_simple_email_async(
                                     _adm['email'],
                                     '3\u00b72\u00b71\u2192THEATER: New Registration Pending',
+                                    context={'purpose': 'account'},
                                     *_mail('New registration pending',
                                            eyebrow='Accounts',
                                            intro='A new account registration is waiting for your approval. '
@@ -24633,6 +24977,7 @@ def approve_registration(reg_id):
         _send_simple_email_async(
             reg['email'],
             '3·2·1→THEATER: Account Approved',
+            context={'purpose': 'account'},
             *_mail('Your account is approved',
                    eyebrow='Your account',
                    intro=f'Welcome to 3·2·1→THEATER! Your account has been approved — you can '
@@ -24659,6 +25004,7 @@ def deny_registration(reg_id):
         _send_simple_email_async(
             reg['email'],
             '3·2·1→THEATER: Registration Declined',
+            context={'purpose': 'account'},
             *_mail('Registration not approved',
                    eyebrow='Your account',
                    intro='Your registration request was not approved. If you think this is a '
@@ -24703,6 +25049,7 @@ def _forgot_password_route():
                 _send_simple_email_async(
                     user['email'],
                     '3·2·1→THEATER: Password Reset',
+                    context={'purpose': 'password_reset', 'sensitive': True},
                     *_mail('Reset your password',
                            eyebrow='Your account',
                            intro=f'Someone (hopefully you) asked to reset the password for '

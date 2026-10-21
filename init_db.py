@@ -1156,6 +1156,35 @@ CREATE INDEX IF NOT EXISTS idx_email_send_log_show ON email_send_log(show_id, pd
 
 -- Email send failures: one row per address that failed to deliver, so the
 -- admin can review bounces, invalid addresses, transient SMTP errors, etc.
+-- The message itself (3.23.0): subject + text/HTML bodies + attachments,
+-- one row per send (every recipient's log row points at it), so Settings →
+-- Email can preview and resend it. Sign-in codes / reset / confirm links are
+-- never kept (sensitive = 1, bodies empty). Bodies + attachments are purged
+-- after email_body_retention_days (body_purged_at stamped, row kept).
+CREATE TABLE IF NOT EXISTS email_messages (
+    id             SERIAL PRIMARY KEY,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    subject        TEXT NOT NULL DEFAULT '',
+    purpose        TEXT NOT NULL DEFAULT '',
+    show_id        INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+    body_text      TEXT DEFAULT NULL,
+    body_html      TEXT DEFAULT NULL,
+    high_priority  INTEGER DEFAULT 0,
+    sensitive      INTEGER DEFAULT 0,
+    body_purged_at TIMESTAMP DEFAULT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_email_messages_created ON email_messages(created_at);
+
+CREATE TABLE IF NOT EXISTS email_message_attachments (
+    id          SERIAL PRIMARY KEY,
+    message_id  INTEGER NOT NULL REFERENCES email_messages(id) ON DELETE CASCADE,
+    filename    TEXT NOT NULL DEFAULT '',
+    mimetype    TEXT NOT NULL DEFAULT 'application/octet-stream',
+    size_bytes  INTEGER DEFAULT 0,
+    data_gz     BYTEA
+);
+CREATE INDEX IF NOT EXISTS idx_email_message_attachments_msg ON email_message_attachments(message_id);
+
 CREATE TABLE IF NOT EXISTS email_send_errors (
     id            SERIAL PRIMARY KEY,
     sent_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1168,7 +1197,8 @@ CREATE TABLE IF NOT EXISTS email_send_errors (
     triggered_by  TEXT DEFAULT '',
     resolved      INTEGER DEFAULT 0,
     resolved_at   TIMESTAMP,
-    resolved_by   INTEGER REFERENCES users(id) ON DELETE SET NULL
+    resolved_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    message_id    INTEGER REFERENCES email_messages(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_email_send_errors_unresolved
@@ -1185,7 +1215,11 @@ CREATE TABLE IF NOT EXISTS email_outbox_log (
     purpose       TEXT NOT NULL DEFAULT '',
     success       INTEGER NOT NULL DEFAULT 0,
     error_message TEXT DEFAULT '',
-    triggered_by  INTEGER REFERENCES users(id) ON DELETE SET NULL
+    triggered_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    message_id    INTEGER REFERENCES email_messages(id) ON DELETE SET NULL,
+    smtp_code     TEXT DEFAULT '',
+    show_id       INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+    resend_of     INTEGER DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_email_outbox_log_sent ON email_outbox_log(sent_at DESC);
 
@@ -1964,6 +1998,14 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         # 3.22.0: the approved gear itself (JSON), so the re-approval email can
         # say exactly what was added / removed / changed since approval.
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approval_lines TEXT',
+        # 3.23.0: searchable email log + resend (email_messages holds the body).
+        f'ALTER TABLE "{app_schema}".email_outbox_log ADD COLUMN IF NOT EXISTS message_id INTEGER REFERENCES "{app_schema}".email_messages(id) ON DELETE SET NULL',
+        f'ALTER TABLE "{app_schema}".email_outbox_log ADD COLUMN IF NOT EXISTS smtp_code TEXT DEFAULT \'\'',
+        f'ALTER TABLE "{app_schema}".email_outbox_log ADD COLUMN IF NOT EXISTS show_id INTEGER REFERENCES "{app_schema}".shows(id) ON DELETE SET NULL',
+        f'ALTER TABLE "{app_schema}".email_outbox_log ADD COLUMN IF NOT EXISTS resend_of INTEGER DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".email_send_errors ADD COLUMN IF NOT EXISTS message_id INTEGER REFERENCES "{app_schema}".email_messages(id) ON DELETE SET NULL',
+        f'CREATE INDEX IF NOT EXISTS idx_email_outbox_log_recipient ON "{app_schema}".email_outbox_log(lower(recipient))',
+        f'CREATE INDEX IF NOT EXISTS idx_email_outbox_log_message ON "{app_schema}".email_outbox_log(message_id)',
         f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS ai_hint TEXT DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS display_as TEXT DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".form_fields ADD COLUMN IF NOT EXISTS allow_multi INTEGER DEFAULT 0',
