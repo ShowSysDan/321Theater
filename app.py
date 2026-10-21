@@ -810,7 +810,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.25.0'
+APP_VERSION = '3.25.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -10124,8 +10124,14 @@ def settings():
         '''SELECT cm.*, prl.name as level_name, prl.hourly_rate as level_rate
            FROM crew_members cm
            LEFT JOIN pay_rate_levels prl ON prl.id = cm.rate_level_id
-           ORDER BY COALESCE(cm.is_archived, 0), LOWER(cm.name)'''
+           WHERE COALESCE(cm.is_archived, 0) = 0
+           ORDER BY LOWER(cm.name)'''
     ).fetchall()] if _can_manage_crew else []
+    # Archived technicians live on their own page (Settings → Technicians →
+    # Archived technicians); the list only links to it.
+    archived_crew_count = db3.execute(
+        'SELECT COUNT(*) FROM crew_members WHERE COALESCE(is_archived, 0) = 1'
+    ).fetchone()[0] if _can_manage_crew else 0
     pay_rate_levels = [dict(r) for r in db3.execute(
         'SELECT * FROM pay_rate_levels ORDER BY sort_order, name'
     ).fetchall()] if _can_manage_crew else []
@@ -10221,6 +10227,7 @@ def settings():
                            distinct_venues=distinct_venues,
                            contact_venues=contact_venues,
                            crew_members_list=crew_members_list,
+                           archived_crew_count=archived_crew_count,
                            pay_rate_levels=pay_rate_levels,
                            labor_billable_items=labor_billable_items,
                            wifi_network=all_settings.get('wifi_network', ''),
@@ -18053,7 +18060,7 @@ def crew_tracker():
 
     # Crew members — alphabetical (case-insensitive); sort_order is legacy.
     members = db.execute(
-        'SELECT * FROM crew_members ORDER BY COALESCE(is_archived, 0), LOWER(name)'
+        'SELECT * FROM crew_members WHERE COALESCE(is_archived, 0) = 0 ORDER BY LOWER(name)'
     ).fetchall()
 
     # Qualifications — capture status per (crew_member_id, position_id) so the
@@ -18283,6 +18290,61 @@ def _archived_crew_refusal(db, cmid, current=None):
         return (f"{row['name']} is archived. Restore them under Settings → "
                 "Technicians to schedule them again.")
     return None
+
+
+@app.route('/settings/technicians/archived')
+@scheduler_required
+def archived_technicians_page():
+    """Archived technicians: their skills, training notes and work history,
+    with Restore / Delete. The only place archived technicians are listed."""
+    db = get_db()
+    techs = [dict(r) for r in db.execute("""
+        SELECT cm.id, cm.name, cm.training_notes, cm.archived_at,
+               prl.name AS level_name, prl.hourly_rate AS level_rate
+          FROM crew_members cm
+          LEFT JOIN pay_rate_levels prl ON prl.id = cm.rate_level_id
+         WHERE COALESCE(cm.is_archived, 0) = 1
+         ORDER BY LOWER(cm.name)""").fetchall()]
+    ids = [t['id'] for t in techs]
+    quals, work = {}, {}
+    if ids:
+        for q in db.execute("""
+            SELECT cq.crew_member_id, jp.name, COALESCE(cq.status, 2) AS status
+              FROM crew_qualifications cq
+              JOIN job_positions jp ON jp.id = cq.position_id
+             WHERE cq.crew_member_id = ANY(%s)
+             ORDER BY LOWER(jp.name)""", (ids,)).fetchall():
+            quals.setdefault(q['crew_member_id'], []).append(
+                {'name': q['name'], 'training': q['status'] == 1})
+        # One row per shift line naming the technician: show schedule,
+        # settlement "Worked by" (a settled line also has its schedule
+        # line, so count shows/dates rather than lines) and overhead.
+        for w in db.execute("""
+            WITH lines AS (
+                SELECT scheduled_crew_member_id AS cid, show_id, work_date
+                  FROM labor_requests WHERE scheduled_crew_member_id = ANY(%s)
+                UNION
+                SELECT crew_member_id, show_id, work_date
+                  FROM post_show_labor WHERE crew_member_id = ANY(%s)
+                UNION ALL
+                SELECT scheduled_crew_member_id, NULL, work_date
+                  FROM overhead_labor_requests WHERE scheduled_crew_member_id = ANY(%s))
+            SELECT cid, COUNT(DISTINCT show_id) AS shows,
+                   COUNT(*) FILTER (WHERE show_id IS NULL) AS overhead_shifts,
+                   MIN(work_date) AS first_date, MAX(work_date) AS last_date
+              FROM lines GROUP BY cid""", (ids, ids, ids)).fetchall():
+            work[w['cid']] = dict(w)
+    db.close()
+    for t in techs:
+        t['quals'] = quals.get(t['id'], [])
+        w = work.get(t['id']) or {}
+        t['shows'] = w.get('shows') or 0
+        t['overhead_shifts'] = w.get('overhead_shifts') or 0
+        t['first_date'] = _as_date(w.get('first_date'))
+        t['last_date'] = _as_date(w.get('last_date'))
+        t['archived_on'] = _as_date(t['archived_at'])
+    return render_template('archived_technicians.html', techs=techs,
+                           can_report=_can_report_labor(), user=get_current_user())
 
 
 @app.route('/settings/crew-members/<int:mid>/archive', methods=['POST'])

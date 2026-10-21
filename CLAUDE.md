@@ -331,7 +331,12 @@ apps. For a 321Theater access change, use this app's own flags instead
   only where the line already names them). Post-Show *Worked by* lists them
   under an Archived group (settling a past show). Server schedule writes call
   `_archived_crew_refusal()`. Reports include them as "Name (archived)";
-  skills coverage counts active only. Skill Tracker shows them read-only.
+  skills coverage counts active only.
+- 3.25.1 (the user's call): archived techs are NOT listed in Settings →
+  Technicians or the Skill Tracker (both query active only). They live on
+  ONE page, `/settings/technicians/archived` (`archived_technicians_page`,
+  `@scheduler_required`): skills, notes, work history, Restore, Work history
+  (→ `/reports?tab=lines&tech=<id>`), Delete only with no shifts.
 - `show_comments.user_id` is `ON DELETE SET NULL` + `author_name` (stamped at
   post and again by `delete_user`); readers LEFT JOIN users and fall back to
   `author_name`. Never go back to CASCADE.

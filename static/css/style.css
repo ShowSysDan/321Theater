@@ -2455,7 +2455,3 @@ html.sidebar-collapsed .sidebar-footer-row > .sidebar-user, html.force-rail .sid
 .email-resend-row { display: flex; gap: 8px; }
 .email-resend-row input { flex: 1; min-width: 0; }
 .email-preview-frame { width: 100%; height: 460px; border: 1px solid var(--border); border-radius: 8px; background: #eef0f3; }
-
-/* Archived technicians (3.25.0): Settings → Technicians + Skill Tracker */
-.crew-archived-tag { display: inline-block; margin-left: 6px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 99px; font-size: 9px; font-weight: 600; letter-spacing: .08em; color: var(--text-dim); vertical-align: middle; }
-tr.crew-archived-row > td { opacity: .7; }

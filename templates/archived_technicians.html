@@ -1,0 +1,138 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{% block title %}Archived Technicians — 3·2·1→Theater{% endblock %}
+
+{% block head %}
+<style>
+/* Archived technicians (3.25.1): one card per technician — skills, notes,
+   work history, Restore / Delete. Fluid, so phones need no extra rules. */
+.atech-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+.atech-toolbar input { max-width: 320px; }
+.atech-list { display: grid; gap: 12px; }
+.atech-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+.atech-head { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+.atech-name { font-size: 15px; font-weight: 600; }
+.atech-meta { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+.atech-actions { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+.atech-row { display: flex; gap: 10px; margin-top: 10px; font-size: 13px; }
+.atech-label { flex: 0 0 92px; color: var(--text-dim); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; padding-top: 3px; }
+.atech-skills { display: flex; flex-wrap: wrap; gap: 5px; }
+.atech-skill { border: 1px solid var(--border); border-radius: 99px; padding: 1px 9px; font-size: 12px; }
+.atech-skill.training { border-style: dashed; color: var(--text-dim); }
+.atech-notes { white-space: pre-wrap; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Archived Technicians</h1>
+    <p class="page-sub">Technicians who have left. They're hidden from the technician list, the Skill Tracker and scheduling, but their skills and work history are kept.</p>
+  </div>
+  <div class="header-actions">
+    <a href="{{ url_for('settings') }}#technicians" class="btn btn-ghost btn-sm">← Manage Technicians</a>
+  </div>
+</div>
+
+{% if not techs %}
+<div class="form-section">
+  <div class="form-section-body" style="text-align:center;padding:32px">
+    <p class="text-dim">No archived technicians.</p>
+  </div>
+</div>
+{% else %}
+<div class="atech-toolbar">
+  <input type="search" id="atech-search" class="field-input field-input-sm" placeholder="Search name or skill…" autocomplete="off">
+  <span class="text-dim text-sm" id="atech-count">{{ techs|length }} archived</span>
+</div>
+
+<div class="atech-list" id="atech-list">
+  {% for t in techs %}
+  <div class="atech-card" data-mid="{{ t.id }}"
+       data-search="{{ (t.name ~ ' ' ~ (t.quals|map(attribute='name')|join(' ')))|lower }}">
+    <div class="atech-head">
+      <div>
+        <div class="atech-name">{{ t.name }}</div>
+        <div class="atech-meta">
+          {% if t.level_name %}{{ t.level_name }} (${{ '%.2f'|format(t.level_rate or 0) }}/hr) · {% endif %}
+          Archived {{ t.archived_on.strftime('%b %-d, %Y') if t.archived_on else '—' }}
+        </div>
+      </div>
+      <div class="atech-actions">
+        {% if can_report and (t.shows or t.overhead_shifts) %}
+        <a class="btn btn-xs btn-ghost" href="{{ url_for('reports_page') }}?tab=lines&tech={{ t.id }}" title="Every labor line they're on, all dates">Work history</a>
+        {% endif %}
+        <button class="btn btn-xs btn-ghost" onclick="restoreTech({{ t.id }})" title="Return to the technician list and scheduling">Restore</button>
+        {% if not (t.shows or t.overhead_shifts) %}
+        <button class="btn btn-xs btn-danger-ghost" onclick="deleteTech({{ t.id }})" title="Never worked a shift: delete permanently">Delete</button>
+        {% endif %}
+      </div>
+    </div>
+    <div class="atech-row">
+      <div class="atech-label">Skills</div>
+      <div class="atech-skills">
+        {% for q in t.quals %}<span class="atech-skill{% if q.training %} training{% endif %}"{% if q.training %} title="In training"{% endif %}>{{ q.name }}{% if q.training %} · training{% endif %}</span>
+        {% else %}<span class="text-dim">None recorded</span>{% endfor %}
+      </div>
+    </div>
+    <div class="atech-row">
+      <div class="atech-label">Worked</div>
+      <div>
+        {% if t.shows or t.overhead_shifts %}
+          {{ t.shows }} show{{ '' if t.shows == 1 else 's' }}{% if t.overhead_shifts %} · {{ t.overhead_shifts }} overhead shift{{ '' if t.overhead_shifts == 1 else 's' }}{% endif %}
+          {% if t.first_date %}<span class="text-dim"> · {{ t.first_date.strftime('%b %-d, %Y') }}{% if t.last_date and t.last_date != t.first_date %} – {{ t.last_date.strftime('%b %-d, %Y') }}{% endif %}</span>{% endif %}
+        {% else %}<span class="text-dim">No shifts on record</span>{% endif %}
+      </div>
+    </div>
+    {% if t.training_notes %}
+    <div class="atech-row">
+      <div class="atech-label">Notes</div>
+      <div class="atech-notes">{{ t.training_notes }}</div>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<script>
+(function() {
+  const input = document.getElementById('atech-search');
+  if (!input) return;
+  const total = {{ techs|length }};
+  input.addEventListener('input', () => {
+    const q = input.value.trim().toLowerCase();
+    let shown = 0;
+    document.querySelectorAll('#atech-list .atech-card').forEach(c => {
+      const hit = !q || c.dataset.search.includes(q);
+      c.style.display = hit ? '' : 'none';
+      if (hit) shown++;
+    });
+    document.getElementById('atech-count').textContent =
+      q ? `${shown} of ${total} archived` : `${total} archived`;
+  });
+})();
+
+async function restoreTech(mid) {
+  const r = await fetch(`/settings/crew-members/${mid}/archive`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({restore: true})
+  });
+  const d = await r.json();
+  if (d.success) location.reload();
+  else alert(d.error || 'Error restoring technician.');
+}
+
+async function deleteTech(mid) {
+  if (!confirm('Permanently delete this technician and their skill records? This cannot be undone.')) return;
+  const r = await fetch(`/settings/crew-members/${mid}/delete`, {method: 'POST'});
+  const d = await r.json();
+  if (d.success) location.reload();
+  else alert(d.error || 'Error deleting technician.');
+}
+</script>
+{% endblock %}
