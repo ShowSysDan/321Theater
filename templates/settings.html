@@ -1914,34 +1914,50 @@
   <div class="form-section mt-lg" id="email-log-section">
     <div class="form-section-header" style="display:flex;align-items:center;gap:10px">
       <span class="section-icon">◈</span>
-      RECENT EMAIL ACTIVITY
+      EMAIL ACTIVITY
       <span id="email-log-summary" class="oh-pill"
             style="font-size:10px;padding:1px 6px;border-radius:999px;background:var(--bg-hover);color:var(--text-dim);border:1px solid var(--border)"></span>
       <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
-        <select id="email-log-status" class="field-input field-input-sm"
-                style="width:auto" onchange="loadEmailLog()">
-          <option value="all">All</option>
-          <option value="success">Delivered only</option>
-          <option value="failed">Failed only</option>
-        </select>
         <button class="btn btn-sm btn-ghost" onclick="loadEmailLog()">Refresh</button>
-        <button class="btn btn-sm btn-danger-ghost" onclick="clearEmailLog()"
-                title="Permanently delete every row in this log">Clear log</button>
       </div>
     </div>
     <div class="form-section-body no-pad">
       <p class="text-dim text-sm" style="padding:10px 14px 0">
-        One row per outgoing email — recipient, subject, and result.
-        Use this to confirm whether a message was actually sent.
+        One row per recipient of every email the app sends — this history is kept for good.
+        Search by address or subject, click a row to see the message, why a send failed,
+        and to resend it. The message itself (for preview and resend) is kept for
+        <select id="email-log-retention" class="field-input field-input-sm" style="width:auto;display:inline-block"
+                onchange="saveEmailRetention(this.value)" title="After this, the content is deleted; the log row stays">
+          <option value="60">60 days</option>
+        </select>, then deleted (sign-in codes and password/confirmation links are never kept).
       </p>
+      <div class="email-log-filters">
+        <input type="search" id="email-log-q" class="field-input field-input-sm"
+               placeholder="Search recipient or subject…" autocomplete="off">
+        <select id="email-log-status" class="field-input field-input-sm" onchange="loadEmailLog()">
+          <option value="all">All results</option>
+          <option value="success">Delivered</option>
+          <option value="failed">Failed</option>
+        </select>
+        <select id="email-log-purpose" class="field-input field-input-sm" onchange="loadEmailLog()">
+          <option value="">All types</option>
+        </select>
+        <label class="text-dim" style="font-size:11px">From
+          <input type="date" id="email-log-from" class="field-input field-input-sm" onchange="loadEmailLog()"></label>
+        <label class="text-dim" style="font-size:11px">To
+          <input type="date" id="email-log-to" class="field-input field-input-sm" onchange="loadEmailLog()"></label>
+        <span id="email-log-rcpt-chip" class="email-log-chip" style="display:none"></span>
+        <button class="btn btn-xs btn-ghost" onclick="resetEmailLogFilters()">Clear filters</button>
+      </div>
+      <div style="overflow-x:auto">
       <table class="data-table" id="email-log-table">
         <thead>
           <tr>
             <th style="width:140px">WHEN</th>
             <th style="min-width:200px">RECIPIENT</th>
             <th style="min-width:240px">SUBJECT</th>
-            <th style="width:110px">PURPOSE</th>
-            <th style="width:90px;text-align:center">RESULT</th>
+            <th style="width:130px">TYPE</th>
+            <th style="width:150px">RESULT</th>
             <th style="width:120px">TRIGGERED BY</th>
           </tr>
         </thead>
@@ -1949,6 +1965,20 @@
           <tr><td colspan="6" class="text-dim" style="text-align:center;padding:14px">Loading…</td></tr>
         </tbody>
       </table>
+      </div>
+      <div id="email-log-more" style="display:none;padding:10px 14px;text-align:center">
+        <button class="btn btn-sm btn-ghost" onclick="loadEmailLog(true)">Load more</button>
+      </div>
+    </div>
+  </div>
+
+  {# Email detail / resend dialog (3.23.0) #}
+  <div id="email-detail-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeEmailDetail()">
+    <div class="modal-card" style="max-width:780px;width:100%;max-height:92vh;overflow-y:auto">
+      <div class="modal-header"><span id="email-detail-title">Email</span>
+        <button type="button" class="modal-close" onclick="closeEmailDetail()">×</button>
+      </div>
+      <div class="modal-body" id="email-detail-body"><p class="text-dim">Loading…</p></div>
     </div>
   </div>
 
@@ -5025,15 +5055,18 @@ async function loadEmailErrors() {
         : '—';
       const ctx = [e.pdf_type].filter(Boolean).map(_emailErrEsc).join(' / ') || '—';
       const cls = e.resolved ? 'style="opacity:0.55"' : '';
-      const actions = e.resolved
+      const resend = e.can_resend
+        ? `<button class="btn btn-xs btn-ghost" data-addr="${_emailAttr(e.recipient || '')}" onclick="resendFromError(${e.message_id | 0}, this.dataset.addr)" title="Send the same message again — you can correct the address first">↻ Resend</button>`
+        : '';
+      const actions = (e.resolved
         ? '<span class="text-dim" style="font-size:11px">reviewed</span>'
-        : `<button class="btn btn-xs btn-ghost" onclick="resolveEmailError(${e.id})">✓ Reviewed</button>`;
+        : `<button class="btn btn-xs btn-ghost" onclick="resolveEmailError(${e.id})">✓ Reviewed</button>`) + resend;
       return `
         <tr ${cls}>
           <td class="text-dim" style="font-size:11px;font-family:var(--font-mono,monospace)">${_emailErrFmtTime(e.sent_at)}</td>
           <td style="font-size:12px"><strong>${_emailErrEsc(e.recipient || '—')}</strong>
               ${e.subject ? `<div class="text-dim" style="font-size:10px">${_emailErrEsc(e.subject)}</div>` : ''}</td>
-          <td style="font-size:11px;color:var(--text);max-width:340px;word-break:break-word">${_emailErrEsc(e.error_msg || '')}</td>
+          <td style="font-size:11px;color:var(--text);max-width:340px;word-break:break-word">${e.explain ? `<strong title="${_emailAttr(e.explain.detail)}">${_emailErrEsc(e.explain.title)}</strong><div class="text-dim">${_emailErrEsc(e.error_msg || '')}</div>` : _emailErrEsc(e.error_msg || '')}</td>
           <td class="text-dim" style="font-size:11px;font-family:var(--font-mono,monospace)">${_emailErrEsc(e.smtp_code || '')}</td>
           <td class="text-dim" style="font-size:11px">${ctx}</td>
           <td style="font-size:11px">${showCell}</td>
@@ -5044,6 +5077,20 @@ async function loadEmailErrors() {
   } catch (err) {
     tbody.innerHTML = '<tr><td colspan="8" class="text-dim" style="text-align:center;padding:14px">Error loading.</td></tr>';
   }
+}
+
+async function resendFromError(mid, recipient) {
+  const to = prompt('Resend this email to (correct the address if it was wrong):', recipient || '');
+  if (!to || !to.trim()) return;
+  const r = await fetch(`/settings/email-messages/${mid}/resend`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({to: to.trim()})});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { showSaveToast('✗ ' + (d.error || 'Resend failed'), 'error'); return; }
+  showSaveToast(d.success ? '✓ Email resent' : '✗ ' + ((d.explain && d.explain.title) || 'Resend failed'),
+                d.success ? undefined : 'error');
+  loadEmailErrors();
+  loadEmailLog();
 }
 
 async function resolveEmailError(eid) {
@@ -5097,35 +5144,83 @@ function _emailLogFmtWhen(ts) {
                                 hour: '2-digit', minute: '2-digit' });
 }
 
-async function loadEmailLog() {
+let _emailLogRows = [], _emailLogRecipient = '', _emailLogTimer = null;
+// Attribute-safe escaping (the text escapers above leave quotes alone).
+function _emailAttr(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+const EMAIL_LOG_PAGE = 100;
+
+function _emailLogParams(offset) {
+  const p = new URLSearchParams();
+  const v = id => (document.getElementById(id) || {}).value || '';
+  if (v('email-log-q').trim()) p.set('q', v('email-log-q').trim());
+  if (v('email-log-status') && v('email-log-status') !== 'all') p.set('status', v('email-log-status'));
+  if (v('email-log-purpose')) p.set('purpose', v('email-log-purpose'));
+  if (v('email-log-from')) p.set('from', v('email-log-from'));
+  if (v('email-log-to')) p.set('to', v('email-log-to'));
+  if (_emailLogRecipient) p.set('recipient', _emailLogRecipient);
+  p.set('offset', offset || 0);
+  p.set('limit', EMAIL_LOG_PAGE);
+  return p.toString();
+}
+
+function _emailResultCell(e) {
+  if (e.success) return '<span style="color:#48BB78;font-weight:600">✓ Sent</span>'
+    + (e.resend_of ? ' <span class="text-dim" style="font-size:10px">resend</span>' : '');
+  const why = e.explain ? e.explain.title : 'Failed';
+  return `<span style="color:#F56565;font-weight:600">✗ Failed</span>`
+    + `<div style="font-size:10px;color:var(--text-dim);margin-top:2px">${_emailLogEsc(why)}</div>`;
+}
+
+async function loadEmailLog(more) {
   const tbody = document.getElementById('email-log-tbody');
   const summary = document.getElementById('email-log-summary');
   if (!tbody) return;
-  tbody.innerHTML = '<tr><td colspan="6" class="text-dim" style="text-align:center;padding:14px">Loading…</td></tr>';
-  const status = document.getElementById('email-log-status').value || 'all';
+  const offset = more ? _emailLogRows.length : 0;
+  if (!more) tbody.innerHTML = '<tr><td colspan="6" class="text-dim" style="text-align:center;padding:14px">Loading…</td></tr>';
   try {
-    const r = await fetch('/settings/email-log?status=' + encodeURIComponent(status));
+    const r = await fetch('/settings/email-log?' + _emailLogParams(offset));
     if (!r.ok) throw new Error('http ' + r.status);
     const d = await r.json();
-    if (summary) {
-      summary.textContent = `${d.total} total · ${d.successes} delivered · ${d.failures} failed`;
+    _emailLogRows = more ? _emailLogRows.concat(d.rows || []) : (d.rows || []);
+    if (summary) summary.textContent = `${d.total} match · ${d.successes} delivered · ${d.failures} failed`;
+    const ret = document.getElementById('email-log-retention');
+    if (ret && d.retention_days && document.activeElement !== ret) {
+      const opts = Array.from(new Set((d.retention_choices || []).concat([d.retention_days])))
+        .sort((a, b) => a - b);
+      ret.innerHTML = opts.map(n => `<option value="${n | 0}">${n >= 365 && n % 365 === 0
+        ? (n / 365) + ' year' + (n === 365 ? '' : 's') : n + ' days'}</option>`).join('');
+      ret.value = String(d.retention_days);
     }
-    const rows = d.rows || [];
-    if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="text-dim" style="text-align:center;padding:14px">No emails recorded yet.</td></tr>';
+    const sel = document.getElementById('email-log-purpose');
+    if (sel && d.purposes) {
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">All types</option>' + d.purposes.map(p =>
+        `<option value="${_emailLogEsc(p.key)}">${_emailLogEsc(p.label)}</option>`).join('');
+      sel.value = cur;
+    }
+    const chip = document.getElementById('email-log-rcpt-chip');
+    if (chip) {
+      chip.style.display = _emailLogRecipient ? '' : 'none';
+      chip.innerHTML = _emailLogRecipient ? `To: <strong>${_emailLogEsc(_emailLogRecipient)}</strong>
+        <button type="button" onclick="filterEmailLogRecipient('')" title="Show every recipient">×</button>` : '';
+    }
+    document.getElementById('email-log-more').style.display =
+      _emailLogRows.length < d.total ? '' : 'none';
+    if (!_emailLogRows.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="text-dim" style="text-align:center;padding:14px">No emails match.</td></tr>';
       return;
     }
-    tbody.innerHTML = rows.map(e => {
+    tbody.innerHTML = _emailLogRows.map((e, i) => {
       const who = e.triggered_by_display || e.triggered_by_name || '';
-      const resultCell = e.success
-        ? '<span style="color:#48BB78;font-weight:600">✓ Sent</span>'
-        : `<span style="color:#F56565;font-weight:600" title="${_emailLogEsc(e.error_message||'')}">✗ Failed</span>`;
-      return `<tr>
+      return `<tr class="email-log-row" onclick="openEmailDetail(${e.id})" title="Details, preview and resend">
         <td class="text-dim" style="font-size:11px;white-space:nowrap">${_emailLogFmtWhen(e.sent_at)}</td>
-        <td style="font-size:12px;font-family:var(--font-mono,monospace)">${_emailLogEsc(e.recipient || '')}</td>
+        <td style="font-size:12px;font-family:var(--font-mono,monospace);word-break:break-all">${_emailLogEsc(e.recipient || '')}</td>
         <td style="font-size:12px">${_emailLogEsc(e.subject || '')}</td>
-        <td class="text-dim" style="font-size:11px">${_emailLogEsc(e.purpose || '')}</td>
-        <td style="text-align:center;font-size:11px">${resultCell}</td>
+        <td class="text-dim" style="font-size:11px">${_emailLogEsc(e.purpose_label || e.purpose || '')}</td>
+        <td style="font-size:11px">${_emailResultCell(e)}</td>
         <td class="text-dim" style="font-size:11px">${_emailLogEsc(who)}</td>
       </tr>`;
     }).join('');
@@ -5134,12 +5229,145 @@ async function loadEmailLog() {
   }
 }
 
-async function clearEmailLog() {
-  if (!confirm('Permanently delete every row in this email activity log?')) return;
-  const r = await fetch('/settings/email-log/clear', { method: 'POST' });
-  if (!r.ok) { showSaveToast('✗ Clear failed', 'error'); return; }
-  showSaveToast('✓ Email log cleared');
+function filterEmailLogRecipient(addr) {
+  _emailLogRecipient = (addr || '').trim().toLowerCase();
+  closeEmailDetail();
   loadEmailLog();
+  const sec = document.getElementById('email-log-section');
+  if (sec && addr) sec.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+function resetEmailLogFilters() {
+  ['email-log-q', 'email-log-from', 'email-log-to', 'email-log-purpose'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = '';
+  });
+  document.getElementById('email-log-status').value = 'all';
+  _emailLogRecipient = '';
+  loadEmailLog();
+}
+
+(function () {
+  const q = document.getElementById('email-log-q');
+  if (q) q.addEventListener('input', () => {
+    clearTimeout(_emailLogTimer);
+    _emailLogTimer = setTimeout(() => loadEmailLog(), 300);
+  });
+})();
+
+function closeEmailDetail() {
+  const m = document.getElementById('email-detail-modal');
+  if (m) m.style.display = 'none';
+}
+
+function _fmtBytes(n) {
+  n = n | 0;
+  return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+}
+
+async function openEmailDetail(logId) {
+  const modal = document.getElementById('email-detail-modal');
+  const body = document.getElementById('email-detail-body');
+  const E = _emailLogEsc;
+  modal.style.display = 'flex';
+  body.innerHTML = '<p class="text-dim">Loading…</p>';
+  let d;
+  try {
+    const r = await fetch('/settings/email-log/' + logId);
+    if (!r.ok) throw new Error();
+    d = await r.json();
+  } catch (e) { body.innerHTML = '<p class="text-dim">Couldn\'t load this email.</p>'; return; }
+  document.getElementById('email-detail-title').textContent = d.subject || '(no subject)';
+  const m = d.message;
+  const st = d.recipient_stats || {};
+  const facts = [
+    ['To', `<span style="font-family:var(--font-mono,monospace)">${E(d.recipient)}</span>
+      <button type="button" class="btn btn-xs btn-ghost" data-addr="${_emailAttr(d.recipient)}" onclick="filterEmailLogRecipient(this.dataset.addr)">All emails to this address</button>`],
+    ['When', E(_emailLogFmtWhen(d.sent_at))],
+    ['Type', E(d.purpose_label || d.purpose || '—')],
+    ['Show', d.show_id ? `<a href="/shows/${d.show_id}" target="_blank" rel="noopener">${E(d.show_name || '#' + d.show_id)}</a>` : '—'],
+    ['Triggered by', E(d.triggered_by)],
+    ['This address', `${st.total || 0} email${st.total === 1 ? '' : 's'} logged · ${st.failed || 0} failed`
+      + (st.last_ok ? ` · last delivered ${E(_emailLogFmtWhen(st.last_ok))}` : ' · never delivered')],
+  ];
+  if (d.resend_of) facts.push(['Resend of', `<a href="#" onclick="openEmailDetail(${d.resend_of});return false">original send</a>`]);
+  let h = '';
+  h += d.success
+    ? '<div class="email-detail-status ok">✓ Delivered to the mail server</div>'
+    : `<div class="email-detail-status bad"><strong>✗ ${E(d.explain ? d.explain.title : 'Failed')}</strong>
+        <div style="margin-top:4px">${E(d.explain ? d.explain.detail : '')}</div>
+        <div class="email-detail-raw">${d.smtp_code ? 'SMTP ' + E(d.smtp_code) + ' · ' : ''}${E(d.error_message || '(no error text)')}</div></div>`;
+  h += '<table class="email-detail-facts">' + facts.map(([k, v]) =>
+    `<tr><th>${k}</th><td>${v}</td></tr>`).join('') + '</table>';
+  if ((d.resends || []).length) {
+    h += '<div class="email-detail-h">Resends</div><ul class="email-detail-list">' + d.resends.map(x =>
+      `<li><a href="#" onclick="openEmailDetail(${x.id});return false">${E(_emailLogFmtWhen(x.sent_at))}</a>
+        to ${E(x.recipient)} by ${E(x.by || 'System')} — ${x.success ? '<span style="color:#48BB78">sent</span>'
+        : '<span style="color:#F56565">failed</span>'}</li>`).join('') + '</ul>';
+  }
+  if (m) {
+    h += '<div class="email-detail-h">Resend</div>';
+    if (m.can_resend) {
+      h += `<div class="email-resend-row">
+        <input type="text" id="email-resend-to" class="field-input field-input-sm" value="${_emailAttr(d.recipient)}"
+               placeholder="address, or several separated by commas">
+        <button type="button" class="btn btn-sm btn-primary" id="email-resend-btn"
+                onclick="resendEmail(${m.id}, ${d.id})">Resend</button></div>
+        <div class="text-dim" style="font-size:11px;margin-top:4px">Sends the same message${(m.attachments || []).length ? ' and attachments' : ''} again. Change the address to send it to a corrected or different one.</div>
+        <div id="email-resend-result" style="margin-top:6px;font-size:12px"></div>`;
+    } else {
+      h += `<p class="text-dim" style="font-size:12px;margin:0">${E(m.why_not_resend || 'Can\'t be resent.')}</p>`;
+    }
+    if ((m.attachments || []).length) {
+      h += '<div class="email-detail-h">Attachments</div><ul class="email-detail-list">' + m.attachments.map(a =>
+        `<li>📎 ${E(a.filename)} <span class="text-dim">(${_fmtBytes(a.size_bytes)})</span></li>`).join('') + '</ul>';
+    }
+    if (m.body_html || m.body_text) {
+      h += '<div class="email-detail-h">Message</div><iframe id="email-preview-frame" class="email-preview-frame" sandbox title="Email preview"></iframe>';
+    }
+  } else {
+    h += '<p class="text-dim" style="font-size:12px;margin-top:12px">This email was sent before message content was kept (3.23.0), so there is no preview and it can\'t be resent from here.</p>';
+  }
+  body.innerHTML = h;
+  const fr = document.getElementById('email-preview-frame');
+  if (fr && m) {
+    fr.srcdoc = m.body_html || ('<pre style="font-family:sans-serif;white-space:pre-wrap;padding:12px">'
+      + E(m.body_text) + '</pre>');
+  }
+}
+
+async function resendEmail(mid, logId) {
+  const to = (document.getElementById('email-resend-to').value || '').trim();
+  const out = document.getElementById('email-resend-result');
+  const btn = document.getElementById('email-resend-btn');
+  if (!to) { out.textContent = 'Enter an address.'; return; }
+  if (!confirm(`Resend this email to ${to}?`)) return;
+  btn.disabled = true;
+  out.textContent = 'Sending…';
+  try {
+    const r = await fetch(`/settings/email-messages/${mid}/resend`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({to, log_id: logId})});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { out.innerHTML = `<span style="color:#F56565">${_emailLogEsc(d.error || 'Resend failed')}</span>`; return; }
+    if (d.success) {
+      out.innerHTML = '<span style="color:#48BB78">✓ Sent.</span> It\'s in the log as a new row.';
+      showSaveToast('✓ Email resent');
+    } else {
+      out.innerHTML = `<span style="color:#F56565">✗ ${_emailLogEsc(d.explain ? d.explain.title : 'Failed')}</span>
+        <div class="text-dim">${_emailLogEsc(d.message || '')}</div>`;
+    }
+    loadEmailLog();
+    loadEmailErrors();
+  } finally { btn.disabled = false; }
+}
+
+async function saveEmailRetention(days) {
+  const r = await fetch('/settings/email-retention', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({days: parseInt(days, 10)})});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { showSaveToast('✗ ' + (d.error || 'Could not save'), 'error'); loadEmailLog(); return; }
+  showSaveToast(`✓ Email content now kept ${d.days} days`);
 }
 
 if (document.getElementById('email-log-tbody')) {
