@@ -29,10 +29,36 @@ Content model (all optional except title):
   links    [(label, url)] — smaller links under the button
   note     small grey text under everything (e.g. "PDF attached")
   footer   footer line (sender / base URL)
-  accent   colour for the eyebrow bar (default orange)
   preheader hidden inbox-preview text
 """
 import html as _html
+import os
+
+# The sidebar's stagelight, as a PNG (Outlook can't show SVG), embedded in
+# the message as a cid: inline image — inline parts display without the
+# "download pictures" prompt that blocks linked images. app.py's
+# _build_mime_message attaches it whenever the HTML references LOGO_CID.
+LOGO_CID = '321t-logo'
+_LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          'static', 'img', 'email-logo.png')
+_logo_cache = []
+
+
+def logo_png():
+    """The logo's bytes, or None if the file is missing (then
+    strip_logo() takes the <img> out so nothing shows broken)."""
+    if not _logo_cache:
+        try:
+            with open(_LOGO_PATH, 'rb') as f:
+                _logo_cache.append(f.read())
+        except OSError:
+            _logo_cache.append(None)
+    return _logo_cache[0]
+
+
+def strip_logo(html):
+    import re
+    return re.sub(r'<td[^>]*data-logo[^>]*>.*?</td>', '', html, flags=re.S)
 
 BLUE = '#1c5494'
 BLUE_DARK = '#163f6e'
@@ -173,7 +199,7 @@ def _text_table(t):
 
 
 def build(title, *, eyebrow='', intro='', facts=(), blocks=(), button=None, links=(),
-          note='', footer='', accent=ORANGE, preheader=''):
+          note='', footer='', preheader=''):
     """(text, html) for one email. See the module docstring."""
     # ── plain text ──
     t = []
@@ -244,12 +270,12 @@ def build(title, *, eyebrow='', intro='', facts=(), blocks=(), button=None, link
                 for l, u in links)))
     if note:
         parts.append(_p(note, size=12, color=DIM, margin='18px 0 0'))
+    # The label sits in the card above the title, in the app's orange text
+    # colour — one brand look for every email, no per-type colour bars.
     eyebrow_html = (
-        f'<tr><td bgcolor="{accent}" style="background:{accent};padding:7px 28px;font-family:{FONT};'
-        f'font-size:11px;font-weight:bold;letter-spacing:1.5px;color:#ffffff;'
-        f'text-transform:uppercase">{_e(eyebrow)}</td></tr>') if eyebrow else (
-        f'<tr><td bgcolor="{accent}" style="background:{accent};height:4px;font-size:0;'
-        f'line-height:0">&nbsp;</td></tr>')
+        f'<p style="margin:0 0 6px;font-family:{FONT};font-size:11px;font-weight:bold;'
+        f'letter-spacing:1.5px;text-transform:uppercase;color:{ORANGE_TEXT}">{_e(eyebrow)}</p>'
+    ) if eyebrow else ''
     pre = (f'<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;'
            f'color:{PAGE};line-height:1px">{_e(preheader or intro or title)}</div>')
     html = (
@@ -262,16 +288,23 @@ def build(title, *, eyebrow='', intro='', facts=(), blocks=(), button=None, link
         f'bgcolor="{PAGE}" style="background:{PAGE}"><tr><td align="center" style="padding:24px 12px">'
         f'<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" '
         f'style="width:100%;max-width:600px;border-collapse:collapse">'
-        # header band — the sidebar's blue + wordmark
-        f'<tr><td bgcolor="{BLUE}" style="background:{BLUE};padding:18px 28px">'
+        # header band — the sidebar's blue, stagelight + wordmark
+        f'<tr><td bgcolor="{BLUE}" style="background:{BLUE};padding:16px 28px">'
+        f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+        f'<td data-logo valign="middle" style="padding:0 12px 0 0">'
+        f'<img src="cid:{LOGO_CID}" width="28" height="34" alt="" '
+        f'style="display:block;border:0;outline:none;width:28px;height:34px"></td>'
+        f'<td valign="middle">'
         f'<span style="font-family:{FONT};font-size:20px;font-weight:bold;color:#ffffff;'
         f'letter-spacing:.5px">3·2·1<span style="color:{ORANGE}">→</span>THEATER</span><br>'
         f'<span style="font-family:{FONT};font-size:11px;color:#c9d6e8;letter-spacing:1px;'
-        f'text-transform:uppercase">Advance to stage in 3-2-1</span></td></tr>'
-        f'{eyebrow_html}'
+        f'text-transform:uppercase">Advance to stage in 3-2-1</span></td></tr></table></td></tr>'
+        f'<tr><td bgcolor="{ORANGE}" style="background:{ORANGE};height:3px;font-size:0;'
+        f'line-height:0">&nbsp;</td></tr>'
         # card
         f'<tr><td bgcolor="#ffffff" style="background:#ffffff;padding:24px 28px 28px;'
         f'border:1px solid {LINE};border-top:none">'
+        f'{eyebrow_html}'
         f'<h1 style="margin:0 0 14px;font-family:{FONT};font-size:21px;line-height:1.3;'
         f'font-weight:bold;color:{INK}">{_e(title)}</h1>'
         + ''.join(parts) +

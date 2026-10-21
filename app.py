@@ -810,7 +810,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.22.0'
+APP_VERSION = '3.22.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -2701,6 +2701,14 @@ def _build_mime_message(subject, from_addr, recipients, body_text=None,
     def _clean_header(v):
         return v.replace('\r', '').replace('\n', '') if v else v
 
+    # The branded layout's header logo is an inline (cid:) image part, so it
+    # shows without the "download pictures" prompt (3.22.1).
+    logo = None
+    if body_html and f'cid:{email_layout.LOGO_CID}' in body_html:
+        logo = email_layout.logo_png()
+        if not logo:
+            body_html = email_layout.strip_logo(body_html)
+
     msg = MIMEMultipart()
     msg['From'] = _clean_header(from_addr)
     if use_bcc:
@@ -2715,13 +2723,24 @@ def _build_mime_message(subject, from_addr, recipients, body_text=None,
         msg['X-MSMail-Priority'] = 'High'
         msg['Importance'] = 'High'
 
-    if body_text and body_html:
-        alt = MIMEMultipart('alternative')
-        alt.attach(MIMEText(body_text, 'plain'))
-        alt.attach(MIMEText(body_html, 'html'))
-        msg.attach(alt)
-    elif body_html:
-        msg.attach(MIMEText(body_html, 'html'))
+    if body_html:
+        html_part = MIMEText(body_html, 'html')
+        if body_text:
+            body = MIMEMultipart('alternative')
+            body.attach(MIMEText(body_text, 'plain'))
+            body.attach(html_part)
+        else:
+            body = html_part
+        if logo:
+            from email.mime.image import MIMEImage
+            related = MIMEMultipart('related')
+            related.attach(body)
+            img = MIMEImage(logo, 'png')
+            img.add_header('Content-ID', f'<{email_layout.LOGO_CID}>')
+            img.add_header('Content-Disposition', 'inline', filename='321theater.png')
+            related.attach(img)
+            body = related
+        msg.attach(body)
     elif body_text:
         msg.attach(MIMEText(body_text, 'plain'))
 
@@ -3815,7 +3834,7 @@ def run_no_labor_alerts():
             subj = f"[3·2·1→Theater] {n} upcoming show{'s' if n != 1 else ''} with no labor requested"
             body_text, body_html = _mail(
                 f"{n} upcoming show{'s' if n != 1 else ''} with no labor requested",
-                eyebrow='Labor scheduling', accent='#B45309',
+                eyebrow='Labor scheduling',
                 intro=(f"{n} active show{'s are' if n != 1 else ' is'} coming up with no labor "
                        f"requested yet. Review staffing and add labor requests where crew is needed."),
                 blocks=[{'table': {'columns': ['Show', 'Date', 'When', 'Venue'],
@@ -21296,7 +21315,7 @@ def show_assets_approve(show_id):
     n_lines = len(table['rows'])
     text, html = _mail(
         f'Assets approved — {show_name}',
-        eyebrow='Asset approval', accent='#15803D',
+        eyebrow='Asset approval',
         intro=f'{approver_name or "An approver"} approved the gear on this show.',
         facts=_show_mail_facts(db, show_id) + [
             ('Approved by', approver_name or '(unknown)'),
@@ -23540,7 +23559,7 @@ def show_piano_tuning_create(show_id):
         recipients,
         f'3·2·1→THEATER: Piano Tuning Request — {show["name"]}',
         _mail(f'Piano tuning requested — {show["name"]}',
-              eyebrow='Piano tuning', accent='#d97706',
+              eyebrow='Piano tuning',
               intro=f'{who} requested a piano tuning.',
               facts=req_facts + [
                   ('Piano', (vals.get('piano') or '—')
@@ -23727,7 +23746,7 @@ def piano_tuning_update(tid):
             [requester['email']],
             f'3·2·1→THEATER: Piano Tuning Scheduled — {cur["show_name"]}',
             _mail(f'Piano tuning scheduled — {cur["show_name"]}',
-                  eyebrow='Piano tuning', accent='#7c3aed',
+                  eyebrow='Piano tuning',
                   intro='Your piano tuning request is scheduled with the vendor.'
                         + (" It is on the show's production schedule." if r['tuning_date'] else ''),
                   facts=[('Show', cur['show_name']), ('When', when or 'Time to be confirmed'),
@@ -24047,7 +24066,7 @@ def piano_tuning_cancel_request(tid):
             recipients,
             f'3·2·1→THEATER: Piano Tuning Cancellation Requested — {t["show_name"]}',
             _mail(f'Cancellation requested — {t["show_name"]}',
-                  eyebrow='Piano tuning', accent='#B91C1C',
+                  eyebrow='Piano tuning',
                   intro=f'{who} asked to cancel a piano tuning.',
                   facts=[('Show', t['show_name']), ('Piano', t['piano'] or '—'),
                          ('Tuning', when), ('Vendor', t['vendor'] or '—')],
@@ -24088,7 +24107,7 @@ def piano_tuning_cancel_request(tid):
             [asker_email],
             f'3·2·1→THEATER: Piano Tuning Will Go Ahead — {t["show_name"]}',
             _mail(f'Piano tuning will go ahead — {t["show_name"]}',
-                  eyebrow='Piano tuning', accent='#7c3aed',
+                  eyebrow='Piano tuning',
                   intro=f'{who} could not cancel this piano tuning, so it is still on. '
                         f'Contact them with any questions.',
                   facts=[('Show', t['show_name']), ('Piano', t['piano'] or '—'),
@@ -24615,7 +24634,7 @@ def approve_registration(reg_id):
             reg['email'],
             '3·2·1→THEATER: Account Approved',
             *_mail('Your account is approved',
-                   eyebrow='Your account', accent='#15803D',
+                   eyebrow='Your account',
                    intro=f'Welcome to 3·2·1→THEATER! Your account has been approved — you can '
                          f'sign in now.',
                    facts=[('Username', reg['username'])],
@@ -24641,7 +24660,7 @@ def deny_registration(reg_id):
             reg['email'],
             '3·2·1→THEATER: Registration Declined',
             *_mail('Registration not approved',
-                   eyebrow='Your account', accent='#6b7280',
+                   eyebrow='Your account',
                    intro='Your registration request was not approved. If you think this is a '
                          'mistake, contact your 3·2·1→THEATER administrator.',
                    facts=[('Username', reg['username'])]),
@@ -25179,7 +25198,6 @@ def _maint_email(kind, notice, message_html, sender):
     return _mail(
         notice['title'] or ('Maintenance complete' if complete else 'Scheduled maintenance'),
         eyebrow='Maintenance complete' if complete else 'Scheduled maintenance',
-        accent='#15803D' if complete else '#B45309',
         facts=[('Maintenance window' if complete else 'When', window)] if window else [],
         blocks=blocks,
         button=('Open 3·2·1→THEATER', base_url) if base_url and complete else None,
