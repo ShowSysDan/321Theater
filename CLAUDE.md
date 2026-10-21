@@ -512,6 +512,17 @@ apps. For a 321Theater access change, use this app's own flags instead
   must call the `_many` form (group by date window when windows differ)
   and `_show_rental_windows()` for many shows. Test/demo shows stay
   excluded inside the demand query.
+- **In use = PEAK single-day demand inside the window (3.20.1)** —
+  `_peak_daily_demand()` clipped to [start, end], never the sum of every
+  overlapping line (that read two different-day bookings as 2 in use).
+  No window → plain sum. Per-UNIT conflicts stay any-overlap. The edit
+  route's self back-out can over-credit under peak math; the post-commit
+  re-check is what guarantees no overbooking — keep it.
+- **Override** = `override_availability` on `POST /shows/<id>/assets`,
+  honoured only for admin / content admin / asset manager (the Approvals
+  add dialog sends it after its warning + confirm). It skips the count +
+  component checks (pre and post), never the pinned-unit conflict; audit
+  `availability_override=1`, syslog ASSET_AVAILABILITY_OVERRIDE.
 
 ## Audit-log Undo — explicit list only (3.3.1)
 - `audit_undo()` reverses only actions in `_UNDO_ACTIONS` (action → (entity_type,
@@ -800,7 +811,12 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   manager = admin or `users.is_piano_manager` (`_is_piano_manager()`,
   `@piano_manager_required`) — a 321Theater flag, never `is_app_*`.
 - Statuses (3.10.2): requested → scheduled (= sent to the vendor; a tuning
-  date also moves it there) → completed, plus cancelled. 'sent' is gone
+  date also moves it there) → completed, plus cancelled. 3.21.0 adds
+  **seen** ("Seen / In progress", between requested and scheduled;
+  `PIANO_OPEN_STATUSES`): bells the requester, leaves the nav badge (badge
+  = unseen requests + cancel requests), and for the PM behaves like
+  requested — a PM edit keeps it 'seen' (a submitted 'requested' is read
+  as the current status). 'sent' is gone
   (migrated; an incoming 'sent' is read as 'scheduled'). Start time only —
   `tuning_end` is legacy, never set or shown. Vendors = `piano_vendors`
   (typical price fills an EMPTY cost client-side); tunings keep
@@ -832,14 +848,20 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
 - The PIANO is gear: a PM request for a piano not on the show books it first
   via the ordinary `POST /shows/<id>/assets` (client-side in show.html's
   `savePianoRequest`), so availability/pricing/asset approval apply. Don't add
-  a second, server-side booking path.
+  a second, server-side booking path. The one server-side asset write is
+  `_piano_pin_unit()` (3.21.0): every tuning save (create + update) pins the
+  tuning's unit on the show's ONE unpinned qty-1 line of that model (type
+  allows units, unit not retired/maintenance, no other line holding it over
+  that line's dates), then `_reset_asset_approval`. It never adds a line;
+  anything ambiguous stays a warning. `_piano_on_show(..., unpinnable=)`
+  never reports 'other_unit' for a model that can't pin units.
   Paperwork uploads (`/piano-tunings/<id>/paperwork`) go to that row via
   S3/DB like other rental PDFs.
 - 3.10.3 rules: S3 deletes are collected (`s3_deletes`) and run by
   `_piano_s3_cleanup()` only AFTER `db.commit()`. `_sync_piano_schedule_rows`
   locks the show row first and compacts sort_order. History restore skips
   rows carrying `piano_tuning_id` (the sync re-adds them). A PM may edit/cancel
-  only while 'requested' AND the manager hasn't set vendor/cost/paperwork. A
+  only while 'requested'/'seen' AND the manager hasn't set vendor/cost/paperwork. A
   submitted piano/vendor equal to the stored one is accepted unvalidated (so
   retired/legacy values survive a Save). Non-managers never get
   manager_notes / sent_by / updated_by from the show endpoint. Piano rows are
@@ -887,7 +909,7 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   three rules and `_piano_service_body`. Syslog PIANO_SERVICE_LOG.
 - Cancellation request (3.11.0): once the manager is on it, a PM only ASKS
   (`/piano-tunings/<id>/cancel-request` POST; DELETE = withdraw / manager
-  decline) — `cancel_pending` = flag set and status requested/scheduled. The
+  decline) — `cancel_pending` = flag set and status in PIANO_OPEN_STATUSES. The
   manager cancels through the normal status change. Refusals syslog
   `PIANO_TUNING_DENIED reason=…`; every write route syslogs.
 
@@ -1028,9 +1050,12 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
 
 ## System emails — one branded layout (3.22.0)
 - Build every email with `_mail(title, eyebrow=, intro=, facts=, blocks=,
-  button=, links=, note=)` → (text, html) — `email_layout.build()` underneath
-  (dependency-free; tables + inline styles + system fonts, no images, so
-  Outlook desktop/web/phone render it). Pass BOTH parts to `_send_email`.
+  button=, links=, note=, preheader=)` → (text, html) — `email_layout.build()`
+  underneath (dependency-free; tables + inline styles + system fonts; the
+  only image is the cid: header logo, so Outlook desktop/web/phone render
+  it). One brand look: no per-email colour bars (3.22.1, the user's call) —
+  `eyebrow` is orange caps text in the card; the Added/Removed/Changed
+  `tone` flags on change lists are the only colour coding. Pass BOTH parts to `_send_email`.
   A text-only send still gets wrapped by `_send_email` as a safety net, but
   new emails should use `_mail`. The header logo is a cid: inline image
   (`email_layout.LOGO_CID`, attached by `_build_mime_message` when the HTML
