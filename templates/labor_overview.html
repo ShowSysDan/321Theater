@@ -41,6 +41,12 @@
     text-transform: uppercase; color: var(--text);
   }
   .lo-day-head.empty { color: var(--text-dim); font-weight: 500; }
+  .lo-day.lo-today { border-color: var(--accent); }
+  .lo-today-tag {
+    display: inline-block; margin-left: 8px; padding: 1px 6px;
+    font-size: 9.5px; letter-spacing: .08em; border-radius: 3px;
+    background: rgba(184,132,10,.18); color: var(--orange-text, var(--accent));
+  }
   .lo-day-count { font-size: 11px; color: var(--text-dim); font-weight: 500; }
 
   .lo-table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -130,13 +136,21 @@
 </div>
 
 <div class="lo-toolbar">
-  <a href="{{ url_for('labor_overview', start=prev_week) }}" class="btn btn-sm btn-ghost" title="Previous week">← Prev Week</a>
-  <a href="{{ url_for('labor_overview', start=today_iso) }}" class="btn btn-sm btn-ghost" title="Jump to this week">Today</a>
-  <a href="{{ url_for('labor_overview', start=next_week) }}" class="btn btn-sm btn-ghost" title="Next week">Next Week →</a>
+  <a href="{{ prev_url }}" class="btn btn-sm btn-ghost" title="Previous 7 days">← Prev Week</a>
+  <a href="{{ url_for('labor_overview') }}" class="btn btn-sm btn-ghost" title="Back to today at the top">Today</a>
+  <a href="{{ next_url }}" class="btn btn-sm btn-ghost" title="Next 7 days">Next Week →</a>
 
   <div class="lo-week-range">
     {{ week_start.strftime('%a, %b %-d') }} → {{ week_end.strftime('%a, %b %-d, %Y') }}
+    {% if overnight_running %}
+    <span class="lo-week-sub">Starting yesterday — an overnight shift is still running</span>
+    {% elif active_day %}
+    <span class="lo-week-sub">Starting today · next 7 days</span>
+    {% elif rolling %}
+    <span class="lo-week-sub">7 days · {{ week_start.isoformat() }} – {{ week_end.isoformat() }}</span>
+    {% else %}
     <span class="lo-week-sub">Week starts Monday · {{ week_start.isoformat() }} – {{ week_end.isoformat() }}</span>
+    {% endif %}
   </div>
 
   <form method="get" action="{{ url_for('labor_overview') }}" class="lo-jump ml-auto">
@@ -149,14 +163,14 @@
 {% set _has_any = days | selectattr('count') | list %}
 {% if not _has_any %}
 <div class="lo-empty">
-  No labor scheduled for this week. Use the arrows to browse another week, or the date picker to jump.
+  No labor scheduled for these 7 days. Use the arrows to browse another week, or the date picker to jump.
 </div>
 {% endif %}
 
 {% for day in days %}
-<div class="lo-day">
+<div class="lo-day{% if day.is_today %} lo-today{% endif %}">
   <div class="lo-day-head {% if not day.count %}empty{% endif %}">
-    <span>{{ day.pretty }}</span>
+    <span>{{ day.pretty }}{% if day.is_today %}<span class="lo-today-tag">Today</span>{% endif %}</span>
     <span class="lo-day-count">{% if day.count %}{{ day.count }} line{{ '' if day.count == 1 else 's' }}{% else %}No labor scheduled{% endif %}</span>
   </div>
   {% if day.count %}
