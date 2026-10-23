@@ -810,7 +810,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.25.1'
+APP_VERSION = '3.26.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -16207,6 +16207,36 @@ def labor_scheduler_no_labor():
                            hidden_venues=hidden_venues)
 
 
+def _labor_active_day(db, now):
+    """The day the Labor Overview opens on: today, unless a shift worked
+    yesterday runs past midnight and hasn't ended yet (out ≤ in = overnight,
+    same rule as _calc_hours) — then yesterday, until that last shift is over.
+    `now` is the Python local clock, the same clock date.today() uses."""
+    from datetime import timedelta
+    today = now.date()
+    yesterday = today - timedelta(days=1)
+    rows = db.execute("""
+        SELECT lr.in_time, lr.out_time
+        FROM labor_requests lr
+        JOIN shows s ON s.id = lr.show_id
+        WHERE (COALESCE(s.status, 'active') != 'archived' OR lr.is_scheduled = 1)
+          AND COALESCE(lr.work_date, s.show_date) = %s
+        UNION ALL
+        SELECT r.in_time, r.out_time
+        FROM overhead_labor_requests r
+        WHERE r.work_date = %s
+    """, (yesterday.isoformat(), yesterday.isoformat())).fetchall()
+    now_hm = now.strftime('%H:%M')
+    for r in rows:
+        t_in = _normalize_perf_time(r['in_time'])[:5]
+        t_out = _normalize_perf_time(r['out_time'])[:5]
+        if len(t_in) != 5 or len(t_out) != 5 or ':' not in t_in + t_out:
+            continue
+        if t_out <= t_in and now_hm < t_out:
+            return yesterday
+    return today
+
+
 @app.route('/labor-overview')
 @login_required
 def labor_overview():
@@ -16215,19 +16245,39 @@ def labor_overview():
     here is editable."""
     from datetime import date, datetime, timedelta
 
+    # Two views:
+    #   ?start=<date> → the Monday–Sunday week holding that date (Jump to).
+    #   default / ?from=<date> → a rolling 7 days starting on that date; with
+    #   no date it starts on the ACTIVE day — today, or yesterday while a shift
+    #   from yesterday is still running past midnight (_labor_active_day).
+    # Prev / Next step 7 days and keep whichever view is showing.
     raw_start = (request.args.get('start') or '').strip()
-    try:
-        anchor = date.fromisoformat(raw_start) if raw_start else date.today()
-    except ValueError:
-        anchor = date.today()
-    # Snap to Monday of the anchor's week (weekday(): Mon=0..Sun=6)
-    week_start = anchor - timedelta(days=anchor.weekday())
-    week_end   = week_start + timedelta(days=6)
-    prev_week  = (week_start - timedelta(days=7)).isoformat()
-    next_week  = (week_start + timedelta(days=7)).isoformat()
-    today_iso  = date.today().isoformat()
-
+    raw_from = (request.args.get('from') or '').strip()
+    today = date.today()
+    active_day = None
     db = get_db()
+    try:
+        week_start = date.fromisoformat(raw_start) if raw_start else None
+    except ValueError:
+        week_start = None
+    if week_start:
+        rolling = False
+        # Snap to Monday of the anchor's week (weekday(): Mon=0..Sun=6)
+        week_start = week_start - timedelta(days=week_start.weekday())
+    else:
+        rolling = True
+        try:
+            week_start = date.fromisoformat(raw_from) if raw_from else None
+        except ValueError:
+            week_start = None
+        if not week_start:
+            active_day = _labor_active_day(db, datetime.now())
+            week_start = active_day
+    week_end   = week_start + timedelta(days=6)
+    nav_key    = 'from' if rolling else 'start'
+    prev_url   = url_for('labor_overview', **{nav_key: (week_start - timedelta(days=7)).isoformat()})
+    next_url   = url_for('labor_overview', **{nav_key: (week_start + timedelta(days=7)).isoformat()})
+    today_iso  = today.isoformat()
 
     # ── Show labor — joined with the show, position, and the scheduled tech.
     show_rows = db.execute(f"""
@@ -16378,8 +16428,9 @@ def labor_overview():
             row['is_group_first'] = key not in seen_groups
             seen_groups.add(key)
         days.append({
-            'name': day_names[i],
+            'name': day_names[d.weekday()],
             'date': d,
+            'is_today': d == today,
             'iso': d_iso,
             'pretty': d.strftime('%A, %B %-d, %Y'),
             'rows': rows,
@@ -16391,8 +16442,13 @@ def labor_overview():
                            days=days,
                            week_start=week_start,
                            week_end=week_end,
-                           prev_week=prev_week,
-                           next_week=next_week,
+                           prev_url=prev_url,
+                           next_url=next_url,
+                           rolling=rolling,
+                           # Set only on the default view: the active day
+                           # it opened on (yesterday = overnight still running).
+                           active_day=active_day,
+                           overnight_running=bool(active_day and active_day < today),
                            today_iso=today_iso,
                            is_viewer=bool(session.get('is_document_viewer')))
 
