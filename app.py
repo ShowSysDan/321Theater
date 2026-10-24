@@ -66,6 +66,7 @@ import nav_layout
 import prism_module  # sandboxed Prism FM integration — wired up near the bottom
 import security_module  # security sign-in sheets — wired up near the bottom
 import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
+import spot_module  # Spot sound-level integration — wired up near the bottom
 import file_store  # S3 <-> PostgreSQL file redundancy + migration — wired up near the bottom
 
 from flask import (Flask, render_template, request, redirect, url_for,
@@ -810,7 +811,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.26.0'
+APP_VERSION = '3.27.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1052,6 +1053,15 @@ APP_MODULES = [
                        'schedules them onto the production schedule and adds '
                        'the cost to the show settlement.',
         'default': '1',
+    },
+    {
+        'key': 'spot',
+        'name': 'Spot Sound Levels',
+        'description': 'After each performance, pulls the dB levels from Spot '
+                       'for the venue\'s linked sensors into the Post Show tab '
+                       'and files Spot\'s PDF report under the show\'s Files. '
+                       'Set up in Settings → Spot.',
+        'default': '0',
     },
 ]
 
@@ -3972,6 +3982,11 @@ def run_no_labor_alerts():
         db.close()
 
 
+def _run_spot_capture_job():
+    with app.app_context():
+        spot_module.run_spot_capture()
+
+
 def start_scheduler():
     """Register all background jobs.
 
@@ -4043,6 +4058,14 @@ def start_scheduler():
         scheduler.add_job(run_no_labor_alerts, 'cron', minute=30,
                           id='no_labor_alert_check', misfire_grace_time=3600,
                           coalesce=True)
+        # Spot sound levels (sandboxed module): leader-gated inside the job,
+        # so only the cluster primary pulls from Spot. Every 5 min so a
+        # show's levels land soon after it ends (+ the grace period); each
+        # performance is claimed in spot_captures before it's fetched, and a
+        # finished one is never re-pulled unless its window changes.
+        scheduler.add_job(_run_spot_capture_job, 'interval', minutes=5,
+                          id='spot_capture', misfire_grace_time=240,
+                          coalesce=True, max_instances=1)
         scheduler.start()
         # Backfill contact↔user link once on boot.
         try:
@@ -6286,6 +6309,7 @@ def show_page(show_id):
     return render_template('show.html',
                            pdf_form_status=pdf_form_status,
                            security_signin_enabled=security_signin_enabled,
+                           spot_enabled=module_enabled('spot'),
                            piano_tuning_enabled=module_enabled('piano_tuning'),
                            security_max_names=security_module.MAX_NAMES,
                            show=show,
@@ -7071,6 +7095,57 @@ def get_attachments(show_id):
     } for r in rows])
 
 
+def _store_show_attachment(db, show_id, filename, mime_type, data, description,
+                           user_id, field_key=None):
+    """Insert a show file and its bytes (S3, falling back to the DB; with
+    dual-write on the DB copy is kept too). Returns the new id. Shared by the
+    upload route and the Spot module, so every show file is stored the same
+    way. Caller audits + commits."""
+    # Insert row first (without file data) to get the auto-assigned id
+    cur = db.execute("""
+        INSERT INTO show_attachments (show_id, uploaded_by, filename, mime_type, file_data, file_size, field_key, description)
+        VALUES (%s, %s, %s, %s, NULL, %s, %s, %s) RETURNING id
+    """, (show_id, user_id, filename, mime_type, len(data), field_key, description))
+    aid = cur.fetchone()['id']
+    sha = file_store.sha256_hex(data)
+    # Upload to S3; fall back to DB storage if S3 is unavailable. With
+    # dual-write on (Settings → File Redundancy) the DB copy is kept too.
+    if s3_storage.is_configured():
+        try:
+            s3_key = f"attachments/{show_id}/{aid}/{filename}"
+            s3_storage.upload_file(s3_key, data, mime_type)
+            if file_store.keep_db_copy():
+                db.execute('UPDATE show_attachments SET s3_key=%s, file_data=%s, content_sha256=%s WHERE id=%s',
+                           (s3_key, data, sha, aid))
+            else:
+                db.execute('UPDATE show_attachments SET s3_key=%s, content_sha256=%s WHERE id=%s',
+                           (s3_key, sha, aid))
+        except Exception as e:
+            app.logger.warning(f"S3 upload failed for attachment {aid}, falling back to DB: {e}")
+            syslog_logger.warning(f"S3_UPLOAD_FAILED table=show_attachments id={aid} show_id={show_id} error={e}")
+            db.execute('UPDATE show_attachments SET file_data=%s, content_sha256=%s WHERE id=%s', (data, sha, aid))
+    else:
+        db.execute('UPDATE show_attachments SET file_data=%s, content_sha256=%s WHERE id=%s', (data, sha, aid))
+    return aid
+
+
+def _archive_show_attachment(db, aid, user_id):
+    """Archive (soft-delete) one show file: stamp deleted_at/deleted_by and
+    gzip a DB copy in place; the S3 object is kept. No-op when it's already
+    archived or gone. Returns the row (or None). Caller audits + commits."""
+    row = db.execute('SELECT * FROM show_attachments WHERE id=%s', (aid,)).fetchone()
+    if not row or row['deleted_at']:
+        return row
+    if row['file_data'] and not row['is_compressed']:
+        packed = gzip.compress(bytes(row['file_data']))
+        if len(packed) < len(row['file_data']):
+            db.execute('UPDATE show_attachments SET file_data=%s, is_compressed=1 WHERE id=%s',
+                       (packed, aid))
+    db.execute('UPDATE show_attachments SET deleted_at=CURRENT_TIMESTAMP, deleted_by=%s WHERE id=%s',
+               (user_id, aid))
+    return row
+
+
 @app.route('/shows/<int:show_id>/attachments', methods=['POST'])
 @login_required
 def upload_attachment(show_id):
@@ -7092,31 +7167,8 @@ def upload_attachment(show_id):
     field_key = (request.form.get('field_key') or '').strip() or None
     description = (request.form.get('description') or '').strip()
     db = get_db()
-    # Insert row first (without file data) to get the auto-assigned id
-    cur = db.execute("""
-        INSERT INTO show_attachments (show_id, uploaded_by, filename, mime_type, file_data, file_size, field_key, description)
-        VALUES (%s, %s, %s, %s, NULL, %s, %s, %s) RETURNING id
-    """, (show_id, session['user_id'], filename, mime_type, len(data), field_key, description))
-    aid = cur.fetchone()['id']
-    sha = file_store.sha256_hex(data)
-    # Upload to S3; fall back to DB storage if S3 is unavailable. With
-    # dual-write on (Settings → File Redundancy) the DB copy is kept too.
-    if s3_storage.is_configured():
-        try:
-            s3_key = f"attachments/{show_id}/{aid}/{filename}"
-            s3_storage.upload_file(s3_key, data, mime_type)
-            if file_store.keep_db_copy():
-                db.execute('UPDATE show_attachments SET s3_key=%s, file_data=%s, content_sha256=%s WHERE id=%s',
-                           (s3_key, data, sha, aid))
-            else:
-                db.execute('UPDATE show_attachments SET s3_key=%s, content_sha256=%s WHERE id=%s',
-                           (s3_key, sha, aid))
-        except Exception as e:
-            app.logger.warning(f"S3 upload failed for attachment {aid}, falling back to DB: {e}")
-            syslog_logger.warning(f"S3_UPLOAD_FAILED table=show_attachments id={aid} show_id={show_id} error={e}")
-            db.execute('UPDATE show_attachments SET file_data=%s, content_sha256=%s WHERE id=%s', (data, sha, aid))
-    else:
-        db.execute('UPDATE show_attachments SET file_data=%s, content_sha256=%s WHERE id=%s', (data, sha, aid))
+    aid = _store_show_attachment(db, show_id, filename, mime_type, data,
+                                 description, session['user_id'], field_key=field_key)
     log_audit(db, 'FILE_UPLOAD', 'attachment', aid, show_id=show_id, detail=filename)
     db.commit()
     row = db.execute("""
@@ -7199,13 +7251,7 @@ def delete_attachment(show_id, aid):
     if row['deleted_at']:
         db.close()
         return jsonify({'success': True, 'archived': True})
-    if row['file_data'] and not row['is_compressed']:
-        packed = gzip.compress(bytes(row['file_data']))
-        if len(packed) < len(row['file_data']):
-            db.execute('UPDATE show_attachments SET file_data=%s, is_compressed=1 WHERE id=%s',
-                       (packed, aid))
-    db.execute('UPDATE show_attachments SET deleted_at=CURRENT_TIMESTAMP, deleted_by=%s WHERE id=%s',
-               (session['user_id'], aid))
+    _archive_show_attachment(db, aid, session['user_id'])
     log_audit(db, 'FILE_ARCHIVE', 'attachment', aid, show_id=show_id,
               detail=row['filename'])
     db.commit()
@@ -8744,6 +8790,10 @@ def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
     ).fetchall()
     logo_data = _get_logo_for_venue(db, show['venue'] if show else '')
     pdf_colors = _get_venue_pdf_colors(db, show['venue'] if show else '')
+    # Spot sound levels: [] unless captured (then the PDF changes, and the
+    # content hash correctly cuts a new version).
+    sound_levels = (spot_module.captures_for_show(db, show_id)
+                    if show and module_enabled('spot') else [])
 
     layout = pdf_layouts.PdfLayout('postnotes', get_app_setting)
 
@@ -8754,6 +8804,7 @@ def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
                                notes_data=notes_data,
                                advance_data=advance_data,
                                schedule_rows=sched_rows,
+                               sound_levels=sound_levels,
                                logo_data=logo_data,
                                version=version,
                                layout=layout,
@@ -9221,7 +9272,8 @@ _SHOW_PURGE_TABLES = ['advance_data', 'schedule_rows', 'schedule_meta',
 # is preserved instead of being cascade-deleted with the duplicate.
 _SHOW_MERGE_MOVE_TABLES = ['labor_requests', 'post_show_labor', 'show_assets',
     'show_external_rentals', 'show_performances', 'show_comments',
-    'show_attachments', 'security_signin_names', 'piano_tunings']
+    'show_attachments', 'security_signin_names', 'piano_tunings',
+    'spot_captures']
 
 # Friendly labels for the merge preview's "what will move" summary.
 _SHOW_MERGE_MOVE_LABELS = {
@@ -9230,6 +9282,7 @@ _SHOW_MERGE_MOVE_LABELS = {
     'show_performances': 'Performances', 'show_comments': 'Comments',
     'show_attachments': 'Files', 'security_signin_names': 'Security sign-in names',
     'piano_tunings': 'Piano tunings',
+    'spot_captures': 'Spot sound levels',
 }
 
 # Advance fields stored as scalar columns on the shows row (vs the advance_data
@@ -28384,6 +28437,34 @@ security_module.register(
     safe_content_disposition=_safe_content_disposition,
     show_span_dates=_show_span_dates,
     pdf_font_config=_wp_font_config,
+)
+
+
+# ─── Spot sound levels (sandboxed) ────────────────────────────────────────────
+# Venue → Spot sensor mapping (Settings → Spot) and the post-show pull of each
+# performance's dB levels + Spot's PDF report. All logic lives in
+# spot_module.py + templates/spot.html behind this one call (plus the
+# spot_capture scheduler job, the Post Show tab section and the postnotes PDF
+# section). It owns spot_venue_monitors / spot_captures; show files go
+# through the shared _store_show_attachment / _archive_show_attachment.
+
+spot_module.register(
+    app,
+    get_db=get_db,
+    get_current_user=get_current_user,
+    login_required=login_required,
+    admin_required=admin_required,
+    can_access_show=can_access_show,
+    module_enabled=module_enabled,
+    am_i_leader=am_i_leader,
+    log_audit=log_audit,
+    syslog_logger=syslog_logger,
+    db_adapter=db_adapter,
+    parse_time=_parse_24h_time,
+    get_distinct_venues=_get_distinct_venues,
+    store_show_attachment=_store_show_attachment,
+    archive_show_attachment=_archive_show_attachment,
+    test_mode=TEST_MODE,
 )
 
 
