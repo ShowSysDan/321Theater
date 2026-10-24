@@ -1257,6 +1257,53 @@ CREATE TABLE IF NOT EXISTS security_signin_names (
 
 CREATE INDEX IF NOT EXISTS idx_ssn_show ON security_signin_names(show_id);
 
+-- Spot sound-level integration (spot_module.py, 3.27.0). Which Spot sensors
+-- (monitor ids from Spot's API) belong to each venue, matched against
+-- shows.venue case- and space-insensitively. is_detect_ref marks the monitor
+-- whose levels Spot uses to find the real curtain up/down (0 everywhere =
+-- Spot's default, the first dB monitor).
+CREATE TABLE IF NOT EXISTS spot_venue_monitors (
+    venue_name    TEXT NOT NULL,
+    monitor_id    INTEGER NOT NULL,
+    monitor_name  TEXT DEFAULT '',
+    unit          TEXT DEFAULT '',
+    is_detect_ref INTEGER DEFAULT 0,
+    PRIMARY KEY (venue_name, monitor_id)
+);
+
+-- One row per performance pulled from Spot. perf_key = 'perf:<performance
+-- id>' or 'show:<show id>' for a show with no performance rows, unique on
+-- its own so a show merge can move rows without a conflict. status:
+-- pending / running (claimed_at = claim time, stale after 10 min) /
+-- captured / no_data / error. sched_start, sched_end, monitor_ids = the
+-- window + sensors asked for (a change makes the capture stale and it is
+-- pulled again). stats_json = per-monitor stats as Spot returned them.
+CREATE TABLE IF NOT EXISTS spot_captures (
+    id              SERIAL PRIMARY KEY,
+    show_id         INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    perf_id         INTEGER DEFAULT NULL,
+    perf_key        TEXT NOT NULL UNIQUE,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    error           TEXT DEFAULT NULL,
+    attempts        INTEGER DEFAULT 0,
+    claimed_at      TIMESTAMP DEFAULT NULL,
+    last_attempt_at TIMESTAMP DEFAULT NULL,
+    sched_start     TEXT DEFAULT NULL,
+    sched_end       TEXT DEFAULT NULL,
+    end_source      TEXT DEFAULT NULL,
+    monitor_ids     TEXT DEFAULT NULL,
+    report_start    TEXT DEFAULT NULL,
+    report_end      TEXT DEFAULT NULL,
+    stats_json      TEXT DEFAULT NULL,
+    detection_json  TEXT DEFAULT NULL,
+    attachment_id   INTEGER REFERENCES show_attachments(id) ON DELETE SET NULL,
+    captured_at     TIMESTAMP DEFAULT NULL,
+    captured_by     TEXT DEFAULT NULL,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_spot_captures_show ON spot_captures(show_id);
+
 -- ── Asset Manager ─────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS warehouse_locations (

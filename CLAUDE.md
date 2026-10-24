@@ -1114,6 +1114,35 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   any send. Failure reasons: `_email_error_explain(code, msg)` rules table;
   type labels: `_EMAIL_PURPOSE_LABELS` (add one for a new purpose).
 
+## Spot sound levels (spot_module.py, 3.27.0) — SANDBOXED, pull-only
+- Optional module `spot` (default OFF). Talks to Spot ONLY over its HTTP API
+  v1 (ShowSysDan/Spot docs/API.md); never reads Spot's DB. Owns
+  `spot_venue_monitors` (venue → Spot monitor ids, matched to shows.venue
+  case/space-insensitively), `spot_captures` (one row per performance,
+  `perf_key` 'perf:<id>' / 'show:<id>', UNIQUE alone so merges move rows) and
+  `spot_*` app_settings. Settings page `/settings/spot` (admin) stays
+  reachable while the module is off; show routes 404 then.
+- `plan()` is THE window planner (job, settings queue, show page): start =
+  performance date+time, end = the schedule row starting at that time, else
+  start + `spot_default_minutes`. `_state()` decides due/stale/retry.
+- `run_spot_capture` (5-min interval) is LEADER-GATED and skips in TEST_MODE
+  (even an admin's forced run). `capture()` CLAIMS the row with a conditional
+  UPDATE (status 'running', stale after 10 min) before any HTTP, and never
+  holds a transaction across HTTP. Keep both — they're what stops several
+  instances pulling/filing the same show twice.
+- Pull, not Spot's push callback: don't add an inbound webhook without being
+  asked (it would be an unauthenticated upload endpoint).
+- The API key is write-only: never render/return it; the connection test
+  sends the SAVED key only to the SAVED URL. `spot_call()` uses its own
+  opener: no env proxy, no redirects, size caps. Spot error text is shown to
+  admins only.
+- Spot's PDF goes into `show_attachments` via app.py's
+  `_store_show_attachment` (shared with the upload route — S3/dual-write)
+  and a re-pull ARCHIVES the old one via `_archive_show_attachment`. Never
+  add a second storage path.
+- Post-Show Notes PDF: `sound_levels` joins the section list ONLY when there
+  are captures, so other post-show PDFs stay byte-identical (export reuse).
+
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.
 At the end of any change that touches code/config, **state plainly which

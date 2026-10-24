@@ -2574,6 +2574,22 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     </div>
   </div>
 
+  {# ── Sound Levels (Spot module, 3.27.0) ─────────────────────────────────
+     dB levels per performance pulled from Spot after the show ends (venue →
+     sensors in Settings → Spot). Filled by the script at the end of this
+     template from /shows/<id>/spot/levels; Spot's PDF is filed under Files. #}
+  {% if spot_enabled %}
+  <div class="form-section" id="spot-levels-section">
+    <div class="form-section-header">
+      <span class="section-icon">◈</span> SOUND LEVELS (SPOT)
+      <span class="text-dim" style="font-size:11px;font-weight:400;text-transform:none;letter-spacing:normal;margin-left:8px">Pulled automatically after each performance</span>
+    </div>
+    <div class="form-section-body" id="spot-levels-body">
+      <p class="text-dim" style="font-size:12px;margin:0">Loading…</p>
+    </div>
+  </div>
+  {% endif %}
+
   {# ── Per-Crew Billable Extras ─────────────────────────────────────────────
      Pick which per-crew charges (parking, etc.) apply to this show, and choose
      whether they show as separate invoice lines or get folded into the hourly
@@ -5545,4 +5561,124 @@ async function emailPdf(showId, pdfType, btn) {
 })();
 
 </script>
+{% if spot_enabled %}
+<script>
+/* Sound Levels (Spot) on the Post Show tab — loads the first time the tab
+   opens (desktop tabs, mobile strip and deep links all go through
+   switchTab). Every value is escaped; numbers are formatted client-side. */
+(function () {
+  const SID = {{ show.id | int }};
+  const ITAB = {{ tab | tojson }};
+  const body = document.getElementById('spot-levels-body');
+  if (!body) return;
+  const E = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const N = v => (typeof v === 'number' && isFinite(v)) ? v.toFixed(1) : '—';
+  const HM = iso => { const d = iso ? parseServerTime(iso) : null;
+    return d && !isNaN(d) ? d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false}) : ''; };
+  const STATE = {
+    captured: 'Pulled', stale: 'Times changed — will re-pull', due: 'Pulling soon',
+    waiting: 'Waiting for the show to finish', upcoming: 'Upcoming', running: 'Pulling…',
+    retry: 'Failed — retrying', failed: 'Failed — gave up', unmapped: 'Not set up', notime: 'No time',
+  };
+  let loaded = false, canPull = false;
+
+  async function load() {
+    loaded = true;
+    try {
+      const r = await fetch(`/shows/${SID}/spot/levels`, {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      render(await r.json());
+    } catch (e) {
+      body.innerHTML = '<p class="text-dim" style="font-size:12px;margin:0">Could not load sound levels.</p>';
+    }
+  }
+
+  function render(d) {
+    canPull = !!d.can_pull;
+    const perfs = d.performances || [];
+    if (!d.configured) {
+      body.innerHTML = '<p class="text-dim" style="font-size:12px;margin:0">Spot isn\'t connected yet — an admin sets it up in Settings → Spot.</p>';
+      return;
+    }
+    if (!perfs.length) {
+      body.innerHTML = '<p class="text-dim" style="font-size:12px;margin:0">No dated performances on this show.</p>';
+      return;
+    }
+    body.innerHTML = perfs.map(perfHtml).join('');
+  }
+
+  function perfHtml(p) {
+    const when = `${E(p.date)}${p.time ? ' · ' + E(p.time) : ''}`;
+    const win = p.start && p.end ? `${HM(p.start)}–${HM(p.end)}${p.end_source === 'default' ? ' (default length)' : ''}` : '';
+    const c = p.capture || {};
+    let status = E(STATE[p.state] || p.state);
+    if (p.problem) status += ` — ${E(p.problem)}`;
+    if (c.error && p.state !== 'captured') status += ` — ${E(c.error)}`;
+    let measured = '';
+    if (p.report_start && p.report_end) {
+      measured = `Measured ${HM(p.report_start)}–${HM(p.report_end)}`;
+      const det = p.detection;
+      if (det && (det.start_detected || det.end_detected)) measured += ' (curtain times detected)';
+    }
+    const pdf = c.attachment_id
+      ? `<a class="no-prefetch" href="/shows/${SID}/attachments/${encodeURIComponent(c.attachment_id)}/download">Spot PDF</a>` : '';
+    const pullable = canPull && !p.problem && ['captured','stale','due','retry','failed'].includes(p.state);
+    const btn = pullable
+      ? `<button type="button" class="btn btn-sm btn-ghost" data-spot-pull="${E(p.perf_key)}">${p.state === 'captured' ? 'Re-pull' : 'Pull now'}</button>` : '';
+    let table = '';
+    const lv = p.levels || [];
+    if (lv.length) {
+      table = `<div style="overflow-x:auto"><table class="data-table" style="font-size:12px;margin-top:6px">
+        <thead><tr><th>Sensor</th><th style="text-align:right">Leq</th><th style="text-align:right">Max</th>
+        <th style="text-align:right">L10</th><th style="text-align:right">L50</th><th style="text-align:right">L90</th>
+        <th style="text-align:right">Avg</th><th style="text-align:right">Max at</th></tr></thead><tbody>` +
+        lv.map(m => { const s = m.stats || {}; return `<tr>
+          <td>${E(m.name || ('Monitor ' + m.id))}${m.unit ? ` <span class="text-dim">(${E(m.unit)})</span>` : ''}</td>
+          <td style="text-align:right">${N(s.leq)}</td><td style="text-align:right">${N(s.max)}</td>
+          <td style="text-align:right">${N(s.l10)}</td><td style="text-align:right">${N(s.l50)}</td>
+          <td style="text-align:right">${N(s.l90)}</td><td style="text-align:right">${N(s.avg)}</td>
+          <td style="text-align:right">${E(HM(s.max_at))}</td></tr>`; }).join('') +
+        '</tbody></table></div>';
+    }
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:12px">
+        <strong>${when}</strong>
+        ${win ? `<span class="text-dim">window ${E(win)}</span>` : ''}
+        <span class="text-dim">${status}</span>
+        ${measured ? `<span class="text-dim">${E(measured)}</span>` : ''}
+        <span style="margin-left:auto;display:flex;gap:8px;align-items:center">${pdf}${btn}</span>
+      </div>${table}</div>`;
+  }
+
+  body.addEventListener('click', async (ev) => {
+    const b = ev.target.closest('[data-spot-pull]');
+    if (!b) return;
+    b.disabled = true;
+    try {
+      const r = await fetch(`/shows/${SID}/spot/pull`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
+        body: JSON.stringify({perf_key: b.getAttribute('data-spot-pull')}),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (d.success) { if (typeof showSaveToast === 'function') showSaveToast('✓ ' + (d.message || 'Pulled')); }
+      else alert(d.error || d.message || 'Could not pull from Spot.');
+    } finally {
+      await load();
+    }
+  });
+
+  if (ITAB === 'postnotes') load();
+  if (typeof window.switchTab === 'function') {
+    const base = window.switchTab;
+    window.switchTab = function (name) {
+      const done = base.apply(this, arguments);
+      if (name === 'postnotes' && !loaded) load();
+      return done;
+    };
+    window.switchTab._lazyInit = base._lazyInit;
+  }
+})();
+</script>
+{% endif %}
 {% endblock %}

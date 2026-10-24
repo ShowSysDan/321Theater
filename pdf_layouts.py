@@ -46,6 +46,7 @@ LAYOUT_CATALOG = {
             {'key': 'equipment_issues', 'default_label': 'Equipment / Maintenance Issues'},
             {'key': 'miscellaneous',    'default_label': 'Miscellaneous'},
         ]},
+        {'key': 'sound_levels', 'default_label': 'Sound Levels (Spot)', 'required': False, 'fields': []},
         {'key': 'production_schedule', 'default_label': 'Production Schedule Timeline', 'required': False, 'fields': []},
     ],
     'asset_invoice': [

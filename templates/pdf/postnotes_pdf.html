@@ -62,7 +62,7 @@
 {% macro n(key, default='') %}{{ notes_data.get(key, default)|string|trim }}{% endmacro %}
 {% macro a(key, default='') %}{{ advance_data.get(key, default)|string|trim }}{% endmacro %}
 
-{% set _section_keys = ['header','info_bar','post_show_notes','production_schedule'] %}
+{# sound_levels only joins when Spot levels exist, so every other post-show PDF renders byte-identical (export reuse keeps working). #}{% set _has_sound = sound_levels is defined and sound_levels %}{% set _section_keys = ['header','info_bar','post_show_notes'] + (['sound_levels'] if _has_sound else []) + ['production_schedule'] %}
 {% for skey in layout.iter_sections(_section_keys) if layout.visible(skey) %}
   {% if layout.page_break_before(skey) %}<div style="page-break-before: always"></div>{% endif %}
 
@@ -134,6 +134,38 @@
 
     </div>
   </div>
+
+  {% elif skey == 'sound_levels' %}
+  {# Spot dB levels per performance (spot_module.captures_for_show). Renders
+     nothing when no levels were captured, so those PDFs are unchanged. #}
+  {% if sound_levels is defined and sound_levels %}
+  <div class="section" style="font-size: {{ layout.font_size('sound_levels', '7.5pt') }}">
+    <div class="section-head">{{ layout.label('sound_levels', 'Sound Levels (Spot)') }}</div>
+    {% for perf in sound_levels %}
+    <div style="font-weight:bold;padding:4px 7px 2px;font-size:7.5pt">
+      {{ perf.date | dowdate or perf.date }}{% if perf.time %} · {{ perf.time | dualtime }}{% endif %}
+      {% if perf.report_start and perf.report_end %}<span style="font-weight:normal;color:#555"> — measured {{ perf.report_start | dualtime }}–{{ perf.report_end | dualtime }}{% if perf.detection and (perf.detection.start_detected or perf.detection.end_detected) %} (curtain times detected){% endif %}</span>{% endif %}
+    </div>
+    <table class="sched-table">
+      <thead>
+        <tr><th>Sensor</th><th style="text-align:right">Leq</th><th style="text-align:right">Max</th><th style="text-align:right">L10</th><th style="text-align:right">L50</th><th style="text-align:right">L90</th><th style="text-align:right">Avg</th></tr>
+      </thead>
+      <tbody>
+        {% for m in perf.monitors %}
+        {% set st = m.stats or {} %}
+        <tr>
+          <td>{{ m.name or ('Monitor ' ~ m.id) }}{% if m.unit %} <span style="color:#777">({{ m.unit }})</span>{% endif %}</td>
+          {% for k in ['leq', 'max', 'l10', 'l50', 'l90', 'avg'] %}
+          <td style="text-align:right">{% if st[k] is number %}{{ '%.1f' | format(st[k]) }}{% else %}—{% endif %}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endfor %}
+    <div style="padding:4px 7px;font-size:6.5pt;color:#666">Leq = equivalent continuous level (average loudness) · L10 = level exceeded 10% of the time (loud passages) · L90 = exceeded 90% of the time (background). Full report attached in the show's files.</div>
+  </div>
+  {% endif %}
 
   {% elif skey == 'production_schedule' %}
   {% if schedule_rows %}

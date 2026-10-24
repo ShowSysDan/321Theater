@@ -1,0 +1,375 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{% block title %}Spot Sound Levels — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Spot Sound Levels</h1>
+    <p class="page-sub">
+      Link Spot's dB meters to venues; after every performance the levels and Spot's PDF report are pulled in automatically.
+      {% if module_on %}
+        <span style="font-size:10px;background:rgba(34,197,94,.12);color:var(--green);padding:2px 7px;border-radius:3px;letter-spacing:.06em">MODULE ON</span>
+      {% else %}
+        <span style="font-size:10px;background:rgba(239,68,68,.12);color:var(--red);padding:2px 7px;border-radius:3px;letter-spacing:.06em">MODULE OFF</span>
+      {% endif %}
+    </p>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <a href="{{ url_for('settings') }}" class="btn btn-ghost">← Settings</a>
+    <button class="btn btn-ghost" type="button" onclick="spotTest(this)">Test Connection</button>
+    <button class="btn btn-primary" type="button" onclick="spotRunNow(this)" {% if not module_on %}disabled title="Turn the module on first"{% endif %}>⟳ Pull Due Now</button>
+  </div>
+</div>
+
+{% if not module_on %}
+<div class="form-section" style="border-left:3px solid var(--red)">
+  <div class="form-section-body">
+    <p style="font-size:12.5px;margin:0">
+      The <strong>Spot Sound Levels</strong> module is switched off, so nothing is pulled and the show pages don't show
+      levels. Configure the connection and the venue sensors here, then turn it on in
+      <a href="{{ url_for('settings') }}#system">Settings → System → Modules</a>.
+    </p>
+  </div>
+</div>
+{% endif %}
+
+{# ── How it works ─────────────────────────────────────────────────────────── #}
+<div class="form-section">
+  <div class="form-section-header" style="cursor:pointer" onclick="spotToggle('spot-help')">
+    <span class="section-icon">?</span> HOW THIS WORKS
+    <span class="ml-auto text-dim" style="font-size:11px">click to expand</span>
+  </div>
+  <div class="form-section-body" id="spot-help" style="display:none;font-size:12.5px;line-height:1.55">
+    <p style="margin:0 0 8px"><strong>Window.</strong> Each performance's start is its date + time from the advance
+      form. The end is the end time of the production-schedule row on that day that starts at the performance time
+      (e.g. <em>19:30–22:15 Show</em>); without one, start + the default show length. With curtain detection on, Spot
+      looks for the real curtain up/down within ± the search window and reports on those.</p>
+    <p style="margin:0 0 8px"><strong>When.</strong> Every 5 minutes the cluster's primary server (only one server,
+      never all of them) pulls every performance that ended more than the grace period ago — plus the detection window
+      when detection is on, so a late curtain-down is in the data. A pulled performance is not pulled again unless its
+      times or sensors change. Failures retry with back-off up to the attempt limit.</p>
+    <p style="margin:0"><strong>Where it lands.</strong> The numbers (Leq, Max, L10/L50/L90, Avg per sensor) show in
+      the show's Post Show tab and print on the Post-Show Notes PDF; Spot's PDF report is filed under the show's Files
+      (a re-pull archives the earlier report). Shows marked test/demo are skipped.</p>
+  </div>
+</div>
+
+{# ── Connection + automation ──────────────────────────────────────────────── #}
+<div class="form-section">
+  <div class="form-section-header">
+    <span class="section-icon">⚙</span> CONNECTION &amp; AUTOMATION
+  </div>
+  <div class="form-section-body">
+    <form id="spot-settings-form" onsubmit="spotSave(event)" autocomplete="off">
+      <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:14px">
+        <div class="field-group" style="flex:2;min-width:240px">
+          <label class="field-label">Spot URL</label>
+          <input type="url" name="spot_base_url" class="field-input" maxlength="500"
+                 value="{{ cfg.spot_base_url }}" placeholder="http://spot.internal:6100">
+          <p class="field-hint" style="font-size:10.5px;color:var(--text-muted);margin-top:3px">The Spot server's address (with or without /api/v1). Use https:// off the trusted network.</p>
+        </div>
+        <div class="field-group" style="flex:2;min-width:240px">
+          <label class="field-label">API key</label>
+          <input type="password" name="spot_api_key" class="field-input" autocomplete="new-password" maxlength="200"
+                 placeholder="{% if has_key %}•••••••• saved — leave blank to keep{% else %}spot_… (Spot → Setup → API keys){% endif %}">
+          {% if has_key %}
+          <label class="checkbox-label" style="font-size:11px;margin-top:4px">
+            <input type="checkbox" name="clear_api_key" value="1"> Clear stored key
+          </label>
+          {% endif %}
+        </div>
+        <div class="field-group" style="min-width:180px">
+          <label class="field-label">Venue timezone</label>
+          <input type="text" name="spot_timezone" class="field-input" maxlength="64"
+                 value="{{ cfg.spot_timezone }}" placeholder="America/New_York">
+        </div>
+      </div>
+
+      <div style="display:flex;flex-wrap:wrap;gap:18px;margin-bottom:14px">
+        <label class="checkbox-label"><input type="checkbox" name="spot_auto_pull" {% if cfg.spot_auto_pull == '1' %}checked{% endif %}> Pull automatically after each show</label>
+        <label class="checkbox-label"><input type="checkbox" name="spot_attach_pdf" {% if cfg.spot_attach_pdf == '1' %}checked{% endif %}> File Spot's PDF under the show's Files</label>
+        <label class="checkbox-label"><input type="checkbox" name="spot_use_schedule_end" {% if cfg.spot_use_schedule_end == '1' %}checked{% endif %}> End time from the production schedule</label>
+        <label class="checkbox-label"><input type="checkbox" name="spot_auto_detect" {% if cfg.spot_auto_detect == '1' %}checked{% endif %}> Detect actual curtain up/down</label>
+      </div>
+
+      <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:14px">
+        <div class="field-group" style="min-width:130px">
+          <label class="field-label">Grace after end (min)</label>
+          <input type="number" name="spot_grace_minutes" class="field-input" min="0" max="240" value="{{ cfg.spot_grace_minutes }}">
+        </div>
+        <div class="field-group" style="min-width:130px">
+          <label class="field-label">Default show length (min)</label>
+          <input type="number" name="spot_default_minutes" class="field-input" min="15" max="1440" value="{{ cfg.spot_default_minutes }}">
+        </div>
+        <div class="field-group" style="min-width:130px">
+          <label class="field-label">Detection window (± min)</label>
+          <input type="number" name="spot_detect_window" class="field-input" min="1" max="60" value="{{ cfg.spot_detect_window }}">
+        </div>
+        <div class="field-group" style="min-width:130px">
+          <label class="field-label">Detection min step (dB)</label>
+          <input type="number" name="spot_detect_min_step" class="field-input" min="0.5" max="60" step="0.5" value="{{ cfg.spot_detect_min_step }}">
+        </div>
+        <div class="field-group" style="min-width:130px">
+          <label class="field-label">Catch up (days back)</label>
+          <input type="number" name="spot_lookback_days" class="field-input" min="0" max="30" value="{{ cfg.spot_lookback_days }}">
+        </div>
+        <div class="field-group" style="min-width:130px">
+          <label class="field-label">Max attempts</label>
+          <input type="number" name="spot_max_attempts" class="field-input" min="1" max="20" value="{{ cfg.spot_max_attempts }}">
+        </div>
+      </div>
+
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-primary" type="submit">Save Settings</button>
+        <span id="spot-test-result" class="text-dim" style="font-size:12px"></span>
+      </div>
+    </form>
+  </div>
+</div>
+
+{# ── Venue sensors ────────────────────────────────────────────────────────── #}
+<div class="form-section">
+  <div class="form-section-header">
+    <span class="section-icon">◈</span> VENUE SENSORS
+    <div class="ml-auto"><button class="btn btn-sm btn-ghost" type="button" onclick="spotLoadMonitors(this)">⟳ Load sensors from Spot</button></div>
+  </div>
+  <div class="form-section-body">
+    <p class="text-dim" style="font-size:12px;margin:0 0 10px">
+      Tick the Spot sensors that belong to each venue (matched to the show's venue, ignoring case and extra spaces).
+      ★ = the sensor whose levels decide the curtain times (blank = Spot's first dB sensor).
+      Spot's "location" text is only a hint — it isn't used for matching.
+    </p>
+    <div id="spot-venues" style="display:flex;flex-direction:column;gap:10px">
+      {% for v in venues %}
+      <div class="spot-venue" data-venue="{{ v }}" style="border:1px solid var(--border);border-radius:var(--radius);padding:8px 10px">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <strong style="font-size:13px">{{ v }}</strong>
+          <span class="text-dim spot-venue-summary" style="font-size:11px"></span>
+          <button class="btn btn-sm btn-primary ml-auto" type="button" onclick="spotSaveVenue(this)">Save</button>
+        </div>
+        <div class="spot-venue-list" style="display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:6px;font-size:12px"></div>
+      </div>
+      {% else %}
+      <p class="text-dim" style="font-size:12px;margin:0">No venues yet — they appear here once shows have a venue.</p>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+{# ── Queue + recent ───────────────────────────────────────────────────────── #}
+<div class="form-section">
+  <div class="form-section-header">
+    <span class="section-icon">◷</span> PERFORMANCES
+    <span class="text-dim" id="spot-leader" style="font-size:11px;font-weight:400;text-transform:none;letter-spacing:normal;margin-left:8px"></span>
+    <div class="ml-auto"><button class="btn btn-sm btn-ghost" type="button" onclick="spotLoadQueue()">⟳ Refresh</button></div>
+  </div>
+  <div class="form-section-body no-pad">
+    <div style="overflow-x:auto">
+      <table class="data-table" style="font-size:12px;min-width:760px">
+        <thead><tr><th>Date</th><th>Show</th><th>Venue</th><th>Window</th><th>Sensors</th><th>Status</th><th></th></tr></thead>
+        <tbody id="spot-queue"><tr><td colspan="7" class="text-dim">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="form-section">
+  <div class="form-section-header">
+    <span class="section-icon">≡</span> RECENT PULLS
+  </div>
+  <div class="form-section-body no-pad">
+    <div style="overflow-x:auto">
+      <table class="data-table" style="font-size:12px;min-width:640px">
+        <thead><tr><th>When</th><th>Show</th><th>Status</th><th>Attempts</th><th>By</th><th>Detail</th></tr></thead>
+        <tbody id="spot-recent"><tr><td colspan="6" class="text-dim">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const E = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const J = {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'};
+  const HM = iso => { const d = iso ? parseServerTime(iso) : null;
+    return d && !isNaN(d) ? d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false}) : ''; };
+  const DT = iso => { const d = iso ? parseServerTime(iso) : null;
+    return d && !isNaN(d) ? `${localIsoDate(d)} ${HM(iso)}` : ''; };
+  const STATE = {
+    captured: ['Pulled', 'var(--green)'], stale: ['Times changed — re-pull due', 'var(--accent)'],
+    due: ['Due', 'var(--accent)'], waiting: ['Waiting for end + grace', ''], upcoming: ['Upcoming', ''],
+    running: ['Pulling…', 'var(--accent)'], retry: ['Failed — will retry', 'var(--red)'],
+    failed: ['Failed — gave up', 'var(--red)'], unmapped: ['Not set up', 'var(--text-muted)'],
+    notime: ['No time', 'var(--text-muted)'],
+  };
+
+  let monitors = null;              // from Spot (null = not loaded)
+  let mapping = {};                 // venueKey → {monitors:[{id,name,unit}], ref}
+  const vkey = v => String(v || '').trim().split(/\s+/).join(' ').toLowerCase();
+
+  window.spotToggle = id => { const el = document.getElementById(id); el.style.display = el.style.display === 'none' ? '' : 'none'; };
+
+  function formPayload() {
+    const f = document.getElementById('spot-settings-form');
+    const out = {};
+    f.querySelectorAll('input').forEach(i => {
+      if (i.type === 'checkbox') out[i.name] = i.checked ? '1' : '0';
+      else out[i.name] = i.value;
+    });
+    if (out.clear_api_key !== '1') delete out.clear_api_key; else out.clear_api_key = true;
+    return out;
+  }
+
+  window.spotSave = async (ev) => {
+    ev.preventDefault();
+    const r = await fetch('/settings/spot', {method: 'POST', headers: J, body: JSON.stringify(formPayload())});
+    const d = await r.json().catch(() => ({}));
+    if (!d.success) { alert(d.error || 'Save failed.'); return; }
+    if (typeof showSaveToast === 'function') showSaveToast('✓ Spot settings saved');
+    setTimeout(() => location.reload(), 400);
+  };
+
+  window.spotTest = async (btn) => {
+    btn.disabled = true;
+    const out = document.getElementById('spot-test-result');
+    out.textContent = 'Testing…';
+    try {
+      const p = formPayload();
+      const r = await fetch('/settings/spot/test', {method: 'POST', headers: J,
+        body: JSON.stringify({spot_base_url: p.spot_base_url, spot_api_key: p.spot_api_key})});
+      const d = await r.json().catch(() => ({}));
+      if (d.success) {
+        const i = d.info || {};
+        out.innerHTML = `<span style="color:var(--green)">✓ Connected</span> — Spot ${E(i.version)}, key “${E(i.key)}”, timezone ${E(i.timezone)}`;
+      } else {
+        out.innerHTML = `<span style="color:var(--red)">✗ ${E(d.error || 'Failed')}</span>`;
+      }
+    } finally { btn.disabled = false; }
+  };
+
+  function renderVenues() {
+    document.querySelectorAll('.spot-venue').forEach(box => {
+      const v = box.dataset.venue;
+      const m = mapping[vkey(v)] || {monitors: [], ref: null};
+      const chosen = new Set(m.monitors.map(x => x.id));
+      const list = box.querySelector('.spot-venue-list');
+      // Known sensors = everything Spot reports + anything saved that Spot no longer lists.
+      const all = (monitors || []).slice();
+      m.monitors.forEach(x => { if (!all.find(a => a.id === x.id)) all.push({id: x.id, name: x.name, unit: x.unit, missing: !!monitors}); });
+      box.querySelector('.spot-venue-summary').textContent =
+        chosen.size ? `${chosen.size} sensor${chosen.size === 1 ? '' : 's'} linked` : 'no sensors linked';
+      if (!all.length) {
+        list.innerHTML = '<span class="text-dim">Load sensors from Spot to choose.</span>';
+        return;
+      }
+      list.innerHTML = all.map(x => {
+        const isDb = /^db/i.test(x.unit || '');
+        const latest = x.latest && typeof x.latest.value === 'number' ? ` · now ${x.latest.value.toFixed(1)}` : '';
+        const hint = [x.unit, x.location].filter(Boolean).join(' · ') + latest;
+        return `<label class="checkbox-label" style="gap:6px" title="Spot monitor #${E(x.id)}${x.enabled === false ? ' (disabled in Spot)' : ''}">
+          <input type="checkbox" class="spot-mon" value="${E(x.id)}" data-name="${E(x.name)}" data-unit="${E(x.unit)}" ${chosen.has(x.id) ? 'checked' : ''}>
+          ${E(x.name || ('Monitor ' + x.id))}${hint ? ` <span class="text-dim">(${E(hint)})</span>` : ''}${x.missing ? ' <span style="color:var(--red)">not in Spot</span>' : ''}
+          ${isDb || chosen.has(x.id) ? `<input type="radio" name="ref-${E(vkey(v))}" class="spot-ref" value="${E(x.id)}" title="Use for curtain detection" ${m.ref === x.id ? 'checked' : ''}>★` : ''}
+        </label>`;
+      }).join('');
+    });
+  }
+
+  async function loadMapping() {
+    const r = await fetch('/settings/spot/mapping', {headers: J});
+    const d = await r.json().catch(() => ({mapping: []}));
+    mapping = {};
+    (d.mapping || []).forEach(m => { mapping[vkey(m.venue)] = m; });
+    renderVenues();
+  }
+
+  window.spotLoadMonitors = async (btn) => {
+    btn.disabled = true;
+    try {
+      const r = await fetch('/settings/spot/monitors', {headers: J});
+      const d = await r.json().catch(() => ({}));
+      if (!d.success) { alert(d.error || 'Could not load sensors from Spot.'); return; }
+      monitors = d.monitors || [];
+      renderVenues();
+    } finally { btn.disabled = false; }
+  };
+
+  window.spotSaveVenue = async (btn) => {
+    const box = btn.closest('.spot-venue');
+    const mons = [...box.querySelectorAll('.spot-mon:checked')].map(i => ({id: +i.value, name: i.dataset.name, unit: i.dataset.unit}));
+    const refEl = box.querySelector('.spot-ref:checked');
+    btn.disabled = true;
+    try {
+      const r = await fetch('/settings/spot/mapping', {method: 'POST', headers: J,
+        body: JSON.stringify({venue: box.dataset.venue, monitors: mons, ref: refEl ? +refEl.value : null})});
+      const d = await r.json().catch(() => ({}));
+      if (!d.success) { alert(d.error || 'Save failed.'); return; }
+      if (typeof showSaveToast === 'function') showSaveToast('✓ Venue sensors saved');
+      await loadMapping();
+      spotLoadQueue();
+    } finally { btn.disabled = false; }
+  };
+
+  window.spotLoadQueue = async () => {
+    const r = await fetch('/settings/spot/queue', {headers: J});
+    const d = await r.json().catch(() => null);
+    const q = document.getElementById('spot-queue'), rc = document.getElementById('spot-recent');
+    if (!d) { q.innerHTML = '<tr><td colspan="7" class="text-dim">Could not load.</td></tr>'; return; }
+    document.getElementById('spot-leader').textContent =
+      d.leader ? 'This server is the cluster primary — it runs the automatic pulls.' : 'Automatic pulls run on the cluster primary (not this server).';
+    q.innerHTML = (d.queue || []).map(p => {
+      const [lbl, col] = STATE[p.state] || [p.state, ''];
+      const c = p.capture || {};
+      const detail = p.problem || (p.state !== 'captured' && c.error) || '';
+      const win = p.start && p.end ? `${HM(p.start)}–${HM(p.end)}${p.end_source === 'default' ? ' <span class="text-dim">(default)</span>' : ''}` : '—';
+      const canPull = !p.problem && ['captured', 'stale', 'due', 'retry', 'failed'].includes(p.state);
+      return `<tr>
+        <td>${E(p.date)} ${E(p.time)}</td>
+        <td><a href="/shows/${encodeURIComponent(p.show_id)}?tab=postnotes">${E(p.show_name)}</a></td>
+        <td>${E(p.venue)}</td><td>${win}</td>
+        <td>${E((p.monitors || []).map(m => m.name || ('#' + m.id)).join(', ')) || '—'}</td>
+        <td><span style="color:${col}">${E(lbl)}</span>${detail ? `<div class="text-dim" style="font-size:11px">${E(detail)}</div>` : ''}</td>
+        <td>${canPull ? `<button class="btn btn-sm btn-ghost" type="button" data-show="${E(p.show_id)}" data-perf="${E(p.perf_key)}" onclick="spotPull(this)">${p.state === 'captured' ? 'Re-pull' : 'Pull now'}</button>` : ''}</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="7" class="text-dim">No performances in the window.</td></tr>';
+    rc.innerHTML = (d.recent || []).map(c => `<tr>
+        <td>${E(DT(c.last_attempt_at || c.captured_at))}</td>
+        <td><a href="/shows/${encodeURIComponent(c.show_id)}?tab=postnotes">${E(c.show_name)}</a></td>
+        <td>${E(c.status)}</td><td>${E(c.attempts)}</td><td>${E(c.captured_by || '')}</td>
+        <td class="text-dim">${E(c.error || '')}</td></tr>`).join('')
+      || '<tr><td colspan="6" class="text-dim">Nothing pulled yet.</td></tr>';
+  };
+
+  window.spotPull = async (btn) => {
+    btn.disabled = true;
+    try {
+      const r = await fetch('/settings/spot/pull', {method: 'POST', headers: J,
+        body: JSON.stringify({show_id: +btn.dataset.show, perf_key: btn.dataset.perf})});
+      const d = await r.json().catch(() => ({}));
+      if (d.success) { if (typeof showSaveToast === 'function') showSaveToast('✓ ' + (d.message || 'Pulled')); }
+      else alert(d.error || 'Pull failed.');
+    } finally { spotLoadQueue(); }
+  };
+
+  window.spotRunNow = async (btn) => {
+    btn.disabled = true;
+    try {
+      const r = await fetch('/settings/spot/run', {method: 'POST', headers: J, body: '{}'});
+      const d = await r.json().catch(() => ({}));
+      const res = d.result || {};
+      alert(res.skipped ? `Skipped: ${res.skipped}` :
+            `Due: ${res.due || 0} · pulled: ${res.pulled || 0} · failed: ${res.failed || 0}` +
+            (res.deferred ? ` · ${res.deferred} left for the next run` : ''));
+    } finally { btn.disabled = false; spotLoadQueue(); }
+  };
+
+  loadMapping();
+  spotLoadQueue();
+})();
+</script>
+{% endblock %}
