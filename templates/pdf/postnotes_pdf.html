@@ -12,7 +12,9 @@
    palette, so output is unchanged until colors are set. #}
 {% set _vc = pdf_colors if pdf_colors is defined else none %}
 {% set C2 = _vc.secondary if _vc else '#B8840A' %}
-{% set C2_TEXT = _vc.secondary_text if _vc else '#B8840A' %}
+{% set C2_TEXT = _vc.secondary_text if _vc else '#B8840A' %}{# 3.27.1: bars, header rule and info bar take the venue colors too. Each
+   fallback is this template's original literal, so unthemed output is
+   byte-identical. #}{% set C1_RULE = _vc.primary if _vc else '#000' %}{% set C1_HEAD = _vc.primary if _vc else '#1a1a1a' %}{% set C1_TH = _vc.primary if _vc else '#333' %}{% set C1_ON = _vc.on_primary if _vc else '#fff' %}{% set C1_BG2 = _vc.primary_bg2 if _vc else '#f5f5f5' %}{% set C1_BORDER = _vc.primary_border if _vc else '#ddd' %}
 
 <style>
   @page {
@@ -27,7 +29,7 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: Arial, Helvetica, sans-serif; font-size: 9pt; color: #1a1a1a; line-height: 1.4; }
 
-  .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; padding-bottom: 7px; border-bottom: 2.5px solid #000; }
+  .doc-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; padding-bottom: 7px; border-bottom: 2.5px solid {{ C1_RULE }}; }
   .doc-type { font-size: 7.5pt; font-weight: bold; color: {{ C2_TEXT }}; letter-spacing: 0.12em; text-transform: uppercase; }
   .show-name { font-size: 25pt; font-weight: 900; line-height: 1.04; color: #1a1a1a; letter-spacing: 0.01em; margin: 1px 0 2px; }
   .show-sub { font-size: 8.5pt; color: #444; }
@@ -36,19 +38,19 @@
   .doc-meta { text-align: right; font-size: 7.5pt; color: #444; white-space: nowrap; padding-left: 12px; }
 
   .section { margin-bottom: 10px; border: 1px solid #ccc; }
-  .section-head { background: #1a1a1a; color: #fff; font-size: 7pt; font-weight: bold; letter-spacing: 0.1em; padding: 4px 7px; text-transform: uppercase; }
+  .section-head { background: {{ C1_HEAD }}; color: {{ C1_ON }}; font-size: 7pt; font-weight: bold; letter-spacing: 0.1em; padding: 4px 7px; text-transform: uppercase; }
   .section-body { padding: 6px 8px; }
 
   .field-row { margin-bottom: 8px; }
   .field-lbl { font-size: 6.5pt; font-weight: bold; color: #666; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 2px; }
   .field-val { font-size: 8.5pt; white-space: pre-wrap; color: #111; }
 
-  .info-bar { display: flex; gap: 16px; margin-bottom: 12px; background: #f5f5f5; border: 1px solid #ddd; padding: 6px 10px; font-size: 8pt; }
+  .info-bar { display: flex; gap: 16px; margin-bottom: 12px; background: {{ C1_BG2 }}; border: 1px solid {{ C1_BORDER }}; padding: 6px 10px; font-size: 8pt; }
   .info-bar span { color: #555; }
   .info-bar strong { color: #111; }
 
   .sched-table { width: 100%; border-collapse: collapse; font-size: 7.5pt; }
-  .sched-table th { background: #333; color: #fff; padding: 4px 7px; text-align: left; text-transform: uppercase; font-size: 6.5pt; letter-spacing: 0.06em; }
+  .sched-table th { background: {{ C1_TH }}; color: {{ C1_ON }}; padding: 4px 7px; text-align: left; text-transform: uppercase; font-size: 6.5pt; letter-spacing: 0.06em; }
   .sched-table td { padding: 3px 7px; border-bottom: 1px solid #eee; vertical-align: top; }
   .sched-table tr:last-child td { border-bottom: none; }
 
