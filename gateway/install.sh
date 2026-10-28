@@ -4,17 +4,20 @@
 # Installs everything the gateway needs on a Debian VPS with firewalld:
 # packages (caddy, python3-venv, fail2ban), the service user, /opt/321gateway
 # + venv, /etc/321gateway/gateway.env (GATE_SECRET_KEY auto-generated),
-# the systemd unit, the Caddyfile, firewalld rules, and the fail2ban jail.
+# the systemd unit, its Caddy site file (/etc/caddy/sites.d/321theater.caddy,
+# shared Caddy: other apps keep their own files), firewalld rules, and the
+# fail2ban jail.
 #
 # Idempotent: re-running is the UPDATE path — it re-syncs the app files from
 # this directory, re-installs requirements, and restarts the service. It
-# never overwrites an existing gateway.env or an existing Caddyfile that
-# already serves the site.
+# never overwrites an existing gateway.env or an existing site file; it never
+# rewrites the main /etc/caddy/Caddyfile wholesale (only moves 321T's own block
+# out of it into sites.d, once, and adds the import line).
 #
 # Usage:  sudo bash install.sh                 (run from this gateway/ dir —
 #                                               e.g. the sparse checkout in
 #                                               /opt/321gateway-src/gateway)
-#         sudo bash install.sh --rewrite-caddy (also regenerate the Caddyfile
+#         sudo bash install.sh --rewrite-caddy (also regenerate 321theater.caddy
 #                                               from GATE_APP_INTERNAL_URLS —
 #                                               use after changing the server
 #                                               list in gateway.env)
@@ -142,8 +145,17 @@ else
     info "Service installed + enabled; start it after setting GATE_SHARED_SECRET."
 fi
 
-# ── Caddy ─────────────────────────────────────────────────────────────────────
+# ── Caddy (shared) ────────────────────────────────────────────────────────────
+# Caddy on this VPS can serve several apps (e.g. glow.lighting next to
+# dpc.321.theater). Convention: the main Caddyfile only holds global options
+# and `import /etc/caddy/sites.d/*.caddy`; each app owns ONE file there. This
+# section only ever writes 321T's file, adds the import line if it is missing,
+# validates the WHOLE config before reloading, and puts both files back if
+# Caddy rejects them. It never rewrites the main Caddyfile wholesale.
 step "Caddy..."
+SITES_DIR="/etc/caddy/sites.d"
+OWN_SITE="${SITES_DIR}/321theater.caddy"
+mkdir -p "${SITES_DIR}"
 # The upstream server list is read from gateway.env — the single source of
 # truth for every 321T installation. Multiple servers get a health-checked
 # block that follows the app's own primary election.
@@ -153,15 +165,90 @@ if [ -z "${UPSTREAM_URLS}" ]; then
 fi
 [ -n "${UPSTREAM_URLS}" ] || UPSTREAM_URLS="http://10.201.2.101:5400"
 
-if [ -f "${CADDYFILE}" ] && grep -q "${SITE}" "${CADDYFILE}" && [ "${REWRITE_CADDY}" -eq 0 ]; then
-    info "Caddyfile already serves ${SITE} — leaving it untouched."
+CADDY_STAMP="$(date +%Y%m%d%H%M%S)"
+CADDY_BAK_MAIN=""; CADDY_BAK_OWN=""
+if [ -f "${CADDYFILE}" ]; then CADDY_BAK_MAIN="${CADDYFILE}.bak.${CADDY_STAMP}"; cp -p "${CADDYFILE}" "${CADDY_BAK_MAIN}"; fi
+if [ -f "${OWN_SITE}" ]; then CADDY_BAK_OWN="${OWN_SITE}.bak.${CADDY_STAMP}"; cp -p "${OWN_SITE}" "${CADDY_BAK_OWN}"; fi
+caddy_restore() {
+    warn "Restoring the Caddy files from before this run..."
+    if [ -n "${CADDY_BAK_MAIN}" ]; then cp -p "${CADDY_BAK_MAIN}" "${CADDYFILE}"; else rm -f "${CADDYFILE}"; fi
+    if [ -n "${CADDY_BAK_OWN}" ]; then cp -p "${CADDY_BAK_OWN}" "${OWN_SITE}"; else rm -f "${OWN_SITE}"; fi
+}
+
+# 1. Move 321T's site block out of the main Caddyfile (the pre-shared layout),
+#    word for word so hand edits survive, and make sure the main file imports
+#    sites.d. Other sites and global options in the main file are left alone.
+python3 - "${CADDYFILE}" "${OWN_SITE}" "${SITE}" "${SITES_DIR}" << 'PYEOF'
+import os, re, sys
+main, own, site, sites_dir = sys.argv[1:]
+imp = f'import {sites_dir}/*.caddy'
+header = (f'# Shared Caddy: each app owns one file in {sites_dir}/ (321T: 321theater.caddy).\n'
+          '# Keep this import line (after the global options block, if any).\n')
+text = open(main).read() if os.path.exists(main) else ''
+lines = text.splitlines(keepends=True)
+code = lambda l: re.sub(r'(^|\s)#.*', '', l)          # braces in comments don't count
+start = next((i for i, l in enumerate(lines)
+              if re.match(r'^(https?://)?' + re.escape(site) + r'(:\d+)?\s*\{\s*$', l)), None)
+if start is not None:
+    depth, end = 0, None
+    for j in range(start, len(lines)):
+        depth += code(lines[j]).count('{') - code(lines[j]).count('}')
+        if depth == 0:
+            end = j + 1
+            break
+    if end is None:
+        sys.exit(f'could not find the end of the {site} block in {main}; fix it by hand')
+    a = start                                         # take its leading comment lines along
+    while a > 0 and lines[a - 1].lstrip().startswith('#'):
+        a -= 1
+    block = ''.join(lines[a:end])
+    if os.path.exists(own):
+        print(f'    {site} was in BOTH {main} and {own}: keeping {own}, removing it from {main}')
+    else:
+        open(own, 'w').write(block)
+        print(f'    moved the {site} block from {main} to {own} (unchanged)')
+    del lines[a:end]
+    text = ''.join(lines)
+    # The old template's header comment (a separate paragraph) would be left
+    # behind saying "Install to /etc/caddy/Caddyfile": drop that paragraph only.
+    paras = re.split(r'(\n\s*\n)', text)
+    old = [i for i, p in enumerate(paras) if '3·2·1→Theater public gateway' in p
+           and all(l.lstrip().startswith('#') for l in p.strip().splitlines())]
+    for i in reversed(old):
+        del paras[i:i + 2]
+    if old:
+        text = ''.join(paras)
+        print(f"    dropped 321T's old header comment from {main}")
+addr = re.compile(r'^([^\s#{}()][^{]*?)\s*\{\s*$')
+if '/usr/share/caddy' in text and [m.group(1) for m in map(addr.match, text.splitlines()) if m] == [':80']:
+    text = ''                                         # Debian's stock welcome page: nothing to keep
+    print(f"    replaced Debian's default welcome-page {main}")
+if not re.search(r'^\s*import\s+' + re.escape(sites_dir) + r'/\*(\.caddy)?\s*$', text, re.M):
+    lines = text.splitlines(keepends=True)
+    i = 0
+    while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith('#')):
+        i += 1
+    if i < len(lines) and lines[i].strip() == '{':    # global options must stay first
+        depth = 0
+        for j in range(i, len(lines)):
+            depth += code(lines[j]).count('{') - code(lines[j]).count('}')
+            if depth == 0:
+                i = j + 1
+                break
+    lines[i:i] = [header, imp + '\n', '\n']
+    text = ''.join(lines)
+    print(f'    {main} now imports {sites_dir}/*.caddy')
+os.makedirs(os.path.dirname(main) or '.', exist_ok=True)
+open(main, 'w').write(text)
+PYEOF
+
+# 2. 321T's own site file: generated from Caddyfile.example + gateway.env the
+#    first time, regenerated only with --rewrite-caddy.
+if [ -f "${OWN_SITE}" ] && [ "${REWRITE_CADDY}" -eq 0 ]; then
+    info "${OWN_SITE} already serves ${SITE} — leaving it untouched."
     info "(To regenerate from GATE_APP_INTERNAL_URLS: install.sh --rewrite-caddy)"
 else
-    if [ -f "${CADDYFILE}" ]; then
-        cp "${CADDYFILE}" "${CADDYFILE}.bak.$(date +%Y%m%d%H%M%S)"
-        warn "Existing Caddyfile backed up alongside it."
-    fi
-    python3 - "${SRC_DIR}/Caddyfile.example" "${CADDYFILE}" "${UPSTREAM_URLS}" << 'PYEOF'
+    python3 - "${SRC_DIR}/Caddyfile.example" "${OWN_SITE}" "${UPSTREAM_URLS}" << 'PYEOF'
 import sys
 src, dst, raw = sys.argv[1], sys.argv[2], sys.argv[3]
 ups = []
@@ -186,14 +273,21 @@ else:
 open(dst, 'w').write(text.replace(marker, block))
 print(f'    upstreams: {" ".join(ups)}')
 PYEOF
-    info "Installed Caddyfile for ${SITE} (upstreams from gateway.env)."
+    info "Wrote ${OWN_SITE} for ${SITE} (upstreams from gateway.env)."
 fi
-if caddy validate --config "${CADDYFILE}" >/dev/null 2>&1; then
+
+# 3. Validate everything (every app's site), then reload. Never reload a
+#    config Caddy rejects, and never leave one on disk.
+if CADDY_OUT=$(caddy validate --config "${CADDYFILE}" --adapter caddyfile 2>&1); then
     systemctl enable caddy >/dev/null 2>&1 || true
     systemctl reload caddy 2>/dev/null || systemctl restart caddy
     info "Caddy reloaded. (Certificate issuance needs DNS for ${SITE} → this VPS and port 80/443 open.)"
+    rm -f "${CADDY_BAK_MAIN}" "${CADDY_BAK_OWN}"          # only kept when something went wrong
 else
-    warn "Caddyfile failed validation — fix it, then: systemctl reload caddy"
+    echo "${CADDY_OUT}" | tail -5 >&2
+    caddy_restore
+    warn "Caddy rejected the config: nothing was reloaded and the files are back as they were"
+    warn "(copies kept: ${CADDY_BAK_MAIN:-none} ${CADDY_BAK_OWN:-})."
 fi
 
 # ── firewalld ─────────────────────────────────────────────────────────────────

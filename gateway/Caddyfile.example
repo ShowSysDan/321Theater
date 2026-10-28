@@ -1,5 +1,7 @@
-# Caddyfile for the 3·2·1→Theater public gateway (VPS: cyclorama).
-# Install to /etc/caddy/Caddyfile, then: systemctl reload caddy
+# Caddy site for the 3·2·1→Theater public gateway (VPS: cyclorama).
+# install.sh writes it to /etc/caddy/sites.d/321theater.caddy: Caddy on this VPS
+# is shared (e.g. with glow.lighting), the main /etc/caddy/Caddyfile only holds
+# `import /etc/caddy/sites.d/*.caddy`, and each app owns one file there.
 #
 # Caddy obtains and renews the Let's Encrypt certificate automatically —
 # dpc.321.theater must already resolve to this VPS (129.121.114.249) and

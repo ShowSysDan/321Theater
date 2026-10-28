@@ -65,7 +65,9 @@ bash gateway/install.sh`
 
 **Emergency OFF switch** (take the site off the internet immediately,
 building access unaffected): `ssh` to cyclorama, `systemctl stop caddy`.
-Turn it back on with `systemctl start caddy`.
+Turn it back on with `systemctl start caddy`. Caddy is shared (3.28.0), so
+this also takes glow.lighting offline; to take only 321T off, use
+`systemctl stop 321gateway` (visitors get the branded offline page).
 
 **Log everyone out of the public site immediately** (lost/stolen laptop):
 edit `/etc/321gateway/gateway.env`, replace the `GATE_SECRET_KEY` value
@@ -332,8 +334,9 @@ sudo bash /opt/321gateway-src/gateway/install.sh
 The script installs the packages, creates the `gateway` user, syncs the app
 to `/opt/321gateway`, builds the venv, writes `/etc/321gateway/gateway.env`
 with a fresh auto-generated `GATE_SECRET_KEY`, installs + enables the
-systemd unit, installs the Caddyfile (backing up any existing one; it never
-touches a Caddyfile that already serves the site), opens http/https in
+systemd unit, writes the Caddy site to `/etc/caddy/sites.d/321theater.caddy`
+(it never touches that file once it exists, except with `--rewrite-caddy`;
+see "Shared Caddy" below), opens http/https in
 firewalld, and sets up the fail2ban jail. It is **idempotent** — re-running
 it is the update procedure — and it never overwrites an existing
 `gateway.env`. The one thing it cannot do for you: paste the
@@ -374,8 +377,15 @@ systemctl enable --now 321gateway
 curl -s http://127.0.0.1:8100/__gate/healthz     # → {"ok": true}
 
 # ── 4. Caddy ─────────────────────────────────────────────────────────────────
-cp Caddyfile.example /etc/caddy/Caddyfile
-systemctl reload caddy
+# Shared Caddy (3.28.0): 321T's site is ONE file in sites.d/, the main
+# Caddyfile only imports them (see "Shared Caddy" below).
+mkdir -p /etc/caddy/sites.d
+cp Caddyfile.example /etc/caddy/sites.d/321theater.caddy
+# Then make sure /etc/caddy/Caddyfile has the line
+#   import /etc/caddy/sites.d/*.caddy
+# (after any global options block; on a fresh VPS, replace Debian's welcome
+# page with just that line). Change nothing else in it: other apps' sites.
+caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy
 journalctl -u caddy -f    # watch the Let's Encrypt issuance succeed
 
 # ── 5. Firewall (firewalld — already running, managed via Cockpit) ──────────
@@ -420,7 +430,34 @@ not the file. Notes:
 - The alternative with zero credentials on the VPS: skip git entirely and
   `rsync gateway/ cyclorama:/opt/321gateway/` from a trusted machine.
 
-### 4.2 Optional: fail2ban jail for code-guessing
+### 4.2 Shared Caddy (3.28.0): other apps on cyclorama
+
+Caddy on cyclorama also serves glow.lighting (PhoneLight). Only one program
+can own ports 80/443, so the apps share Caddy by one convention:
+
+```
+/etc/caddy/Caddyfile                    global options (if any) + import /etc/caddy/sites.d/*.caddy
+/etc/caddy/sites.d/321theater.caddy     321T's site      (written only by this install.sh)
+/etc/caddy/sites.d/glow-lighting.caddy  glow.lighting    (written only by PhoneLight's gateway/install.sh)
+```
+
+- `install.sh` writes only `321theater.caddy`, adds the `import` line if it is
+  missing, and changes nothing else in the main Caddyfile. On its first run
+  after 3.28.0 it moves the `dpc.321.theater` block out of the main Caddyfile
+  into `321theater.caddy` word for word, so hand edits survive.
+- It validates the **whole** config (every app's site) before reloading. If
+  Caddy rejects it, both files are put back, nothing is reloaded, and copies
+  are kept as `*.bak.<time>`.
+- Edit 321T's site in `sites.d/321theater.caddy`, never another app's file.
+- `systemctl stop caddy` takes **every** site offline; `systemctl stop
+  321gateway` takes only 321T off (branded offline page).
+- Debian's Caddy 2.6 closes open WebSockets on every reload; glow.lighting's
+  phones use them, so avoid reloading Caddy during a glow show.
+
+Undo by hand: copy `321theater.caddy`'s contents into `/etc/caddy/Caddyfile`
+in place of the `import` line, then `systemctl reload caddy`.
+
+### 4.3 Optional: fail2ban jail for code-guessing
 
 Both the gateway and the app log a `GATE_OTP_FAIL ip=<ip>` /
 `GATEWAY_OTP_FAIL` line per failed attempt. On the VPS:
@@ -526,7 +563,7 @@ instead of inventing its own:
   ```
 
 - After editing the list, run `sudo bash install.sh --rewrite-caddy`. That
-  regenerates the Caddyfile's proxy block with all upstreams,
+  regenerates `/etc/caddy/sites.d/321theater.caddy` (only that file) with all upstreams,
   `lb_policy first`, and a 5-second health check against the primary
   probe — so browsing traffic follows the election and fails over
   automatically when the primary dies (its heartbeats go stale and the

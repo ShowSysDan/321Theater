@@ -176,8 +176,9 @@ existing cluster-election leader role for its host; 503 when secondary or
 when PG is unreachable; single-instance installs always 200). The gateway
 reads `GATE_APP_INTERNAL_URLS` (comma list — the single source of truth for
 all installations), polls the probe with a 10 s cache for its OTP calls, and
-fails over across the list on error. `install.sh` generates the Caddyfile's
-data-path block from the same env line (`--rewrite-caddy` to regenerate):
+fails over across the list on error. `install.sh` generates the site file's
+(`/etc/caddy/sites.d/321theater.caddy` since 3.28.0: Caddy is shared with
+glow.lighting, each app owns one file there) data-path block from the same env line (`--rewrite-caddy` to regenerate):
 multiple upstreams get `lb_policy first` + `health_uri
 /internal/cluster/primary`, so browsing traffic follows the election
 automatically.
