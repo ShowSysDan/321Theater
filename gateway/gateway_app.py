@@ -596,7 +596,14 @@ def _rate_limited(ip):
         stamps.append(now)
         _buckets[ip] = stamps
         if len(_buckets) > 10000:   # memory backstop under address churn
-            _buckets.clear()
+            # Drop only idle addresses: clearing everything let anyone with
+            # many addresses (an IPv6 /64) reset every other client's bucket.
+            for k in [k for k, v in _buckets.items()
+                      if not v or now - v[-1] >= _BUCKET_WINDOW]:
+                del _buckets[k]
+            if len(_buckets) > 10000:
+                _buckets.clear()
+                _buckets[ip] = stamps
         return False
 
 

@@ -95,7 +95,8 @@ fi
 step "Creating backup directories..."
 mkdir -p "${APP_DIR}/backups/hourly"
 mkdir -p "${APP_DIR}/backups/daily"
-chmod -R 755 "${APP_DIR}/backups"
+# Owner-only: dumps hold password hashes, live session ids and stored secrets.
+chmod -R u=rwX,go= "${APP_DIR}/backups"
 info "Backup dirs ready: ${APP_DIR}/backups/{hourly,daily}"
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -207,6 +208,9 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=${APP_NAME}
+# Files the app creates are not world-readable; /tmp is private to the service.
+UMask=0027
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target

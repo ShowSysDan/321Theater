@@ -49,6 +49,7 @@ import socket
 import time
 import uuid
 import hmac
+import ipaddress
 import fcntl
 import tempfile
 import html as _html_mod
@@ -77,10 +78,30 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
 
-def _safe_content_disposition(filename):
+def _safe_content_disposition(filename, inline=True):
     """Build a safe Content-Disposition header value, stripping injection chars."""
     safe = secure_filename(filename) or 'download'
-    return f'inline; filename="{safe}"'
+    return f'{"inline" if inline else "attachment"}; filename="{safe}"'
+
+
+# Types a stored upload may be served as INLINE on the app's origin (3.29.0).
+# The stored type is whatever the uploader's browser claimed, so anything else
+# (text/html, image/svg+xml, XML, JS…) would run script as whoever opens the
+# file: it is served as a download (application/octet-stream) instead.
+_INLINE_SAFE_TYPES = frozenset({
+    'application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+    'image/bmp', 'text/plain', 'text/csv', 'audio/mpeg', 'audio/wav',
+    'video/mp4', 'video/quicktime',
+})
+_IMAGE_SAFE_TYPES = frozenset({'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp'})
+
+
+def _served_type(stored, allowed=_INLINE_SAFE_TYPES):
+    """(content_type, inline) for serving an upload whose type the client chose."""
+    t = (stored or '').split(';', 1)[0].strip().lower()
+    if t in allowed:
+        return (t + '; charset=utf-8' if t.startswith('text/') else t), True
+    return 'application/octet-stream', False
 
 
 # Allowed HTML tags/attributes for user-supplied rich text (message body)
@@ -104,9 +125,16 @@ def _sanitize_html(raw):
                 k = k.lower()
                 if k not in allowed or not v:
                     continue
-                # Reject javascript: and data: URIs
-                if re.match(r'\s*(javascript|data|vbscript)\s*:', v, re.I):
-                    continue
+                # Links: only http(s), mailto, or a relative URL. Browsers drop
+                # tab/CR/LF and leading control chars, so "java&#9;script:" must
+                # be judged with them removed (a blocklist regex missed it).
+                if k == 'href':
+                    bare = re.sub(r'[\x00-\x20\x7f]+', '', v).lower()
+                    scheme = re.match(r'([a-z][a-z0-9+.-]*):', bare)
+                    if scheme and scheme.group(1) not in ('http', 'https', 'mailto'):
+                        continue
+                    if bare.startswith(('//', '\\', '/\\')):
+                        continue
                 safe_attrs += f' {_html_mod.escape(k)}="{_html_mod.escape(v)}"'
             self.out.append(f'<{t}{safe_attrs}>')
         def handle_endtag(self, tag):
@@ -206,6 +234,10 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 if app_config.get_bool('SESSION_COOKIE_SECURE'):
     app.config['SESSION_COOKIE_SECURE'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
+# Hard cap on any request body (3.29.0). Upload routes read the whole file
+# before checking Settings' upload_max_mb (max 500), so without this a single
+# multi-GB POST was buffered in a worker. Over it: 413 before the route runs.
+app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024
 
 
 # ── DB-backed sessions ────────────────────────────────────────────────────────
@@ -394,6 +426,11 @@ def _set_security_headers(response):
     response.headers.setdefault('X-Content-Type-Options', 'nosniff')
     response.headers.setdefault('X-Frame-Options', 'SAMEORIGIN')
     response.headers.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
+    # Baseline CSP (3.29.0). Pages still use inline scripts, so this can't
+    # stop script injection yet; it blocks plugins, <base> hijacking and
+    # framing by other sites.
+    response.headers.setdefault('Content-Security-Policy',
+                                "object-src 'none'; base-uri 'self'; frame-ancestors 'self'")
     return response
 
 
@@ -811,7 +848,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.28.0'
+APP_VERSION = '3.29.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1852,6 +1889,18 @@ def admin_required(f):
     return decorated
 
 
+def _readonly_guard(f, *args, **kwargs):
+    """The role decorators below grant by role/flag; a Read-only account that
+    also carries a flag (the user modal allows the combination) must still
+    not write (3.29.0). Admins are never read-only here, as before."""
+    if (session.get('is_readonly') and session.get('user_role') != 'admin'
+            and request.method not in ('GET', 'HEAD', 'OPTIONS')):
+        if request.is_json or request.headers.get('X-Requested-With'):
+            return jsonify({'error': 'Read-only access'}), 403
+        abort(403)
+    return f(*args, **kwargs)
+
+
 def content_admin_required(f):
     """Allow system admins and content admins (staff role)."""
     @wraps(f)
@@ -1859,9 +1908,9 @@ def content_admin_required(f):
         if 'user_id' not in session:
             return redirect(url_for('login'))
         if session.get('user_role') == 'admin':
-            return f(*args, **kwargs)
+            return _readonly_guard(f, *args, **kwargs)
         if session.get('is_content_admin'):
-            return f(*args, **kwargs)
+            return _readonly_guard(f, *args, **kwargs)
         abort(403)
     return decorated
 
@@ -1874,7 +1923,7 @@ def staff_or_admin_required(f):
             return redirect(url_for('login'))
         if session.get('user_role') not in ('admin', 'staff'):
             abort(403)
-        return f(*args, **kwargs)
+        return _readonly_guard(f, *args, **kwargs)
     return decorated
 
 
@@ -1899,7 +1948,7 @@ def scheduler_required(f):
         if 'user_id' not in session:
             return redirect(url_for('login'))
         if _can_schedule_labor():
-            return f(*args, **kwargs)
+            return _readonly_guard(f, *args, **kwargs)
         abort(403)
     return decorated
 
@@ -1911,11 +1960,11 @@ def asset_manager_required(f):
         if 'user_id' not in session:
             return redirect(url_for('login'))
         if session.get('user_role') == 'admin':
-            return f(*args, **kwargs)
+            return _readonly_guard(f, *args, **kwargs)
         if session.get('is_content_admin'):
-            return f(*args, **kwargs)
+            return _readonly_guard(f, *args, **kwargs)
         if session.get('is_asset_manager'):
-            return f(*args, **kwargs)
+            return _readonly_guard(f, *args, **kwargs)
         abort(403)
     return decorated
 
@@ -1927,7 +1976,7 @@ def piano_manager_required(f):
         if 'user_id' not in session:
             return redirect(url_for('login'))
         if _is_piano_manager():
-            return f(*args, **kwargs)
+            return _readonly_guard(f, *args, **kwargs)
         abort(403)
     return decorated
 
@@ -1964,6 +2013,23 @@ def show_advance_editor_required(f):
     return decorated
 
 
+def _end_other_sessions(db, uid):
+    """After a password change or reset, sign the account out everywhere else
+    (3.29.0): a stolen session cookie must not outlive the new password. The
+    current browser's session is kept when it belongs to that same account."""
+    keep = getattr(session, 'sid', None) if session.get('user_id') == uid else None
+    if keep:
+        db.execute('DELETE FROM app_sessions WHERE user_id=%s AND sid <> %s', (uid, keep))
+    else:
+        db.execute('DELETE FROM app_sessions WHERE user_id=%s', (uid,))
+
+
+def _end_view_as_keys():
+    session.pop('_view_as', None)
+    for k in [k for k in session.keys() if k.startswith('_real_')]:
+        session.pop(k, None)
+
+
 def _populate_session_from_user(user, ts=None):
     """Copy role / permission flags from a users row into the Flask session.
     Used by both the login route (initial population) and the periodic role
@@ -1993,8 +2059,18 @@ def _populate_session_from_user(user, ts=None):
     # their REAL flags from the DB — re-apply the preview override so it doesn't
     # silently expire on the periodic role refresh. Guarded on the saved real
     # admin role so it never affects a genuine (non-preview) session.
-    if session.get('_view_as') and session.get('_real_role') == 'admin':
-        _apply_view_as_override(session['_view_as'])
+    # 3.29.0: the saved real role is re-taken from the DB here, so a preview
+    # can never carry an admin role the DB no longer grants; a demoted admin's
+    # preview simply ends.
+    if session.get('_view_as'):
+        if user['role'] == 'admin':
+            for k in ('is_readonly', 'is_content_admin', 'is_labor_scheduler',
+                      'is_scheduler', 'is_asset_manager', 'is_piano_manager'):
+                session['_real_' + k] = session[k]
+            session['_real_role'] = 'admin'
+            _apply_view_as_override(session['_view_as'])
+        else:
+            _end_view_as_keys()
 
 
 def _connection_path():
@@ -2481,6 +2557,9 @@ def _run_pg_dump(dest_path, settings):
         if result.returncode != 0:
             raise RuntimeError(f"pg_dump failed: {result.stderr.decode('utf-8', errors='replace')}")
         size = os.path.getsize(tmp_path)
+        # The dump holds password hashes, live session ids and stored secrets:
+        # owner-only, whatever the service's umask (3.29.0).
+        os.chmod(tmp_path, 0o600)
         os.replace(tmp_path, dest_path)
         return size
     finally:
@@ -3184,16 +3263,42 @@ def _send_email(subject, recipients, body_text=None, body_html=None,
 _MAIL_FOOTER = '3·2·1→Theater · Dr. Phillips Center for the Performing Arts'
 
 
+def _request_host_trusted():
+    """May an emailed link be built from this request's Host header? (3.29.0)
+
+    The Host header is whatever the client sent: a LAN client posting
+    /forgot-password with `Host: evil.example` used to get the victim a
+    genuine reset email linking to evil.example (token stolen on click).
+    Trusted: an IP address or localhost, a name in ALLOWED_HOSTS (.env), or a
+    request through the gateway (TRUSTED_PROXY_IPS peer: Caddy only serves
+    its own site name)."""
+    if not has_request_context():
+        return False
+    if request.environ.get('werkzeug.proxy_fix.orig_remote_addr'):
+        return True
+    host = (request.host or '').lower()
+    name = host[1:host.find(']')] if host.startswith('[') else host.rsplit(':', 1)[0] if host.count(':') == 1 else host
+    if not name:
+        return False
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        pass
+    allowed = {h.strip().lower() for h in (app_config.get('ALLOWED_HOSTS') or '').split(',') if h.strip()}
+    return name == 'localhost' or name in allowed
+
+
 def _mail_url(path):
     """Absolute link for an email: Settings' public base URL first, else the
-    request's own host; '' when neither is known (a job with no base URL),
-    so callers simply leave the link out."""
+    request's own host when it can be trusted (_request_host_trusted); ''
+    when neither is known, so callers simply leave the link out."""
     if not path:
         return ''
     if path.startswith(('http://', 'https://')):
         return path
     base = (get_app_setting('public_base_url', '') or '').rstrip('/')
-    if not base and has_request_context():
+    if not base and _request_host_trusted():
         base = request.url_root.rstrip('/')
     return base + path if base else ''
 
@@ -5072,7 +5177,9 @@ def _login_page_messages():
         """, (now, now)).fetchall()
     finally:
         db.close()
-    return [dict(r) for r in rows]
+    # site_messages is a SHARED table: sister apps can write it, so the HTML
+    # is sanitized again on the way out, not only when 321T saves it (3.29.0).
+    return [dict(r, body_html=_sanitize_html(r['body_html'] or '')) for r in rows]
 
 
 _NEXT_CONTROL_CHARS = re.compile(r'[\x00-\x1f\x7f]')
@@ -5169,6 +5276,12 @@ def _login_route():
             # Constant-time failure: always hash something to prevent user enumeration
             if not user:
                 check_password_hash(_DUMMY_PW_HASH, password)
+            # 3.29.0: failed sign-ins were invisible (no log line), so nobody
+            # (and no fail2ban jail) could see password guessing. The name is
+            # reduced to safe characters so it can't forge a log line.
+            syslog_logger.warning(
+                f"LOGIN_FAIL ip={request.remote_addr} via={_connection_path()} "
+                f"user={re.sub(r'[^A-Za-z0-9._@+-]', '?', username)[:64]}")
         db.close()
         flash('Invalid username or password.', 'error')
 
@@ -5290,6 +5403,9 @@ _GATEWAY_OTP_MAX_ATTEMPTS = 5      # guesses allowed per code
 _GATEWAY_OTP_RATE_WINDOW_MIN = 15  # rate-limit window
 _GATEWAY_OTP_MAX_PER_EMAIL = 3     # codes per email per window
 _GATEWAY_OTP_MAX_PER_IP = 10       # codes per client IP per window
+_GATEWAY_OTP_MAX_PER_EMAIL_DAY = 10  # codes per email per 24 h (3.29.0): caps
+                                     # guesses at 50/day per address (5 each),
+                                     # where the 15-min window alone allowed 1440
 
 # Raw socket peers allowed to call the endpoints (parsed once, like
 # _TRUSTED_PROXY_IPS). Empty set = no peer restriction.
@@ -5309,7 +5425,10 @@ def _gateway_auth_ok():
     if not secret:
         return False
     supplied = request.headers.get('X-Gateway-Secret', '')
-    if not hmac.compare_digest(supplied, secret):
+    # Bytes: compare_digest raises TypeError on non-ASCII str, which 500'd
+    # (and so revealed the endpoints were enabled) instead of 404ing.
+    if not hmac.compare_digest(supplied.encode('utf-8', 'surrogateescape'),
+                               secret.encode('utf-8', 'surrogateescape')):
         return False
     if _GATEWAY_PEER_IPS:
         # Compare the raw socket peer, not request.remote_addr — with the
@@ -5533,11 +5652,14 @@ def gateway_otp_request():
                 'SELECT %s, %s, %s, %s, %s '
                 'WHERE (SELECT COUNT(*) FROM gateway_otp_codes '
                 '       WHERE email = %s AND created_at > %s) < %s '
+                'AND (SELECT COUNT(*) FROM gateway_otp_codes '
+                '     WHERE email = %s AND created_at > %s) < %s '
                 "AND (%s = '' OR (SELECT COUNT(*) FROM gateway_otp_codes "
                 '     WHERE client_ip = %s AND created_at > %s) < %s)',
                 (email, code_hash, client_ip,
                  now + timedelta(minutes=_GATEWAY_OTP_TTL_MIN), now,
                  email, window, _GATEWAY_OTP_MAX_PER_EMAIL,
+                 email, now - timedelta(days=1), _GATEWAY_OTP_MAX_PER_EMAIL_DAY,
                  client_ip, client_ip, window, _GATEWAY_OTP_MAX_PER_IP))
             if getattr(cur, 'rowcount', 0) == 1:
                 # Invalidate older outstanding codes only once the new one
@@ -5685,14 +5807,22 @@ def admin_view_as_reset():
     """Restore the admin's real role after view-as preview."""
     if '_real_role' not in session:
         return jsonify({'success': True})
-    session['user_role'] = session.pop('_real_role')
-    session['is_readonly'] = session.pop('_real_is_readonly', False)
-    session['is_content_admin'] = session.pop('_real_is_content_admin', False)
-    session['is_labor_scheduler'] = session.pop('_real_is_labor_scheduler', False)
-    session['is_scheduler'] = session.pop('_real_is_scheduler', False)
-    session['is_asset_manager'] = session.pop('_real_is_asset_manager', False)
-    session['is_piano_manager'] = session.pop('_real_is_piano_manager', False)
-    session.pop('_view_as', None)
+    # Restore from the DATABASE, never from the role saved when the preview
+    # began (3.29.0): an admin demoted mid-preview used to get admin back here.
+    _end_view_as_keys()
+    db = get_db()
+    try:
+        user = db.execute(
+            'SELECT id, role, display_name, is_readonly, is_scheduler, is_asset_manager, '
+            '       is_piano_manager, is_document_viewer, viewer_venues, viewer_doc_types, '
+            '       viewer_labor_overview, viewer_show_calendar, is_locked '
+            'FROM users WHERE id=%s', (session['user_id'],)).fetchone()
+    finally:
+        db.close()
+    if not user or user['is_locked']:
+        session.clear()
+        return jsonify({'success': False, 'error': 'Signed out'}), 401
+    _populate_session_from_user(user)
     syslog_logger.info(f"ADMIN_VIEW_AS_RESET by={session.get('username')}")
     return jsonify({'success': True})
 
@@ -5720,6 +5850,7 @@ def force_change_password():
         db = get_db()
         db.execute('UPDATE users SET password_hash=%s, must_change_password=0 WHERE id=%s',
                    (generate_password_hash(new_pw), session['user_id']))
+        _end_other_sessions(db, session['user_id'])
         db.commit()
         db.close()
         session.pop('must_change_password', None)
@@ -7203,7 +7334,7 @@ def download_attachment(show_id, aid):
     row = db.execute(
         f"SELECT {_cols_except(db, 'show_attachments', 'file_data')}, "
         f"{file_store.in_db_col('attachments')} "
-        'FROM show_attachments WHERE id=%s AND show_id=%s', (aid, show_id)
+        'FROM show_attachments WHERE id=%s AND show_id=%s AND deleted_at IS NULL', (aid, show_id)
     ).fetchone()
     db.close()
     if not row:
@@ -7219,8 +7350,9 @@ def download_attachment(show_id, aid):
         app.logger.error(f"Download failed for attachment {aid}: {e}")
         abort(503)
     resp = make_response(data)
-    resp.headers['Content-Type'] = row['mime_type']
-    resp.headers['Content-Disposition'] = _safe_content_disposition(row['filename'])
+    ctype, inline = _served_type(row['mime_type'])
+    resp.headers['Content-Type'] = ctype
+    resp.headers['Content-Disposition'] = _safe_content_disposition(row['filename'], inline)
     return resp
 
 
@@ -8741,6 +8873,9 @@ def email_pdf(show_id, pdf_type):
         return jsonify({'success': False, 'error': 'Invalid PDF type.'}), 400
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if session.get('is_readonly'):
+        # Mails the whole distribution list and cuts a new export version.
+        return jsonify({'success': False, 'error': 'Read-only access'}), 403
     get_show_or_404(show_id)
     triggered_by = session.get('username') or session.get('user_display') or 'user'
     exported_by_id = session.get('user_id')
@@ -10220,7 +10355,9 @@ def settings():
         'smtp_host':  all_settings.get('smtp_host', ''),
         'smtp_port':  all_settings.get('smtp_port', '587'),
         'smtp_user':  all_settings.get('smtp_user', ''),
-        'smtp_pass':  all_settings.get('smtp_pass', '') if _is_admin else '',
+        # Write-only (3.29.0): the page only learns whether one is saved.
+        'smtp_pass':  '',
+        'smtp_pass_set': bool(all_settings.get('smtp_pass')) if _is_admin else False,
         'smtp_from':  all_settings.get('smtp_from', ''),
         'smtp_tls':   all_settings.get('smtp_tls', '1'),
     }
@@ -10535,12 +10672,19 @@ def edit_user(uid):
                                  "you'd be locked out of admin."}), 400
     db = get_db()
     row = db.execute(
-        'SELECT username, is_document_viewer FROM users WHERE id=%s', (uid,)
+        'SELECT username, role, is_readonly, is_scheduler, is_asset_manager, '
+        '       is_piano_manager, is_document_viewer FROM users WHERE id=%s', (uid,)
     ).fetchone()
     if not row:
         db.close()
         return jsonify({'success': False, 'error': 'User not found'}), 404
     was_document_viewer = bool(row.get('is_document_viewer', 0))
+    perms_changed = (
+        (row['role'], bool(row['is_readonly']), bool(row['is_scheduler']),
+         bool(row['is_asset_manager']), bool(row['is_piano_manager']),
+         was_document_viewer)
+        != (role, bool(is_readonly), bool(is_scheduler), bool(is_asset_manager),
+            bool(is_piano_manager), bool(is_document_viewer)))
     db.execute(
         'UPDATE users SET display_name=%s, email=%s, role=%s, is_readonly=%s, '
         '                 is_scheduler=%s, is_asset_manager=%s, is_piano_manager=%s, '
@@ -10554,14 +10698,20 @@ def edit_user(uid):
          viewer_labor_overview, viewer_show_calendar,
          is_app_user, is_app_admin, uid)
     )
-    # If the doc-viewer flag flipped (either direction), invalidate any active
-    # sessions for this user so the new permission set takes effect immediately
-    # instead of waiting for the next 5-minute role refresh.
-    if was_document_viewer != bool(is_document_viewer):
-        try:
-            db.execute('DELETE FROM app_sessions WHERE user_id=%s', (uid,))
-        except Exception:
-            pass  # Table missing or DB-sessions disabled — fall through
+    # If the role or any permission flag changed, end the user's active
+    # sessions so the new permission set takes effect immediately instead of
+    # after the next 5-minute role refresh (3.29.0: before, only the doc-viewer
+    # flag did, and a demoted admin kept admin for up to 5 minutes, enough to
+    # re-promote themselves). Your own edit re-reads your role on the next
+    # request instead of signing you out.
+    if perms_changed:
+        if uid == session.get('user_id'):
+            session['_role_checked_at'] = 0
+        else:
+            try:
+                db.execute('DELETE FROM app_sessions WHERE user_id=%s', (uid,))
+            except Exception:
+                pass  # Table missing or DB-sessions disabled — fall through
     log_audit(db, 'USER_EDIT', 'user', uid,
               detail=(f'role={role} readonly={is_readonly} scheduler={is_scheduler} '
                       f'asset_mgr={is_asset_manager} piano_mgr={is_piano_manager} '
@@ -10672,6 +10822,7 @@ def admin_reset_user_password(uid):
     db = get_db()
     db.execute('UPDATE users SET password_hash=%s, must_change_password=%s WHERE id=%s',
                (generate_password_hash(pw), must_change, uid))
+    _end_other_sessions(db, uid)
     log_audit(db, 'USER_PASSWORD_RESET', 'user', uid,
               detail=f'reset by {session.get("username")} must_change={must_change}')
     db.commit(); db.close()
@@ -10770,6 +10921,7 @@ def change_own_password():
     # A voluntary change also satisfies any pending forced-change requirement.
     db.execute('UPDATE users SET password_hash=%s, must_change_password=0 WHERE id=%s',
                (generate_password_hash(new_pw), session['user_id']))
+    _end_other_sessions(db, session['user_id'])
     db.commit(); db.close()
     session.pop('must_change_password', None)
     syslog_logger.info(f"PASSWORD_CHANGE user_id={session['user_id']} by={session.get('username')} (self)")
@@ -13036,7 +13188,14 @@ def save_logo():
         b64 = base64.b64encode(data).decode()
         logo_data = f'data:{mime};base64,{b64}'
     else:
-        data_uri = (request.get_json(force=True) or {}).get('logo_data', '')
+        data_uri = str((request.get_json(force=True) or {}).get('logo_data', '') or '')
+        # Only an inline image: the value lands in every PDF's <img src>, and
+        # WeasyPrint would fetch an http:// or file:// URL from the server (3.29.0).
+        if data_uri and not re.match(r'^data:image/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=\s]+$', data_uri):
+            return jsonify({'success': False,
+                            'error': 'Unsupported image type. Allowed: PNG, JPEG, GIF, WebP.'}), 400
+        if len(data_uri) > 3 * 1024 * 1024:
+            return jsonify({'success': False, 'error': 'Logo too large (max 2 MB).'}), 413
         logo_data = data_uri
 
     db = get_db()
@@ -13641,6 +13800,8 @@ def save_smtp_settings():
     db = get_db()
     for key in ('smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass',
                 'smtp_from', 'smtp_tls'):
+        if key == 'smtp_pass' and not data.get(key):
+            continue        # write-only field: blank keeps the saved password
         if key in data:
             db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                        (key, str(data[key])))
@@ -13661,6 +13822,12 @@ def test_smtp_connection():
     port     = int(data.get('smtp_port') or 587)
     user     = data.get('smtp_user', '')
     password = data.get('smtp_pass', '')
+    if not password:
+        # Blank = the saved password, sent only to the SAVED host and user
+        # (like the Spot key): it can't be pointed at another server.
+        saved = {k: get_app_setting(k, '') for k in ('smtp_host', 'smtp_user', 'smtp_pass')}
+        if host == saved['smtp_host'] and user == saved['smtp_user']:
+            password = saved['smtp_pass']
     use_tls  = data.get('smtp_tls', '1') not in ('0', 'false', 'False', '')
     from_addr = data.get('smtp_from') or user
     to_addr   = data.get('test_to') or user
@@ -18311,9 +18478,15 @@ def api_crew_members():
     for q in quals:
         qual_map.setdefault(q['crew_member_id'], []).append(q['position_id'])
 
+    # Pay rates and training notes are for schedulers / content admins only
+    # (Settings hides the crew list from everyone else); the pickers every
+    # user sees need just the names and qualifications (3.29.0).
+    private = () if _can_schedule_labor() else ('training_notes', 'level_rate')
     result = []
     for m in members:
         m_dict = dict(m)
+        for k in private:
+            m_dict.pop(k, None)
         m_dict['qualifications'] = qual_map.get(m['id'], [])
         result.append(m_dict)
     db.close()
@@ -19265,7 +19438,9 @@ def asset_type_photo_upload(type_id):
     f = request.files.get('photo')
     if not f:
         return jsonify({'error': 'No file'}), 400
-    mime = f.mimetype or 'image/jpeg'
+    mime = (f.mimetype or 'image/jpeg').lower()
+    if mime not in _IMAGE_SAFE_TYPES:
+        return jsonify({'error': 'Photo must be a PNG, JPEG, GIF, WebP or BMP image'}), 400
     data = f.read()
     sha = file_store.sha256_hex(data)
     db = get_db()
@@ -19326,7 +19501,10 @@ def asset_type_photo(type_id):
         app.logger.error(f"Download failed for asset photo type_id={type_id}: {e}")
         abort(503)
     resp = make_response(data)
-    resp.headers['Content-Type'] = row['photo_mime'] or 'image/jpeg'
+    ctype, inline = _served_type(row['photo_mime'] or 'image/jpeg', _IMAGE_SAFE_TYPES)
+    resp.headers['Content-Type'] = ctype
+    if not inline:
+        resp.headers['Content-Disposition'] = 'attachment; filename="photo"'
     resp.headers['Cache-Control'] = 'max-age=86400'
     return resp
 
@@ -25089,6 +25267,17 @@ def _send_simple_email_async(to_addr, subject, body_text, body_html=None, contex
     threading.Thread(target=_bg, daemon=True).start()
 
 
+def _form_int(name, default=0):
+    """An int form field; junk reads as `default` instead of a 500."""
+    try:
+        return int(request.form.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+_EMAIL_RE = re.compile(r'^[^@\s<>"\'(),;:\\]+@[^@\s<>"\'(),;:\\]+\.[^@\s<>"\'(),;:\\]+$')
+
+
 def _register_route():
     if session.get('user_id'):
         return redirect(url_for('dashboard'))
@@ -25099,7 +25288,7 @@ def _register_route():
         email = request.form.get('email', '').strip().lower()
         password = request.form.get('password', '')
         confirm  = request.form.get('confirm_password', '')
-        score    = int(request.form.get('captcha_score', 0))
+        score    = _form_int('captcha_score')
 
         if score < 1:
             error = 'Please complete the mini-game challenge first.'
@@ -25111,6 +25300,11 @@ def _register_route():
             error = _validate_password(password)
         elif not re.match(r'^[a-z0-9_.-]{3,32}$', username):
             error = 'Username: 3-32 characters, letters/numbers/._- only.'
+        elif len(email) > 254 or not _EMAIL_RE.match(email):
+            error = 'Enter a valid email address.'
+        elif len(display_name) > 80 or re.search(r'[<>\x00-\x1f\x7f]', display_name):
+            # Shown to admins before anyone has vetted the account (3.29.0).
+            error = 'Display name: up to 80 characters, no < or >.'
         else:
             db = get_db()
             existing = db.execute('SELECT id FROM users WHERE username=%s', (username,)).fetchone()
@@ -25134,7 +25328,7 @@ def _register_route():
                             VALUES (%s,%s,%s,%s,%s,%s)
                         """, (username, display_name, email, pw_hash, token, expires.isoformat()))
                         db.commit()
-                        confirm_url = url_for('confirm_email', token=token, _external=True)
+                        confirm_url = _mail_url(url_for('confirm_email', token=token))
                         _send_simple_email_async(
                             email,
                             '3·2·1→THEATER: Confirm Your Email',
@@ -25159,7 +25353,7 @@ def _register_route():
                                 ).fetchall()
                             finally:
                                 _adb.close()
-                            _settings_url = url_for('settings', _external=True) + '#registrations'
+                            _settings_url = _mail_url(url_for('settings') + '#registrations')
                             for _adm in _admins:
                                 _send_simple_email_async(
                                     _adm['email'],
@@ -25232,7 +25426,8 @@ def confirm_email(token):
 def pending_registrations():
     db = get_db()
     rows = db.execute("""
-        SELECT * FROM user_pending_registration
+        SELECT id, username, display_name, email, email_confirmed, created_at
+          FROM user_pending_registration
         WHERE admin_approved=0
         ORDER BY created_at
     """).fetchall()
@@ -25317,7 +25512,7 @@ def _forgot_password_route():
     error = None
     if request.method == 'POST':
         identifier = request.form.get('identifier', '').strip()
-        score = int(request.form.get('captcha_score', 0))
+        score = _form_int('captcha_score')
         if score < 1:
             error = 'Please complete the mini-game challenge first.'
         elif not identifier:
@@ -25339,21 +25534,26 @@ def _forgot_password_route():
                     VALUES (%s,%s,%s)
                 """, (user['id'], token, expires.isoformat()))
                 db.commit()
-                reset_url = url_for('reset_password', token=token, _external=True)
-                _send_simple_email_async(
-                    user['email'],
-                    '3·2·1→THEATER: Password Reset',
-                    context={'purpose': 'password_reset', 'sensitive': True},
-                    *_mail('Reset your password',
-                           eyebrow='Your account',
-                           intro=f'Someone (hopefully you) asked to reset the password for '
-                                 f'{user["username"]}. Use the button to choose a new one.',
-                           button=('Reset my password', reset_url),
-                           note=f'The link expires in 2 hours and works once. If the button '
-                                f'doesn\'t work, paste this into your browser: {reset_url}\n'
-                                f'Didn\'t ask for this? Ignore this email — your password stays '
-                                f'the same.')
-                )
+                reset_url = _mail_url(url_for('reset_password', token=token))
+                if not reset_url:
+                    # Untrusted Host and no public base URL: never mail a link
+                    # to a host the requester chose.
+                    syslog_logger.error(f'PASSWORD_RESET_NO_URL user={user["username"]} host={request.host[:80]!r} '
+                                        '(set Settings public base URL or ALLOWED_HOSTS in .env)')
+                else:
+                    _send_simple_email_async(
+                      user['email'],
+                      '3·2·1→THEATER: Password Reset',
+                      context={'purpose': 'password_reset', 'sensitive': True},
+                      *_mail('Reset your password',
+                             eyebrow='Your account',
+                             intro=f'Someone (hopefully you) asked to reset the password for '
+                                   f'{user["username"]}. Use the button to choose a new one.',
+                             button=('Reset my password', reset_url),
+                             note=f'The link expires in 2 hours and works once. If the button '
+                                  f'doesn\'t work, paste this into your browser: {reset_url}\n'
+                                  f'Didn\'t ask for this? Ignore this email — your password stays '
+                                  f'the same.'))
                 syslog_logger.info(f'PASSWORD_RESET_REQUEST user={user["username"]}')
             db.close()
             sent = True
@@ -25397,6 +25597,7 @@ def reset_password(token):
             # A completed reset also satisfies any pending forced-change flag.
             db.execute('UPDATE users SET password_hash=%s, must_change_password=0 WHERE id=%s',
                        (pw_hash, rec['user_id']))
+            _end_other_sessions(db, rec['user_id'])
             db.execute('UPDATE password_reset_tokens SET used=1 WHERE token=%s', (token,))
             db.commit()
             user_row = db.execute('SELECT username FROM users WHERE id=%s', (rec['user_id'],)).fetchone()
@@ -25512,8 +25713,10 @@ def get_messages_api():
     msg_type = request.args.get('type')
     msgs = get_active_messages(session['user_id'], msg_type,
                                group=_session_audience_group())
-    # Filter out already dismissed for users
-    result = [m for m in msgs if not m['dismissed']]
+    # Filter out already dismissed for users. body_html is re-sanitized: the
+    # table is shared with sister apps (3.29.0).
+    result = [dict(m, body_html=_sanitize_html(m.get('body_html') or ''))
+              for m in msgs if not m['dismissed']]
     # Record that this user has now seen each delivered message (first-seen wins;
     # INSERT OR IGNORE keeps the original seen_at). These are the messages the
     # browser actually renders as banners, so this is our "seen" signal.
@@ -26644,6 +26847,9 @@ def dashboards_list():
 @login_required
 def dashboard_create():
     data = request.get_json(force=True) or {}
+    if data.get('is_public') and session.get('is_readonly'):
+        # A public link is readable with no sign-in at all (3.29.0).
+        return jsonify({'success': False, 'error': 'Read-only accounts can\'t publish a public dashboard.'}), 403
     name = (data.get('name') or 'My Dashboard').strip()
     slug = secrets.token_urlsafe(12) if data.get('is_public') else None
     db = get_db()
@@ -26699,6 +26905,9 @@ def dashboard_edit(dash_id):
         db.close()
         abort(403)
     data = request.get_json(force=True) or {}
+    if data.get('is_public') and not d['is_public'] and session.get('is_readonly'):
+        db.close()
+        return jsonify({'success': False, 'error': 'Read-only accounts can\'t publish a public dashboard.'}), 403
     slug = d['public_slug']
     if data.get('is_public') and not slug:
         slug = secrets.token_urlsafe(12)
