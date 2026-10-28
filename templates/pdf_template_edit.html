@@ -158,7 +158,8 @@ async function renamePdfTemplate(name) {
 }
 
 async function loadPdf() {
-  const pdf = await pdfjsLib.getDocument(PDF_URL).promise;
+  // isEvalSupported:false closes CVE-2024-4367 (script from a crafted font) in the bundled pdf.js 3.x.
+  const pdf = await pdfjsLib.getDocument({ url: PDF_URL, isEvalSupported: false }).promise;
   const container = document.getElementById('pdf-pages');
   container.innerHTML = '';
   _pages = [];

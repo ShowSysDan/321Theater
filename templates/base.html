@@ -1054,7 +1054,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeHelp();
         ? `<button onclick="dismissMsg(${m.id},this)" title="Dismiss this message" style="background:none;border:none;cursor:pointer;color:inherit;margin-left:auto;display:flex;align-items:center;gap:5px;padding:0;font-size:13px;font-weight:600;white-space:nowrap"><span style="color:#EF4444;font-size:18px;line-height:1" aria-hidden="true">×</span>Close</button>`
         : '';
       return `<div class="flash flash-${cls}" id="site-msg-${m.id}" style="display:flex;align-items:flex-start;gap:8px">
-        <div style="flex:1"><strong>${m.title}</strong>${m.body_html ? '<br><div style="margin-top:4px;font-size:12px">'+m.body_html+'</div>' : ''}</div>
+        <div style="flex:1"><strong>${String(m.title ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}</strong>${m.body_html ? '<br><div style="margin-top:4px;font-size:12px">'+m.body_html+'</div>' : ''}</div>
         ${dismissBtn}
       </div>`;
     }).join('');

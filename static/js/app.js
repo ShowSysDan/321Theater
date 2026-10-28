@@ -2975,7 +2975,8 @@ async function _renderPdfFillerPages() {
   const body = document.getElementById('pdf-filler-body');
   body.innerHTML = '<div class="pdf-filler-loading">Rendering PDF…</div>';
   await _ensurePdfJs();
-  const pdf = await pdfjsLib.getDocument(_pdfFillerState.pdf_url).promise;
+  // isEvalSupported:false closes CVE-2024-4367 (script from a crafted font) in the bundled pdf.js 3.x.
+  const pdf = await pdfjsLib.getDocument({ url: _pdfFillerState.pdf_url, isEvalSupported: false }).promise;
   body.innerHTML = '';
   const fieldsByPage = {};
   for (const f of _pdfFillerState.fields) {
@@ -3487,8 +3488,10 @@ function showMentionDropdown(query) {
   if (!matches.length) { hideMentionDropdown(); return; }
   dropdown.innerHTML = matches.map(u => {
     const color = _userColor(u.display_name || u.username);
-    return `<div class="mention-item" onclick="insertMention('${_esc(u.display_name || u.username)}')">
-      <span class="mention-avatar" style="background:${color}">${_initials(u.display_name || u.username)}</span>
+    // The name rides in a data attribute: an escaped value inside a quoted JS
+    // string in onclick is decoded back before the JS runs (3.29.0).
+    return `<div class="mention-item" data-mention="${_esc(u.display_name || u.username)}" onclick="insertMention(this.dataset.mention)">
+      <span class="mention-avatar" style="background:${_esc(color)}">${_esc(_initials(u.display_name || u.username))}</span>
       <span>${_esc(u.display_name || u.username)}</span>
     </div>`;
   }).join('');

@@ -1669,8 +1669,9 @@
         </div>
         <div class="field-group">
           <label class="field-label">PASSWORD</label>
-          <input type="password" id="smtp_pass" class="field-input" placeholder="••••••••"
-                 value="{{ smtp_settings.smtp_pass }}" autocomplete="off">
+          <input type="password" id="smtp_pass" class="field-input"
+                 placeholder="{{ 'Saved: leave blank to keep' if smtp_settings.smtp_pass_set else '••••••••' }}"
+                 value="" autocomplete="new-password">
         </div>
         <div class="field-group">
           <label class="field-label">FROM ADDRESS</label>
@@ -3146,7 +3147,9 @@ function _agRenderExtraContacts() {
   });
 }
 
-function _esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+function _esc(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 
 function agShowExtraContacts() {
   agAddExtraContact();
@@ -3945,7 +3948,7 @@ function godConnCell(u) {
   // amber for gateway (came in from the public internet), green for internal
   const bg = isGw ? 'rgba(245,127,32,.18)' : 'rgba(60,180,110,.16)';
   const fg = isGw ? '#F0A050' : '#5FB574';
-  const ip = u.last_conn_ip ? ` <span class="mono" style="opacity:.7">${u.last_conn_ip}</span>` : '';
+  const ip = u.last_conn_ip ? ` <span class="mono" style="opacity:.7">${_esc(u.last_conn_ip)}</span>` : '';
   const when = u.last_conn_at ? ` · ${fmtDate(u.last_conn_at)}` : '';
   return `<span style="display:inline-block;padding:1px 6px;border-radius:4px;`
        + `background:${bg};color:${fg};font-size:10px;font-weight:600">${label}</span>${ip}${when}`;
@@ -3964,9 +3967,9 @@ async function loadGodMode() {
       } else {
         sessEl.innerHTML = `<table class="data-table"><thead><tr><th>USER</th><th>SHOW</th><th>TAB</th><th>LAST SEEN</th></tr></thead><tbody>` +
           data.sessions.map(s => `<tr>
-            <td>${s.user}</td>
-            <td><a href="/shows/${s.show_id}" style="color:var(--accent)">${s.show}</a></td>
-            <td><span class="field-type-badge">${s.tab}</span></td>
+            <td>${_esc(s.user)}</td>
+            <td><a href="/shows/${encodeURIComponent(s.show_id)}" style="color:var(--accent)">${_esc(s.show)}</a></td>
+            <td><span class="field-type-badge">${_esc(s.tab)}</span></td>
             <td class="text-dim" style="font-size:11px">${fmtDate(s.last_seen)}</td>
           </tr>`).join('') +
           '</tbody></table>';
@@ -3977,9 +3980,9 @@ async function loadGodMode() {
     const tbody = document.querySelector('#god-users-table tbody');
     if (tbody && data.users) {
       tbody.innerHTML = data.users.map(u => `<tr>
-        <td>${u.name}</td>
-        <td class="mono text-sm">${u.username}</td>
-        <td><span class="role-badge role-${u.role}">${u.role.toUpperCase()}</span></td>
+        <td>${_esc(u.name)}</td>
+        <td class="mono text-sm">${_esc(u.username)}</td>
+        <td><span class="role-badge role-${_esc(u.role)}">${_esc(String(u.role || '').toUpperCase())}</span></td>
         <td class="text-dim" style="font-size:11px">${fmtDate(u.last_login)}</td>
         <td class="text-dim" style="font-size:11px">${godConnCell(u)}</td>
       </tr>`).join('');
@@ -4143,7 +4146,7 @@ async function loadFileManager() {
     el.innerHTML = `<table class="data-table"><thead><tr><th>SHOW</th><th>TYPE</th><th>FILE</th><th>SIZE</th><th>STORED IN</th><th>UPLOADED BY</th><th>DATE</th><th></th></tr></thead><tbody>` +
       data.files.map(f => {
         const archivedBadge = f.archived
-          ? ` <span class="badge" title="Archived${f.archived_by ? ' by ' + f.archived_by : ''}${f.archived_at ? ' · ' + fmtDate(f.archived_at) : ''}" style="background:rgba(240,78,35,.12);color:#f04e23;border:1px solid rgba(240,78,35,.35);font-size:10px;padding:1px 6px;border-radius:99px">ARCHIVED</span>`
+          ? ` <span class="badge" title="Archived${f.archived_by ? ' by ' + _esc(f.archived_by) : ''}${f.archived_at ? ' · ' + fmtDate(f.archived_at) : ''}" style="background:rgba(240,78,35,.12);color:#f04e23;border:1px solid rgba(240,78,35,.35);font-size:10px;padding:1px 6px;border-radius:99px">ARCHIVED</span>`
           : '';
         let actions = '';
         if (f.archived) {
@@ -4153,12 +4156,12 @@ async function loadFileManager() {
           actions = `<button class="btn btn-xs btn-danger-ghost" onclick="adminDeleteFile('${f.delete_url}',this)" title="Archive (soft delete)">×</button>`;
         }
         return `<tr${f.archived ? ' style="opacity:.75"' : ''}>
-        <td style="font-size:11px">${f.show_id ? `<a href="/shows/${f.show_id}" style="color:var(--accent)">${f.show_name}</a>` : `<span class="text-dim">${f.show_name}</span>`}</td>
-        <td style="font-size:11px" class="text-dim">${typeLabel[f.file_type] || f.file_type}</td>
-        <td style="font-size:11px">${f.download_url ? `<a href="${f.download_url}">${f.filename}</a>` : f.filename}${archivedBadge}</td>
+        <td style="font-size:11px">${f.show_id ? `<a href="/shows/${encodeURIComponent(f.show_id)}" style="color:var(--accent)">${_esc(f.show_name)}</a>` : `<span class="text-dim">${_esc(f.show_name)}</span>`}</td>
+        <td style="font-size:11px" class="text-dim">${_esc(typeLabel[f.file_type] || f.file_type)}</td>
+        <td style="font-size:11px">${f.download_url ? `<a href="${_esc(f.download_url)}">${_esc(f.filename)}</a>` : _esc(f.filename)}${archivedBadge}</td>
         <td style="font-size:11px" class="text-dim">${_fmtBytes(f.file_size)}</td>
-        <td style="font-size:11px" class="text-dim" title="Where this file's bytes are stored (Database → File Redundancy)">${f.stored_in || '—'}</td>
-        <td style="font-size:11px">${f.uploader}</td>
+        <td style="font-size:11px" class="text-dim" title="Where this file's bytes are stored (Database → File Redundancy)">${_esc(f.stored_in) || '—'}</td>
+        <td style="font-size:11px">${_esc(f.uploader)}</td>
         <td style="font-size:11px" class="text-dim">${fmtDate(f.created_at)}</td>
         <td style="white-space:nowrap">${actions}</td>
       </tr>`;
@@ -5438,10 +5441,10 @@ async function loadPendingRegs() {
   }
   tbody.innerHTML = rows.map(r => `
     <tr id="reg-row-${r.id}">
-      <td class="mono">${r.username}</td>
-      <td>${r.display_name || '—'}</td>
-      <td class="text-sm">${r.email}</td>
-      <td class="text-dim text-sm">${(r.created_at||'').slice(0,10) || '—'}</td>
+      <td class="mono">${_esc(r.username)}</td>
+      <td>${_esc(r.display_name) || '—'}</td>
+      <td class="text-sm">${_esc(r.email)}</td>
+      <td class="text-dim text-sm">${_esc(String(r.created_at||'').slice(0,10)) || '—'}</td>
       <td>${r.email_confirmed ? '<span style="color:#22C55E">✓ Yes</span>' : '<span style="color:#FBBF24">Pending</span>'}</td>
       <td>
         <div class="action-btns">

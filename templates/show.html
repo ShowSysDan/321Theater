@@ -83,7 +83,8 @@
       </div>
       <div class="adv-pdf-form-actions">
         <button type="button" class="btn btn-sm btn-primary"
-                onclick="openPdfFormFiller('{{ field.field_key }}', '{{ field.label|e }}')"
+                data-field-key="{{ field.field_key }}" data-field-label="{{ field.label }}"
+                onclick="openPdfFormFiller(this.dataset.fieldKey, this.dataset.fieldLabel)"
                 {% if not field.pdf_template_id %}disabled title="No PDF template bound — pick one in Settings → Form Fields"{% endif %}>
           {% if _pf_status %}Edit form →{% else %}Fill out form →{% endif %}
         </button>
