@@ -775,6 +775,12 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   (`handle` before `respond`), so a bare `respond @blocked 404` next to a
   catch-all `handle` never runs. Verify edge changes with `caddy adapt`
   (route order) and a live Caddy, not by reading the file.
+- **Caddy is SHARED (3.28.0)** with glow.lighting on cyclorama. Main
+  `/etc/caddy/Caddyfile` = global options + `import /etc/caddy/sites.d/*.caddy`;
+  321T owns ONLY `sites.d/321theater.caddy`. install.sh must never rewrite the
+  main Caddyfile wholesale or touch another app's file, must `caddy validate`
+  the whole config before reloading, and restores its files if Caddy rejects
+  them. `--rewrite-caddy` regenerates only `321theater.caddy`.
 - The offline page (`gateway/offline/unavailable.html`) is served by CADDY
   (`handle_errors`) so it works with the gateway down: keep it
   self-contained (inline CSS/logo, no script) and branded; it must never
