@@ -2501,3 +2501,10 @@ li.hist-mod s, li.hist-del s { opacity: .7; }
 .sched-import-mode { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .sched-toolbar-tip { font-size: 11px; margin-right: auto; align-self: center; }
 .sched-toolbar-tip code { font-family: var(--font-mono, monospace); font-size: 11px; }
+/* Dark days (3.31.0) */
+.sched-dark-toggle { display: inline-flex; align-items: center; gap: 5px; margin-left: 12px; font-size: 11px;
+  font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text-dim); cursor: pointer; white-space: nowrap; }
+.sched-day-dark .schedule-table { opacity: .45; }
+.sched-day-tab-dark { opacity: .6; }
+.sched-dark-tag { font-weight: 600; }
+.sched-dark-note { margin: 0; padding: 8px 14px; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); }

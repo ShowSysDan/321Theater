@@ -300,3 +300,4 @@ html.mobile-view .sched-tool-modal .modal-card { width: 100% !important; max-wid
 html.mobile-view .sched-import-day-head { flex-direction: column; align-items: stretch; }
 html.mobile-view .sched-import-target select { width: 100%; }
 html.mobile-view .sched-conflict-actions .btn { flex: 1 1 auto; }
+html.mobile-view .sched-dark-toggle { margin-left: 0; flex-basis: 100%; padding: 4px 0; }

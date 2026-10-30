@@ -904,6 +904,14 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
         TIMELINE{% if d.orphan %} — OFF-DATE: {{ d.perf_date }}{% elif schedule_days | length > 1 %} — DAY {{ d.day_num }}{% if d.perf_date %}: {{ d.perf_date }}{% endif %}{% endif %}
         {% set _times = d.perfs | selectattr('perf_time') | map(attribute='perf_time') | list %}
         {% if _times %} <span class="text-dim" style="font-weight:400">({% for t in _times %}{{ t | hhmm }}{% if not loop.last %}, {% endif %}{% endfor %})</span>{% endif %}
+        {% if schedule_days | length > 1 and d.perf_date and not d.orphan %}
+        {# Dark day (3.31.0): left off the schedule PDF. Saved as schedule meta. #}
+        <label class="sched-dark-toggle" title="Leave this day off the printed production schedule">
+          <input type="checkbox" class="sched-meta sched-dark" data-key="dark_day:{{ d.date_key }}"
+                 {% if schedule_meta.get('dark_day:' ~ d.date_key) == '1' %}checked{% endif %}
+                 {% if restricted %}disabled{% endif %}> Dark day — omit from print
+        </label>
+        {% endif %}
         {% if not restricted %}
         <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-wrap:wrap">
           {# Apply template dropdown #}

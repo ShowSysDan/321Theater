@@ -889,7 +889,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.30.0'
+APP_VERSION = '3.31.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -4458,6 +4458,33 @@ def _build_schedule_days(db, show_id, show_row=None, include_orphans=False):
     return performances, schedule_days
 
 
+# A day of a multi-day run can be marked DARK on the Schedule tab (3.31.0):
+# the schedule PDF leaves it out instead of printing an empty header. Stored
+# as schedule_meta `dark_day:<YYYY-MM-DD>` = '1', so it saves through the
+# editor's normal (revision-checked, changed-keys-only) meta path and lands
+# in History like any other schedule field.
+DARK_DAY_PREFIX = 'dark_day:'
+
+
+def _dark_day_dates(meta):
+    """{iso date} marked dark in a schedule_meta dict."""
+    return {k[len(DARK_DAY_PREFIX):] for k, v in (meta or {}).items()
+            if k.startswith(DARK_DAY_PREFIX) and str(v or '').strip() == '1'}
+
+
+def _sched_meta_label(key, labels):
+    if key.startswith(DARK_DAY_PREFIX):
+        d = _as_date(key[len(DARK_DAY_PREFIX):])
+        return f'Dark day {d.month}/{d.day}' if d else 'Dark day'
+    return labels.get(key) or key.replace('_', ' ').title()
+
+
+def _sched_meta_value(key, value):
+    if key.startswith(DARK_DAY_PREFIX):
+        return 'Dark (left off the PDF)' if str(value or '').strip() == '1' else ''
+    return str(value or '').strip()
+
+
 def _schedule_rows_for_editor(rows, schedule_days):
     """Schedule rows as the editor template groups them. A legacy row (no
     day_date) whose performance was deleted is handed to the first day like
@@ -7138,9 +7165,9 @@ def _schedule_diff(old, new, perf_dates, meta_labels):
     meta = []
     om, nm = old.get('meta') or {}, new.get('meta') or {}
     for k in sorted(set(om) | set(nm)):
-        a, b = str(om.get(k) or '').strip(), str(nm.get(k) or '').strip()
+        a, b = _sched_meta_value(k, om.get(k)), _sched_meta_value(k, nm.get(k))
         if a != b and k in nm:
-            meta.append({'key': k, 'label': meta_labels.get(k) or k.replace('_', ' ').title(),
+            meta.append({'key': k, 'label': _sched_meta_label(k, meta_labels),
                          'before': a, 'after': b})
     rows_before = sum(len(v) for v in old_days.values())
     rows_after = sum(len(v) for v in new_days.values())
@@ -7299,8 +7326,8 @@ def history_snapshot(show_id, hist_id):
         by_day = _hist_rows_by_day(data.get('rows'), perf_dates)
         out['days'] = [{'day': k, 'label': _hist_day_label(k), 'rows': by_day[k]}
                        for k in sorted(by_day, key=lambda k: (k == '', k))]
-        out['meta'] = [{'label': labels.get(k) or k.replace('_', ' ').title(), 'value': v}
-                       for k, v in sorted((data.get('meta') or {}).items()) if str(v or '').strip()]
+        out['meta'] = [{'label': _sched_meta_label(k, labels), 'value': _sched_meta_value(k, v)}
+                       for k, v in sorted((data.get('meta') or {}).items()) if _sched_meta_value(k, v)]
     else:
         flat = data.get('advance_data') or data.get('notes_data') or {}
         out['fields'] = sorted(
@@ -8169,7 +8196,12 @@ def schedule_state(show_id):
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
     _, schedule_days = _build_schedule_days(db, show_id, show, include_orphans=True)
+    dark = _dark_day_dates({r['field_key']: r['field_value'] for r in db.execute(
+        'SELECT field_key, field_value FROM schedule_meta WHERE show_id=%s AND field_key LIKE %s',
+        (show_id, DARK_DAY_PREFIX + '%')).fetchall()})
     db.close()
+    for d in schedule_days:
+        d['dark'] = d['date_key'] in dark
     return jsonify({'success': True, 'schedule_days': schedule_days})
 
 
@@ -8296,6 +8328,10 @@ def show_heartbeat(show_id):
 
     _upsert_active_session(db, session['user_id'], show_id, tab, focused_field)
     others = _get_other_active_users(db, session['user_id'], show_id)
+    # Schedule tab (3.31.0): the rows' revision, so a tab whose copy went stale
+    # — including the SAME person's other tab, which the last_saved_by banner
+    # deliberately ignores — is told to reload before anyone types into it.
+    sched_rev = _schedule_rev(db, show_id)[0] if tab == 'schedule' else None
 
     db.commit()
     db.close()
@@ -8305,6 +8341,7 @@ def show_heartbeat(show_id):
         'last_saved_by': show['last_saved_by'],
         'last_saved_at': _ts_out(show['last_saved_at']),
         'attachments_rev': _attachments_rev_from(show),
+        'schedule_rev': sched_rev,
     })
 
 
@@ -9062,6 +9099,16 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
         schedule_days = [{'perf': {'perf_date': show['show_date'], 'perf_time': show['show_time']},
                           'rows': rows_by_perf.get(None, []), 'day_num': 1}]
 
+    # Days marked dark on the Schedule tab are left off (they keep their Day
+    # number, so the gap shows). Never drop every day.
+    run_days = len(schedule_days)
+    dark = _dark_day_dates(schedule_meta)
+    if dark:
+        lit = [d for d in schedule_days if _iso_pdf(d['perf'].get('perf_date')) not in dark]
+        if lit:
+            schedule_days = lit
+    dark_count = run_days - len(schedule_days)
+
     # Crew call times — unique in_times from labor_requests, sorted. Training /
     # shadow shifts are excluded so they never surface on show paperwork.
     labor_in_times = db.execute(
@@ -9083,6 +9130,8 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
                                show_dates=show_dates,
                                sched_fit=fit or {},
                                schedule_days=schedule_days,
+                               run_days=run_days,
+                               dark_count=dark_count,
                                schedule_meta=schedule_meta,
                                sched_meta_fields=get_schedule_meta_fields(),
                                advance_data=advance_data,

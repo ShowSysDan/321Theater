@@ -364,6 +364,14 @@ Two user-reported "schedule cleared itself" bugs came from that:
   100. List/diff/restore summaries are server-computed (`_schedule_diff`,
   `_fields_diff`); restore re-applies advance scalar columns via
   `_advance_show_sets()` and records a version with a `note`.
+- **Dark days (3.31.0):** schedule_meta `dark_day:<YYYY-MM-DD>`='1' (header
+  checkbox `.sched-dark`, a `.sched-meta` checkbox — collectScheduleData
+  sends '1'/''). `_dark_day_dates()` drops those days from the schedule PDF
+  only (Day numbers kept; never drop every day); `/schedule-state` returns
+  `dark` per day. History labels via `_sched_meta_label/_value`.
+- The heartbeat returns `schedule_rev` on the Schedule tab so a stale tab
+  (incl. the same user's other tab — the last_saved_by banner ignores own
+  saves) is told to reload early. The 409 stays the real guard.
 - **Next-day times:** `1+00:30` = 00:30 the day after the row's day (the
   editor normalizes `+0030` / `24:30` to it — `_schedParseTime`). Sorts via
   `_schedTimeKey` (JS) / `_hhmm_minutes` (piano placement) past 24:00; every

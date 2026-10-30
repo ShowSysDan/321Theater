@@ -171,7 +171,8 @@
              else [show.show_date or (schedule_days[0].perf.perf_date if schedule_days else None)] %}
         {% set _hdr_text = _hdr_dates | showdates %}
         {% if _hdr_text %}{% if show.venue %} &nbsp;·&nbsp; {% endif %}<strong>{{ _hdr_text }}</strong>{% endif %}
-        {% if schedule_days | length > 1 %} &nbsp;·&nbsp; {{ schedule_days | length }} days{% endif %}
+        {% set _run = run_days if run_days is defined else schedule_days | length %}
+        {% if _run > 1 %} &nbsp;·&nbsp; {{ _run }} days{% if dark_count is defined and dark_count %} ({{ dark_count }} dark){% endif %}{% endif %}
       </div>
       <div class="doc-org">Dr. Phillips Center for the Performing Arts</div>
     </div>
@@ -196,7 +197,7 @@
     {% set _cz = (_fit.get('levels') or {}).get(_di, 0) %}
     <table class="sched-table{% if _cz %} cz-{{ _cz }}{% endif %}{% if _di in (_fit.get('breaks') or []) %} pb-before{% endif %}" data-sched-day="{{ _di }}" style="font-size: {{ layout.font_size('sched_table', '8.5pt') }}">
       <thead>
-        {% if layout.visible('day_banner') and schedule_days | length > 1 %}
+        {% if layout.visible('day_banner') and (run_days if run_days is defined else schedule_days | length) > 1 %}
         {# The banner heading is the calendar date itself ("Monday - June 14th
            2026"); "Day N" moves to the right-hand slot so the run count is
            still visible. Dateless days fall back to the old "Day N" heading. #}

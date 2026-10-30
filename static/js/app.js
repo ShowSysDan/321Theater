@@ -192,6 +192,7 @@ function _checkAttachmentsRev(rev) {
  */
 async function _pollHeartbeat() {
   if (!SHOW_ID) return;
+  const revAtSend = window.SCHED_REV;
   try {
     const resp = await fetch(`/shows/${SHOW_ID}/heartbeat`, {
       method: 'POST',
@@ -207,6 +208,15 @@ async function _pollHeartbeat() {
       _showOtherSavedBanner(d.last_saved_at);
     }
     _checkAttachmentsRev(d.attachments_rev);
+    // Saved schedule rows moved on without this page (another person, or this
+    // person in another tab): say so before they type into a stale copy. A
+    // save of ours that landed mid-poll changes SCHED_REV — skip that poll.
+    if (activeTab === 'schedule' && d.schedule_rev && revAtSend &&
+        window.SCHED_REV === revAtSend && d.schedule_rev !== revAtSend &&
+        !_schedSaving && !_schedConflict && typeof _schedShowBanner === 'function' &&
+        !document.getElementById('sched-conflict-banner')) {
+      _schedShowBanner('stale', d);
+    }
   } catch (_) {}
 }
 
@@ -972,9 +982,11 @@ function bindScheduleForm() {
   if (!form) return;
   _schedInitBaseline();
   form.addEventListener('change', (e) => {
+    if (e.target.classList && e.target.classList.contains('sched-dark')) _applyDarkDays();
     _maybeAutoSortAfterEdit(e.target);
     scheduleSave();
   });
+  _applyDarkDays();
   form.addEventListener('input',  () => scheduleSave());
   // Auto-insert colon on blur for start/end time cells
   form.addEventListener('blur', (e) => {
@@ -1221,6 +1233,39 @@ function _renderScheduleDays(days) {
 
   _syncDayTabs(form, days);
   _syncCopyDropdowns(days);
+  _applyDarkDays();
+}
+
+/* Dark days (3.31.0): dim the pane, mark its tab, warn when it has rows
+   (they won't print). Runs on load, after structure syncs and on toggle. */
+function _applyDarkDays() {
+  document.querySelectorAll('#schedule-form .sched-day-pane').forEach(pane => {
+    const cb = pane.querySelector('.sched-dark');
+    const dark = !!(cb && cb.checked);
+    pane.classList.toggle('sched-day-dark', dark);
+    const key = pane.dataset.dayKey;
+    const tab = key ? document.querySelector(`.sched-day-tab[data-day-key="${CSS.escape(key)}"]`) : null;
+    if (tab) {
+      tab.classList.toggle('sched-day-tab-dark', dark);
+      let tag = tab.querySelector('.sched-dark-tag');
+      if (dark && !tag) {
+        tag = document.createElement('span');
+        tag.className = 'sched-dark-tag';
+        tag.textContent = ' · DARK';
+        tab.appendChild(tag);
+      } else if (!dark && tag) tag.remove();
+    }
+    let note = pane.querySelector('.sched-dark-note');
+    const hasRows = !!pane.querySelector('.schedule-row');
+    if (dark && hasRows) {
+      if (!note) {
+        note = document.createElement('div');
+        note.className = 'sched-dark-note';
+        note.textContent = 'Dark day: this day and its rows are left off the printed schedule.';
+        pane.querySelector('.form-section-header')?.insertAdjacentElement('afterend', note);
+      }
+    } else if (note) note.remove();
+  });
 }
 
 function _buildPaneHeader(d, dayNum, totalDays) {
@@ -1259,10 +1304,16 @@ function _buildPaneHeader(d, dayNum, totalDays) {
         <button type="button" class="btn btn-sm btn-ghost" onclick='addScheduleRow(${keyArg})'>+ Add Row</button>
       </div>`;
   }
+  const dark = (totalDays > 1 && d.perf_date && !d.orphan) ? `
+      <label class="sched-dark-toggle" title="Leave this day off the printed production schedule">
+        <input type="checkbox" class="sched-meta sched-dark" data-key="dark_day:${_esc(d.date_key)}"
+               ${d.dark ? 'checked' : ''} ${RESTRICTED ? 'disabled' : ''}> Dark day — omit from print
+      </label>` : '';
   return `
     <div class="form-section-header">
       <span class="section-icon">◈</span>
       TIMELINE${dateLabel}${timesLabel}
+      ${dark}
       ${actions}
     </div>`;
 }
@@ -1271,6 +1322,8 @@ function _updateDayPaneHeader(pane, d, dayNum, totalDays) {
   const header = pane.querySelector('.form-section-header');
   if (!header) return;
   _setOrphanNote(pane, d);
+  const cur = header.querySelector('.sched-dark');
+  if (cur) d = Object.assign({}, d, {dark: cur.checked});
   const tmp = document.createElement('div');
   tmp.innerHTML = _buildPaneHeader(d, dayNum, totalDays).trim();
   const fresh = tmp.firstElementChild;
@@ -1837,7 +1890,7 @@ function collectScheduleData() {
   const meta = {};
   document.querySelectorAll('#schedule-form .sched-meta').forEach(el => {
     const key = el.dataset.key;
-    if (key) meta[key] = el.value;
+    if (key) meta[key] = el.type === 'checkbox' ? (el.checked ? '1' : '') : el.value;
   });
   const rows = [];
   // Collect all day panes (multi-day or single legacy)
@@ -1917,6 +1970,15 @@ function _schedShowBanner(kind, info) {
         <button type="button" class="btn btn-sm btn-primary" data-act="reload">Reload (get their version)</button>
         <button type="button" class="btn btn-sm btn-ghost" data-act="history">View history</button>
         <button type="button" class="btn btn-sm btn-danger" data-act="force">Keep mine (overwrite)</button>
+      </div>`;
+  } else if (kind === 'stale') {
+    div.innerHTML = `
+      <div><strong>This production schedule was changed somewhere else</strong> (another person, or
+        you in another tab) after this page loaded. Reload before editing — edits made here to the
+        rows won't be saved over the newer version.</div>
+      <div class="sched-conflict-actions">
+        <button type="button" class="btn btn-sm btn-primary" data-act="reload">Reload</button>
+        <button type="button" class="btn btn-sm btn-ghost" data-act="history">View history</button>
       </div>`;
   } else {
     div.innerHTML = `
