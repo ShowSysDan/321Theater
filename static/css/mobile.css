@@ -292,3 +292,11 @@ html.mobile-view .email-log-filters > * { flex: 1 1 100%; }
 html.mobile-view .email-log-filters label input { flex: 1; }
 html.mobile-view .email-resend-row { flex-direction: column; }
 html.mobile-view .email-preview-frame { height: 380px; }
+
+/* Version history + schedule tools (3.30.0) */
+html.mobile-view .sched-toolbar { justify-content: stretch; }
+html.mobile-view .sched-toolbar .btn { flex: 1 1 auto; }
+html.mobile-view .sched-tool-modal .modal-card { width: 100% !important; max-width: 100vw; }
+html.mobile-view .sched-import-day-head { flex-direction: column; align-items: stretch; }
+html.mobile-view .sched-import-target select { width: 100%; }
+html.mobile-view .sched-conflict-actions .btn { flex: 1 1 auto; }

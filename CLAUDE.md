@@ -341,6 +341,37 @@ apps. For a 321Theater access change, use this app's own flags instead
   post and again by `delete_user`); readers LEFT JOIN users and fall back to
   `author_name`. Never go back to CASCADE.
 
+## Production schedule editor — data-loss guards (3.30.0) — keep all of them
+`save_schedule` rebuilds `schedule_rows` wholesale from what the editor
+posts, so anything the editor doesn't RENDER gets deleted by the next save.
+Two user-reported "schedule cleared itself" bugs came from that:
+- **Off-date rows:** `_build_schedule_days(..., include_orphans=True)` (show
+  page + `/schedule-state`) adds an `orphan` day for every date that still
+  has non-piano rows but left the load range / performances; the editor
+  shows it as ⚠ OFF-DATE. `_schedule_rows_for_editor()` hands legacy rows
+  whose performance was deleted to the first day. JS `_renderScheduleDays`
+  keeps any local pane that still holds rows. Never filter rows out of the
+  editor render again.
+- **Stale tabs:** the page carries `SCHED_REV` (`_schedule_rev()`: md5 of the
+  non-piano rows — piano sync must not change it); row posts send `base_rev`
+  and the server 409s (`SCHEDULE_SAVE_CONFLICT`) unless `force`. The client
+  posts `rows` only when they differ from its baseline and meta keys only
+  when edited; an all-empty row set needs `allow_clear` (client confirms).
+  Old clients without `base_rev` are still accepted.
+- History versions are built from the DB (`_schedule_state_snapshot`), not
+  the request. `_snapshot_form_history()` skips identical saves, groups one
+  user's saves within 10 min, never groups a save that removes content, keeps
+  100. List/diff/restore summaries are server-computed (`_schedule_diff`,
+  `_fields_diff`); restore re-applies advance scalar columns via
+  `_advance_show_sets()` and records a version with a `note`.
+- **Next-day times:** `1+00:30` = 00:30 the day after the row's day (the
+  editor normalizes `+0030` / `24:30` to it — `_schedParseTime`). Sorts via
+  `_schedTimeKey` (JS) / `_hhmm_minutes` (piano placement) past 24:00; every
+  display of schedule times uses the `schedtime(day[, dual])` filter (prints
+  `3/2 00:30`), never raw `dualtime` — add it to any new surface.
+- Import-from-show and save-as-template are editor-side (DOM), written by the
+  normal checked autosave — don't add a server-side schedule write path.
+
 ## Production schedule PDF is page-aware (3.6.0, 3.6.1)
 - `_fit_schedule_pdf()` lays the schedule out with WeasyPrint, reads which
   page every day/row landed on from the box tree (`<table data-sched-day>`,
@@ -475,12 +506,17 @@ apps. For a 321Theater access change, use this app's own flags instead
   on-bar text in the templates must go through `C1_ON` / `C1_ON_SOFT` so the
   setting reaches it. Blank keeps today's automatic output byte-identical.
 
-## Optional feature modules (`APP_MODULES` + Settings → System → Modules)
+## Optional feature modules (`APP_MODULES` + Settings → Modules)
 - `APP_MODULES` registry + `module_enabled(key)` in app.py; flags live in
   `app_settings` as `module_<key>_enabled` ('1'/'0', missing = the entry's
   default), toggled at runtime by an admin (`GET/POST /settings/modules`,
   syslog `MODULE_TOGGLE`) — no restart, all instances. A disabled module's
   routes 404 (checked per request) and its UI hides; data is always kept.
+- Settings → **Modules** is a top-level tab (3.30.0; God Mode sits beside
+  Audit Log the same way): each entry's `settings_endpoint` gives an "Open
+  settings →" child page (Piano Tuning, Spot); `APP_INTEGRATIONS` lists
+  non-toggle integrations (Prism) the same way. A new module with its own
+  page sets `settings_endpoint`, and that page links back to `/settings#modules`.
 - First module: **Security Sign-In Sheets** (`security_module.py`, 2.41.0;
   key `security_signin`, default ON). Sandboxed like Prism/Snapshots: one
   `register(app, **deps)` call, owns only `security_signin_names` (included

@@ -28,7 +28,7 @@ SANDBOX RULES (mirrors prism_module / snapshot_module):
   * app.py's only knowledge of it is one `register(app, **deps)` call, the
     module-enabled flag it reads through the injected `module_enabled`, and
     the show-page Security tab + export card (both gated on that flag).
-  * The whole feature is toggleable in Settings → System → Modules
+  * The whole feature is toggleable in Settings → Modules
     (app_settings key `module_security_signin_enabled`). When disabled every
     route here 404s and the show-page tab/card disappear.
 

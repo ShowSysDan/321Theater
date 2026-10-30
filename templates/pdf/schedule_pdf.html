@@ -216,8 +216,8 @@
         {% for row in day.rows %}
         {% if row.description or row.start_time %}
         <tr data-sched-row="{{ _di }}-{{ loop.index }}">
-          <td class="time-col">{{ row.start_time | dualtime }}</td>
-          <td class="time-col">{{ row.end_time | dualtime }}</td>
+          <td class="time-col">{{ row.start_time | schedtime(day.perf.perf_date) }}</td>
+          <td class="time-col">{{ row.end_time | schedtime(day.perf.perf_date) }}</td>
           <td class="desc-col">{{ row.description or '' }}</td>
           <td class="notes-col">{{ row.notes or '' }}</td>
         </tr>

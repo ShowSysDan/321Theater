@@ -715,6 +715,47 @@ def dualtime_filter(value):
     return Markup(f'{h:02d}:{m:02d} <span class="t12">({h12}:{m:02d} {ampm})</span>')
 
 
+# Next-day times on a production schedule (3.30.0): a long show day's
+# after-midnight items stay on that day's timeline, typed "1+00:30" (the
+# editor also turns "+0030" / "24:30" into that). They sort after 23:59 and
+# print with the real date ("3/2 00:30") — no extra schedule day needed.
+_SCHED_NEXT_DAY_RE = re.compile(r'^\s*(\d)?\s*\+\s*(\d{1,2}:?\d{2})\s*$')
+
+
+def _sched_time_offset(value):
+    """'1+00:30' → (1, '00:30'); '+0030' → (1, '0030'); '24:30' → (1, '00:30');
+    anything else → (0, value)."""
+    s = value if isinstance(value, str) else ('' if value is None else str(value))
+    m = _SCHED_NEXT_DAY_RE.match(s)
+    if m:
+        return int(m.group(1) or 1), m.group(2)
+    m = re.match(r'^\s*(\d{2}):(\d{2})\s*$', s)
+    if m and 24 <= int(m.group(1)) < 48 and int(m.group(2)) < 60:
+        return 1, f'{int(m.group(1)) - 24:02d}:{m.group(2)}'
+    return 0, value
+
+
+@app.template_filter('schedtime')
+def schedtime_filter(value, day=None, dual=True):
+    """A production-schedule time for display. Same-day times are `dualtime`
+    (paperwork) or as typed (dual=False, screens); a next-day time gets the
+    real date in front — '3/2 00:30' — or 'next day' when the row's day has
+    no date."""
+    off, t = _sched_time_offset(value)
+    if not off:
+        return dualtime_filter(value) if dual else (value or '')
+    d = _as_date(day)
+    if d:
+        nd = d + timedelta(days=off)
+        prefix = f'{nd.month}/{nd.day}'
+    else:
+        prefix = 'next day' if off == 1 else f'+{off} days'
+    parsed = _parse_24h_time(t)
+    clean = f'{parsed[0]:02d}:{parsed[1]:02d}' if parsed else t
+    inner = dualtime_filter(clean) if dual else clean
+    return Markup('{} ').format(prefix) + Markup.escape(inner)
+
+
 @app.template_filter('dowdate')
 def dowdate_filter(value):
     """Format a date value for printed paperwork WITH its weekday name, e.g. a
@@ -848,7 +889,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.29.0'
+APP_VERSION = '3.30.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1068,7 +1109,7 @@ def get_app_setting(key, default=''):
         return default
 
 
-# ─── Optional feature modules (Settings → System → Modules) ──────────────────
+# ─── Optional feature modules (Settings → Modules) ──────────────────
 # Registry of the sandboxed feature modules an admin can switch on/off at
 # runtime. Each entry's flag lives in app_settings as
 # `module_<key>_enabled` ('1'/'0'; missing key = the entry's default), so a
@@ -1081,6 +1122,7 @@ APP_MODULES = [
         'description': 'Per-show personnel list that prints as the sign-in '
                        'sheet at the security desk (show page → Export & Files).',
         'default': '1',
+        'settings_endpoint': None,      # lives on each show page
     },
     {
         'key': 'piano_tuning',
@@ -1090,6 +1132,7 @@ APP_MODULES = [
                        'schedules them onto the production schedule and adds '
                        'the cost to the show settlement.',
         'default': '1',
+        'settings_endpoint': 'piano_tuning_page',
     },
     {
         'key': 'spot',
@@ -1097,8 +1140,21 @@ APP_MODULES = [
         'description': 'After each performance, pulls the dB levels from Spot '
                        'for the venue\'s linked sensors into the Post Show tab '
                        'and files Spot\'s PDF report under the show\'s Files. '
-                       'Set up in Settings → Spot.',
+                       'Set up on its settings page.',
         'default': '0',
+        'settings_endpoint': 'spot_settings_page',
+    },
+]
+
+# Integrations that show under Settings → Modules beside the switchable
+# modules (3.30.0) but have their own on/off on their page.
+APP_INTEGRATIONS = [
+    {
+        'key': 'prism',
+        'name': 'Prism Sync',
+        'description': 'Pulls the building schedule from Prism FM into a staging '
+                       'area for import. Enabled / disabled on its own page.',
+        'settings_endpoint': 'prism_page',
     },
 ]
 
@@ -4313,13 +4369,20 @@ def _show_span_dates(db, show_row):
     return dates
 
 
-def _build_schedule_days(db, show_id, show_row=None):
+def _build_schedule_days(db, show_id, show_row=None, include_orphans=False):
     """
     Build the canonical list of schedule "days" for a show: one entry per
     calendar date that has either a performance or falls inside the
     load-in → load-out window. Used by both view_show() (Jinja render)
     and the JSON sync endpoint that lets the Schedule tab pick up newly
     added performances without a full page reload.
+
+    include_orphans (the editor's callers): also add a day, flagged
+    `orphan`, for every date that still holds schedule rows but is no longer
+    a performance date or inside the load range (3.30.0). The editor posts
+    back only the rows it rendered, so a row on a date that left the range
+    used to be invisible and was deleted by the next autosave — a year typo
+    on load-in wiped the whole schedule that way.
     """
     if show_row is None:
         show_row = db.execute('SELECT * FROM shows WHERE id = %s', (show_id,)).fetchone()
@@ -4366,16 +4429,89 @@ def _build_schedule_days(db, show_id, show_row=None):
                 'perf_ids': [],
             })
 
+    if include_orphans:
+        for r in db.execute(
+                "SELECT DISTINCT day_date FROM schedule_rows WHERE show_id=%s "
+                "AND day_date IS NOT NULL AND piano_tuning_id IS NULL",
+                (show_id,)).fetchall():
+            _k = _as_date(r['day_date'])
+            _k = _k.isoformat() if _k else None
+            if _k and _k not in _date_to_idx:
+                _date_to_idx[_k] = len(schedule_days)
+                schedule_days.append({'perf_date': _k, 'date_key': _k,
+                                      'perfs': [], 'perf_ids': [], 'orphan': True})
+
     def _sort_key(d):
         pd = d.get('perf_date')
         return (0, pd) if pd else (1, d.get('date_key') or '')
     schedule_days.sort(key=_sort_key)
 
+    day_num = 0
     for d in schedule_days:
         d['primary_perf_id'] = d['perf_ids'][0] if d['perf_ids'] else None
         if not d.get('date_key'):
             d['date_key'] = d.get('perf_date') or f"__null_{d['primary_perf_id']}"
+        d['orphan'] = bool(d.get('orphan'))
+        if not d['orphan']:
+            day_num += 1
+        d['day_num'] = day_num   # orphan days don't take a DAY number
     return performances, schedule_days
+
+
+def _schedule_rows_for_editor(rows, schedule_days):
+    """Schedule rows as the editor template groups them. A legacy row (no
+    day_date) whose performance was deleted is handed to the first day like
+    any perf-less legacy row — otherwise it was rendered nowhere and the
+    next autosave deleted it."""
+    live = {pid for d in schedule_days for pid in d['perf_ids']}
+    out = []
+    for r in rows:
+        r = dict(r)
+        if not r.get('day_date') and r.get('perf_id') not in live:
+            r['perf_id'] = None
+        if r.get('day_date') and _as_date(r['day_date']):
+            r['day_date'] = _as_date(r['day_date']).isoformat()
+        out.append(r)
+    return out
+
+
+def _schedule_canon_rows(rows):
+    """The PM-owned schedule rows (piano rows are re-derived, so excluded)
+    in order, as comparable tuples. Shared by the revision hash and the
+    history diff so they agree on what counts as a change."""
+    out = []
+    for r in rows:
+        if r.get('piano_tuning_id'):
+            continue
+        dd = r.get('day_date')
+        dd = _as_date(dd).isoformat() if dd and _as_date(dd) else None
+        try:
+            pid = int(r.get('perf_id')) if r.get('perf_id') else None
+        except (TypeError, ValueError):
+            pid = None
+        out.append((dd, None if dd else pid,
+                    str(r.get('start_time') or ''), str(r.get('end_time') or ''),
+                    str(r.get('description') or ''), str(r.get('notes') or '')))
+    return out
+
+
+def _schedule_rev(db, show_id):
+    """Revision token of the show's saved schedule rows (3.30.0). The editor
+    sends the token it loaded with; save_schedule refuses a row write made
+    against an older one, so a tab opened before someone else built the
+    schedule can no longer replace their work with its stale (or empty)
+    copy. Piano rows are left out — their sync re-places them without any
+    PM edit and must not invalidate open tabs."""
+    import hashlib
+    rows = [dict(r) for r in db.execute(
+        'SELECT day_date, perf_id, start_time, end_time, description, notes, piano_tuning_id '
+        'FROM schedule_rows WHERE show_id=%s ORDER BY sort_order, id', (show_id,)).fetchall()]
+    canon = _schedule_canon_rows(rows)
+    return hashlib.md5(json.dumps(canon).encode('utf-8')).hexdigest()[:16], canon
+
+
+def _sched_row_has_content(r):
+    return any(str(x or '').strip() for x in r[2:])
 
 
 def _sync_show_primary_date(db, show_id):
@@ -4460,21 +4596,113 @@ def get_contacts_by_dept(db=None):
     return by_dept
 
 
-def _snapshot_form_history(db, show_id, form_type, snapshot_data):
-    """Insert a history snapshot and prune to 50 entries."""
+def _advance_show_sets(data):
+    """(column, value) pairs of the shows-row columns an advance form post
+    carries (name, dates, venue, load range). Shared by save_advance and a
+    history restore — a restore that skipped these left the show's real
+    dates/venue/name at the newer values while the form fields went back."""
+    def _txt(k):
+        v = data.get(k)
+        return str(v).strip() if v is not None else ''
+    sets = []
+    if 'show_name' in data and data['show_name']:
+        sets.append(('name', data['show_name']))
+    if 'show_date' in data:
+        sets.append(('show_date', _txt('show_date') or None))
+    if 'show_time' in data:
+        sets.append(('show_time', data['show_time']))
+    if 'venue' in data:
+        sets.append(('venue', data['venue']))
+    for k in ('load_in_date', 'load_out_date'):
+        if k in data:
+            sets.append((k, _txt(k) or None))
+    for k in ('load_in_time', 'load_out_time'):
+        if k in data:
+            sets.append((k, _txt(k)))
+    return sets
+
+
+_HISTORY_KEEP = 100          # versions kept per show + form
+_HISTORY_COALESCE_MIN = 10   # one person's autosaves within this window = one version
+
+
+def _history_filled(v):
+    s = str(v if v is not None else '').strip()
+    return bool(s) and s not in ('-', '—', 'false', '[]', 'None')
+
+
+def _history_weight(form_type, data):
+    """How much content a snapshot holds: schedule rows with any text, or
+    advance / notes fields with a real value."""
+    if form_type == 'schedule':
+        return sum(1 for r in _schedule_canon_rows(data.get('rows') or [])
+                   if _sched_row_has_content(r))
+    flat = data.get('advance_data') or data.get('notes_data') or {}
+    return sum(1 for v in flat.values() if _history_filled(v))
+
+
+def _snapshot_form_history(db, show_id, form_type, snapshot_data, note=None):
+    """Record a version of a form (3.30.0 rules):
+    - a save identical to the latest version records nothing (the 30 s
+      safety-net save and no-op autosaves used to push real versions out);
+    - the same person's autosaves within _HISTORY_COALESCE_MIN minutes update
+      their latest version instead of stacking one per keystroke pause —
+      EXCEPT a save that removes content, which always starts a new version,
+      so the state before a deletion/wipe can always be restored;
+    - a version with a note (restore / import) is never merged into;
+    - the newest _HISTORY_KEEP versions are kept."""
+    uid = session.get('user_id') if has_request_context() else None
+    new_json = json.dumps(snapshot_data, default=str)
+    latest = db.execute("""
+        SELECT id, saved_by, snapshot_json, note,
+               saved_at > NOW() - make_interval(mins => %s) AS recent
+          FROM form_history WHERE show_id=%s AND form_type=%s
+         ORDER BY id DESC LIMIT 1
+    """, (_HISTORY_COALESCE_MIN, show_id, form_type)).fetchone()
+    if latest and not note:
+        try:
+            old = json.loads(latest['snapshot_json'])
+        except (TypeError, ValueError):
+            old = None
+        if old == json.loads(new_json):
+            return
+        if (old is not None and not latest['note'] and latest['recent']
+                and uid is not None and latest['saved_by'] == uid
+                and _history_weight(form_type, snapshot_data) >= _history_weight(form_type, old)):
+            db.execute('UPDATE form_history SET snapshot_json=%s, saved_at=CURRENT_TIMESTAMP '
+                       'WHERE id=%s', (new_json, latest['id']))
+            return
     db.execute("""
-        INSERT INTO form_history (show_id, form_type, saved_by, snapshot_json)
-        VALUES (%s, %s, %s, %s)
-    """, (show_id, form_type, session.get('user_id'), json.dumps(snapshot_data)))
+        INSERT INTO form_history (show_id, form_type, saved_by, snapshot_json, note)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (show_id, form_type, uid, new_json, note))
     db.execute("""
         DELETE FROM form_history
         WHERE show_id = %s AND form_type = %s
           AND id NOT IN (
             SELECT id FROM form_history
             WHERE show_id = %s AND form_type = %s
-            ORDER BY saved_at DESC LIMIT 50
+            ORDER BY id DESC LIMIT %s
           )
-    """, (show_id, form_type, show_id, form_type))
+    """, (show_id, form_type, show_id, form_type, _HISTORY_KEEP))
+
+
+def _schedule_state_snapshot(db, show_id):
+    """The show's whole saved production schedule (meta + PM rows) — what a
+    schedule history version stores. Built from the DB, not the request: the
+    editor now posts rows only when they changed."""
+    meta = {r['field_key']: r['field_value'] or '' for r in db.execute(
+        'SELECT field_key, field_value FROM schedule_meta WHERE show_id=%s ORDER BY field_key',
+        (show_id,)).fetchall()}
+    rows = []
+    for r in db.execute(
+            'SELECT perf_id, day_date, start_time, end_time, description, notes '
+            'FROM schedule_rows WHERE show_id=%s AND piano_tuning_id IS NULL '
+            'ORDER BY sort_order, id', (show_id,)).fetchall():
+        rows.append({'perf_id': r['perf_id'], 'day_date': r['day_date'] or None,
+                     'start_time': r['start_time'] or '', 'end_time': r['end_time'] or '',
+                     'description': r['description'] or '', 'notes': r['notes'] or ''})
+    return {'meta': meta, 'rows': rows}
 
 
 # ─── Field-Change Alert / Notification Helpers ────────────────────────────────
@@ -6357,7 +6585,9 @@ def show_page(show_id):
 
     # Performances and per-day groupings (one entry per calendar date covered
     # by either a performance or the load-in → load-out window).
-    performances, schedule_days = _build_schedule_days(db, show_id, show)
+    performances, schedule_days = _build_schedule_days(db, show_id, show,
+                                                       include_orphans=True)
+    schedule_rev, _ = _schedule_rev(db, show_id)
 
     # Export log
     exports = db.execute("""
@@ -6448,7 +6678,10 @@ def show_page(show_id):
                            advance_data=advance_data,
                            performances=performances,
                            schedule_days=schedule_days,
-                           schedule_rows=[dict(r) for r in sched_rows],
+                           schedule_rows=_schedule_rows_for_editor(sched_rows, schedule_days),
+                           schedule_rev=schedule_rev,
+                           can_edit_sched_templates=(session.get('user_role') == 'admin'
+                                                     or bool(session.get('is_content_admin'))),
                            schedule_meta=schedule_meta,
                            sched_meta_fields=get_schedule_meta_fields(),
                            notes_data=notes_data,
@@ -6542,25 +6775,7 @@ def save_advance(show_id):
             app.logger.warning(f'arts_groups upsert failed for {new_groups!r}: {e}')
 
     # Sync core show fields + track last saved — one UPDATE of the shows row.
-    show_sets = []
-    if 'show_name' in data and data['show_name']:
-        show_sets.append(('name', data['show_name']))
-    if 'show_date' in data:
-        show_sets.append(('show_date', data['show_date'] or None))
-    if 'show_time' in data:
-        show_sets.append(('show_time', data['show_time']))
-    if 'venue' in data:
-        show_sets.append(('venue', data['venue']))
-    if 'load_in_date' in data:
-        val = data['load_in_date'].strip() if data['load_in_date'] else None
-        show_sets.append(('load_in_date', val or None))
-    if 'load_in_time' in data:
-        show_sets.append(('load_in_time', data['load_in_time'].strip() if data['load_in_time'] else ''))
-    if 'load_out_date' in data:
-        val = data['load_out_date'].strip() if data['load_out_date'] else None
-        show_sets.append(('load_out_date', val or None))
-    if 'load_out_time' in data:
-        show_sets.append(('load_out_time', data['load_out_time'].strip() if data['load_out_time'] else ''))
+    show_sets = _advance_show_sets(data)
     set_sql = ''.join(f'{col}=%s, ' for col, _ in show_sets)
     if show_sets:
         set_sql += 'updated_at=CURRENT_TIMESTAMP, '
@@ -6709,20 +6924,61 @@ def save_schedule(show_id):
     get_show_or_404(show_id)
     data = request.get_json(force=True) or {}
     db = get_db()
-    if 'meta' in data:
+    # Serialize schedule writes on this show (piano sync takes the same lock),
+    # so the revision check below can't race another save.
+    db.execute('SELECT 1 FROM shows WHERE id=%s FOR UPDATE', (show_id,))
+    rows_before = None
+    if isinstance(data.get('rows'), list):
+        rev_now, canon_now = _schedule_rev(db, show_id)
+        rows_before = sum(1 for r in canon_now if _sched_row_has_content(r))
+        # Stale tab: the editor loaded rows at base_rev; someone else has saved
+        # different rows since. Writing would silently replace their work with
+        # this tab's old copy — refuse and let the person choose (3.30.0).
+        base_rev = data.get('base_rev')
+        if base_rev and base_rev != rev_now and not data.get('force'):
+            last = db.execute("""
+                SELECT s.last_saved_at::timestamptz AS at, u.display_name, u.username
+                  FROM shows s LEFT JOIN users u ON u.id = s.last_saved_by
+                 WHERE s.id=%s""", (show_id,)).fetchone()
+            db.close()
+            syslog_logger.warning(
+                f"SCHEDULE_SAVE_CONFLICT show_id={show_id} by={session.get('username')} "
+                f"base={base_rev} current={rev_now}")
+            return jsonify({'success': False, 'conflict': True,
+                            'error': 'The production schedule was changed by someone else '
+                                     'after this page loaded.',
+                            'saved_by': (last['display_name'] or last['username'] or '') if last else '',
+                            'saved_at': _ts_out(last['at']) if last else None,
+                            'rev': rev_now}), 409
+        incoming = _schedule_canon_rows([r for r in data['rows'] if isinstance(r, dict)])
+        # Never empty a schedule without the editor saying the person meant it.
+        if rows_before and not any(_sched_row_has_content(r) for r in incoming) \
+                and not data.get('allow_clear'):
+            db.close()
+            syslog_logger.warning(
+                f"SCHEDULE_CLEAR_REFUSED show_id={show_id} by={session.get('username')} "
+                f"rows={rows_before}")
+            return jsonify({'success': False, 'refused_clear': True,
+                            'error': 'Refused to remove every row of the production schedule.'}), 409
+    if isinstance(data.get('meta'), dict):
         for key, val in data['meta'].items():
             db.execute("""
                 INSERT INTO schedule_meta (show_id, field_key, field_value)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
             """, (show_id, key, val or ''))
-    if 'rows' in data:
+    if rows_before is not None:
         db.execute('DELETE FROM schedule_rows WHERE show_id = %s', (show_id,))
-        for i, row in enumerate(data['rows']):
-            perf_id = row.get('perf_id')  # None for single-day / first day
+        for i, row in enumerate(r for r in data['rows'] if isinstance(r, dict)):
+            try:
+                perf_id = int(row.get('perf_id')) if row.get('perf_id') else None
+            except (TypeError, ValueError):
+                perf_id = None
             day_date = row.get('day_date') or None
-            if isinstance(day_date, str):
-                day_date = day_date.strip() or None
+            if not (isinstance(day_date, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', day_date.strip())):
+                day_date = None
+            else:
+                day_date = day_date.strip()
             # A piano-tuning row keeps its link (its text is re-derived by
             # _sync_piano_schedule_rows below, so edits to it don't stick).
             try:
@@ -6742,13 +6998,19 @@ def save_schedule(show_id):
         UPDATE shows SET last_saved_by=%s, last_saved_at=CURRENT_TIMESTAMP WHERE id=%s
     """, (session['user_id'], show_id))
 
-    _snapshot_form_history(db, show_id, 'schedule', data)
-    log_audit(db, 'FORM_SAVE', 'form', show_id, show_id=show_id, detail='type=schedule')
+    _snapshot_form_history(db, show_id, 'schedule', _schedule_state_snapshot(db, show_id))
+    rev_after, canon_after = _schedule_rev(db, show_id)
+    rows_after = sum(1 for r in canon_after if _sched_row_has_content(r))
+    rows_note = (f' rows={rows_after} was={rows_before}' if rows_before is not None
+                 else ' rows=unchanged')
+    log_audit(db, 'FORM_SAVE', 'form', show_id, show_id=show_id,
+              detail='type=schedule' + rows_note)
 
     db.commit()
     db.close()
-    syslog_logger.info(f"FORM_SAVE show_id={show_id} type=schedule by={session.get('username')}")
-    return jsonify({'success': True})
+    syslog_logger.info(f"FORM_SAVE show_id={show_id} type=schedule{rows_note} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'rev': rev_after})
 
 
 @app.route('/shows/<int:show_id>/save/postnotes', methods=['POST'])
@@ -6807,29 +7069,212 @@ def save_postnotes(show_id):
 
 
 # ─── Version History ──────────────────────────────────────────────────────────
+# 3.30.0: every version carries a plain-language summary of what changed since
+# the one before it (rows added / removed / edited, fields changed), large
+# removals are flagged, and /diff shows the actual changes — vs the previous
+# version, or vs what's live now (= what a restore would do). Diffs are
+# computed here, never in the browser, so the list and the dialog agree.
+
+_HISTORY_FORM_TYPES = ('advance', 'schedule', 'postnotes')
+
+
+def _hist_rows_by_day(rows, perf_dates):
+    """{day_key: [row dict]} of a schedule snapshot's rows that have content.
+    A legacy row with only a perf_id is placed on that performance's date."""
+    out = {}
+    for t in _schedule_canon_rows(rows or []):
+        if not _sched_row_has_content(t):
+            continue
+        day = t[0] or (perf_dates.get(t[1]) if t[1] else None) or ''
+        out.setdefault(day, []).append(
+            {'start_time': t[2], 'end_time': t[3], 'description': t[4], 'notes': t[5]})
+    return out
+
+
+def _hist_day_label(day):
+    d = _as_date(day) if day else None
+    if not d:
+        return 'No date'
+    return f"{d.strftime('%a')} {d.month}/{d.day}/{d.year}"
+
+
+def _hist_row_key(r):
+    return (r['start_time'], r['end_time'], r['description'], r['notes'])
+
+
+def _schedule_diff(old, new, perf_dates, meta_labels):
+    """What changed from schedule snapshot `old` to `new` (either may be {})."""
+    old_days = _hist_rows_by_day(old.get('rows'), perf_dates)
+    new_days = _hist_rows_by_day(new.get('rows'), perf_dates)
+    days, tot = [], {'added': 0, 'removed': 0, 'changed': 0}
+    for day in sorted(set(old_days) | set(new_days), key=lambda k: (k == '', k)):
+        before = list(old_days.get(day, []))
+        after = list(new_days.get(day, []))
+        unchanged = 0
+        for r in list(after):                       # identical rows
+            k = _hist_row_key(r)
+            for i, o in enumerate(before):
+                if _hist_row_key(o) == k:
+                    before.pop(i); after.remove(r); unchanged += 1
+                    break
+        changed = []
+        for field in ('description', 'start_time'):  # same item, edited
+            for r in list(after):
+                key = (r[field] or '').strip().lower()
+                if not key:
+                    continue
+                for i, o in enumerate(before):
+                    if (o[field] or '').strip().lower() == key:
+                        before.pop(i); after.remove(r)
+                        changed.append({'before': o, 'after': r,
+                                        'fields': [f for f in ('start_time', 'end_time', 'description', 'notes')
+                                                   if (o[f] or '') != (r[f] or '')]})
+                        break
+        if not (after or before or changed):
+            continue
+        days.append({'day': day, 'label': _hist_day_label(day), 'added': after,
+                     'removed': before, 'changed': changed, 'unchanged': unchanged})
+        tot['added'] += len(after); tot['removed'] += len(before); tot['changed'] += len(changed)
+    meta = []
+    om, nm = old.get('meta') or {}, new.get('meta') or {}
+    for k in sorted(set(om) | set(nm)):
+        a, b = str(om.get(k) or '').strip(), str(nm.get(k) or '').strip()
+        if a != b and k in nm:
+            meta.append({'key': k, 'label': meta_labels.get(k) or k.replace('_', ' ').title(),
+                         'before': a, 'after': b})
+    rows_before = sum(len(v) for v in old_days.values())
+    rows_after = sum(len(v) for v in new_days.values())
+    return {'days': days, 'meta': meta,
+            'summary': dict(tot, meta=len(meta), rows_before=rows_before, rows_after=rows_after)}
+
+
+def _hist_display(v):
+    s = str(v if v is not None else '').strip()
+    if s.startswith('[') and s.endswith(']'):
+        try:
+            arr = json.loads(s)
+            if isinstance(arr, list):
+                return ', '.join(str(x) for x in arr if str(x).strip())
+        except ValueError:
+            pass
+    return s if _history_filled(s) else ''
+
+
+def _fields_diff(old, new, labels, only_keys=None):
+    """Field-by-field changes between two advance / post-show snapshots."""
+    of = old.get('advance_data') or old.get('notes_data') or {}
+    nf = new.get('advance_data') or new.get('notes_data') or {}
+    keys = set(of) | set(nf) if only_keys is None else set(only_keys)
+    fields, cleared, filled = [], 0, 0
+    for k in keys:
+        a, b = _hist_display(of.get(k)), _hist_display(nf.get(k))
+        if a == b:
+            continue
+        fields.append({'key': k, 'label': labels.get(k) or k.replace('_', ' ').title(),
+                       'before': a, 'after': b})
+        if a and not b:
+            cleared += 1
+        elif b and not a:
+            filled += 1
+    fields.sort(key=lambda f: f['label'].lower())
+    return {'fields': fields,
+            'summary': {'changed': len(fields), 'cleared': cleared, 'filled': filled,
+                        'total_filled': sum(1 for v in nf.values() if _hist_display(v))}}
+
+
+def _hist_context(db, show_id, form_type):
+    """Labels + performance dates a diff needs (one round of queries)."""
+    perf_dates = {r['id']: (_as_date(r['perf_date']).isoformat() if _as_date(r['perf_date']) else '')
+                  for r in db.execute('SELECT id, perf_date FROM show_performances WHERE show_id=%s',
+                                      (show_id,)).fetchall()}
+    if form_type == 'schedule':
+        labels = {r['field_key']: r['label'] for r in db.execute(
+            'SELECT field_key, label FROM schedule_meta_fields').fetchall()}
+        labels.setdefault('security_email', 'Security Email')
+    elif form_type == 'advance':
+        labels = {r['field_key']: r['label'] for r in db.execute(
+            'SELECT field_key, label FROM form_fields').fetchall()}
+    else:
+        labels = {}
+    return perf_dates, labels
+
+
+def _hist_diff(form_type, old, new, ctx, only_keys=None):
+    perf_dates, labels = ctx
+    if form_type == 'schedule':
+        return _schedule_diff(old, new, perf_dates, labels)
+    return _fields_diff(old, new, labels, only_keys)
+
+
+def _hist_warn(form_type, summary):
+    """A version that removed a lot — what a wipe looks like in the list."""
+    if form_type == 'schedule':
+        before, removed = summary.get('rows_before', 0), summary.get('removed', 0)
+        return bool(before and (summary.get('rows_after') == 0
+                                or (removed >= 3 and removed * 2 >= before)))
+    return summary.get('cleared', 0) >= 5
+
+
+def _current_form_state(db, show_id, form_type):
+    if form_type == 'schedule':
+        return _schedule_state_snapshot(db, show_id)
+    if form_type == 'advance':
+        return {'advance_data': {r['field_key']: r['field_value'] for r in db.execute(
+            'SELECT field_key, field_value FROM advance_data WHERE show_id=%s', (show_id,)).fetchall()}}
+    return {'notes_data': {r['field_key']: r['field_value'] for r in db.execute(
+        'SELECT field_key, field_value FROM post_show_notes WHERE show_id=%s', (show_id,)).fetchall()}}
+
+
+def _hist_load(raw):
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
 
 @app.route('/shows/<int:show_id>/history/<form_type>')
 @login_required
 def form_history_list(show_id, form_type):
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    if form_type not in _HISTORY_FORM_TYPES:
+        return jsonify([])
     db = get_db()
     entries = db.execute("""
-        SELECT fh.id, fh.saved_at, fh.form_type,
+        SELECT fh.id, fh.saved_at::timestamptz AS saved_at, fh.form_type, fh.note,
+               fh.snapshot_json,
                u.display_name as saved_by_name, u.username as saved_by_username
         FROM form_history fh
         LEFT JOIN users u ON fh.saved_by = u.id
         WHERE fh.show_id = %s AND fh.form_type = %s
-        ORDER BY fh.saved_at DESC
-        LIMIT 50
-    """, (show_id, form_type)).fetchall()
+        ORDER BY fh.id DESC
+        LIMIT %s
+    """, (show_id, form_type, _HISTORY_KEEP)).fetchall()
+    ctx = _hist_context(db, show_id, form_type)
     db.close()
-    return jsonify([{
-        'id': e['id'],
-        'saved_at': e['saved_at'],
-        'form_type': e['form_type'],
-        'saved_by_name': e['saved_by_name'] or e['saved_by_username'] or 'Unknown',
-    } for e in entries])
+    snaps = [_hist_load(e['snapshot_json']) for e in entries]
+    out = []
+    for i, e in enumerate(entries):
+        prev = snaps[i + 1] if i + 1 < len(snaps) else None
+        d = _hist_diff(form_type, prev or {}, snaps[i], ctx)
+        summ = d['summary']
+        item = {
+            'id': e['id'],
+            'saved_at': _ts_out(e['saved_at']),
+            'form_type': e['form_type'],
+            'note': e['note'] or '',
+            'saved_by_name': e['saved_by_name'] or e['saved_by_username'] or 'Unknown',
+            'first': prev is None,
+            'summary': summ,
+            'warn': prev is not None and _hist_warn(form_type, summ),
+        }
+        if form_type != 'schedule':
+            item['field_labels'] = [f['label'] for f in d['fields'][:4]]
+        else:
+            item['day_labels'] = [dd['label'] for dd in d['days'][:3]]
+        out.append(item)
+    return jsonify(out)
 
 
 @app.route('/shows/<int:show_id>/history/<int:hist_id>/snapshot')
@@ -6839,14 +7284,66 @@ def history_snapshot(show_id, hist_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     db = get_db()
     entry = db.execute(
-        'SELECT * FROM form_history WHERE id=%s AND show_id=%s', (hist_id, show_id)
+        'SELECT id, form_type, note, snapshot_json, saved_at::timestamptz AS saved_at '
+        'FROM form_history WHERE id=%s AND show_id=%s', (hist_id, show_id)
     ).fetchone()
-    db.close()
     if not entry:
+        db.close()
         return jsonify({'success': False, 'error': 'Snapshot not found.'}), 404
-    return jsonify({'id': entry['id'], 'form_type': entry['form_type'],
-                    'saved_at': entry['saved_at'],
-                    'data': json.loads(entry['snapshot_json'])})
+    data = _hist_load(entry['snapshot_json'])
+    perf_dates, labels = _hist_context(db, show_id, entry['form_type'])
+    db.close()
+    out = {'id': entry['id'], 'form_type': entry['form_type'], 'note': entry['note'] or '',
+           'saved_at': _ts_out(entry['saved_at']), 'data': data}
+    if entry['form_type'] == 'schedule':
+        by_day = _hist_rows_by_day(data.get('rows'), perf_dates)
+        out['days'] = [{'day': k, 'label': _hist_day_label(k), 'rows': by_day[k]}
+                       for k in sorted(by_day, key=lambda k: (k == '', k))]
+        out['meta'] = [{'label': labels.get(k) or k.replace('_', ' ').title(), 'value': v}
+                       for k, v in sorted((data.get('meta') or {}).items()) if str(v or '').strip()]
+    else:
+        flat = data.get('advance_data') or data.get('notes_data') or {}
+        out['fields'] = sorted(
+            ({'label': labels.get(k) or k.replace('_', ' ').title(), 'value': _hist_display(v)}
+             for k, v in flat.items() if _hist_display(v)),
+            key=lambda f: f['label'].lower())
+    return jsonify(out)
+
+
+@app.route('/shows/<int:show_id>/history/<int:hist_id>/diff')
+@login_required
+def history_diff(show_id, hist_id):
+    """?against=prev (default): what this version changed vs the one before
+    it. ?against=current: what restoring this version would change now."""
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    against = request.args.get('against', 'prev')
+    db = get_db()
+    entry = db.execute(
+        'SELECT id, form_type, snapshot_json FROM form_history WHERE id=%s AND show_id=%s',
+        (hist_id, show_id)).fetchone()
+    if not entry:
+        db.close()
+        return jsonify({'success': False, 'error': 'Snapshot not found.'}), 404
+    form_type = entry['form_type']
+    snap = _hist_load(entry['snapshot_json'])
+    ctx = _hist_context(db, show_id, form_type)
+    if against == 'current':
+        old = _current_form_state(db, show_id, form_type)
+        # A restore writes only the snapshot's own field keys (rows replace all).
+        only = None
+        if form_type != 'schedule':
+            only = list((snap.get('advance_data') or snap.get('notes_data') or {}).keys())
+        diff = _hist_diff(form_type, old, snap, ctx, only)
+    else:
+        prev = db.execute(
+            'SELECT snapshot_json FROM form_history WHERE show_id=%s AND form_type=%s AND id < %s '
+            'ORDER BY id DESC LIMIT 1', (show_id, form_type, hist_id)).fetchone()
+        diff = _hist_diff(form_type, _hist_load(prev['snapshot_json']) if prev else {}, snap, ctx)
+        diff['first'] = prev is None
+    db.close()
+    diff.update({'success': True, 'form_type': form_type, 'against': against})
+    return jsonify(diff)
 
 
 @app.route('/shows/<int:show_id>/history/<int:hist_id>/restore', methods=['POST'])
@@ -6859,13 +7356,15 @@ def restore_history(show_id, hist_id):
 
     db = get_db()
     entry = db.execute(
-        'SELECT * FROM form_history WHERE id=%s AND show_id=%s', (hist_id, show_id)
+        'SELECT fh.*, fh.saved_at::timestamptz AS saved_at_tz, u.display_name, u.username '
+        'FROM form_history fh LEFT JOIN users u ON u.id = fh.saved_by '
+        'WHERE fh.id=%s AND fh.show_id=%s', (hist_id, show_id)
     ).fetchone()
     if not entry:
         db.close()
         return jsonify({'success': False, 'error': 'Snapshot not found.'}), 404
 
-    snapshot = json.loads(entry['snapshot_json'])
+    snapshot = _hist_load(entry['snapshot_json'])
     form_type = entry['form_type']
 
     # Check for newer snapshots — warn the user before overwriting
@@ -6876,7 +7375,7 @@ def restore_history(show_id, hist_id):
             FROM form_history fh
             LEFT JOIN users u ON fh.saved_by = u.id
             WHERE fh.show_id=%s AND fh.form_type=%s AND fh.id > %s
-            ORDER BY fh.saved_at DESC LIMIT 1
+            ORDER BY fh.id DESC LIMIT 1
         """, (show_id, form_type, hist_id)).fetchone()
         if newer:
             db.close()
@@ -6888,6 +7387,7 @@ def restore_history(show_id, hist_id):
                 'current_snapshot':  json.loads(newer['snapshot_json']),
             }), 409
 
+    db.execute('SELECT 1 FROM shows WHERE id=%s FOR UPDATE', (show_id,))
     if form_type == 'advance':
         adv = snapshot.get('advance_data', {})
         for key, val in adv.items():
@@ -6896,6 +7396,11 @@ def restore_history(show_id, hist_id):
                 VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value, updated_at = EXCLUDED.updated_at
             """, (show_id, key, str(val) if val is not None else ''))
+        show_sets = _advance_show_sets(adv)
+        if show_sets:
+            db.execute(f"UPDATE shows SET {''.join(f'{c}=%s, ' for c, _ in show_sets)}"
+                       f"updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                       [v for _, v in show_sets] + [show_id])
 
     elif form_type == 'schedule':
         if 'meta' in snapshot:
@@ -6939,6 +7444,14 @@ def restore_history(show_id, hist_id):
     db.execute("""
         UPDATE shows SET last_saved_by=%s, last_saved_at=CURRENT_TIMESTAMP WHERE id=%s
     """, (session['user_id'], show_id))
+    # The restore is itself a version, so the list says what happened and the
+    # state it replaced stays one click away.
+    when = entry['saved_at_tz']
+    who = entry['display_name'] or entry['username'] or 'Unknown'
+    note = (f"Restored the version saved {when.strftime('%m/%d/%Y %H:%M') if when else '?'} "
+            f"by {who}")
+    after = _schedule_state_snapshot(db, show_id) if form_type == 'schedule' else snapshot
+    _snapshot_form_history(db, show_id, form_type, after, note=note)
     log_audit(db, 'HISTORY_RESTORE', 'form', hist_id, show_id=show_id,
               detail=f'type={form_type}')
     db.commit()
@@ -7655,9 +8168,101 @@ def schedule_state(show_id):
     if not show:
         db.close()
         return jsonify({'success': False, 'error': 'Not found.'}), 404
-    _, schedule_days = _build_schedule_days(db, show_id, show)
+    _, schedule_days = _build_schedule_days(db, show_id, show, include_orphans=True)
     db.close()
     return jsonify({'success': True, 'schedule_days': schedule_days})
+
+
+def _schedule_rows_by_editor_day(rows, schedule_days):
+    """{date_key: [row]} exactly as the Schedule tab groups rows (day_date
+    first, legacy perf_id rows on their performance's day, everything else
+    on the first day)."""
+    rows = _schedule_rows_for_editor(rows, schedule_days)
+    out = {d['date_key']: [] for d in schedule_days}
+    perf_day = {pid: d['date_key'] for d in schedule_days for pid in d['perf_ids']}
+    first = schedule_days[0]['date_key'] if schedule_days else ''
+    for r in rows:
+        key = r.get('day_date') if r.get('day_date') in out else None
+        if key is None and not r.get('day_date'):
+            key = perf_day.get(r.get('perf_id')) or first
+        if key is None:
+            continue
+        out.setdefault(key, []).append(r)
+    return out
+
+
+@app.route('/shows/<int:show_id>/schedule-import/sources')
+@login_required
+def schedule_import_sources(show_id):
+    """Shows whose production schedule can be pulled into this one (3.30.0):
+    any other show with at least one schedule row, newest first, filtered by
+    name / venue."""
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    q = (request.args.get('q') or '').strip()[:100]
+    params = [show_id]
+    where = ''
+    if q:
+        where = 'AND (s.name ILIKE %s OR s.venue ILIKE %s)'
+        params += [f'%{q}%', f'%{q}%']
+    db = get_db()
+    rows = db.execute(f"""
+        SELECT s.id, s.name, s.venue, s.status, s.show_date, s.load_in_date,
+               COUNT(sr.id) AS row_count
+          FROM shows s
+          JOIN schedule_rows sr ON sr.show_id = s.id AND sr.piano_tuning_id IS NULL
+               AND (COALESCE(sr.description, '') <> '' OR COALESCE(sr.start_time, '') <> '')
+         WHERE s.id <> %s {where}
+         GROUP BY s.id
+         ORDER BY COALESCE(s.show_date, s.load_in_date) DESC NULLS LAST, s.id DESC
+         LIMIT 40
+    """, params).fetchall()
+    db.close()
+    return jsonify({'success': True, 'shows': [{
+        'id': r['id'], 'name': r['name'] or '', 'venue': r['venue'] or '',
+        'archived': r['status'] == 'archived',
+        'date': (_as_date(r['show_date'] or r['load_in_date']).isoformat()
+                 if _as_date(r['show_date'] or r['load_in_date']) else ''),
+        'row_count': r['row_count'],
+    } for r in rows if can_access_show(session['user_id'], r['id'])]})
+
+
+@app.route('/shows/<int:show_id>/schedule-import/<int:src_id>')
+@login_required
+def schedule_import_source(show_id, src_id):
+    """One show's production schedule, day by day, for the import dialog.
+    Read-only: the dialog drops the rows into the editor and the normal
+    (revision-checked) autosave writes them."""
+    if not (can_access_show(session['user_id'], show_id)
+            and can_access_show(session['user_id'], src_id)):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    db = get_db()
+    src = db.execute('SELECT * FROM shows WHERE id=%s', (src_id,)).fetchone()
+    if not src:
+        db.close()
+        return jsonify({'success': False, 'error': 'Show not found.'}), 404
+    _, days = _build_schedule_days(db, src_id, src, include_orphans=True)
+    rows = db.execute('SELECT * FROM schedule_rows WHERE show_id=%s AND piano_tuning_id IS NULL '
+                      'ORDER BY sort_order, id', (src_id,)).fetchall()
+    db.close()
+    if not days:
+        days = [{'date_key': '', 'perf_date': None, 'perf_ids': [], 'orphan': False, 'day_num': 1}]
+    grouped = _schedule_rows_by_editor_day(rows, days)
+    out = []
+    for d in days:
+        day_rows = [{'start_time': r.get('start_time') or '', 'end_time': r.get('end_time') or '',
+                     'description': r.get('description') or '', 'notes': r.get('notes') or ''}
+                    for r in grouped.get(d['date_key'], [])]
+        day_rows = [r for r in day_rows if any(v.strip() for v in r.values())]
+        if not day_rows:
+            continue
+        out.append({'date': d.get('perf_date') or '', 'day_num': d.get('day_num') or 0,
+                    'orphan': bool(d.get('orphan')),
+                    'label': (_hist_day_label(d['perf_date']) if d.get('perf_date') else 'No date'),
+                    'rows': day_rows})
+    return jsonify({'success': True, 'show': {'id': src['id'], 'name': src['name'] or '',
+                                              'venue': src['venue'] or ''},
+                    'days': out})
 
 
 @app.route('/shows/<int:show_id>/heartbeat', methods=['POST'])
@@ -13535,13 +14140,22 @@ def venue_colors_save():
 @admin_required
 def modules_list():
     """The optional feature modules (APP_MODULES) with their current state,
-    for the Settings → System → Modules panel."""
+    for the Settings → Modules panel."""
+    def _url(m):
+        try:
+            return url_for(m['settings_endpoint']) if m.get('settings_endpoint') else None
+        except Exception:
+            return None
     return jsonify({'modules': [{
         'key': m['key'],
         'name': m['name'],
         'description': m['description'],
         'enabled': module_enabled(m['key']),
-    } for m in APP_MODULES]})
+        'settings_url': _url(m),
+    } for m in APP_MODULES], 'integrations': [{
+        'key': m['key'], 'name': m['name'], 'description': m['description'],
+        'settings_url': _url(m),
+    } for m in APP_INTEGRATIONS]})
 
 
 @app.route('/settings/modules', methods=['POST'])
@@ -23669,7 +24283,7 @@ def combined_invoice_pdf():
 # puts ONE read-only row on that day of the show's production schedule
 # (schedule_rows.piano_tuning_id, kept by _sync_piano_schedule_rows) — and
 # the cost, billed on the Final / Combined Invoice. Optional module
-# 'piano_tuning' (Settings → System → Modules); a disabled module hides the
+# 'piano_tuning' (Settings → Modules); a disabled module hides the
 # UI and 404s the routes, while existing schedule rows and billed costs stay.
 
 # 'Sent to vendor' and 'Scheduled' are one step (3.10.2): Scheduled = handed
@@ -23933,6 +24547,12 @@ def _piano_schedule_refresh(db, show_id):
 
 
 def _hhmm_minutes(v):
+    """Minutes into the schedule day; a next-day time ('1+00:30') counts
+    past midnight so it orders after every same-day time."""
+    off, t = _sched_time_offset(v)
+    if off:
+        p = _parse_24h_time(t)
+        return off * 1440 + p[0] * 60 + p[1] if p else None
     m = re.match(r'^\s*(\d{1,2}):(\d{2})', str(v or ''))
     if not m:
         return None

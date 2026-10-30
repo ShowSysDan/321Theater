@@ -970,6 +970,7 @@ function _normalizeSchedTime(val) {
 function bindScheduleForm() {
   const form = document.getElementById('schedule-form');
   if (!form) return;
+  _schedInitBaseline();
   form.addEventListener('change', (e) => {
     _maybeAutoSortAfterEdit(e.target);
     scheduleSave();
@@ -1043,12 +1044,15 @@ function sortSchedRowsByTime(dayKey) {
   rows.sort((a, b) => {
     const ta = a.querySelectorAll('.sched-cell')[0]?.value || '';
     const tb = b.querySelectorAll('.sched-cell')[0]?.value || '';
-    const na = parseTimeToHHMM(ta);
-    const nb = parseTimeToHHMM(tb);
     // Empty times sort to the end
     if (!ta && !tb) return 0;
     if (!ta) return 1;
     if (!tb) return -1;
+    // Next-day times ("1+00:30") sort after 23:59 of the same show day.
+    const ka = _schedTimeKey(ta), kb = _schedTimeKey(tb);
+    if (ka !== null && kb !== null) return ka - kb;
+    const na = parseTimeToHHMM(ta);
+    const nb = parseTimeToHHMM(tb);
     return na < nb ? -1 : na > nb ? 1 : 0;
   });
   rows.forEach(r => tbody.appendChild(r));
@@ -1128,9 +1132,29 @@ function _shortDateLabel(iso) {
   return String(iso).slice(5).replace('-', '/');
 }
 
+/* Tab / header label of a day: "DAY n" or, for a date outside the show's
+   dates that still holds rows (server flag `orphan`), "OFF-DATE". */
+function _schedDayLabel(d, short) {
+  const date = d.perf_date ? (short ? _shortDateLabel(d.perf_date) : d.perf_date) : '';
+  if (d.orphan) return (short ? '⚠ OFF-DATE' : 'OFF-DATE') + (date ? (short ? ' · ' : ': ') + date : '');
+  return `DAY ${d.day_num || ''}` + (date ? (short ? ' · ' : ': ') + date : '');
+}
+
 function _renderScheduleDays(days) {
   const form = document.getElementById('schedule-form');
   if (!form || !days.length) return;  // empty → leave fallback HTML alone
+  days = days.slice();
+  // A pane this tab still holds rows in (e.g. its date just left the show's
+  // range and the rows aren't saved there yet) stays listed as OFF-DATE:
+  // hiding it would make the next save drop those rows.
+  form.querySelectorAll('.sched-day-pane[data-day-key]').forEach(p => {
+    const k = p.dataset.dayKey || '';
+    if (!k || days.some(d => d.date_key === k)) return;
+    if (!p.querySelector('.schedule-row')) return;
+    days.push({date_key: k, perf_date: /^\d{4}-\d{2}-\d{2}$/.test(k) ? k : null,
+               perfs: [], perf_ids: [], primary_perf_id: null, orphan: true, day_num: 0});
+  });
+  days.sort((a, b) => String(a.perf_date || '~' + a.date_key).localeCompare(String(b.perf_date || '~' + b.date_key)));
 
   // Index existing panes by data-day-key. Capture the fallback pane (no
   // data-day-key) so we can promote it into the first day if needed.
@@ -1201,7 +1225,7 @@ function _renderScheduleDays(days) {
 
 function _buildPaneHeader(d, dayNum, totalDays) {
   const perfTimes = (d.perfs || []).filter(p => p.perf_time).map(p => parseTimeToHHMM(p.perf_time));
-  const dateLabel = totalDays > 1 ? ` — DAY ${dayNum}${d.perf_date ? ': ' + _esc(d.perf_date) : ''}` : '';
+  const dateLabel = (totalDays > 1 || d.orphan) ? ` — ${_esc(_schedDayLabel(d, false))}` : '';
   const timesLabel = perfTimes.length
     ? ` <span class="text-dim" style="font-weight:400">(${perfTimes.map(_esc).join(', ')})</span>`
     : '';
@@ -1210,7 +1234,7 @@ function _buildPaneHeader(d, dayNum, totalDays) {
   if (!RESTRICTED) {
     const templates = window.SCHED_TEMPLATES || [];
     const tmplDrop = templates.length ? `
-      <select class="field-input" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
+      <select class="field-input sched-tmpl-select" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
               onchange='applySchedTemplate(this.value, ${keyArg}); this.value=""'>
         <option value="">Apply template…</option>
         ${templates.map(t => `<option value="${_esc(t.id)}">${_esc(t.name)}</option>`).join('')}
@@ -1246,10 +1270,24 @@ function _buildPaneHeader(d, dayNum, totalDays) {
 function _updateDayPaneHeader(pane, d, dayNum, totalDays) {
   const header = pane.querySelector('.form-section-header');
   if (!header) return;
+  _setOrphanNote(pane, d);
   const tmp = document.createElement('div');
   tmp.innerHTML = _buildPaneHeader(d, dayNum, totalDays).trim();
   const fresh = tmp.firstElementChild;
   if (fresh) header.replaceWith(fresh);
+}
+
+function _setOrphanNote(pane, d) {
+  const sec = pane.querySelector('.form-section');
+  let note = pane.querySelector('.sched-orphan-note');
+  if (!d.orphan) { note?.remove(); return; }
+  if (note || !sec) return;
+  note = document.createElement('div');
+  note.className = 'sched-orphan-note';
+  note.innerHTML = `<strong>${_esc(d.perf_date || d.date_key)} is outside this show's dates</strong>
+    (load-in → load-out and performances). These rows are kept here so nothing is lost — copy them
+    to a real day ("Copy from…" on that day) or delete them. They don't print on the schedule PDF.`;
+  sec.querySelector('.form-section-header')?.insertAdjacentElement('afterend', note);
 }
 
 function _buildDayPane(d, dayNum, totalDays) {
@@ -1286,6 +1324,7 @@ function _buildDayPane(d, dayNum, totalDays) {
       </div>
       ${footer}
     </div>`;
+  _setOrphanNote(wrapper, d);
   return wrapper;
 }
 
@@ -1327,11 +1366,12 @@ function _syncDayTabs(form, days) {
     const btn = document.createElement('button');
     btn.type = 'button';
     const isActive = d.date_key === activeKey;
-    btn.className = `btn btn-sm ${isActive ? 'btn-primary' : 'btn-ghost'} sched-day-tab`;
+    btn.className = `btn btn-sm ${isActive ? 'btn-primary' : 'btn-ghost'} sched-day-tab` +
+                    (d.orphan ? ' sched-day-tab-orphan' : '');
     btn.dataset.dayKey = d.date_key;
     btn.dataset.perfId = d.primary_perf_id || '';
     btn.setAttribute('onclick', `switchSchedDay(${JSON.stringify(d.date_key)}, this)`);
-    btn.textContent = `DAY ${idx + 1}` + (d.perf_date ? ` · ${_shortDateLabel(d.perf_date)}` : '');
+    btn.textContent = _schedDayLabel(d, true);
     container.appendChild(btn);
   });
 
@@ -1351,7 +1391,7 @@ function _syncCopyDropdowns(days) {
     const opts = ['<option value="">Copy from…</option>'];
     days.forEach((d, idx) => {
       if (d.date_key === selfKey) return;
-      const label = `Day ${idx + 1}${d.perf_date ? ' (' + _shortDateLabel(d.perf_date) + ')' : ''}`;
+      const label = `${d.orphan ? 'Off-date' : 'Day ' + (d.day_num || idx + 1)}${d.perf_date ? ' (' + _shortDateLabel(d.perf_date) + ')' : ''}`;
       opts.push(`<option value="${_esc(d.date_key)}">${_esc(label)}</option>`);
     });
     sel.innerHTML = opts.join('');
@@ -1564,6 +1604,235 @@ async function applySchedTemplate(templateId, dayKey) {
   sortSchedRowsByTime(dayKey);
 }
 
+/* ── Schedule: import from another show / save as template (3.30.0) ──
+   Both work on the editor's DOM like templates and Copy-from do; the normal
+   (revision-checked) autosave writes the result, so there is no second write
+   path to the schedule. */
+function _schedNewRow(r) {
+  const tr = document.createElement('tr');
+  tr.className = 'schedule-row';
+  tr.innerHTML = `
+    <td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>
+    <td><input type="text" class="sched-cell" placeholder="15:00" value="${_esc(r.start_time || '')}"></td>
+    <td><input type="text" class="sched-cell" placeholder="16:00" value="${_esc(r.end_time || '')}"></td>
+    <td><input type="text" class="sched-cell" placeholder="Description" value="${_esc(r.description || '')}"></td>
+    <td><input type="text" class="sched-cell" placeholder="Notes" value="${_esc(r.notes || '')}"></td>
+    <td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>`;
+  _bindRowDrag(tr);
+  return tr;
+}
+
+/* The editor's days: [{key (null = single legacy pane), label, pane}] */
+function _schedEditorDays() {
+  return Array.from(document.querySelectorAll('#schedule-form .sched-day-pane')).map(p => {
+    const key = p.dataset.dayKey || null;
+    const tab = key ? document.querySelector(`.sched-day-tab[data-day-key="${CSS.escape(key)}"]`) : null;
+    const label = tab ? tab.textContent.trim() : 'Timeline';
+    const visible = !p.classList.contains('hidden') && p.style.display !== 'none';
+    return {key, label: label.replace(/\s+/g, ' '), pane: p, visible};
+  });
+}
+
+function _schedFmtDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+  return m ? `${+m[2]}/${+m[3]}/${m[1]}` : '';
+}
+
+function _schedDayRows(pane) {
+  return Array.from(pane.querySelectorAll('.schedule-row:not(.piano-sched-row)')).map(tr => {
+    const c = tr.querySelectorAll('.sched-cell');
+    return {start_time: c[0]?.value || '', end_time: c[1]?.value || '',
+            description: c[2]?.value || '', notes: c[3]?.value || ''};
+  }).filter(r => Object.values(r).some(v => v.trim()));
+}
+
+function _schedModal(title, bodyHtml, footHtml, width) {
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay sched-tool-modal';
+  ov.innerHTML = `
+    <div class="modal-card" style="width:${width || 560}px;max-height:88vh;display:flex;flex-direction:column">
+      <div class="modal-header"><span>${title}</span>
+        <button type="button" class="modal-close" data-close>✕</button></div>
+      <div class="modal-body" style="overflow-y:auto">${bodyHtml}</div>
+      <div class="modal-footer">${footHtml}</div>
+    </div>`;
+  ov.addEventListener('click', e => {
+    if (e.target === ov || e.target.closest('[data-close]')) ov.remove();
+  });
+  document.body.appendChild(ov);
+  return ov;
+}
+
+function openSchedImport() {
+  const ov = _schedModal('Import schedule from another show', `
+      <p class="text-dim" style="margin:0;font-size:12px">Pick a show, then choose which of its days
+        go onto which day here. Nothing is saved until you press Import.</p>
+      <input type="search" class="field-input" data-q placeholder="Search shows by name or venue…">
+      <div data-list class="sched-import-list"><p class="text-dim">Loading…</p></div>`,
+    `<button type="button" class="btn btn-ghost" data-close>Cancel</button>`, 620);
+  const list = ov.querySelector('[data-list]');
+  const q = ov.querySelector('[data-q]');
+  let timer = null;
+  async function load() {
+    list.innerHTML = '<p class="text-dim">Loading…</p>';
+    try {
+      const r = await fetch(`/shows/${SHOW_ID}/schedule-import/sources?q=${encodeURIComponent(q.value.trim())}`);
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error || 'failed');
+      if (!d.shows.length) {
+        list.innerHTML = '<p class="text-dim">No other show with a production schedule matches.</p>';
+        return;
+      }
+      list.innerHTML = d.shows.map(sh => `
+        <button type="button" class="sched-import-show" data-id="${sh.id}">
+          <span><strong>${_esc(sh.name || 'Untitled')}</strong>${sh.archived ? ' <span class="badge">archived</span>' : ''}<br>
+          <span class="text-dim">${_esc([_schedFmtDate(sh.date), sh.venue].filter(Boolean).join(' · '))}</span></span>
+          <span class="text-dim">${sh.row_count} row${sh.row_count === 1 ? '' : 's'}</span>
+        </button>`).join('');
+    } catch (e) {
+      list.innerHTML = '<p class="text-dim">Could not load shows.</p>';
+    }
+  }
+  q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(load, 250); });
+  list.addEventListener('click', e => {
+    const b = e.target.closest('.sched-import-show');
+    if (b) { ov.remove(); _schedImportPick(parseInt(b.dataset.id, 10)); }
+  });
+  load();
+  setTimeout(() => q.focus(), 0);
+}
+
+async function _schedImportPick(srcId) {
+  let d;
+  try {
+    const r = await fetch(`/shows/${SHOW_ID}/schedule-import/${srcId}`);
+    d = await r.json();
+    if (!d.success) throw new Error(d.error || 'failed');
+  } catch (e) {
+    alert('Could not load that show\'s schedule.');
+    return;
+  }
+  const targets = _schedEditorDays();
+  const real = targets.filter(t => !t.pane.querySelector('.sched-orphan-note'));
+  const opts = (sel) => ['<option value="">Don\'t import</option>'].concat(targets.map((t, i) =>
+    `<option value="${i}" ${i === sel ? 'selected' : ''}>${_esc(t.label)}</option>`)).join('');
+  const rowsHtml = d.days.map((sd, i) => {
+    const def = real[i] ? targets.indexOf(real[i]) : -1;
+    const preview = sd.rows.map(r =>
+      `<tr><td>${_esc(r.start_time)}</td><td>${_esc(r.end_time)}</td><td>${_esc(r.description)}</td><td class="text-dim">${_esc(r.notes)}</td></tr>`).join('');
+    return `
+      <div class="sched-import-day">
+        <div class="sched-import-day-head">
+          <div><strong>${sd.orphan ? 'Off-date' : 'Day ' + sd.day_num}</strong>
+            <span class="text-dim">${_esc(sd.label)} · ${sd.rows.length} row${sd.rows.length === 1 ? '' : 's'}</span>
+            <button type="button" class="btn btn-xs btn-ghost" data-toggle="${i}">Show rows</button></div>
+          <label class="sched-import-target">→ <select class="field-input" data-src="${i}">${opts(def)}</select></label>
+        </div>
+        <table class="data-table sched-import-preview" data-preview="${i}" hidden><tbody>${preview}</tbody></table>
+      </div>`;
+  }).join('') || '<p class="text-dim">That show has no schedule rows.</p>';
+  const ov = _schedModal(`Import from “${_esc(d.show.name)}”`, `
+      ${rowsHtml}
+      <div class="sched-import-mode">
+        <label><input type="radio" name="sched-imp-mode" value="merge" checked> Add to the rows already on the day</label>
+        <label><input type="radio" name="sched-imp-mode" value="replace"> Replace the rows already on the day</label>
+      </div>`,
+    `<button type="button" class="btn btn-ghost" data-back>← Other show</button>
+     <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+     <button type="button" class="btn btn-primary" data-go>Import</button>`, 680);
+  ov.addEventListener('click', e => {
+    const t = e.target.closest('[data-toggle]');
+    if (t) {
+      const tbl = ov.querySelector(`[data-preview="${t.dataset.toggle}"]`);
+      tbl.hidden = !tbl.hidden;
+      t.textContent = tbl.hidden ? 'Show rows' : 'Hide rows';
+    }
+    if (e.target.closest('[data-back]')) { ov.remove(); openSchedImport(); }
+    if (e.target.closest('[data-go]')) {
+      const mode = ov.querySelector('input[name="sched-imp-mode"]:checked').value;
+      const plan = new Map();   // target index → rows
+      ov.querySelectorAll('select[data-src]').forEach(sel => {
+        if (sel.value === '') return;
+        const ti = parseInt(sel.value, 10);
+        plan.set(ti, (plan.get(ti) || []).concat(d.days[parseInt(sel.dataset.src, 10)].rows));
+      });
+      if (!plan.size) { alert('Choose at least one day to import.'); return; }
+      if (mode === 'replace') {
+        const hit = [...plan.keys()].filter(ti => _schedDayRows(targets[ti].pane).length);
+        if (hit.length && !confirm(`Replace the existing rows on ${hit.map(ti => targets[ti].label).join(', ')}? ` +
+                                   'The current version stays in History.')) return;
+      }
+      let n = 0;
+      plan.forEach((rows, ti) => {
+        const tbody = targets[ti].pane.querySelector('tbody');
+        if (!tbody) return;
+        if (mode === 'replace') {
+          tbody.querySelectorAll('.schedule-row:not(.piano-sched-row)').forEach(tr => tr.remove());
+        } else {
+          tbody.querySelectorAll('.schedule-row:not(.piano-sched-row)').forEach(tr => {
+            if (!Array.from(tr.querySelectorAll('.sched-cell')).some(c => c.value.trim())) tr.remove();
+          });
+        }
+        rows.forEach(r => { tbody.appendChild(_schedNewRow(r)); n++; });
+        sortSchedRowsByTime(targets[ti].key);   // also queues the save
+      });
+      ov.remove();
+      const first = targets[[...plan.keys()][0]];
+      const tab = first.key ? document.querySelector(`.sched-day-tab[data-day-key="${CSS.escape(first.key)}"]`) : null;
+      if (tab) switchSchedDay(first.key, tab);
+      showSaveToast(`Imported ${n} row${n === 1 ? '' : 's'} from ${d.show.name} — saving…`);
+    }
+  });
+}
+
+function openSaveSchedTemplate() {
+  const days = _schedEditorDays();
+  const cur = Math.max(0, days.findIndex(t => t.visible));
+  const dayPick = days.length > 1 ? `
+      <label class="field-label">Day</label>
+      <select class="field-input" data-day>${days.map((t, i) =>
+        `<option value="${i}" ${i === cur ? 'selected' : ''}>${_esc(t.label)} (${_schedDayRows(t.pane).length} rows)</option>`).join('')}</select>` : '';
+  const ov = _schedModal('Save day as template', `
+      ${dayPick}
+      <label class="field-label">Template name</label>
+      <input type="text" class="field-input" data-name maxlength="120" placeholder="e.g. Orchestra concert — single day">
+      <p class="text-dim" style="margin:0;font-size:12px">Saves the day's rows (times, descriptions, notes) as a
+        schedule template anyone can apply from "Apply template…". Piano tuning rows are left out.
+        Using an existing template's name replaces that template.</p>`,
+    `<button type="button" class="btn btn-ghost" data-close>Cancel</button>
+     <button type="button" class="btn btn-primary" data-go>Save template</button>`, 480);
+  const nameEl = ov.querySelector('[data-name]');
+  setTimeout(() => nameEl.focus(), 0);
+  ov.querySelector('[data-go]').addEventListener('click', async () => {
+    const name = nameEl.value.trim();
+    if (!name) { nameEl.focus(); return; }
+    const day = days[days.length > 1 ? parseInt(ov.querySelector('[data-day]').value, 10) : 0];
+    const rows = day ? _schedDayRows(day.pane) : [];
+    if (!rows.length) { alert('That day has no rows to save.'); return; }
+    const existing = (window.SCHED_TEMPLATES || []).find(t => (t.name || '').trim().toLowerCase() === name.toLowerCase());
+    if (existing && !confirm(`Replace the existing template “${existing.name}” with these ${rows.length} rows?`)) return;
+    const url = existing ? `/settings/schedule-templates/${existing.id}/edit` : '/settings/schedule-templates/add';
+    try {
+      const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                  body: JSON.stringify({name, rows})});
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.success) throw new Error(d.error || `HTTP ${r.status}`);
+      if (!existing) {
+        window.SCHED_TEMPLATES = (window.SCHED_TEMPLATES || []).concat([{id: d.id, name}]);
+        document.querySelectorAll('.sched-tmpl-select').forEach(sel => {
+          const o = document.createElement('option');
+          o.value = d.id; o.textContent = name;
+          sel.appendChild(o);
+        });
+      }
+      ov.remove();
+      showSaveToast(`✓ Template “${name}” saved (${rows.length} rows)`);
+    } catch (e) {
+      alert('Could not save the template: ' + e.message);
+    }
+  });
+}
+
 function collectScheduleData() {
   const meta = {};
   document.querySelectorAll('#schedule-form .sched-meta').forEach(el => {
@@ -1594,24 +1863,158 @@ function collectScheduleData() {
   return {meta, rows};
 }
 
-async function saveSchedule() {
+/* ── Schedule save safety (3.30.0) ──────────────────────────────
+   Two reported "schedule cleared itself" cases led to these rules:
+   - Rows are posted ONLY when they differ from what this page last loaded /
+     saved (_schedBaseline). A meta edit, the 30 s safety net or any other
+     save that didn't touch the rows can never rewrite them.
+   - Row posts carry the revision the page loaded with (SCHED_REV). If
+     someone else saved rows since, the server answers 409 and nothing is
+     written; the person chooses Reload or Keep mine.
+   - Removing every row asks first (the server refuses it otherwise).
+   - Venue & tech fields are posted only when changed, so a stale tab can't
+     put back old values over someone else's edits either. */
+let _schedBaseline = null;   // canonical JSON of the PM rows last loaded/saved
+let _schedMetaBaseline = {}; // meta values last loaded/saved (only changed keys are posted)
+let _schedConflict = false;  // a 409 is waiting on the person's choice
+let _schedClearDeclined = false; // person said no to saving an empty schedule
+let _schedSaving = null;     // in-flight save promise (saves never overlap)
+
+function _schedCanonRows(rows) {
+  return JSON.stringify((rows || [])
+    .filter(r => !r.piano_tuning_id)
+    .map(r => [r.day_date || null, r.day_date ? null : (r.perf_id || null),
+               r.start_time || '', r.end_time || '', r.description || '', r.notes || '']));
+}
+function _schedHasContent(rows) {
+  return (rows || []).some(r => !r.piano_tuning_id &&
+    [r.start_time, r.end_time, r.description, r.notes].some(v => String(v || '').trim()));
+}
+function _schedInitBaseline() {
+  if (!document.getElementById('schedule-form')) return;
+  const d = collectScheduleData();
+  _schedBaseline = _schedCanonRows(d.rows);
+  _schedMetaBaseline = Object.assign({}, d.meta);
+}
+
+function _schedShowBanner(kind, info) {
+  document.getElementById('sched-conflict-banner')?.remove();
+  const pane = document.getElementById('tab-schedule');
+  if (!pane) return;
+  const div = document.createElement('div');
+  div.id = 'sched-conflict-banner';
+  div.className = 'sched-conflict-banner';
+  let when = '';
+  const t = info && info.saved_at ? parseServerTime(info.saved_at) : null;
+  if (t) when = ' at ' + t.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  const who = info && info.saved_by ? _esc(info.saved_by) : 'Someone else';
+  if (kind === 'conflict') {
+    div.innerHTML = `
+      <div><strong>Your schedule changes were NOT saved.</strong>
+        ${who} saved this production schedule${when} after you opened the page.
+        Saving now would replace their version with yours.</div>
+      <div class="sched-conflict-actions">
+        <button type="button" class="btn btn-sm btn-primary" data-act="reload">Reload (get their version)</button>
+        <button type="button" class="btn btn-sm btn-ghost" data-act="history">View history</button>
+        <button type="button" class="btn btn-sm btn-danger" data-act="force">Keep mine (overwrite)</button>
+      </div>`;
+  } else {
+    div.innerHTML = `
+      <div><strong>The schedule was not cleared.</strong> Removing every row was cancelled, so the
+        saved schedule still has its rows. Reload to see them again.</div>
+      <div class="sched-conflict-actions">
+        <button type="button" class="btn btn-sm btn-primary" data-act="reload">Reload</button>
+      </div>`;
+  }
+  div.addEventListener('click', e => {
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if (act === 'reload') { _isDirty = false; location.reload(); }
+    if (act === 'history' && typeof openHistory === 'function') openHistory('schedule');
+    if (act === 'force') {
+      if (!confirm('Replace the saved production schedule with the rows on your screen? ' +
+                   'Their version stays in History.')) return;
+      _schedConflict = false;
+      div.remove();
+      saveSchedule({force: true});
+    }
+  });
+  pane.insertAdjacentElement('afterbegin', div);
+}
+
+async function saveSchedule(opts) {
   if (!SHOW_ID) return;
+  if (_schedSaving) {               // let the running save land first
+    await _schedSaving.catch(() => {});
+  }
+  _schedSaving = _saveScheduleNow(opts || {});
+  try { return await _schedSaving; } finally { _schedSaving = null; }
+}
+
+async function _saveScheduleNow(opts) {
+  const collected = collectScheduleData();
+  const meta = {};
+  Object.entries(collected.meta).forEach(([k, v]) => {
+    if (_schedMetaBaseline[k] !== v) meta[k] = v;
+  });
+  const payload = {meta};
+  const canon = _schedCanonRows(collected.rows);
+  // No baseline = the editor never finished initialising; don't trust its rows.
+  const rowsChanged = _schedBaseline !== null && canon !== _schedBaseline;
+  if (rowsChanged && _schedConflict && !opts.force) {
+    // Waiting on Reload / Keep mine — keep saving meta only.
+  } else if (rowsChanged) {
+    payload.rows = collected.rows;
+    payload.base_rev = window.SCHED_REV || null;
+    if (opts.force) payload.force = true;
+    if (!_schedHasContent(collected.rows) && _schedBaseline !== _schedCanonRows([])) {
+      if (!_schedClearDeclined &&
+          confirm('This removes EVERY row from the production schedule. Save it empty?')) {
+        payload.allow_clear = true;
+      } else {
+        // Asked once; hold the empty schedule back until rows come back or a reload.
+        delete payload.rows;
+        if (!_schedClearDeclined) _schedShowBanner('cleared');
+        _schedClearDeclined = true;
+      }
+    } else {
+      _schedClearDeclined = false;
+    }
+  }
+  if (!payload.rows && !Object.keys(meta).length) {
+    // Nothing new to write (or only rows held back above) — don't post, so
+    // a no-op save can't stamp "last saved" or ping other tabs.
+    _isDirty = rowsChanged;
+    setSaveStatus('', '');
+    return;
+  }
   setSaveStatus('saving', 'Saving...');
   try {
     const resp = await fetch(`/shows/${SHOW_ID}/save/schedule`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(collectScheduleData())
+      body: JSON.stringify(payload)
     });
-    const d = await resp.json();
+    const d = await resp.json().catch(() => ({}));
+    if (resp.status === 409 && d.conflict) {
+      _schedConflict = true;
+      setSaveStatus('error', '✗ Not saved — conflict');
+      showSaveToast('✗ Schedule changed by someone else — not saved', 'error');
+      _schedShowBanner('conflict', d);
+      return;
+    }
     if (d.success) {
-      _isDirty = false;
+      if (d.rev) window.SCHED_REV = d.rev;
+      if (payload.rows) _schedBaseline = canon;
+      Object.assign(_schedMetaBaseline, meta);
+      // Rows that changed but weren't sent (conflict pending, clear cancelled)
+      // are still unsaved — keep the leave-page warning on for them.
+      _isDirty = rowsChanged && !payload.rows;
       setSaveStatus('saved', '✓ Saved');
       showSaveToast('✓ Saved');
       setTimeout(() => setSaveStatus('', ''), 3000);
     } else {
       setSaveStatus('error', '✗ Save failed');
-      showSaveToast('✗ Save failed', 'error');
+      showSaveToast('✗ ' + (d.error || 'Save failed'), 'error');
     }
   } catch(e) {
     setSaveStatus('error', '✗ Network error');
@@ -3867,6 +4270,30 @@ function parseTimeToHHMM(str) {
   return String(hours).padStart(2, '0') + ':' + String(minutes).padStart(2, '0');
 }
 
+/* Schedule time cell → canonical text. Next-day items of a long show day
+   (3.30.0) are written "1+00:30": "+0030", "1+30" style input and "24:30"
+   become that; the PDF prints them with the next date ("3/2 00:30"). */
+function _schedParseTime(v) {
+  const s = String(v || '').trim();
+  let m = /^(\d)?\s*\+\s*(.+)$/.exec(s);
+  if (m) {
+    const t = parseTimeToHHMM(m[2]);
+    return /^\d{2}:\d{2}$/.test(t) ? `${m[1] || 1}+${t}` : s;
+  }
+  m = /^(\d{2}):?(\d{2})$/.exec(s);
+  if (m && +m[1] >= 24 && +m[1] < 48 && +m[2] < 60) {
+    return `1+${String(+m[1] - 24).padStart(2, '0')}:${m[2]}`;
+  }
+  return parseTimeToHHMM(v);
+}
+
+/* Minutes into the schedule day (next-day times count past 24:00), or null. */
+function _schedTimeKey(v) {
+  const t = _schedParseTime(v);
+  const m = /^(?:(\d)\+)?(\d{2}):(\d{2})$/.exec(t || '');
+  return m ? (+(m[1] || 0)) * 1440 + (+m[2]) * 60 + (+m[3]) : null;
+}
+
 // Bind time normalisation to all schedule time cells on blur
 function _bindScheduleTimeParsing() {
   const form = document.getElementById('schedule-form');
@@ -3878,7 +4305,7 @@ function _bindScheduleTimeParsing() {
     if (!tr) return;
     const cells = tr.querySelectorAll('.sched-cell');
     if (e.target === cells[0] || e.target === cells[1]) {
-      const parsed = parseTimeToHHMM(e.target.value);
+      const parsed = _schedParseTime(e.target.value);
       if (parsed !== e.target.value) {
         e.target.value = parsed;
         e.target.dispatchEvent(new Event('input', {bubbles: true}));
