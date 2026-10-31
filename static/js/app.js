@@ -1239,7 +1239,14 @@ function _renderScheduleDays(days) {
     // don't all read as edited (which would shield other people's changes).
     if (typeof _schedRowBase !== 'undefined') {
       fallback.querySelectorAll('tr.schedule-row[data-row-id]').forEach(tr => {
-        _schedRowBase.set(parseInt(tr.dataset.rowId, 10), _schedSig(fallback, _schedCells(tr)));
+        const id = parseInt(tr.dataset.rowId, 10);
+        const old = _schedRowBase.get(id);
+        if (old) {   // only the day part changes; an edit in flight stays an edit
+          const b = JSON.parse(old); b[0] = firstKey; b[1] = null;
+          _schedRowBase.set(id, JSON.stringify(b));
+        } else {
+          _schedRowBase.set(id, _schedSig(fallback, _schedCells(tr)));
+        }
       });
       if (_schedOrderBase[''] !== undefined) { _schedOrderBase[firstKey] = _schedOrderBase['']; delete _schedOrderBase['']; }
     }
@@ -2037,6 +2044,12 @@ function _schedMarkReordered(tbody) {
   if (pane) pane.dataset.reordered = '1';
 }
 function _schedIdsJson(list) { return JSON.stringify(list.filter(x => typeof x === 'number')); }
+/* A sort / drag that left the saved order unchanged (most start-time edits)
+   is not a reorder: drop the flag, or this tab would stop following other
+   people's drags on that day and later overwrite them. */
+function _schedClearStaleReorder(pane, key, idsJson) {
+  if (pane && pane.dataset.reordered === '1' && idsJson === (_schedOrderBase[key] || '[]')) delete pane.dataset.reordered;
+}
 
 function _schedInitBaseline() {
   if (!document.getElementById('schedule-form')) return;
@@ -2072,18 +2085,21 @@ function _schedPending() {
     }
   });
   const del = [..._schedRowBase.keys()].filter(id => !seen.has(id));
-  const ord = {};
+  const ord = {}, place = {};
   Object.entries(order).forEach(([k, list]) => {
     const refs = list.map(x => typeof x === 'number' ? x
                        : (_schedHasText(_schedCells(x)) ? x.dataset.cid : null)).filter(Boolean);
     const hasNew = refs.some(x => typeof x === 'string');
+    const idsJson = _schedIdsJson(refs);
+    _schedClearStaleReorder(panes[k], k, idsJson);
     const reordered = panes[k] && panes[k].dataset.reordered === '1';
-    if (hasNew || (reordered && _schedIdsJson(refs) !== (_schedOrderBase[k] || '[]'))) ord[k] = refs;
+    if (reordered && idsJson !== (_schedOrderBase[k] || '[]')) ord[k] = refs;
+    else if (hasNew) place[k] = refs;   // slot the new rows in; keep everyone else's order
   });
   const baseHadText = [..._schedRowBase.values()].some(sig => JSON.parse(sig).slice(2).some(v => String(v).trim()));
   const hasText = rows.some(r => _schedHasText(r.vals));
-  return {upsert, delete: del, order: ord, hasText, baseHadText,
-          any: upsert.length || del.length || Object.keys(ord).length};
+  return {upsert, delete: del, order: ord, place, hasText, baseHadText,
+          any: upsert.length || del.length || Object.keys(ord).length || Object.keys(place).length};
 }
 
 function _schedClearedBanner() {
@@ -2126,10 +2142,11 @@ async function _schedResync() {
     const pane = form.querySelector(`.sched-day-pane[data-day-key="${CSS.escape(sr.day)}"]`);
     if (!pane) return;
     const sig = _schedSig(pane, sr);
-    const tr = local.find(t => t.closest('.sched-day-pane') === pane && _schedSig(pane, _schedCells(t)) === sig);
+    const tr = local.find(t => t.closest('.sched-day-pane') === pane &&
+                               (t._sentSig === sig || _schedSig(pane, _schedCells(t)) === sig));
     if (!tr) return;
-    tr.dataset.rowId = sr.id; delete tr.dataset.cid;
-    _schedRowBase.set(sr.id, sig);
+    tr.dataset.rowId = sr.id; delete tr.dataset.cid; delete tr._sentSig;
+    _schedRowBase.set(sr.id, sig);   // typing since the send stays a pending cell edit
     local.splice(local.indexOf(tr), 1);
   });
   _schedMerge(form, st);
@@ -2141,7 +2158,15 @@ async function _schedResync() {
    them back, instead of deleting them with the next edit. */
 function _schedForgetDeletions() {
   const form = document.getElementById('schedule-form');
-  const present = new Set(Array.from(form.querySelectorAll('tr.schedule-row[data-row-id]')).map(t => parseInt(t.dataset.rowId, 10)));
+  const present = new Set();
+  form.querySelectorAll('tr.schedule-row[data-row-id]').forEach(tr => {
+    const id = parseInt(tr.dataset.rowId, 10);
+    present.add(id);
+    const base = _schedRowBase.get(id);
+    if (!base) return;
+    const b = JSON.parse(base), cells = tr.querySelectorAll('.sched-cell');   // blanked, not removed: put the text back
+    [2, 3, 4, 5].forEach(i => { if (cells[i - 2] && cells[i - 2].value !== b[i]) cells[i - 2].value = b[i]; });
+  });
   [..._schedRowBase.keys()].forEach(id => { if (!present.has(id)) _schedRowBase.delete(id); });
   _schedSyncHash = '';
 }
@@ -2171,8 +2196,11 @@ async function _saveScheduleNow(opts) {
     if (send) {
       payload.ops = {
         upsert: p.upsert.map(u => { const o = Object.assign({}, u); delete o._tr; delete o._sig; return o; }),
-        delete: p.delete, order: p.order,
+        delete: p.delete, order: p.order, place: p.place,
       };
+      // What each new row was sent as — the resync after a lost response
+      // matches on this, not on cells the person may have kept typing into.
+      p.upsert.forEach(u => { if (u.ref) u._tr._sentSig = u._sig; });
     }
   }
   if (payload.ops && window._schedNextNote) {
@@ -2210,7 +2238,10 @@ async function _saveScheduleNow(opts) {
           if (id) _schedRowBase.set(id, u._sig);
         });
         p.delete.forEach(id => _schedRowBase.delete(id));
-        Object.entries(p.order).forEach(([k, refs]) => {
+        Object.entries(Object.assign({}, p.place, p.order)).forEach(([k, refs]) => {
+          // For a placement the server may hold a different order (someone
+          // else's drag): baseline = our local order, so the next poll finds
+          // the day clean and adopts the saved order.
           _schedOrderBase[k] = JSON.stringify(refs.map(r => typeof r === 'number' ? r : ids[r]).filter(Boolean));
           const pane = document.querySelector(`#schedule-form .sched-day-pane[data-day-key="${CSS.escape(k)}"]`)
                     || document.querySelector('#schedule-form .sched-day-pane:not([data-day-key])');
@@ -2224,6 +2255,9 @@ async function _saveScheduleNow(opts) {
       showSaveToast('✓ Saved');
       setTimeout(() => setSaveStatus('', ''), 3000);
     } else {
+      // No JSON refusal (a gateway 502/504 page): the server may still have
+      // committed — treat like a lost response.
+      if (payload.ops && !d.error) _schedResyncNeeded = true;
       setSaveStatus('error', '✗ Save failed');
       showSaveToast('✗ ' + (d.error || 'Save failed'), 'error');
     }
@@ -2358,7 +2392,7 @@ function _schedMerge(form, st) {
       const sig = _schedSig(pane, r);
       let tr = form.querySelector(`tr.schedule-row[data-row-id="${r.id}"]`);
       if (tr) {
-        if (sig === _schedRowBase.get(r.id)) return;       // nothing new from the server
+        if (sig === _schedRowBase.get(r.id)) { _schedRemotePending.delete(r.id); return; }   // nothing new
         if (tr === focusTr) {                              // applied when the row is left
           _schedRemotePending.set(r.id, r); skipped++;
           return;
@@ -2383,7 +2417,7 @@ function _schedMerge(form, st) {
   // Rows / piano rows deleted elsewhere.
   form.querySelectorAll('tr.schedule-row[data-row-id]').forEach(tr => {
     const id = parseInt(tr.dataset.rowId, 10);
-    if (serverIds.has(id)) return;
+    if (serverIds.has(id)) { if (_schedRemotePending.get(id) === null) _schedRemotePending.delete(id); return; }
     const dirty = _schedRowBase.get(id) !== _schedSig(tr.closest('.sched-day-pane'), _schedCells(tr));
     if (dirty) return;                                     // edited here: the save re-creates it
     if (tr === focusTr) { _schedRemotePending.set(id, null); skipped++; return; }
@@ -2400,9 +2434,15 @@ function _schedMerge(form, st) {
     if (!pane) return;
     const tbody = pane.querySelector('tbody');
     const localIds = [...tbody.querySelectorAll('tr.schedule-row[data-row-id]')].map(t => parseInt(t.dataset.rowId, 10));
+    // Rows this merge just added aren't in the baseline yet: compare the
+    // order of the rows the baseline knows, or a new row from someone else
+    // would keep this tab from adopting the saved order.
+    const baseIds = new Set(JSON.parse(_schedOrderBase[key] || '[]'));
+    const knownOrder = JSON.stringify(localIds.filter(id => serverIds.has(id) && baseIds.has(id)));
+    _schedClearStaleReorder(pane, key, knownOrder);
     const clean = !tbody.querySelector('tr.schedule-row:not([data-row-id]):not(.piano-sched-row)') &&
                   !(focusTr && tbody.contains(focusTr)) && pane.dataset.reordered !== '1' &&
-                  JSON.stringify(localIds.filter(id => serverIds.has(id))) === (_schedOrderBase[key] || '[]') &&
+                  knownOrder === (_schedOrderBase[key] || '[]') &&
                   [...tbody.querySelectorAll('tr.schedule-row[data-row-id]')].every(t =>
                     _schedRowBase.get(parseInt(t.dataset.rowId, 10)) === _schedSig(pane, _schedCells(t)));
     const want = rows.map(r => r.piano_id
@@ -2432,6 +2472,7 @@ function _schedMerge(form, st) {
     if (!el) return;
     if (el === focusEl) {
       if (value !== (_schedMetaBaseline[key] ?? value)) { _schedMetaPending[key] = value; skipped++; }
+      else delete _schedMetaPending[key];
       return;
     }
     const local = el.type === 'checkbox' ? (el.checked ? '1' : '') : el.value;

@@ -358,7 +358,10 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
 - **Schedule** rows carry `data-row-id`; `_schedRowBase` / `_schedOrderBase`
   / `_schedMetaBaseline` are the baseline; `_schedPending()` → `ops`
   (`upsert` with id + `changed` cell list, or `ref` for a new row; `delete`;
-  `order` only for days flagged `data-reordered` or holding new rows) →
+  `order` only for days flagged `data-reordered` whose order differs from
+  the baseline — `_schedClearStaleReorder` drops a flag a no-op sort set;
+  `place` for days with new rows: the server keeps its order and slots each
+  new row after its listed predecessor, 3.32.3) →
   `_apply_schedule_ops()` (UPDATE writes only `changed` columns; a row that
   no longer exists anywhere is re-created). `/sync/schedule` (3 s; ONE SQL
   digest `_schedule_sync_hash` first, full state only on change) →
@@ -367,8 +370,9 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   `_schedRemotePending` / `_schedMetaPending` and applied on focusout, and
   the hash is committed only when nothing was held back (`skipped`). Saves
   are serialized per form (`_serializedSave`); a lost response sets
-  `_schedResyncNeeded` → `_schedResync()` adopts server rows before the
-  next save. Declined clear → `_schedForgetDeletions()`. Caps:
+  `_schedResyncNeeded` (also on a non-JSON error response) → `_schedResync()`
+  adopts server rows by the signature SENT (`tr._sentSig`) before the next
+  save. Declined clear → `_schedForgetDeletions()`. Caps:
   `_SCHED_OPS_MAX` per save, `_SCHED_ROWS_MAX_PER_SHOW`, 300 meta keys. `_schedNewRow()` is THE row
   builder; `_bindScheduleTimeParsing` the ONE blur normaliser. The
   whole-list `rows` path (`_schedule_legacy_rows_save`, 409 on stale

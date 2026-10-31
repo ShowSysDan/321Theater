@@ -3685,12 +3685,19 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     try { await saveActive(); } catch (_) {}
     if (_isDirty && !confirm('Some of your edits on this page could not be saved and will be lost. Restore anyway?')) return;
     try {
+      // Our own flush may have changed the state: re-read the token so the
+      // restore is bound to the state as of now (the diff shown was vs the
+      // server; our flushed edits are exactly what a restore replaces).
+      if (_restoreExpected) {
+        const t = await fetch(`/shows/${SHOW_ID}/history/${_currentHistId}/diff?against=current`).then(r => r.json()).catch(() => null);
+        if (t && t.state_token) _restoreExpected = t.state_token;
+      }
       const q = _restoreExpected ? `?expected_state=${encodeURIComponent(_restoreExpected)}` : '?force=1';
       const resp = await fetch(`/shows/${SHOW_ID}/history/${_currentHistId}/restore${q}`, {method: 'POST'});
       const d = await resp.json();
       if (resp.status === 409 && d.conflict) {
         // Someone saved after the preview: show what restoring would change NOW.
-        showSaveToast(`${d.newer_saved_by || 'Someone'} saved after you opened this — preview updated`, 'error');
+        showSaveToast('This form changed after you opened the preview — preview updated', 'error');
         restoreSnapshot(_currentHistId);
         return;
       }

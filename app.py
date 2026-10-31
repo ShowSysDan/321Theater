@@ -889,7 +889,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.32.2'
+APP_VERSION = '3.32.3'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -7045,13 +7045,41 @@ def _apply_schedule_ops(db, show_id, ops):
         if rid:
             created[str(rid)] = new_id
     order = ops.get('order') if isinstance(ops.get('order'), dict) else {}
-    if order:
+    place = ops.get('place') if isinstance(ops.get('place'), dict) else {}
+    if order or place:
         show = db.execute('SELECT * FROM shows WHERE id=%s', (show_id,)).fetchone()
         _, days = _build_schedule_days(db, show_id, show, include_orphans=True)
         rows = [dict(r) for r in db.execute(
             'SELECT * FROM schedule_rows WHERE show_id=%s AND piano_tuning_id IS NULL '
             'ORDER BY sort_order, id', (show_id,)).fetchall()]
         by_day = _schedule_rows_by_editor_day(rows, days)
+        # `place` (3.32.3): the day keeps its saved order; each new row goes
+        # right after the row listed before it — so adding a row can't undo
+        # a reorder someone else saved meanwhile.
+        for key, refs in place.items():
+            if key not in by_day or not isinstance(refs, list) or key in order:
+                continue
+            day_rows = list(by_day[key])
+            byid = {r['id']: r for r in day_rows}
+            prev = None
+            for ref in refs:
+                rid = created.get(str(ref)) if isinstance(ref, str) else None
+                if rid is None:
+                    try:
+                        rid = int(ref)
+                    except (TypeError, ValueError):
+                        continue
+                    if rid in byid:
+                        prev = rid
+                    continue
+                row = byid.get(rid)
+                if row is None:
+                    continue
+                day_rows.remove(row)
+                pos = next((i + 1 for i, r in enumerate(day_rows) if r['id'] == prev), 0) if prev else 0
+                day_rows.insert(pos, row)
+                prev = rid
+            by_day[key] = day_rows
         for key, refs in order.items():
             if key not in by_day or not isinstance(refs, list):
                 continue
@@ -7719,6 +7747,9 @@ def restore_history(show_id, hist_id):
 
     snapshot = _hist_load(entry['snapshot_json'])
     form_type = entry['form_type']
+    # Lock first: a save committing between the state check and the write
+    # would otherwise be overwritten without the 409.
+    db.execute('SELECT 1 FROM shows WHERE id=%s FOR UPDATE', (show_id,))
 
     # A restore is bound to the state the person previewed (3.32.2): the
     # client sends the latest version id its "what would change" was computed
@@ -7758,7 +7789,6 @@ def restore_history(show_id, hist_id):
                 'current_snapshot':  json.loads(newer['snapshot_json']),
             }), 409
 
-    db.execute('SELECT 1 FROM shows WHERE id=%s FOR UPDATE', (show_id,))
     if form_type == 'advance':
         adv = snapshot.get('advance_data', {})
         for key, val in adv.items():
