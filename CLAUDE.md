@@ -375,8 +375,13 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   removes when someone saved in between.
 - Versions (`_snapshot_form_history`) are built from the DB after the
   write (`_current_form_state` / `_schedule_state_snapshot`), never from
-  the request. Skips identical saves, groups one user's saves within 10 min
-  (never across a removal), keeps 100; `note` marks restores/imports.
+  the request. Skips identical saves; groups one user's saves into the
+  version first saved <10 min ago ONLY while they purely add
+  (`_history_pure_addition`: new rows / filled fields / continued typing —
+  any removal or replacement starts a new version, 3.32.1); keeps 100;
+  `note` marks restores/imports (the client sends `note` on the save after
+  an import). Schedule meta keys are validated (`_schedule_meta_key_ok`);
+  `_schedule_save_reject` caps list sizes and refuses non-dates.
 - Off-date rows: `_build_schedule_days(..., include_orphans=True)` keeps
   rows whose date left the load range / performances visible (⚠ OFF-DATE);
   never filter rows out of the editor render.

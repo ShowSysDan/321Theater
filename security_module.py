@@ -230,6 +230,8 @@ def _names_save_view(show_id):
     raw = data.get('names')
     if not isinstance(raw, list):
         return jsonify({'success': False, 'error': 'names must be a list.'}), 400
+    if isinstance(data.get('base'), list) and len(data['base']) > MAX_NAMES:
+        return jsonify({'success': False, 'error': 'base is too long.'}), 400
     names = [n for n in (_clean_name(x) for x in raw) if n]
     if len(names) > MAX_NAMES:
         return jsonify({'success': False,
@@ -281,7 +283,8 @@ def _merge_names(current, base, mine):
     from its base, plus what it added (by count, so duplicate names work)."""
     from collections import Counter
     removed = Counter(base) - Counter(mine)
-    added = Counter(mine) - Counter(base)
+    # Names this editor added that someone else added meanwhile count once.
+    added = (Counter(mine) - Counter(base)) - (Counter(current) - Counter(base))
     out = []
     for n in current:
         if removed[n] > 0:

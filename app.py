@@ -889,7 +889,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.32.0'
+APP_VERSION = '3.32.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -4658,24 +4658,39 @@ def _history_filled(v):
     return bool(s) and s not in ('-', '—', 'false', '[]', 'None')
 
 
-def _history_weight(form_type, data):
-    """How much content a snapshot holds: schedule rows with any text, or
-    advance / notes fields with a real value."""
+def _history_pure_addition(db, show_id, form_type, old, new):
+    """True when `new` only ADDS to `old`: new rows / filled fields, or text
+    that continues what was there (typing). Any removal, or a value replaced
+    by something that doesn't start with it, is a change the previous
+    version must survive — so it is never merged away."""
+    def _grows(before, after):
+        return str(after or '').startswith(str(before or ''))
     if form_type == 'schedule':
-        return sum(1 for r in _schedule_canon_rows(data.get('rows') or [])
-                   if _sched_row_has_content(r))
-    flat = data.get('advance_data') or data.get('notes_data') or {}
-    return sum(1 for v in flat.values() if _history_filled(v))
+        perf_dates = {r['id']: (_as_date(r['perf_date']).isoformat() if _as_date(r['perf_date']) else '')
+                      for r in db.execute('SELECT id, perf_date FROM show_performances WHERE show_id=%s',
+                                          (show_id,)).fetchall()}
+        d = _schedule_diff(old, new, perf_dates, {})
+        if d['summary']['removed']:
+            return False
+        for day in d['days']:
+            for c in day['changed']:
+                if not all(_grows(c['before'][f], c['after'][f]) for f in c['fields']):
+                    return False
+        return all(_grows(m['before'], m['after']) for m in d['meta'])
+    d = _fields_diff(old, new, {})
+    return all(_grows(f['before'], f['after']) for f in d['fields'])
 
 
 def _snapshot_form_history(db, show_id, form_type, snapshot_data, note=None):
     """Record a version of a form (3.30.0 rules):
     - a save identical to the latest version records nothing (the 30 s
       safety-net save and no-op autosaves used to push real versions out);
-    - the same person's autosaves within _HISTORY_COALESCE_MIN minutes update
-      their latest version instead of stacking one per keystroke pause —
-      EXCEPT a save that removes content, which always starts a new version,
-      so the state before a deletion/wipe can always be restored;
+    - the same person's autosaves within _HISTORY_COALESCE_MIN minutes of a
+      version's FIRST save update that version instead of stacking one per
+      keystroke pause — but only while they purely add (new rows, filled
+      fields, continued typing; `_history_pure_addition`): a save that
+      removes or replaces anything always starts a new version, so what it
+      replaced can always be restored;
     - a version with a note (restore / import) is never merged into;
     - the newest _HISTORY_KEEP versions are kept."""
     uid = session.get('user_id') if has_request_context() else None
@@ -4695,9 +4710,10 @@ def _snapshot_form_history(db, show_id, form_type, snapshot_data, note=None):
             return
         if (old is not None and not latest['note'] and latest['recent']
                 and uid is not None and latest['saved_by'] == uid
-                and _history_weight(form_type, snapshot_data) >= _history_weight(form_type, old)):
-            db.execute('UPDATE form_history SET snapshot_json=%s, saved_at=CURRENT_TIMESTAMP '
-                       'WHERE id=%s', (new_json, latest['id']))
+                and _history_pure_addition(db, show_id, form_type, old, snapshot_data)):
+            # saved_at stays = the burst's first save, so the window can't slide.
+            db.execute('UPDATE form_history SET snapshot_json=%s WHERE id=%s',
+                       (new_json, latest['id']))
             return
     db.execute("""
         INSERT INTO form_history (show_id, form_type, saved_by, snapshot_json, note)
@@ -6966,8 +6982,7 @@ def _apply_schedule_ops(db, show_id, ops):
     for u in ops.get('upsert') or []:
         if not isinstance(u, dict):
             continue
-        dd = u.get('day_date')
-        dd = dd.strip() if isinstance(dd, str) and re.match(r'^\s*\d{4}-\d{2}-\d{2}\s*$', dd) else None
+        dd = _sched_day_date(u.get('day_date'))
         try:
             pid = int(u.get('perf_id')) if u.get('perf_id') else None
         except (TypeError, ValueError):
@@ -6985,6 +7000,8 @@ def _apply_schedule_ops(db, show_id, ops):
                              vals + (rid, show_id))
             if cur.rowcount:
                 continue
+            if db.execute('SELECT 1 FROM schedule_rows WHERE id=%s', (rid,)).fetchone():
+                continue   # another show's row, or a piano row: not this editor's
             # Someone deleted the row while this person was editing it: keep
             # the edit (re-create it) rather than silently dropping it.
         new_id = db.execute(
@@ -7102,6 +7119,47 @@ def sync_postnotes(show_id):
     return jsonify({'success': True, 'hash': h, 'notes': notes})
 
 
+def _sched_day_date(v):
+    """A row's day as 'YYYY-MM-DD', or None. A string that only LOOKS like a
+    date ('2026-13-45') is rejected like any other text: it used to pass the
+    regex, land in the DB and render on no day at all."""
+    if not isinstance(v, str):
+        return None
+    d = _as_date(v.strip()) if re.match(r'^\s*\d{4}-\d{2}-\d{2}\s*$', v) else None
+    return d.isoformat() if d else None
+
+
+def _schedule_save_reject(data, ops):
+    """Reason to refuse a schedule save before touching the DB, or None: a
+    save can't legitimately carry more than a schedule's worth of rows (a bad
+    client must not insert thousands), and dates must be real dates."""
+    lists = [(ops or {}).get('upsert'), (ops or {}).get('delete'), data.get('rows')]
+    order = (ops or {}).get('order')
+    if isinstance(order, dict):
+        if len(order) > 400:
+            return 'Too many days in one save.'
+        lists += list(order.values())
+    for lst in lists:
+        if isinstance(lst, list) and len(lst) > _SCHED_OPS_MAX:
+            return f'Too many schedule rows in one save (max {_SCHED_OPS_MAX}).'
+    for u in (ops or {}).get('upsert') or []:
+        if isinstance(u, dict) and u.get('day_date') and not _sched_day_date(u['day_date']):
+            return f"Not a date: {_sched_clip(u['day_date'], 40)!r}"
+    return None
+
+
+def _schedule_meta_key_ok(db, key):
+    """Only this install's Venue & Tech fields, the fixed security_email and
+    per-day dark flags may be written — never arbitrary keys."""
+    if not isinstance(key, str) or len(key) > 200:
+        return False
+    if key == 'security_email':
+        return True
+    if key.startswith(DARK_DAY_PREFIX):
+        return _sched_day_date(key[len(DARK_DAY_PREFIX):]) == key[len(DARK_DAY_PREFIX):]
+    return db.execute('SELECT 1 FROM schedule_meta_fields WHERE field_key=%s', (key,)).fetchone() is not None
+
+
 def _schedule_legacy_rows_save(db, show_id, data):
     """Whole-list schedule save from a page running pre-3.32.0 code (still
     open across the deploy): the browser posts every row and the list is
@@ -7130,9 +7188,7 @@ def _schedule_legacy_rows_save(db, show_id, data):
             perf_id = int(row.get('perf_id')) if row.get('perf_id') else None
         except (TypeError, ValueError):
             perf_id = None
-        day_date = row.get('day_date')
-        day_date = day_date.strip() if isinstance(day_date, str) and \
-            re.match(r'^\s*\d{4}-\d{2}-\d{2}\s*$', day_date) else None
+        day_date = _sched_day_date(row.get('day_date'))
         # A piano-tuning row keeps its link (its text is re-derived by
         # _sync_piano_schedule_rows, so edits to it don't stick).
         try:
@@ -7165,23 +7221,23 @@ def save_schedule(show_id):
     get_show_or_404(show_id)
     data = request.get_json(force=True) or {}
     ops = data.get('ops') if isinstance(data.get('ops'), dict) else None
-    # A save can't legitimately touch more than a schedule's worth of rows;
-    # refuse before taking a connection so a bad client can't insert thousands.
-    for lst in ((ops or {}).get('upsert'), (ops or {}).get('delete'), data.get('rows')):
-        if isinstance(lst, list) and len(lst) > _SCHED_OPS_MAX:
-            return jsonify({'success': False,
-                            'error': f'Too many schedule rows in one save (max {_SCHED_OPS_MAX}).'}), 400
+    bad = _schedule_save_reject(data, ops)
+    if bad:
+        return jsonify({'success': False, 'error': bad}), 400
+    note = _sched_clip(data.get('note'), 200).strip() or None
     db = get_db()
     # One schedule write at a time per show (the piano sync takes the same
     # lock), so two saves can't interleave their row changes.
     db.execute('SELECT 1 FROM shows WHERE id=%s FOR UPDATE', (show_id,))
     if isinstance(data.get('meta'), dict):
         for key, val in data['meta'].items():
+            if not _schedule_meta_key_ok(db, key):
+                continue   # not a Venue & Tech field of this install
             db.execute("""
                 INSERT INTO schedule_meta (show_id, field_key, field_value)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
-            """, (show_id, _sched_clip(key, 200), _sched_clip(val)))
+            """, (show_id, key, _sched_clip(val)))
 
     def _content_rows():
         return sum(1 for r in _schedule_rev(db, show_id)[1] if _sched_row_has_content(r))
@@ -7210,7 +7266,7 @@ def save_schedule(show_id):
     db.execute("""
         UPDATE shows SET updated_at=CURRENT_TIMESTAMP, last_saved_by=%s, last_saved_at=CURRENT_TIMESTAMP
         WHERE id=%s""", (session['user_id'], show_id))
-    _snapshot_form_history(db, show_id, 'schedule', _schedule_state_snapshot(db, show_id))
+    _snapshot_form_history(db, show_id, 'schedule', _schedule_state_snapshot(db, show_id), note=note)
     rows_note = (f' rows={rows_after} was={rows_before}' if rows_before is not None
                  else ' rows=unchanged')
     log_audit(db, 'FORM_SAVE', 'form', show_id, show_id=show_id,

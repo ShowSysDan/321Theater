@@ -1786,6 +1786,8 @@ async function _schedImportPick(srcId) {
         sortSchedRowsByTime(targets[ti].key);   // also queues the save
       });
       ov.remove();
+      window._schedNextNote = `Imported ${n} row${n === 1 ? '' : 's'} from ${d.show.name}` +
+                              (mode === 'replace' ? ' (replaced)' : '');
       const first = targets[[...plan.keys()][0]];
       const tab = first.key ? document.querySelector(`.sched-day-tab[data-day-key="${CSS.escape(first.key)}"]`) : null;
       if (tab) switchSchedDay(first.key, tab);
@@ -2027,6 +2029,10 @@ async function _saveScheduleNow(opts) {
         delete: p.delete, order: p.order,
       };
     }
+  }
+  if (payload.ops && window._schedNextNote) {
+    payload.note = window._schedNextNote;   // the version gets a label
+    window._schedNextNote = null;
   }
   if (!payload.ops && !Object.keys(meta).length) {
     _isDirty = held;
