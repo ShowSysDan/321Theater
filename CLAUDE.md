@@ -986,8 +986,9 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   never reports 'other_unit' for a model that can't pin units.
   3.34.0 widened it: `_reset_asset_approval()` runs it for every open
   tuning (`_piano_pin_open_tunings`, re-entrancy guarded, `reset=False`
-  inside) so a piano booked AFTER the request picks up the S/N; several
-  unpinned lines → the one covering the tuning date; a qty-N line is SPLIT
+  inside; DB-tools callers pass `pin_tunings=False` so an admin's un-pin
+  sticks) so a piano booked AFTER the request picks up the S/N; ranking:
+  covers the tuning date, then qty 1, then id; a qty-N line is SPLIT
   (N-1 + one pinned qty-1 copy — still never a new booking). It returns
   (sa_id, reason); `POST /piano-tunings/<id>/pin-unit` ("Pin unit" button)
   shows the reason (`_PIANO_PIN_REASONS`). "Any unit" →

@@ -889,7 +889,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.34.0'
+APP_VERSION = '3.34.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -22014,7 +22014,7 @@ def _notify_asset_change(db, show_id, row, reason, reapproval):
         show_id=show_id, coalesce_key='asset_approval')
 
 
-def _reset_asset_approval(db, show_id, reason):
+def _reset_asset_approval(db, show_id, reason, pin_tunings=True):
     """Reconcile the approval flag against the canonical asset state.
 
     Called from every write path that changes a show's gear. If the show
@@ -22039,7 +22039,9 @@ def _reset_asset_approval(db, show_id, reason):
     # An open tuning's unit (S/N) becomes the reservation on any matching
     # unpinned line (3.34.0), and a pinned unit names the piano on its
     # tuning's schedule row (3.18.2).
-    _piano_pin_open_tunings(db, show_id)
+    # DB tools pass pin_tunings=False: an admin clearing a unit there means it.
+    if pin_tunings:
+        _piano_pin_open_tunings(db, show_id)
     _piano_schedule_refresh(db, show_id)
     row = db.execute(
         'SELECT s.assets_approved, s.assets_approval_snapshot, s.assets_approval_lines, '
@@ -23840,7 +23842,7 @@ def asset_dbt_update(table, row_id):
               detail=f"DB tools: {', '.join(cols)}")
     db.commit()
     if table == 'show_assets' and show_id:
-        _reset_asset_approval(db, show_id, 'Asset line edited via DB tools')
+        _reset_asset_approval(db, show_id, 'Asset line edited via DB tools', pin_tunings=False)
         db.commit()
     syslog_logger.info(
         f"ASSET_DBT_EDIT table={table} id={row_id} cols={','.join(cols)} "
@@ -23935,7 +23937,7 @@ def asset_dbt_delete(table, row_id):
               detail=f'DB tools hard delete: {label}')
     db.commit()
     if table == 'show_assets' and show_id:
-        _reset_asset_approval(db, show_id, 'Asset line deleted via DB tools')
+        _reset_asset_approval(db, show_id, 'Asset line deleted via DB tools', pin_tunings=False)
         db.commit()
     syslog_logger.info(
         f"ASSET_DBT_DELETE table={table} id={row_id} force={force} "
@@ -24055,7 +24057,7 @@ def asset_dbt_merge_type(src_id):
                      f'{moved_lines} show line(s) repointed')
     db.commit()
     for sid in show_ids:
-        _reset_asset_approval(db, sid, 'Asset type merged via DB tools')
+        _reset_asset_approval(db, sid, 'Asset type merged via DB tools', pin_tunings=False)
     db.commit()
     syslog_logger.info(
         f"ASSET_DBT_MERGE src={src_id} target={target_id} items={moved_items} "
@@ -25019,9 +25021,9 @@ def _piano_pin_unit(db, show_id, type_id, unit_id, near_date=None, reset=True):
               AND rental_end >= %s AND rental_start <= %s""",
             (unit_id, ln['id'], ln['rental_start'], ln['rental_end'])).fetchone()
 
-    # Single-quantity lines first (a plain pin), then splitting a bigger
-    # line; within each, the line covering the tuning date first.
-    ranked = sorted(pool, key=lambda ln: (int(ln['quantity'] or 1) != 1, not covers(ln), ln['id']))
+    # The line covering the tuning date first (the reservation that matters),
+    # then single-quantity lines (a plain pin) before splitting a bigger one.
+    ranked = sorted(pool, key=lambda ln: (not covers(ln), int(ln['quantity'] or 1) != 1, ln['id']))
     line = next((ln for ln in ranked if free(ln)), None)
     if line is None:
         return None, 'unit_conflict'
@@ -25085,9 +25087,12 @@ def _piano_default_unit(db, show_id, type_id):
     if not type_id:
         return None
     if show_id is not None:
+        # A unit retired since it was pinned can't be named on a request.
         pinned = db.execute(
-            'SELECT DISTINCT asset_item_id FROM show_assets WHERE show_id=%s '
-            'AND asset_type_id=%s AND asset_item_id IS NOT NULL', (show_id, type_id)).fetchall()
+            'SELECT DISTINCT sa.asset_item_id FROM show_assets sa '
+            'JOIN asset_items ai ON ai.id = sa.asset_item_id '
+            "WHERE sa.show_id=%s AND sa.asset_type_id=%s AND COALESCE(ai.status, '') <> 'retired'",
+            (show_id, type_id)).fetchall()
         if len(pinned) == 1:
             return pinned[0]['asset_item_id']
         if pinned:
@@ -26152,7 +26157,6 @@ def piano_tuning_pin_unit(tid):
     if t['status'] == 'cancelled':
         db.close()
         return jsonify({'error': 'This tuning is cancelled.'}), 409
-    db.execute('SELECT id FROM shows WHERE id=%s FOR UPDATE', (show_id,))
     sa_id, reason = _piano_pin_unit(db, show_id, t['piano_asset_type_id'], t['piano_asset_item_id'],
                                     near_date=t['tuning_date'] or t['requested_date'])
     db.commit()
