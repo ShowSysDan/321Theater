@@ -419,6 +419,23 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
 - Import-from-show and save-as-template are editor-side (DOM), written by
   the normal row-level autosave — don't add a server-side schedule write path.
 
+## Devices per user (3.33.0) + wide tables on phones
+- `user_clients` (app schema, one row per user × UA hash × screen): written
+  only by `POST /api/client-info` (base.html beacon, once per browser per
+  6 h via localStorage; in `_VIEWER_ALLOWED_ENDPOINTS` so viewers count),
+  `_parse_ua()` → browser / OS / device class. Read by
+  `GET /settings/users/<id>/clients` (admin; Settings → Users → Devices).
+  180-day trim in `_hourly_maintenance_work`. Troubleshooting data only —
+  never gate behaviour on it.
+- Phones: cards are `overflow: hidden`, so a wide table must live in a
+  sideways scroller. `_initMobileTableScroll()` (app.js, mobile only) wraps
+  an overflowing table in `.m-scroll`, or adds `.m-wide` (natural width)
+  when the table already sits in an `overflow-x: auto` body; the labor
+  tables (`.lo-table`, `.sched-day-block table`, `.labor-day-table`,
+  `.oh-summary-table`) are always treated this way with `nowrap` cells
+  (mobile.css). New wide tables on phones: put them in a scroll box or add
+  them to that selector list — never let a card clip them.
+
 ## Production schedule PDF is page-aware (3.6.0, 3.6.1)
 - `_fit_schedule_pdf()` lays the schedule out with WeasyPrint, reads which
   page every day/row landed on from the box tree (`<table data-sched-day>`,

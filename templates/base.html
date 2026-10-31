@@ -396,6 +396,29 @@
 {% endif %}
 
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+{% if user %}
+<script>
+/* Browser / screen record for troubleshooting (3.33.0): once per browser
+   per 6 h — Settings → Users → Devices. Nothing else reads it. */
+(function () {
+  try {
+    var key = 'cliInfo:' + {{ user.id | tojson }};
+    var now = Date.now();
+    if (now - (+(localStorage.getItem(key) || 0)) < 6 * 3600 * 1000) return;
+    localStorage.setItem(key, String(now));
+    fetch('/api/client-info', {
+      method: 'POST', keepalive: true,
+      headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
+      body: JSON.stringify({
+        screen_w: screen.width, screen_h: screen.height, viewport_w: innerWidth, viewport_h: innerHeight,
+        dpr: window.devicePixelRatio || 1, touch: ('ontouchstart' in window) || navigator.maxTouchPoints > 0,
+        lang: navigator.language || '', tz: (Intl.DateTimeFormat().resolvedOptions().timeZone) || ''
+      })
+    }).catch(function () {});
+  } catch (e) {}
+})();
+</script>
+{% endif %}
 {% block scripts %}{% endblock %}
 <div id="save-toast" class="save-toast"></div>
 <style>

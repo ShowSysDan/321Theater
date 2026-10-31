@@ -353,6 +353,40 @@ function _showOtherSavedBanner(savedAt) {
     ?.insertAdjacentElement('beforebegin', banner);
 }
 
+/* ── Mobile: wide tables pan sideways (3.33.0) ─────────────────────
+   Cards clip (overflow:hidden), so on phones a table wider than its box
+   was simply cut off. Wrap such tables in a .m-scroll (see mobile.css);
+   re-check when the page changes (JS-built tables) and on rotate. */
+function _initMobileTableScroll() {
+  if (!document.documentElement.classList.contains('mobile-view')) return;
+  const wrapWide = () => {
+    document.querySelectorAll('.main-content table').forEach(t => {
+      if (t.closest('.m-scroll') || t.closest('.modal-overlay')) return;
+      const box = t.parentElement;
+      if (!box) return;
+      const labor = t.matches('.lo-table, .sched-day-block table, #labor-days-container table, .labor-day-table, .oh-summary-table');
+      const ov = getComputedStyle(box).overflowX;
+      if (ov === 'auto' || ov === 'scroll') {                 // already a scroller:
+        if (labor) t.classList.add('m-wide');                  // just stop the table squeezing
+        return;
+      }
+      if (t.scrollWidth <= box.clientWidth + 2 && !labor) return;
+      const w = document.createElement('div');
+      w.className = 'm-scroll';
+      box.insertBefore(w, t);
+      w.appendChild(t);
+    });
+  };
+  let timer = null;
+  const schedule = () => { clearTimeout(timer); timer = setTimeout(wrapWide, 150); };
+  wrapWide();
+  window.addEventListener('resize', schedule);
+  const main = document.querySelector('.main-content');
+  if (main && window.MutationObserver) new MutationObserver(schedule).observe(main, {childList: true, subtree: true});
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _initMobileTableScroll);
+else _initMobileTableScroll();
+
 /* ── Tab Switching ─────────────────────────────────────────────── */
 async function switchTab(name) {
   // If there's a debounced save pending against the *previous* tab, flush

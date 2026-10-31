@@ -790,6 +790,30 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS user_clients (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    ua_hash TEXT NOT NULL,
+    user_agent TEXT DEFAULT '',
+    browser TEXT DEFAULT '',
+    os TEXT DEFAULT '',
+    device TEXT DEFAULT '',
+    screen_w INTEGER DEFAULT 0,
+    screen_h INTEGER DEFAULT 0,
+    viewport_w INTEGER DEFAULT 0,
+    viewport_h INTEGER DEFAULT 0,
+    dpr DOUBLE PRECISION DEFAULT 1,
+    touch INTEGER DEFAULT 0,
+    view_mode TEXT DEFAULT '',
+    lang TEXT DEFAULT '',
+    tz TEXT DEFAULT '',
+    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    hits INTEGER DEFAULT 1,
+    UNIQUE(user_id, ua_hash, screen_w, screen_h)
+);
+CREATE INDEX IF NOT EXISTS idx_user_clients_user ON user_clients(user_id, last_seen);
+
 CREATE TABLE IF NOT EXISTS active_sessions (
     user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     show_id       INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
@@ -2051,6 +2075,30 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".form_history ADD COLUMN IF NOT EXISTS note TEXT DEFAULT NULL',
         # 3.32.2: the version list's change summary, computed once at save time.
         f'ALTER TABLE "{app_schema}".form_history ADD COLUMN IF NOT EXISTS summary_json TEXT DEFAULT NULL',
+        # 3.33.0: browser / screen per user, for troubleshooting (see _record_client).
+        f'''CREATE TABLE IF NOT EXISTS "{app_schema}".user_clients (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES "{shared_schema}".users(id) ON DELETE CASCADE,
+            ua_hash TEXT NOT NULL,
+            user_agent TEXT DEFAULT '',
+            browser TEXT DEFAULT '',
+            os TEXT DEFAULT '',
+            device TEXT DEFAULT '',
+            screen_w INTEGER DEFAULT 0,
+            screen_h INTEGER DEFAULT 0,
+            viewport_w INTEGER DEFAULT 0,
+            viewport_h INTEGER DEFAULT 0,
+            dpr DOUBLE PRECISION DEFAULT 1,
+            touch INTEGER DEFAULT 0,
+            view_mode TEXT DEFAULT '',
+            lang TEXT DEFAULT '',
+            tz TEXT DEFAULT '',
+            first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            hits INTEGER DEFAULT 1,
+            UNIQUE(user_id, ua_hash, screen_w, screen_h)
+        )''',
+        f'CREATE INDEX IF NOT EXISTS idx_user_clients_user ON "{app_schema}".user_clients(user_id, last_seen)',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approved INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approved_by INTEGER',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approved_at TIMESTAMP',

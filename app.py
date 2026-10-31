@@ -889,7 +889,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.32.3'
+APP_VERSION = '3.33.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -2372,6 +2372,7 @@ def viewer_accessible_shows(user_id):
 _VIEWER_ALLOWED_ENDPOINTS = frozenset({
     'viewer_home', 'viewer_show', 'viewer_export',
     'login', 'logout', 'static',
+    'api_client_info',   # browser/screen record (3.33.0) — viewers too
     'force_change_password',
     # Theme + password change so the user can still toggle dark/light + reset
     'set_theme', 'change_own_password',
@@ -2730,6 +2731,8 @@ def _hourly_maintenance_work():
     try:
         cur = db.execute('DELETE FROM app_sessions WHERE expires_at < %s',
                          (datetime.utcnow(),))
+        # Browser/screen records (3.33.0): keep 180 days of last use.
+        db.execute("DELETE FROM user_clients WHERE last_seen < NOW() - INTERVAL '180 days'")
         try:
             harvested = cur.rowcount or 0
         except Exception:
@@ -8702,6 +8705,99 @@ def schedule_import_source(show_id, src_id):
     return jsonify({'success': True, 'show': {'id': src['id'], 'name': src['name'] or '',
                                               'venue': src['venue'] or ''},
                     'days': out})
+
+
+# ─── Browser / screen per user (3.33.0) ──────────────────────────────────────
+# For troubleshooting ("what are they on?"): every signed-in page posts its
+# screen/viewport/pixel ratio/touch once per browser per 6 h to
+# /api/client-info; the server adds the User-Agent (parsed to browser + OS
+# + device class) and keeps one row per user × browser × screen in
+# `user_clients` (Settings → Users → Devices). Rows age out after 180 days.
+_UA_BROWSERS = (
+    ('Edg/', 'Edge'), ('EdgiOS/', 'Edge'), ('EdgA/', 'Edge'), ('OPR/', 'Opera'),
+    ('SamsungBrowser/', 'Samsung Internet'), ('FxiOS/', 'Firefox'), ('Firefox/', 'Firefox'),
+    ('CriOS/', 'Chrome'), ('Chrome/', 'Chrome'), ('Version/', 'Safari'),
+)
+
+
+def _parse_ua(ua):
+    """(browser 'Chrome 130', os 'iOS 17.5', device phone|tablet|desktop)."""
+    ua = ua or ''
+    browser = 'Unknown'
+    for tag, name in _UA_BROWSERS:
+        if tag in ua and (name != 'Safari' or 'Safari/' in ua):
+            m = re.search(re.escape(tag) + r'(\d+)', ua)
+            browser = f'{name} {m.group(1)}' if m else name
+            break
+    device = 'desktop'
+    m = re.search(r'iPhone OS (\d+)[_.](\d+)', ua)
+    if m:
+        os_, device = f'iOS {m.group(1)}.{m.group(2)}', 'phone'
+    elif 'iPad' in ua or ('Macintosh' in ua and 'Mobile/' in ua):
+        os_, device = 'iPadOS', 'tablet'
+    elif re.search(r'Android (\d+(?:\.\d+)?)', ua):
+        os_ = 'Android ' + re.search(r'Android (\d+(?:\.\d+)?)', ua).group(1)
+        device = 'phone' if 'Mobile' in ua else 'tablet'
+    elif 'Windows NT 10.0' in ua:
+        os_ = 'Windows 10/11'
+    elif 'Windows' in ua:
+        os_ = 'Windows'
+    elif re.search(r'Mac OS X (\d+)[_.](\d+)', ua):
+        m = re.search(r'Mac OS X (\d+)[_.](\d+)', ua)
+        os_ = f'macOS {m.group(1)}.{m.group(2)}'
+    elif 'CrOS' in ua:
+        os_ = 'ChromeOS'
+    elif 'Linux' in ua:
+        os_ = 'Linux'
+    else:
+        os_ = 'Unknown'
+    return browser, os_, device
+
+
+@app.route('/api/client-info', methods=['POST'])
+@login_required
+def api_client_info():
+    data = request.get_json(silent=True) or {}
+
+    def _n(key, lo, hi, cast=int, default=0):
+        try:
+            v = cast(data.get(key))
+        except (TypeError, ValueError):
+            return default
+        return v if lo <= v <= hi else default
+    ua = (request.headers.get('User-Agent') or '')[:500]
+    browser, os_, device = _parse_ua(ua)
+    db = get_db()
+    db.execute("""
+        INSERT INTO user_clients (user_id, ua_hash, user_agent, browser, os, device, screen_w, screen_h,
+                                  viewport_w, viewport_h, dpr, touch, view_mode, lang, tz)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (user_id, ua_hash, screen_w, screen_h) DO UPDATE SET
+            last_seen = CURRENT_TIMESTAMP, hits = user_clients.hits + 1,
+            viewport_w = EXCLUDED.viewport_w, viewport_h = EXCLUDED.viewport_h, dpr = EXCLUDED.dpr,
+            touch = EXCLUDED.touch, view_mode = EXCLUDED.view_mode, lang = EXCLUDED.lang, tz = EXCLUDED.tz
+    """, (session['user_id'], hashlib.sha1(ua.encode('utf-8', 'replace')).hexdigest()[:16], ua,
+          browser, os_, device, _n('screen_w', 0, 20000), _n('screen_h', 0, 20000),
+          _n('viewport_w', 0, 20000), _n('viewport_h', 0, 20000), _n('dpr', 0.25, 8, float, 1.0),
+          1 if data.get('touch') else 0, _resolve_view_mode()[0],
+          str(data.get('lang') or '')[:32], str(data.get('tz') or '')[:64]))
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/settings/users/<int:uid>/clients')
+@admin_required
+def user_clients_list(uid):
+    """The browsers / screens a user has signed in from (newest use first)."""
+    db = get_db()
+    rows = db.execute("""
+        SELECT browser, os, device, screen_w, screen_h, viewport_w, viewport_h, dpr, touch, view_mode,
+               lang, tz, hits, user_agent, first_seen::timestamptz AS first_seen, last_seen::timestamptz AS last_seen
+          FROM user_clients WHERE user_id = %s ORDER BY last_seen DESC LIMIT 50""", (uid,)).fetchall()
+    db.close()
+    return jsonify({'success': True, 'clients': [dict(
+        r, first_seen=_ts_out(r['first_seen']), last_seen=_ts_out(r['last_seen'])) for r in rows]})
 
 
 @app.route('/shows/<int:show_id>/heartbeat', methods=['POST'])

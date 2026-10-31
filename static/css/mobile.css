@@ -301,3 +301,23 @@ html.mobile-view .sched-import-day-head { flex-direction: column; align-items: s
 html.mobile-view .sched-import-target select { width: 100%; }
 html.mobile-view .sched-conflict-actions .btn { flex: 1 1 auto; }
 html.mobile-view .sched-dark-toggle { margin-left: 0; flex-basis: 100%; padding: 4px 0; }
+
+/* Wide tables on phones (3.33.0). Cards clip their contents (overflow:
+   hidden), so a table wider than the screen — Labor Overview, the Labor
+   Scheduler's day blocks, the show page's labor days, Overhead crew — was
+   cut off at the right edge with no way to reach the rest. app.js's
+   _initMobileTableScroll wraps any table that overflows its box in a
+   .m-scroll that pans sideways; these tables keep their natural width so
+   they overflow (and scroll) instead of crushing every column to one word
+   per line. */
+html.mobile-view .m-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
+html.mobile-view .m-scroll > table, html.mobile-view table.m-wide { width: max-content; min-width: 100%; }
+html.mobile-view .lo-table th, html.mobile-view .lo-table td,
+html.mobile-view .sched-day-block th, html.mobile-view .sched-day-block td,
+html.mobile-view #labor-days-container th, html.mobile-view #labor-days-container td,
+html.mobile-view .labor-day-table th, html.mobile-view .labor-day-table td,
+html.mobile-view .oh-summary-table th, html.mobile-view .oh-summary-table td { white-space: nowrap; }
+/* Labor Scheduler day header: date, PM, notes and Add Line wrap onto rows
+   instead of running past the card's clipped edge. */
+html.mobile-view .sched-day-header { flex-wrap: wrap; row-gap: 8px; }
+html.mobile-view .sched-day-header .sched-day-notes { flex: 1 1 100%; min-width: 0; }
