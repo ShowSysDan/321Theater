@@ -236,8 +236,20 @@ def _names_save_view(show_id):
                         'error': f'Too many names (max {MAX_NAMES}).'}), 400
 
     db = _d['get_db']()
+    merged = False
     try:
+        db.execute('SELECT 1 FROM shows WHERE id=%s FOR UPDATE', (show_id,))
         before = _fetch_names(db, show_id)
+        base = data.get('base')
+        if isinstance(base, list):
+            base = [n for n in (_clean_name(x) for x in base) if n]
+            if base != before:
+                # Someone saved since this editor loaded the list (3.32.0):
+                # apply only THIS editor's removals and additions to the
+                # current list, so their names survive. Without `base` (old
+                # pages) the posted list replaces the list as before.
+                names = _merge_names(before, base, names)[:MAX_NAMES]
+                merged = True
         db.execute('DELETE FROM security_signin_names WHERE show_id=%s', (show_id,))
         for i, name in enumerate(names):
             db.execute(
@@ -261,7 +273,26 @@ def _names_save_view(show_id):
     _d['syslog_logger'].info(
         f"SECURITY_SIGNIN_SAVE show_id={show_id} count={len(names)} "
         f"by={session.get('username')}")
-    return jsonify({'success': True, 'names': names})
+    return jsonify({'success': True, 'names': names, 'merged': merged})
+
+
+def _merge_names(current, base, mine):
+    """Three-way merge of name lists: current minus what this editor removed
+    from its base, plus what it added (by count, so duplicate names work)."""
+    from collections import Counter
+    removed = Counter(base) - Counter(mine)
+    added = Counter(mine) - Counter(base)
+    out = []
+    for n in current:
+        if removed[n] > 0:
+            removed[n] -= 1
+        else:
+            out.append(n)
+    for n in mine:
+        if added[n] > 0:
+            out.append(n)
+            added[n] -= 1
+    return out
 
 
 def _parse_view(show_id):

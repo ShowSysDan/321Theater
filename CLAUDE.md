@@ -341,44 +341,57 @@ apps. For a 321Theater access change, use this app's own flags instead
   post and again by `delete_user`); readers LEFT JOIN users and fall back to
   `author_name`. Never go back to CASCADE.
 
-## Production schedule editor — data-loss guards (3.30.0) — keep all of them
-`save_schedule` rebuilds `schedule_rows` wholesale from what the editor
-posts, so anything the editor doesn't RENDER gets deleted by the next save.
-Two user-reported "schedule cleared itself" bugs came from that:
-- **Off-date rows:** `_build_schedule_days(..., include_orphans=True)` (show
-  page + `/schedule-state`) adds an `orphan` day for every date that still
-  has non-piano rows but left the load range / performances; the editor
-  shows it as ⚠ OFF-DATE. `_schedule_rows_for_editor()` hands legacy rows
-  whose performance was deleted to the first day. JS `_renderScheduleDays`
-  keeps any local pane that still holds rows. Never filter rows out of the
-  editor render again.
-- **Stale tabs:** the page carries `SCHED_REV` (`_schedule_rev()`: md5 of the
-  non-piano rows — piano sync must not change it); row posts send `base_rev`
-  and the server 409s (`SCHEDULE_SAVE_CONFLICT`) unless `force`. The client
-  posts `rows` only when they differ from its baseline and meta keys only
-  when edited; an all-empty row set needs `allow_clear` (client confirms).
-  Old clients without `base_rev` are still accepted.
-- History versions are built from the DB (`_schedule_state_snapshot`), not
-  the request. `_snapshot_form_history()` skips identical saves, groups one
-  user's saves within 10 min, never groups a save that removes content, keeps
-  100. List/diff/restore summaries are server-computed (`_schedule_diff`,
-  `_fields_diff`); restore re-applies advance scalar columns via
-  `_advance_show_sets()` and records a version with a `note`.
+## Show tabs are multi-user LIVE (3.32.0) — the model, keep every rule
+Every form on the show page follows the Advance Sheet's model: the browser
+remembers what the SERVER holds per field/row (a baseline), a save posts
+ONLY what differs from it, and a poll merges other people's saves into
+anything with no unsaved edit here. Nothing posts a whole form or list.
+- **Advance** (`_advBaseline`, `saveAdvance`): changed keys only; `save_advance`
+  already writes only changed rows. `/sync/advance` (2 s) returns every
+  field with `updated_at > cursor − _SYNC_OVERLAP_S` (no cursor = all) —
+  NO "skip the last saver" filter (it hid other users' edits and never
+  delivered a person's edits to their other tab); echoes are no-ops on the
+  client. A poll that raced a save (`_advSaveSeq`) is discarded. Never
+  bump `_syncSince` past your own write again.
+- **Schedule** rows carry `data-row-id`; `_schedRowBase` / `_schedOrderBase`
+  / `_schedMetaBaseline` are the baseline; `_schedPending()` → `ops`
+  (`upsert` with id or `ref`, `delete`, `order` per day) →
+  `_apply_schedule_ops()`; editing a row someone deleted re-creates it.
+  `/sync/schedule` (3 s, hash short-circuit) → `_schedMerge()`: a row with
+  an unsaved edit, or being typed in, is never touched; a day's saved order
+  is adopted only when the day is clean here. `_schedNewRow()` is THE row
+  builder; `_bindScheduleTimeParsing` the ONE blur normaliser. The
+  whole-list `rows` path (`_schedule_legacy_rows_save`, 409 on stale
+  `base_rev`) exists only for pages loaded before 3.32.0 — don't extend it.
+  Emptying a schedule that had rows needs `allow_clear` (client confirms;
+  server rolls back and 409s otherwise).
+- **Post-Show notes** (`_notesBaseline`, `/sync/postnotes` 3 s): same.
+- **Labor Requests**: `update_labor_request` writes only the columns in the
+  body; `_laborRowChanges(tr)` diffs against `tr._laborBase` (set when the
+  row is drawn, updated on save); a `<select>` that can't show the saved
+  value is not a change. The show page never sends `notes` (scheduler's).
+- **Sign-In Sheet**: POST carries `base` (the list this page loaded);
+  `_merge_names(current, base, mine)` applies only this editor's adds /
+  removes when someone saved in between.
+- Versions (`_snapshot_form_history`) are built from the DB after the
+  write (`_current_form_state` / `_schedule_state_snapshot`), never from
+  the request. Skips identical saves, groups one user's saves within 10 min
+  (never across a removal), keeps 100; `note` marks restores/imports.
+- Off-date rows: `_build_schedule_days(..., include_orphans=True)` keeps
+  rows whose date left the load range / performances visible (⚠ OFF-DATE);
+  never filter rows out of the editor render.
+- The heartbeat's "another user saved — reload" banner is suppressed on
+  schedule/postnotes (they merge live); keep it for the other tabs.
 - **Dark days (3.31.0):** schedule_meta `dark_day:<YYYY-MM-DD>`='1' (header
-  checkbox `.sched-dark`, a `.sched-meta` checkbox — collectScheduleData
-  sends '1'/''). `_dark_day_dates()` drops those days from the schedule PDF
-  only (Day numbers kept; never drop every day); `/schedule-state` returns
-  `dark` per day. History labels via `_sched_meta_label/_value`.
-- The heartbeat returns `schedule_rev` on the Schedule tab so a stale tab
-  (incl. the same user's other tab — the last_saved_by banner ignores own
-  saves) is told to reload early. The 409 stays the real guard.
-- **Next-day times:** `1+00:30` = 00:30 the day after the row's day (the
-  editor normalizes `+0030` / `24:30` to it — `_schedParseTime`). Sorts via
-  `_schedTimeKey` (JS) / `_hhmm_minutes` (piano placement) past 24:00; every
-  display of schedule times uses the `schedtime(day[, dual])` filter (prints
-  `3/2 00:30`), never raw `dualtime` — add it to any new surface.
-- Import-from-show and save-as-template are editor-side (DOM), written by the
-  normal checked autosave — don't add a server-side schedule write path.
+  checkbox `.sched-dark`); `_dark_day_dates()` drops those days from the
+  schedule PDF only (Day numbers kept; never drop every day).
+- **Next-day times:** `1+00:30` = 00:30 the day after the row's day (editor
+  normalizes `+0030` / `24:30` to it — `_schedParseTime`). Sorts via
+  `_schedTimeKey` (JS) / `_hhmm_minutes` past 24:00; every display of
+  schedule times uses the `schedtime(day[, dual])` filter (prints
+  `3/2 00:30`), never raw `dualtime`.
+- Import-from-show and save-as-template are editor-side (DOM), written by
+  the normal row-level autosave — don't add a server-side schedule write path.
 
 ## Production schedule PDF is page-aware (3.6.0, 3.6.1)
 - `_fit_schedule_pdf()` lays the schedule out with WeasyPrint, reads which

@@ -33,6 +33,13 @@ let _syncSeeded = false;       // false until the first poll seeds _syncSince; s
 let MY_USER_ID = null;         // current user's id — seeded by initShow(); used to tell "my save" from "someone else's"
 let _savedBaselineToken = null;// opaque "(last_saved_by|last_saved_at)" snapshot captured at page load
 let _savedSeeded = false;      // false until the baseline snapshot is captured; suppresses the false "another user saved" banner
+// Multi-user editing (3.32.0): each form remembers what the SERVER holds per
+// field. Saves post only fields that differ from it, and incoming changes
+// from other people / other tabs are merged only into fields with no unsaved
+// edit here — so two people editing different fields both keep their work,
+// and a stale tab can never write old values back over newer ones.
+let _advBaseline = null;       // {field_key: value} last loaded / saved / merged
+let _advSaveSeq = 0;           // bumps on every advance save; a poll that raced one is discarded
 
 /**
  * Decide whether the show's last-save state represents a *new* save by
@@ -114,6 +121,7 @@ function parseServerTime(v) {
 async function _pollAdvanceSync() {
   if (!SHOW_ID || _syncInFlight) return;
   _syncInFlight = true;
+  const seqAtSend = _advSaveSeq;
   try {
     const params = new URLSearchParams({
       since: _syncSince,
@@ -133,11 +141,18 @@ async function _pollAdvanceSync() {
     // for what is effectively just the freshest data hydrating into the form.
     const isFirstPoll = !_syncSeeded;
     const focused = document.activeElement;
-    const fields = d.fields || {};
+    // A save of ours went out while this poll was in flight: its field list
+    // may predate that save, so don't merge it (the next poll re-covers it).
+    const fields = (seqAtSend === _advSaveSeq) ? (d.fields || {}) : {};
     let mergedCount = 0;
     for (const [key, value] of Object.entries(fields)) {
-      const el = document.querySelector(`#advance-form [data-key="${key}"]`);
+      const el = document.querySelector(`#advance-form [data-key="${CSS.escape(key)}"]`);
       if (!el || el === focused) continue;   // never overwrite what you're typing
+      if (_advBaseline && key in _advBaseline) {
+        const local = el.type === 'checkbox' ? (el.checked ? 'true' : 'false') : el.value;
+        if (local !== _advBaseline[key] && local !== value) continue;  // unsaved edit here wins
+        _advBaseline[key] = value;
+      }
       if (el.type === 'checkbox') {
         const next = (value === 'true');
         if (el.checked !== next) {
@@ -192,7 +207,6 @@ function _checkAttachmentsRev(rev) {
  */
 async function _pollHeartbeat() {
   if (!SHOW_ID) return;
-  const revAtSend = window.SCHED_REV;
   try {
     const resp = await fetch(`/shows/${SHOW_ID}/heartbeat`, {
       method: 'POST',
@@ -203,20 +217,13 @@ async function _pollHeartbeat() {
     const d = await resp.json();
     _updatePresenceBadge(d.active_users || []);
     // Only surface the banner for a genuinely new save by another user since
-    // this page loaded — not for whoever happened to save the show last.
-    if (_checkOtherSaved(d.last_saved_by, d.last_saved_at) && !_isDirty) {
+    // this page loaded — not for whoever happened to save the show last — and
+    // only on tabs that don't merge other people's saves live themselves.
+    const live = activeTab === 'schedule' || activeTab === 'postnotes';
+    if (_checkOtherSaved(d.last_saved_by, d.last_saved_at) && !_isDirty && !live) {
       _showOtherSavedBanner(d.last_saved_at);
     }
     _checkAttachmentsRev(d.attachments_rev);
-    // Saved schedule rows moved on without this page (another person, or this
-    // person in another tab): say so before they type into a stale copy. A
-    // save of ours that landed mid-poll changes SCHED_REV — skip that poll.
-    if (activeTab === 'schedule' && d.schedule_rev && revAtSend &&
-        window.SCHED_REV === revAtSend && d.schedule_rev !== revAtSend &&
-        !_schedSaving && !_schedConflict && typeof _schedShowBanner === 'function' &&
-        !document.getElementById('sched-conflict-banner')) {
-      _schedShowBanner('stale', d);
-    }
   } catch (_) {}
 }
 
@@ -441,6 +448,13 @@ function _startSync() {
   _syncInterval = setInterval(() => {
     if (activeTab === 'advance') _pollAdvanceSync();
   }, 2000);
+
+  // Schedule + Post-Show notes merge other people's saves live (3.32.0).
+  // 3 s: a cheap hash check when nothing changed.
+  setInterval(() => {
+    if (activeTab === 'schedule' && typeof _pollScheduleSync === 'function') _pollScheduleSync();
+    if (activeTab === 'postnotes') _pollPostNotesSync();
+  }, 3000);
 
   // All tabs: 15-second heartbeat for presence + "someone saved" notice
   _heartbeatInterval = setInterval(() => {
@@ -691,6 +705,7 @@ function _syncScheduleMirrors() {
 function bindAdvanceForm() {
   const form = document.getElementById('advance-form');
   if (!form) return;
+  _advBaseline = collectAdvanceData();
   form.addEventListener('change', () => { evaluateAllConditionals(); _syncScheduleMirrors(); scheduleSave(); });
   form.addEventListener('input', () => { _syncScheduleMirrors(); scheduleSave(); });
 
@@ -940,19 +955,28 @@ function collectAdvanceData() {
 
 async function saveAdvance() {
   if (!SHOW_ID) return;
+  const all = collectAdvanceData();
+  if (!_advBaseline) _advBaseline = {};
+  const changed = {};
+  Object.entries(all).forEach(([k, v]) => { if (_advBaseline[k] !== v) changed[k] = v; });
+  if (!Object.keys(changed).length) { _isDirty = false; setSaveStatus('', ''); return; }
+  _advSaveSeq++;
   setSaveStatus('saving', 'Saving...');
   try {
     const resp = await fetch(`/shows/${SHOW_ID}/save/advance`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(collectAdvanceData())
+      body: JSON.stringify(changed)
     });
     const d = await resp.json();
     if (d.success) {
-      _isDirty = false;
-      // Advance the sync cursor past our own write so the next poll doesn't
-      // echo our edits back as "↓ N fields updated".
-      if (d.since) _syncSince = d.since;
+      Object.assign(_advBaseline, changed);
+      // Still dirty if the person kept typing while this save was in flight.
+      const now = collectAdvanceData();
+      _isDirty = Object.keys(now).some(k => now[k] !== _advBaseline[k]);
+      // No cursor jump past our own write any more (3.32.0): it could skip
+      // someone else's edit that landed just before ours. Our own values
+      // coming back are no-ops (same value as the field already shows).
       setSaveStatus('saved', '✓ Saved');
       showSaveToast('✓ Saved');
       setTimeout(() => setSaveStatus('', ''), 3000);
@@ -967,16 +991,6 @@ async function saveAdvance() {
 }
 
 /* ── Schedule Form ──────────────────────────────────────────────── */
-function _normalizeSchedTime(val) {
-  const s = val.trim();
-  // Already has colon or is empty/description-like — leave it
-  if (!s || s.includes(':')) return s;
-  // 3 digits: 930 → 9:30, 4 digits: 1300 → 13:00
-  if (/^\d{3}$/.test(s))  return s[0] + ':' + s.slice(1);
-  if (/^\d{4}$/.test(s))  return s.slice(0, 2) + ':' + s.slice(2);
-  return s;
-}
-
 function bindScheduleForm() {
   const form = document.getElementById('schedule-form');
   if (!form) return;
@@ -988,20 +1002,7 @@ function bindScheduleForm() {
   });
   _applyDarkDays();
   form.addEventListener('input',  () => scheduleSave());
-  // Auto-insert colon on blur for start/end time cells
-  form.addEventListener('blur', (e) => {
-    const el = e.target;
-    if (!el.classList.contains('sched-cell')) return;
-    const tr = el.closest('tr');
-    if (!tr) return;
-    const cells = Array.from(tr.querySelectorAll('.sched-cell'));
-    if (el !== cells[0] && el !== cells[1]) return; // only time columns
-    const formatted = _normalizeSchedTime(el.value);
-    if (formatted !== el.value) {
-      el.value = formatted;
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-  }, true); // capture so blur propagates
+  // Time cells are normalised on blur by _bindScheduleTimeParsing.
 }
 
 /* Re-sort a day's rows by start time after a start-time cell is edited,
@@ -1027,18 +1028,8 @@ function addScheduleRow(dayKey) {
   const tbodyId = key !== null ? `schedule-rows-${key}` : 'schedule-rows-null';
   const tbody = document.getElementById(tbodyId);
   if (!tbody) return;
-  const tr = document.createElement('tr');
-  tr.className = 'schedule-row';
-  tr.innerHTML = `
-    <td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>
-    <td><input type="text" class="sched-cell" placeholder="15:00" value=""></td>
-    <td><input type="text" class="sched-cell" placeholder="16:00" value=""></td>
-    <td><input type="text" class="sched-cell" placeholder="Description" value=""></td>
-    <td><input type="text" class="sched-cell" placeholder="Notes" value=""></td>
-    <td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>
-  `;
+  const tr = _schedNewRow({});
   tbody.appendChild(tr);
-  _bindRowDrag(tr);
   tr.querySelectorAll('.sched-cell')[0].focus();
 }
 
@@ -1477,19 +1468,7 @@ function copySchedDay(sourceKey, targetKey) {
   tgt.innerHTML = '';
   keepPiano.forEach(r => tgt.appendChild(r));
   src.querySelectorAll('.schedule-row:not(.piano-sched-row)').forEach(row => {
-    const cells = row.querySelectorAll('.sched-cell');
-    const tr = document.createElement('tr');
-    tr.className = 'schedule-row';
-    tr.innerHTML = `
-      <td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>
-      <td><input type="text" class="sched-cell" placeholder="15:00" value="${_esc(cells[0]?.value || '')}"></td>
-      <td><input type="text" class="sched-cell" placeholder="16:00" value="${_esc(cells[1]?.value || '')}"></td>
-      <td><input type="text" class="sched-cell" placeholder="Description" value="${_esc(cells[2]?.value || '')}"></td>
-      <td><input type="text" class="sched-cell" placeholder="Notes" value="${_esc(cells[3]?.value || '')}"></td>
-      <td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>
-    `;
-    tgt.appendChild(tr);
-    _bindRowDrag(tr);
+    tgt.appendChild(_schedNewRow(_schedCells(row)));
   });
   scheduleSave();
 }
@@ -1543,18 +1522,8 @@ function pullAdvanceTime(dayKey, perfTime) {
     const hhmm = parseTimeToHHMM(t);
     if (existing.has(hhmm + '|SHOW START')) return;
     const endTime = lengthMin > 0 ? addMinutesToHHMM(hhmm, lengthMin) : '';
-    const tr = document.createElement('tr');
-    tr.className = 'schedule-row';
-    tr.innerHTML = `
-      <td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>
-      <td><input type="text" class="sched-cell" value="${hhmm}"></td>
-      <td><input type="text" class="sched-cell" placeholder="16:00" value="${endTime}"></td>
-      <td><input type="text" class="sched-cell" value="SHOW START"></td>
-      <td><input type="text" class="sched-cell" placeholder="Notes" value=""></td>
-      <td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>
-    `;
-    tbody.insertBefore(tr, tbody.firstChild);
-    _bindRowDrag(tr);
+    tbody.insertBefore(_schedNewRow({start_time: hhmm, end_time: endTime, description: 'SHOW START'}),
+                       tbody.firstChild);
   });
   scheduleSave();
 }
@@ -1638,20 +1607,7 @@ async function applySchedTemplate(templateId, dayKey) {
     });
   }
 
-  d.rows.forEach(r => {
-    const tr = document.createElement('tr');
-    tr.className = 'schedule-row';
-    tr.innerHTML = `
-      <td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>
-      <td><input type="text" class="sched-cell" placeholder="15:00" value="${_esc(r.start_time || '')}"></td>
-      <td><input type="text" class="sched-cell" placeholder="16:00" value="${_esc(r.end_time || '')}"></td>
-      <td><input type="text" class="sched-cell" placeholder="Description" value="${_esc(r.description || '')}"></td>
-      <td><input type="text" class="sched-cell" placeholder="Notes" value="${_esc(r.notes || '')}"></td>
-      <td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>
-    `;
-    tbody.appendChild(tr);
-    _bindRowDrag(tr);
-  });
+  d.rows.forEach(r => tbody.appendChild(_schedNewRow(r)));
   // Keep the day's rows chronological after applying — especially in merge
   // mode where template rows are appended after existing ones.
   sortSchedRowsByTime(dayKey);
@@ -1916,139 +1872,168 @@ function collectScheduleData() {
   return {meta, rows};
 }
 
-/* ── Schedule save safety (3.30.0) ──────────────────────────────
-   Two reported "schedule cleared itself" cases led to these rules:
-   - Rows are posted ONLY when they differ from what this page last loaded /
-     saved (_schedBaseline). A meta edit, the 30 s safety net or any other
-     save that didn't touch the rows can never rewrite them.
-   - Row posts carry the revision the page loaded with (SCHED_REV). If
-     someone else saved rows since, the server answers 409 and nothing is
-     written; the person chooses Reload or Keep mine.
-   - Removing every row asks first (the server refuses it otherwise).
-   - Venue & tech fields are posted only when changed, so a stale tab can't
-     put back old values over someone else's edits either. */
-let _schedBaseline = null;   // canonical JSON of the PM rows last loaded/saved
-let _schedMetaBaseline = {}; // meta values last loaded/saved (only changed keys are posted)
-let _schedConflict = false;  // a 409 is waiting on the person's choice
-let _schedClearDeclined = false; // person said no to saving an empty schedule
-let _schedSaving = null;     // in-flight save promise (saves never overlap)
+/* ── Schedule: row-level saves + live merge (3.30.0 / 3.32.0) ──────
+   Works like the Advance form, row by row:
+   - Every saved row carries its id (data-row-id). The page remembers what
+     the server holds per row (_schedRowBase) and per day's order
+     (_schedOrderBase); a save posts only rows added / changed / deleted
+     here, plus the order of days reordered here. Two people editing
+     different rows both keep their work; on the same row the last save wins
+     for that row only. A stale tab can't delete or revert anything it
+     didn't touch itself.
+   - Every ~3 s the Schedule tab pulls the saved rows (+ Venue & Tech fields)
+     and merges them into rows / fields with no unsaved edit here, so other
+     people's (and your other tabs') changes appear without reloading.
+   - Removing every row asks first; the server refuses an unconfirmed clear.
+   - Venue & Tech fields are posted only when changed. */
+let _schedRowBase = new Map();  // row id → signature the server holds
+let _schedOrderBase = {};       // day key → JSON of saved row ids in order
+let _schedMetaBaseline = {};    // meta values the server holds
+let _schedReady = false;        // baselines taken (never save rows before)
+let _schedClearDeclined = false;
+let _schedSaving = null;        // in-flight save promise (saves never overlap)
+let _schedSaveSeq = 0;          // a poll that raced a save is discarded
+let _schedSyncHash = '';
+let _schedSyncBusy = false;
+let _schedCid = 0;
 
-function _schedCanonRows(rows) {
-  return JSON.stringify((rows || [])
-    .filter(r => !r.piano_tuning_id)
-    .map(r => [r.day_date || null, r.day_date ? null : (r.perf_id || null),
-               r.start_time || '', r.end_time || '', r.description || '', r.notes || '']));
+function _schedPaneKey(pane) { return pane.dataset.dayKey || ''; }
+function _schedPaneDay(pane) {
+  const k = _schedPaneKey(pane);
+  const dayDate = /^\d{4}-\d{2}-\d{2}$/.test(k) ? k : null;
+  const pid = pane.dataset.perfId ? parseInt(pane.dataset.perfId, 10) : null;
+  return {day_date: dayDate, perf_id: dayDate ? null : pid};
 }
-function _schedHasContent(rows) {
-  return (rows || []).some(r => !r.piano_tuning_id &&
-    [r.start_time, r.end_time, r.description, r.notes].some(v => String(v || '').trim()));
+function _schedCells(tr) {
+  const c = tr.querySelectorAll('.sched-cell');
+  return {start_time: c[0]?.value || '', end_time: c[1]?.value || '',
+          description: c[2]?.value || '', notes: c[3]?.value || ''};
 }
+function _schedSig(pane, vals) {
+  const d = _schedPaneDay(pane);
+  return JSON.stringify([d.day_date, d.perf_id, vals.start_time, vals.end_time, vals.description, vals.notes]);
+}
+function _schedHasText(vals) {
+  return [vals.start_time, vals.end_time, vals.description, vals.notes].some(v => String(v || '').trim());
+}
+
+/* Every PM row on the page: [{tr, pane, key, id, vals, sig}] + per-day order. */
+function _schedScan() {
+  const rows = [], order = {};
+  document.querySelectorAll('#schedule-form .sched-day-pane').forEach(pane => {
+    const key = _schedPaneKey(pane);
+    order[key] = order[key] || [];
+    pane.querySelectorAll('.schedule-row:not(.piano-sched-row)').forEach(tr => {
+      const vals = _schedCells(tr);
+      const id = tr.dataset.rowId ? parseInt(tr.dataset.rowId, 10) : null;
+      rows.push({tr, pane, key, id, vals, sig: _schedSig(pane, vals)});
+      order[key].push(id || tr);
+    });
+  });
+  return {rows, order};
+}
+function _schedIdsJson(list) { return JSON.stringify(list.filter(x => typeof x === 'number')); }
+
 function _schedInitBaseline() {
   if (!document.getElementById('schedule-form')) return;
-  const d = collectScheduleData();
-  _schedBaseline = _schedCanonRows(d.rows);
-  _schedMetaBaseline = Object.assign({}, d.meta);
+  const {rows, order} = _schedScan();
+  _schedRowBase = new Map();
+  rows.forEach(r => { if (r.id) _schedRowBase.set(r.id, r.sig); });
+  _schedOrderBase = {};
+  Object.entries(order).forEach(([k, l]) => { _schedOrderBase[k] = _schedIdsJson(l); });
+  _schedMetaBaseline = Object.assign({}, collectScheduleData().meta);
+  _schedReady = true;
 }
 
-function _schedShowBanner(kind, info) {
+/* The pending row changes: {upsert, delete, order, hasText, baseHadText}. */
+function _schedPending() {
+  const {rows, order} = _schedScan();
+  const upsert = [], seen = new Set();
+  rows.forEach(r => {
+    if (r.id) {
+      seen.add(r.id);
+      if (_schedRowBase.get(r.id) !== r.sig) {
+        upsert.push(Object.assign({id: r.id, _tr: r.tr, _sig: r.sig}, _schedPaneDay(r.pane), r.vals));
+      }
+    } else if (_schedHasText(r.vals)) {   // a blank new row isn't worth saving yet
+      if (!r.tr.dataset.cid) r.tr.dataset.cid = 'c' + (++_schedCid);
+      upsert.push(Object.assign({ref: r.tr.dataset.cid, _tr: r.tr, _sig: r.sig}, _schedPaneDay(r.pane), r.vals));
+    }
+  });
+  const del = [..._schedRowBase.keys()].filter(id => !seen.has(id));
+  const ord = {};
+  Object.entries(order).forEach(([k, list]) => {
+    const refs = list.map(x => typeof x === 'number' ? x
+                       : (_schedHasText(_schedCells(x)) ? x.dataset.cid : null)).filter(Boolean);
+    const hasNew = refs.some(x => typeof x === 'string');
+    if (hasNew || _schedIdsJson(refs) !== (_schedOrderBase[k] || '[]')) ord[k] = refs;
+  });
+  const baseHadText = [..._schedRowBase.values()].some(sig => JSON.parse(sig).slice(2).some(v => String(v).trim()));
+  const hasText = rows.some(r => _schedHasText(r.vals));
+  return {upsert, delete: del, order: ord, hasText, baseHadText,
+          any: upsert.length || del.length || Object.keys(ord).length};
+}
+
+function _schedClearedBanner() {
   document.getElementById('sched-conflict-banner')?.remove();
   const pane = document.getElementById('tab-schedule');
   if (!pane) return;
   const div = document.createElement('div');
   div.id = 'sched-conflict-banner';
   div.className = 'sched-conflict-banner';
-  let when = '';
-  const t = info && info.saved_at ? parseServerTime(info.saved_at) : null;
-  if (t) when = ' at ' + t.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-  const who = info && info.saved_by ? _esc(info.saved_by) : 'Someone else';
-  if (kind === 'conflict') {
-    div.innerHTML = `
-      <div><strong>Your schedule changes were NOT saved.</strong>
-        ${who} saved this production schedule${when} after you opened the page.
-        Saving now would replace their version with yours.</div>
-      <div class="sched-conflict-actions">
-        <button type="button" class="btn btn-sm btn-primary" data-act="reload">Reload (get their version)</button>
-        <button type="button" class="btn btn-sm btn-ghost" data-act="history">View history</button>
-        <button type="button" class="btn btn-sm btn-danger" data-act="force">Keep mine (overwrite)</button>
-      </div>`;
-  } else if (kind === 'stale') {
-    div.innerHTML = `
-      <div><strong>This production schedule was changed somewhere else</strong> (another person, or
-        you in another tab) after this page loaded. Reload before editing — edits made here to the
-        rows won't be saved over the newer version.</div>
-      <div class="sched-conflict-actions">
-        <button type="button" class="btn btn-sm btn-primary" data-act="reload">Reload</button>
-        <button type="button" class="btn btn-sm btn-ghost" data-act="history">View history</button>
-      </div>`;
-  } else {
-    div.innerHTML = `
-      <div><strong>The schedule was not cleared.</strong> Removing every row was cancelled, so the
-        saved schedule still has its rows. Reload to see them again.</div>
-      <div class="sched-conflict-actions">
-        <button type="button" class="btn btn-sm btn-primary" data-act="reload">Reload</button>
-      </div>`;
-  }
+  div.innerHTML = `
+    <div><strong>The schedule was not cleared.</strong> Removing every row was cancelled, so the
+      saved schedule still has its rows. Reload to see them again.</div>
+    <div class="sched-conflict-actions">
+      <button type="button" class="btn btn-sm btn-primary" data-act="reload">Reload</button>
+    </div>`;
   div.addEventListener('click', e => {
-    const act = e.target.closest('[data-act]')?.dataset.act;
-    if (act === 'reload') { _isDirty = false; location.reload(); }
-    if (act === 'history' && typeof openHistory === 'function') openHistory('schedule');
-    if (act === 'force') {
-      if (!confirm('Replace the saved production schedule with the rows on your screen? ' +
-                   'Their version stays in History.')) return;
-      _schedConflict = false;
-      div.remove();
-      saveSchedule({force: true});
-    }
+    if (e.target.closest('[data-act="reload"]')) { _isDirty = false; location.reload(); }
   });
   pane.insertAdjacentElement('afterbegin', div);
 }
 
 async function saveSchedule(opts) {
   if (!SHOW_ID) return;
-  if (_schedSaving) {               // let the running save land first
-    await _schedSaving.catch(() => {});
-  }
+  if (_schedSaving) await _schedSaving.catch(() => {});
   _schedSaving = _saveScheduleNow(opts || {});
   try { return await _schedSaving; } finally { _schedSaving = null; }
 }
 
 async function _saveScheduleNow(opts) {
-  const collected = collectScheduleData();
+  const metaAll = collectScheduleData().meta;
   const meta = {};
-  Object.entries(collected.meta).forEach(([k, v]) => {
-    if (_schedMetaBaseline[k] !== v) meta[k] = v;
-  });
+  Object.entries(metaAll).forEach(([k, v]) => { if (_schedMetaBaseline[k] !== v) meta[k] = v; });
   const payload = {meta};
-  const canon = _schedCanonRows(collected.rows);
-  // No baseline = the editor never finished initialising; don't trust its rows.
-  const rowsChanged = _schedBaseline !== null && canon !== _schedBaseline;
-  if (rowsChanged && _schedConflict && !opts.force) {
-    // Waiting on Reload / Keep mine — keep saving meta only.
-  } else if (rowsChanged) {
-    payload.rows = collected.rows;
-    payload.base_rev = window.SCHED_REV || null;
-    if (opts.force) payload.force = true;
-    if (!_schedHasContent(collected.rows) && _schedBaseline !== _schedCanonRows([])) {
+  let held = false;
+  const p = _schedReady ? _schedPending() : {any: false};
+  if (p.any) {
+    let send = true;
+    if (!p.hasText && p.baseHadText) {
       if (!_schedClearDeclined &&
           confirm('This removes EVERY row from the production schedule. Save it empty?')) {
         payload.allow_clear = true;
       } else {
-        // Asked once; hold the empty schedule back until rows come back or a reload.
-        delete payload.rows;
-        if (!_schedClearDeclined) _schedShowBanner('cleared');
+        send = false; held = true;
+        if (!_schedClearDeclined) _schedClearedBanner();
         _schedClearDeclined = true;
       }
     } else {
       _schedClearDeclined = false;
     }
+    if (send) {
+      payload.ops = {
+        upsert: p.upsert.map(u => { const o = Object.assign({}, u); delete o._tr; delete o._sig; return o; }),
+        delete: p.delete, order: p.order,
+      };
+    }
   }
-  if (!payload.rows && !Object.keys(meta).length) {
-    // Nothing new to write (or only rows held back above) — don't post, so
-    // a no-op save can't stamp "last saved" or ping other tabs.
-    _isDirty = rowsChanged;
+  if (!payload.ops && !Object.keys(meta).length) {
+    _isDirty = held;
     setSaveStatus('', '');
     return;
   }
+  _schedSaveSeq++;
   setSaveStatus('saving', 'Saving...');
   try {
     const resp = await fetch(`/shows/${SHOW_ID}/save/schedule`, {
@@ -2057,20 +2042,30 @@ async function _saveScheduleNow(opts) {
       body: JSON.stringify(payload)
     });
     const d = await resp.json().catch(() => ({}));
-    if (resp.status === 409 && d.conflict) {
-      _schedConflict = true;
-      setSaveStatus('error', '✗ Not saved — conflict');
-      showSaveToast('✗ Schedule changed by someone else — not saved', 'error');
-      _schedShowBanner('conflict', d);
-      return;
-    }
     if (d.success) {
-      if (d.rev) window.SCHED_REV = d.rev;
-      if (payload.rows) _schedBaseline = canon;
+      const ids = d.ids || {};
+      if (payload.ops) {
+        p.upsert.forEach(u => {
+          let id = u.id;
+          if (u.ref && ids[u.ref]) {
+            id = ids[u.ref];
+            u._tr.dataset.rowId = id;
+            delete u._tr.dataset.cid;
+          } else if (u.id && ids[String(u.id)]) {   // re-created after someone deleted it
+            id = ids[String(u.id)];
+            u._tr.dataset.rowId = id;
+            _schedRowBase.delete(u.id);
+          }
+          if (id) _schedRowBase.set(id, u._sig);
+        });
+        p.delete.forEach(id => _schedRowBase.delete(id));
+        Object.entries(p.order).forEach(([k, refs]) => {
+          _schedOrderBase[k] = JSON.stringify(refs.map(r => typeof r === 'number' ? r : ids[r]).filter(Boolean));
+        });
+      }
       Object.assign(_schedMetaBaseline, meta);
-      // Rows that changed but weren't sent (conflict pending, clear cancelled)
-      // are still unsaved — keep the leave-page warning on for them.
-      _isDirty = rowsChanged && !payload.rows;
+      _isDirty = held || !!(_schedPending().any) ||
+                 Object.entries(collectScheduleData().meta).some(([k, v]) => _schedMetaBaseline[k] !== v);
       setSaveStatus('saved', '✓ Saved');
       showSaveToast('✓ Saved');
       setTimeout(() => setSaveStatus('', ''), 3000);
@@ -2084,10 +2079,180 @@ async function _saveScheduleNow(opts) {
   }
 }
 
+/* Build a <tr> for a row that came from the server. */
+function _schedServerRow(r) {
+  if (r.piano_id) {
+    const tr = document.createElement('tr');
+    tr.className = 'schedule-row piano-sched-row';
+    tr.dataset.pianoId = r.piano_id;
+    tr.title = "Added by Piano Tuning — change it on the Advance tab's Piano Tuning panel";
+    tr.innerHTML = `
+      ${RESTRICTED ? '' : '<td class="drag-col"></td>'}
+      <td><input type="text" class="sched-cell" value="${_esc(r.start_time)}" readonly tabindex="-1"></td>
+      <td><input type="text" class="sched-cell" value="${_esc(r.end_time)}" readonly tabindex="-1"></td>
+      <td><input type="text" class="sched-cell" value="${_esc(r.description)}" readonly tabindex="-1"></td>
+      <td><input type="text" class="sched-cell" value="${_esc(r.notes)}" readonly tabindex="-1"></td>
+      ${RESTRICTED ? '' : '<td><span class="piano-sched-lock" title="Managed by Piano Tuning">🎹</span></td>'}`;
+    return tr;
+  }
+  const tr = _schedNewRow(r);
+  tr.dataset.rowId = r.id;
+  if (RESTRICTED) {
+    tr.querySelector('.drag-col')?.remove();
+    tr.querySelector('.row-del-btn')?.closest('td')?.remove();
+    tr.querySelectorAll('.sched-cell').forEach(i => { i.disabled = true; });
+  }
+  return tr;
+}
+
+function _schedSetCells(tr, r) {
+  const c = tr.querySelectorAll('.sched-cell');
+  let changed = false;
+  ['start_time', 'end_time', 'description', 'notes'].forEach((f, i) => {
+    if (c[i] && c[i].value !== (r[f] || '')) { c[i].value = r[f] || ''; changed = true; }
+  });
+  return changed;
+}
+
+/* Live poll: merge saved rows / fields into everything not edited here. */
+async function _pollScheduleSync() {
+  const form = document.getElementById('schedule-form');
+  if (!SHOW_ID || !form || !_schedReady || _schedSyncBusy || _schedSaving) return;
+  _schedSyncBusy = true;
+  const seq = _schedSaveSeq;
+  try {
+    const r = await fetch(`/shows/${SHOW_ID}/sync/schedule?h=${encodeURIComponent(_schedSyncHash)}`);
+    if (!r.ok) return;
+    const st = await r.json();
+    if (!st.success || st.same || seq !== _schedSaveSeq || _schedSaving) return;
+    _schedMerge(form, st);
+    _schedSyncHash = st.hash;
+  } catch (_) {
+  } finally { _schedSyncBusy = false; }
+}
+
+function _schedMerge(form, st) {
+  const focusTr = document.activeElement?.closest?.('#schedule-form tr.schedule-row') || null;
+  const panes = {};
+  form.querySelectorAll('.sched-day-pane').forEach(p => { panes[_schedPaneKey(p)] = p; });
+  const byDay = {};
+  (st.rows || []).forEach(r => { (byDay[r.day] = byDay[r.day] || []).push(r); });
+  const serverIds = new Set((st.rows || []).filter(r => !r.piano_id).map(r => r.id));
+  const serverPiano = new Set((st.rows || []).filter(r => r.piano_id).map(r => String(r.piano_id)));
+  let changes = 0, needStructure = false;
+  const touchedPanes = new Set();
+
+  Object.entries(byDay).forEach(([key, rows]) => {
+    const pane = panes[key];
+    if (!pane) { needStructure = true; return; }
+    const tbody = pane.querySelector('tbody');
+    rows.forEach(r => {
+      if (r.piano_id) {
+        let tr = form.querySelector(`tr.piano-sched-row[data-piano-id="${r.piano_id}"]`);
+        if (!tr) { tbody.appendChild(_schedServerRow(r)); touchedPanes.add(pane); changes++; }
+        else if (_schedSetCells(tr, r)) changes++;
+        return;
+      }
+      const sig = _schedSig(pane, r);
+      let tr = form.querySelector(`tr.schedule-row[data-row-id="${r.id}"]`);
+      if (tr) {
+        const myPane = tr.closest('.sched-day-pane');
+        const dirty = _schedRowBase.get(r.id) !== _schedSig(myPane, _schedCells(tr));
+        if (dirty || tr === focusTr) return;              // unsaved edit here wins
+        if (myPane !== pane) { tbody.appendChild(tr); touchedPanes.add(pane); }
+        if (_schedSetCells(tr, r)) { _flashField(tr); changes++; }
+        _schedRowBase.set(r.id, sig);
+      } else {
+        if (_schedRowBase.has(r.id)) return;              // deleted here, not saved yet
+        tr = _schedServerRow(r);
+        tbody.appendChild(tr);
+        _schedRowBase.set(r.id, sig);
+        touchedPanes.add(pane);
+        _flashField(tr);
+        changes++;
+      }
+    });
+  });
+
+  // Rows / piano rows deleted elsewhere.
+  form.querySelectorAll('tr.schedule-row[data-row-id]').forEach(tr => {
+    const id = parseInt(tr.dataset.rowId, 10);
+    if (serverIds.has(id) || tr === focusTr) return;
+    const dirty = _schedRowBase.get(id) !== _schedSig(tr.closest('.sched-day-pane'), _schedCells(tr));
+    if (dirty) return;                                     // edited here: the save re-creates it
+    tr.remove(); _schedRowBase.delete(id); changes++;
+  });
+  form.querySelectorAll('tr.piano-sched-row').forEach(tr => {
+    if (!serverPiano.has(String(tr.dataset.pianoId))) { tr.remove(); changes++; }
+  });
+
+  // Order: adopt the saved order for a day this page hasn't reordered or
+  // edited (and nobody is typing in); else just keep new rows in time order.
+  Object.entries(byDay).forEach(([key, rows]) => {
+    const pane = panes[key];
+    if (!pane) return;
+    const tbody = pane.querySelector('tbody');
+    const localIds = [...tbody.querySelectorAll('tr.schedule-row[data-row-id]')].map(t => parseInt(t.dataset.rowId, 10));
+    const clean = !tbody.querySelector('tr.schedule-row:not([data-row-id]):not(.piano-sched-row)') &&
+                  !(focusTr && tbody.contains(focusTr)) &&
+                  JSON.stringify(localIds.filter(id => serverIds.has(id))) === (_schedOrderBase[key] || '[]') &&
+                  [...tbody.querySelectorAll('tr.schedule-row[data-row-id]')].every(t =>
+                    _schedRowBase.get(parseInt(t.dataset.rowId, 10)) === _schedSig(pane, _schedCells(t)));
+    const want = rows.map(r => r.piano_id
+      ? tbody.querySelector(`tr.piano-sched-row[data-piano-id="${r.piano_id}"]`)
+      : tbody.querySelector(`tr.schedule-row[data-row-id="${r.id}"]`)).filter(Boolean);
+    if (clean) {
+      const cur = [...tbody.querySelectorAll('tr.schedule-row')];
+      if (want.length === cur.length && want.some((t, i) => t !== cur[i])) {
+        want.forEach(t => tbody.appendChild(t));
+        changes++;
+      }
+      _schedOrderBase[key] = JSON.stringify(rows.filter(r => !r.piano_id).map(r => r.id));
+    } else if (touchedPanes.has(pane)) {
+      _schedPlaceByTime(tbody, rows);
+    }
+  });
+
+  // Venue & Tech fields (+ dark days).
+  const focusEl = document.activeElement;
+  Object.entries(st.meta || {}).forEach(([key, value]) => {
+    const el = form.querySelector(`.sched-meta[data-key="${CSS.escape(key)}"]`);
+    if (!el || el === focusEl) return;
+    const local = el.type === 'checkbox' ? (el.checked ? '1' : '') : el.value;
+    if (local !== (_schedMetaBaseline[key] ?? local) && local !== value) return;
+    _schedMetaBaseline[key] = value;
+    if (local !== value) {
+      if (el.type === 'checkbox') el.checked = value === '1'; else el.value = value;
+      _flashField(el);
+      changes++;
+    }
+  });
+  _applyDarkDays();
+  if (needStructure && typeof _syncScheduleStructure === 'function') _syncScheduleStructure();
+  if (changes) showSaveToast('↓ Schedule updated');
+}
+
+/* Move rows that just arrived into time order without disturbing the rest. */
+function _schedPlaceByTime(tbody, serverRows) {
+  const newIds = new Set(serverRows.filter(r => !r.piano_id).map(r => String(r.id)));
+  [...tbody.querySelectorAll('tr.schedule-row[data-row-id]')].forEach(tr => {
+    if (!newIds.has(tr.dataset.rowId) || !tr.classList.contains('field-synced')) return;
+    const k = _schedTimeKey(_schedCells(tr).start_time);
+    if (k === null) return;
+    const before = [...tbody.querySelectorAll('tr.schedule-row')].find(o => {
+      if (o === tr) return false;
+      const ok = _schedTimeKey(_schedCells(o).start_time);
+      return ok !== null && ok > k;
+    });
+    if (before) tbody.insertBefore(tr, before); else tbody.appendChild(tr);
+  });
+}
+
 /* ── Post-Show Notes ──────────────────────────────────────────── */
 function bindPostNotesForm() {
   const form = document.getElementById('postnotes-form');
   if (!form) return;
+  _notesBaseline = collectPostNotesData();
   form.addEventListener('change', () => scheduleSave());
   form.addEventListener('input', () => scheduleSave());
 }
@@ -2101,18 +2266,31 @@ function collectPostNotesData() {
   return data;
 }
 
+let _notesBaseline = null;   // {field_key: value} the server holds (3.32.0)
+let _notesSaveSeq = 0;
+let _notesSyncHash = '';
+let _notesSyncBusy = false;
+
 async function savePostNotes() {
   if (!SHOW_ID) return;
+  const all = collectPostNotesData();
+  if (!_notesBaseline) _notesBaseline = {};
+  const changed = {};
+  Object.entries(all).forEach(([k, v]) => { if (_notesBaseline[k] !== v) changed[k] = v; });
+  if (!Object.keys(changed).length) { _isDirty = false; setSaveStatus('', ''); return; }
+  _notesSaveSeq++;
   setSaveStatus('saving', 'Saving...');
   try {
     const resp = await fetch(`/shows/${SHOW_ID}/save/postnotes`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(collectPostNotesData())
+      body: JSON.stringify(changed)
     });
     const d = await resp.json();
     if (d.success) {
-      _isDirty = false;
+      Object.assign(_notesBaseline, changed);
+      const now = collectPostNotesData();
+      _isDirty = Object.keys(now).some(k => now[k] !== _notesBaseline[k]);
       setSaveStatus('saved', '✓ Saved');
       showSaveToast('✓ Saved');
       setTimeout(() => setSaveStatus('', ''), 3000);
@@ -2124,6 +2302,32 @@ async function savePostNotes() {
     setSaveStatus('error', '✗ Network error');
     showSaveToast('✗ Network error', 'error');
   }
+}
+
+/* Live Post-Show notes (3.32.0): every ~3 s on that tab, merge fields other
+   people / other tabs saved into fields with no unsaved edit here. */
+async function _pollPostNotesSync() {
+  if (!SHOW_ID || _notesSyncBusy || !document.getElementById('postnotes-form')) return;
+  _notesSyncBusy = true;
+  const seq = _notesSaveSeq;
+  try {
+    const r = await fetch(`/shows/${SHOW_ID}/sync/postnotes?h=${encodeURIComponent(_notesSyncHash)}`);
+    if (!r.ok) return;
+    const d = await r.json();
+    if (!d.success || d.same || seq !== _notesSaveSeq) return;
+    const focused = document.activeElement;
+    let n = 0;
+    Object.entries(d.notes || {}).forEach(([key, value]) => {
+      const el = document.querySelector(`#postnotes-form .notes-field[data-key="${CSS.escape(key)}"]`);
+      if (!el || el === focused) return;
+      if (_notesBaseline && key in _notesBaseline && el.value !== _notesBaseline[key] && el.value !== value) return;
+      if (_notesBaseline) _notesBaseline[key] = value;
+      if (el.value !== value) { el.value = value; _flashField(el); n++; }
+    });
+    _notesSyncHash = d.hash;
+    if (n) showSaveToast(`↓ ${n} note${n > 1 ? 's' : ''} updated`);
+  } catch (_) {
+  } finally { _notesSyncBusy = false; }
 }
 
 /* ── Conditional Fields ──────────────────────────────────────────── */

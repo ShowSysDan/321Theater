@@ -889,7 +889,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.31.0'
+APP_VERSION = '3.32.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -6614,7 +6614,6 @@ def show_page(show_id):
     # by either a performance or the load-in → load-out window).
     performances, schedule_days = _build_schedule_days(db, show_id, show,
                                                        include_orphans=True)
-    schedule_rev, _ = _schedule_rev(db, show_id)
 
     # Export log
     exports = db.execute("""
@@ -6706,7 +6705,6 @@ def show_page(show_id):
                            performances=performances,
                            schedule_days=schedule_days,
                            schedule_rows=_schedule_rows_for_editor(sched_rows, schedule_days),
-                           schedule_rev=schedule_rev,
                            can_edit_sched_templates=(session.get('user_role') == 'admin'
                                                      or bool(session.get('is_content_admin'))),
                            schedule_meta=schedule_meta,
@@ -6819,7 +6817,9 @@ def save_advance(show_id):
         app.logger.warning(f'_stage_field_alerts failed for show {show_id}: {e}')
 
     # Version snapshot
-    _snapshot_form_history(db, show_id, 'advance', {'advance_data': data})
+    # The editor posts only the fields it changed (3.32.0): the version is the
+    # show's whole saved advance, read back after the write.
+    _snapshot_form_history(db, show_id, 'advance', _current_form_state(db, show_id, 'advance'))
     log_audit(db, 'FORM_SAVE', 'form', show_id, show_id=show_id, detail='type=advance')
 
     # Return the new MAX(updated_at) so the client can bump its sync cursor
@@ -6940,9 +6940,223 @@ def delete_performance(show_id, perf_id):
     return jsonify({'success': True})
 
 
+_SCHED_OPS_MAX = 1000
+
+
+def _sched_clip(v, n=2000):
+    return str(v if v is not None else '')[:n]
+
+
+def _apply_schedule_ops(db, show_id, ops):
+    """Apply a row-level schedule save. ops = {upsert: [{id?|ref, day_date,
+    perf_id, start_time, end_time, description, notes}], delete: [id],
+    order: {day_key: [id|ref, …]}}. Returns {ref/id: new id} for rows it
+    created. Piano rows are never touched here (their sync re-places them).
+    Caller holds the show-row lock and commits."""
+    created = {}
+    dels = []
+    for x in ops.get('delete') or []:
+        try:
+            dels.append(int(x))
+        except (TypeError, ValueError):
+            pass
+    if dels:
+        db.execute('DELETE FROM schedule_rows WHERE show_id=%s AND piano_tuning_id IS NULL '
+                   'AND id = ANY(%s)', (show_id, dels))
+    for u in ops.get('upsert') or []:
+        if not isinstance(u, dict):
+            continue
+        dd = u.get('day_date')
+        dd = dd.strip() if isinstance(dd, str) and re.match(r'^\s*\d{4}-\d{2}-\d{2}\s*$', dd) else None
+        try:
+            pid = int(u.get('perf_id')) if u.get('perf_id') else None
+        except (TypeError, ValueError):
+            pid = None
+        vals = (dd, pid, _sched_clip(u.get('start_time'), 40), _sched_clip(u.get('end_time'), 40),
+                _sched_clip(u.get('description')), _sched_clip(u.get('notes')))
+        try:
+            rid = int(u.get('id') or 0) or None
+        except (TypeError, ValueError):
+            rid = None
+        if rid:
+            cur = db.execute('UPDATE schedule_rows SET day_date=%s, perf_id=%s, start_time=%s, '
+                             'end_time=%s, description=%s, notes=%s '
+                             'WHERE id=%s AND show_id=%s AND piano_tuning_id IS NULL',
+                             vals + (rid, show_id))
+            if cur.rowcount:
+                continue
+            # Someone deleted the row while this person was editing it: keep
+            # the edit (re-create it) rather than silently dropping it.
+        new_id = db.execute(
+            'INSERT INTO schedule_rows (show_id, day_date, perf_id, start_time, end_time, '
+            'description, notes, sort_order) VALUES (%s,%s,%s,%s,%s,%s,%s, '
+            '(SELECT COALESCE(MAX(sort_order), -1) + 1 FROM schedule_rows WHERE show_id=%s)) '
+            'RETURNING id', (show_id,) + vals + (show_id,)).fetchone()['id']
+        if u.get('ref') is not None:
+            created[str(u['ref'])] = new_id
+        if rid:
+            created[str(rid)] = new_id
+    order = ops.get('order') if isinstance(ops.get('order'), dict) else {}
+    if order:
+        show = db.execute('SELECT * FROM shows WHERE id=%s', (show_id,)).fetchone()
+        _, days = _build_schedule_days(db, show_id, show, include_orphans=True)
+        rows = [dict(r) for r in db.execute(
+            'SELECT * FROM schedule_rows WHERE show_id=%s AND piano_tuning_id IS NULL '
+            'ORDER BY sort_order, id', (show_id,)).fetchall()]
+        by_day = _schedule_rows_by_editor_day(rows, days)
+        for key, refs in order.items():
+            if key not in by_day or not isinstance(refs, list):
+                continue
+            day_rows = by_day[key]
+            byid = {r['id']: r for r in day_rows}
+            listed, seen = [], set()
+            for ref in refs:
+                rid = created.get(str(ref))
+                if rid is None:
+                    try:
+                        rid = int(ref)
+                    except (TypeError, ValueError):
+                        continue
+                if rid in byid and rid not in seen:
+                    listed.append(byid[rid]); seen.add(rid)
+            # Rows this editor didn't list (added by someone else meanwhile)
+            # slot in by start time instead of being shoved to the end.
+            for o in (r for r in day_rows if r['id'] not in seen):
+                k = _hhmm_minutes(o['start_time'])
+                pos = len(listed)
+                if k is not None:
+                    for i, r in enumerate(listed):
+                        rk = _hhmm_minutes(r['start_time'])
+                        if rk is not None and rk > k:
+                            pos = i
+                            break
+                listed.insert(pos, o)
+            by_day[key] = listed
+        keys = [d['date_key'] for d in days] + [k for k in by_day if k not in {d['date_key'] for d in days}]
+        seq = [r['id'] for k in keys for r in by_day.get(k, [])]
+        placed = set(seq)
+        seq += [r['id'] for r in rows if r['id'] not in placed]
+        if seq:
+            db.execute('UPDATE schedule_rows sr SET sort_order = t.n FROM '
+                       'unnest(%s::int[], %s::int[]) AS t(id, n) WHERE sr.id = t.id',
+                       (seq, list(range(len(seq)))))
+    _sync_piano_schedule_rows(db, show_id)
+    return created
+
+
+def _schedule_live_state(db, show_id):
+    """Rows (piano included) + meta as the editor shows them, with a hash."""
+    import hashlib
+    show = db.execute('SELECT * FROM shows WHERE id=%s', (show_id,)).fetchone()
+    if not show:
+        return None
+    rows = [dict(r) for r in db.execute(
+        'SELECT id, day_date, perf_id, start_time, end_time, description, notes, piano_tuning_id '
+        'FROM schedule_rows WHERE show_id=%s ORDER BY sort_order, id', (show_id,)).fetchall()]
+    meta = {r['field_key']: r['field_value'] or '' for r in db.execute(
+        'SELECT field_key, field_value FROM schedule_meta WHERE show_id=%s', (show_id,)).fetchall()}
+    _, days = _build_schedule_days(db, show_id, show, include_orphans=True)
+    out = []
+    for key, day_rows in _schedule_rows_by_editor_day(rows, days).items():
+        for r in day_rows:
+            out.append({'id': r['id'], 'day': key, 'start_time': r['start_time'] or '',
+                        'end_time': r['end_time'] or '', 'description': r['description'] or '',
+                        'notes': r['notes'] or '', 'piano_id': r['piano_tuning_id']})
+    h = hashlib.md5(json.dumps([out, sorted(meta.items())], default=str).encode()).hexdigest()[:16]
+    return {'hash': h, 'rows': out, 'meta': meta}
+
+
+@app.route('/shows/<int:show_id>/sync/schedule')
+@login_required
+def sync_schedule(show_id):
+    """Live schedule poll (3.32.0, every ~3 s on the Schedule tab): the
+    saved rows + Venue & Tech fields when they differ from the caller's
+    hash, else just {same: true}. The editor merges rows / fields it has no
+    unsaved edits in, so everyone sees everyone's changes without reloading."""
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    db = get_db()
+    st = _schedule_live_state(db, show_id)
+    db.close()
+    if st is None:
+        return jsonify({'success': False, 'error': 'Show not found.'}), 404
+    if request.args.get('h') == st['hash']:
+        return jsonify({'success': True, 'same': True, 'hash': st['hash']})
+    return jsonify(dict(st, success=True))
+
+
+@app.route('/shows/<int:show_id>/sync/postnotes')
+@login_required
+def sync_postnotes(show_id):
+    """Live Post-Show notes poll (3.32.0): all note fields when they changed."""
+    import hashlib
+    if not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    db = get_db()
+    notes = {r['field_key']: r['field_value'] or '' for r in db.execute(
+        'SELECT field_key, field_value FROM post_show_notes WHERE show_id=%s', (show_id,)).fetchall()}
+    db.close()
+    h = hashlib.md5(json.dumps(sorted(notes.items())).encode()).hexdigest()[:16]
+    if request.args.get('h') == h:
+        return jsonify({'success': True, 'same': True, 'hash': h})
+    return jsonify({'success': True, 'hash': h, 'notes': notes})
+
+
+def _schedule_legacy_rows_save(db, show_id, data):
+    """Whole-list schedule save from a page running pre-3.32.0 code (still
+    open across the deploy): the browser posts every row and the list is
+    replaced. Keeps that release's guard — a list built on an older revision
+    than the saved one is refused (409) unless `force` — and returns a
+    (response, status) to send, or None when the rows were written."""
+    rev_now, _ = _schedule_rev(db, show_id)
+    base_rev = data.get('base_rev')
+    if base_rev and base_rev != rev_now and not data.get('force'):
+        last = db.execute("""
+            SELECT s.last_saved_at::timestamptz AS at, u.display_name, u.username
+              FROM shows s LEFT JOIN users u ON u.id = s.last_saved_by
+             WHERE s.id=%s""", (show_id,)).fetchone()
+        syslog_logger.warning(
+            f"SCHEDULE_SAVE_CONFLICT show_id={show_id} by={session.get('username')} "
+            f"base={base_rev} current={rev_now}")
+        return jsonify({'success': False, 'conflict': True,
+                        'error': 'The production schedule was changed by someone else '
+                                 'after this page loaded.',
+                        'saved_by': (last['display_name'] or last['username'] or '') if last else '',
+                        'saved_at': _ts_out(last['at']) if last else None,
+                        'rev': rev_now}), 409
+    db.execute('DELETE FROM schedule_rows WHERE show_id = %s', (show_id,))
+    for i, row in enumerate(r for r in data['rows'] if isinstance(r, dict)):
+        try:
+            perf_id = int(row.get('perf_id')) if row.get('perf_id') else None
+        except (TypeError, ValueError):
+            perf_id = None
+        day_date = row.get('day_date')
+        day_date = day_date.strip() if isinstance(day_date, str) and \
+            re.match(r'^\s*\d{4}-\d{2}-\d{2}\s*$', day_date) else None
+        # A piano-tuning row keeps its link (its text is re-derived by
+        # _sync_piano_schedule_rows, so edits to it don't stick).
+        try:
+            piano_id = int(row.get('piano_tuning_id') or 0) or None
+        except (TypeError, ValueError):
+            piano_id = None
+        db.execute("""
+            INSERT INTO schedule_rows (show_id, perf_id, day_date, sort_order, start_time, end_time, description, notes, piano_tuning_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (show_id, perf_id, day_date, i,
+              _sched_clip(row.get('start_time'), 40), _sched_clip(row.get('end_time'), 40),
+              _sched_clip(row.get('description')), _sched_clip(row.get('notes')), piano_id))
+    _sync_piano_schedule_rows(db, show_id)
+    return None
+
+
 @app.route('/shows/<int:show_id>/save/schedule', methods=['POST'])
 @login_required
 def save_schedule(show_id):
+    """Production schedule autosave. Body: `meta` {key: value} for the Venue &
+    Tech fields the editor changed, and EITHER `ops` (row-level: the rows
+    this editor added / changed / deleted + the order of days it reordered,
+    see _apply_schedule_ops) OR, from pre-3.32.0 pages, `rows` (the whole
+    list). Emptying a schedule that had rows needs `allow_clear`."""
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     if session.get('is_readonly') or session.get('is_restricted'):
@@ -6950,94 +7164,63 @@ def save_schedule(show_id):
 
     get_show_or_404(show_id)
     data = request.get_json(force=True) or {}
+    ops = data.get('ops') if isinstance(data.get('ops'), dict) else None
+    # A save can't legitimately touch more than a schedule's worth of rows;
+    # refuse before taking a connection so a bad client can't insert thousands.
+    for lst in ((ops or {}).get('upsert'), (ops or {}).get('delete'), data.get('rows')):
+        if isinstance(lst, list) and len(lst) > _SCHED_OPS_MAX:
+            return jsonify({'success': False,
+                            'error': f'Too many schedule rows in one save (max {_SCHED_OPS_MAX}).'}), 400
     db = get_db()
-    # Serialize schedule writes on this show (piano sync takes the same lock),
-    # so the revision check below can't race another save.
+    # One schedule write at a time per show (the piano sync takes the same
+    # lock), so two saves can't interleave their row changes.
     db.execute('SELECT 1 FROM shows WHERE id=%s FOR UPDATE', (show_id,))
-    rows_before = None
-    if isinstance(data.get('rows'), list):
-        rev_now, canon_now = _schedule_rev(db, show_id)
-        rows_before = sum(1 for r in canon_now if _sched_row_has_content(r))
-        # Stale tab: the editor loaded rows at base_rev; someone else has saved
-        # different rows since. Writing would silently replace their work with
-        # this tab's old copy — refuse and let the person choose (3.30.0).
-        base_rev = data.get('base_rev')
-        if base_rev and base_rev != rev_now and not data.get('force'):
-            last = db.execute("""
-                SELECT s.last_saved_at::timestamptz AS at, u.display_name, u.username
-                  FROM shows s LEFT JOIN users u ON u.id = s.last_saved_by
-                 WHERE s.id=%s""", (show_id,)).fetchone()
-            db.close()
-            syslog_logger.warning(
-                f"SCHEDULE_SAVE_CONFLICT show_id={show_id} by={session.get('username')} "
-                f"base={base_rev} current={rev_now}")
-            return jsonify({'success': False, 'conflict': True,
-                            'error': 'The production schedule was changed by someone else '
-                                     'after this page loaded.',
-                            'saved_by': (last['display_name'] or last['username'] or '') if last else '',
-                            'saved_at': _ts_out(last['at']) if last else None,
-                            'rev': rev_now}), 409
-        incoming = _schedule_canon_rows([r for r in data['rows'] if isinstance(r, dict)])
-        # Never empty a schedule without the editor saying the person meant it.
-        if rows_before and not any(_sched_row_has_content(r) for r in incoming) \
-                and not data.get('allow_clear'):
-            db.close()
-            syslog_logger.warning(
-                f"SCHEDULE_CLEAR_REFUSED show_id={show_id} by={session.get('username')} "
-                f"rows={rows_before}")
-            return jsonify({'success': False, 'refused_clear': True,
-                            'error': 'Refused to remove every row of the production schedule.'}), 409
     if isinstance(data.get('meta'), dict):
         for key, val in data['meta'].items():
             db.execute("""
                 INSERT INTO schedule_meta (show_id, field_key, field_value)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
-            """, (show_id, key, val or ''))
-    if rows_before is not None:
-        db.execute('DELETE FROM schedule_rows WHERE show_id = %s', (show_id,))
-        for i, row in enumerate(r for r in data['rows'] if isinstance(r, dict)):
-            try:
-                perf_id = int(row.get('perf_id')) if row.get('perf_id') else None
-            except (TypeError, ValueError):
-                perf_id = None
-            day_date = row.get('day_date') or None
-            if not (isinstance(day_date, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', day_date.strip())):
-                day_date = None
-            else:
-                day_date = day_date.strip()
-            # A piano-tuning row keeps its link (its text is re-derived by
-            # _sync_piano_schedule_rows below, so edits to it don't stick).
-            try:
-                piano_id = int(row.get('piano_tuning_id') or 0) or None
-            except (TypeError, ValueError):
-                piano_id = None
-            db.execute("""
-                INSERT INTO schedule_rows (show_id, perf_id, day_date, sort_order, start_time, end_time, description, notes, piano_tuning_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (show_id, perf_id, day_date, i,
-                  row.get('start_time', ''), row.get('end_time', ''),
-                  row.get('description', ''), row.get('notes', ''), piano_id))
-        _sync_piano_schedule_rows(db, show_id)
+            """, (show_id, _sched_clip(key, 200), _sched_clip(val)))
 
-    db.execute('UPDATE shows SET updated_at=CURRENT_TIMESTAMP WHERE id=%s', (show_id,))
+    def _content_rows():
+        return sum(1 for r in _schedule_rev(db, show_id)[1] if _sched_row_has_content(r))
+
+    rows_before = None
+    ids_out = {}
+    if ops is not None:
+        rows_before = _content_rows()
+        ids_out = _apply_schedule_ops(db, show_id, ops)
+    elif isinstance(data.get('rows'), list):
+        rows_before = _content_rows()
+        refused = _schedule_legacy_rows_save(db, show_id, data)
+        if refused:
+            db.rollback(); db.close()
+            return refused
+    rows_after = _content_rows()
+    if rows_before and not rows_after and not data.get('allow_clear'):
+        # Never empty a schedule without the editor saying the person meant it.
+        db.rollback(); db.close()
+        syslog_logger.warning(
+            f"SCHEDULE_CLEAR_REFUSED show_id={show_id} by={session.get('username')} "
+            f"rows={rows_before}")
+        return jsonify({'success': False, 'refused_clear': True,
+                        'error': 'Refused to remove every row of the production schedule.'}), 409
+
     db.execute("""
-        UPDATE shows SET last_saved_by=%s, last_saved_at=CURRENT_TIMESTAMP WHERE id=%s
-    """, (session['user_id'], show_id))
-
+        UPDATE shows SET updated_at=CURRENT_TIMESTAMP, last_saved_by=%s, last_saved_at=CURRENT_TIMESTAMP
+        WHERE id=%s""", (session['user_id'], show_id))
     _snapshot_form_history(db, show_id, 'schedule', _schedule_state_snapshot(db, show_id))
-    rev_after, canon_after = _schedule_rev(db, show_id)
-    rows_after = sum(1 for r in canon_after if _sched_row_has_content(r))
     rows_note = (f' rows={rows_after} was={rows_before}' if rows_before is not None
                  else ' rows=unchanged')
     log_audit(db, 'FORM_SAVE', 'form', show_id, show_id=show_id,
               detail='type=schedule' + rows_note)
-
+    rev_after = _schedule_rev(db, show_id)[0]
     db.commit()
     db.close()
     syslog_logger.info(f"FORM_SAVE show_id={show_id} type=schedule{rows_note} "
                        f"by={session.get('username')}")
-    return jsonify({'success': True, 'rev': rev_after})
+    return jsonify({'success': True, 'rev': rev_after, 'ids': ids_out})
 
 
 @app.route('/shows/<int:show_id>/save/postnotes', methods=['POST'])
@@ -7086,7 +7269,7 @@ def save_postnotes(show_id):
         UPDATE shows SET last_saved_by=%s, last_saved_at=CURRENT_TIMESTAMP WHERE id=%s
     """, (session['user_id'], show_id))
 
-    _snapshot_form_history(db, show_id, 'postnotes', {'notes_data': data})
+    _snapshot_form_history(db, show_id, 'postnotes', _current_form_state(db, show_id, 'postnotes'))
     log_audit(db, 'FORM_SAVE', 'form', show_id, show_id=show_id, detail='type=postnotes')
 
     db.commit()
@@ -8114,6 +8297,9 @@ def _attachments_rev_from(row):
     return f"{row['att_count']}:{row['att_max_id']}"
 
 
+_SYNC_OVERLAP_S = 10
+
+
 @app.route('/shows/<int:show_id>/sync/advance')
 @login_required
 def sync_advance(show_id):
@@ -8133,9 +8319,16 @@ def sync_advance(show_id):
     db = get_db()
 
     # Everything this poll reads comes from ONE statement (one snapshot):
-    #  - fields changed since the last poll, excluding the current user's own
-    #    saves so we don't echo back what they just wrote (NULL last_saved_by
-    #    = no tracked save yet → deliver; a plain != dropped every row then);
+    #  - fields changed since the last poll — ALL of them, the caller's own
+    #    included (3.32.0). The old "skip if this user saved the show last"
+    #    filter dropped other people's edits whenever the caller had saved
+    #    since, and never delivered a person's edits to their OTHER tab. Echoes
+    #    are harmless: the client skips values it already shows and fields it
+    #    has unsaved edits in. The window reaches _SYNC_OVERLAP back, because a
+    #    save's updated_at is its transaction START: one that commits after a
+    #    poll can carry a timestamp older than that poll's cursor. No cursor
+    #    yet (a page opened on an empty form) = everything, so the first
+    #    field someone else types still arrives;
     #  - the new "since" cursor = latest updated_at across the show's advance
     #    data. Reading it in the same snapshot as the changed fields means a
     #    save committing mid-poll can't move the cursor past an edit this
@@ -8150,11 +8343,12 @@ def sync_advance(show_id):
                (SELECT json_object_agg(ad.field_key, ad.field_value)
                 FROM advance_data ad
                 WHERE ad.show_id = s.id
-                  AND ad.updated_at > CAST(NULLIF(%s, '') AS TIMESTAMP)
-                  AND s.last_saved_by IS DISTINCT FROM %s) AS changed,
+                  AND ad.updated_at > COALESCE(CAST(NULLIF(%s, '') AS TIMESTAMP)
+                                               - %s * INTERVAL '1 second', '-infinity')
+               ) AS changed,
                """ + _ATTACHMENTS_REV_COLS + """
         FROM shows s WHERE s.id = %s
-    """, (since, session['user_id'], show_id)).fetchone()
+    """, (since, _SYNC_OVERLAP_S, show_id)).fetchone()
     if not state:
         # Deleted show (e.g. a tab left open): the presence upsert below
         # would 500 on the active_sessions foreign key.
@@ -8328,10 +8522,6 @@ def show_heartbeat(show_id):
 
     _upsert_active_session(db, session['user_id'], show_id, tab, focused_field)
     others = _get_other_active_users(db, session['user_id'], show_id)
-    # Schedule tab (3.31.0): the rows' revision, so a tab whose copy went stale
-    # — including the SAME person's other tab, which the last_saved_by banner
-    # deliberately ignores — is told to reload before anyone types into it.
-    sched_rev = _schedule_rev(db, show_id)[0] if tab == 'schedule' else None
 
     db.commit()
     db.close()
@@ -8341,7 +8531,6 @@ def show_heartbeat(show_id):
         'last_saved_by': show['last_saved_by'],
         'last_saved_at': _ts_out(show['last_saved_at']),
         'attachments_rev': _attachments_rev_from(show),
-        'schedule_rev': sched_rev,
     })
 
 
@@ -15816,24 +16005,25 @@ def update_labor_request(show_id, rid):
     if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
     data = request.get_json(force=True) or {}
+    # Only the columns the request carries (3.32.0). Writing every column
+    # blanked `notes` on every show-page save (the page never sends it — the
+    # Labor Scheduler owns it) and let a stale tab put back old times/names.
+    sets, params = [], []
+    for col, conv in (('position_id', lambda v: v or None),
+                      ('work_date', lambda v: v or None),
+                      ('in_time', _normalize_perf_time), ('out_time', _normalize_perf_time),
+                      ('break_start', _normalize_perf_time), ('break_end', _normalize_perf_time),
+                      ('break2_start', _normalize_perf_time), ('break2_end', _normalize_perf_time),
+                      ('requested_name', lambda v: v or ''),
+                      ('notes', lambda v: (v or '').strip())):
+        if col in data:
+            sets.append(f'{col}=%s')
+            params.append(conv(data.get(col) or ''))
+    if not sets:
+        return jsonify({'success': True})
     db = get_db()
-    db.execute("""
-        UPDATE labor_requests
-        SET position_id=%s, work_date=%s, in_time=%s, out_time=%s,
-            break_start=%s, break_end=%s, break2_start=%s, break2_end=%s,
-            requested_name=%s, notes=%s
-        WHERE id=%s AND show_id=%s
-    """, (data.get('position_id') or None,
-          data.get('work_date') or None,
-          _normalize_perf_time(data.get('in_time', '')),
-          _normalize_perf_time(data.get('out_time', '')),
-          _normalize_perf_time(data.get('break_start', '')),
-          _normalize_perf_time(data.get('break_end', '')),
-          _normalize_perf_time(data.get('break2_start', '')),
-          _normalize_perf_time(data.get('break2_end', '')),
-          data.get('requested_name', ''),
-          (data.get('notes') or '').strip(),
-          rid, show_id))
+    db.execute(f"UPDATE labor_requests SET {', '.join(sets)} WHERE id=%s AND show_id=%s",
+               params + [rid, show_id])
     log_audit(db, 'LABOR_REQUEST_EDIT', 'labor_request', rid, show_id=show_id)
     db.commit()
     db.close()

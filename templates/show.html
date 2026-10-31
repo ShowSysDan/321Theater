@@ -784,9 +784,6 @@ const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
 // can reach them reliably from the global scope.
 window.SCHED_PERFORMANCES = SCHED_PERFORMANCES;
 window.SCHED_TEMPLATES = SCHED_TEMPLATES;
-// Revision of the schedule rows this page was rendered with — saveSchedule()
-// sends it so the server can refuse a stale tab's overwrite (3.30.0).
-window.SCHED_REV = {{ schedule_rev | tojson }};
 window.CAN_EDIT_SCHED_TEMPLATES = {{ 'true' if can_edit_sched_templates else 'false' }};
 // Mutable so the labor-tab dropdowns can react to live venue edits on the
 // Advance Sheet. Read everywhere via window.SHOW_VENUE.
@@ -980,7 +977,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
               {% if not restricted %}<td><span class="piano-sched-lock" title="Managed by Piano Tuning">🎹</span></td>{% endif %}
             </tr>
             {% else %}
-            <tr class="schedule-row">
+            <tr class="schedule-row" data-row-id="{{ row.id }}">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
               <td><input type="text" class="sched-cell" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
               <td><input type="text" class="sched-cell" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
@@ -1044,7 +1041,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
               {% if not restricted %}<td><span class="piano-sched-lock" title="Managed by Piano Tuning">🎹</span></td>{% endif %}
             </tr>
             {% else %}
-            <tr class="schedule-row">
+            <tr class="schedule-row" data-row-id="{{ row.id }}">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
               <td><input type="text" class="sched-cell" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
               <td><input type="text" class="sched-cell" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
@@ -1386,7 +1383,9 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
   // Called by switchTab() on every activation; fetches once.
   window.loadSecurityTab = async function () {
-    if (loaded) return;
+    // Re-fetch on every visit unless this page holds unsaved edits, so names
+    // others saved meanwhile show up (3.32.0).
+    if (loaded && JSON.stringify(names) !== savedNames) return;
     try {
       const r = await fetch(`/shows/${SHOW_ID}/security/names`);
       const j = await r.json();
@@ -1463,14 +1462,17 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       const r = await fetch(`/shows/${SHOW_ID}/security/names`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-        body: JSON.stringify({ names: cleaned }),
+        // `base` = the list this page loaded/saved last: the server applies
+        // only our additions/removals if someone else saved in between.
+        body: JSON.stringify({ names: cleaned, base: JSON.parse(savedNames || '[]') }),
       });
       const j = await r.json();
       if (!j.success) throw new Error(j.error || 'Save failed');
       names = j.names;
       savedNames = JSON.stringify(names);
       render();
-      bulkMsg.textContent = 'Saved.';
+      bulkMsg.textContent = j.merged
+        ? 'Saved — merged with names someone else saved meanwhile.' : 'Saved.';
     } catch (e) {
       alert('Save failed: ' + e.message);
     } finally {
@@ -3900,7 +3902,52 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       });
       techSel.addEventListener('change', () => saveLaborRow(techSel));
     }
+    // What the server holds for this row — saves send only fields that differ
+    // from it (3.32.0), so a save can't put back stale values in fields this
+    // page didn't touch, or blank columns it never shows (notes).
+    tr._laborBase = {
+      position_id: lr.position_id == null ? '' : String(lr.position_id),
+      work_date: lr.work_date || '',
+      in_time: lr.in_time || '', out_time: lr.out_time || '',
+      break_start: lr.break_start || '', break_end: lr.break_end || '',
+      break2_start: lr.break2_start || '', break2_end: lr.break2_end || '',
+      requested_name: lr.requested_name || '',
+    };
     return tr;
+  }
+
+  const _LABOR_PUT_FIELDS = ['position_id', 'in_time', 'out_time', 'break_start', 'break_end',
+                             'break2_start', 'break2_end', 'requested_name'];
+  /* {field: value} of a labor row's fields that differ from its baseline. */
+  function _laborRowChanges(tr, overrides) {
+    const base = tr._laborBase || {};
+    const out = {};
+    _LABOR_PUT_FIELDS.forEach(f => {
+      const el = tr.querySelector(`[data-field="${f}"]`);
+      if (!el) return;
+      const v = el.value || '';
+      const b = base[f] ?? '';
+      // A dropdown that can't show the saved value (catalog not loaded, the
+      // option filtered out) reads as blank — that's not an edit.
+      if (el.tagName === 'SELECT' && b && !Array.from(el.options).some(o => o.value === b)) return;
+      if (v !== b) out[f] = v;
+    });
+    const wd = (overrides && overrides.work_date !== undefined)
+      ? overrides.work_date : (tr.closest('.labor-day')?.dataset.workDate || '');
+    if (wd !== (base.work_date ?? '')) out.work_date = wd;
+    return out;
+  }
+  async function _putLaborChanges(tr, changes) {
+    const resp = await fetch(`/shows/${SHOW_ID}/labor-requests/${tr.dataset.rid}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(changes),
+    });
+    if (resp.ok) {
+      tr._laborBase = Object.assign({}, tr._laborBase || {}, changes);
+      if ('position_id' in changes) tr._laborBase.position_id = changes.position_id || '';
+    }
+    return resp.ok;
   }
 
   /* Build a day-block element for the given date (empty string = Unscheduled) */
@@ -4153,28 +4200,12 @@ window._psSettlement = {{ post_show_settlement | tojson }};
   }
 
   async function _putLabor(rid, fields) {
-    // Send all current field values along with any overrides in `fields`,
-    // scoped by finding the row in the DOM.
     const tr = document.querySelector(`tr[data-rid="${rid}"]`);
     if (!tr) return;
-    const dayBlock = tr.closest('.labor-day');
-    const work_date = (fields.work_date !== undefined) ? fields.work_date : (dayBlock?.dataset.workDate || '');
-    const position_id    = tr.querySelector('[data-field="position_id"]').value || null;
-    const in_time        = tr.querySelector('[data-field="in_time"]').value || '';
-    const out_time       = tr.querySelector('[data-field="out_time"]').value || '';
-    const break_start    = tr.querySelector('[data-field="break_start"]').value || '';
-    const break_end      = tr.querySelector('[data-field="break_end"]').value || '';
-    const break2_start   = tr.querySelector('[data-field="break2_start"]')?.value || '';
-    const break2_end     = tr.querySelector('[data-field="break2_end"]')?.value || '';
-    const requested_name = tr.querySelector('[data-field="requested_name"]').value || '';
-    const resp = await fetch(`/shows/${SHOW_ID}/labor-requests/${rid}`, {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({position_id, work_date, in_time, out_time,
-                            break_start, break_end, break2_start, break2_end,
-                            requested_name}),
-    });
-    if (resp.ok) showSaveToast('✓ Saved');
+    const changes = _laborRowChanges(tr, fields);
+    if (!Object.keys(changes).length) return;
+    const ok = await _putLaborChanges(tr, changes);
+    if (ok) showSaveToast('✓ Saved');
     else showSaveToast('✗ Save failed', 'error');
   }
 
@@ -5478,32 +5509,15 @@ window._psSettlement = {{ post_show_settlement | tojson }};
 
   async function saveLaborAll() {
     const rows = document.querySelectorAll('#labor-days-container tbody tr[data-rid]');
-    if (!rows.length) { showSaveToast('Nothing to save'); return; }
     let ok = 0, fail = 0;
     for (const tr of rows) {
-      const rid = tr.dataset.rid;
-      if (!rid) continue;
-      const dayBlock = tr.closest('.labor-day');
-      const work_date = dayBlock?.dataset.workDate || '';
-      const position_id    = tr.querySelector('[data-field="position_id"]')?.value || null;
-      const in_time        = tr.querySelector('[data-field="in_time"]')?.value || '';
-      const out_time       = tr.querySelector('[data-field="out_time"]')?.value || '';
-      const break_start    = tr.querySelector('[data-field="break_start"]')?.value || '';
-      const break_end      = tr.querySelector('[data-field="break_end"]')?.value || '';
-      const break2_start   = tr.querySelector('[data-field="break2_start"]')?.value || '';
-      const break2_end     = tr.querySelector('[data-field="break2_end"]')?.value || '';
-      const requested_name = tr.querySelector('[data-field="requested_name"]')?.value || '';
-      const r = await fetch(`/shows/${SHOW_ID}/labor-requests/${rid}`, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({position_id, work_date, in_time, out_time,
-                              break_start, break_end, break2_start, break2_end,
-                              requested_name}),
-      });
-      if (r.ok) ok++; else fail++;
+      if (!tr.dataset.rid) continue;
+      const changes = _laborRowChanges(tr);
+      if (!Object.keys(changes).length) continue;   // untouched rows aren't re-sent
+      if (await _putLaborChanges(tr, changes)) ok++; else fail++;
     }
     if (fail) showSaveToast(`✗ ${fail} failed, ${ok} saved`, 'error');
-    else showSaveToast(`✓ All ${ok} rows saved`);
+    else showSaveToast(ok ? `✓ ${ok} row${ok === 1 ? '' : 's'} saved` : '✓ All saved');
   }
 
   function applyQuickFill(toAll) {
