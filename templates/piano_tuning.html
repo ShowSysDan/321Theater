@@ -227,7 +227,7 @@
         <td>${t.show_id ? `<a href="/shows/${t.show_id}?tab=advance">${esc(t.show_name)}</a>
           <div class="sub">${esc(t.show_venue || '')}${t.production_manager ? ' · PM ' + esc(t.production_manager) : ''}</div>`
           : `<span class="piano-house-tag" title="Not tied to a show">🏠 House</span> ${esc(t.purpose || 'Maintenance')}`}</td>
-        <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? '<div class="piano-warn" style="margin-left:0" title="The show hasn\'t added this piano on its Assets tab.">⚠ not on show\'s Assets tab</div>' : ''}${t.piano_on_show === 'other_unit' && t.status !== 'cancelled' ? '<div class="piano-warn" style="margin-left:0" title="The show books this model, but not this specific unit.">⚠ unit not pinned on Assets tab</div>' : ''}</td>
+        <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? '<div class="piano-warn" style="margin-left:0" title="The show hasn\'t added this piano on its Assets tab.">⚠ not on show\'s Assets tab</div>' : ''}${t.piano_on_show === 'other_unit' && t.status !== 'cancelled' ? '<div class="piano-warn" style="margin-left:0" title="The show books this model, but not this specific unit.">⚠ unit not pinned on Assets tab <button type="button" class="btn btn-xs btn-ghost" onclick="ptPinUnit(' + t.id + ')" title="Make the show\'s Assets line for this model name this unit (S/N)">Pin unit</button></div>' : ''}</td>
         <td style="white-space:nowrap">${esc(t.requested_date || '')} ${esc(t.requested_time || '')}</td>
         <td style="white-space:nowrap">${t.tuning_date ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}` : '—'}</td>
         <td>${esc(t.vendor) || '—'}</td>
@@ -535,6 +535,14 @@
     if (!confirm("Decline the cancellation request? The tuning stays on and the requester is emailed.")) return;
     const r = await fetch(`/piano-tunings/${id}/cancel-request`, {method: 'DELETE', headers: H});
     if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Could not decline.'); return; }
+    load();
+  };
+
+  // Make the show's reservation name this tuning's unit (3.34.0).
+  window.ptPinUnit = async function(id) {
+    const r = await fetch(`/piano-tunings/${id}/pin-unit`, {method: 'POST', headers: H, body: '{}'});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(d.error || 'Could not pin the unit.'); return; }
     load();
   };
 

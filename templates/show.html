@@ -615,7 +615,7 @@
         const open = t.status === 'requested' || t.status === 'seen' || t.status === 'scheduled';
         return `<tr>
           <td><span class="piano-status piano-status-${esc(t.status)}">${esc(t.status_label)}</span></td>
-          <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? ` <span class="piano-warn" title="Add this piano on the Assets tab so it's reserved for the show.">⚠ not on Assets tab</span>` : ''}${t.piano_on_show === 'other_unit' && t.status !== 'cancelled' ? ` <span class="piano-warn" title="The Assets tab books this model, but not this specific unit (S/N). Pin the unit on the Assets tab.">⚠ unit not pinned on Assets tab</span>` : ''}${t.vendor ? `<div class="text-dim" style="font-size:10px">Vendor: ${esc(t.vendor)}</div>` : ''}</td>
+          <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? ` <span class="piano-warn" title="Add this piano on the Assets tab so it's reserved for the show.">⚠ not on Assets tab</span>${CAN_EDIT && _pianos.length ? ` <button type="button" class="btn btn-xs btn-ghost" onclick="pianoBookOnShow(${t.id})" title="Book this piano on the Assets tab (with its S/N when the request names one)">Add to Assets</button>` : ''}` : ''}${t.piano_on_show === 'other_unit' && t.status !== 'cancelled' ? ` <span class="piano-warn" title="The Assets tab books this model, but not this specific unit (S/N).">⚠ unit not pinned on Assets tab</span>${CAN_EDIT ? ` <button type="button" class="btn btn-xs btn-ghost" onclick="pianoPinUnit(${t.id})" title="Make the show's Assets line for this model name this unit (S/N)">Pin unit</button>` : ''}` : ''}${t.vendor ? `<div class="text-dim" style="font-size:10px">Vendor: ${esc(t.vendor)}</div>` : ''}</td>
           <td style="white-space:nowrap">${esc(t.requested_date || '')} ${esc(t.requested_time || '')}</td>
           <td style="white-space:nowrap">${sched}</td>
           <td class="num">${money(t.cost) || '—'}${t.paperwork_filename ? `<div style="font-size:10px"><a href="/shows/${SHOW_ID}/external-rentals/${t.er_id}/pdf" target="_blank">📄 Paperwork</a></div>` : ''}</td>
@@ -672,6 +672,9 @@
     sel.innerHTML = '<option value="">Any unit (not specific)</option>' + units.map(u =>
       `<option value="${u.id}" data-on-show="${u.on_show ? 1 : 0}">${esc(u.label)}${u.status && u.status !== 'available' ? ' — ' + esc(u.status) : ''}${u.on_show ? ' (on this show)' : ''}</option>`).join('');
     sel.value = keep && units.some(u => u.id === keep) ? String(keep) : '';
+    // A model with one unit: that's the S/N (3.34.0) — the server does the
+    // same for "Any unit", so the request and its reservation name it.
+    if (!sel.value && units.length === 1) sel.value = String(units[0].id);
   };
   // Warn (not block) when the picked piano — or the picked unit — isn't
   // booked on the Assets tab.
@@ -738,6 +741,27 @@
       closePianoModal();
       loadPiano();
     } finally { btn.disabled = false; }
+  };
+
+  // Fix an older request's reservation in one click (3.34.0).
+  window.pianoPinUnit = async function(id) {
+    const r = await fetch(`/piano-tunings/${id}/pin-unit`, {method: 'POST', headers: H, body: '{}'});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(d.error || 'Could not pin the unit.'); return; }
+    if (window.loadAssetsTab) window.loadAssetsTab();
+    loadPiano();
+  };
+  window.pianoBookOnShow = async function(id) {
+    const t = _tunings.find(x => x.id === id);
+    if (!t || !t.piano_asset_type_id) return;
+    const p = _pianos.find(x => x.id === t.piano_asset_type_id);
+    const booking = {asset_type_id: t.piano_asset_type_id, quantity: 1};
+    if (t.piano_asset_item_id && p && p.allow_unit_selection) booking.asset_item_id = t.piano_asset_item_id;
+    const r = await fetch(`/shows/${SHOW_ID}/assets`, {method: 'POST', headers: H, body: JSON.stringify(booking)});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(`Couldn't add ${t.piano || 'the piano'} to this show's Assets: ${d.error || 'error'}`); return; }
+    if (window.loadAssetsTab) window.loadAssetsTab();
+    loadPiano();
   };
 
   window.cancelPianoRequest = async function(id) {

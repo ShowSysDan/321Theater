@@ -984,6 +984,15 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   that line's dates), then `_reset_asset_approval`. It never adds a line;
   anything ambiguous stays a warning. `_piano_on_show(..., unpinnable=)`
   never reports 'other_unit' for a model that can't pin units.
+  3.34.0 widened it: `_reset_asset_approval()` runs it for every open
+  tuning (`_piano_pin_open_tunings`, re-entrancy guarded, `reset=False`
+  inside) so a piano booked AFTER the request picks up the S/N; several
+  unpinned lines → the one covering the tuning date; a qty-N line is SPLIT
+  (N-1 + one pinned qty-1 copy — still never a new booking). It returns
+  (sa_id, reason); `POST /piano-tunings/<id>/pin-unit` ("Pin unit" button)
+  shows the reason (`_PIANO_PIN_REASONS`). "Any unit" →
+  `_piano_default_unit()` (the one unit pinned on the show, else the
+  model's only unit), server and form.
   Paperwork uploads (`/piano-tunings/<id>/paperwork`) go to that row via
   S3/DB like other rental PDFs.
 - 3.10.3 rules: S3 deletes are collected (`s3_deletes`) and run by

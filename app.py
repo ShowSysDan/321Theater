@@ -889,7 +889,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.33.0'
+APP_VERSION = '3.34.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -22036,7 +22036,10 @@ def _reset_asset_approval(db, show_id, reason):
     column existed) are not auto-managed; manual approval is required.
     Manual unapprove clears the snapshot to truly revoke approval.
     """
-    # A pinned unit names the piano on its tuning's schedule row (3.18.2).
+    # An open tuning's unit (S/N) becomes the reservation on any matching
+    # unpinned line (3.34.0), and a pinned unit names the piano on its
+    # tuning's schedule row (3.18.2).
+    _piano_pin_open_tunings(db, show_id)
     _piano_schedule_refresh(db, show_id)
     row = db.execute(
         'SELECT s.assets_approved, s.assets_approval_snapshot, s.assets_approval_lines, '
@@ -24943,49 +24946,165 @@ def _piano_on_show(show_id, type_id, unit_id, booked, pinned, unpinnable=frozens
     return (show_id, type_id) in booked
 
 
-def _piano_pin_unit(db, show_id, type_id, unit_id):
-    """Carry a tuning's unit (S/N) onto the show's Assets line (3.20.1).
-    The request form books a model that isn't on the show yet WITH its unit,
-    but when the model is already booked (added earlier, a unit picked or
-    changed later, or set by the manager) nothing named the unit, and the
-    manager saw "unit not pinned on Assets tab". This pins the unit on the
-    show's ONE unpinned single-quantity line of that model, under the same
-    rules as a pinned add: the type allows unit selection, the unit is
-    bookable and not booked by another line over that line's dates. It
-    never books or adds a line (the PM's ordinary asset add does that) and
-    leaves anything ambiguous to the asset manager. Caller commits; returns
-    the show_assets id pinned, or None."""
-    if show_id is None or not type_id or not unit_id:
-        return None
+_PIANO_PIN_REASONS = {
+    'no_unit': 'This tuning names no unit (S/N) — pick the unit first.',
+    'not_allowed': "This piano model doesn't allow unit selection, so the Assets line "
+                   "can't name an S/N. Turn on \"Allow unit selection\" for it in the Asset Manager.",
+    'unit_unavailable': "That unit is retired or in maintenance, so it can't be booked.",
+    'not_booked': "This piano isn't on the show's Assets tab — add it there first.",
+    'component_only': 'The show books this piano only inside a system/package, which '
+                      "can't name a unit. Ask the asset manager.",
+    'all_pinned': "Every line for this model on the Assets tab already names a different unit.",
+    'unit_conflict': 'That unit is already booked on another show for these dates.',
+}
+
+_piano_pin_guard = threading.local()
+
+
+def _piano_pin_unit(db, show_id, type_id, unit_id, near_date=None, reset=True):
+    """Carry a tuning's unit (S/N) onto the show's Assets reservation
+    (3.20.1; widened 3.34.0). When the show already books the model with no
+    unit named, the reservation becomes that unit:
+      - an unpinned single-quantity line of the model is pinned (several →
+        the one whose rental window covers `near_date`, else the oldest);
+      - failing that, an unpinned line of quantity N is split: N-1 stay as
+        they were and one line (same dates, price, rate card, notes) names
+        the unit — the booked count and the total don't change.
+    Same rules as a pinned add: the type allows unit selection, the unit is
+    bookable and not on another line over that line's dates. It never adds
+    a new booking (the PM's ordinary asset add does that). Caller commits.
+    Returns (show_assets id or None, reason) — reason is None when pinned
+    now, 'already' when the unit was pinned here, else a _PIANO_PIN_REASONS
+    key. `reset=False` skips the approval reconcile (the caller runs it)."""
+    if show_id is None or not type_id:
+        return None, 'not_booked'
+    if not unit_id:
+        return None, 'no_unit'
     if db.execute('SELECT 1 FROM show_assets WHERE show_id=%s AND asset_item_id=%s',
                   (show_id, unit_id)).fetchone():
-        return None                              # already pinned here
+        return None, 'already'
     unit = db.execute("""
         SELECT ai.status, at.allow_unit_selection FROM asset_items ai
         JOIN asset_types at ON at.id = ai.asset_type_id
         WHERE ai.id=%s AND ai.asset_type_id=%s""", (unit_id, type_id)).fetchone()
-    if not unit or not unit['allow_unit_selection'] or unit['status'] in ('retired', 'maintenance'):
+    if not unit:
+        return None, 'unit_unavailable'
+    if not unit['allow_unit_selection']:
+        return None, 'not_allowed'
+    if unit['status'] in ('retired', 'maintenance'):
+        return None, 'unit_unavailable'
+    lines = db.execute("""
+        SELECT id, quantity, asset_item_id, rental_start, rental_end FROM show_assets
+        WHERE show_id=%s AND asset_type_id=%s ORDER BY id FOR UPDATE""",
+        (show_id, type_id)).fetchall()
+    if not lines:
+        comp = db.execute("""
+            SELECT 1 FROM show_assets sa
+            JOIN asset_type_system_members m ON m.system_type_id = sa.asset_type_id
+            WHERE sa.show_id=%s AND m.component_type_id=%s LIMIT 1""",
+            (show_id, type_id)).fetchone()
+        return None, ('component_only' if comp else 'not_booked')
+    pool = [ln for ln in lines if ln['asset_item_id'] is None]
+    if not pool:
+        return None, 'all_pinned'
+    near = _as_date(near_date)
+
+    def covers(ln):
+        s, e = _as_date(ln['rental_start']), _as_date(ln['rental_end'])
+        return bool(near and s and e and s <= near <= e)
+
+    def free(ln):
+        return not db.execute("""
+            SELECT 1 FROM show_assets WHERE asset_item_id=%s AND id <> %s
+              AND rental_end >= %s AND rental_start <= %s""",
+            (unit_id, ln['id'], ln['rental_start'], ln['rental_end'])).fetchone()
+
+    # Single-quantity lines first (a plain pin), then splitting a bigger
+    # line; within each, the line covering the tuning date first.
+    ranked = sorted(pool, key=lambda ln: (int(ln['quantity'] or 1) != 1, not covers(ln), ln['id']))
+    line = next((ln for ln in ranked if free(ln)), None)
+    if line is None:
+        return None, 'unit_conflict'
+    qty = int(line['quantity'] or 1)
+    if qty <= 1:
+        db.execute('UPDATE show_assets SET asset_item_id=%s WHERE id=%s AND asset_item_id IS NULL',
+                   (unit_id, line['id']))
+        sa_id = line['id']
+        detail = f'pinned_unit_id={unit_id} (piano tuning)'
+    else:
+        sa_id = db.execute("""
+            INSERT INTO show_assets (show_id, asset_type_id, asset_item_id, quantity,
+                                     rental_start, rental_end, locked_price,
+                                     original_locked_price, is_hidden, notes, added_by,
+                                     rate_company)
+            SELECT show_id, asset_type_id, %s, 1, rental_start, rental_end, locked_price,
+                   original_locked_price, is_hidden, notes, added_by, rate_company
+            FROM show_assets WHERE id=%s RETURNING id""", (unit_id, line['id'])).fetchone()['id']
+        db.execute('UPDATE show_assets SET quantity = quantity - 1 WHERE id=%s', (line['id'],))
+        detail = (f'pinned_unit_id={unit_id} (piano tuning; split 1 of qty {qty} '
+                  f"from line {line['id']})")
+    log_audit(db, 'ASSET_SHOW_EDIT', 'show_asset', sa_id, show_id=show_id, detail=detail)
+    if reset:
+        _reset_asset_approval(db, show_id, 'asset_edited')
+    syslog_logger.info(f"PIANO_UNIT_PINNED show_id={show_id} sa_id={sa_id} unit_id={unit_id} "
+                       f"split_from={line['id'] if qty > 1 else '-'} "
+                       f"by={session.get('username') if has_request_context() else '-'}")
+    return sa_id, None
+
+
+def _piano_pin_open_tunings(db, show_id):
+    """Pin every open tuning's unit on the show's Assets lines (3.34.0).
+    Runs from _reset_asset_approval — i.e. after EVERY gear change — so a
+    piano added to the Assets tab after its tuning was requested (or a line
+    whose quantity changed) picks up the tuning's S/N at once, not only
+    when someone re-saves the tuning. Cheap no-op without such tunings.
+    Re-entrancy guarded (a pin itself reconciles approval). Caller commits."""
+    if getattr(_piano_pin_guard, 'active', False):
+        return
+    rows = db.execute(
+        "SELECT piano_asset_type_id, piano_asset_item_id, "
+        "COALESCE(tuning_date, requested_date) AS near FROM piano_tunings "
+        "WHERE show_id=%s AND piano_asset_item_id IS NOT NULL "
+        "AND piano_asset_type_id IS NOT NULL AND status = ANY(%s) ORDER BY id",
+        (show_id, list(PIANO_OPEN_STATUSES))).fetchall()
+    if not rows or not _piano_module_on():
+        return
+    _piano_pin_guard.active = True
+    try:
+        for r in rows:
+            _piano_pin_unit(db, show_id, r['piano_asset_type_id'], r['piano_asset_item_id'],
+                            near_date=r['near'], reset=False)
+    finally:
+        _piano_pin_guard.active = False
+
+
+def _piano_default_unit(db, show_id, type_id):
+    """The unit a request left at "Any unit" most likely means (3.34.0): the
+    one unit of that model already pinned on the show, else the model's only
+    live unit. None when it's genuinely ambiguous."""
+    if not type_id:
         return None
-    pool = db.execute("""
-        SELECT id, rental_start, rental_end FROM show_assets
-        WHERE show_id=%s AND asset_type_id=%s AND asset_item_id IS NULL AND quantity = 1
-        FOR UPDATE""", (show_id, type_id)).fetchall()
-    if len(pool) != 1:
-        return None
-    line = pool[0]
-    if db.execute("""
-        SELECT 1 FROM show_assets WHERE asset_item_id=%s AND id <> %s
-          AND rental_end >= %s AND rental_start <= %s""",
-            (unit_id, line['id'], line['rental_start'], line['rental_end'])).fetchone():
-        return None                              # unit booked elsewhere then
-    db.execute('UPDATE show_assets SET asset_item_id=%s WHERE id=%s AND asset_item_id IS NULL',
-               (unit_id, line['id']))
-    log_audit(db, 'ASSET_SHOW_EDIT', 'show_asset', line['id'], show_id=show_id,
-              detail=f'pinned_unit_id={unit_id} (piano tuning)')
-    _reset_asset_approval(db, show_id, 'asset_edited')
-    syslog_logger.info(f"PIANO_UNIT_PINNED show_id={show_id} sa_id={line['id']} "
-                       f"unit_id={unit_id} by={session.get('username') if has_request_context() else '-'}")
-    return line['id']
+    if show_id is not None:
+        pinned = db.execute(
+            'SELECT DISTINCT asset_item_id FROM show_assets WHERE show_id=%s '
+            'AND asset_type_id=%s AND asset_item_id IS NOT NULL', (show_id, type_id)).fetchall()
+        if len(pinned) == 1:
+            return pinned[0]['asset_item_id']
+        if pinned:
+            return None
+    live = db.execute("SELECT id FROM asset_items WHERE asset_type_id=%s "
+                      "AND COALESCE(status, '') <> 'retired' LIMIT 2", (type_id,)).fetchall()
+    return live[0]['id'] if len(live) == 1 else None
+
+
+def _piano_unpinnable(db, type_id):
+    """{type_id} when that piano model can't name a unit on an Assets line
+    (allow_unit_selection off), else an empty set — for _piano_on_show."""
+    if not type_id:
+        return frozenset()
+    r = db.execute('SELECT allow_unit_selection FROM asset_types WHERE id=%s',
+                   (type_id,)).fetchone()
+    return frozenset() if (r and r['allow_unit_selection']) else frozenset({type_id})
 
 
 def _piano_booked(db, show_ids):
@@ -25507,6 +25626,10 @@ def show_piano_tuning_create(show_id):
     if not show:
         db.close()
         return jsonify({'error': 'Show not found'}), 404
+    if vals.get('piano_asset_type_id') and not vals.get('piano_asset_item_id'):
+        # "Any unit" where only one unit can be meant → name it (3.34.0), so
+        # the S/N reaches the request, its schedule row and the reservation.
+        vals['piano_asset_item_id'] = _piano_default_unit(db, show_id, vals['piano_asset_type_id'])
     err = _piano_resolve(db, vals, require=True)
     if err:
         db.close()
@@ -25521,9 +25644,11 @@ def show_piano_tuning_create(show_id):
           vals.get('requested_date'), vals.get('requested_time', ''),
           vals.get('notes', ''), session['user_id'], session['user_id'])).fetchone()['id']
     pid = vals.get('piano_asset_type_id')
-    _piano_pin_unit(db, show_id, pid, vals.get('piano_asset_item_id'))
+    _piano_pin_unit(db, show_id, pid, vals.get('piano_asset_item_id'),
+                    near_date=vals.get('requested_date'))
     not_on_show = _piano_on_show(show_id, pid, vals.get('piano_asset_item_id'),
-                                 _piano_booked(db, [show_id]), _piano_pinned(db, [show_id])) is False
+                                 _piano_booked(db, [show_id]), _piano_pinned(db, [show_id]),
+                                 _piano_unpinnable(db, pid)) is False
     log_audit(db, 'PIANO_TUNING_REQUEST', 'piano_tuning', tid, show_id=show_id,
               detail=f"date={vals.get('requested_date')} piano={vals.get('piano', '')!r}")
     recipients = _piano_manager_emails(db, exclude_user_id=session['user_id'])
@@ -25608,6 +25733,10 @@ def piano_tuning_update(tid):
         t_chg = 'piano_asset_type_id' in vals and vals['piano_asset_type_id'] != cur['piano_asset_type_id']
         if t_chg and 'piano_asset_item_id' not in vals:
             vals['piano_asset_item_id'] = None
+        # "Any unit" where only one unit can be meant → name it (3.34.0).
+        new_t = vals.get('piano_asset_type_id', cur['piano_asset_type_id'])
+        if 'piano_asset_item_id' in vals and not vals['piano_asset_item_id'] and new_t:
+            vals['piano_asset_item_id'] = _piano_default_unit(db, show_id, new_t)
         u_chg = 'piano_asset_item_id' in vals and vals['piano_asset_item_id'] != cur['piano_asset_item_id']
         if 'piano_asset_type_id' in vals and not t_chg:
             vals.pop('piano_asset_type_id')
@@ -25668,7 +25797,9 @@ def piano_tuning_update(tid):
         # when it can, so re-saving also fixes an older unpinned request.
         _piano_pin_unit(db, show_id,
                         vals.get('piano_asset_type_id', cur['piano_asset_type_id']),
-                        vals.get('piano_asset_item_id', cur['piano_asset_item_id']))
+                        vals.get('piano_asset_item_id', cur['piano_asset_item_id']),
+                        near_date=(vals.get('tuning_date', cur['tuning_date'])
+                                   or vals.get('requested_date', cur['requested_date'])))
     if show_id is not None:      # house tunings have no schedule row / charge
         _sync_piano_schedule_rows(db, show_id)
         _sync_piano_external_rental(db, tid, s3_deletes)
@@ -25995,6 +26126,45 @@ def piano_vendor_update(vid):
     db.close()
     syslog_logger.info(f"{event} id={vid} by={session.get('username')}")
     return jsonify({'success': True})
+
+
+@app.route('/piano-tunings/<int:tid>/pin-unit', methods=['POST'])
+@login_required
+def piano_tuning_pin_unit(tid):
+    """Make the show's Assets reservation name this tuning's unit (3.34.0) —
+    the "Pin unit" button beside "⚠ unit not pinned". Same rules as the
+    automatic pin (_piano_pin_unit); when it can't, says why. The piano
+    manager or an editor of the show."""
+    if not _piano_module_on():
+        abort(404)
+    db = get_db()
+    t = db.execute('SELECT id, show_id, status, piano_asset_type_id, piano_asset_item_id, '
+                   'tuning_date, requested_date FROM piano_tunings WHERE id=%s', (tid,)).fetchone()
+    if not t or t['show_id'] is None:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+    show_id = t['show_id']
+    editor = (not session.get('is_readonly') and not session.get('is_restricted')
+              and can_access_show(session['user_id'], show_id))
+    if not (_is_piano_manager() or editor):
+        db.close()
+        return jsonify({'error': 'Access denied'}), 403
+    if t['status'] == 'cancelled':
+        db.close()
+        return jsonify({'error': 'This tuning is cancelled.'}), 409
+    db.execute('SELECT id FROM shows WHERE id=%s FOR UPDATE', (show_id,))
+    sa_id, reason = _piano_pin_unit(db, show_id, t['piano_asset_type_id'], t['piano_asset_item_id'],
+                                    near_date=t['tuning_date'] or t['requested_date'])
+    db.commit()
+    db.close()
+    if sa_id:
+        return jsonify({'success': True, 'show_asset_id': sa_id})
+    if reason == 'already':
+        return jsonify({'success': True, 'already': True})
+    syslog_logger.info(f"PIANO_UNIT_PIN_REFUSED id={tid} show_id={show_id} reason={reason} "
+                       f"by={session.get('username')}")
+    return jsonify({'error': _PIANO_PIN_REASONS.get(reason, "Couldn't pin the unit."),
+                    'reason': reason}), 409
 
 
 @app.route('/piano-tunings/<int:tid>/cancel-request', methods=['POST', 'DELETE'])
