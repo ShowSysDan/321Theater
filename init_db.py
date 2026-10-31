@@ -780,7 +780,8 @@ CREATE TABLE IF NOT EXISTS form_history (
     saved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     snapshot_json TEXT NOT NULL,
-    note TEXT DEFAULT NULL
+    note TEXT DEFAULT NULL,
+    summary_json TEXT DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_form_history_show_type ON form_history(show_id, form_type);
 
@@ -2048,6 +2049,8 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".schedule_rows ADD COLUMN IF NOT EXISTS day_date TEXT DEFAULT NULL',
         # 3.30.0: why a version exists ("Restored version from …", "Imported from …").
         f'ALTER TABLE "{app_schema}".form_history ADD COLUMN IF NOT EXISTS note TEXT DEFAULT NULL',
+        # 3.32.2: the version list's change summary, computed once at save time.
+        f'ALTER TABLE "{app_schema}".form_history ADD COLUMN IF NOT EXISTS summary_json TEXT DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approved INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approved_by INTEGER',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approved_at TIMESTAMP',

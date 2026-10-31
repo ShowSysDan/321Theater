@@ -250,8 +250,12 @@ def _names_save_view(show_id):
                 # apply only THIS editor's removals and additions to the
                 # current list, so their names survive. Without `base` (old
                 # pages) the posted list replaces the list as before.
-                names = _merge_names(before, base, names)[:MAX_NAMES]
+                names = _merge_names(before, base, names)
                 merged = True
+                if len(names) > MAX_NAMES:
+                    return jsonify({'success': False,
+                                    'error': f'Together with names saved by someone else this would be '
+                                             f'{len(names)} names — the sheet holds {MAX_NAMES}.'}), 409
         db.execute('DELETE FROM security_signin_names WHERE show_id=%s', (show_id,))
         for i, name in enumerate(names):
             db.execute(

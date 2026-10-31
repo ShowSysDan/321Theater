@@ -979,10 +979,10 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
             {% else %}
             <tr class="schedule-row" data-row-id="{{ row.id }}">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
-              <td><input type="text" class="sched-cell" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
               {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)" title="Remove">×</button></td>{% endif %}
             </tr>
             {% endif %}
@@ -1043,10 +1043,10 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
             {% else %}
             <tr class="schedule-row" data-row-id="{{ row.id }}">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
-              <td><input type="text" class="sched-cell" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
               {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>{% endif %}
             </tr>
             {% endif %}
@@ -1390,6 +1390,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       const r = await fetch(`/shows/${SHOW_ID}/security/names`);
       const j = await r.json();
       if (!j.success) throw new Error(j.error || 'load failed');
+      if (loaded && dirty()) return;   // typed into while the fetch was in flight
       names = j.names || [];
       savedNames = JSON.stringify(names);
       loaded = true;
@@ -3660,6 +3661,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       const r = await fetch(`/shows/${SHOW_ID}/history/${histId}/diff?against=current`);
       const d = await r.json();
       if (!d.success) throw new Error();
+      _restoreExpected = d.state_token || null;
       const s = d.summary || {};
       const empty = d.form_type === 'schedule'
         ? !(s.added || s.removed || s.changed || s.meta) : !s.changed;
@@ -3675,11 +3677,23 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     }
   }
 
+  let _restoreExpected = null;   // latest version id the preview was computed against
   async function confirmRestore() {
     if (!_currentHistId) return;
+    // Land this page's own unsaved edits first; what can't be saved is lost
+    // by the reload, so say so.
+    try { await saveActive(); } catch (_) {}
+    if (_isDirty && !confirm('Some of your edits on this page could not be saved and will be lost. Restore anyway?')) return;
     try {
-      const resp = await fetch(`/shows/${SHOW_ID}/history/${_currentHistId}/restore?force=1`, {method: 'POST'});
+      const q = _restoreExpected ? `?expected_state=${encodeURIComponent(_restoreExpected)}` : '?force=1';
+      const resp = await fetch(`/shows/${SHOW_ID}/history/${_currentHistId}/restore${q}`, {method: 'POST'});
       const d = await resp.json();
+      if (resp.status === 409 && d.conflict) {
+        // Someone saved after the preview: show what restoring would change NOW.
+        showSaveToast(`${d.newer_saved_by || 'Someone'} saved after you opened this — preview updated`, 'error');
+        restoreSnapshot(_currentHistId);
+        return;
+      }
       if (d.success) {
         closeSnapshot();
         closeHistory();
@@ -3929,7 +3943,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       const b = base[f] ?? '';
       // A dropdown that can't show the saved value (catalog not loaded, the
       // option filtered out) reads as blank — that's not an edit.
-      if (el.tagName === 'SELECT' && b && !Array.from(el.options).some(o => o.value === b)) return;
+      if (el.tagName === 'SELECT' && b && v === '' && !Array.from(el.options).some(o => o.value === b)) return;
       if (v !== b) out[f] = v;
     });
     const wd = (overrides && overrides.work_date !== undefined)
@@ -3946,6 +3960,13 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     if (resp.ok) {
       tr._laborBase = Object.assign({}, tr._laborBase || {}, changes);
       if ('position_id' in changes) tr._laborBase.position_id = changes.position_id || '';
+    } else if (resp.status === 404) {
+      const d = await resp.json().catch(() => ({}));
+      if (d.deleted) {
+        showSaveToast('✗ This request was removed by someone else', 'error');
+        tr.remove();
+        if (typeof _refreshLaborData === 'function') _refreshLaborData();
+      }
     }
     return resp.ok;
   }

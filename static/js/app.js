@@ -27,6 +27,7 @@ let _isUploading = false;      // true while any file upload is in progress
 let _syncSince = '';           // ISO timestamp cursor for advance-field sync
 let _syncInterval = null;      // advance field poll handle (2 s)
 let _heartbeatInterval = null; // presence-only poll handle for other tabs (15 s)
+let _liveSyncInterval = null;  // schedule / post-show notes live merge (3 s)
 let _syncInFlight = false;     // guards against overlapping sync polls on slow networks
 let _focusedField = null;      // field_key the current user has focused right now (set by bindAdvanceForm's focusin/focusout)
 let _syncSeeded = false;       // false until the first poll seeds _syncSince; suppresses spurious toasts during slow page loads
@@ -40,6 +41,18 @@ let _savedSeeded = false;      // false until the baseline snapshot is captured;
 // and a stale tab can never write old values back over newer ones.
 let _advBaseline = null;       // {field_key: value} last loaded / saved / merged
 let _advSaveSeq = 0;           // bumps on every advance save; a poll that raced one is discarded
+let _advPending = {};          // other people's values for fields skipped because focused here
+const _saveChains = {};        // per-form in-flight save promise (saves never overlap)
+
+/* Run `fn` after the form's in-flight save (if any) finishes. Each queued
+   save recomputes what changed against the updated baseline, so two queued
+   calls never post the same new row/field twice. */
+function _serializedSave(slot, fn) {
+  const prev = _saveChains[slot] || Promise.resolve();
+  const p = prev.catch(() => {}).then(fn);
+  _saveChains[slot] = p;
+  return p.finally(() => { if (_saveChains[slot] === p) _saveChains[slot] = null; });
+}
 
 /**
  * Decide whether the show's last-save state represents a *new* save by
@@ -132,8 +145,6 @@ async function _pollAdvanceSync() {
     if (!resp.ok) return;
     const d = await resp.json();
 
-    if (d.since) _syncSince = d.since;
-
     // ── Merge field values ───────────────────────────────────────────────────
     // On the very first poll after a page load, the server-rendered form may
     // be stale (slow HTML download while other users were editing). Merge
@@ -143,11 +154,14 @@ async function _pollAdvanceSync() {
     const focused = document.activeElement;
     // A save of ours went out while this poll was in flight: its field list
     // may predate that save, so don't merge it (the next poll re-covers it).
-    const fields = (seqAtSend === _advSaveSeq) ? (d.fields || {}) : {};
+    const raced = seqAtSend !== _advSaveSeq;
+    if (d.since && !raced) _syncSince = d.since;   // a discarded poll keeps the cursor
+    const fields = raced ? {} : (d.fields || {});
     let mergedCount = 0;
     for (const [key, value] of Object.entries(fields)) {
       const el = document.querySelector(`#advance-form [data-key="${CSS.escape(key)}"]`);
-      if (!el || el === focused) continue;   // never overwrite what you're typing
+      if (!el) continue;
+      if (el === focused) { _advPending[key] = value; continue; }   // applied on focusout
       if (_advBaseline && key in _advBaseline) {
         const local = el.type === 'checkbox' ? (el.checked ? 'true' : 'false') : el.value;
         if (local !== _advBaseline[key] && local !== value) continue;  // unsaved edit here wins
@@ -220,7 +234,12 @@ async function _pollHeartbeat() {
     // this page loaded — not for whoever happened to save the show last — and
     // only on tabs that don't merge other people's saves live themselves.
     const live = activeTab === 'schedule' || activeTab === 'postnotes';
-    if (_checkOtherSaved(d.last_saved_by, d.last_saved_at) && !_isDirty && !live) {
+    const other = _checkOtherSaved(d.last_saved_by, d.last_saved_at);
+    if (live) {
+      // Already merged live — absorb it, or the banner would fire later on
+      // the Labor / Assets / Files tab for a save the person has seen.
+      _savedBaselineToken = `${d.last_saved_by == null ? '' : d.last_saved_by}|${d.last_saved_at == null ? '' : d.last_saved_at}`;
+    } else if (other && !_isDirty) {
       _showOtherSavedBanner(d.last_saved_at);
     }
     _checkAttachmentsRev(d.attachments_rev);
@@ -451,7 +470,7 @@ function _startSync() {
 
   // Schedule + Post-Show notes merge other people's saves live (3.32.0).
   // 3 s: a cheap hash check when nothing changed.
-  setInterval(() => {
+  _liveSyncInterval = setInterval(() => {
     if (activeTab === 'schedule' && typeof _pollScheduleSync === 'function') _pollScheduleSync();
     if (activeTab === 'postnotes') _pollPostNotesSync();
   }, 3000);
@@ -499,7 +518,7 @@ function scheduleSave() {
     const overlay = (e.target && e.target.classList && e.target.classList.contains('modal-overlay'))
       ? e.target : null;
     if (!overlay) return;
-    if (overlay.dataset.dirty === '1') {
+    if (overlay.dataset.dirty === '1' && !overlay.dataset.noDirtyGuard) {
       if (!window.confirm('You have unsaved changes in this dialog. Discard them?')) {
         e.stopImmediatePropagation();
         e.preventDefault();
@@ -702,10 +721,27 @@ function _syncScheduleMirrors() {
   }
 }
 
+/* Values other people saved to a field while it was focused here: apply
+   them once it is left, if nothing was typed into it meanwhile. */
+function _advApplyPending() {
+  Object.entries(_advPending).forEach(([key, value]) => {
+    const el = document.querySelector(`#advance-form [data-key="${CSS.escape(key)}"]`);
+    if (!el || el === document.activeElement) return;
+    const local = el.type === 'checkbox' ? (el.checked ? 'true' : 'false') : el.value;
+    delete _advPending[key];
+    if (_advBaseline && local !== _advBaseline[key]) return;   // typed here: this tab's edit wins
+    if (_advBaseline) _advBaseline[key] = value;
+    if (el.type === 'checkbox') el.checked = (value === 'true'); else el.value = value;
+    _flashField(el);
+    evaluateAllConditionals();
+  });
+}
+
 function bindAdvanceForm() {
   const form = document.getElementById('advance-form');
   if (!form) return;
   _advBaseline = collectAdvanceData();
+  form.addEventListener('focusout', () => setTimeout(_advApplyPending, 0));
   form.addEventListener('change', () => { evaluateAllConditionals(); _syncScheduleMirrors(); scheduleSave(); });
   form.addEventListener('input', () => { _syncScheduleMirrors(); scheduleSave(); });
 
@@ -953,8 +989,12 @@ function collectAdvanceData() {
   return data;
 }
 
-async function saveAdvance() {
-  if (!SHOW_ID) return;
+function saveAdvance() {
+  if (!SHOW_ID) return Promise.resolve();
+  return _serializedSave('advance', _saveAdvanceNow);
+}
+
+async function _saveAdvanceNow() {
   const all = collectAdvanceData();
   if (!_advBaseline) _advBaseline = {};
   const changed = {};
@@ -1002,6 +1042,8 @@ function bindScheduleForm() {
   });
   _applyDarkDays();
   form.addEventListener('input',  () => scheduleSave());
+  form.querySelectorAll('tr.schedule-row[data-row-id]').forEach(_schedBindRowFocus);
+  form.addEventListener('focusout', () => setTimeout(_schedApplyMetaPending, 0));
   // Time cells are normalised on blur by _bindScheduleTimeParsing.
 }
 
@@ -1059,6 +1101,7 @@ function sortSchedRowsByTime(dayKey) {
     return na < nb ? -1 : na > nb ? 1 : 0;
   });
   rows.forEach(r => tbody.appendChild(r));
+  _schedMarkReordered(tbody);
   scheduleSave();
 }
 
@@ -1102,6 +1145,7 @@ function _bindRowDrag(tr) {
     } else {
       tbody.insertBefore(_dragSrc, this);
     }
+    _schedMarkReordered(tbody);
   });
 }
 
@@ -1157,7 +1201,8 @@ function _renderScheduleDays(days) {
     days.push({date_key: k, perf_date: /^\d{4}-\d{2}-\d{2}$/.test(k) ? k : null,
                perfs: [], perf_ids: [], primary_perf_id: null, orphan: true, day_num: 0});
   });
-  days.sort((a, b) => String(a.perf_date || '~' + a.date_key).localeCompare(String(b.perf_date || '~' + b.date_key)));
+  days.sort((a, b) => ((a.orphan ? 1 : 0) - (b.orphan ? 1 : 0)) ||
+    String(a.perf_date || '~' + a.date_key).localeCompare(String(b.perf_date || '~' + b.date_key)));
 
   // Index existing panes by data-day-key. Capture the fallback pane (no
   // data-day-key) so we can promote it into the first day if needed.
@@ -1190,6 +1235,14 @@ function _renderScheduleDays(days) {
       `;
     }
     existing[firstKey] = fallback;
+    // The rows' saved signature now carries the day: re-baseline them so they
+    // don't all read as edited (which would shield other people's changes).
+    if (typeof _schedRowBase !== 'undefined') {
+      fallback.querySelectorAll('tr.schedule-row[data-row-id]').forEach(tr => {
+        _schedRowBase.set(parseInt(tr.dataset.rowId, 10), _schedSig(fallback, _schedCells(tr)));
+      });
+      if (_schedOrderBase[''] !== undefined) { _schedOrderBase[firstKey] = _schedOrderBase['']; delete _schedOrderBase['']; }
+    }
   }
 
   // Build / refresh each pane in the order the server gave us, then re-insert
@@ -1224,6 +1277,16 @@ function _renderScheduleDays(days) {
 
   _syncDayTabs(form, days);
   _syncCopyDropdowns(days);
+  // A dark-day checkbox that first appears now (new pane, or a 1-day show
+  // becoming multi-day) needs a baseline, or every save would post it.
+  if (typeof _schedMetaBaseline !== 'undefined') {
+    days.forEach(d => {
+      const k = 'dark_day:' + d.date_key;
+      if (!(k in _schedMetaBaseline) && form.querySelector(`.sched-dark[data-key="${CSS.escape(k)}"]`)) {
+        _schedMetaBaseline[k] = d.dark ? '1' : '';
+      }
+    });
+  }
   _applyDarkDays();
 }
 
@@ -1470,6 +1533,7 @@ function copySchedDay(sourceKey, targetKey) {
   src.querySelectorAll('.schedule-row:not(.piano-sched-row)').forEach(row => {
     tgt.appendChild(_schedNewRow(_schedCells(row)));
   });
+  _schedMarkReordered(tgt);
   scheduleSave();
 }
 
@@ -1524,6 +1588,7 @@ function pullAdvanceTime(dayKey, perfTime) {
     const endTime = lengthMin > 0 ? addMinutesToHHMM(hhmm, lengthMin) : '';
     tbody.insertBefore(_schedNewRow({start_time: hhmm, end_time: endTime, description: 'SHOW START'}),
                        tbody.firstChild);
+    _schedMarkReordered(tbody);
   });
   scheduleSave();
 }
@@ -1622,10 +1687,10 @@ function _schedNewRow(r) {
   tr.className = 'schedule-row';
   tr.innerHTML = `
     <td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>
-    <td><input type="text" class="sched-cell" placeholder="15:00" value="${_esc(r.start_time || '')}"></td>
-    <td><input type="text" class="sched-cell" placeholder="16:00" value="${_esc(r.end_time || '')}"></td>
-    <td><input type="text" class="sched-cell" placeholder="Description" value="${_esc(r.description || '')}"></td>
-    <td><input type="text" class="sched-cell" placeholder="Notes" value="${_esc(r.notes || '')}"></td>
+    <td><input type="text" class="sched-cell" maxlength="40" placeholder="15:00" value="${_esc(r.start_time || '')}"></td>
+    <td><input type="text" class="sched-cell" maxlength="40" placeholder="16:00" value="${_esc(r.end_time || '')}"></td>
+    <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Description" value="${_esc(r.description || '')}"></td>
+    <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Notes" value="${_esc(r.notes || '')}"></td>
     <td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>`;
   _bindRowDrag(tr);
   return tr;
@@ -1658,6 +1723,7 @@ function _schedDayRows(pane) {
 function _schedModal(title, bodyHtml, footHtml, width) {
   const ov = document.createElement('div');
   ov.className = 'modal-overlay sched-tool-modal';
+  ov.dataset.noDirtyGuard = '1';   // a search box / target pick isn't "unsaved work"
   ov.innerHTML = `
     <div class="modal-card" style="width:${width || 560}px;max-height:88vh;display:flex;flex-direction:column">
       <div class="modal-header"><span>${title}</span>
@@ -1681,12 +1747,14 @@ function openSchedImport() {
     `<button type="button" class="btn btn-ghost" data-close>Cancel</button>`, 620);
   const list = ov.querySelector('[data-list]');
   const q = ov.querySelector('[data-q]');
-  let timer = null;
+  let timer = null, seq = 0;
   async function load() {
+    const my = ++seq;
     list.innerHTML = '<p class="text-dim">Loading…</p>';
     try {
       const r = await fetch(`/shows/${SHOW_ID}/schedule-import/sources?q=${encodeURIComponent(q.value.trim())}`);
       const d = await r.json();
+      if (my !== seq) return;   // a newer search is already showing
       if (!d.success) throw new Error(d.error || 'failed');
       if (!d.shows.length) {
         list.innerHTML = '<p class="text-dim">No other show with a production schedule matches.</p>';
@@ -1893,8 +1961,10 @@ let _schedOrderBase = {};       // day key → JSON of saved row ids in order
 let _schedMetaBaseline = {};    // meta values the server holds
 let _schedReady = false;        // baselines taken (never save rows before)
 let _schedClearDeclined = false;
-let _schedSaving = null;        // in-flight save promise (saves never overlap)
 let _schedSaveSeq = 0;          // a poll that raced a save is discarded
+let _schedResyncNeeded = false; // a save's response was lost: re-adopt rows before saving again
+const _schedRemotePending = new Map(); // row id → server row (null = deleted) held back while focused
+let _schedMetaPending = {};     // meta key → server value held back while focused
 let _schedSyncHash = '';
 let _schedSyncBusy = false;
 let _schedCid = 0;
@@ -1915,15 +1985,41 @@ function _schedSig(pane, vals) {
   const d = _schedPaneDay(pane);
   return JSON.stringify([d.day_date, d.perf_id, vals.start_time, vals.end_time, vals.description, vals.notes]);
 }
+const _SCHED_SIG_COLS = ['day_date', 'perf_id', 'start_time', 'end_time', 'description', 'notes'];
+
+/* Cell-level merge of a server row into an existing <tr>: cells not edited
+   here take the server's value; cells edited here keep the edit. The row's
+   baseline becomes the server state, so the next save sends only the cells
+   that still differ. Returns the number of cells changed on screen. */
+function _schedMergeRow(tr, pane, r) {
+  const myPane = tr.closest('.sched-day-pane');
+  const baseSig = _schedRowBase.get(r.id);
+  const base = baseSig ? JSON.parse(baseSig) : null;
+  const local = JSON.parse(_schedSig(myPane, _schedCells(tr)));
+  const server = JSON.parse(_schedSig(pane, r));
+  let n = 0;
+  const cells = tr.querySelectorAll('.sched-cell');
+  [2, 3, 4, 5].forEach(i => {
+    const edited = base && local[i] !== base[i];
+    if (edited || !cells[i - 2]) return;
+    if (cells[i - 2].value !== server[i]) { cells[i - 2].value = server[i]; n++; }
+  });
+  const dayEdited = base && (local[0] !== base[0] || local[1] !== base[1]);
+  if (myPane !== pane && !dayEdited) { pane.querySelector('tbody').appendChild(tr); n++; }
+  _schedRowBase.set(r.id, _schedSig(pane, r));
+  return n;
+}
+
 function _schedHasText(vals) {
   return [vals.start_time, vals.end_time, vals.description, vals.notes].some(v => String(v || '').trim());
 }
 
-/* Every PM row on the page: [{tr, pane, key, id, vals, sig}] + per-day order. */
+/* Every PM row on the page: [{tr, pane, key, id, vals, sig}] + per-day order + panes. */
 function _schedScan() {
-  const rows = [], order = {};
+  const rows = [], order = {}, panes = {};
   document.querySelectorAll('#schedule-form .sched-day-pane').forEach(pane => {
     const key = _schedPaneKey(pane);
+    panes[key] = pane;
     order[key] = order[key] || [];
     pane.querySelectorAll('.schedule-row:not(.piano-sched-row)').forEach(tr => {
       const vals = _schedCells(tr);
@@ -1932,7 +2028,13 @@ function _schedScan() {
       order[key].push(id || tr);
     });
   });
-  return {rows, order};
+  return {rows, order, panes};
+}
+/* Mark a day as reordered here (drag, sort, copy, template, import): only
+   such days — or days with new rows to place — send an order op. */
+function _schedMarkReordered(tbody) {
+  const pane = tbody && tbody.closest ? tbody.closest('.sched-day-pane') : null;
+  if (pane) pane.dataset.reordered = '1';
 }
 function _schedIdsJson(list) { return JSON.stringify(list.filter(x => typeof x === 'number')); }
 
@@ -1940,6 +2042,8 @@ function _schedInitBaseline() {
   if (!document.getElementById('schedule-form')) return;
   const {rows, order} = _schedScan();
   _schedRowBase = new Map();
+  _schedRemotePending.clear();
+  _schedMetaPending = {};
   rows.forEach(r => { if (r.id) _schedRowBase.set(r.id, r.sig); });
   _schedOrderBase = {};
   Object.entries(order).forEach(([k, l]) => { _schedOrderBase[k] = _schedIdsJson(l); });
@@ -1949,13 +2053,18 @@ function _schedInitBaseline() {
 
 /* The pending row changes: {upsert, delete, order, hasText, baseHadText}. */
 function _schedPending() {
-  const {rows, order} = _schedScan();
+  const {rows, order, panes} = _schedScan();
   const upsert = [], seen = new Set();
   rows.forEach(r => {
     if (r.id) {
       seen.add(r.id);
-      if (_schedRowBase.get(r.id) !== r.sig) {
-        upsert.push(Object.assign({id: r.id, _tr: r.tr, _sig: r.sig}, _schedPaneDay(r.pane), r.vals));
+      const baseSig = _schedRowBase.get(r.id);
+      if (baseSig !== r.sig) {
+        // Which cells differ from what the server holds — the save writes only those.
+        const base = baseSig ? JSON.parse(baseSig) : [];
+        const cur = JSON.parse(r.sig);
+        const changed = _SCHED_SIG_COLS.filter((c, i) => base[i] !== cur[i]);
+        upsert.push(Object.assign({id: r.id, changed, _tr: r.tr, _sig: r.sig}, _schedPaneDay(r.pane), r.vals));
       }
     } else if (_schedHasText(r.vals)) {   // a blank new row isn't worth saving yet
       if (!r.tr.dataset.cid) r.tr.dataset.cid = 'c' + (++_schedCid);
@@ -1968,7 +2077,8 @@ function _schedPending() {
     const refs = list.map(x => typeof x === 'number' ? x
                        : (_schedHasText(_schedCells(x)) ? x.dataset.cid : null)).filter(Boolean);
     const hasNew = refs.some(x => typeof x === 'string');
-    if (hasNew || _schedIdsJson(refs) !== (_schedOrderBase[k] || '[]')) ord[k] = refs;
+    const reordered = panes[k] && panes[k].dataset.reordered === '1';
+    if (hasNew || (reordered && _schedIdsJson(refs) !== (_schedOrderBase[k] || '[]'))) ord[k] = refs;
   });
   const baseHadText = [..._schedRowBase.values()].some(sig => JSON.parse(sig).slice(2).some(v => String(v).trim()));
   const hasText = rows.some(r => _schedHasText(r.vals));
@@ -1985,7 +2095,7 @@ function _schedClearedBanner() {
   div.className = 'sched-conflict-banner';
   div.innerHTML = `
     <div><strong>The schedule was not cleared.</strong> Removing every row was cancelled, so the
-      saved schedule still has its rows. Reload to see them again.</div>
+      saved schedule still has its rows — they'll reappear here in a moment.</div>
     <div class="sched-conflict-actions">
       <button type="button" class="btn btn-sm btn-primary" data-act="reload">Reload</button>
     </div>`;
@@ -1995,14 +2105,49 @@ function _schedClearedBanner() {
   pane.insertAdjacentElement('afterbegin', div);
 }
 
-async function saveSchedule(opts) {
-  if (!SHOW_ID) return;
-  if (_schedSaving) await _schedSaving.catch(() => {});
-  _schedSaving = _saveScheduleNow(opts || {});
-  try { return await _schedSaving; } finally { _schedSaving = null; }
+function saveSchedule(opts) {
+  if (!SHOW_ID) return Promise.resolve();
+  return _serializedSave('schedule', () => _saveScheduleNow(opts || {}));
+}
+
+/* After a save whose response was lost (the server may have committed it):
+   pull the saved rows and adopt any that match a new row here, so the next
+   save updates them instead of inserting them a second time. */
+async function _schedResync() {
+  const form = document.getElementById('schedule-form');
+  if (!form) return;
+  const r = await fetch(`/shows/${SHOW_ID}/sync/schedule`);
+  if (!r.ok) return;
+  const st = await r.json();
+  if (!st.success || !st.rows) return;
+  const local = Array.from(form.querySelectorAll('tr.schedule-row:not([data-row-id]):not(.piano-sched-row)'));
+  st.rows.forEach(sr => {
+    if (sr.piano_id || form.querySelector(`tr.schedule-row[data-row-id="${sr.id}"]`) || _schedRowBase.has(sr.id)) return;
+    const pane = form.querySelector(`.sched-day-pane[data-day-key="${CSS.escape(sr.day)}"]`);
+    if (!pane) return;
+    const sig = _schedSig(pane, sr);
+    const tr = local.find(t => t.closest('.sched-day-pane') === pane && _schedSig(pane, _schedCells(t)) === sig);
+    if (!tr) return;
+    tr.dataset.rowId = sr.id; delete tr.dataset.cid;
+    _schedRowBase.set(sr.id, sig);
+    local.splice(local.indexOf(tr), 1);
+  });
+  _schedMerge(form, st);
+  _schedResyncNeeded = false;
+}
+
+/* After a declined "save it empty?": the rows removed on this page were never
+   deleted on the server — forget the local deletions so the next poll brings
+   them back, instead of deleting them with the next edit. */
+function _schedForgetDeletions() {
+  const form = document.getElementById('schedule-form');
+  const present = new Set(Array.from(form.querySelectorAll('tr.schedule-row[data-row-id]')).map(t => parseInt(t.dataset.rowId, 10)));
+  [..._schedRowBase.keys()].forEach(id => { if (!present.has(id)) _schedRowBase.delete(id); });
+  _schedSyncHash = '';
 }
 
 async function _saveScheduleNow(opts) {
+  if (_schedResyncNeeded) { try { await _schedResync(); } catch (_) { return; } }
   const metaAll = collectScheduleData().meta;
   const meta = {};
   Object.entries(metaAll).forEach(([k, v]) => { if (_schedMetaBaseline[k] !== v) meta[k] = v; });
@@ -2016,8 +2161,8 @@ async function _saveScheduleNow(opts) {
           confirm('This removes EVERY row from the production schedule. Save it empty?')) {
         payload.allow_clear = true;
       } else {
-        send = false; held = true;
-        if (!_schedClearDeclined) _schedClearedBanner();
+        send = false;
+        if (!_schedClearDeclined) { _schedClearedBanner(); _schedForgetDeletions(); }
         _schedClearDeclined = true;
       }
     } else {
@@ -2067,6 +2212,9 @@ async function _saveScheduleNow(opts) {
         p.delete.forEach(id => _schedRowBase.delete(id));
         Object.entries(p.order).forEach(([k, refs]) => {
           _schedOrderBase[k] = JSON.stringify(refs.map(r => typeof r === 'number' ? r : ids[r]).filter(Boolean));
+          const pane = document.querySelector(`#schedule-form .sched-day-pane[data-day-key="${CSS.escape(k)}"]`)
+                    || document.querySelector('#schedule-form .sched-day-pane:not([data-day-key])');
+          if (pane) delete pane.dataset.reordered;
         });
       }
       Object.assign(_schedMetaBaseline, meta);
@@ -2080,6 +2228,9 @@ async function _saveScheduleNow(opts) {
       showSaveToast('✗ ' + (d.error || 'Save failed'), 'error');
     }
   } catch(e) {
+    // The server may have committed before the response was lost: re-adopt
+    // our new rows from it before the next save (never insert them twice).
+    if (payload.ops) _schedResyncNeeded = true;
     setSaveStatus('error', '✗ Network error');
     showSaveToast('✗ Network error', 'error');
   }
@@ -2103,6 +2254,7 @@ function _schedServerRow(r) {
   }
   const tr = _schedNewRow(r);
   tr.dataset.rowId = r.id;
+  _schedBindRowFocus(tr);
   if (RESTRICTED) {
     tr.querySelector('.drag-col')?.remove();
     tr.querySelector('.row-del-btn')?.closest('td')?.remove();
@@ -2123,20 +2275,63 @@ function _schedSetCells(tr, r) {
 /* Live poll: merge saved rows / fields into everything not edited here. */
 async function _pollScheduleSync() {
   const form = document.getElementById('schedule-form');
-  if (!SHOW_ID || !form || !_schedReady || _schedSyncBusy || _schedSaving) return;
+  if (!SHOW_ID || !form || !_schedReady || _schedSyncBusy || _saveChains.schedule) return;
   _schedSyncBusy = true;
   const seq = _schedSaveSeq;
   try {
     const r = await fetch(`/shows/${SHOW_ID}/sync/schedule?h=${encodeURIComponent(_schedSyncHash)}`);
     if (!r.ok) return;
     const st = await r.json();
-    if (!st.success || st.same || seq !== _schedSaveSeq || _schedSaving) return;
-    _schedMerge(form, st);
-    _schedSyncHash = st.hash;
+    if (!st.success || st.same || seq !== _schedSaveSeq || _saveChains.schedule) return;
+    const skipped = _schedMerge(form, st);
+    // Rows/fields held back (focused here, or on a day this page has no pane
+    // for yet) are delivered again by the next poll: commit the hash only
+    // when everything was merged.
+    _schedSyncHash = skipped ? '' : st.hash;
   } catch (_) {
   } finally { _schedSyncBusy = false; }
 }
 
+/* A server change to the row the person is sitting in (cursor there, nothing
+   typed) is applied as soon as they leave it — unless they typed meanwhile. */
+function _schedApplyPending(tr) {
+  const id = tr.dataset.rowId ? parseInt(tr.dataset.rowId, 10) : null;
+  if (!id || !_schedRemotePending.has(id)) return;
+  const remote = _schedRemotePending.get(id);
+  _schedRemotePending.delete(id);
+  const pane = tr.closest('.sched-day-pane');
+  if (!pane) return;
+  const clean = _schedRowBase.get(id) === _schedSig(pane, _schedCells(tr));
+  if (remote === null) {                                   // deleted elsewhere
+    if (clean) { tr.remove(); _schedRowBase.delete(id); }  // edited here: the save re-creates it
+    return;
+  }
+  const target = document.querySelector(`#schedule-form .sched-day-pane[data-day-key="${CSS.escape(remote.day)}"]`) || pane;
+  if (_schedMergeRow(tr, target, remote)) _flashField(tr);
+}
+function _schedBindRowFocus(tr) {
+  tr.addEventListener('focusout', () => setTimeout(() => {
+    if (!tr.contains(document.activeElement)) _schedApplyPending(tr);
+  }, 0));
+}
+function _schedApplyMetaPending() {
+  Object.entries(_schedMetaPending).forEach(([key, value]) => {
+    const el = document.querySelector(`#schedule-form .sched-meta[data-key="${CSS.escape(key)}"]`);
+    if (!el || el === document.activeElement) return;
+    delete _schedMetaPending[key];
+    const local = el.type === 'checkbox' ? (el.checked ? '1' : '') : el.value;
+    if (local !== (_schedMetaBaseline[key] ?? local)) return;
+    _schedMetaBaseline[key] = value;
+    if (local !== value) {
+      if (el.type === 'checkbox') el.checked = value === '1'; else el.value = value;
+      _flashField(el);
+      _applyDarkDays();
+    }
+  });
+}
+
+/* Returns how many rows / fields could NOT be merged (focused here, or on a
+   day with no pane yet) — the caller then leaves the hash uncommitted. */
 function _schedMerge(form, st) {
   const focusTr = document.activeElement?.closest?.('#schedule-form tr.schedule-row') || null;
   const panes = {};
@@ -2145,29 +2340,34 @@ function _schedMerge(form, st) {
   (st.rows || []).forEach(r => { (byDay[r.day] = byDay[r.day] || []).push(r); });
   const serverIds = new Set((st.rows || []).filter(r => !r.piano_id).map(r => r.id));
   const serverPiano = new Set((st.rows || []).filter(r => r.piano_id).map(r => String(r.piano_id)));
-  let changes = 0, needStructure = false;
+  let changes = 0, needStructure = false, skipped = 0;
   const touchedPanes = new Set();
 
   Object.entries(byDay).forEach(([key, rows]) => {
     const pane = panes[key];
-    if (!pane) { needStructure = true; return; }
+    if (!pane) { needStructure = true; skipped += rows.length; return; }
     const tbody = pane.querySelector('tbody');
     rows.forEach(r => {
       if (r.piano_id) {
         let tr = form.querySelector(`tr.piano-sched-row[data-piano-id="${r.piano_id}"]`);
-        if (!tr) { tbody.appendChild(_schedServerRow(r)); touchedPanes.add(pane); changes++; }
-        else if (_schedSetCells(tr, r)) changes++;
+        if (!tr) { tbody.appendChild(_schedServerRow(r)); touchedPanes.add(pane); changes++; return; }
+        if (tr.closest('.sched-day-pane') !== pane) { tbody.appendChild(tr); touchedPanes.add(pane); changes++; }
+        if (_schedSetCells(tr, r)) changes++;
         return;
       }
       const sig = _schedSig(pane, r);
       let tr = form.querySelector(`tr.schedule-row[data-row-id="${r.id}"]`);
       if (tr) {
-        const myPane = tr.closest('.sched-day-pane');
-        const dirty = _schedRowBase.get(r.id) !== _schedSig(myPane, _schedCells(tr));
-        if (dirty || tr === focusTr) return;              // unsaved edit here wins
-        if (myPane !== pane) { tbody.appendChild(tr); touchedPanes.add(pane); }
-        if (_schedSetCells(tr, r)) { _flashField(tr); changes++; }
-        _schedRowBase.set(r.id, sig);
+        if (sig === _schedRowBase.get(r.id)) return;       // nothing new from the server
+        if (tr === focusTr) {                              // applied when the row is left
+          _schedRemotePending.set(r.id, r); skipped++;
+          return;
+        }
+        _schedRemotePending.delete(r.id);
+        const before = tr.closest('.sched-day-pane');
+        const n = _schedMergeRow(tr, pane, r);           // cell-level: edits here are kept
+        if (tr.closest('.sched-day-pane') !== before) touchedPanes.add(pane);
+        if (n) { _flashField(tr); changes++; }
       } else {
         if (_schedRowBase.has(r.id)) return;              // deleted here, not saved yet
         tr = _schedServerRow(r);
@@ -2183,9 +2383,10 @@ function _schedMerge(form, st) {
   // Rows / piano rows deleted elsewhere.
   form.querySelectorAll('tr.schedule-row[data-row-id]').forEach(tr => {
     const id = parseInt(tr.dataset.rowId, 10);
-    if (serverIds.has(id) || tr === focusTr) return;
+    if (serverIds.has(id)) return;
     const dirty = _schedRowBase.get(id) !== _schedSig(tr.closest('.sched-day-pane'), _schedCells(tr));
     if (dirty) return;                                     // edited here: the save re-creates it
+    if (tr === focusTr) { _schedRemotePending.set(id, null); skipped++; return; }
     tr.remove(); _schedRowBase.delete(id); changes++;
   });
   form.querySelectorAll('tr.piano-sched-row').forEach(tr => {
@@ -2200,7 +2401,7 @@ function _schedMerge(form, st) {
     const tbody = pane.querySelector('tbody');
     const localIds = [...tbody.querySelectorAll('tr.schedule-row[data-row-id]')].map(t => parseInt(t.dataset.rowId, 10));
     const clean = !tbody.querySelector('tr.schedule-row:not([data-row-id]):not(.piano-sched-row)') &&
-                  !(focusTr && tbody.contains(focusTr)) &&
+                  !(focusTr && tbody.contains(focusTr)) && pane.dataset.reordered !== '1' &&
                   JSON.stringify(localIds.filter(id => serverIds.has(id))) === (_schedOrderBase[key] || '[]') &&
                   [...tbody.querySelectorAll('tr.schedule-row[data-row-id]')].every(t =>
                     _schedRowBase.get(parseInt(t.dataset.rowId, 10)) === _schedSig(pane, _schedCells(t)));
@@ -2216,6 +2417,11 @@ function _schedMerge(form, st) {
       _schedOrderBase[key] = JSON.stringify(rows.filter(r => !r.piano_id).map(r => r.id));
     } else if (touchedPanes.has(pane)) {
       _schedPlaceByTime(tbody, rows);
+      // Not reordered here and nothing typed: the saved order is the baseline,
+      // so an unrelated save from this tab never carries an order op.
+      if (pane.dataset.reordered !== '1' && !tbody.querySelector('tr.schedule-row:not([data-row-id]):not(.piano-sched-row)')) {
+        _schedOrderBase[key] = JSON.stringify(rows.filter(r => !r.piano_id).map(r => r.id));
+      }
     }
   });
 
@@ -2223,7 +2429,11 @@ function _schedMerge(form, st) {
   const focusEl = document.activeElement;
   Object.entries(st.meta || {}).forEach(([key, value]) => {
     const el = form.querySelector(`.sched-meta[data-key="${CSS.escape(key)}"]`);
-    if (!el || el === focusEl) return;
+    if (!el) return;
+    if (el === focusEl) {
+      if (value !== (_schedMetaBaseline[key] ?? value)) { _schedMetaPending[key] = value; skipped++; }
+      return;
+    }
     const local = el.type === 'checkbox' ? (el.checked ? '1' : '') : el.value;
     if (local !== (_schedMetaBaseline[key] ?? local) && local !== value) return;
     _schedMetaBaseline[key] = value;
@@ -2236,6 +2446,7 @@ function _schedMerge(form, st) {
   _applyDarkDays();
   if (needStructure && typeof _syncScheduleStructure === 'function') _syncScheduleStructure();
   if (changes) showSaveToast('↓ Schedule updated');
+  return skipped;
 }
 
 /* Move rows that just arrived into time order without disturbing the rest. */
@@ -2259,6 +2470,7 @@ function bindPostNotesForm() {
   const form = document.getElementById('postnotes-form');
   if (!form) return;
   _notesBaseline = collectPostNotesData();
+  form.addEventListener('focusout', () => setTimeout(_notesApplyPending, 0));
   form.addEventListener('change', () => scheduleSave());
   form.addEventListener('input', () => scheduleSave());
 }
@@ -2277,8 +2489,25 @@ let _notesSaveSeq = 0;
 let _notesSyncHash = '';
 let _notesSyncBusy = false;
 
-async function savePostNotes() {
-  if (!SHOW_ID) return;
+let _notesPending = {};      // other people's values for the field focused here
+
+function savePostNotes() {
+  if (!SHOW_ID) return Promise.resolve();
+  return _serializedSave('postnotes', _savePostNotesNow);
+}
+
+function _notesApplyPending() {
+  Object.entries(_notesPending).forEach(([key, value]) => {
+    const el = document.querySelector(`#postnotes-form .notes-field[data-key="${CSS.escape(key)}"]`);
+    if (!el || el === document.activeElement) return;
+    delete _notesPending[key];
+    if (_notesBaseline && el.value !== _notesBaseline[key]) return;
+    if (_notesBaseline) _notesBaseline[key] = value;
+    if (el.value !== value) { el.value = value; _flashField(el); }
+  });
+}
+
+async function _savePostNotesNow() {
   const all = collectPostNotesData();
   if (!_notesBaseline) _notesBaseline = {};
   const changed = {};
@@ -2322,15 +2551,18 @@ async function _pollPostNotesSync() {
     const d = await r.json();
     if (!d.success || d.same || seq !== _notesSaveSeq) return;
     const focused = document.activeElement;
-    let n = 0;
+    let n = 0, skipped = 0;
     Object.entries(d.notes || {}).forEach(([key, value]) => {
       const el = document.querySelector(`#postnotes-form .notes-field[data-key="${CSS.escape(key)}"]`);
-      if (!el || el === focused) return;
+      if (!el) return;
+      if (el === focused) { _notesPending[key] = value; skipped++; return; }
       if (_notesBaseline && key in _notesBaseline && el.value !== _notesBaseline[key] && el.value !== value) return;
       if (_notesBaseline) _notesBaseline[key] = value;
       if (el.value !== value) { el.value = value; _flashField(el); n++; }
     });
-    _notesSyncHash = d.hash;
+    // A field held back for focus is applied on focusout; until then the hash
+    // isn't committed, so the next poll delivers it again.
+    _notesSyncHash = skipped ? '' : d.hash;
     if (n) showSaveToast(`↓ ${n} note${n > 1 ? 's' : ''} updated`);
   } catch (_) {
   } finally { _notesSyncBusy = false; }
@@ -5378,6 +5610,7 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
     // Stop the page's background pollers — they'd hammer a dead session.
     try { clearInterval(_syncInterval); } catch (_) {}
     try { clearInterval(_heartbeatInterval); } catch (_) {}
+    try { clearInterval(_liveSyncInterval); } catch (_) {}
     try { clearInterval(_notifPollTimer); } catch (_) {}
     showDead(which);
     const reloadAt = Date.now() + RELOAD_GRACE_S * 1000;

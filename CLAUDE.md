@@ -346,7 +346,9 @@ Every form on the show page follows the Advance Sheet's model: the browser
 remembers what the SERVER holds per field/row (a baseline), a save posts
 ONLY what differs from it, and a poll merges other people's saves into
 anything with no unsaved edit here. Nothing posts a whole form or list.
-- **Advance** (`_advBaseline`, `saveAdvance`): changed keys only; `save_advance`
+- **Advance** (`_advBaseline`, `saveAdvance` → `_saveAdvanceNow`, serialized;
+  focused field's remote value parked in `_advPending`, applied on focusout):
+  changed keys only; `save_advance`
   already writes only changed rows. `/sync/advance` (2 s) returns every
   field with `updated_at > cursor − _SYNC_OVERLAP_S` (no cursor = all) —
   NO "skip the last saver" filter (it hid other users' edits and never
@@ -355,17 +357,27 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   bump `_syncSince` past your own write again.
 - **Schedule** rows carry `data-row-id`; `_schedRowBase` / `_schedOrderBase`
   / `_schedMetaBaseline` are the baseline; `_schedPending()` → `ops`
-  (`upsert` with id or `ref`, `delete`, `order` per day) →
-  `_apply_schedule_ops()`; editing a row someone deleted re-creates it.
-  `/sync/schedule` (3 s, hash short-circuit) → `_schedMerge()`: a row with
-  an unsaved edit, or being typed in, is never touched; a day's saved order
-  is adopted only when the day is clean here. `_schedNewRow()` is THE row
+  (`upsert` with id + `changed` cell list, or `ref` for a new row; `delete`;
+  `order` only for days flagged `data-reordered` or holding new rows) →
+  `_apply_schedule_ops()` (UPDATE writes only `changed` columns; a row that
+  no longer exists anywhere is re-created). `/sync/schedule` (3 s; ONE SQL
+  digest `_schedule_sync_hash` first, full state only on change) →
+  `_schedMerge()`: CELL-level (`_schedMergeRow`: cells edited here keep the
+  edit, the rest take the server's), the focused row/field is held in
+  `_schedRemotePending` / `_schedMetaPending` and applied on focusout, and
+  the hash is committed only when nothing was held back (`skipped`). Saves
+  are serialized per form (`_serializedSave`); a lost response sets
+  `_schedResyncNeeded` → `_schedResync()` adopts server rows before the
+  next save. Declined clear → `_schedForgetDeletions()`. Caps:
+  `_SCHED_OPS_MAX` per save, `_SCHED_ROWS_MAX_PER_SHOW`, 300 meta keys. `_schedNewRow()` is THE row
   builder; `_bindScheduleTimeParsing` the ONE blur normaliser. The
   whole-list `rows` path (`_schedule_legacy_rows_save`, 409 on stale
   `base_rev`) exists only for pages loaded before 3.32.0 — don't extend it.
   Emptying a schedule that had rows needs `allow_clear` (client confirms;
   server rolls back and 409s otherwise).
-- **Post-Show notes** (`_notesBaseline`, `/sync/postnotes` 3 s): same.
+- **Post-Show notes** (`_notesBaseline`, `/sync/postnotes` 3 s, `_notesPending`
+  for the focused field): same. `_POSTNOTES_INTERNAL_KEYS` (billing toggle,
+  settlement marker) never enter a version, a restore or the poll.
 - **Labor Requests**: `update_labor_request` writes only the columns in the
   body; `_laborRowChanges(tr)` diffs against `tr._laborBase` (set when the
   row is drawn, updated on save); a `<select>` that can't show the saved
@@ -380,7 +392,12 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   (`_history_pure_addition`: new rows / filled fields / continued typing —
   any removal or replacement starts a new version, 3.32.1); keeps 100;
   `note` marks restores/imports (the client sends `note` on the save after
-  an import). Schedule meta keys are validated (`_schedule_meta_key_ok`);
+  an import). The list reads `form_history.summary_json` (written by
+  `_history_entry_summary` at save time). Restore is bound to the previewed
+  state (`state_token` from `/diff?against=current` → `expected_state`,
+  409 on drift), keeps ids of unchanged rows, validates like a save, and
+  re-derives show_date/time from performances. Schedule meta keys are
+  validated (`_schedule_meta_key_ok` — dark flags only on the show's days);
   `_schedule_save_reject` caps list sizes and refuses non-dates.
 - Off-date rows: `_build_schedule_days(..., include_orphans=True)` keeps
   rows whose date left the load range / performances visible (⚠ OFF-DATE);
