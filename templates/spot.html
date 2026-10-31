@@ -20,7 +20,7 @@
     </p>
   </div>
   <div style="display:flex;gap:8px;flex-wrap:wrap">
-    <a href="{{ url_for('settings') }}" class="btn btn-ghost">← Settings</a>
+    <a href="{{ url_for('settings') }}#modules" class="btn btn-ghost">← Modules</a>
     <button class="btn btn-ghost" type="button" onclick="spotTest(this)">Test Connection</button>
     <button class="btn btn-primary" type="button" onclick="spotRunNow(this)" {% if not module_on %}disabled title="Turn the module on first"{% endif %}>⟳ Pull Due Now</button>
   </div>
@@ -32,7 +32,7 @@
     <p style="font-size:12.5px;margin:0">
       The <strong>Spot Sound Levels</strong> module is switched off, so nothing is pulled and the show pages don't show
       levels. Configure the connection and the venue sensors here, then turn it on in
-      <a href="{{ url_for('settings') }}#system">Settings → System → Modules</a>.
+      <a href="{{ url_for('settings') }}#modules">Settings → Modules</a>.
     </p>
   </div>
 </div>

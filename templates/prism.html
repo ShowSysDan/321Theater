@@ -19,7 +19,8 @@
       {% endif %}
     </p>
   </div>
-  <div style="display:flex;gap:8px">
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <a href="{{ url_for('settings') }}#modules" class="btn btn-ghost">← Modules</a>
     <button class="btn btn-ghost" title="Live 7-day events fetch showing the exact request, SDK chatter, and raw response — touches nothing"
             onclick="rawApiFetch(this)">Raw API Fetch</button>
     <button class="btn btn-ghost" onclick="testConnection(this)">Test Connection</button>

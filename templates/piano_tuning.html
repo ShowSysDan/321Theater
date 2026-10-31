@@ -13,6 +13,7 @@
     <p class="page-sub">Every tuning requested from a show page. Schedule it with a vendor, set the tuning time (it goes onto the show's production schedule) and the cost (it shows on the show's Assets tab and invoices). <strong>Add House Tuning</strong> logs a tuning that isn't for a show: maintenance, a rehearsal, a recording. A <strong>Completed</strong> tuning is added to the piano unit's service record (Assets → unit → Log).</p>
   </div>
   <div class="header-actions">
+    {% if user and user.role == 'admin' %}<a href="{{ url_for('settings') }}#modules" class="btn btn-ghost btn-sm">← Modules</a>{% endif %}
     <button type="button" class="btn btn-ghost btn-sm" onclick="pvOpen()">Vendors</button>
     <button type="button" class="btn btn-primary btn-sm" onclick="ptOpenHouse()">+ Add House Tuning</button>
   </div>

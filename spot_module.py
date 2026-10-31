@@ -40,7 +40,7 @@ SANDBOX RULES (mirrors prism_module / security_module):
   * app.py's knowledge of it: one register() call, the scheduler job, the
     Post Show tab section + postnotes PDF section (module-gated), and the
     show merge / snapshot child-table lists.
-  * The module flag (Settings → System → Modules, key `spot`, default OFF)
+  * The module flag (Settings → Modules, key `spot`, default OFF)
     gates the show-page routes, the job and the show-page UI. The Spot
     settings page stays reachable for admins so it can be configured first.
 

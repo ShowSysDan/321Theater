@@ -28,7 +28,7 @@ SANDBOX RULES (mirrors prism_module / snapshot_module):
   * app.py's only knowledge of it is one `register(app, **deps)` call, the
     module-enabled flag it reads through the injected `module_enabled`, and
     the show-page Security tab + export card (both gated on that flag).
-  * The whole feature is toggleable in Settings → System → Modules
+  * The whole feature is toggleable in Settings → Modules
     (app_settings key `module_security_signin_enabled`). When disabled every
     route here 404s and the show-page tab/card disappear.
 
@@ -230,14 +230,32 @@ def _names_save_view(show_id):
     raw = data.get('names')
     if not isinstance(raw, list):
         return jsonify({'success': False, 'error': 'names must be a list.'}), 400
+    if isinstance(data.get('base'), list) and len(data['base']) > MAX_NAMES:
+        return jsonify({'success': False, 'error': 'base is too long.'}), 400
     names = [n for n in (_clean_name(x) for x in raw) if n]
     if len(names) > MAX_NAMES:
         return jsonify({'success': False,
                         'error': f'Too many names (max {MAX_NAMES}).'}), 400
 
     db = _d['get_db']()
+    merged = False
     try:
+        db.execute('SELECT 1 FROM shows WHERE id=%s FOR UPDATE', (show_id,))
         before = _fetch_names(db, show_id)
+        base = data.get('base')
+        if isinstance(base, list):
+            base = [n for n in (_clean_name(x) for x in base) if n]
+            if base != before:
+                # Someone saved since this editor loaded the list (3.32.0):
+                # apply only THIS editor's removals and additions to the
+                # current list, so their names survive. Without `base` (old
+                # pages) the posted list replaces the list as before.
+                names = _merge_names(before, base, names)
+                merged = True
+                if len(names) > MAX_NAMES:
+                    return jsonify({'success': False,
+                                    'error': f'Together with names saved by someone else this would be '
+                                             f'{len(names)} names — the sheet holds {MAX_NAMES}.'}), 409
         db.execute('DELETE FROM security_signin_names WHERE show_id=%s', (show_id,))
         for i, name in enumerate(names):
             db.execute(
@@ -261,7 +279,27 @@ def _names_save_view(show_id):
     _d['syslog_logger'].info(
         f"SECURITY_SIGNIN_SAVE show_id={show_id} count={len(names)} "
         f"by={session.get('username')}")
-    return jsonify({'success': True, 'names': names})
+    return jsonify({'success': True, 'names': names, 'merged': merged})
+
+
+def _merge_names(current, base, mine):
+    """Three-way merge of name lists: current minus what this editor removed
+    from its base, plus what it added (by count, so duplicate names work)."""
+    from collections import Counter
+    removed = Counter(base) - Counter(mine)
+    # Names this editor added that someone else added meanwhile count once.
+    added = (Counter(mine) - Counter(base)) - (Counter(current) - Counter(base))
+    out = []
+    for n in current:
+        if removed[n] > 0:
+            removed[n] -= 1
+        else:
+            out.append(n)
+    for n in mine:
+        if added[n] > 0:
+            out.append(n)
+            added[n] -= 1
+    return out
 
 
 def _parse_view(show_id):

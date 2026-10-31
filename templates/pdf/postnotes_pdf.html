@@ -181,8 +181,8 @@
         {% for row in schedule_rows %}
         {% if row.description or row.start_time %}
         <tr>
-          <td>{{ row.start_time | dualtime }}</td>
-          <td>{{ row.end_time | dualtime }}</td>
+          <td>{{ row.start_time | schedtime(row.day_date) }}</td>
+          <td>{{ row.end_time | schedtime(row.day_date) }}</td>
           <td>{{ row.description or '' }}</td>
           <td style="color:#555">{{ row.notes or '' }}</td>
         </tr>

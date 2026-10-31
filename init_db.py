@@ -779,7 +779,9 @@ CREATE TABLE IF NOT EXISTS form_history (
     form_type TEXT NOT NULL,
     saved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    snapshot_json TEXT NOT NULL
+    snapshot_json TEXT NOT NULL,
+    note TEXT DEFAULT NULL,
+    summary_json TEXT DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_form_history_show_type ON form_history(show_id, form_type);
 
@@ -787,6 +789,30 @@ CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS user_clients (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    ua_hash TEXT NOT NULL,
+    user_agent TEXT DEFAULT '',
+    browser TEXT DEFAULT '',
+    os TEXT DEFAULT '',
+    device TEXT DEFAULT '',
+    screen_w INTEGER DEFAULT 0,
+    screen_h INTEGER DEFAULT 0,
+    viewport_w INTEGER DEFAULT 0,
+    viewport_h INTEGER DEFAULT 0,
+    dpr DOUBLE PRECISION DEFAULT 1,
+    touch INTEGER DEFAULT 0,
+    view_mode TEXT DEFAULT '',
+    lang TEXT DEFAULT '',
+    tz TEXT DEFAULT '',
+    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    hits INTEGER DEFAULT 1,
+    UNIQUE(user_id, ua_hash, screen_w, screen_h)
+);
+CREATE INDEX IF NOT EXISTS idx_user_clients_user ON user_clients(user_id, last_seen);
 
 CREATE TABLE IF NOT EXISTS active_sessions (
     user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -2045,6 +2071,34 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'CREATE INDEX IF NOT EXISTS idx_agc_group ON "{app_schema}".arts_group_contacts(arts_group_id)',
         f'ALTER TABLE "{app_schema}".schedule_rows ADD COLUMN IF NOT EXISTS perf_id INTEGER DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".schedule_rows ADD COLUMN IF NOT EXISTS day_date TEXT DEFAULT NULL',
+        # 3.30.0: why a version exists ("Restored version from …", "Imported from …").
+        f'ALTER TABLE "{app_schema}".form_history ADD COLUMN IF NOT EXISTS note TEXT DEFAULT NULL',
+        # 3.32.2: the version list's change summary, computed once at save time.
+        f'ALTER TABLE "{app_schema}".form_history ADD COLUMN IF NOT EXISTS summary_json TEXT DEFAULT NULL',
+        # 3.33.0: browser / screen per user, for troubleshooting (see _record_client).
+        f'''CREATE TABLE IF NOT EXISTS "{app_schema}".user_clients (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES "{shared_schema}".users(id) ON DELETE CASCADE,
+            ua_hash TEXT NOT NULL,
+            user_agent TEXT DEFAULT '',
+            browser TEXT DEFAULT '',
+            os TEXT DEFAULT '',
+            device TEXT DEFAULT '',
+            screen_w INTEGER DEFAULT 0,
+            screen_h INTEGER DEFAULT 0,
+            viewport_w INTEGER DEFAULT 0,
+            viewport_h INTEGER DEFAULT 0,
+            dpr DOUBLE PRECISION DEFAULT 1,
+            touch INTEGER DEFAULT 0,
+            view_mode TEXT DEFAULT '',
+            lang TEXT DEFAULT '',
+            tz TEXT DEFAULT '',
+            first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            hits INTEGER DEFAULT 1,
+            UNIQUE(user_id, ua_hash, screen_w, screen_h)
+        )''',
+        f'CREATE INDEX IF NOT EXISTS idx_user_clients_user ON "{app_schema}".user_clients(user_id, last_seen)',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approved INTEGER DEFAULT 0',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approved_by INTEGER',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS assets_approved_at TIMESTAMP',

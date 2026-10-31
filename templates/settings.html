@@ -39,11 +39,14 @@
   <button class="tab-btn" onclick="switchSettingsTab('system')">System</button>
   <button class="tab-btn" onclick="switchSettingsTab('email')">Email</button>
   <a href="{{ url_for('audit_log_view') }}" class="tab-btn">Audit Log</a>
+  {# God Mode sits beside Audit Log (3.30.0) — both are "who is doing what" tools #}
+  <button class="tab-btn" onclick="switchSettingsTab('godmode')">God Mode</button>
   <a href="{{ url_for('performance_view') }}" class="tab-btn" title="Per-page response times and database query timing">Performance</a>
   <a href="{{ url_for('snapshots_page') }}" class="tab-btn" title="Inspect hourly/daily database backups, diff against live data, and recover rows or whole shows">DB Snapshots</a>
   <button class="tab-btn" onclick="switchSettingsTab('dashboards')">Dashboards</button>
-  <a href="{{ url_for('prism_page') }}" class="tab-btn">Prism Sync</a>
-  <a href="{{ url_for('spot_settings_page') }}" class="tab-btn" title="Link Spot dB meters to venues; levels + Spot's PDF are pulled in after every performance">Spot Sound Levels</a>
+  {# Modules (3.30.0): on/off switches + each module's own settings page
+     (Piano Tuning, Spot Sound Levels, Prism Sync) are children of this tab. #}
+  <button class="tab-btn" onclick="switchSettingsTab('modules')">Modules</button>
   <a href="{{ url_for('nav_editor_page') }}" class="tab-btn">Sidebar Editor</a>
   <a href="{{ url_for('merge_shows_page') }}" class="tab-btn" title="Merge two duplicate show entries into one">Merge Duplicates</a>
   {% endif %}
@@ -273,6 +276,7 @@
                         data-doc-types='{{ u.viewer_doc_types_list|tojson }}'>Edit</button>
                 {# single-quoted on purpose — |tojson escapes apostrophes (') but emits double quotes #}
                 <button class="btn btn-xs btn-ghost" onclick='openResetPw({{ u.id }}, {{ (u.display_name or u.username)|tojson }})'>Reset PW</button>
+                <button class="btn btn-xs btn-ghost" onclick='openUserDevices({{ u.id }}, {{ (u.display_name or u.username)|tojson }})' title="Browsers and screens this person has signed in from">Devices</button>
                 {% if u.id != user.id %}
                 <button class="btn btn-xs btn-ghost" onclick="toggleForcePwChange({{ u.id }}, {{ 1 if u.must_change_password else 0 }})">{{ 'Cancel PW Change' if u.must_change_password else 'Require PW Change' }}</button>
                 <button class="btn btn-xs btn-ghost" onclick="toggleUserLock({{ u.id }}, {{ 1 if u.is_locked else 0 }}, this)">{{ 'Unlock' if u.is_locked else 'Lock' }}</button>
@@ -606,10 +610,8 @@
     <button class="tab-btn system-sub-btn" data-stab="backups" onclick="switchSystemTab('backups')">Backups</button>
     <button class="tab-btn system-sub-btn" data-stab="files" onclick="switchSystemTab('files')">Files</button>
     <button class="tab-btn system-sub-btn" data-stab="database" onclick="switchSystemTab('database')">Database</button>
-    <button class="tab-btn system-sub-btn" data-stab="modules" onclick="switchSystemTab('modules')" title="Switch optional feature modules on/off">Modules</button>
     <button class="tab-btn system-sub-btn" data-stab="ai" onclick="switchSystemTab('ai')">AI</button>
     <button class="tab-btn system-sub-btn" data-stab="cluster" onclick="switchSystemTab('cluster')">Cluster</button>
-    <button class="tab-btn system-sub-btn" data-stab="godmode" onclick="switchSystemTab('godmode')">God Mode</button>
   </div>
 </div>
 {% endif %}
@@ -971,6 +973,7 @@
         Optional feature modules can be switched on or off here. Changes apply immediately —
         no restart needed. A disabled module hides its UI everywhere and its pages return
         "not found"; its saved data is kept and comes back when re-enabled.
+        <strong>Open settings →</strong> takes you to a module's own page.
       </p>
       <div id="modules-list">
         <p class="text-dim" style="font-size:12px;margin:0">Loading...</p>
@@ -2553,6 +2556,19 @@
 {% endif %}
 
 {# ── EDIT USER MODAL ──────────────────────────────────────────────────────────── #}
+{# Devices (3.33.0): what browser / OS / screen a person uses — the first
+   thing to know when they report "it looks wrong on my phone". #}
+<div id="user-devices-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeUserDevices()">
+  <div class="modal-card" style="max-width:860px;max-height:88vh;display:flex;flex-direction:column">
+    <div class="modal-header"><span id="user-devices-title">Devices</span> <button onclick="closeUserDevices()" class="modal-close">×</button></div>
+    <div class="modal-body" style="overflow:auto;flex:1">
+      <p class="text-dim" style="font-size:12px;margin:0 0 10px">Each row is one browser on one screen size, recorded when the person opens the app (at most once every 6 hours per browser; kept 180 days). Hover a row for the full user-agent string.</p>
+      <div id="user-devices-body"><p class="text-dim">Loading…</p></div>
+    </div>
+    <div class="modal-footer"><button type="button" class="btn btn-ghost" onclick="closeUserDevices()">Close</button></div>
+  </div>
+</div>
+
 <div id="edit-user-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeEditUser()">
   <div class="modal-card" style="max-width:480px;max-height:88vh;display:flex;flex-direction:column">
     <div class="modal-header">Edit User <button onclick="closeEditUser()" class="modal-close">×</button></div>
@@ -2742,7 +2758,7 @@ function switchFieldsTab(name) {
 }
 
 /* ── Settings Tab Switcher ─────────────────────────────────────── */
-const ALL_STABS = ['contacts','users','fields','arts-groups','positions','technicians','registrations','system','messages','update','syslog','backups','account','files','godmode','database','ai','email','dashboards'];
+const ALL_STABS = ['contacts','users','fields','arts-groups','positions','technicians','registrations','system','messages','update','syslog','backups','account','files','godmode','modules','database','ai','email','dashboards'];
 
 function switchSettingsTab(name) {
   ALL_STABS.forEach(t => {
@@ -2754,6 +2770,7 @@ function switchSettingsTab(name) {
   });
   history.replaceState({}, '', '#' + name);
   if (name === 'godmode') loadGodMode();
+  if (name === 'modules') loadModules();
   if (name === 'files') loadFileManager();
   if (name === 'backups') loadBackupStatus();
 }
@@ -2873,6 +2890,35 @@ async function toggleUserLock(id, isLocked, btn) {
 }
 
 let _resetPwRulesUpdate = null;
+
+/* ── Devices (3.33.0) ───────────────────────────────────────────── */
+function _escD(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+async function openUserDevices(uid, name) {
+  document.getElementById('user-devices-title').textContent = `Devices — ${name}`;
+  const body = document.getElementById('user-devices-body');
+  body.innerHTML = '<p class="text-dim">Loading…</p>';
+  document.getElementById('user-devices-modal').style.display = '';
+  try {
+    const r = await fetch(`/settings/users/${uid}/clients`);
+    const j = await r.json();
+    if (!j.success) throw new Error(j.error || 'failed');
+    if (!j.clients.length) { body.innerHTML = '<p class="text-dim">No devices recorded yet — rows appear after the person opens the app on 3.33.0 or later.</p>'; return; }
+    const when = v => { const t = parseServerTime(v); return t ? t.toLocaleString([], {month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'}) : '—'; };
+    body.innerHTML = `<table class="data-table" style="font-size:12px"><thead><tr>
+        <th>Browser</th><th>System</th><th>Type</th><th>Screen</th><th>Window</th><th>Scale</th><th>Touch</th><th>Site mode</th><th>Locale</th><th>Last seen</th><th>First seen</th><th>Visits</th>
+      </tr></thead><tbody>${j.clients.map(c => `
+      <tr title="${_escD(c.user_agent)}">
+        <td>${_escD(c.browser)}</td><td>${_escD(c.os)}</td><td>${_escD(c.device)}</td>
+        <td>${c.screen_w || '?'}×${c.screen_h || '?'}</td><td>${c.viewport_w || '?'}×${c.viewport_h || '?'}</td>
+        <td>${c.dpr ? (+c.dpr).toFixed(2).replace(/\.?0+$/, '') + '×' : '—'}</td><td>${c.touch ? 'yes' : 'no'}</td>
+        <td>${_escD(c.view_mode)}</td><td>${_escD([c.lang, c.tz].filter(Boolean).join(' · '))}</td>
+        <td style="white-space:nowrap">${when(c.last_seen)}</td><td style="white-space:nowrap">${when(c.first_seen)}</td><td>${c.hits}</td>
+      </tr>`).join('')}</tbody></table>`;
+  } catch (e) {
+    body.innerHTML = '<p class="text-dim">Could not load devices.</p>';
+  }
+}
+function closeUserDevices() { document.getElementById('user-devices-modal').style.display = 'none'; }
 
 function openResetPw(id, name) {
   document.getElementById('reset-pw-uid').value = id;
@@ -5708,7 +5754,7 @@ async function pollUpdateStatus() {
 }
 
 /* ── System sub-tab routing ─────────────────────────────────────── */
-const _SYSTEM_SUBS = ['messages','update','branding','syslog','backups','files','database','modules','ai','cluster','godmode'];
+const _SYSTEM_SUBS = ['messages','update','branding','syslog','backups','files','database','ai','cluster'];
 let _curSystemSub = 'messages';
 
 function switchSystemTab(name) {
@@ -5730,37 +5776,55 @@ function switchSystemTab(name) {
   if (name === 'backups')  loadBackupStatus();
   if (name === 'files')    loadFileManager();
   if (name === 'cluster')  startClusterPolling(); else stopClusterPolling();
-  if (name === 'godmode')  loadGodMode();
-  if (name === 'modules')  loadModules();
 }
 
-/* ── Feature modules on/off (Settings → System → Modules) ─────────────────── */
+/* ── Feature modules on/off (Settings → Modules) ─────────────────── */
 async function loadModules() {
   const box = document.getElementById('modules-list');
   try {
     const r = await fetch('/settings/modules');
     const j = await r.json();
     box.textContent = '';
-    (j.modules || []).forEach(m => {
-      const row = document.createElement('label');
-      row.style.cssText = 'display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = !!m.enabled;
-      cb.style.marginTop = '2px';
-      cb.addEventListener('change', () => toggleModule(m.key, cb));
+    const addRow = (m, toggle) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border)';
+      const lbl = document.createElement('label');
+      lbl.style.cssText = 'display:flex;gap:10px;align-items:flex-start;flex:1;min-width:0;cursor:' + (toggle ? 'pointer' : 'default');
+      if (toggle) {
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = !!m.enabled;
+        cb.style.marginTop = '2px';
+        cb.addEventListener('change', () => toggleModule(m.key, cb));
+        lbl.appendChild(cb);
+      } else {
+        const sp = document.createElement('span');
+        sp.style.cssText = 'width:13px;flex-shrink:0';
+        lbl.appendChild(sp);
+      }
       const txt = document.createElement('div');
       const nm = document.createElement('div');
       nm.style.cssText = 'font-size:13px;font-weight:600';
-      nm.textContent = m.name;
+      nm.textContent = m.name + (toggle ? '' : ' (integration)');
       const desc = document.createElement('div');
       desc.className = 'text-dim';
       desc.style.cssText = 'font-size:11.5px;margin-top:2px';
       desc.textContent = m.description || '';
       txt.appendChild(nm); txt.appendChild(desc);
-      row.appendChild(cb); row.appendChild(txt);
+      lbl.appendChild(txt);
+      row.appendChild(lbl);
+      if (m.settings_url) {
+        const a = document.createElement('a');
+        a.href = m.settings_url;
+        a.className = 'btn btn-ghost btn-sm';
+        a.style.flexShrink = '0';
+        a.textContent = 'Open settings →';
+        row.appendChild(a);
+      }
       box.appendChild(row);
-    });
+    };
+    (j.modules || []).forEach(m => addRow(m, true));
+    (j.integrations || []).forEach(m => addRow(m, false));
     if (!(j.modules || []).length)
       box.innerHTML = '<p class="text-dim" style="font-size:12px;margin:0">No optional modules available.</p>';
   } catch (e) {

@@ -2455,3 +2455,56 @@ html.sidebar-collapsed .sidebar-footer-row > .sidebar-user, html.force-rail .sid
 .email-resend-row { display: flex; gap: 8px; }
 .email-resend-row input { flex: 1; min-width: 0; }
 .email-preview-frame { width: 100%; height: 460px; border: 1px solid var(--border); border-radius: 8px; background: #eef0f3; }
+
+/* ── Version history + schedule tools (3.30.0) ────────────────────── */
+.history-drawer { width: 440px; }
+.history-entry { flex-direction: column; align-items: stretch; gap: 6px; }
+.history-entry-meta { flex-direction: row; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.history-entry-warn { border-left: 3px solid var(--red); }
+.hist-help { margin: 0; padding: 10px 14px; font-size: 11px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
+.hist-note { font-size: 11px; font-style: italic; color: var(--text-dim); }
+.hist-summary { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.hist-chip { font-size: 10.5px; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap; }
+.hist-chip.hist-add { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+.hist-chip.hist-del { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.hist-chip.hist-mod { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, transparent); }
+.hist-chip.hist-now { color: var(--orange-text, var(--accent)); font-weight: 600; }
+.hist-warn { font-size: 11px; color: var(--red); font-weight: 600; }
+.hist-diff, .hist-modal-body { font-size: 12px; }
+.hist-diff { padding: 8px 10px; background: var(--bg-hover); border-radius: 6px; }
+.hist-diff ul, .hist-modal-body ul { margin: 2px 0 6px; padding-left: 4px; list-style: none; }
+.hist-diff li, .hist-modal-body li { padding: 1px 0; overflow-wrap: anywhere; }
+li.hist-add { color: var(--green); }
+li.hist-del { color: var(--red); }
+li.hist-del, li.hist-del * { text-decoration: none; }
+li.hist-mod s, li.hist-del s { opacity: .7; }
+.hist-day-label { font-weight: 600; font-size: 11.5px; margin-top: 4px; }
+.hist-time { font-family: var(--font-mono, monospace); font-size: 11px; }
+
+.sched-toolbar { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin: 0 0 8px; }
+.sched-day-tab-orphan { border-color: var(--red) !important; }
+.sched-orphan-note { margin: 0; padding: 10px 14px; font-size: 12px; border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--red) 10%, transparent); }
+.sched-conflict-banner { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  padding: 10px 14px; margin-bottom: 12px; border: 1px solid var(--red); border-radius: 8px; font-size: 13px;
+  background: color-mix(in srgb, var(--red) 12%, transparent); }
+.sched-conflict-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.sched-import-list { display: flex; flex-direction: column; gap: 4px; max-height: 50vh; overflow-y: auto; }
+.sched-import-show { display: flex; justify-content: space-between; align-items: center; gap: 10px; text-align: left;
+  width: 100%; padding: 8px 10px; font: inherit; font-size: 13px; color: var(--text); cursor: pointer;
+  background: transparent; border: 1px solid var(--border); border-radius: 6px; }
+.sched-import-show:hover { background: var(--bg-hover); }
+.sched-import-day { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+.sched-import-day-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.sched-import-target select { width: auto; display: inline-block; font-size: 12px; }
+.sched-import-preview { font-size: 11.5px; margin-top: 6px; }
+.sched-import-mode { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.sched-toolbar-tip { font-size: 11px; margin-right: auto; align-self: center; }
+.sched-toolbar-tip code { font-family: var(--font-mono, monospace); font-size: 11px; }
+/* Dark days (3.31.0) */
+.sched-dark-toggle { display: inline-flex; align-items: center; gap: 5px; margin-left: 12px; font-size: 11px;
+  font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text-dim); cursor: pointer; white-space: nowrap; }
+.sched-day-dark .schedule-table { opacity: .45; }
+.sched-day-tab-dark { opacity: .6; }
+.sched-dark-tag { font-weight: 600; }
+.sched-dark-note { margin: 0; padding: 8px 14px; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); }

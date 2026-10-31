@@ -784,6 +784,7 @@ const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
 // can reach them reliably from the global scope.
 window.SCHED_PERFORMANCES = SCHED_PERFORMANCES;
 window.SCHED_TEMPLATES = SCHED_TEMPLATES;
+window.CAN_EDIT_SCHED_TEMPLATES = {{ 'true' if can_edit_sched_templates else 'false' }};
 // Mutable so the labor-tab dropdowns can react to live venue edits on the
 // Advance Sheet. Read everywhere via window.SHOW_VENUE.
 window.SHOW_VENUE = {{ show.venue | tojson }};
@@ -848,16 +849,29 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
     </div>
   </div>
 
+  {# ── Schedule tools (3.30.0) ──────────────────────────────────────────── #}
+  {% if not restricted %}
+  <div class="sched-toolbar">
+    <span class="sched-toolbar-tip text-dim" title="Prints on the schedule with the next date, e.g. 3/2 00:30">After midnight on the same show day? Type <code>1+00:30</code></span>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="openSchedImport()" title="Copy another show's production schedule into this one">⇩ Import from another show…</button>
+    {% if can_edit_sched_templates %}
+    <button type="button" class="btn btn-ghost btn-sm" onclick="openSaveSchedTemplate()" title="Save a day of this schedule as a reusable template">☆ Save day as template…</button>
+    {% endif %}
+    <button type="button" class="btn btn-ghost btn-sm" onclick="openHistory('schedule')" title="Every saved version of this schedule, with what changed">History</button>
+  </div>
+  {% endif %}
+
   {# ── Day Tabs (grouped by calendar date) ─────────────────────────────── #}
   {% if schedule_days | length > 1 %}
   <div class="sched-day-tabs" style="display:flex;gap:6px;padding:0 0 0 0;margin-bottom:0">
     {% for d in schedule_days %}
     <button type="button"
-            class="btn btn-sm {% if loop.first %}btn-primary{% else %}btn-ghost{% endif %} sched-day-tab"
+            class="btn btn-sm {% if loop.first %}btn-primary{% else %}btn-ghost{% endif %} sched-day-tab{% if d.orphan %} sched-day-tab-orphan{% endif %}"
             data-day-key="{{ d.date_key }}"
             data-perf-id="{{ d.primary_perf_id or '' }}"
+            {% if d.orphan %}title="This date is outside the show's dates — its rows are kept until you move or delete them"{% endif %}
             onclick='switchSchedDay({{ d.date_key | tojson }}, this)'>
-      DAY {{ loop.index }}{% if d.perf_date %} · {{ (d.perf_date|string)[5:] | replace('-','/') }}{% endif %}
+      {% if d.orphan %}⚠ OFF-DATE{% else %}DAY {{ d.day_num }}{% endif %}{% if d.perf_date %} · {{ (d.perf_date|string)[5:] | replace('-','/') }}{% endif %}
     </button>
     {% endfor %}
   </div>
@@ -884,14 +898,22 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
     <div class="form-section">
       <div class="form-section-header">
         <span class="section-icon">◈</span>
-        TIMELINE{% if schedule_days | length > 1 %} — DAY {{ loop.index }}{% if d.perf_date %}: {{ d.perf_date }}{% endif %}{% endif %}
+        TIMELINE{% if d.orphan %} — OFF-DATE: {{ d.perf_date }}{% elif schedule_days | length > 1 %} — DAY {{ d.day_num }}{% if d.perf_date %}: {{ d.perf_date }}{% endif %}{% endif %}
         {% set _times = d.perfs | selectattr('perf_time') | map(attribute='perf_time') | list %}
         {% if _times %} <span class="text-dim" style="font-weight:400">({% for t in _times %}{{ t | hhmm }}{% if not loop.last %}, {% endif %}{% endfor %})</span>{% endif %}
+        {% if schedule_days | length > 1 and d.perf_date and not d.orphan %}
+        {# Dark day (3.31.0): left off the schedule PDF. Saved as schedule meta. #}
+        <label class="sched-dark-toggle" title="Leave this day off the printed production schedule">
+          <input type="checkbox" class="sched-meta sched-dark" data-key="dark_day:{{ d.date_key }}"
+                 {% if schedule_meta.get('dark_day:' ~ d.date_key) == '1' %}checked{% endif %}
+                 {% if restricted %}disabled{% endif %}> Dark day — omit from print
+        </label>
+        {% endif %}
         {% if not restricted %}
         <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-wrap:wrap">
           {# Apply template dropdown #}
           {% if sched_templates %}
-          <select class="field-input" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
+          <select class="field-input sched-tmpl-select" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
                   onchange='applySchedTemplate(this.value, {{ d.date_key | tojson }}); this.value=""'>
             <option value="">Apply template…</option>
             {% for t in sched_templates %}
@@ -901,12 +923,12 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
           {% endif %}
           {# Copy from another day #}
           {% if schedule_days | length > 1 %}
-          <select class="field-input" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
+          <select class="field-input sched-copy-from" data-self-key="{{ d.date_key }}" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
                   onchange='copySchedDay(this.value, {{ d.date_key | tojson }}); this.value=""'>
             <option value="">Copy from…</option>
             {% for od in schedule_days %}
             {% if od.date_key != d.date_key %}
-            <option value="{{ od.date_key }}">Day {{ loop.index }}{% if od.perf_date %} ({{ (od.perf_date|string)[5:] | replace('-','/') }}){% endif %}</option>
+            <option value="{{ od.date_key }}">{% if od.orphan %}Off-date{% else %}Day {{ od.day_num }}{% endif %}{% if od.perf_date %} ({{ (od.perf_date|string)[5:] | replace('-','/') }}){% endif %}</option>
             {% endif %}
             {% endfor %}
           </select>
@@ -922,6 +944,13 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
         </div>
         {% endif %}
       </div>
+      {% if d.orphan %}
+      <div class="sched-orphan-note">
+        <strong>{{ d.perf_date }} is outside this show's dates</strong> (load-in → load-out and performances).
+        These rows were saved on that day and are kept here so nothing is lost — copy them to a real day
+        ("Copy from…" on that day) or delete them. They don't print on the schedule PDF.
+      </div>
+      {% endif %}
       <div class="form-section-body no-pad">
         <table class="schedule-table">
           <thead>
@@ -948,12 +977,12 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
               {% if not restricted %}<td><span class="piano-sched-lock" title="Managed by Piano Tuning">🎹</span></td>{% endif %}
             </tr>
             {% else %}
-            <tr class="schedule-row">
+            <tr class="schedule-row" data-row-id="{{ row.id }}">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
-              <td><input type="text" class="sched-cell" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
               {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)" title="Remove">×</button></td>{% endif %}
             </tr>
             {% endif %}
@@ -978,7 +1007,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
         {% if not restricted %}
         <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-wrap:wrap">
           {% if sched_templates %}
-          <select class="field-input" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
+          <select class="field-input sched-tmpl-select" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
                   onchange="applySchedTemplate(this.value, null); this.value=''">
             <option value="">Apply template…</option>
             {% for t in sched_templates %}
@@ -1012,12 +1041,12 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
               {% if not restricted %}<td><span class="piano-sched-lock" title="Managed by Piano Tuning">🎹</span></td>{% endif %}
             </tr>
             {% else %}
-            <tr class="schedule-row">
+            <tr class="schedule-row" data-row-id="{{ row.id }}">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
-              <td><input type="text" class="sched-cell" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
               {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>{% endif %}
             </tr>
             {% endif %}
@@ -1219,7 +1248,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 {#                    SECURITY SIGN-IN SHEET TAB (security_module.py)            #}
 {# Names load lazily on first activation via the module's JSON API; the pane    #}
 {# only talks to /shows/<id>/security/* endpoints. Whole tab disappears when    #}
-{# the module is switched off in Settings → System → Modules.                   #}
+{# the module is switched off in Settings → Modules.                   #}
 {# ════════════════════════════════════════════════════════════════════════════ #}
 <div id="tab-security" class="tab-pane {% if tab == 'security' %}active{% endif %}">
 
@@ -1354,11 +1383,14 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
   // Called by switchTab() on every activation; fetches once.
   window.loadSecurityTab = async function () {
-    if (loaded) return;
+    // Re-fetch on every visit unless this page holds unsaved edits, so names
+    // others saved meanwhile show up (3.32.0).
+    if (loaded && JSON.stringify(names) !== savedNames) return;
     try {
       const r = await fetch(`/shows/${SHOW_ID}/security/names`);
       const j = await r.json();
       if (!j.success) throw new Error(j.error || 'load failed');
+      if (loaded && dirty()) return;   // typed into while the fetch was in flight
       names = j.names || [];
       savedNames = JSON.stringify(names);
       loaded = true;
@@ -1431,14 +1463,17 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       const r = await fetch(`/shows/${SHOW_ID}/security/names`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-        body: JSON.stringify({ names: cleaned }),
+        // `base` = the list this page loaded/saved last: the server applies
+        // only our additions/removals if someone else saved in between.
+        body: JSON.stringify({ names: cleaned, base: JSON.parse(savedNames || '[]') }),
       });
       const j = await r.json();
       if (!j.success) throw new Error(j.error || 'Save failed');
       names = j.names;
       savedNames = JSON.stringify(names);
       render();
-      bulkMsg.textContent = 'Saved.';
+      bulkMsg.textContent = j.merged
+        ? 'Saved — merged with names someone else saved meanwhile.' : 'Saved.';
     } catch (e) {
       alert('Save failed: ' + e.message);
     } finally {
@@ -2727,8 +2762,8 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           {% for row in schedule_rows %}
           {% if row.description or row.start_time %}
           <tr>
-            <td>{{ row.start_time or '' }}</td>
-            <td>{{ row.end_time or '' }}</td>
+            <td>{{ row.start_time | schedtime(row.day_date, false) }}</td>
+            <td>{{ row.end_time | schedtime(row.day_date, false) }}</td>
             <td>{{ row.description or '' }}</td>
             <td class="text-dim">{{ row.notes or '' }}</td>
           </tr>
@@ -2865,7 +2900,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     </div>
 
     {% if security_signin_enabled %}
-    <!-- Security Sign-In Sheet (optional module — Settings → System → Modules) -->
+    <!-- Security Sign-In Sheet (optional module — Settings → Modules) -->
     <div class="export-card">
       <div class="export-card-header">
         <div class="export-card-icon">
@@ -2978,7 +3013,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     <div style="display:flex;gap:8px;align-items:center">
       <select id="history-form-type" class="field-input" style="width:auto;font-size:12px" onchange="loadHistory(this.value)">
         <option value="advance">Advance Sheet</option>
-        <option value="schedule">Schedule</option>
+        <option value="schedule">Production Schedule</option>
         <option value="postnotes">Post-Show Notes</option>
       </select>
       <button type="button" class="btn btn-ghost btn-sm" onclick="closeHistory()">✕</button>
@@ -2989,50 +3024,19 @@ window._psSettlement = {{ post_show_settlement | tojson }};
   </div>
 </div>
 
-{# ─── Snapshot Preview Modal ──────────────────────────────────────────────── #}
+{# ─── Version view / restore confirmation ─────────────────────────────────── #}
 <div id="snapshot-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeSnapshot()">
-  <div class="modal-card" style="max-width:640px;max-height:80vh;overflow-y:auto">
+  <div class="modal-card" style="width:680px;max-height:84vh;overflow-y:auto">
     <div class="modal-header">
-      <h3 class="modal-title">Snapshot Preview</h3>
+      <h3 class="modal-title" id="snapshot-title">Version</h3>
       <button type="button" class="modal-close" onclick="closeSnapshot()">✕</button>
     </div>
-    <div id="snapshot-content" class="modal-body">
+    <div id="snapshot-content" class="modal-body hist-modal-body">
       <p class="text-dim">Loading...</p>
     </div>
     <div class="modal-footer">
       <button type="button" class="btn btn-ghost" onclick="closeSnapshot()">Close</button>
-      <button type="button" class="btn btn-primary" id="restore-btn" onclick="confirmRestore()">Restore This Version</button>
-    </div>
-  </div>
-</div>
-
-{# Conflict resolution modal — shown when restoring would overwrite newer changes #}
-<div id="conflict-modal" class="modal-overlay" style="display:none">
-  <div class="modal-card" style="max-width:820px;max-height:90vh;overflow-y:auto">
-    <div class="modal-header">
-      <h3 class="modal-title">Restore Conflict Detected</h3>
-      <button type="button" class="modal-close" onclick="closeConflict()">✕</button>
-    </div>
-    <div class="modal-body">
-      <div class="flash flash-warning" style="margin-bottom:1rem">
-        <strong>Heads up:</strong> Someone made changes after this snapshot was saved
-        (<span id="conflict-newer-user"></span>, <span id="conflict-newer-time"></span>).
-        Review the differences below before deciding which version to keep.
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
-        <div>
-          <div class="field-label" style="margin-bottom:.5rem">RESTORING (older)</div>
-          <pre id="conflict-old-json" style="font-size:.75rem;white-space:pre-wrap;word-break:break-word;background:var(--bg-tertiary);padding:.75rem;border-radius:6px;max-height:340px;overflow-y:auto;margin:0"></pre>
-        </div>
-        <div>
-          <div class="field-label" style="margin-bottom:.5rem">CURRENT (newer — will be lost)</div>
-          <pre id="conflict-new-json" style="font-size:.75rem;white-space:pre-wrap;word-break:break-word;background:var(--bg-tertiary);padding:.75rem;border-radius:6px;max-height:340px;overflow-y:auto;margin:0"></pre>
-        </div>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button type="button" class="btn btn-ghost" onclick="closeConflict()">Cancel — keep current</button>
-      <button type="button" class="btn btn-danger" onclick="forceRestore()">Confirm Restore (overwrite newer)</button>
+      <button type="button" class="btn btn-primary" id="restore-btn" style="display:none" onclick="confirmRestore()">Restore This Version</button>
     </div>
   </div>
 </div>
@@ -3447,12 +3451,15 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     }
   }
 
-  /* ── Version History ────────────────────────────────────────── */
-  function openHistory() {
-    const formType = activeTab === 'advance' ? 'advance'
-                   : activeTab === 'schedule' ? 'schedule'
-                   : activeTab === 'postnotes' ? 'postnotes'
-                   : 'advance';
+  /* ── Version History (3.30.0) ───────────────────────────────────
+     Each version lists who/when plus a server-computed summary of what it
+     changed; "Changes" expands the diff vs the version before it, and
+     Restore first shows what restoring would change NOW. */
+  const _HIST_TYPES = {advance: 'Advance Sheet', schedule: 'Production Schedule', postnotes: 'Post-Show Notes'};
+
+  function openHistory(formType) {
+    formType = _HIST_TYPES[formType] ? formType
+             : (_HIST_TYPES[activeTab] ? activeTab : 'advance');
     document.getElementById('history-form-type').value = formType;
     document.getElementById('history-overlay').style.display = '';
     document.getElementById('history-drawer').style.display = '';
@@ -3464,6 +3471,50 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     document.getElementById('history-drawer').style.display = 'none';
   }
 
+  function _histWhen(iso) {
+    const t = parseServerTime(iso);
+    if (!t) return {abs: '—', rel: ''};
+    const abs = t.toLocaleString([], {month: 'short', day: 'numeric', year: 'numeric',
+                                      hour: 'numeric', minute: '2-digit'});
+    const mins = Math.round((Date.now() - t.getTime()) / 60000);
+    const rel = mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago`
+              : mins < 1440 ? `${Math.round(mins / 60)} h ago` : `${Math.round(mins / 1440)} d ago`;
+    return {abs, rel};
+  }
+
+  function _plural(n, word) { return `${n} ${word}${n === 1 ? '' : 's'}`; }
+
+  function _histSummaryHtml(e, formType) {
+    const s = e.summary || {};
+    const chips = [];
+    if (formType === 'schedule') {
+      if (e.first) {
+        chips.push(`<span class="hist-chip">Earliest kept version · ${_plural(s.rows_after || 0, 'row')}</span>`);
+      } else {
+        if (s.added)   chips.push(`<span class="hist-chip hist-add">+${_plural(s.added, 'row')} added</span>`);
+        if (s.removed) chips.push(`<span class="hist-chip hist-del">−${_plural(s.removed, 'row')} removed</span>`);
+        if (s.changed) chips.push(`<span class="hist-chip hist-mod">${_plural(s.changed, 'row')} edited</span>`);
+        if (s.meta)    chips.push(`<span class="hist-chip hist-mod">${_plural(s.meta, 'info field')}</span>`);
+        if (!chips.length) chips.push('<span class="hist-chip">Reordered / no visible change</span>');
+        chips.push(`<span class="hist-chip">${_plural(s.rows_after || 0, 'row')} total</span>`);
+      }
+      if (!e.first && (e.day_labels || []).length) {
+        chips.push(`<span class="text-dim" style="font-size:11px">${e.day_labels.map(_esc).join(', ')}</span>`);
+      }
+    } else {
+      if (e.first) {
+        chips.push(`<span class="hist-chip">Earliest kept version · ${_plural(s.total_filled || 0, 'field')} filled</span>`);
+      } else if (!s.changed) {
+        chips.push('<span class="hist-chip">No visible change</span>');
+      } else {
+        chips.push(`<span class="hist-chip hist-mod">${_plural(s.changed, 'field')} changed</span>`);
+        if (s.cleared) chips.push(`<span class="hist-chip hist-del">${s.cleared} cleared</span>`);
+        chips.push(`<span class="text-dim" style="font-size:11px">${(e.field_labels || []).map(_esc).join(', ')}${s.changed > 4 ? '…' : ''}</span>`);
+      }
+    }
+    return chips.join(' ');
+  }
+
   async function loadHistory(formType) {
     const list = document.getElementById('history-list');
     list.innerHTML = '<p class="text-dim" style="padding:16px;margin:0">Loading...</p>';
@@ -3471,60 +3522,125 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       const resp = await fetch(`/shows/${SHOW_ID}/history/${formType}`);
       const entries = await resp.json();
       if (!entries.length) {
-        list.innerHTML = '<p class="text-dim" style="padding:16px;margin:0">No history yet. Save the form to create snapshots.</p>';
+        list.innerHTML = '<p class="text-dim" style="padding:16px;margin:0">No history yet. Versions are recorded as the form is saved.</p>';
         return;
       }
-      list.innerHTML = entries.map(e => `
-        <div class="history-entry">
-          <div class="history-entry-meta">
-            <strong>${e.saved_by_name}</strong>
-            <span class="text-dim" style="font-size:11px">${e.saved_at ? e.saved_at.substring(0,16).replace('T',' ') : '—'}</span>
-          </div>
-          <div class="history-entry-actions">
-            <button class="btn btn-xs btn-ghost" onclick="previewSnapshot(${e.id})">Preview</button>
-            ${!RESTRICTED ? `<button class="btn btn-xs btn-ghost" onclick="restoreSnapshot(${e.id})">Restore</button>` : ''}
-          </div>
-        </div>
-      `).join('');
+      list.innerHTML = `<p class="hist-help">Newest first. A version is recorded each time this form is saved
+        (one person's quick edits are grouped). Click <strong>Changes</strong> to see exactly what it changed.</p>` +
+        entries.map((e, i) => {
+          const w = _histWhen(e.saved_at);
+          const warn = e.warn ? `<div class="hist-warn">⚠ Large removal — if this wasn't intended, restore the version below it.</div>` : '';
+          return `
+          <div class="history-entry${e.warn ? ' history-entry-warn' : ''}" data-hist-id="${e.id}">
+            <div class="history-entry-meta">
+              <strong>${_esc(e.saved_by_name)}${i === 0 ? ' <span class="hist-chip hist-now">current</span>' : ''}</strong>
+              <span class="text-dim" style="font-size:11px" title="${_esc(w.abs)}">${_esc(w.abs)} · ${_esc(w.rel)}</span>
+            </div>
+            ${e.note ? `<div class="hist-note">${_esc(e.note)}</div>` : ''}
+            <div class="hist-summary">${_histSummaryHtml(e, formType)}</div>
+            ${warn}
+            <div class="history-entry-actions">
+              ${e.first ? '' : `<button class="btn btn-xs btn-ghost" onclick="toggleHistDiff(${e.id}, this)">Changes ▾</button>`}
+              <button class="btn btn-xs btn-ghost" onclick="previewSnapshot(${e.id})">View</button>
+              ${!RESTRICTED && i > 0 ? `<button class="btn btn-xs btn-ghost" onclick="restoreSnapshot(${e.id})">Restore…</button>` : ''}
+            </div>
+            <div class="hist-diff" hidden></div>
+          </div>`;
+        }).join('');
     } catch(err) {
       list.innerHTML = '<p class="text-dim" style="padding:16px;margin:0">Failed to load history.</p>';
     }
   }
 
+  function _histRowText(r) {
+    const t = [r.start_time, r.end_time].filter(Boolean).join('–');
+    return `${t ? `<span class="hist-time">${_esc(t)}</span> ` : ''}${_esc(r.description || '(no description)')}` +
+           (r.notes ? ` <span class="text-dim">· ${_esc(r.notes)}</span>` : '');
+  }
+
+  /* Render a /diff payload. `restore` words it as "what restoring does". */
+  function _histDiffHtml(d, restore) {
+    const parts = [];
+    if (d.form_type === 'schedule') {
+      (d.days || []).forEach(day => {
+        const lines = [];
+        day.added.forEach(r => lines.push(`<li class="hist-add">+ ${_histRowText(r)}</li>`));
+        day.removed.forEach(r => lines.push(`<li class="hist-del">− ${_histRowText(r)}</li>`));
+        day.changed.forEach(c => {
+          const what = c.fields.map(f => {
+            const lbl = {start_time: 'start', end_time: 'end', description: 'description', notes: 'notes'}[f];
+            return `${lbl}: <s>${_esc(c.before[f] || '—')}</s> → ${_esc(c.after[f] || '—')}`;
+          }).join('; ');
+          lines.push(`<li class="hist-mod">~ ${_histRowText(c.after)} <span class="text-dim">(${what})</span></li>`);
+        });
+        parts.push(`<div class="hist-day"><div class="hist-day-label">${_esc(day.label)}
+          ${day.unchanged ? `<span class="text-dim">· ${day.unchanged} unchanged</span>` : ''}</div><ul>${lines.join('')}</ul></div>`);
+      });
+      if ((d.meta || []).length) {
+        parts.push(`<div class="hist-day"><div class="hist-day-label">Venue &amp; tech info</div><ul>${
+          d.meta.map(m => `<li class="hist-mod">${_esc(m.label)}: <s>${_esc(m.before || '—')}</s> → ${_esc(m.after || '—')}</li>`).join('')}</ul></div>`);
+      }
+    } else {
+      if ((d.fields || []).length) {
+        parts.push(`<ul>${d.fields.map(f =>
+          `<li class="${f.after ? 'hist-mod' : 'hist-del'}"><strong>${_esc(f.label)}</strong>: <s>${_esc(f.before || '—')}</s> → ${_esc(f.after || '(cleared)')}</li>`).join('')}</ul>`);
+      }
+    }
+    if (!parts.length) {
+      return `<p class="text-dim" style="margin:0">${restore ? 'This version matches what is saved now — restoring changes nothing.' : 'No visible change (rows reordered or blank rows only).'}</p>`;
+    }
+    return parts.join('');
+  }
+
+  async function toggleHistDiff(histId, btn) {
+    const box = btn.closest('.history-entry').querySelector('.hist-diff');
+    if (!box.hidden) { box.hidden = true; btn.textContent = 'Changes ▾'; return; }
+    box.hidden = false; btn.textContent = 'Changes ▴';
+    if (box.dataset.loaded) return;
+    box.innerHTML = '<p class="text-dim" style="margin:0">Loading…</p>';
+    try {
+      const r = await fetch(`/shows/${SHOW_ID}/history/${histId}/diff?against=prev`);
+      const d = await r.json();
+      if (!d.success) throw new Error();
+      box.innerHTML = _histDiffHtml(d, false);
+      box.dataset.loaded = '1';
+    } catch (e) {
+      box.innerHTML = '<p class="text-dim" style="margin:0">Could not load the changes.</p>';
+    }
+  }
+
   async function previewSnapshot(histId) {
     _currentHistId = histId;
+    document.getElementById('snapshot-title').textContent = 'Version';
+    document.getElementById('restore-btn').style.display = 'none';
     document.getElementById('snapshot-modal').style.display = '';
     document.getElementById('snapshot-content').innerHTML = '<p class="text-dim">Loading...</p>';
     try {
       const resp = await fetch(`/shows/${SHOW_ID}/history/${histId}/snapshot`);
       const snap = await resp.json();
-      const data = snap.data || {};
-      let html = `<p style="margin-bottom:12px;font-size:12px;color:var(--text-dim)">
-        Saved ${snap.saved_at ? snap.saved_at.substring(0,16).replace('T',' ') : '—'}
-      </p><table class="data-table" style="font-size:12px">`;
-
-      const flat = data.advance_data || data.notes_data || {};
-      const rows = data.rows || [];
-
-      if (Object.keys(flat).length) {
-        html += '<thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>';
-        for (const [k, v] of Object.entries(flat)) {
-          if (v && v !== '-' && v !== 'false') {
-            html += `<tr><td style="color:var(--text-dim);white-space:nowrap">${k.replace(/_/g,' ')}</td><td>${v}</td></tr>`;
-          }
-        }
-        html += '</tbody>';
-      } else if (rows.length) {
-        html += '<thead><tr><th>Start</th><th>End</th><th>Description</th><th>Notes</th></tr></thead><tbody>';
-        rows.forEach(r => {
-          html += `<tr><td>${r.start_time||''}</td><td>${r.end_time||''}</td><td>${r.description||''}</td><td>${r.notes||''}</td></tr>`;
+      const w = _histWhen(snap.saved_at);
+      let html = `<p style="margin:0 0 4px;font-size:12px;color:var(--text-dim)">Saved ${_esc(w.abs)} (${_esc(w.rel)})</p>`;
+      if (snap.note) html += `<p class="hist-note" style="margin:0 0 8px">${_esc(snap.note)}</p>`;
+      if (snap.form_type === 'schedule') {
+        if (!(snap.days || []).length) html += '<p class="text-dim"><strong>This version has no schedule rows.</strong></p>';
+        (snap.days || []).forEach(day => {
+          html += `<div class="hist-day-label" style="margin-top:10px">${_esc(day.label)} · ${_plural(day.rows.length, 'row')}</div>
+            <table class="data-table" style="font-size:12px"><thead><tr><th>Start</th><th>End</th><th>Description</th><th>Notes</th></tr></thead><tbody>
+            ${day.rows.map(r => `<tr><td>${_esc(r.start_time)}</td><td>${_esc(r.end_time)}</td><td>${_esc(r.description)}</td><td>${_esc(r.notes)}</td></tr>`).join('')}
+            </tbody></table>`;
         });
-        html += '</tbody>';
+        if ((snap.meta || []).length) {
+          html += `<div class="hist-day-label" style="margin-top:10px">Venue &amp; tech info</div><table class="data-table" style="font-size:12px"><tbody>
+            ${snap.meta.map(m => `<tr><td class="text-dim" style="white-space:nowrap">${_esc(m.label)}</td><td>${_esc(m.value)}</td></tr>`).join('')}</tbody></table>`;
+        }
+      } else {
+        html += `<table class="data-table" style="font-size:12px"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>
+          ${(snap.fields || []).map(f => `<tr><td class="text-dim" style="white-space:nowrap">${_esc(f.label)}</td><td>${_esc(f.value)}</td></tr>`).join('')}
+          </tbody></table>`;
       }
-      html += '</table>';
       document.getElementById('snapshot-content').innerHTML = html;
     } catch(err) {
-      document.getElementById('snapshot-content').innerHTML = '<p class="text-dim">Failed to load snapshot.</p>';
+      document.getElementById('snapshot-content').innerHTML = '<p class="text-dim">Failed to load this version.</p>';
     }
   }
 
@@ -3533,27 +3649,62 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     _currentHistId = null;
   }
 
-  async function confirmRestore(force = false) {
-    if (!_currentHistId) return;
-    const url = `/shows/${SHOW_ID}/history/${_currentHistId}/restore` + (force ? '?force=1' : '');
+  async function restoreSnapshot(histId) {
+    _currentHistId = histId;
+    document.getElementById('snapshot-title').textContent = 'Restore this version?';
+    const btn = document.getElementById('restore-btn');
+    btn.style.display = 'none';
+    document.getElementById('snapshot-modal').style.display = '';
+    const box = document.getElementById('snapshot-content');
+    box.innerHTML = '<p class="text-dim">Working out what would change…</p>';
     try {
-      const resp = await fetch(url, {method:'POST'});
-      if (resp.status === 409) {
-        const d = await resp.json();
-        if (d.conflict) {
-          // Show conflict modal instead of proceeding
-          document.getElementById('conflict-newer-user').textContent = d.newer_saved_by || 'Unknown';
-          document.getElementById('conflict-newer-time').textContent = parseServerTime(d.newer_saved_at)?.toLocaleString() || '';
-          document.getElementById('conflict-old-json').textContent = JSON.stringify(d.restoring_snapshot, null, 2);
-          document.getElementById('conflict-new-json').textContent = JSON.stringify(d.current_snapshot, null, 2);
-          document.getElementById('conflict-modal').style.display = '';
-          return;
-        }
+      const r = await fetch(`/shows/${SHOW_ID}/history/${histId}/diff?against=current`);
+      const d = await r.json();
+      if (!d.success) throw new Error();
+      _restoreExpected = d.state_token || null;
+      const s = d.summary || {};
+      const empty = d.form_type === 'schedule'
+        ? !(s.added || s.removed || s.changed || s.meta) : !s.changed;
+      box.innerHTML = `
+        <p style="margin:0 0 8px">Restoring replaces what is saved now with this version.
+          ${empty ? '' : 'Here is exactly what would change:'}</p>
+        ${_histDiffHtml(d, true)}
+        <p class="text-dim" style="margin:10px 0 0;font-size:12px">The current version stays in History,
+          so you can undo this by restoring it.</p>`;
+      if (!empty) btn.style.display = '';
+    } catch (e) {
+      box.innerHTML = '<p class="text-dim">Could not compare this version with the current one.</p>';
+    }
+  }
+
+  let _restoreExpected = null;   // latest version id the preview was computed against
+  async function confirmRestore() {
+    if (!_currentHistId) return;
+    // Land this page's own unsaved edits first; what can't be saved is lost
+    // by the reload, so say so.
+    try { await saveActive(); } catch (_) {}
+    if (_isDirty && !confirm('Some of your edits on this page could not be saved and will be lost. Restore anyway?')) return;
+    try {
+      // Our own flush may have changed the state: re-read the token so the
+      // restore is bound to the state as of now (the diff shown was vs the
+      // server; our flushed edits are exactly what a restore replaces).
+      if (_restoreExpected) {
+        const t = await fetch(`/shows/${SHOW_ID}/history/${_currentHistId}/diff?against=current`).then(r => r.json()).catch(() => null);
+        if (t && t.state_token) _restoreExpected = t.state_token;
       }
+      const q = _restoreExpected ? `?expected_state=${encodeURIComponent(_restoreExpected)}` : '?force=1';
+      const resp = await fetch(`/shows/${SHOW_ID}/history/${_currentHistId}/restore${q}`, {method: 'POST'});
       const d = await resp.json();
+      if (resp.status === 409 && d.conflict) {
+        // Someone saved after the preview: show what restoring would change NOW.
+        showSaveToast('This form changed after you opened the preview — preview updated', 'error');
+        restoreSnapshot(_currentHistId);
+        return;
+      }
       if (d.success) {
         closeSnapshot();
         closeHistory();
+        _isDirty = false;   // the restored version replaces this page's state
         location.reload();
       } else {
         alert('Restore failed: ' + (d.error || 'Unknown error'));
@@ -3561,21 +3712,6 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     } catch(err) {
       alert('Network error during restore.');
     }
-  }
-
-  function closeConflict() {
-    document.getElementById('conflict-modal').style.display = 'none';
-  }
-
-  async function forceRestore() {
-    closeConflict();
-    await confirmRestore(true);
-  }
-
-  function restoreSnapshot(histId) {
-    previewSnapshot(histId).then(() => {
-      document.getElementById('snapshot-modal').style.display = '';
-    });
   }
 
   /* ── Labor Requests ─────────────────────────────────────────── */
@@ -3787,7 +3923,59 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       });
       techSel.addEventListener('change', () => saveLaborRow(techSel));
     }
+    // What the server holds for this row — saves send only fields that differ
+    // from it (3.32.0), so a save can't put back stale values in fields this
+    // page didn't touch, or blank columns it never shows (notes).
+    tr._laborBase = {
+      position_id: lr.position_id == null ? '' : String(lr.position_id),
+      work_date: lr.work_date || '',
+      in_time: lr.in_time || '', out_time: lr.out_time || '',
+      break_start: lr.break_start || '', break_end: lr.break_end || '',
+      break2_start: lr.break2_start || '', break2_end: lr.break2_end || '',
+      requested_name: lr.requested_name || '',
+    };
     return tr;
+  }
+
+  const _LABOR_PUT_FIELDS = ['position_id', 'in_time', 'out_time', 'break_start', 'break_end',
+                             'break2_start', 'break2_end', 'requested_name'];
+  /* {field: value} of a labor row's fields that differ from its baseline. */
+  function _laborRowChanges(tr, overrides) {
+    const base = tr._laborBase || {};
+    const out = {};
+    _LABOR_PUT_FIELDS.forEach(f => {
+      const el = tr.querySelector(`[data-field="${f}"]`);
+      if (!el) return;
+      const v = el.value || '';
+      const b = base[f] ?? '';
+      // A dropdown that can't show the saved value (catalog not loaded, the
+      // option filtered out) reads as blank — that's not an edit.
+      if (el.tagName === 'SELECT' && b && v === '' && !Array.from(el.options).some(o => o.value === b)) return;
+      if (v !== b) out[f] = v;
+    });
+    const wd = (overrides && overrides.work_date !== undefined)
+      ? overrides.work_date : (tr.closest('.labor-day')?.dataset.workDate || '');
+    if (wd !== (base.work_date ?? '')) out.work_date = wd;
+    return out;
+  }
+  async function _putLaborChanges(tr, changes) {
+    const resp = await fetch(`/shows/${SHOW_ID}/labor-requests/${tr.dataset.rid}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(changes),
+    });
+    if (resp.ok) {
+      tr._laborBase = Object.assign({}, tr._laborBase || {}, changes);
+      if ('position_id' in changes) tr._laborBase.position_id = changes.position_id || '';
+    } else if (resp.status === 404) {
+      const d = await resp.json().catch(() => ({}));
+      if (d.deleted) {
+        showSaveToast('✗ This request was removed by someone else', 'error');
+        tr.remove();
+        if (typeof _refreshLaborData === 'function') _refreshLaborData();
+      }
+    }
+    return resp.ok;
   }
 
   /* Build a day-block element for the given date (empty string = Unscheduled) */
@@ -4040,28 +4228,12 @@ window._psSettlement = {{ post_show_settlement | tojson }};
   }
 
   async function _putLabor(rid, fields) {
-    // Send all current field values along with any overrides in `fields`,
-    // scoped by finding the row in the DOM.
     const tr = document.querySelector(`tr[data-rid="${rid}"]`);
     if (!tr) return;
-    const dayBlock = tr.closest('.labor-day');
-    const work_date = (fields.work_date !== undefined) ? fields.work_date : (dayBlock?.dataset.workDate || '');
-    const position_id    = tr.querySelector('[data-field="position_id"]').value || null;
-    const in_time        = tr.querySelector('[data-field="in_time"]').value || '';
-    const out_time       = tr.querySelector('[data-field="out_time"]').value || '';
-    const break_start    = tr.querySelector('[data-field="break_start"]').value || '';
-    const break_end      = tr.querySelector('[data-field="break_end"]').value || '';
-    const break2_start   = tr.querySelector('[data-field="break2_start"]')?.value || '';
-    const break2_end     = tr.querySelector('[data-field="break2_end"]')?.value || '';
-    const requested_name = tr.querySelector('[data-field="requested_name"]').value || '';
-    const resp = await fetch(`/shows/${SHOW_ID}/labor-requests/${rid}`, {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({position_id, work_date, in_time, out_time,
-                            break_start, break_end, break2_start, break2_end,
-                            requested_name}),
-    });
-    if (resp.ok) showSaveToast('✓ Saved');
+    const changes = _laborRowChanges(tr, fields);
+    if (!Object.keys(changes).length) return;
+    const ok = await _putLaborChanges(tr, changes);
+    if (ok) showSaveToast('✓ Saved');
     else showSaveToast('✗ Save failed', 'error');
   }
 
@@ -5365,32 +5537,15 @@ window._psSettlement = {{ post_show_settlement | tojson }};
 
   async function saveLaborAll() {
     const rows = document.querySelectorAll('#labor-days-container tbody tr[data-rid]');
-    if (!rows.length) { showSaveToast('Nothing to save'); return; }
     let ok = 0, fail = 0;
     for (const tr of rows) {
-      const rid = tr.dataset.rid;
-      if (!rid) continue;
-      const dayBlock = tr.closest('.labor-day');
-      const work_date = dayBlock?.dataset.workDate || '';
-      const position_id    = tr.querySelector('[data-field="position_id"]')?.value || null;
-      const in_time        = tr.querySelector('[data-field="in_time"]')?.value || '';
-      const out_time       = tr.querySelector('[data-field="out_time"]')?.value || '';
-      const break_start    = tr.querySelector('[data-field="break_start"]')?.value || '';
-      const break_end      = tr.querySelector('[data-field="break_end"]')?.value || '';
-      const break2_start   = tr.querySelector('[data-field="break2_start"]')?.value || '';
-      const break2_end     = tr.querySelector('[data-field="break2_end"]')?.value || '';
-      const requested_name = tr.querySelector('[data-field="requested_name"]')?.value || '';
-      const r = await fetch(`/shows/${SHOW_ID}/labor-requests/${rid}`, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({position_id, work_date, in_time, out_time,
-                              break_start, break_end, break2_start, break2_end,
-                              requested_name}),
-      });
-      if (r.ok) ok++; else fail++;
+      if (!tr.dataset.rid) continue;
+      const changes = _laborRowChanges(tr);
+      if (!Object.keys(changes).length) continue;   // untouched rows aren't re-sent
+      if (await _putLaborChanges(tr, changes)) ok++; else fail++;
     }
     if (fail) showSaveToast(`✗ ${fail} failed, ${ok} saved`, 'error');
-    else showSaveToast(`✓ All ${ok} rows saved`);
+    else showSaveToast(ok ? `✓ ${ok} row${ok === 1 ? '' : 's'} saved` : '✓ All saved');
   }
 
   function applyQuickFill(toAll) {

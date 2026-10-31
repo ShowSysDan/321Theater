@@ -12,7 +12,10 @@
     <h1 class="page-title">Audit Log</h1>
     <p class="page-sub">Full history of user actions — {{ total }} total entries</p>
   </div>
-  <a href="{{ url_for('settings') }}" class="btn btn-secondary">← Settings</a>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <a href="{{ url_for('settings') }}#godmode" class="btn btn-secondary" title="Who is signed in and what they're viewing right now">God Mode</a>
+    <a href="{{ url_for('settings') }}" class="btn btn-secondary">← Settings</a>
+  </div>
 </div>
 
 {# ── Filters ──────────────────────────────────────────────────────────────── #}

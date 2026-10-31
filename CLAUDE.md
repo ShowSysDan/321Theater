@@ -341,6 +341,101 @@ apps. For a 321Theater access change, use this app's own flags instead
   post and again by `delete_user`); readers LEFT JOIN users and fall back to
   `author_name`. Never go back to CASCADE.
 
+## Show tabs are multi-user LIVE (3.32.0) — the model, keep every rule
+Every form on the show page follows the Advance Sheet's model: the browser
+remembers what the SERVER holds per field/row (a baseline), a save posts
+ONLY what differs from it, and a poll merges other people's saves into
+anything with no unsaved edit here. Nothing posts a whole form or list.
+- **Advance** (`_advBaseline`, `saveAdvance` → `_saveAdvanceNow`, serialized;
+  focused field's remote value parked in `_advPending`, applied on focusout):
+  changed keys only; `save_advance`
+  already writes only changed rows. `/sync/advance` (2 s) returns every
+  field with `updated_at > cursor − _SYNC_OVERLAP_S` (no cursor = all) —
+  NO "skip the last saver" filter (it hid other users' edits and never
+  delivered a person's edits to their other tab); echoes are no-ops on the
+  client. A poll that raced a save (`_advSaveSeq`) is discarded. Never
+  bump `_syncSince` past your own write again.
+- **Schedule** rows carry `data-row-id`; `_schedRowBase` / `_schedOrderBase`
+  / `_schedMetaBaseline` are the baseline; `_schedPending()` → `ops`
+  (`upsert` with id + `changed` cell list, or `ref` for a new row; `delete`;
+  `order` only for days flagged `data-reordered` whose order differs from
+  the baseline — `_schedClearStaleReorder` drops a flag a no-op sort set;
+  `place` for days with new rows: the server keeps its order and slots each
+  new row after its listed predecessor, 3.32.3) →
+  `_apply_schedule_ops()` (UPDATE writes only `changed` columns; a row that
+  no longer exists anywhere is re-created). `/sync/schedule` (3 s; ONE SQL
+  digest `_schedule_sync_hash` first, full state only on change) →
+  `_schedMerge()`: CELL-level (`_schedMergeRow`: cells edited here keep the
+  edit, the rest take the server's), the focused row/field is held in
+  `_schedRemotePending` / `_schedMetaPending` and applied on focusout, and
+  the hash is committed only when nothing was held back (`skipped`). Saves
+  are serialized per form (`_serializedSave`); a lost response sets
+  `_schedResyncNeeded` (also on a non-JSON error response) → `_schedResync()`
+  adopts server rows by the signature SENT (`tr._sentSig`) before the next
+  save. Declined clear → `_schedForgetDeletions()`. Caps:
+  `_SCHED_OPS_MAX` per save, `_SCHED_ROWS_MAX_PER_SHOW`, 300 meta keys. `_schedNewRow()` is THE row
+  builder; `_bindScheduleTimeParsing` the ONE blur normaliser. The
+  whole-list `rows` path (`_schedule_legacy_rows_save`, 409 on stale
+  `base_rev`) exists only for pages loaded before 3.32.0 — don't extend it.
+  Emptying a schedule that had rows needs `allow_clear` (client confirms;
+  server rolls back and 409s otherwise).
+- **Post-Show notes** (`_notesBaseline`, `/sync/postnotes` 3 s, `_notesPending`
+  for the focused field): same. `_POSTNOTES_INTERNAL_KEYS` (billing toggle,
+  settlement marker) never enter a version, a restore or the poll.
+- **Labor Requests**: `update_labor_request` writes only the columns in the
+  body; `_laborRowChanges(tr)` diffs against `tr._laborBase` (set when the
+  row is drawn, updated on save); a `<select>` that can't show the saved
+  value is not a change. The show page never sends `notes` (scheduler's).
+- **Sign-In Sheet**: POST carries `base` (the list this page loaded);
+  `_merge_names(current, base, mine)` applies only this editor's adds /
+  removes when someone saved in between.
+- Versions (`_snapshot_form_history`) are built from the DB after the
+  write (`_current_form_state` / `_schedule_state_snapshot`), never from
+  the request. Skips identical saves; groups one user's saves into the
+  version first saved <10 min ago ONLY while they purely add
+  (`_history_pure_addition`: new rows / filled fields / continued typing —
+  any removal or replacement starts a new version, 3.32.1); keeps 100;
+  `note` marks restores/imports (the client sends `note` on the save after
+  an import). The list reads `form_history.summary_json` (written by
+  `_history_entry_summary` at save time). Restore is bound to the previewed
+  state (`state_token` from `/diff?against=current` → `expected_state`,
+  409 on drift), keeps ids of unchanged rows, validates like a save, and
+  re-derives show_date/time from performances. Schedule meta keys are
+  validated (`_schedule_meta_key_ok` — dark flags only on the show's days);
+  `_schedule_save_reject` caps list sizes and refuses non-dates.
+- Off-date rows: `_build_schedule_days(..., include_orphans=True)` keeps
+  rows whose date left the load range / performances visible (⚠ OFF-DATE);
+  never filter rows out of the editor render.
+- The heartbeat's "another user saved — reload" banner is suppressed on
+  schedule/postnotes (they merge live); keep it for the other tabs.
+- **Dark days (3.31.0):** schedule_meta `dark_day:<YYYY-MM-DD>`='1' (header
+  checkbox `.sched-dark`); `_dark_day_dates()` drops those days from the
+  schedule PDF only (Day numbers kept; never drop every day).
+- **Next-day times:** `1+00:30` = 00:30 the day after the row's day (editor
+  normalizes `+0030` / `24:30` to it — `_schedParseTime`). Sorts via
+  `_schedTimeKey` (JS) / `_hhmm_minutes` past 24:00; every display of
+  schedule times uses the `schedtime(day[, dual])` filter (prints
+  `3/2 00:30`), never raw `dualtime`.
+- Import-from-show and save-as-template are editor-side (DOM), written by
+  the normal row-level autosave — don't add a server-side schedule write path.
+
+## Devices per user (3.33.0) + wide tables on phones
+- `user_clients` (app schema, one row per user × UA hash × screen): written
+  only by `POST /api/client-info` (base.html beacon, once per browser per
+  6 h via localStorage; in `_VIEWER_ALLOWED_ENDPOINTS` so viewers count),
+  `_parse_ua()` → browser / OS / device class. Read by
+  `GET /settings/users/<id>/clients` (admin; Settings → Users → Devices).
+  180-day trim in `_hourly_maintenance_work`. Troubleshooting data only —
+  never gate behaviour on it.
+- Phones: cards are `overflow: hidden`, so a wide table must live in a
+  sideways scroller. `_initMobileTableScroll()` (app.js, mobile only) wraps
+  an overflowing table in `.m-scroll`, or adds `.m-wide` (natural width)
+  when the table already sits in an `overflow-x: auto` body; the labor
+  tables (`.lo-table`, `.sched-day-block table`, `.labor-day-table`,
+  `.oh-summary-table`) are always treated this way with `nowrap` cells
+  (mobile.css). New wide tables on phones: put them in a scroll box or add
+  them to that selector list — never let a card clip them.
+
 ## Production schedule PDF is page-aware (3.6.0, 3.6.1)
 - `_fit_schedule_pdf()` lays the schedule out with WeasyPrint, reads which
   page every day/row landed on from the box tree (`<table data-sched-day>`,
@@ -475,12 +570,17 @@ apps. For a 321Theater access change, use this app's own flags instead
   on-bar text in the templates must go through `C1_ON` / `C1_ON_SOFT` so the
   setting reaches it. Blank keeps today's automatic output byte-identical.
 
-## Optional feature modules (`APP_MODULES` + Settings → System → Modules)
+## Optional feature modules (`APP_MODULES` + Settings → Modules)
 - `APP_MODULES` registry + `module_enabled(key)` in app.py; flags live in
   `app_settings` as `module_<key>_enabled` ('1'/'0', missing = the entry's
   default), toggled at runtime by an admin (`GET/POST /settings/modules`,
   syslog `MODULE_TOGGLE`) — no restart, all instances. A disabled module's
   routes 404 (checked per request) and its UI hides; data is always kept.
+- Settings → **Modules** is a top-level tab (3.30.0; God Mode sits beside
+  Audit Log the same way): each entry's `settings_endpoint` gives an "Open
+  settings →" child page (Piano Tuning, Spot); `APP_INTEGRATIONS` lists
+  non-toggle integrations (Prism) the same way. A new module with its own
+  page sets `settings_endpoint`, and that page links back to `/settings#modules`.
 - First module: **Security Sign-In Sheets** (`security_module.py`, 2.41.0;
   key `security_signin`, default ON). Sandboxed like Prism/Snapshots: one
   `register(app, **deps)` call, owns only `security_signin_names` (included
