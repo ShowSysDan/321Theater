@@ -260,7 +260,9 @@
     </nav>
 
     <div class="sidebar-footer">
-      {% if session.get('_real_role') == 'admin' or user.role == 'admin' %}
+      {# Not for document viewers (an admin account can carry the viewer flag):
+         their gate 403s /admin/view-as, and a preview can't lift it anyway. #}
+      {% if (session.get('_real_role') == 'admin' or user.role == 'admin') and not session.get('is_document_viewer') %}
       <div>
         {% if session.get('_view_as') %}
         <button onclick="resetViewAs()" style="width:100%;font-size:10px;padding:5px 8px;background:rgba(246,173,85,.15);border:1px solid rgba(246,173,85,.4);color:#F6AD55;border-radius:4px;cursor:pointer;letter-spacing:.04em;font-weight:600">
@@ -294,10 +296,14 @@
             </div>
           </div>
         </div>
+        {% if not session.get('is_document_viewer') %}
+        {# No bell for document viewers: notifications link to pages they
+           can't open, and app.js only polls when this button exists. #}
         <button class="theme-toggle-btn notif-bell-btn" id="notif-bell-btn" onclick="toggleNotifPanel(event)" title="Notifications" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
           <span id="notif-bell-badge" class="notif-bell-badge" hidden>0</span>
         </button>
+        {% endif %}
         <button class="theme-toggle-btn" id="theme-toggle-btn" onclick="toggleTheme()" title="Theme: Dark / Light / Auto">
           {% if user.theme == 'light' %}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/></svg>
