@@ -2117,9 +2117,10 @@ def _populate_session_from_user(user, ts=None):
     # admin role so it never affects a genuine (non-preview) session.
     # 3.29.0: the saved real role is re-taken from the DB here, so a preview
     # can never carry an admin role the DB no longer grants; a demoted admin's
-    # preview simply ends.
+    # preview simply ends. So does one whose account became a document viewer:
+    # the viewer gate overrides any preview and refuses its Exit button.
     if session.get('_view_as'):
-        if user['role'] == 'admin':
+        if user['role'] == 'admin' and not session['is_document_viewer']:
             for k in ('is_readonly', 'is_content_admin', 'is_labor_scheduler',
                       'is_scheduler', 'is_asset_manager', 'is_piano_manager'):
                 session['_real_' + k] = session[k]
@@ -2384,9 +2385,9 @@ _VIEWER_ALLOWED_ENDPOINTS = frozenset({
     # get_active_messages() still filters by audience (Doc Viewers group).
     'get_messages_api', 'dismiss_message',
     # Session-expiry watchdog (app.js _initSessionWatch, every page): viewers'
-    # sessions expire like anyone's. Both carry no show data; status stays
-    # side-effect-free. Before this the gate 403'd them, so viewers got no
-    # warning and a 403 in the console on every page.
+    # sessions expire like anyone's. Both carry no show data, and the status
+    # endpoint itself writes nothing. Before this the gate 403'd them, so
+    # viewers got no warning and a 403 in the console on every page.
     'api_session_status', 'api_session_extend',
     # "Mobile site / Desktop site" footer link: a cookie-only UI preference
     # that isn't even login-gated (the login page has the switch too).

@@ -260,7 +260,9 @@
     </nav>
 
     <div class="sidebar-footer">
-      {% if session.get('_real_role') == 'admin' or user.role == 'admin' %}
+      {# Not for document viewers (an admin account can carry the viewer flag):
+         their gate 403s /admin/view-as, and a preview can't lift it anyway. #}
+      {% if (session.get('_real_role') == 'admin' or user.role == 'admin') and not session.get('is_document_viewer') %}
       <div>
         {% if session.get('_view_as') %}
         <button onclick="resetViewAs()" style="width:100%;font-size:10px;padding:5px 8px;background:rgba(246,173,85,.15);border:1px solid rgba(246,173,85,.4);color:#F6AD55;border-radius:4px;cursor:pointer;letter-spacing:.04em;font-weight:600">
