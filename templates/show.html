@@ -4685,28 +4685,28 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     tr.innerHTML = `
       ${RESTRICTED ? '' : '<td style="text-align:center"><input type="checkbox" class="labor-row-check"></td>'}
       <td><select class="field-input field-input-sm labor-field" data-field="position_id" ${RESTRICTED ? 'disabled' : ''}></select></td>
-      <td><input type="text" class="field-input field-input-sm labor-field" data-field="in_time" value="${lr.in_time || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}></td>
+      <td><input type="text" class="field-input field-input-sm labor-field" data-field="in_time" value="${_esc(lr.in_time || '')}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}></td>
       <td class="labor-stack-cell">
         <div class="labor-stack-row" title="Lunch 1 start">
           <span class="labor-stack-tag">S</span>
-          <input type="text" class="field-input field-input-sm labor-field" data-field="break_start"  value="${lr.break_start  || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
+          <input type="text" class="field-input field-input-sm labor-field" data-field="break_start"  value="${_esc(lr.break_start  || '')}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
         </div>
         <div class="labor-stack-row" title="Lunch 1 end">
           <span class="labor-stack-tag">E</span>
-          <input type="text" class="field-input field-input-sm labor-field" data-field="break_end"    value="${lr.break_end    || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
+          <input type="text" class="field-input field-input-sm labor-field" data-field="break_end"    value="${_esc(lr.break_end    || '')}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
         </div>
       </td>
       <td class="labor-stack-cell">
         <div class="labor-stack-row" title="Lunch 2 start">
           <span class="labor-stack-tag">S</span>
-          <input type="text" class="field-input field-input-sm labor-field" data-field="break2_start" value="${lr.break2_start || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
+          <input type="text" class="field-input field-input-sm labor-field" data-field="break2_start" value="${_esc(lr.break2_start || '')}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
         </div>
         <div class="labor-stack-row" title="Lunch 2 end">
           <span class="labor-stack-tag">E</span>
-          <input type="text" class="field-input field-input-sm labor-field" data-field="break2_end"   value="${lr.break2_end   || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
+          <input type="text" class="field-input field-input-sm labor-field" data-field="break2_end"   value="${_esc(lr.break2_end   || '')}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
         </div>
       </td>
-      <td><input type="text" class="field-input field-input-sm labor-field" data-field="out_time" value="${lr.out_time || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}></td>
+      <td><input type="text" class="field-input field-input-sm labor-field" data-field="out_time" value="${_esc(lr.out_time || '')}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}></td>
       <td><select class="field-input field-input-sm labor-field" data-field="requested_name" ${RESTRICTED ? 'disabled' : ''}></select></td>
       <td style="text-align:center" title="Set by the labor scheduler"><input type="checkbox" class="labor-is-scheduled" disabled ${lr.is_scheduled ? 'checked' : ''}></td>
       <td class="labor-scheduled-tech" title="Set by the labor scheduler"></td>
@@ -4756,6 +4756,32 @@ window._psSettlement = {{ post_show_settlement | tojson }};
 
   const _LABOR_PUT_FIELDS = ['position_id', 'in_time', 'out_time', 'break_start', 'break_end',
                              'break2_start', 'break2_end', 'requested_name'];
+  const _LABOR_TIME_FIELDS = ['in_time', 'break_start', 'break_end', 'break2_start', 'break2_end', 'out_time'];
+  /* A time cell as HH:MM ("7pm" → 19:00, "930" → 09:30), '' when blank, or
+     null when it isn't a time — the server refuses free text. */
+  function _laborTimeValue(raw) {
+    const s = String(raw || '').trim();
+    if (!s) return '';
+    const v = String(parseTimeToHHMM(s) || '');
+    return /^([01]\d|2[0-3]):[0-5]\d$/.test(v) ? v : null;
+  }
+  /* Before a save: normalise the row's EDITED time cells; one that still
+     isn't a time goes back to the saved value (else it would fail every
+     later save of the row) and a toast says so. */
+  function _laborNormalizeTimes(tr) {
+    const base = tr._laborBase || {};
+    _LABOR_TIME_FIELDS.forEach(f => {
+      const el = tr.querySelector(`[data-field="${f}"]`);
+      if (!el || el.value === (base[f] ?? '')) return;
+      const v = _laborTimeValue(el.value);
+      if (v === null) {
+        showSaveToast(`✗ "${el.value.trim()}" isn't a time — use HH:MM (24-hour)`, 'error');
+        el.value = base[f] ?? '';
+      } else if (v !== el.value) {
+        el.value = v;
+      }
+    });
+  }
   /* {field: value} of a labor row's fields that differ from its baseline. */
   function _laborRowChanges(tr, overrides) {
     const base = tr._laborBase || {};
@@ -4805,8 +4831,8 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     header.className = 'labor-day-header';
     const dayInfo = (window._laborDaysMap || {})[date] || {};
     header.innerHTML = `
-      <span class="labor-day-label">${date ? _dayLabel(date).toUpperCase() : 'UNSCHEDULED'}</span>
-      <input type="date" class="field-input field-input-sm labor-day-date" value="${date || ''}" ${RESTRICTED ? 'disabled' : ''} title="Work date for this day">
+      <span class="labor-day-label">${date ? _esc(_dayLabel(date).toUpperCase()) : 'UNSCHEDULED'}</span>
+      <input type="date" class="field-input field-input-sm labor-day-date" value="${_esc(date || '')}" ${RESTRICTED ? 'disabled' : ''} title="Work date for this day">
       <span class="labor-day-pm-wrap" title="PM on duty for this day — pick one when another PM covers the show for the day. Blank = the show's main PM.">
         <label>Day PM</label>
         <select class="field-input field-input-sm labor-day-pm" ${RESTRICTED ? 'disabled' : ''}
@@ -5047,6 +5073,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
   async function _putLabor(rid, fields) {
     const tr = document.querySelector(`tr[data-rid="${rid}"]`);
     if (!tr) return;
+    _laborNormalizeTimes(tr);
     const changes = _laborRowChanges(tr, fields);
     if (!Object.keys(changes).length) return;
     const ok = await _putLaborChanges(tr, changes);
@@ -5127,9 +5154,10 @@ window._psSettlement = {{ post_show_settlement | tojson }};
 
   /* Sort by call time (3.35.0): order ONE day's requests by In time —
      earliest first, an unreadable time after the readable ones, blank
-     last, ties keep their order — then save the order. sort_order is one
-     sequence per show, so the FULL show order (every day block, top to
-     bottom) is posted: the other days keep theirs. */
+     last, ties keep their order — then save the order. Only THAT day's
+     ids are posted; the server slots them into its own show-wide order, so
+     a stale tab can't put back an old order on another day (and a 409
+     means this day changed elsewhere → reload). */
   function _laborCallKey(tr) {
     const raw = (tr.querySelector('[data-field="in_time"]')?.value || '').trim();
     if (!raw) return 20000;
@@ -5154,7 +5182,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     const tools = _laborToolsOf(block);
     ToolsMenu.setBusy(tools, 'Sorting…');
     try {
-      const d = await _saveLaborOrder();
+      const d = await _saveLaborOrder(block);
       if (d && d.success) showSaveToast('✓ Sorted by call time');
       else {
         alert((d && d.error) || 'Could not save the new order.');
@@ -5163,19 +5191,19 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     } finally { ToolsMenu.setBusy(tools, null); }
   }
 
-  /* POST the page's labor order. Serialized, and the id list is read when
+  /* POST one day block's order. Serialized, and the id list is read when
      the request is SENT, so the last save always carries the newest order
-     (two quick sorts on different days can't land out of order). */
+     (two quick sorts can't land out of order). */
   let _laborOrderChain = Promise.resolve();
-  function _saveLaborOrder() {
+  function _saveLaborOrder(block) {
     const run = async () => {
-      const ids = Array.from(document.querySelectorAll('#labor-days-container .labor-day tbody tr[data-rid]'))
+      const ids = Array.from(block.querySelectorAll('tbody tr[data-rid]'))
         .map(tr => parseInt(tr.dataset.rid, 10)).filter(n => Number.isInteger(n) && n > 0);
       try {
         const resp = await fetch(`/shows/${SHOW_ID}/labor-requests/reorder`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({request_ids: ids}),
+          body: JSON.stringify({work_date: block.dataset.workDate || '', request_ids: ids}),
         });
         const d = await resp.json().catch(() => ({}));
         if (!resp.ok && d.success === undefined) d.success = false;
@@ -5206,8 +5234,13 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       byDate[d].push(lr);
     });
     // Ensure a day block exists for every date in the load-in → load-out
-    // range, even if no labor rows have been added for it yet.
+    // range, even if no labor rows have been added for it yet — and for
+    // every day holding a Day PM / notes, so one set on a day outside the
+    // range (or left by another surface) can always be seen and cleared.
     _loadRangeDates().forEach(d => { if (!(d in byDate)) byDate[d] = []; });
+    Object.entries(window._laborDaysMap || {}).forEach(([d, info]) => {
+      if (info && (info.cover_pm || info.day_notes) && !(d in byDate)) byDate[d] = [];
+    });
     const dates = Object.keys(byDate).sort((a, b) => {
       if (!a && b) return -1;
       if (a && !b) return 1;
@@ -6304,12 +6337,24 @@ window._psSettlement = {{ post_show_settlement | tojson }};
 
   /* ── Day-level actions ───────────────────────────────── */
 
+  /* A real calendar date written YYYY-MM-DD (what a DATE column takes). */
+  function _laborDateOk(s) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
+    if (!m) return false;
+    const d = new Date(+m[1], +m[2] - 1, +m[3]);
+    return d.getFullYear() === +m[1] && d.getMonth() === +m[2] - 1 && d.getDate() === +m[3];
+  }
+
   async function addLaborDay() {
     const today = localTodayIso();
     const date = prompt('Work date for the new day (YYYY-MM-DD):', today);
     if (date === null) return;
     const trimmed = (date || '').trim();
     // Allow empty string → Unscheduled bucket
+    if (trimmed && !_laborDateOk(trimmed)) {
+      alert(`"${trimmed}" isn't a date — use YYYY-MM-DD.`);
+      return;
+    }
     const container = document.getElementById('labor-days-container');
     // If a block already exists for this date, scroll to it and return
     const existing = container.querySelector(`.labor-day[data-work-date="${CSS.escape(trimmed)}"]`);
@@ -6363,6 +6408,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     if (toDate === null) return;
     const trimmed = (toDate || '').trim();
     if (!trimmed) { alert('A target date is required.'); return; }
+    if (!_laborDateOk(trimmed)) { alert(`"${trimmed}" isn't a date — use YYYY-MM-DD.`); return; }
     if (trimmed === fromDate) { alert('Target date must differ from source.'); return; }
 
     const rows = Array.from(block.querySelectorAll('tbody tr'));
@@ -6375,14 +6421,13 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         const payload = {
           work_date:      trimmed,
           position_id:    tr.querySelector('[data-field="position_id"]').value || null,
-          in_time:        tr.querySelector('[data-field="in_time"]').value || '',
-          out_time:       tr.querySelector('[data-field="out_time"]').value || '',
-          break_start:    tr.querySelector('[data-field="break_start"]').value || '',
-          break_end:      tr.querySelector('[data-field="break_end"]').value || '',
-          break2_start:   tr.querySelector('[data-field="break2_start"]')?.value || '',
-          break2_end:     tr.querySelector('[data-field="break2_end"]')?.value || '',
           requested_name: tr.querySelector('[data-field="requested_name"]').value || '',
         };
+        // Copy the times billing can read; a cell that isn't a time
+        // (old free text) is cloned blank — the server refuses it.
+        _LABOR_TIME_FIELDS.forEach(f => {
+          payload[f] = _laborTimeValue(tr.querySelector(`[data-field="${f}"]`)?.value) || '';
+        });
         const resp = await fetch(`/shows/${SHOW_ID}/labor-requests`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
@@ -6405,23 +6450,53 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     }
   }
 
+  /* Delete Day: every request on the day AND its Day PM / notes
+     (show_labor_days) — left behind, a cover PM on a day with no block
+     would still feed My Shows, Search and the schedule. The block goes
+     only once every DELETE answered ok (404 = already gone); anything
+     else (503, expired session → 302 → 405) reloads the list instead. */
   async function deleteLaborDay(blockEl) {
     const block = _laborBlockOf(blockEl);
     if (!block) return;
     const date = block.dataset.workDate || '';
     const rows = Array.from(block.querySelectorAll('tbody tr'));
     const label = date ? _dayLabel(date) : 'Unscheduled';
-    if (rows.length && !confirm(`Delete ${label} and all ${rows.length} labor request${rows.length===1?'':'s'} on it?`)) return;
+    if (date) await _loadLaborDays();   // someone may have set a Day PM since
+    const info = (date && (window._laborDaysMap || {})[date]) || {};
+    const hasInfo = !!(info.cover_pm || info.day_notes);
+    if (rows.length || hasInfo) {
+      const what = [];
+      if (rows.length) what.push(`all ${rows.length} labor request${rows.length === 1 ? '' : 's'} on it`);
+      if (hasInfo) what.push('its Day PM / notes');
+      if (!confirm(`Delete ${label} and ${what.join(' and ')}?`)) return;
+    }
     const tools = _laborToolsOf(block);
     ToolsMenu.setBusy(tools, 'Deleting…');
+    let failed = 0, lastStatus = '';
     try {
       for (const tr of rows) {
         const rid = tr.dataset.rid;
-        if (rid) await fetch(`/shows/${SHOW_ID}/labor-requests/${rid}`, {method:'DELETE'});
+        if (!rid) continue;
+        const r = await fetch(`/shows/${SHOW_ID}/labor-requests/${rid}`, {method: 'DELETE'});
+        if (!r.ok && r.status !== 404) { failed++; lastStatus = r.status; }
       }
     } catch (e) {
       ToolsMenu.setBusy(tools, null);
       alert('Network error — some requests on this day may not have been deleted.');
+      await _refreshLaborData();
+      return;
+    }
+    if (failed) {
+      ToolsMenu.setBusy(tools, null);
+      alert(`${failed} request${failed === 1 ? '' : 's'} on this day could not be deleted `
+            + `(HTTP ${lastStatus}). The list will reload.`);
+      await _refreshLaborData();
+      return;
+    }
+    if (hasInfo && !(await _saveLaborDay(date, {cover_pm: '', day_notes: ''}))) {
+      ToolsMenu.setBusy(tools, null);
+      alert(`${rows.length ? 'The requests were deleted, but the' : 'The'} day's Day PM / notes `
+            + 'could not be cleared. The list will reload.');
       await _refreshLaborData();
       return;
     }
@@ -6456,6 +6531,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     let ok = 0, fail = 0;
     for (const tr of rows) {
       if (!tr.dataset.rid) continue;
+      _laborNormalizeTimes(tr);
       const changes = _laborRowChanges(tr);
       if (!Object.keys(changes).length) continue;   // untouched rows aren't re-sent
       if (await _putLaborChanges(tr, changes)) ok++; else fail++;
