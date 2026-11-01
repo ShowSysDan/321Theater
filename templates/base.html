@@ -582,11 +582,17 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li><strong>Venue &amp; Tech Info</strong> — fields marked "From Advance Sheet" are read-only mirrors; edit them on the Advance tab.</li>
         <li><strong>Day tabs</strong> — one timeline per calendar date when the show spans multiple days.</li>
-        <li>Timeline rows: Start / End / Description / Notes; drag the ⠿ handle to reorder, × to delete, <strong>+ Add Row</strong> to append.</li>
-        <li><strong>Apply template…</strong> — insert a pre-built timeline (defined in Settings → Form Fields → Day Templates).</li>
-        <li><strong>Copy from…</strong> — copy another day's rows into this day.</li>
-        <li><strong>Pull time(s)</strong> — insert a SHOW START row for each performance that date.</li>
-        <li><strong>⇅ Sort</strong> — reorder rows by start time.</li>
+        <li>Timeline rows: Start / End / Description / Notes; drag the ⠿ handle to reorder, × to delete, <strong>+ Add Row</strong> (day header and under the table) to append. After midnight on the same show day, type <code>1+00:30</code>.</li>
+        <li><strong>Tools ▾ above the day tabs</strong> — <strong>Import from another show…</strong> (copy another show's schedule onto chosen days; add to or replace what's there), <strong>Save day as template…</strong> (admins and content admins) and <strong>History</strong> (every saved version, with what changed).</li>
+        <li><strong>Tools ▾ in each day's header</strong>:
+          <ul style="${_HELP_UL}">
+            <li><strong>Apply template</strong> — pick a template to insert a pre-built timeline (replace or merge when the day already has rows). Templates are defined in Settings → Form Fields → Day Templates, or saved from a day here.</li>
+            <li><strong>Copy from day</strong> — replace this day's rows with a copy of another day's (piano tuning rows stay put).</li>
+            <li><strong>Pull show time(s)</strong> — insert a SHOW START row for each performance that date (only on days with performance times).</li>
+            <li><strong>Sort by time</strong> — reorder rows by start time (a START edit also re-sorts).</li>
+          </ul></li>
+        <li>Menus work from the keyboard too: Enter or ↓ opens, ↑/↓ move, Esc closes.</li>
+        <li><strong>Dark day</strong> (multi-day shows) — leaves that day off the printed schedule.</li>
       </ul>
     `
   },
@@ -595,7 +601,13 @@ const _HELP_PAGES = {
     html: `
       <p>Request crew per day. Rows save individually as you edit.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>+ Add Day</strong> — each day block has its own date, a <strong>Day PM</strong> (covering PM for that date only), day notes, and Clone to… / Delete Day.</li>
+        <li><strong>+ Add Day</strong> — each day block has its own date, a <strong>Day PM</strong> (covering PM for that date only), day notes, <strong>+ Add Request</strong> under its table, and a <strong>Tools ▾</strong> menu:
+          <ul style="${_HELP_UL}">
+            <li><strong>Apply preset</strong> — append a preset's standing positions to the day (presets are set up in Settings → Job Positions; existing rows are kept).</li>
+            <li><strong>Clone to…</strong> — copy the day's rows (position, times, requested tech) to another date.</li>
+            <li><strong>Sort by call time</strong> — order the day's requests by In time, blank times last; the order is saved for everyone.</li>
+            <li><strong>Delete Day</strong> — delete the day and all its requests (asks first).</li>
+          </ul></li>
         <li>Rows read like a shift, left to right: Position, In, Lunch 1 (start over end), Lunch 2 (start over end), Out, Requested Tech. <strong>SCHED and Scheduled Tech are read-only here</strong> — the Labor Scheduler sets them.</li>
         <li><strong>Quick Fill</strong> — enter times once, then Apply to Selected / Apply to All.</li>
         <li><strong>Show Labor Notes</strong> — visible to schedulers and on the Labor Overview.</li>

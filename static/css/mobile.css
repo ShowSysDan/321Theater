@@ -321,3 +321,20 @@ html.mobile-view .oh-summary-table th, html.mobile-view .oh-summary-table td { w
    instead of running past the card's clipped edge. */
 html.mobile-view .sched-day-header { flex-wrap: wrap; row-gap: 8px; }
 html.mobile-view .sched-day-header .sched-day-notes { flex: 1 1 100%; min-width: 0; }
+
+/* Tools menus (3.35.0): touch-sized items (44 px), a panel that uses the
+   phone's width (JS caps it at the viewport − 16 px), and a trigger that
+   doesn't stretch in the schedule toolbar. */
+html.mobile-view .tools-menu-panel { min-width: min(280px, calc(100vw - 16px)); font-size: 15px; padding: 6px; }
+html.mobile-view .tools-menu-item { min-height: 44px; padding: 11px 12px; display: flex; align-items: center; }
+html.mobile-view .tools-menu-item.tools-menu-sub { padding-left: 22px; }
+html.mobile-view .tools-menu-heading { padding: 10px 12px 4px; font-size: 11.5px; }
+html.mobile-view .tools-menu-note { padding: 6px 12px 10px 22px; font-size: 13px; }
+html.mobile-view .tools-menu-btn { min-height: 40px; }
+html.mobile-view .sched-toolbar { align-items: center; }
+html.mobile-view .sched-toolbar-tip { flex: 1 1 0; min-width: 0; }
+html.mobile-view .sched-day-actions { margin-left: auto; }
+html.mobile-view .labor-day-actions { margin-left: auto; }
+/* The schedule day header wraps: title, then Dark day, then the actions
+   (right-aligned) — instead of squeezing the title into a narrow column. */
+html.mobile-view #schedule-form .sched-day-pane .form-section-header { flex-wrap: wrap; row-gap: 8px; }

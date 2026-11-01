@@ -13,6 +13,12 @@
 {% macro meta(key, default='') %}{{ schedule_meta.get(key, default) }}{% endmacro %}
 {% macro note(key, default='') %}{{ notes_data.get(key, default) }}{% endmacro %}
 
+{# "Tools ▾" action menu (3.35.0) — the SAME markup as app.js ToolsMenu.html();
+   its items are built in JS when it opens (ToolsMenu.register(provider, …)). #}
+{% macro tools_menu(provider, title='Tools', perf_times=none) -%}
+<div class="tools-menu" data-tools="{{ provider }}"{% if perf_times is not none %} data-perf-times='{{ perf_times | tojson }}'{% endif %}><button type="button" class="btn btn-sm btn-ghost tools-menu-btn" aria-haspopup="menu" aria-expanded="false" title="{{ title }}"><span class="tools-menu-label">Tools</span><span class="tools-menu-busy" hidden></span><span class="tools-menu-caret" aria-hidden="true">▾</span></button><div class="tools-menu-panel" role="menu" aria-label="{{ title }}" hidden></div></div>
+{%- endmacro %}
+
 {% macro contact_select(key, label, dept) %}
 {% set _cv = advance_data.get(key, '') %}
 <div class="field-group">
@@ -809,6 +815,9 @@ const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
 window.SCHED_PERFORMANCES = SCHED_PERFORMANCES;
 window.SCHED_TEMPLATES = SCHED_TEMPLATES;
 window.CAN_EDIT_SCHED_TEMPLATES = {{ 'true' if can_edit_sched_templates else 'false' }};
+// Tools menus (Production Schedule + Labor Requests): editors only — the
+// read-only and restricted roles can't save what the tools change.
+window.CAN_USE_SHOW_TOOLS = {{ 'false' if restricted or session.get('is_readonly') else 'true' }};
 // Mutable so the labor-tab dropdowns can react to live venue edits on the
 // Advance Sheet. Read everywhere via window.SHOW_VENUE.
 window.SHOW_VENUE = {{ show.venue | tojson }};
@@ -816,6 +825,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
 
 <div id="tab-schedule" class="tab-pane {% if tab == 'schedule' %}active{% endif %}">
 <form id="schedule-form" autocomplete="off">
+{% set show_tools_ok = not restricted and not session.get('is_readonly') %}
 
   {# ── Schedule Meta ─────────────────────────────────────────────────────── #}
   <div class="form-section">
@@ -873,15 +883,13 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
     </div>
   </div>
 
-  {# ── Schedule tools (3.30.0) ──────────────────────────────────────────── #}
-  {% if not restricted %}
+  {# ── Schedule tools (3.30.0; one Tools menu since 3.35.0) ─────────────
+     Import from another show… / Save day as template… (admin + content
+     admin) / History — items built by app.js ToolsMenu 'sched-tab'. #}
+  {% if show_tools_ok %}
   <div class="sched-toolbar">
     <span class="sched-toolbar-tip text-dim" title="Prints on the schedule with the next date, e.g. 3/2 00:30">After midnight on the same show day? Type <code>1+00:30</code></span>
-    <button type="button" class="btn btn-ghost btn-sm" onclick="openSchedImport()" title="Copy another show's production schedule into this one">⇩ Import from another show…</button>
-    {% if can_edit_sched_templates %}
-    <button type="button" class="btn btn-ghost btn-sm" onclick="openSaveSchedTemplate()" title="Save a day of this schedule as a reusable template">☆ Save day as template…</button>
-    {% endif %}
-    <button type="button" class="btn btn-ghost btn-sm" onclick="openHistory('schedule')" title="Every saved version of this schedule, with what changed">History</button>
+    {{ tools_menu('sched-tab', 'Schedule tools') }}
   </div>
   {% endif %}
 
@@ -934,36 +942,11 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
         </label>
         {% endif %}
         {% if not restricted %}
-        <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-wrap:wrap">
-          {# Apply template dropdown #}
-          {% if sched_templates %}
-          <select class="field-input sched-tmpl-select" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
-                  onchange='applySchedTemplate(this.value, {{ d.date_key | tojson }}); this.value=""'>
-            <option value="">Apply template…</option>
-            {% for t in sched_templates %}
-            <option value="{{ t.id }}">{{ t.name }}</option>
-            {% endfor %}
-          </select>
-          {% endif %}
-          {# Copy from another day #}
-          {% if schedule_days | length > 1 %}
-          <select class="field-input sched-copy-from" data-self-key="{{ d.date_key }}" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
-                  onchange='copySchedDay(this.value, {{ d.date_key | tojson }}); this.value=""'>
-            <option value="">Copy from…</option>
-            {% for od in schedule_days %}
-            {% if od.date_key != d.date_key %}
-            <option value="{{ od.date_key }}">{% if od.orphan %}Off-date{% else %}Day {{ od.day_num }}{% endif %}{% if od.perf_date %} ({{ (od.perf_date|string)[5:] | replace('-','/') }}){% endif %}</option>
-            {% endif %}
-            {% endfor %}
-          </select>
-          {% endif %}
-          {# Pull show time — one button per day, inserts a SHOW START row for each time #}
-          {% set _times = d.perfs | selectattr('perf_time') | map(attribute='perf_time') | list %}
-          {% if _times %}
-          <button type="button" class="btn btn-sm btn-ghost"
-                  onclick='pullAdvanceTime({{ d.date_key | tojson }}, {{ _times | tojson }})'>Pull time{% if _times|length > 1 %}s{% endif %}</button>
-          {% endif %}
-          <button type="button" class="btn btn-sm btn-ghost" onclick='sortSchedRowsByTime({{ d.date_key | tojson }})' title="Sort rows by start time">⇅ Sort</button>
+        {# Day actions — the SAME markup as app.js _buildPaneHeader: a Tools
+           menu (Apply template / Copy from day / Pull show time(s) / Sort by
+           time — built when it opens, ToolsMenu 'sched-day') + "+ Add Row". #}
+        <div class="sched-day-actions">
+          {% if show_tools_ok %}{{ tools_menu('sched-day', 'Day tools', d.perfs | selectattr('perf_time') | map(attribute='perf_time') | map('hhmm') | list) }}{% endif %}
           <button type="button" class="btn btn-sm btn-ghost" onclick='addScheduleRow({{ d.date_key | tojson }})'>+ Add Row</button>
         </div>
         {% endif %}
@@ -972,7 +955,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
       <div class="sched-orphan-note">
         <strong>{{ d.perf_date }} is outside this show's dates</strong> (load-in → load-out and performances).
         These rows were saved on that day and are kept here so nothing is lost — copy them to a real day
-        ("Copy from…" on that day) or delete them. They don't print on the schedule PDF.
+        (that day's Tools → Copy from day) or delete them. They don't print on the schedule PDF.
       </div>
       {% endif %}
       <div class="form-section-body no-pad">
@@ -1017,7 +1000,6 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
       {% if not restricted %}
       <div class="form-section-footer">
         <button type="button" class="btn btn-ghost btn-sm" onclick='addScheduleRow({{ d.date_key | tojson }})'>+ Add Row</button>
-        <button type="button" class="btn btn-ghost btn-sm" onclick='sortSchedRowsByTime({{ d.date_key | tojson }})'>⇅ Sort by time</button>
       </div>
       {% endif %}
     </div>
@@ -1029,17 +1011,8 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
       <div class="form-section-header">
         <span class="section-icon">◈</span> TIMELINE
         {% if not restricted %}
-        <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-wrap:wrap">
-          {% if sched_templates %}
-          <select class="field-input sched-tmpl-select" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
-                  onchange="applySchedTemplate(this.value, null); this.value=''">
-            <option value="">Apply template…</option>
-            {% for t in sched_templates %}
-            <option value="{{ t.id }}">{{ t.name }}</option>
-            {% endfor %}
-          </select>
-          {% endif %}
-          <button type="button" class="btn btn-sm btn-ghost" onclick="sortSchedRowsByTime(null)" title="Sort rows by start time">⇅ Sort</button>
+        <div class="sched-day-actions">
+          {% if show_tools_ok %}{{ tools_menu('sched-day', 'Day tools', []) }}{% endif %}
           <button type="button" class="btn btn-sm btn-ghost" onclick="addScheduleRow(null)">+ Add Row</button>
         </div>
         {% endif %}
@@ -1081,7 +1054,6 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
       {% if not restricted %}
       <div class="form-section-footer">
         <button type="button" class="btn btn-ghost btn-sm" onclick="addScheduleRow(null)">+ Add Row</button>
-        <button type="button" class="btn btn-ghost btn-sm" onclick="sortSchedRowsByTime(null)">⇅ Sort by time</button>
       </div>
       {% endif %}
     </div>
@@ -3239,7 +3211,6 @@ window._psSettlement = {{ post_show_settlement | tojson }};
 }
 .labor-day-date { width: 150px; }
 .labor-day-actions { display: flex; gap: 6px; align-items: center; }
-.labor-day-preset { max-width: 170px; }
 .labor-day-pm-wrap { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .labor-day-pm-wrap label {
   font-size: 10px; font-weight: 700; letter-spacing: .06em;
@@ -4024,12 +3995,8 @@ window._psSettlement = {{ post_show_settlement | tojson }};
              placeholder="Day notes — shown on the scheduler &amp; Labor Overview"
              title="Notes for this show on this day only"
              onchange="onLaborDayNotesChange(this)">
-      ${RESTRICTED ? '' : `
-        <div class="labor-day-actions">
-          ${_laborPresetSelectHtml()}
-          <button type="button" class="btn btn-xs btn-ghost" onclick="cloneLaborDay(this)" title="Copy all rows to another date">Clone to…</button>
-          <button type="button" class="btn btn-xs btn-danger-ghost" onclick="deleteLaborDay(this)" title="Delete this day and all its rows">Delete Day</button>
-        </div>
+      ${(RESTRICTED || !window.CAN_USE_SHOW_TOOLS) ? '' : `
+        <div class="labor-day-actions">${ToolsMenu.html('labor-day', {title: 'Day tools'})}</div>
       `}
     `;
     block.appendChild(header);
@@ -4275,30 +4242,51 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     } catch (_) { window._laborPresets = window._laborPresets || []; }
   }
 
-  /* "Apply preset…" dropdown for a day-block header ('' when no presets exist) */
-  function _laborPresetSelectHtml() {
-    const presets = window._laborPresets || [];
-    if (!presets.length) return '';
-    return `<select class="field-input field-input-sm labor-day-preset"
-                    onchange="applyLaborPreset(this)"
-                    title="Append a preset's standing positions to this day">
-      <option value="">Apply preset…</option>
-      ${presets.map(p => `<option value="${p.id}">${_esc(p.name)} (${p.row_count})</option>`).join('')}
-    </select>`;
+  /* ── Day Tools menu (3.35.0) ─────────────────────────────────────
+     Each day header's "Tools ▾" (app.js ToolsMenu): Apply preset ▸,
+     Clone to…, Sort by call time, Delete Day. Built when it opens, so the
+     preset list is whatever _loadLaborPresets() last fetched. The menu
+     lives inside the .labor-day block; every tool gets the block. */
+  function _laborBlockOf(el) {
+    if (!el) return null;
+    return el.classList && el.classList.contains('labor-day') ? el : el.closest('.labor-day');
   }
+  function _laborToolsOf(block) { return block ? block.querySelector('.labor-day-actions .tools-menu') : null; }
 
-  async function applyLaborPreset(sel) {
-    const pid = sel.value;
-    sel.value = '';
+  ToolsMenu.register('labor-day', (wrap) => {
+    const block = _laborBlockOf(wrap);
+    const presets = window._laborPresets || [];
+    return [
+      {group: 'Apply preset',
+       empty: 'No presets yet — Settings → Job Positions',
+       items: presets.map(p => ({
+         label: `${p.name} (${p.row_count})`,
+         title: 'Append this preset\'s standing positions to this day',
+         onSelect: () => applyLaborPreset(p.id, block)}))},
+      {separator: true},
+      {label: 'Clone to…', title: 'Copy all rows to another date', onSelect: () => cloneLaborDay(block)},
+      {label: 'Sort by call time', title: 'Order this day\'s requests by In time (blank times last)',
+       onSelect: () => sortLaborDayByCallTime(block)},
+      {separator: true},
+      {label: 'Delete Day', danger: true, title: 'Delete this day and all its rows',
+       onSelect: () => deleteLaborDay(block)},
+    ];
+  });
+
+  async function applyLaborPreset(presetId, blockEl) {
+    const pid = presetId;
     if (!pid) return;
-    const block = sel.closest('.labor-day');
-    const workDate = block?.dataset.workDate || '';
+    const block = _laborBlockOf(blockEl);
+    if (!block) return;
+    const workDate = block.dataset.workDate || '';
     if (!workDate) { alert('Set a date on this day before applying a preset.'); return; }
     const preset = (window._laborPresets || []).find(p => String(p.id) === String(pid));
     const label = preset ? `"${preset.name}" (${preset.row_count} request${preset.row_count === 1 ? '' : 's'})` : 'this preset';
     if (!confirm(`Add ${label} to ${workDate}? Existing rows are kept.`)) return;
+    const tools = _laborToolsOf(block);
+    ToolsMenu.setBusy(tools, 'Applying…');
     try {
-      const resp = await fetch(`/shows/${SHOW_ID}/labor-presets/${pid}/apply`, {
+      const resp = await fetch(`/shows/${SHOW_ID}/labor-presets/${encodeURIComponent(pid)}/apply`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({work_date: workDate}),
@@ -4308,6 +4296,72 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       showSaveToast(`✓ ${d.created} request${d.created === 1 ? '' : 's'} added`);
       await _refreshLaborData();
     } catch (_) { alert('Network error.'); }
+    finally { ToolsMenu.setBusy(tools, null); }
+  }
+
+  /* Sort by call time (3.35.0): order ONE day's requests by In time —
+     earliest first, an unreadable time after the readable ones, blank
+     last, ties keep their order — then save the order. sort_order is one
+     sequence per show, so the FULL show order (every day block, top to
+     bottom) is posted: the other days keep theirs. */
+  function _laborCallKey(tr) {
+    const raw = (tr.querySelector('[data-field="in_time"]')?.value || '').trim();
+    if (!raw) return 20000;
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(parseTimeToHHMM(raw) || ''));
+    if (!m) return 10000;
+    const h = parseInt(m[1], 10), mi = parseInt(m[2], 10);
+    return (h < 24 && mi < 60) ? h * 60 + mi : 10000;
+  }
+
+  async function sortLaborDayByCallTime(blockEl) {
+    const block = _laborBlockOf(blockEl);
+    const tbody = block?.querySelector('tbody');
+    if (!tbody) return;
+    const rows = Array.from(tbody.querySelectorAll('tr[data-rid]'));
+    const sorted = rows.map((tr, i) => ({tr, i, k: _laborCallKey(tr)}))
+                       .sort((a, b) => (a.k - b.k) || (a.i - b.i));
+    if (sorted.every((x, i) => x.i === i)) {
+      showSaveToast(rows.length > 1 ? 'Already in call-time order' : 'Nothing to sort');
+      return;
+    }
+    sorted.forEach(x => tbody.appendChild(x.tr));
+    const tools = _laborToolsOf(block);
+    ToolsMenu.setBusy(tools, 'Sorting…');
+    try {
+      const d = await _saveLaborOrder();
+      if (d && d.success) showSaveToast('✓ Sorted by call time');
+      else {
+        alert((d && d.error) || 'Could not save the new order.');
+        await _refreshLaborData();   // show what the server holds
+      }
+    } finally { ToolsMenu.setBusy(tools, null); }
+  }
+
+  /* POST the page's labor order. Serialized, and the id list is read when
+     the request is SENT, so the last save always carries the newest order
+     (two quick sorts on different days can't land out of order). */
+  let _laborOrderChain = Promise.resolve();
+  function _saveLaborOrder() {
+    const run = async () => {
+      const ids = Array.from(document.querySelectorAll('#labor-days-container .labor-day tbody tr[data-rid]'))
+        .map(tr => parseInt(tr.dataset.rid, 10)).filter(n => Number.isInteger(n) && n > 0);
+      try {
+        const resp = await fetch(`/shows/${SHOW_ID}/labor-requests/reorder`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({request_ids: ids}),
+        });
+        const d = await resp.json().catch(() => ({}));
+        if (!resp.ok && d.success === undefined) d.success = false;
+        if (!resp.ok && !d.error) d.error = `Could not save the new order (HTTP ${resp.status}).`;
+        return d;
+      } catch (_) {
+        return {success: false, error: 'Network error — the new order was not saved.'};
+      }
+    };
+    const p = _laborOrderChain.then(run, run);
+    _laborOrderChain = p.catch(() => {});
+    return p;
   }
 
   async function initLaborTab() {
@@ -4373,7 +4427,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     const out = [];
     const cur = new Date(d1);
     while (cur <= d2) {
-      out.push(cur.toISOString().slice(0, 10));
+      out.push(localIsoDate(cur));   // local date — toISOString() is UTC (a day early east of UTC)
       cur.setDate(cur.getDate() + 1);
     }
     return out;
@@ -5466,8 +5520,9 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     tr.querySelector('select[data-field="position_id"]')?.focus();
   }
 
-  async function cloneLaborDay(btn) {
-    const block = btn.closest('.labor-day');
+  async function cloneLaborDay(blockEl) {
+    const block = _laborBlockOf(blockEl);
+    if (!block) return;
     const fromDate = block.dataset.workDate || '';
     if (!fromDate) { alert('Set a date on this day before cloning.'); return; }
     const suggested = (() => {
@@ -5475,7 +5530,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         const [y,m,d] = fromDate.split('-').map(Number);
         const dt = new Date(y, m-1, d);
         dt.setDate(dt.getDate() + 1);
-        return dt.toISOString().slice(0,10);
+        return localIsoDate(dt);   // local date (toISOString() is UTC)
       } catch(e) { return ''; }
     })();
     const toDate = prompt(`Clone all rows from ${fromDate} to which date? (YYYY-MM-DD)`, suggested);
@@ -5487,8 +5542,8 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     const rows = Array.from(block.querySelectorAll('tbody tr'));
     if (!rows.length) { alert('Nothing to clone — this day has no rows yet.'); return; }
 
-    btn.disabled = true;
-    btn.textContent = 'Cloning…';
+    const tools = _laborToolsOf(block);
+    ToolsMenu.setBusy(tools, 'Cloning…');
     try {
       for (const tr of rows) {
         const payload = {
@@ -5518,20 +5573,31 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     } catch (e) {
       alert('Clone failed: ' + e.message);
     } finally {
-      btn.disabled = false;
-      btn.textContent = 'Clone to…';
+      // A successful clone re-renders every block; this only matters when
+      // the clone failed and the old block (and its menu) is still here.
+      ToolsMenu.setBusy(tools, null);
     }
   }
 
-  async function deleteLaborDay(btn) {
-    const block = btn.closest('.labor-day');
+  async function deleteLaborDay(blockEl) {
+    const block = _laborBlockOf(blockEl);
+    if (!block) return;
     const date = block.dataset.workDate || '';
     const rows = Array.from(block.querySelectorAll('tbody tr'));
     const label = date ? _dayLabel(date) : 'Unscheduled';
     if (rows.length && !confirm(`Delete ${label} and all ${rows.length} labor request${rows.length===1?'':'s'} on it?`)) return;
-    for (const tr of rows) {
-      const rid = tr.dataset.rid;
-      if (rid) await fetch(`/shows/${SHOW_ID}/labor-requests/${rid}`, {method:'DELETE'});
+    const tools = _laborToolsOf(block);
+    ToolsMenu.setBusy(tools, 'Deleting…');
+    try {
+      for (const tr of rows) {
+        const rid = tr.dataset.rid;
+        if (rid) await fetch(`/shows/${SHOW_ID}/labor-requests/${rid}`, {method:'DELETE'});
+      }
+    } catch (e) {
+      ToolsMenu.setBusy(tools, null);
+      alert('Network error — some requests on this day may not have been deleted.');
+      await _refreshLaborData();
+      return;
     }
     block.remove();
     _updateEmptyHint();
