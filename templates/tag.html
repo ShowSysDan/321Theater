@@ -20,7 +20,8 @@
     <a href="{{ url_for('tags_index') }}" class="back-link">← All tags</a>
     <h1 class="page-title tag-page-title">#{{ tag }}</h1>
     <p class="page-sub">
-      {% if total %}{{ total }} mention{{ '' if total == 1 else 's' }} in {{ groups|length }} show{{ '' if groups|length == 1 else 's' }}{% if capped %} (showing the first {{ total }}){% endif %} · newest first · each line opens the show at that spot
+      {% if total and capped %}{{ total_all }} mentions — only the newest {{ total }} are listed, in {{ groups|length }} show{{ '' if groups|length == 1 else 's' }} · each line opens the show at that spot
+      {% elif total %}{{ total }} mention{{ '' if total == 1 else 's' }} in {{ groups|length }} show{{ '' if groups|length == 1 else 's' }} · newest first · each line opens the show at that spot
       {% else %}No show mentions #{{ tag }} right now{% endif %}
     </p>
   </div>

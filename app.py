@@ -30695,6 +30695,7 @@ find_module.register(
     as_date=_as_date,
     ts_out=_ts_out,
     get_distinct_venues=_get_distinct_venues,
+    module_enabled=module_enabled,
 )
 
 

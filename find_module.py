@@ -6,8 +6,9 @@
 
 TAGS. Anyone can write a #tag in any free-text box of a show (Advance text /
 notes fields, schedule rows + VENUE & TECH text, Post Show notes, comments,
-labor notes / day notes / line notes, Assets line notes, external rentals,
-piano tuning notes, file descriptions). Nothing is stored at write time:
+labor notes / day notes / line notes, Assets line notes (never hidden,
+admin-only lines), external rentals, piano tuning notes (only while the
+piano_tuning module is on), file descriptions). Nothing is stored at write time:
 the tag index is a QUERY over the live text (`_sources_sql`, one UNION ALL
 builder over every source), so the ~25 write paths, the module code, merges
 and snapshot restores can never leave a stale index behind.
@@ -81,7 +82,8 @@ MAX_Q_LEN = 200              # search text cap
 MAX_TAGS = 5                 # tags per search (AND)
 MAX_RESULTS = 500            # hard cap on a search page
 DEFAULT_RESULTS = 200
-TAG_PAGE_CAP = 1000          # occurrences listed on one tag page
+TAG_PAGE_CAP = 1000          # occurrences listed on one tag page (newest shows first)
+SHOW_STRIP_MAX = 40          # tags /api/shows/<id>/tags returns (the header strip; +N for the rest)
 CONTENT_HITS_PER_SHOW = 3    # snippets per show in a content search
 _CACHE_TTL = 30.0            # all-tags list, per process
 _CACHE_MAX_KEYS = 8
@@ -105,10 +107,11 @@ def normalize_tag(raw):
 
 def extract_tags(text):
     """Distinct normalized tags in a text, in order of first appearance."""
-    out = []
+    out, seen = [], set()
     for m in TAG_RE.finditer(str(text or '')):
         t = m.group(1).lower()
-        if len(t) <= TAG_MAX_LEN and t not in out:
+        if len(t) <= TAG_MAX_LEN and t not in seen:
+            seen.add(t)
             out.append(t)
     return out
 
@@ -149,6 +152,10 @@ def tagify(text):
 # Labels are finished in Python (_occ_label). manager_notes / the piano
 # cancel note are manager-only and are NEVER a source. Piano-owned schedule
 # rows and piano external-rental lines carry derived text — excluded.
+# Hidden (admin-only) asset lines are never a source either: the Assets tab,
+# invoices and reports hide them from non-admins, and the tag counts are
+# cached per access set, not per role. The 'piano' branch is dropped while
+# the piano_tuning module is off (_sources_sql).
 
 _POSTNOTE_LABELS = {
     'show_notes_tour': 'Show Notes (Tour/Client)',
@@ -180,7 +187,8 @@ _BRANCHES = (
      _ISO.format('ld.work_date'), 'NULL'),
     ('laborreq', 'labor_requests lr LEFT JOIN job_positions jp ON jp.id = lr.position_id', '',
      'lr.show_id', 'lr.id', 'jp.name', 'lr.notes', _ISO.format('lr.work_date'), 'lr.in_time'),
-    ('asset', 'show_assets sa LEFT JOIN asset_types aty ON aty.id = sa.asset_type_id', '',
+    ('asset', 'show_assets sa LEFT JOIN asset_types aty ON aty.id = sa.asset_type_id',
+     'COALESCE(sa.is_hidden, 0) = 0',
      'sa.show_id', 'sa.id', 'aty.name', 'sa.notes', 'NULL', 'NULL'),
     ('rental', 'show_external_rentals er', 'er.piano_tuning_id IS NULL',
      'er.show_id', 'er.id', "''", 'er.description', 'NULL', 'NULL'),
@@ -211,15 +219,26 @@ FOCUS_KINDS = {
 }
 
 
-def _sources_sql(cond, cond_params=(), show_ids=None):
+def _piano_on():
+    """The piano_tuning module's switch (app.py's module_enabled, injected —
+    this module never imports app.py). Off = its notes are no source."""
+    return bool(_d['module_enabled']('piano_tuning'))
+
+
+def _sources_sql(cond, cond_params=(), show_ids=None, piano=None):
     """(sql, params) for the UNION ALL of every text source, as rows of
     (show_id, kind, ref, label, body, at_date, at_time). `cond` is a body
     predicate with '{body}' standing for the branch's text expression (e.g.
     "strpos({body}, '#') > 0") and `cond_params` its parameters, applied in
     EVERY branch so each table is filtered at the source. show_ids: None = all
-    shows, else only those ids."""
+    shows, else only those ids. piano: include the piano-tuning branch
+    (None = read the module switch now)."""
+    if piano is None:
+        piano = _piano_on()
     parts, params = [], []
     for (kind, frm, where, show, ref, label, body, at_date, at_time) in _BRANCHES:
+        if kind == 'piano' and not piano:
+            continue
         conds = [where] if where else []
         if show_ids is not None:
             conds.append(f'{show} = ANY(%s)')
@@ -255,8 +274,10 @@ _cache_lock = threading.Lock()
 
 def all_tag_counts(db, show_ids=None):
     """[{tag, n (occurrences = text boxes holding it), shows}] for every tag,
-    most used first. Cached per process for _CACHE_TTL seconds per access set."""
-    key = 'all' if show_ids is None else tuple(show_ids)
+    most used first. Cached per process for _CACHE_TTL seconds per access set
+    (and piano-module state, which decides whether tuning notes count)."""
+    piano = _piano_on()
+    key = (piano, 'all' if show_ids is None else tuple(show_ids))
     now = time.monotonic()
     with _cache_lock:
         hit = _cache.get(key)
@@ -265,7 +286,7 @@ def all_tag_counts(db, show_ids=None):
     if show_ids is not None and not show_ids:
         out = []
     else:
-        src, params = _sources_sql("strpos({body}, '#') > 0", (), show_ids)
+        src, params = _sources_sql("strpos({body}, '#') > 0", (), show_ids, piano=piano)
         rows = _d['get_db_rows'](db, f"""
             SELECT tag, COUNT(*) AS n, COUNT(DISTINCT show_id) AS shows FROM (
               SELECT DISTINCT s.show_id, s.kind, s.ref, lower(m[1]) AS tag
@@ -282,27 +303,38 @@ def all_tag_counts(db, show_ids=None):
     return out
 
 
-def show_tag_counts(db, show_id):
-    """[{tag, n}] for one show (live, not cached)."""
+def show_tag_counts(db, show_id, limit=SHOW_STRIP_MAX):
+    """([{tag, n}] — the `limit` most used —, number of distinct tags) for
+    one show (live, not cached)."""
     src, params = _sources_sql("strpos({body}, '#') > 0", (), [int(show_id)])
     rows = _d['get_db_rows'](db, f"""
-        SELECT tag, COUNT(*) AS n FROM (
+        SELECT tag, COUNT(*) AS n, COUNT(*) OVER () AS total FROM (
           SELECT DISTINCT s.kind, s.ref, lower(m[1]) AS tag
           FROM ({src}) s CROSS JOIN LATERAL regexp_matches(s.body, %s, 'g') AS m
         ) t WHERE length(tag) <= %s GROUP BY tag ORDER BY COUNT(*) DESC, tag
-    """, params + [TAG_PG_PATTERN, TAG_MAX_LEN])
-    return [{'tag': r['tag'], 'n': int(r['n'])} for r in rows]
+        LIMIT %s
+    """, params + [TAG_PG_PATTERN, TAG_MAX_LEN, limit])
+    return ([{'tag': r['tag'], 'n': int(r['n'])} for r in rows],
+            int(rows[0]['total']) if rows else 0)
 
 
 def tag_occurrences(db, tag, show_ids=None, limit=TAG_PAGE_CAP):
-    """Source rows holding #tag (each text box once)."""
+    """Source rows holding #tag (each text box once), newest show first (the
+    tag page's order, so the cap drops the OLDEST), at most `limit`. Every
+    row carries `total` = all text boxes holding it, before the cap."""
     if show_ids is not None and not show_ids:
         return []
     src, params = _sources_sql('strpos(lower({body}), %s) > 0', ('#' + tag,), show_ids)
     return _d['get_db_rows'](db, f"""
-        SELECT s.* FROM ({src}) s
+        SELECT s.*, COUNT(*) OVER () AS total FROM ({src}) s
+        JOIN shows sh ON sh.id = s.show_id
+        LEFT JOIN LATERAL (SELECT MIN(perf_date) AS first_perf, MAX(perf_date) AS last_perf
+                           FROM show_performances WHERE show_id = sh.id) p ON TRUE
         WHERE EXISTS (SELECT 1 FROM regexp_matches(s.body, %s, 'g') AS m
                       WHERE lower(m[1]) = %s)
+        ORDER BY GREATEST(sh.load_out_date, sh.show_date, p.last_perf) DESC NULLS LAST,
+                 LEAST(sh.load_in_date, sh.show_date, p.first_perf) DESC NULLS LAST,
+                 s.show_id DESC, s.kind, s.ref
         LIMIT %s
     """, params + [TAG_PG_PATTERN, tag, limit])
 
@@ -444,7 +476,13 @@ def _snippet(body, hits, radius=80, max_len=260):
     if end < len(body):
         sp = body.find(' ', end, min(len(body), end + 15))
         end = sp if sp >= 0 else end
-    tags = {(a, b): t for a, b, t in _tag_spans(body)}
+    # Keep only the hits / tags that can touch the window (a hit inside a
+    # #tag may sit up to a tag's length outside it), so the matching below is
+    # O(window) however many tags the body holds — over the whole body it was
+    # quadratic, and one huge tagged note stalled every view of its tag page.
+    m = TAG_MAX_LEN + 1
+    hits = [(a, b) for a, b in hits if a < end + m and b > start - m]
+    tags = {(a, b): t for a, b, t in _tag_spans(body) if a < end + m and b > start - m}
     # A text hit inside a #tag marks (and links) the whole tag.
     hits = [next(((ta, tb) for (ta, tb) in tags if ta <= a and b <= tb), (a, b))
             for a, b in hits]
@@ -512,6 +550,7 @@ def _tag_view(tag):
     db = _d['get_db']()
     try:
         occ = tag_occurrences(db, norm, acc)
+        total_all = int(occ[0]['total']) if occ else 0
         ids = sorted({r['show_id'] for r in occ})
         shows = {r['id']: r for r in _show_rows(db, 's.id = ANY(%s)', [ids])} if ids else {}
     finally:
@@ -539,7 +578,7 @@ def _tag_view(tag):
     out.sort(key=lambda c: (c['end'] or '', c['start'] or '', c['id']), reverse=True)
     total = sum(len(c['occurrences']) for c in out)
     return render_template('tag.html', tag=norm, groups=out, total=total,
-                           capped=len(occ) >= TAG_PAGE_CAP,
+                           total_all=total_all, capped=total_all > len(occ),
                            user=_d['get_current_user']())
 
 
@@ -564,10 +603,10 @@ def _api_show_tags_view(show_id):
     try:
         if not db.execute('SELECT 1 FROM shows WHERE id=%s', (show_id,)).fetchone():
             return jsonify({'success': False, 'error': 'Show not found.'}), 404
-        tags = show_tag_counts(db, show_id)
+        tags, total = show_tag_counts(db, show_id)
     finally:
         db.close()
-    return jsonify({'success': True, 'tags': tags})
+    return jsonify({'success': True, 'tags': tags, 'total': total})
 
 
 def _search_page_view():
@@ -689,6 +728,15 @@ def _api_search_view():
         edits = {}
 
         if editor and cands:
+            ur = db.execute("SELECT COALESCE(NULLIF(TRIM(display_name), ''), username) AS name, "
+                            "COALESCE(is_locked, 0) = 0 AND COALESCE(pending_approval, 0) = 0 AS listed "
+                            "FROM users WHERE id = %s", (editor,)).fetchone()
+            if not ur or not (ur['listed'] or editor == session['user_id']):
+                # Same rule as the Edited-by picker (_api_editors_view): a
+                # locked, pending or unknown account's activity isn't searchable.
+                cands = {}
+
+        if editor and cands:
             erows = _d['get_db_rows'](db, """
                 SELECT show_id, MAX(ts)::timestamptz AS last_edit, COUNT(*) AS n FROM (
                   SELECT show_id, "timestamp" AS ts FROM audit_log
@@ -697,9 +745,7 @@ def _api_search_view():
                   SELECT show_id, saved_at FROM form_history WHERE saved_by = %s
                 ) x WHERE show_id = ANY(%s) GROUP BY show_id
             """, [editor, editor, sorted(cands)])
-            ur = db.execute("SELECT COALESCE(NULLIF(TRIM(display_name), ''), username) AS name "
-                            "FROM users WHERE id = %s", (editor,)).fetchone()
-            ename = ur['name'] if ur else 'that user'
+            ename = ur['name']
             edits = {r['show_id']: r for r in erows}
             for sid in list(cands):
                 if sid not in edits:
@@ -836,7 +882,8 @@ def register(app, **deps):
     Wire the module into the Flask app. `deps` must provide:
       get_db, get_current_user, login_required, can_access_show,
       get_accessible_shows, my_pm_names, pm_contacts_many, name_key, as_date,
-      ts_out, get_distinct_venues.
+      ts_out, get_distinct_venues, module_enabled (app.py's switch for the
+      optional modules — piano tuning notes are a source only while it's on).
     Called once from app.py; everything else in this file is self-contained.
     """
     _d.update(deps, app=app)
