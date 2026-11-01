@@ -82,10 +82,13 @@
           <option value="skills">Skills Overview — technician coverage</option>
         </select>
       </div>
+      {# dashboard_create() refuses a public dashboard from a read-only account. #}
+      {% if not session.get('is_readonly') %}
       <div class="field-group" style="display:flex;align-items:center;gap:8px">
         <input type="checkbox" id="new-dash-public" style="width:auto;margin:0">
         <label for="new-dash-public" style="font-size:12px;color:var(--text);margin:0;cursor:pointer">Make this dashboard publicly accessible (no login required)</label>
       </div>
+      {% endif %}
       <div id="new-dash-msg" class="field-msg" style="display:none"></div>
     </div>
     <div class="modal-footer">
@@ -104,7 +107,7 @@ function closeDashModal()   { document.getElementById('new-dash-modal').style.di
 async function createDash() {
   const name   = document.getElementById('new-dash-name').value.trim();
   const layout = document.getElementById('new-dash-layout').value;
-  const pub    = document.getElementById('new-dash-public').checked;
+  const pub    = !!document.getElementById('new-dash-public')?.checked;
   if (!name) { document.getElementById('new-dash-msg').style.display='block'; document.getElementById('new-dash-msg').textContent='Name required.'; return; }
   const resp = await fetch('/dashboards/new', {
     method:'POST', headers:{'Content-Type':'application/json'},
