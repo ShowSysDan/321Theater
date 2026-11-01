@@ -16202,6 +16202,118 @@ def _get_show_labor_days(db, show_id):
     return out
 
 
+# ─── PM contact cards (3.35.0) ───────────────────────────────────────────────
+# THE resolver for "who is the production manager on this day, and how do I
+# reach them": the day's covering PM (show_labor_days.cover_pm) or else the
+# show's PRODUCTION MANAGER advance value, looked up in `contacts` for title /
+# phone / email. Both PM fields store a contact NAME (free text, not unique,
+# may outlive a rename), so the lookup is case/space-insensitive, falls back
+# to printing the stored name (`found` False), and breaks duplicate names
+# deterministically (PM department first, then a contact linked to a user,
+# then lowest id). Used by the schedule editor + PDF, the Sign-In Sheet, the
+# Home day timeline and Search — don't add a per-surface lookup.
+
+_PM_UNSET = ('', '-')          # '-' = N/A on a contact_dropdown
+
+
+def _name_key(name):
+    """Comparison form of a person/contact name (case/space-insensitive)."""
+    return ' '.join(str(name or '').split()).lower()
+
+
+def _pm_contact_dept(db):
+    """Department the PRODUCTION MANAGER field draws contacts from."""
+    r = db.execute("SELECT contact_dept FROM form_fields WHERE field_key=%s",
+                   ('production_manager',)).fetchone()
+    return (r['contact_dept'] if r and r['contact_dept'] else 'Production')
+
+
+def _pm_contact_index(db, dept=None):
+    """{name_key: contact row} over ALL contacts (a cover PM may sit outside
+    the PM department), duplicates resolved deterministically."""
+    dept = dept if dept is not None else _pm_contact_dept(db)
+    rows = db.execute('SELECT id, name, title, department, phone, email, user_id '
+                      'FROM contacts').fetchall()
+    by_key = {}
+    for c in sorted(rows, key=lambda c: ((c['department'] or '') != dept,
+                                         c['user_id'] is None, c['id'])):
+        k = _name_key(c['name'])
+        if k:
+            by_key.setdefault(k, c)
+    return by_key
+
+
+def _pm_card(name, is_cover, index):
+    """Contact card for a stored PM name, or None for unset / N/A."""
+    name = ' '.join(str(name or '').split())
+    if name in _PM_UNSET:
+        return None
+    c = index.get(name.lower())
+    return {'name': name,
+            'title': ((c['title'] if c else '') or ''),
+            'phone': ((c['phone'] if c else '') or ''),
+            'email': ((c['email'] if c else '') or ''),
+            'contact_id': c['id'] if c else None,
+            'is_cover': bool(is_cover), 'found': bool(c)}
+
+
+def _pm_contacts_many(db, show_ids, dates=None):
+    """{show_id: {'show_pm': card|None, 'days': {iso: card|None}}} in 3
+    queries for any number of shows. `days` covers `dates` (ISO strings, or
+    date objects) — each date's cover PM, else the show PM — or, with
+    dates=None, only the dates that have a cover PM. Shows with no PM data
+    still get an entry."""
+    ids = sorted({int(i) for i in (show_ids or []) if i})
+    if not ids:
+        return {}
+    pm = {r['show_id']: r['field_value'] for r in db.execute(
+        "SELECT show_id, field_value FROM advance_data "
+        "WHERE field_key='production_manager' AND show_id = ANY(%s)",
+        (ids,)).fetchall()}
+    covers = {}
+    for r in db.execute("SELECT show_id, work_date, cover_pm FROM show_labor_days "
+                        "WHERE show_id = ANY(%s) AND COALESCE(cover_pm, '') <> ''",
+                        (ids,)).fetchall():
+        dv = _as_date(r['work_date'])
+        if dv:
+            covers[(r['show_id'], dv.isoformat())] = r['cover_pm']
+    index = _pm_contact_index(db)
+    want_all = None
+    if dates is not None:
+        want_all = []
+        for d in dates:
+            dv = _as_date(d)
+            if dv:
+                want_all.append(dv.isoformat())
+    out = {}
+    for sid in ids:
+        base = _pm_card(pm.get(sid), False, index)
+        want = (want_all if want_all is not None
+                else sorted(d for (s, d) in covers if s == sid))
+        days = {}
+        for iso in want:
+            cv = covers.get((sid, iso))
+            card = _pm_card(cv, True, index) if cv else None
+            days[iso] = card or base
+        out[sid] = {'show_pm': base, 'days': days}
+    return out
+
+
+def _pm_contacts_for_show(db, show_id, dates=None):
+    """_pm_contacts_many for one show."""
+    return (_pm_contacts_many(db, [show_id], dates).get(int(show_id))
+            or {'show_pm': None, 'days': {}})
+
+
+def _pm_contact_for_day(db, show_id, day):
+    """The PM card on duty for one show on one day (cover PM, else show PM)."""
+    dv = _as_date(day)
+    if not dv:
+        return _pm_contacts_for_show(db, show_id)['show_pm']
+    iso = dv.isoformat()
+    return _pm_contacts_for_show(db, show_id, [iso])['days'].get(iso)
+
+
 @app.route('/shows/<int:show_id>/labor-days', methods=['GET'])
 @login_required
 def get_show_labor_days(show_id):
@@ -16232,9 +16344,11 @@ def save_show_labor_day(show_id):
     existing = db.execute(
         'SELECT cover_pm, day_notes FROM show_labor_days '
         'WHERE show_id=%s AND work_date=%s', (show_id, wd)).fetchone()
-    cover_pm = (str(data.get('cover_pm') or '').strip() if 'cover_pm' in data
+    # Length caps (3.35.0): cover_pm is a contact name; day notes are a line.
+    cover_pm = (' '.join(str(data.get('cover_pm') or '').split())[:200]
+                if 'cover_pm' in data
                 else ((existing['cover_pm'] or '') if existing else ''))
-    day_notes = (str(data.get('day_notes') or '').strip() if 'day_notes' in data
+    day_notes = (str(data.get('day_notes') or '').strip()[:2000] if 'day_notes' in data
                  else ((existing['day_notes'] or '') if existing else ''))
     if not cover_pm and not day_notes:
         db.execute('DELETE FROM show_labor_days WHERE show_id=%s AND work_date=%s',
@@ -16266,16 +16380,20 @@ def api_production_managers():
     PRODUCTION MANAGER advance field draws from (contacts in the department
     configured on the production_manager form field; 'Production' by default)."""
     db = get_db()
-    dept_row = db.execute(
-        "SELECT contact_dept FROM form_fields WHERE field_key=%s",
-        ('production_manager',)).fetchone()
-    dept = (dept_row['contact_dept'] if dept_row and dept_row['contact_dept']
-            else 'Production')
-    rows = db.execute(
-        'SELECT name FROM contacts WHERE department=%s ORDER BY name',
-        (dept,)).fetchall()
-    db.close()
-    return jsonify({'names': [r['name'] for r in rows if (r['name'] or '').strip()]})
+    try:
+        dept = _pm_contact_dept(db)
+        rows = db.execute(
+            'SELECT name, title, phone, email FROM contacts WHERE department=%s '
+            'ORDER BY name', (dept,)).fetchall()
+    finally:
+        db.close()
+    rows = [r for r in rows if (r['name'] or '').strip()]
+    # `names` is what older pages read; `contacts` (3.35.0) adds the contact
+    # details so a Day PM picker can show how to reach the PM.
+    return jsonify({'names': [r['name'] for r in rows],
+                    'contacts': [{'name': r['name'], 'title': r['title'] or '',
+                                  'phone': r['phone'] or '',
+                                  'email': r['email'] or ''} for r in rows]})
 
 
 @app.route('/shows/<int:show_id>/labor-requests', methods=['POST'])
