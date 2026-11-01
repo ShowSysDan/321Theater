@@ -69,6 +69,7 @@ import security_module  # security sign-in sheets — wired up near the bottom
 import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
 import spot_module  # Spot sound-level integration — wired up near the bottom
 import file_store  # S3 <-> PostgreSQL file redundancy + migration — wired up near the bottom
+from init_db import pg_name_key  # SQL twin of _name_key (idx_contacts_name_key's text)
 
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, session, jsonify, make_response, abort, send_file,
@@ -7587,13 +7588,9 @@ def _apply_schedule_ops(db, show_id, ops):
     return created
 
 
-def _schedule_sync_hash(db, show_id):
-    """ONE query: a digest of the show's schedule rows, Venue & Tech fields and
-    day structure (load range + performance dates). The 3 s poll compares it
-    before building anything (3.32.2); None when the show is gone. 3.35.0
-    adds the Day PM inputs (show_labor_days.cover_pm + the show's PRODUCTION
-    MANAGER advance value) so a Day PM picked anywhere reaches open editors."""
-    row = db.execute("""
+# Built once (see _schedule_sync_hash): the name keys are init_db.pg_name_key,
+# the exact text idx_contacts_name_key indexes.
+_SCHEDULE_SYNC_HASH_SQL = """
         SELECT md5(
             coalesce((SELECT string_agg(id || '|' || coalesce(day_date, '') || '|' || coalesce(perf_id::text, '')
                                         || '|' || coalesce(start_time, '') || '|' || coalesce(end_time, '')
@@ -7605,13 +7602,61 @@ def _schedule_sync_hash(db, show_id):
             || '#' || coalesce(s.load_in_date::text, '') || '/' || coalesce(s.load_out_date::text, '')
             || '#' || coalesce((SELECT string_agg(coalesce(perf_date::text, '') || ':' || id, ',' ORDER BY id)
                                 FROM show_performances WHERE show_id = s.id), '')
-            || '#' || coalesce((SELECT string_agg(work_date::text || '=' || cover_pm, E'\\n' ORDER BY work_date)
-                                FROM show_labor_days
-                                WHERE show_id = s.id AND coalesce(cover_pm, '') <> ''), '')
-            || '#' || coalesce((SELECT field_value FROM advance_data
-                                WHERE show_id = s.id AND field_key = 'production_manager'), '')
+            || '#' || coalesce(cv.covers, '')
+            || '#' || coalesce(pmv.v, '')
+            || '#' || coalesce((SELECT contact_dept FROM form_fields
+                                WHERE field_key = 'production_manager'), '')
+            || '#' || coalesce((SELECT string_agg(c.id || '|' || coalesce(c.name, '') || '|' || coalesce(c.title, '')
+                                                  || '|' || coalesce(c.department, '') || '|' || coalesce(c.phone, '')
+                                                  || '|' || coalesce(c.email, '') || '|' || coalesce(c.user_id::text, ''),
+                                                  E'\\n' ORDER BY c.id)
+                                FROM contacts c
+                                WHERE """ + pg_name_key('c.name') + """
+                                      = ANY(array_append(cv.keys, """ + pg_name_key('pmv.v') + """))), '')
         ) AS h
-        FROM shows s WHERE s.id = %s""", (show_id,)).fetchone()
+        FROM shows s
+        CROSS JOIN LATERAL (
+            SELECT LEAST(s.load_in_date, s.load_out_date, p.lo, r.lo) AS lo,
+                   GREATEST(s.load_in_date, s.load_out_date, p.hi, r.hi) AS hi
+            FROM (SELECT min(perf_date) AS lo, max(perf_date) AS hi
+                  FROM show_performances WHERE show_id = s.id) p,
+                 (SELECT min(t.d) AS lo, max(t.d) AS hi FROM (
+                      SELECT CASE WHEN q.v ~ '^[1-9][0-9]{3}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
+                                  THEN make_date(left(q.v, 4)::int, substr(q.v, 6, 2)::int, 1)
+                                       + (right(q.v, 2)::int - 1) END AS d
+                      FROM (SELECT left(day_date, 10) AS v FROM schedule_rows
+                            WHERE show_id = s.id AND piano_tuning_id IS NULL) q) t) r
+        ) w
+        CROSS JOIN LATERAL (
+            SELECT string_agg(work_date::text || '=' || cover_pm, E'\\n' ORDER BY work_date) AS covers,
+                   array_agg(DISTINCT """ + pg_name_key('cover_pm') + """) AS keys
+            FROM show_labor_days
+            WHERE show_id = s.id AND coalesce(cover_pm, '') <> ''
+              AND work_date BETWEEN w.lo AND w.hi
+        ) cv
+        LEFT JOIN LATERAL (SELECT field_value AS v FROM advance_data
+                           WHERE show_id = s.id AND field_key = 'production_manager') pmv ON TRUE
+        WHERE s.id = %s"""
+
+
+def _schedule_sync_hash(db, show_id):
+    """ONE query: a digest of the show's schedule rows, Venue & Tech fields and
+    day structure (load range + performance dates). The 3 s poll compares it
+    before building anything (3.32.2); None when the show is gone. 3.35.0
+    adds the Day PM inputs (show_labor_days.cover_pm + the show's PRODUCTION
+    MANAGER advance value) so a Day PM picked anywhere reaches open editors.
+    Cover rows count only inside the editor's date window `w` (load range,
+    performance dates, off-date rows' days — an index range, so cover rows on
+    other dates cost a poll nothing). schedule_rows.day_date is TEXT and a
+    legacy one can be junk ('2026-13-45'), so it is never cast: the CASE
+    builds a date from regex-checked parts of its first 10 chars (what
+    _as_date reads; a bad day-of-month just rolls over, harmless for a
+    window bound). The PM contacts those names resolve
+    to (+ the PM department that ranks duplicates) are in it too, so a
+    corrected phone / email / title reaches open editors' Day PM bars —
+    matched by pg_name_key (= _name_key, NBSP & co. included), the text
+    idx_contacts_name_key indexes, so the lookup never scans contacts."""
+    row = db.execute(_SCHEDULE_SYNC_HASH_SQL, (show_id,)).fetchone()
     return row['h'][:16] if row else None
 
 
@@ -7626,25 +7671,71 @@ def _schedule_day_pm(db, show_id, days):
     return _pm_contacts_for_show(db, show_id, dates)
 
 
+# Contact field caps (add_contact / edit_contact). The link filters below
+# also refuse a phone / email longer than its cap (legacy rows).
+_CONTACT_NAME_MAX = 200
+_CONTACT_TITLE_MAX = 200
+_CONTACT_PHONE_MAX = 100
+_CONTACT_EMAIL_MAX = 254
+# Contact text as both link filters (and their app.js twins) read it.
+# Python's and JS's whitespace differ only in controls (\x1c-\x1f, \x85)
+# and the BOM, so those become plain spaces first; every class below spells
+# its spaces out (_LINK_WS, never \s) — the twins then agree on any input.
+_LINK_CTRL_RE = re.compile(r'[\x00-\x1f\x7f-\x9f\ufeff]')
+_LINK_WS = r' \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000'
+# One run of a phone number: optional '+' ('+ 1 …' too) / '(', a digit,
+# then digits and separators — ASCII and Unicode dashes / minus (Word's
+# '407–555–0101'), dots / middle dot, brackets, spaces — and '/' only
+# right before a digit ('407/555-0101'). One choice per character, nothing
+# to backtrack: linear on any input (the 3.35.0 extension-stripping regex
+# was quadratic).
+_TEL_RUN_RE = re.compile(r'(?:\+ ?)?\(?[0-9](?:[0-9().\-\u00b7\u2010-\u2015\u2212\uff0d'
+                         + _LINK_WS + r']|/(?=[0-9]))*')
+# Address chars: no spaces, quotes, brackets or separators, and none of
+# ? & = % / # — they would add headers (?bcc=…&body=…) to the mailto: link.
+_MAILTO_PART = r'[^@<>"\'(),;:\\?&=%/#' + _LINK_WS + r']+'
+_MAILTO_RE = re.compile('^' + _MAILTO_PART + '@' + _MAILTO_PART + r'\.' + _MAILTO_PART + '$')
+
+
+def _link_text(value, cap):
+    """`value` as the link filters read it (controls / BOM → spaces, then
+    stripped), or None when it's over `cap` characters — code points, which
+    is what app.js LaborDays._linkText counts too."""
+    s = _LINK_CTRL_RE.sub(' ', str(value or '')).strip()
+    return s if len(s) <= cap else None
+
+
 @app.template_filter('tel_href')
 def _tel_href(phone):
     """'tel:' link for a contact phone ('407-555-0101 x12' → tel:4075550101),
     or '' when it doesn't hold a dialable number (then print it unlinked).
-    Mirrors app.js LaborDays.telHref."""
-    s = str(phone or '').strip()
-    s = re.split(r'(?i)\s*(?:x|ext\.?|extension|#|,|;)\s*\d*\s*$', s)[0]
-    digits = ''.join(ch for ch in s if ch.isdigit())
-    if not 3 <= len(digits) <= 20:
-        return ''
-    return 'tel:' + ('+' if s.startswith('+') else '') + digits
+    Dials the FIRST number only: the first run of digits + separators with
+    3+ digits, so an extension ('x12', 'ext. 3', '#5') or a second number
+    ('… / 321-…', '…, …', '… or …', 'c 407-… o 407-…') never joins it, and
+    a '/' joins only a prefix of under 7 digits ('407/555-0101'), never a
+    second number or alternate ending ('407-555-0101/0102'); more than 15
+    digits (the E.164 maximum) isn't a number. Mirrors app.js
+    LaborDays.telHref — keep the two in step."""
+    for m in _TEL_RUN_RE.finditer(_link_text(phone, _CONTACT_PHONE_MAX) or ''):
+        run = m.group(0)
+        digits = ''
+        for part in run.split('/'):
+            if len(digits) >= 7:
+                break
+            digits += re.sub(r'[^0-9]', '', part)
+        if len(digits) >= 3:
+            if len(digits) > 15:
+                return ''
+            return 'tel:' + ('+' if run.startswith('+') else '') + digits
+    return ''
 
 
 @app.template_filter('mailto_href')
 def _mailto_href(email):
     """'mailto:' link for a plain address, or '' when it isn't one.
-    Mirrors app.js LaborDays.mailtoHref."""
-    s = str(email or '').strip()
-    if len(s) > 254 or not re.match(r'^[^\s@<>"\'(),;:\\]+@[^\s@<>"\'(),;:\\]+\.[^\s@<>"\'(),;:\\]+$', s):
+    Mirrors app.js LaborDays.mailtoHref — keep the two in step."""
+    s = _link_text(email, _CONTACT_EMAIL_MAX)
+    if not s or not _MAILTO_RE.match(s):
         return ''
     return 'mailto:' + s
 
@@ -12195,7 +12286,7 @@ def _normalize_venue_filter(raw):
 @content_admin_required
 def add_contact():
     db = get_db()
-    name = request.form.get('name','').strip()
+    name = request.form.get('name','').strip()[:_CONTACT_NAME_MAX]
     # venue_filter not exposed on the add form yet — set via edit modal.
     cur = db.execute("""
         INSERT INTO contacts (name, title, department, phone, email,
@@ -12203,10 +12294,10 @@ def add_contact():
                               postnotes_recipient, venue_filter, mode_filter)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
     """, (name,
-          request.form.get('title','').strip(),
+          request.form.get('title','').strip()[:_CONTACT_TITLE_MAX],
           request.form.get('department','').strip(),
-          request.form.get('phone','').strip(),
-          request.form.get('email','').strip(),
+          request.form.get('phone','').strip()[:_CONTACT_PHONE_MAX],
+          request.form.get('email','').strip()[:_CONTACT_EMAIL_MAX],
           1 if request.form.get('report_recipient') else 0,
           1 if request.form.get('advance_recipient') else 0,
           1 if request.form.get('production_recipient') else 0,
@@ -12232,8 +12323,12 @@ def edit_contact(cid):
     sets = ["name=%s", "title=%s", "department=%s", "phone=%s", "email=%s",
             "report_recipient=%s", "advance_recipient=%s",
             "production_recipient=%s", "postnotes_recipient=%s"]
-    params = [data.get('name',''), data.get('title',''), data.get('department',''),
-              data.get('phone',''), data.get('email',''),
+
+    def _txt(key, cap):
+        return str(data.get(key) or '').strip()[:cap]
+    params = [_txt('name', _CONTACT_NAME_MAX), _txt('title', _CONTACT_TITLE_MAX),
+              data.get('department',''),
+              _txt('phone', _CONTACT_PHONE_MAX), _txt('email', _CONTACT_EMAIL_MAX),
               1 if data.get('report_recipient') else 0,
               1 if data.get('advance_recipient') else 0,
               1 if data.get('production_recipient') else 0,
@@ -12247,10 +12342,10 @@ def edit_contact(cid):
     params.append(cid)
     db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=%s", params)
     after = _snapshot_row(db, 'contacts', cid)
-    log_audit(db, 'CONTACT_EDIT', 'contact', cid, detail=data.get('name',''),
+    log_audit(db, 'CONTACT_EDIT', 'contact', cid, detail=params[0],
               before=before, after=after)
     db.commit(); db.close()
-    syslog_logger.info(f"CONTACT_EDIT id={cid} name={data.get('name','')!r} by={session.get('username')}")
+    syslog_logger.info(f"CONTACT_EDIT id={cid} name={params[0]!r} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -16811,14 +16906,20 @@ def _pm_contact_index(db, dept=None):
 
 
 def _pm_card(name, is_cover, index):
-    """Contact card for a stored PM name, or None for unset / N/A."""
+    """Contact card for a stored PM name, or None for unset / N/A. A matched
+    contact prints its own name (as /api/production-managers lists it), so
+    'pat   MANAGER' reads 'Pat Manager' like the phone/email beside it.
+    Name / title / phone are clipped to the contact-field caps (a legacy
+    row may predate them) — every PM surface, PDFs included, reads this."""
     name = ' '.join(str(name or '').split())
     if name in _PM_UNSET:
         return None
     c = index.get(name.lower())
-    return {'name': name,
-            'title': ((c['title'] if c else '') or ''),
-            'phone': ((c['phone'] if c else '') or ''),
+    if c:
+        name = ' '.join(str(c['name'] or '').split()) or name
+    return {'name': name[:_CONTACT_NAME_MAX],
+            'title': ((c['title'] if c else '') or '')[:_CONTACT_TITLE_MAX],
+            'phone': ((c['phone'] if c else '') or '')[:_CONTACT_PHONE_MAX],
             'email': ((c['email'] if c else '') or ''),
             'contact_id': c['id'] if c else None,
             'is_cover': bool(is_cover), 'found': bool(c)}
@@ -16837,14 +16938,6 @@ def _pm_contacts_many(db, show_ids, dates=None):
         "SELECT show_id, field_value FROM advance_data "
         "WHERE field_key='production_manager' AND show_id = ANY(%s)",
         (ids,)).fetchall()}
-    covers = {}
-    for r in db.execute("SELECT show_id, work_date, cover_pm FROM show_labor_days "
-                        "WHERE show_id = ANY(%s) AND COALESCE(cover_pm, '') <> ''",
-                        (ids,)).fetchall():
-        dv = _as_date(r['work_date'])
-        if dv:
-            covers[(r['show_id'], dv.isoformat())] = r['cover_pm']
-    index = _pm_contact_index(db)
     want_all = None
     if dates is not None:
         want_all = []
@@ -16852,6 +16945,20 @@ def _pm_contacts_many(db, show_ids, dates=None):
             dv = _as_date(d)
             if dv:
                 want_all.append(dv.isoformat())
+    covers = {}
+    # Only the asked-for days' rows (index lookups), however many cover rows
+    # a show holds on other dates.
+    sql = ("SELECT show_id, work_date, cover_pm FROM show_labor_days "
+           "WHERE show_id = ANY(%s) AND COALESCE(cover_pm, '') <> ''")
+    params = [ids]
+    if want_all is not None:
+        sql += " AND work_date = ANY(%s::date[])"
+        params.append(sorted(set(want_all)))
+    for r in (db.execute(sql, params).fetchall() if want_all != [] else []):
+        dv = _as_date(r['work_date'])
+        if dv:
+            covers[(r['show_id'], dv.isoformat())] = r['cover_pm']
+    index = _pm_contact_index(db)
     out = {}
     for sid in ids:
         base = _pm_card(pm.get(sid), False, index)
@@ -16967,22 +17074,32 @@ def save_show_labor_day(show_id):
 def api_production_managers():
     """Contact names eligible as a covering PM — same source the show's
     PRODUCTION MANAGER advance field draws from (contacts in the department
-    configured on the production_manager form field; 'Production' by default)."""
+    configured on the production_manager form field; 'Production' by default).
+    One entry per person: each name as the PM cards print it (whitespace
+    collapsed, the contact _pm_contact_index resolves it to), so a picked
+    value is exactly what PUT /labor-days stores and the poll sends back."""
     db = get_db()
     try:
         dept = _pm_contact_dept(db)
         rows = db.execute(
-            'SELECT name, title, phone, email FROM contacts WHERE department=%s '
+            'SELECT name FROM contacts WHERE department=%s '
             'ORDER BY name', (dept,)).fetchall()
+        index = _pm_contact_index(db, dept)
     finally:
         db.close()
-    rows = [r for r in rows if (r['name'] or '').strip()]
+    pool, seen = [], set()
+    for r in rows:
+        k = _name_key(r['name'])
+        if k and k not in seen and k in index:
+            seen.add(k)
+            pool.append(index[k])
     # `names` is what older pages read; `contacts` (3.35.0) adds the contact
     # details so a Day PM picker can show how to reach the PM.
-    return jsonify({'names': [r['name'] for r in rows],
-                    'contacts': [{'name': r['name'], 'title': r['title'] or '',
-                                  'phone': r['phone'] or '',
-                                  'email': r['email'] or ''} for r in rows]})
+    names = [' '.join(c['name'].split()) for c in pool]
+    return jsonify({'names': names,
+                    'contacts': [{'name': nm, 'title': c['title'] or '',
+                                  'phone': c['phone'] or '',
+                                  'email': c['email'] or ''} for nm, c in zip(names, pool)]})
 
 
 @app.route('/shows/<int:show_id>/labor-requests', methods=['POST'])
