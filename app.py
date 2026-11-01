@@ -20755,6 +20755,17 @@ def asset_category_delete(cat_id):
 
 # ─── Asset Manager — Types ────────────────────────────────────────────────────
 
+# What the PM-facing catalog (/api/asset-types without a manager's
+# include_hidden) sends per type: picker data only. A new column the show
+# page's Add Asset browser needs goes here — never supplier / storage data.
+_ASSET_PICKER_COLS = (
+    'id', 'category_id', 'parent_type_id', 'name', 'manufacturer', 'model',
+    'storage_location', 'rental_cost', 'weekly_rate', 'reserve_count',
+    'is_consumable', 'is_system', 'is_package', 'track_quantity',
+    'allow_unit_selection', 'hide_from_pm', 'sort_order',
+)
+
+
 @app.route('/api/asset-types', methods=['GET'])
 @login_required
 def asset_types_api():
@@ -20773,6 +20784,10 @@ def asset_types_api():
     bogus $0.00/day duplicate of its own children — exactly what happened
     when a type created without a group later had real types parented
     under it. The asset-manager finder applies the same rule client-side.
+
+    Only a manager asking with include_hidden gets every column; everyone
+    else gets the picker-level `_ASSET_PICKER_COLS` (no supplier name /
+    contact, storage keys or hashes — this is the PM-facing catalog).
     """
     include_hidden = request.args.get('include_hidden') == '1'
     is_manager = (
@@ -20781,6 +20796,10 @@ def asset_types_api():
         or session.get('is_asset_manager')
     )
     db = get_db()
+    if include_hidden and is_manager:
+        cols = _cols_except(db, 'asset_types', 'photo', 'at')
+    else:
+        cols = ', '.join(f'at.{c}' for c in _ASSET_PICKER_COLS)
     where = ['at.is_retired = 0']
     where.append("""NOT (
             at.parent_type_id IS NULL
@@ -20791,7 +20810,7 @@ def asset_types_api():
     if not (include_hidden and is_manager):
         where.append('COALESCE(at.hide_from_pm, 0) = 0')
     rows = db.execute(f"""
-        SELECT {_cols_except(db, 'asset_types', 'photo', 'at')}, {_ASSET_HAS_PHOTO_SQL},
+        SELECT {cols}, {_ASSET_HAS_PHOTO_SQL},
                ac.name as category_name,
                pt.name as parent_name
         FROM asset_types at
@@ -21283,13 +21302,25 @@ def asset_type_photo(type_id):
 @app.route('/settings/asset-types/<int:type_id>/used-in')
 @login_required
 def asset_type_used_in(type_id):
-    """Return system/package types that include this type as a component."""
+    """Return system/package types that include this type as a component.
+
+    Managers (the Asset Manager page) get every kit. Anyone else — the show
+    page's Add Asset browser calls this for every item — gets only kits the
+    picker shows: retired and hide_from_pm kits are left out, the same
+    visibility /api/asset-types and /api/asset-types/<id>/components apply."""
+    is_manager = (
+        session.get('user_role') == 'admin'
+        or session.get('is_content_admin')
+        or session.get('is_asset_manager')
+    )
+    visible = '' if is_manager else \
+        'AND at.is_retired = 0 AND COALESCE(at.hide_from_pm, 0) = 0'
     db = get_db()
-    rows = db.execute("""
+    rows = db.execute(f"""
         SELECT at.id, at.name, at.is_system, at.is_package
         FROM asset_type_system_members m
         JOIN asset_types at ON at.id = m.system_type_id
-        WHERE m.component_type_id = %s
+        WHERE m.component_type_id = %s {visible}
         ORDER BY at.name
     """, (type_id,)).fetchall()
     db.close()

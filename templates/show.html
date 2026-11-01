@@ -2123,8 +2123,10 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
   };
 
   function _abIsKit(t) { return !!(t && (t.is_system || t.is_package)); }
-  const _abByName = (a, b) => String(a.name || '').localeCompare(
-    String(b.name || ''), undefined, {numeric: true, sensitivity: 'base'});
+  // ONE collator: localeCompare(…, options) builds a new one per call, and
+  // _abSearch() sorts every match on each keystroke.
+  const _abColl = new Intl.Collator(undefined, {numeric: true, sensitivity: 'base'});
+  const _abByName = (a, b) => _abColl.compare(String(a.name || ''), String(b.name || ''));
 
   // The default rental window selectAssetType() pre-fills: the Advance
   // Sheet's live load-in / load-out, else the first / last performance.
@@ -2941,6 +2943,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     const availDiv = document.getElementById('asset-avail-info');
     if (!typeId || !availDiv) return;
     if (_currentAssetIsSystem) {
+      ++_availFetchSeq;   // drop a still-pending response for the item picked before
       _currentAvailData = null;
       availDiv.innerHTML = `<span style="color:var(--accent)">${esc(_kitAvailMsg(_catalogType(typeId)))}</span>`;
       _updateAddAssetBlockState();
@@ -3004,7 +3007,9 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         suffix = ` — booked${b.show_name ? ' for ' + b.show_name : ''}`;
         disabled = ' disabled';
       } else { suffix = ' — available'; }
-      html += `<option value="${u.id}"${disabled}>${label}${suffix}</option>`;
+      // Barcodes and show names are user text: escape them (Chromium's
+      // customizable <select> keeps <img> etc. inside an <option>).
+      html += `<option value="${Number(u.id)}"${disabled}>${esc(label + suffix)}</option>`;
     });
     unitSel.innerHTML = html;
     unitSel.value = '';
@@ -3030,6 +3035,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
   window.closeAssetAddModal = function() {
     document.getElementById('asset-add-modal').style.display = 'none';
+    ++_availFetchSeq;   // a late availability response must not touch the closed modal
     _currentAvailData = null;
   };
 

@@ -955,7 +955,9 @@ function _populateApprUnitPicker(av) {
       suffix = ` — booked${b.show_name ? ' for ' + b.show_name : ''}`;
       disabled = ' disabled';
     } else { suffix = ' — available'; }
-    html += `<option value="${u.id}"${disabled}>${label}${suffix}</option>`;
+    // Barcodes and show names are user text: escape them (Chromium's
+    // customizable <select> keeps <img> etc. inside an <option>).
+    html += `<option value="${Number(u.id)}"${disabled}>${_esc(label + suffix)}</option>`;
   });
   unitSel.innerHTML = html;
   unitSel.value = '';
