@@ -1351,12 +1351,19 @@ function bindScheduleForm() {
   if (!form) return;
   _schedInitBaseline();
   form.addEventListener('change', (e) => {
+    // Day PM picker (3.35.0) saves on its own (show_labor_days), never
+    // through the schedule autosave.
+    if (e.target.closest && e.target.closest('.sched-daypm')) { _schedDayPmChange(e.target); return; }
     if (e.target.classList && e.target.classList.contains('sched-dark')) _applyDarkDays();
     _maybeAutoSortAfterEdit(e.target);
     scheduleSave();
   });
   _applyDarkDays();
-  form.addEventListener('input',  () => scheduleSave());
+  _schedDayPmInit(form);
+  form.addEventListener('input',  (e) => {
+    if (e.target.closest && e.target.closest('.sched-daypm')) return;
+    scheduleSave();
+  });
   form.querySelectorAll('tr.schedule-row[data-row-id]').forEach(_schedBindRowFocus);
   form.addEventListener('focusout', () => setTimeout(_schedApplyMetaPending, 0));
   // Time cells are normalised on blur by _bindScheduleTimeParsing.
@@ -1573,6 +1580,7 @@ function _renderScheduleDays(days) {
   const ordered = days.map((d, idx) => {
     if (existing[d.date_key]) {
       _updateDayPaneHeader(existing[d.date_key], d, idx + 1, days.length);
+      _schedDayPmEnsure(existing[d.date_key]);   // e.g. the promoted fallback pane
       return existing[d.date_key];
     }
     return _buildDayPane(d, idx + 1, days.length);
@@ -1800,6 +1808,7 @@ function _buildDayPane(d, dayNum, totalDays) {
       ${footer}
     </div>`;
   _setOrphanNote(wrapper, d);
+  _schedDayPmEnsure(wrapper);
   return wrapper;
 }
 
@@ -2657,12 +2666,12 @@ async function _pollScheduleSync() {
   const form = document.getElementById('schedule-form');
   if (!SHOW_ID || !form || !_schedReady || _schedSyncBusy || _saveChains.schedule) return;
   _schedSyncBusy = true;
-  const seq = _schedSaveSeq;
+  const seq = _schedSaveSeq, pmSeq = _schedDayPmSeq;
   try {
     const r = await fetch(`/shows/${SHOW_ID}/sync/schedule?h=${encodeURIComponent(_schedSyncHash)}`);
     if (!r.ok) return;
     const st = await r.json();
-    if (!st.success || st.same || seq !== _schedSaveSeq || _saveChains.schedule) return;
+    if (!st.success || st.same || seq !== _schedSaveSeq || pmSeq !== _schedDayPmSeq || _saveChains.schedule) return;
     const skipped = _schedMerge(form, st);
     // Rows/fields held back (focused here, or on a day this page has no pane
     // for yet) are delivered again by the next poll: commit the hash only
@@ -2830,6 +2839,9 @@ function _schedMerge(form, st) {
       changes++;
     }
   });
+  // Day PM per dated day (3.35.0) — show_labor_days, saved elsewhere.
+  const pm = _schedDayPmMerge(st);
+  skipped += pm.skipped; changes += pm.changes;
   _applyDarkDays();
   if (needStructure && typeof _syncScheduleStructure === 'function') _syncScheduleStructure();
   if (changes) showSaveToast('↓ Schedule updated');
@@ -2850,6 +2862,221 @@ function _schedPlaceByTime(tbody, serverRows) {
     });
     if (before) tbody.insertBefore(tr, before); else tbody.appendChild(tr);
   });
+}
+
+/* ── Day PM bar on the schedule editor (3.35.0) ──────────────────────────
+   Each DATED day pane (off-date days too; never a __null_* day or the
+   no-days fallback pane) has a bar between its header and its table: the
+   day's covering PM picker and the on-duty PM's contact. The value is
+   show_labor_days.cover_pm — the SAME setting as the Labor Requests tab's
+   "Day PM" — saved via LaborDays.save (PUT /labor-days), never through the
+   schedule autosave (the select carries no .sched-meta; bindScheduleForm
+   routes its events here). State = window.SCHED_DAY_PM {show_pm, days:
+   {iso: card}} (card = the PM on duty: cover, else show PM, is_cover says
+   which); the 3 s schedule poll carries `day_pm` so other people's / other
+   tabs' changes arrive live (a focused picker is left alone until blur). */
+let _schedDayPm = {show_pm: null, days: {}};
+let _schedDayPmSeq = 0;          // bumps on every Day PM save; a poll that raced one is discarded
+const _schedDayPmPending = {};   // iso -> server card held while that picker is focused
+
+function _schedDayPmIso(key) {
+  const k = String(key || '');
+  return /^\d{4}-\d{2}-\d{2}$/.test(k) ? k : '';
+}
+function _schedDayPmCover(iso) {
+  const c = _schedDayPm.days[iso];
+  return (c && c.is_cover && c.name) || '';
+}
+function _schedDayPmBlankLabel() {
+  const sp = _schedDayPm.show_pm;
+  return sp && sp.name ? `— Show PM (${sp.name}) —` : '— Show PM —';
+}
+/* The card shown for a picked value: blank → the show PM; a name → its
+   contact from the PM pool (or the server-resolved card already held). */
+function _schedDayPmCardFor(iso, name) {
+  name = String(name || '').split(/\s+/).filter(Boolean).join(' ');
+  if (!name) return _schedDayPm.show_pm ? Object.assign({}, _schedDayPm.show_pm, {is_cover: false}) : null;
+  const held = _schedDayPm.days[iso];
+  if (held && held.is_cover && held.name === name) return held;
+  const c = window.LaborDays && LaborDays.contactFor(name);
+  return {name, title: (c && c.title) || '', phone: (c && c.phone) || '', email: (c && c.email) || '',
+          is_cover: true, found: !!c};
+}
+
+function _schedDayPmBar(iso) {
+  const bar = document.createElement('div');
+  bar.className = 'sched-daypm';
+  bar.dataset.date = iso;
+  const lab = document.createElement('label');
+  lab.className = 'sched-daypm-label';
+  lab.textContent = 'Day PM';
+  const sel = document.createElement('select');
+  sel.className = 'field-input field-input-sm sched-daypm-select';
+  sel.id = 'sched-daypm-' + iso;
+  sel.title = "Production manager on duty this day — blank = the show's PM. Same setting as Day PM on the Labor Requests tab.";
+  sel.disabled = !window.SCHED_DAY_PM_EDIT;
+  lab.htmlFor = sel.id;
+  const contact = document.createElement('span');
+  contact.className = 'sched-daypm-contact';
+  bar.append(lab, sel, contact);
+  return bar;
+}
+
+/* Draw one bar from state: picker value + blank label + contact line. The
+   options are rebuilt only when they'd change, and never under the cursor. */
+function _schedDayPmRender(bar) {
+  const iso = bar.dataset.date;
+  const sel = bar.querySelector('.sched-daypm-select');
+  const cover = _schedDayPmCover(iso);
+  if (sel && sel !== document.activeElement) {
+    const blank = _schedDayPmBlankLabel();
+    const want = (LaborDays._pmNames || []).length + 1 + (cover && !(LaborDays._pmNames || []).includes(cover) ? 1 : 0);
+    if (sel.value !== cover || sel.options.length !== want || (sel.options[0] && sel.options[0].textContent !== blank)) {
+      LaborDays.buildPmSelect(sel, cover, blank);
+    }
+  }
+  const card = _schedDayPm.days[iso] !== undefined ? _schedDayPm.days[iso] : _schedDayPmCardFor(iso, cover);
+  LaborDays.contactInto(bar.querySelector('.sched-daypm-contact'), card);
+}
+
+/* Give a pane its bar when its key is an ISO date (new pane, promoted
+   fallback pane), or drop it when it isn't. Idempotent. */
+function _schedDayPmEnsure(pane) {
+  if (!pane) return;
+  const iso = _schedDayPmIso(pane.dataset.dayKey);
+  let bar = pane.querySelector('.sched-daypm');
+  if (bar && bar.dataset.date === iso) return;
+  if (bar) bar.remove();
+  if (!iso) return;
+  const body = pane.querySelector('.form-section > .form-section-body');
+  if (!body) return;
+  bar = _schedDayPmBar(iso);
+  body.parentElement.insertBefore(bar, body);
+  if (_schedDayPm.days[iso] === undefined) {
+    // A day this page had no card for: start from what's known (the Labor
+    // tab's map, else the show PM) and let the next poll bring the server's.
+    const known = window._laborDaysMap && window._laborDaysMap[iso];
+    _schedDayPm.days[iso] = _schedDayPmCardFor(iso, known ? known.cover_pm : '');
+    _schedSyncHash = '';
+  }
+  _schedDayPmRender(bar);
+}
+
+function _schedDayPmInit(form) {
+  const init = window.SCHED_DAY_PM || {};
+  _schedDayPm = {show_pm: init.show_pm || null, days: Object.assign({}, init.days || {})};
+  form.querySelectorAll('.sched-day-pane').forEach(_schedDayPmEnsure);
+  // A remote value held back while a picker had focus lands on blur.
+  form.addEventListener('focusout', (e) => {
+    if (e.target.classList && e.target.classList.contains('sched-daypm-select')) {
+      setTimeout(_schedDayPmApplyPending, 0);
+    }
+  });
+  if (!window.LaborDays) return;
+  LaborDays.pmNames().then(() => {
+    form.querySelectorAll('.sched-daypm').forEach(_schedDayPmRender);
+  });
+}
+
+/* Labor Requests tab twin: keep its map + "Day PM" select on the same value. */
+function _schedDayPmToLabor(iso, cover) {
+  const map = window._laborDaysMap;
+  if (map) {
+    const e = map[iso];
+    if (cover) map[iso] = {cover_pm: cover, day_notes: (e && e.day_notes) || ''};
+    else if (e && e.day_notes) e.cover_pm = '';
+    else delete map[iso];
+  }
+  document.querySelectorAll(`.labor-day[data-work-date="${iso}"] .labor-day-pm`).forEach(sel => {
+    if (sel === document.activeElement || sel.value === cover) return;
+    LaborDays.pmNames().then(() => { if (sel.value !== cover) LaborDays.buildPmSelect(sel, cover); });
+  });
+}
+
+/* A covering PM saved for `iso` (here, on the Labor tab, or by someone
+   else): update state + this page's pickers. */
+function _schedDayPmSet(iso, cover, card) {
+  iso = _schedDayPmIso(iso);
+  if (!iso) return false;
+  const before = _schedDayPmCover(iso);
+  const known = _schedDayPm.days[iso] !== undefined;
+  _schedDayPm.days[iso] = card !== undefined ? card : _schedDayPmCardFor(iso, cover);
+  const bar = document.querySelector(`#schedule-form .sched-daypm[data-date="${iso}"]`);
+  if (bar) _schedDayPmRender(bar);
+  const now = _schedDayPmCover(iso);
+  if (now !== before) _schedDayPmToLabor(iso, now);
+  return known && now !== before;
+}
+/* Called by show.html's Labor tab after it saves a day's PM. */
+window.schedDayPmExternal = function (iso, cover) {
+  _schedDayPmSeq++;
+  const bar = document.querySelector(`#schedule-form .sched-daypm[data-date="${_schedDayPmIso(iso)}"]`);
+  if (_schedDayPmSet(iso, cover || '') && bar) _flashField(bar);
+};
+
+function _schedDayPmChange(sel) {
+  if (!sel || !sel.classList.contains('sched-daypm-select')) return;
+  const bar = sel.closest('.sched-daypm');
+  const iso = bar ? _schedDayPmIso(bar.dataset.date) : '';
+  if (!iso || !SHOW_ID) return;
+  if (!window.SCHED_DAY_PM_EDIT) { _schedDayPmRender(bar); return; }
+  // Show the picked PM's contact right away; the save confirms it.
+  LaborDays.contactInto(bar.querySelector('.sched-daypm-contact'), _schedDayPmCardFor(iso, sel.value));
+  _serializedSave('daypm', async () => {
+    const cur = document.querySelector(`#schedule-form .sched-daypm[data-date="${iso}"] .sched-daypm-select`) || sel;
+    const want = cur.value;
+    if (want === _schedDayPmCover(iso)) return;      // a queued save already posted it
+    _schedDayPmSeq++;
+    const res = await LaborDays.save(SHOW_ID, iso, {cover_pm: want});
+    _schedDayPmSeq++;
+    if (!res || !res.success) {
+      showSaveToast('✗ Day PM not saved', 'error');
+      if (cur.value === want) {                      // put back what the server holds
+        const b = cur.closest('.sched-daypm');
+        if (b) { cur.blur(); _schedDayPmRender(b); }
+      }
+      return;
+    }
+    _schedDayPmSet(iso, (res.day && res.day.cover_pm) || '');
+    showSaveToast('✓ Day PM saved');
+  });
+}
+
+function _schedDayPmApplyPending() {
+  Object.keys(_schedDayPmPending).forEach(iso => {
+    const bar = document.querySelector(`#schedule-form .sched-daypm[data-date="${iso}"]`);
+    const sel = bar && bar.querySelector('.sched-daypm-select');
+    if (sel && sel === document.activeElement) return;
+    const card = _schedDayPmPending[iso];
+    delete _schedDayPmPending[iso];
+    if (_saveChains.daypm) return;                   // our save wins; the poll re-delivers
+    if (_schedDayPmSet(iso, (card && card.is_cover && card.name) || '', card) && bar) _flashField(bar);
+  });
+}
+
+/* Poll merge: {skipped, changes}. Nothing is merged while one of this
+   page's Day PM saves is in flight (the next poll carries the result). */
+function _schedDayPmMerge(st) {
+  const dp = st && st.day_pm;
+  const out = {skipped: 0, changes: 0};
+  if (!dp || !dp.days) return out;
+  if (_saveChains.daypm) { out.skipped = 1; return out; }
+  _schedDayPm.show_pm = dp.show_pm || null;   // the blank option names the show PM
+  document.querySelectorAll('#schedule-form .sched-daypm').forEach(bar => {
+    const iso = bar.dataset.date;
+    if (!Object.prototype.hasOwnProperty.call(dp.days, iso)) return;   // a pane the server doesn't list
+    const card = dp.days[iso] || null;
+    const cover = (card && card.is_cover && card.name) || '';
+    const sel = bar.querySelector('.sched-daypm-select');
+    if (sel && sel === document.activeElement && sel.value !== cover) {
+      _schedDayPmPending[iso] = card;
+      out.skipped++;
+      return;
+    }
+    delete _schedDayPmPending[iso];
+    if (_schedDayPmSet(iso, cover, card)) { _flashField(bar); out.changes++; }
+  });
+  return out;
 }
 
 /* ── Post-Show Notes ──────────────────────────────────────────── */
@@ -5644,26 +5871,83 @@ async function loadReadReceipts() {
    dropdown / save / re-date-move logic exists exactly once. */
 window.LaborDays = {
   _pmNames: null,
+  _pmContacts: null,   // [{name, title, phone, email}] — same pool (3.35.0)
+  _pmLoading: null,
 
   /* Contact names eligible as a covering "PM for the day" — same pool the
      show's PRODUCTION MANAGER advance field draws from. Cached per page. */
   async pmNames() {
     if (this._pmNames) return this._pmNames;
-    try {
-      const r = await fetch('/api/production-managers');
-      this._pmNames = (await r.json()).names || [];
-    } catch (e) { this._pmNames = []; }
-    return this._pmNames;
+    if (!this._pmLoading) {
+      this._pmLoading = (async () => {
+        try {
+          const j = await (await fetch('/api/production-managers')).json();
+          this._pmContacts = Array.isArray(j.contacts) ? j.contacts : [];
+          this._pmNames = j.names || [];
+        } catch (e) { this._pmNames = []; this._pmContacts = []; }
+        this._pmLoading = null;
+        return this._pmNames;
+      })();
+    }
+    return this._pmLoading;
   },
 
-  /* Fill a <select> with the PM pool. Blank option = use the show's main PM.
+  /* Contact details for a pool name (case/space-insensitive), or null —
+     a name outside the pool has none client-side; the server's PM cards
+     (_pm_contacts_many) resolve against every contact. */
+  contactFor(name) {
+    const k = String(name || '').split(/\s+/).filter(Boolean).join(' ').toLowerCase();
+    if (!k) return null;
+    return (this._pmContacts || []).find(c =>
+      String(c.name || '').split(/\s+/).filter(Boolean).join(' ').toLowerCase() === k) || null;
+  },
+
+  /* Link targets for a contact's phone / email — '' when the value isn't
+     dialable / an address (it then prints unlinked). Mirrors app.py's
+     tel_href / mailto_href Jinja filters. */
+  telHref(phone) {
+    let s = String(phone || '').trim();
+    s = s.replace(/\s*(?:x|ext\.?|extension|#|,|;)\s*\d*\s*$/i, '');
+    const digits = s.replace(/\D/g, '');
+    if (digits.length < 3 || digits.length > 20) return '';
+    return 'tel:' + (s.charAt(0) === '+' ? '+' : '') + digits;
+  },
+  mailtoHref(email) {
+    const s = String(email || '').trim();
+    if (s.length > 254 || !/^[^\s@<>"'(),;:\\]+@[^\s@<>"'(),;:\\]+\.[^\s@<>"'(),;:\\]+$/.test(s)) return '';
+    return 'mailto:' + s;
+  },
+
+  /* Render a PM card ({name, title, phone, email, is_cover}) into `el` as
+     the .pmc-* contact line — DOM + textContent only. The Jinja twin is
+     show.html's pm_contact_line macro. */
+  contactInto(el, card, emptyText) {
+    if (!el) return;
+    el.textContent = '';
+    const add = (tag, cls, text, href) => {
+      const n = document.createElement(tag);
+      n.className = cls;
+      n.textContent = text;
+      if (href) n.href = href;
+      el.appendChild(n);
+    };
+    if (!card || !card.name) { add('span', 'pmc-none', emptyText || 'No production manager set'); return; }
+    add('span', 'pmc-name', card.name);
+    if (card.title) add('span', 'pmc-title', card.title);
+    if (card.phone) { const h = this.telHref(card.phone); add(h ? 'a' : 'span', 'pmc-phone', card.phone, h); }
+    if (card.email) { const h = this.mailtoHref(card.email); add(h ? 'a' : 'span', 'pmc-email', card.email, h); }
+    if (card.is_cover) add('span', 'pmc-cover', 'covering');
+  },
+
+  /* Fill a <select> with the PM pool. Blank option = use the show's main PM
+     (`blankLabel` overrides its text, e.g. "— Show PM (Jane Doe) —").
      A saved name no longer in the pool stays visible as a ghost option. */
-  buildPmSelect(selectEl, selected) {
+  buildPmSelect(selectEl, selected, blankLabel) {
     if (!selectEl) return;
     selectEl.innerHTML = '';
     const def = document.createElement('option');
     def.value = '';
-    def.textContent = '— Show PM —';
+    def.textContent = blankLabel || '— Show PM —';
     selectEl.appendChild(def);
     (this._pmNames || []).forEach(name => {
       const opt = document.createElement('option');

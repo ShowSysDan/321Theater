@@ -64,6 +64,14 @@
   .day-row .day-name { text-transform: none; letter-spacing: 0.02em; }
   .cols-row th { background: {{ C1 }}; color: {{ C1_ON_SOFT }}; font-size: 7pt; letter-spacing: 0.08em; text-align: left;
                  padding: 3px 8px; text-transform: uppercase; border-top: 1px solid {{ C1_MID }}; }
+  /* PM on duty that day (3.35.0) — its own thead row, so it repeats on a
+     continuation page and prints for single-day shows / a hidden banner. */
+  .day-pm-row th { background: {{ C1 }}; color: {{ C1_ON }}; font-size: 7.5pt; font-weight: normal; text-align: left;
+                   padding: 2px 8px 3px; text-transform: none; letter-spacing: 0; border-top: 1px solid {{ C1_MID }}; }
+  .day-pm-row .pm-lbl { color: {{ C1_ON_SOFT }}; font-size: 6.5pt; font-weight: bold; letter-spacing: 0.08em; text-transform: uppercase; margin-right: 4px; }
+  .day-pm-row .pm-name { font-weight: bold; }
+  .day-pm-row .pm-cover { color: {{ C2_ON }}; font-weight: bold; }
+  .day-pm-row .pm-sep { color: {{ C1_ON_SOFT }}; }
   .sched-table td { padding: 5px 8px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
   /* A row never splits across a page break (3.6.1): a two-line row cut in
      half reads as two items. The whole row moves to the next page. */
@@ -89,17 +97,20 @@
   .sched-table.cz-1 td { padding: 3px 7px; line-height: 1.25; }
   .sched-table.cz-1 .time-col, .sched-table.cz-1 .desc-col { font-size: 8pt; }
   .sched-table.cz-1 .notes-col { font-size: 7pt; }
+  .sched-table.cz-1 .day-pm-row th { padding: 2px 7px; }
   .sched-table.cz-2 td { padding: 2px 6px; line-height: 1.18; }
   .sched-table.cz-2 .time-col, .sched-table.cz-2 .desc-col { font-size: 7.5pt; }
   .sched-table.cz-2 .notes-col { font-size: 6.75pt; }
   .sched-table.cz-2 .day-row th { padding-top: 3px; padding-bottom: 3px; }
   .sched-table.cz-2 .cols-row th { padding-top: 2px; padding-bottom: 2px; }
+  .sched-table.cz-2 .day-pm-row th { padding: 1px 6px 2px; }
   .sched-table.cz-3 td { padding: 1px 5px; line-height: 1.1; }
   .sched-table.cz-3 .time-col, .sched-table.cz-3 .desc-col { font-size: 7pt; }
   .sched-table.cz-3 .notes-col { font-size: 6.5pt; }
   .sched-table.cz-3 .time-col .t12 { font-size: 0.72em; }
   .sched-table.cz-3 .day-row th { padding-top: 2px; padding-bottom: 2px; }
   .sched-table.cz-3 .cols-row th { padding-top: 1px; padding-bottom: 1px; }
+  .sched-table.cz-3 .day-pm-row th { padding: 0 5px 1px; font-size: 7pt; }
   .sched-table.pb-before { break-before: page; page-break-before: always; }
 
   /* ── Sidebar: venue/config info as a vertical column ── */
@@ -204,6 +215,15 @@
         {% set day_heading = day.perf.perf_date | dowlongdate %}
         <tr class="day-row">
           <th colspan="4" style="font-size: {{ layout.font_size('day_banner', '10.5pt') }}">{% if day_heading %}<span class="day-name">{{ day_heading }}</span>{% else %}{{ layout.label('day_banner', 'Day') }} {{ day.day_num }}{% endif %}<span class="day-date">{% if day_heading %}{{ layout.label('day_banner', 'Day') }} {{ day.day_num }}{% endif %}{% if day.perf.perf_time %} · {{ day.perf.perf_time | dualtime }}{% endif %}</span></th>
+        </tr>
+        {% endif %}
+        {# PM on duty (3.35.0): cover PM else show PM, resolved per day by
+           _build_schedule_pdf. Never data-sched-row — the page fit counts
+           only body rows; the extra thead height is measured like the rest. #}
+        {% if day.pm and layout.visible('day_pm') %}
+        {% set _pmfs = layout.font_size('day_pm', '') %}
+        <tr class="day-pm-row">
+          <th colspan="4"{% if _pmfs %} style="font-size: {{ _pmfs }}"{% endif %}><span class="pm-lbl">{{ layout.label('day_pm', 'PM on duty') }}</span> <span class="pm-name">{{ day.pm.name }}</span>{% if day.pm.is_cover %} <span class="pm-cover">(covering)</span>{% endif %}{% if day.pm.phone %} <span class="pm-sep">·</span> {{ day.pm.phone }}{% endif %}{% if day.pm.email %} <span class="pm-sep">·</span> {{ day.pm.email }}{% endif %}</th>
         </tr>
         {% endif %}
         <tr class="cols-row">
@@ -324,12 +344,21 @@
           ] %}
           {% set val = adv(key) %}
           {% if val and val not in ['-',''] %}
+          {% if key == 'production_manager' and show_pm_card is defined and show_pm_card %}
+          {# The show PM's card (3.35.0): same resolver as the per-day PM rows
+             (case-insensitive name match), with email. #}
+          <tr>
+            <td class="lbl">{{ role }}</td>
+            <td>{{ show_pm_card.name }}{% if show_pm_card.phone %}<br><span style="font-size:7pt;color:#666">{{ show_pm_card.phone }}</span>{% endif %}{% if show_pm_card.email %}<br><span style="font-size:7pt;color:#666">{{ show_pm_card.email }}</span>{% endif %}</td>
+          </tr>
+          {% else %}
           {% set _c = contact_name_map.get(val, {}) %}
           {% set _phone = _c.get('phone', '') %}
           <tr>
             <td class="lbl">{{ role }}</td>
             <td>{{ val }}{% if _phone %}<br><span style="font-size:7pt;color:#666">{{ _phone }}</span>{% endif %}</td>
           </tr>
+          {% endif %}
           {% endif %}
           {% endfor %}
           {% set sec = m('security_email') %}

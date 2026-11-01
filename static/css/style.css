@@ -2795,3 +2795,30 @@ a.find-why-text:hover { border-color: rgba(232,130,47,.45); }
 .tools-menu-sep { height: 1px; margin: 5px 4px; background: var(--border); }
 /* Production Schedule day header: Tools + "+ Add Row" pinned right */
 .sched-day-actions { display: flex; gap: 6px; align-items: center; margin-left: auto; flex-wrap: wrap; }
+
+/* ══ Day PM (3.35.0) — Production Schedule "Day PM" bar + PM contact line ══
+   .sched-daypm sits between a dated schedule day's header and its table
+   (show.html sched_day_pm_bar macro / app.js _schedDayPmBar). The .pmc-*
+   contact line (name · title · phone · email · covering) is shared with the
+   Sign-In Sheet tab's "Production contact for security" section. */
+.sched-daypm { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; padding: 8px 14px;
+  border-bottom: 1px solid var(--border); background: var(--bg-surface); font-size: 12.5px; }
+.sched-daypm-label { font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text-muted); white-space: nowrap; }
+.sched-daypm-select { width: auto; min-width: 170px; max-width: 280px; }
+.sched-daypm-contact { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 3px 12px; min-width: 0; }
+.pmc-name { font-weight: 600; color: var(--ink, var(--text)); }
+.pmc-title { color: var(--text-dim); }
+.pmc-phone, .pmc-email { color: var(--text); overflow-wrap: anywhere; }
+a.pmc-phone, a.pmc-email { color: var(--orange-text, var(--accent)); text-decoration: none; }
+a.pmc-phone:hover, a.pmc-email:hover { text-decoration: underline; }
+.pmc-cover { font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+  padding: 1px 7px; border-radius: 999px; color: var(--orange-text, var(--accent));
+  background: color-mix(in srgb, var(--accent) 14%, transparent); white-space: nowrap; }
+.pmc-none { color: var(--text-muted); font-style: italic; }
+/* Sign-In Sheet tab: one line per run of days with the same PM */
+.sec-pm-rows { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.sec-pm-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 3px 12px; }
+.sec-pm-days { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--text-dim); min-width: 120px; white-space: nowrap; }
+.sec-pm-contact { display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: 3px 12px; min-width: 0; }

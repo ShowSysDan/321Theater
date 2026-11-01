@@ -399,3 +399,11 @@ html.mobile-view .labor-day-actions { margin-left: auto; }
 /* The schedule day header wraps: title, then Dark day, then the actions
    (right-aligned) — instead of squeezing the title into a narrow column. */
 html.mobile-view #schedule-form .sched-day-pane .form-section-header { flex-wrap: wrap; row-gap: 8px; }
+
+/* Day PM (3.35.0): the schedule's Day PM bar stacks — picker full width,
+   contact line under it; the Sign-In Sheet PM rows put the dates on top. */
+html.mobile-view .sched-daypm { padding: 8px 12px; }
+html.mobile-view .sched-daypm-select { flex: 1 1 auto; min-width: 0; max-width: none; }
+html.mobile-view .sched-daypm-contact { flex: 1 1 100%; }
+html.mobile-view .sec-pm-row { flex-direction: column; gap: 2px; }
+html.mobile-view .sec-pm-days { min-width: 0; }

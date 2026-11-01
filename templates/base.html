@@ -593,6 +593,7 @@ const _HELP_PAGES = {
       <p>The day-of timeline plus venue/tech info and contacts.</p>
       <ul style="${_HELP_UL}">
         <li><strong>Venue &amp; Tech Info</strong> — fields marked "From Advance Sheet" are read-only mirrors; edit them on the Advance tab.</li>
+        <li><strong>Day PM</strong> — the bar under each dated day's heading picks the production manager on duty that day (blank = the show's PM from the Advance Sheet) and shows their title, phone and email, tagged <em>covering</em> when it's not the show PM. It's the same setting as Day PM on the Labor Requests tab (changing one changes the other), saves as soon as you pick, updates live for everyone, and prints on the Production Schedule PDF and the Security Sign-In Sheet. Read-only users can see it but not change it.</li>
         <li><strong>Day tabs</strong> — one timeline per calendar date when the show spans multiple days.</li>
         <li>Timeline rows: Start / End / Description / Notes; drag the ⠿ handle to reorder, × to delete, <strong>+ Add Row</strong> (day header and under the table) to append. After midnight on the same show day, type <code>1+00:30</code>.</li>
         <li><strong>Tools ▾ above the day tabs</strong> — <strong>Import from another show…</strong> (copy another show's schedule onto chosen days; add to or replace what's there), <strong>Save day as template…</strong> (admins and content admins) and <strong>History</strong> (every saved version, with what changed).</li>
@@ -613,7 +614,7 @@ const _HELP_PAGES = {
     html: `
       <p>Request crew per day. Rows save individually as you edit.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>+ Add Day</strong> — each day block has its own date, a <strong>Day PM</strong> (covering PM for that date only), day notes, <strong>+ Add Request</strong> under its table, and a <strong>Tools ▾</strong> menu:
+        <li><strong>+ Add Day</strong> — each day block has its own date, a <strong>Day PM</strong> (covering PM for that date only — the same setting as the Day PM bar on the Production Schedule; it prints on the schedule PDF and the security sign-in sheet), day notes, <strong>+ Add Request</strong> under its table, and a <strong>Tools ▾</strong> menu:
           <ul style="${_HELP_UL}">
             <li><strong>Apply preset</strong> — append a preset's standing positions to the day (presets are set up in Settings → Job Positions; existing rows are kept).</li>
             <li><strong>Clone to…</strong> — copy the day's rows (position, times, requested tech) to another date.</li>
@@ -654,6 +655,7 @@ const _HELP_PAGES = {
         <li>Rows can be edited, reordered and removed by hand; <strong>Save</strong> replaces the stored list.</li>
         <li><strong>Export PDF</strong> — prints saved names with blank Signature / Time In columns plus walk-up rows, in this venue's paperwork colors.</li>
         <li>A <strong>multi-day</strong> show/event prints one initials column per day instead (days come from load-in → load-out and the performance dates; very long runs continue in a second table).</li>
+        <li><strong>Production contact for security</strong> (read-only) — the production manager on duty with phone and email, printed at the top of the sheet so the desk knows who to call. It's the show's PM, or a day's covering PM (set <strong>Day PM</strong> on the Production Schedule or Labor Requests tab); a multi-day sheet lists each run of days with its PM and marks a covered day's column with the cover PM's name.</li>
       </ul>
     `
   },
@@ -691,6 +693,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li>Export cards: <strong>Advance Sheet</strong>, <strong>Production Schedule</strong>, <strong>Post-Show Report</strong> (each with a version number and an Email button that sends to the configured recipients), <strong>Final Invoice</strong> (warns when the show's labor hasn't been settled yet), and <strong>Pre-Show Estimate</strong> (labor + assets quote).</li>
         <li>The Production Schedule PDF is <strong>page-aware</strong>: a day that would spill 4 or fewer rows onto the next page is tightened a step at a time so it fits on its own page, and a day that would still be split moves whole to the next page when it fits there. A row is never cut in half at a page break.</li>
+        <li>Each day of the Production Schedule PDF prints its <strong>PM on duty</strong> (that day's covering PM, marked "(covering)", else the show PM) with phone and email; content admins can hide or relabel that line in Settings → PDF Designer (Production Schedule → "PM on Duty (per day)").</li>
         <li><strong>Export History</strong> — the last 10 exports; Download re-fetches that exact stored PDF.</li>
         <li><strong>Attachments</strong> — + Attach File or drag-and-drop; admins can move a file to another show.</li>
         <li><strong>Advance Read By</strong> — read receipts for who has viewed the advance.</li>

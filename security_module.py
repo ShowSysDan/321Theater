@@ -25,6 +25,10 @@ this module's JSON endpoints below.
 SANDBOX RULES (mirrors prism_module / snapshot_module):
   * This module owns exactly one table — `security_signin_names` — and never
     writes any other app table (audit_log via the injected log_audit only).
+  * The production manager on duty (3.35.0: printed under the org line, and
+    shown on the tab via GET …/names) is read ONLY through the injected
+    `pm_contacts_for_show` — never by querying advance_data / contacts /
+    show_labor_days here.
   * app.py's only knowledge of it is one `register(app, **deps)` call, the
     module-enabled flag it reads through the injected `module_enabled`, and
     the show-page Security tab + export card (both gated on that flag).
@@ -120,6 +124,43 @@ def _fetch_names(db, show_id):
         'ORDER BY sort_order, id', (show_id,)).fetchall()]
 
 
+def _day_label(iso):
+    """'Mon 3/2' for an ISO date (the per-day column label format)."""
+    try:
+        d = date.fromisoformat(str(iso)[:10])
+        return f'{d.strftime("%a")} {d.month}/{d.day}'
+    except (ValueError, TypeError):
+        return str(iso)
+
+
+def _pm_payload(db, show, span):
+    """Who security calls (3.35.0): (show_pm, by_date, runs). Read only
+    through the injected `pm_contacts_for_show` (app.py's shared resolver —
+    this module never queries advance_data / contacts / show_labor_days).
+    by_date = {iso: card|None}, the PM on duty each sheet day (covering PM,
+    else the show PM); runs = consecutive days with the same PM collapsed:
+    [{'first', 'last', 'label', 'pm': card|None}]. card = {name, title,
+    phone, email, is_cover, ...}."""
+    resolve = _d.get('pm_contacts_for_show')
+    if not resolve:
+        return None, {}, []
+    pm = resolve(db, show['id'], list(span)) or {}
+    by_date = pm.get('days') or {}
+    runs = []
+    for iso in span:
+        c = by_date.get(iso)
+        key = (c['name'].lower(), bool(c['is_cover'])) if c else None
+        if runs and runs[-1]['_key'] == key:
+            runs[-1]['last'] = iso
+        else:
+            runs.append({'first': iso, 'last': iso, '_key': key, 'pm': c})
+    for r in runs:
+        r.pop('_key')
+        r['label'] = (_day_label(r['first']) if r['first'] == r['last']
+                      else f"{_day_label(r['first'])} – {_day_label(r['last'])}")
+    return pm.get('show_pm'), by_date, runs
+
+
 # ─── Name parsing (paste box + CSV upload share this) ────────────────────────
 
 def _parse_names_text(text):
@@ -213,13 +254,17 @@ def _page_view(show_id):
 
 
 def _names_get_view(show_id):
-    _require_show(show_id)
+    show = _require_show(show_id)
     db = _d['get_db']()
     try:
         names = _fetch_names(db, show_id)
+        # The tab's read-only "Production contact for security" section
+        # (3.35.0) — the same PM data the PDF prints.
+        show_pm, _by_date, runs = _pm_payload(db, show, _d['show_span_dates'](db, show))
     finally:
         db.close()
-    return jsonify({'success': True, 'names': names})
+    return jsonify({'success': True, 'names': names,
+                    'show_pm': show_pm, 'pm_days': runs})
 
 
 def _names_save_view(show_id):
@@ -319,13 +364,7 @@ def _day_columns(iso_dates):
     0–1 dates — the single-day sheet keeps its Signature / Time In layout."""
     if len(iso_dates) <= 1:
         return []
-    cols = []
-    for iso in iso_dates:
-        try:
-            d = date.fromisoformat(str(iso)[:10])
-            cols.append({'iso': iso, 'label': f'{d.strftime("%a")} {d.month}/{d.day}'})
-        except (ValueError, TypeError):
-            cols.append({'iso': iso, 'label': str(iso)})
+    cols = [{'iso': iso, 'label': _day_label(iso)} for iso in iso_dates]
     return [cols[i:i + MAX_DAY_COLS] for i in range(0, len(cols), MAX_DAY_COLS)]
 
 
@@ -339,6 +378,9 @@ def _pdf_view(show_id):
         # Multi-day shows get one initials column per calendar day (span
         # computed by the injected app helper — load-in→load-out ∪ perf dates).
         span = _d['show_span_dates'](db, show)
+        # Production manager on duty (3.35.0) — printed under the org line
+        # so the desk knows who to call.
+        show_pm, pm_by_date, pm_runs = _pm_payload(db, show, span)
     finally:
         db.close()
 
@@ -351,6 +393,10 @@ def _pdf_view(show_id):
         day_groups=day_groups,
         span_first=span[0] if day_groups else '',
         span_last=span[-1] if day_groups else '',
+        # single-day sheet: that day's PM (no dates at all → the show PM)
+        pm_single=(pm_by_date.get(span[0]) if span else show_pm),
+        pm_runs=pm_runs,
+        pm_by_date=pm_by_date,
         pdf_colors=pdf_colors,
         logo_data=logo_data,
         generated_date=date.today().isoformat(),
@@ -383,7 +429,10 @@ def register(app, **deps):
     Wire the module into the Flask app. `deps` must provide:
       get_db, get_current_user, login_required, can_access_show,
       module_enabled, log_audit, syslog_logger, get_venue_pdf_colors,
-      get_logo_for_venue, safe_content_disposition, show_span_dates.
+      get_logo_for_venue, safe_content_disposition, show_span_dates,
+      pdf_font_config (the shared WeasyPrint FontConfiguration getter), and
+      pm_contacts_for_show (3.35.0 — app.py's PM contact-card resolver:
+      (db, show_id, dates) → {'show_pm': card, 'days': {iso: card}}).
     Called once from app.py; everything else in this file is self-contained.
     """
     _d.update(deps, app=app)
