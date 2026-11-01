@@ -316,7 +316,7 @@
     var kind = i < 0 ? f : f.slice(0, i), ref = i < 0 ? '' : f.slice(i + 1);
     // Own keys only: ?focus=constructor / __proto__ must not find Object's.
     var spec = Object.prototype.hasOwnProperty.call(FOCUS, kind) ? FOCUS[kind] : null;
-    if (!spec ||!/^[A-Za-z0-9_.:-]{0,100}$/.test(ref)) { clearFocusParam(); return; }
+    if (!spec || !/^[A-Za-z0-9_.:-]{0,100}$/.test(ref)) { clearFocusParam(); return; }
     if (typeof activeTab !== 'undefined' && activeTab !== spec.tab && typeof switchTab === 'function') switchTab(spec.tab);
     // Lazy tabs (labor, comments, assets, files, the piano panel) render
     // asynchronously: look again every 150 ms for up to ~9 s.

@@ -400,6 +400,8 @@ async function switchTab(name) {
     saveTimer = null;
     pendingSave = saveActive();
   }
+  // A tab with no pane (stale link, module switched off) would hide them all.
+  if (!document.getElementById('tab-' + name) && document.getElementById('tab-advance')) name = 'advance';
   activeTab = name;
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));

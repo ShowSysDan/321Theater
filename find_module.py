@@ -20,7 +20,9 @@ and snapshot restores can never leave a stale index behind.
       preceded by the start of the text or a character NOT in [A-Za-z0-9_&/#]
       (so 'x#a', 'Truck #2', 'http://x/#frag', '&#39;' are not tags),
       normalized to lowercase, at most TAG_MAX_LEN characters (longer = not a
-      tag). ASCII only, so every engine agrees.
+      tag). ASCII only, so every engine agrees. _tag_exact_core is the same
+      rule for ONE known tag (the tag page + tag search test each text box
+      with one regex search instead of enumerating every tag in it).
 
 SEARCH. /search + /api/search: free text over show name / venue / Arts
 Group / PM names (optionally inside every tag source as well), PM (show PM
@@ -41,7 +43,8 @@ Routes:
   GET /tags                    every tag with its counts (filter + sort)
   GET /tags/<tag>              one tag: occurrences grouped by show, deep links
   GET /search                  the Search page
-  GET /api/tags?q=             prefix autocomplete (top 20 by count)
+  GET /api/tags?q=             prefix autocomplete (top 20 by count; &match=contains
+                               &limit=<=200 for the /tags filter)
   GET /api/shows/<id>/tags     one show's tags + counts (show header strip)
   GET /api/search              search results (JSON)
   GET /api/search/editors      users who have edited shows (Edited-by picker)
@@ -78,12 +81,36 @@ TAG_RE = re.compile(r'(?<![A-Za-z0-9_&/#])' + _TAG_CORE)
 TAG_PG_PATTERN = r'(?:^|[^A-Za-z0-9_&/#])' + _TAG_CORE
 _TAG_NAME_RE = re.compile(r'^[a-z][a-z0-9_]*(?:-[a-z0-9_]+)*$')
 
+
+def _tag_exact_core(tag):
+    """'#' + one normalized tag, each letter as [Xx], ending exactly where
+    _TAG_CORE's greedy tag body would. With the same prefix rule this matches
+    a text iff TAG_RE / TAG_PG_PATTERN finds `tag` in it — but it is ONE
+    search that stops at the first hit, instead of enumerating every tag (a
+    box holding #x 30,000 times cost ~55 ms of regexp_matches per box)."""
+    if not _TAG_NAME_RE.match(tag or ''):
+        raise ValueError('not a normalized tag')
+    return '#' + ''.join(f'[{c.upper()}{c}]' if 'a' <= c <= 'z' else c for c in tag) \
+        + r'(?![A-Za-z0-9_]|-[A-Za-z0-9_])'
+
+
+def _tag_exact_re(tag):
+    return re.compile(r'(?<![A-Za-z0-9_&/#])' + _tag_exact_core(tag))
+
+
+def _tag_exact_pg(tag):
+    """PostgreSQL ARE twin of _tag_exact_re (bind it as a parameter)."""
+    return r'(?:^|[^A-Za-z0-9_&/#])' + _tag_exact_core(tag)
+
+
 MAX_Q_LEN = 200              # search text cap
 MAX_TAGS = 5                 # tags per search (AND)
 MAX_RESULTS = 500            # hard cap on a search page
 DEFAULT_RESULTS = 200
 TAG_PAGE_CAP = 1000          # occurrences listed on one tag page (newest shows first)
 SHOW_STRIP_MAX = 40          # tags /api/shows/<id>/tags returns (the header strip; +N for the rest)
+TAGS_INDEX_MAX = 2000        # pills /tags renders (most used); its filter asks /api/tags for the rest
+TAGS_API_MAX = 200           # most tags one /api/tags call returns (default 20)
 CONTENT_HITS_PER_SHOW = 3    # snippets per show in a content search
 _CACHE_TTL = 30.0            # all-tags list, per process
 _CACHE_MAX_KEYS = 8
@@ -219,10 +246,22 @@ FOCUS_KINDS = {
 }
 
 
+_PIANO_TTL = 5.0
+_piano_memo = (0.0, None)    # (monotonic time read, value)
+
+
 def _piano_on():
     """The piano_tuning module's switch (app.py's module_enabled, injected —
-    this module never imports app.py). Off = its notes are no source."""
-    return bool(_d['module_enabled']('piano_tuning'))
+    this module never imports app.py). Off = its notes are no source.
+    Remembered for _PIANO_TTL s: module_enabled is a DB read, and the
+    all-tags cache (hit on every /api/tags keystroke) is keyed on it."""
+    global _piano_memo
+    ts, val = _piano_memo
+    now = time.monotonic()
+    if val is None or now - ts >= _PIANO_TTL:
+        val = bool(_d['module_enabled']('piano_tuning'))
+        _piano_memo = (now, val)
+    return val
 
 
 def _sources_sql(cond, cond_params=(), show_ids=None, piano=None):
@@ -330,13 +369,12 @@ def tag_occurrences(db, tag, show_ids=None, limit=TAG_PAGE_CAP):
         JOIN shows sh ON sh.id = s.show_id
         LEFT JOIN LATERAL (SELECT MIN(perf_date) AS first_perf, MAX(perf_date) AS last_perf
                            FROM show_performances WHERE show_id = sh.id) p ON TRUE
-        WHERE EXISTS (SELECT 1 FROM regexp_matches(s.body, %s, 'g') AS m
-                      WHERE lower(m[1]) = %s)
+        WHERE s.body ~ %s
         ORDER BY GREATEST(sh.load_out_date, sh.show_date, p.last_perf) DESC NULLS LAST,
                  LEAST(sh.load_in_date, sh.show_date, p.first_perf) DESC NULLS LAST,
                  s.show_id DESC, s.kind, s.ref
         LIMIT %s
-    """, params + [TAG_PG_PATTERN, tag, limit])
+    """, params + [_tag_exact_pg(tag), limit])
 
 
 def shows_with_tags(db, tags, show_ids=None):
@@ -345,12 +383,11 @@ def shows_with_tags(db, tags, show_ids=None):
         return {}
     src, params = _sources_sql("strpos({body}, '#') > 0", (), show_ids)
     rows = _d['get_db_rows'](db, f"""
-        SELECT s.show_id, array_agg(DISTINCT lower(m[1])) AS tags
-        FROM ({src}) s CROSS JOIN LATERAL regexp_matches(s.body, %s, 'g') AS m
-        WHERE lower(m[1]) = ANY(%s)
+        SELECT s.show_id, array_agg(DISTINCT t.tag) AS tags
+        FROM ({src}) s JOIN unnest(%s::text[], %s::text[]) AS t(tag, pat) ON s.body ~ t.pat
         GROUP BY s.show_id
-        HAVING COUNT(DISTINCT lower(m[1])) = %s
-    """, params + [TAG_PG_PATTERN, list(tags), len(tags)])
+        HAVING COUNT(DISTINCT t.tag) = %s
+    """, params + [list(tags), [_tag_exact_pg(t) for t in tags], len(tags)])
     return {r['show_id']: sorted(r['tags']) for r in rows}
 
 
@@ -456,6 +493,11 @@ def occ_link(show_id, kind, ref):
     return f'/shows/{int(show_id)}?tab={tab}&focus={quote(focus, safe=":")}'
 
 
+# How far past the first hit another hit can still touch _snippet's window
+# (default radius / max_len): > max_len + the 15-char word snap + a tag.
+_SNIPPET_REACH = 400
+
+
 def _snippet(body, hits, radius=80, max_len=260):
     """Snippet around the first hit as segments [[kind, text, tag]]: kind
     'text', 'tag' (a #tag → link) or 'hit' (the match; tag set when the
@@ -480,9 +522,19 @@ def _snippet(body, hits, radius=80, max_len=260):
     # #tag may sit up to a tag's length outside it), so the matching below is
     # O(window) however many tags the body holds — over the whole body it was
     # quadratic, and one huge tagged note stalled every view of its tag page.
+    # The tags are scanned from just before the window only: a tag (≤ m
+    # long, and a match never holds a '#' past its first character) ending
+    # after start - m can't start before start - 2m.
     m = TAG_MAX_LEN + 1
     hits = [(a, b) for a, b in hits if a < end + m and b > start - m]
-    tags = {(a, b): t for a, b, t in _tag_spans(body) if a < end + m and b > start - m}
+    tags = {}
+    for mt in TAG_RE.finditer(body, max(0, start - 2 * m)):
+        a, b = mt.span()
+        if a >= end + m:
+            break
+        t = mt.group(1).lower()
+        if len(t) <= TAG_MAX_LEN and b > start - m:
+            tags[(a, b)] = t
     # A text hit inside a #tag marks (and links) the whole tag.
     hits = [next(((ta, tb) for (ta, tb) in tags if ta <= a and b <= tb), (a, b))
             for a, b in hits]
@@ -537,7 +589,11 @@ def _tags_index_view():
         tags = all_tag_counts(db, _accessible_ids())
     finally:
         db.close()
-    return render_template('tags.html', tags=tags, user=_d['get_current_user']())
+    # The TAGS_INDEX_MAX most used only: one pill per distinct tag was a
+    # 10 MB page (and a frozen filter) once someone pasted tens of thousands
+    # of tags into a box. The filter searches the rest through /api/tags.
+    return render_template('tags.html', tags=tags[:TAGS_INDEX_MAX], total=len(tags),
+                           user=_d['get_current_user']())
 
 
 def _tag_view(tag):
@@ -555,13 +611,18 @@ def _tag_view(tag):
         shows = {r['id']: r for r in _show_rows(db, 's.id = ANY(%s)', [ids])} if ids else {}
     finally:
         db.close()
+    exact = _tag_exact_re(norm)
     groups = {}
     for r in occ:
         sh = shows.get(r['show_id'])
         if not sh:
             continue
         body = r['body'] or ''
-        hits = [(a, b) for a, b, t in _tag_spans(body) if t == norm]
+        hits = []
+        for mt in exact.finditer(body):
+            if hits and mt.start() > hits[0][0] + _SNIPPET_REACH:
+                break   # can't reach the snippet window around the first hit
+            hits.append(mt.span())
         groups.setdefault(r['show_id'], []).append({
             'kind': r['kind'], 'label': _occ_label(r),
             'link': occ_link(r['show_id'], r['kind'], r['ref']),
@@ -586,14 +647,21 @@ def _api_tags_view():
     raw = (request.args.get('q') or '').strip()[:TAG_MAX_LEN + 1]
     prefix = raw[1:] if raw.startswith('#') else raw
     prefix = prefix.lower()
+    # match=contains (the /tags filter): substring instead of prefix;
+    # limit: up to TAGS_API_MAX (default 20, the autocomplete's).
+    contains = request.args.get('match') == 'contains'
+    try:
+        limit = min(max(int(request.args.get('limit') or 20), 1), TAGS_API_MAX)
+    except ValueError:
+        limit = 20
     db = _d['get_db']()
     try:
         tags = all_tag_counts(db, _accessible_ids())
     finally:
         db.close()
     if prefix:
-        tags = [t for t in tags if t['tag'].startswith(prefix)]
-    return jsonify({'success': True, 'tags': tags[:20]})
+        tags = [t for t in tags if (prefix in t['tag'] if contains else t['tag'].startswith(prefix))]
+    return jsonify({'success': True, 'tags': tags[:limit], 'matched': len(tags)})
 
 
 def _api_show_tags_view(show_id):

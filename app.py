@@ -6979,6 +6979,11 @@ def new_show():
 
 # ─── Show Page (all tabs) ─────────────────────────────────────────────────────
 
+# The show page's tab panes (show.html `tab-<name>`).
+_SHOW_TABS = frozenset(('advance', 'schedule', 'staffing', 'security', 'assets',
+                        'postnotes', 'comments', 'export'))
+
+
 @app.route('/shows/<int:show_id>')
 @login_required
 def show_page(show_id):
@@ -6986,6 +6991,8 @@ def show_page(show_id):
         abort(403)
 
     tab = request.args.get('tab', 'advance')
+    if tab not in _SHOW_TABS:
+        tab = 'advance'   # unknown ?tab= would render with no pane showing
     security_signin_enabled = module_enabled('security_signin')
     if tab == 'security' and not security_signin_enabled:
         tab = 'advance'   # module switched off — its tab/pane doesn't render
