@@ -740,11 +740,12 @@ const _HELP_PAGES = {
   manage_shows: {
     title: 'Manage Shows',
     html: `
-      <p>Every show — active and archived — in one table.</p>
+      <p>Every show — active and archived — in one table (Settings → <strong>Shows</strong>; staff and admins). The header counts active and archived shows.</p>
       <ul style="${_HELP_UL}">
         <li><strong>Search</strong> (name / venue / year) and a <strong>status filter</strong> (All / Active / Archived).</li>
-        <li><strong>Archive</strong> hides a show from the home board — nothing is deleted; <strong>Restore</strong> brings it back.</li>
-        <li>Shows auto-archive a set number of days after their last date (last performance or load-out) — 3 by default. Until then they're marked <strong>PAST</strong> with the day they'll archive; admins set the number of days at the top of this page. A restored show gets the same number of days again, counted from the restore.</li>
+        <li>Each row: the show name (click to open it; <strong>TEST</strong> marks a test/demo show), venue, date(s), number of performances, status, and who created it.</li>
+        <li><strong>Archive</strong> takes a show off the <strong>Shows</strong> board — nothing is deleted; <strong>Restore</strong> brings it back. Archived shows are also listed under Shows → <strong>Archived</strong>.</li>
+        <li><strong>Auto-archive shows … days after their last date</strong> — shows archive themselves that many days after their last performance or load-out (3 by default; 0 = the day after). Until then they're marked <strong>PAST</strong> with the day they'll archive. Only admins can change the number. A restored show gets the same number of days again, counted from the restore.</li>
       </ul>
     `
   },
@@ -753,9 +754,10 @@ const _HELP_PAGES = {
     html: `
       <p>Fold an accidental duplicate into the real show (admin only).</p>
       <ul style="${_HELP_UL}">
-        <li>Pick the show to <strong>KEEP</strong> and the <strong>DUPLICATE</strong> to absorb — a live preview shows exactly what moves (labor, assets, performances, comments, attachments).</li>
-        <li>Blank advance fields on the keeper are filled from the duplicate; the labor scheduler is never changed.</li>
-        <li>Type <strong>MERGE</strong> to confirm. The duplicate is permanently deleted.</li>
+        <li>Pick the show to <strong>KEEP</strong> (it survives) and the <strong>DUPLICATE</strong> (absorbed, then deleted). Archived shows are listed too.</li>
+        <li>The preview shows <strong>what moves to the keeper</strong> — labor, post-show labor, assets, external rentals, performances, comments and files, counted for each show — and the <strong>advance fields</strong>: blank fields on the keeper are filled from the duplicate; where both have a value, the keeper's is kept.</li>
+        <li>Labor keeps its date, so a second day becomes its own day block. The Labor Scheduler is never changed.</li>
+        <li>Type <strong>MERGE</strong> and click <strong>Merge &amp; Delete Duplicate</strong>. The duplicate is permanently deleted and you land on the keeper.</li>
       </ul>
     `
   },
@@ -931,95 +933,163 @@ const _HELP_PAGES = {
   audit_log: {
     title: 'Audit Log',
     html: `
-      <p>Full history of user actions (admin only).</p>
+      <p>Every tracked change — who, when, what — newest first (admin only).</p>
       <ul style="${_HELP_UL}">
-        <li>Filter by user, show, action (e.g. FORM_SAVE), and date range; 50 entries per page.</li>
-        <li><strong>Show diff</strong> — side-by-side BEFORE / AFTER snapshots where recorded.</li>
-        <li><strong>↺ Undo</strong> on undoable rows reverses the action and records a new entry.</li>
+        <li>Filter by <strong>user</strong>, <strong>show</strong>, <strong>action</strong> (e.g. FORM_SAVE) and a date range, then <strong>Filter</strong>; <strong>Clear</strong> resets. 50 entries per page (← Prev / Next →).</li>
+        <li>Columns: time, user, action, the record it touched, show / detail, and the IP address it came from.</li>
+        <li><strong>▾ Show diff</strong> — side-by-side BEFORE / AFTER snapshots where recorded.</li>
+        <li><strong>↺ Undo</strong> (curved arrow) appears only on actions the app knows how to reverse safely, and is refused while other records still depend on that row. Each entry can be undone once; the undo is logged as a new entry and the original is tagged <em>undone</em>.</li>
+        <li><strong>God Mode</strong> (top right) — who is signed in and what they're looking at right now.</li>
       </ul>
     `
   },
   performance: {
     title: 'Performance',
     html: `
-      <p>Per-page response times and DB query timing — is anything getting slower as the data grows?</p>
+      <p>Per-page response times and database query timing — is anything getting slower as the data grows? (admin only)</p>
       <ul style="${_HELP_UL}">
-        <li><strong>History</strong>: pick a period (Today, 7 days to 3 years, or a custom range). Tiles show requests, avg response, avg DB time and DB share, with a daily DB-vs-app chart and a per-page table (click a slowest query to see its SQL).</li>
-        <li><strong>Day / hours</strong>: one day, hour by hour, for any hour window (hourly detail is kept 90 days).</li>
-        <li><strong>Live</strong>: every request as it happens, from every server, with filter, Hide polling, ≥ 250 ms, Pause and Clear. Capture runs only while this view is open and switches itself off 10 minutes after you leave.</li>
-        <li><strong>Reset stats…</strong>: clears the stats for a date range or everything, to start a clean measurement (audit-logged).</li>
-        <li>Slowest individual queries are kept for 90 days. Stats flush from memory about once a minute.</li>
+        <li><strong>History</strong>: pick a period (Today, 7 days to 3 years) or a custom range with <strong>Apply range</strong>. Tiles show requests, avg response, avg DB time and DB share, with a daily DB-vs-app chart, a <strong>By Page</strong> table (requests, avg / min / max, DB %, queries per request — click a page's slowest query to see its SQL) and the <strong>Slowest Individual Queries</strong> (100 ms or more, kept 90 days).</li>
+        <li><strong>Day / hours</strong>: one day, hour by hour, for any hour window (<strong>Show</strong>). Hourly detail is kept 90 days.</li>
+        <li><strong>Live</strong>: every request as it happens, from every server, with a filter box, <strong>Hide polling</strong>, <strong>≥ 250 ms only</strong>, <strong>Pause</strong>, <strong>Clear</strong> and a running average / p95. Capture runs only while a Live page is open and switches itself off 10 minutes after you leave; <strong>Stop capture</strong> ends it now. A dot on the Live tab means capture is on.</li>
+        <li><strong>Reset stats…</strong>: clears the stats for a date range (<strong>Reset these days</strong>) or <strong>everything</strong>, to start a clean measurement (audit-logged).</li>
+        <li>Stats flush from memory about once a minute, so the newest requests can take a minute to show up (Live excepted).</li>
       </ul>
     `
   },
   settings: {
     title: 'Settings',
     html: `
-      <p>Tabs you'll see depend on your role.</p>
+      <p>The tabs you see depend on your role. <strong>Everyone</strong> gets Users and My Account; <strong>staff and admins</strong> also get Contacts, Shows, Form Fields, Arts Groups and PDF Designer; <strong>schedulers</strong> (and staff / admins) get Job Positions and Technicians; the rest is <strong>admin only</strong>. Tabs that open their own page have their own help there. On phones the tab row wraps and wide tables scroll sideways. More detail: README → <em>Admin &amp; Settings Guide</em>.</p>
+      <p style="margin:10px 0 0"><strong>People &amp; directory</strong></p>
       <ul style="${_HELP_UL}">
-        <li><strong>Contacts</strong> — the shared directory; the ADVANCE / PROD / ALL checkboxes decide who receives which auto-emails (see the "Email Routing" popover).</li>
-        <li><strong>Users</strong> — roles are User / Staff / Admin / Read-only, plus per-user flags: Scheduler, Asset Manager, Document Viewer (with venue and doc-type limits). Admins can reset passwords, force a change, lock, or delete. The <strong>Last Active</strong> column shows when each account was last seen (hover for the exact time, last login, and whether they connected internally or via the gateway).</li>
-        <li><strong>Form Fields</strong> — Advance Fields, Schedule Fields, and Day Templates; drag to reorder sections and fields.</li>
-        <li><strong>Job Positions / Technicians</strong> — venues, categories, positions (incl. training-only), pay rate levels, roster, and per-crew billable items.</li>
-        <li><strong>Email</strong> — SMTP setup, the Advance / Production Schedule auto-emails, send-time, the Next Scheduled Send preview, and the send-error panel.</li>
-        <li><strong>System</strong> — messages (site-wide banners for chosen groups, plus <strong>Maintenance Notices</strong>: email a notice — optionally high priority — to Admins / Staff / Users / Doc Viewers, post it as a banner, then send a work-completed email), updates, branding &amp; paperwork (logos, per-venue colors — text printed on those colors picks a contrasting shade automatically, or set each venue's <strong>Banner text</strong> color yourself; WiFi defaults, PDF time format), server &amp; logs (app port, remote syslog), backups, files (upload limit + file manager with archived-file restore/purge), database &amp; file storage (S3), AI, cluster.</li>
-        <li>Links out to: Shows, PDF Designer, Audit Log, Performance, DB Snapshots, Dashboards, Prism Sync, Sidebar Editor, Merge Duplicates.</li>
-        <li><strong>My Account</strong> — change your password. (Theme is the sun/moon button in the sidebar.)</li>
+        <li><strong>Contacts</strong> — the directory behind contact dropdowns and emails: search, department filter, <strong>+ Add Contact</strong>, ✎ edit, × delete (a <strong>USER</strong> row mirrors a user account; change it under Users). Admins also see the <strong>ALL / ADVANCE / PROD / POST</strong> columns — which PDF emails each contact receives — and set them in ✎ along with a venue filter and a shows-only / events-only filter. The <strong>?</strong> by the title explains who gets which email.</li>
+        <li><strong>Users</strong> — admins add accounts (username, name, email, temporary password, role: User / Staff / Admin / Read-only). Per row: <strong>Edit</strong> (role plus extra permissions: Scheduler, Asset Manager, Piano Tuning Manager, Document Viewer with allowed venues, document types and optional Labor Overview / Show Calendar access; the <em>Other applications</em> flags do nothing in this app), <strong>Reset PW</strong>, <strong>Devices</strong> (the browsers and screen sizes they've used), <strong>Require PW Change</strong>, <strong>Lock</strong>, <strong>Delete</strong>. <strong>Last Active</strong> — hover for the exact time, last login and whether they came in internally or through the gateway. Everyone else sees the list only.</li>
+        <li><strong>Registrations</strong> — self-registered accounts waiting for approval (the tab shows how many): pick a role, then <strong>Approve</strong> or <strong>Deny</strong>; <strong>↻ Refresh</strong>.</li>
+        <li><strong>Arts Groups</strong> — touring companies and resident groups for arts-group fields: <strong>+ Add Group</strong>, <strong>Edit</strong> (primary contact, additional contacts, notes), ×. Names typed into an arts-group field on an advance are added here automatically.</li>
+        <li><strong>My Account</strong> — change your password (8+ characters, an uppercase letter and a punctuation mark). Theme is the sun button in the sidebar footer.</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>Shows, forms &amp; paperwork</strong></p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Shows</strong> — opens Manage Shows: archive / restore any show and the auto-archive days.</li>
+        <li><strong>Form Fields</strong>:
+          <ul style="${_HELP_UL}">
+            <li><strong>Advance Fields</strong> — <strong>+ Add Section</strong>, Edit / Delete sections and fields, drag <strong>⠿</strong> to reorder. Each field has a type (text, date, dropdown, yes/no, contact, arts group, file upload, notes, PDF form, piano tuning…), options, a width, an optional "show when" condition, change alerts, an AI hint, and can be left off the PDF. Changes apply to every show at once.</li>
+            <li><strong>Schedule Fields</strong> — the Venue &amp; Tech Info fields on the Production Schedule; link one to an advance field to mirror it read-only, or list it with the contacts.</li>
+            <li><strong>Day Templates</strong> — <strong>+ New Template</strong>, Edit, Delete: named timelines (start, end, description, notes) that a schedule day applies from its Tools menu.</li>
+            <li><strong>PDF Form Templates →</strong> — fillable PDFs for pdf_form fields (own page).</li>
+          </ul></li>
+        <li><strong>PDF Designer</strong> — section order, labels, font sizes and page breaks of the exported PDFs (own page).</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>Labor</strong></p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Job Positions</strong> — venues (read-only, taken from show data), skill <strong>categories</strong>, <strong>positions</strong> (venue, category, optional special rate, training-only), and <strong>Labor Day Presets</strong> (<strong>+ New Preset</strong>: positions × quantity with times and notes, applied to a labor day from its Tools menu).</li>
+        <li><strong>Technicians</strong> — <strong>pay rate levels</strong> (<em>In Estimate</em> decides which rates the pre-show estimate may use), the technician list (✎ name / rate level, <strong>Archive</strong> someone who has left, × only for a mistaken entry with no shifts; <strong>Archived technicians</strong> opens their page), and <strong>per-crew billable items</strong> (e.g. parking).</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>Email</strong> (admin)</p>
+      <ul style="${_HELP_UL}">
+        <li>Sending method (SMTP relay or direct send), server details and <strong>Send Test Email</strong>; the Advance Sheet and Production Schedule <strong>auto-emails</strong> (days before the show) and the <strong>send hour</strong>; <strong>Labor — No-Request Alerts</strong>; the subject / body <strong>message content</strong> with {variables}; the <strong>Next Scheduled Send</strong> preview.</li>
+        <li><strong>Email Send Errors</strong> — failed recipients to review: ✓ Reviewed, ↻ Resend, Mark all reviewed, Clear reviewed. <strong>Email Activity</strong> — every send, with search and filters; click a row for the message, why it failed and <strong>Resend</strong>; pick how long message content is kept.</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>System</strong> (admin) — sub-tabs</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Messages</strong> — <strong>Maintenance Notices</strong> (email a notice and post a banner to chosen groups, then <strong>✓ Work Complete</strong>) and <strong>Site-Wide Messages</strong> (banners for chosen groups, optionally on the sign-in page; the Seen / Dismissed count opens who saw it; <strong>✕ All</strong> takes one down for everyone).</li>
+        <li><strong>Updates</strong> — Auto-Detect the service, <strong>Check for Updates</strong>, then apply and restart.</li>
+        <li><strong>Branding &amp; Paperwork</strong> — WiFi defaults (printed with a QR code on schedule PDFs), the 12-hour hint on PDF times, the organization logo, and <strong>Venue Branding</strong> (Edit a venue: its logo, paperwork colors and banner text color, with a preview).</li>
+        <li><strong>Server &amp; Logs</strong> — the app port; remote syslog (host, port, facility, BSD or IETF format).</li>
+        <li><strong>Backups</strong> — hourly and daily database backups: <strong>Run Backup Now</strong>, ↓ Download.</li>
+        <li><strong>Files</strong> — the upload size limit, and a file manager for every show's files (× archive, ↩ restore, ✕ delete an archived file for good).</li>
+        <li><strong>Database</strong> — connection status and Test Connection; file storage (S3 endpoints, keys, bucket); file redundancy (keep copies in S3 and / or the database, which to read first, <strong>Copy S3 → Database</strong>, <strong>Copy Database → S3</strong>, <strong>Verify Both Copies</strong>).</li>
+        <li><strong>AI</strong> — Ollama URL and model, Test Connection, the system prompt, and how many AI sessions may run at once.</li>
+        <li><strong>Cluster</strong> — this server, the other servers found and which is leader; heartbeat settings and the force-leader override.</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>Admin tools</strong></p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Audit Log</strong>, <strong>Performance</strong>, <strong>DB Snapshots</strong>, <strong>Sidebar Editor</strong> and <strong>Merge Duplicates</strong> open their own pages.</li>
+        <li><strong>God Mode</strong> — who is on a show page right now (show, tab, last seen; <strong>Refresh</strong>), and every user's last login and last connection.</li>
+        <li><strong>Dashboards</strong> — <strong>Load</strong> lists every dashboard, public ones first: owner, public link (<strong>Copy</strong>), <strong>View</strong>, and <strong>Make Private</strong> to switch a public link off.</li>
+        <li><strong>Modules</strong> — tick to switch an optional module on or off for everyone at once (Security Sign-In Sheets, Piano Tuning, Spot Sound Levels; data is kept while off), and <strong>Open settings →</strong> for Piano Tuning, Spot Sound Levels and Prism Sync.</li>
       </ul>
     `
   },
   pdf_templates: {
     title: 'PDF Form Templates',
     html: `
-      <p>Upload a PDF and drag field boxes onto it; reference it from a <strong>pdf_form</strong> advance field so users can fill it in a popup and export the stamped PDF.</p>
+      <p>Fillable forms built on your own PDFs (admins and content admins). Reference one from a <strong>pdf_form</strong> advance field: people fill it in a popup on the show and export the stamped PDF.</p>
       <ul style="${_HELP_UL}">
-        <li>Upload (name + PDF) drops you straight into the field builder.</li>
-        <li>Re-point any advance fields before deleting a template.</li>
+        <li><strong>Upload New Template</strong> — name, PDF file and an optional description; <strong>Upload PDF</strong> drops you straight into the builder.</li>
+        <li>The list shows each template's pages, placed fields and last update, with <strong>Open builder</strong>, <strong>PDF</strong> (the original file) and <strong>×</strong> delete. Re-point any advance fields that use a template before deleting it.</li>
+        <li><strong>Builder</strong>: click-and-drag on the page to place a field; click a placed field to rename it, change its type (text, multiline, date, today, checkbox, signature), link it with <strong>Pull from advance</strong> (pre-fills each show's value) or <strong>Delete field</strong>; drag a corner to resize.</li>
+        <li><strong>Default new-field type</strong> sets the type of the next field you draw; <strong>View advance field keys</strong> lists every key you can pull from. Click the title to rename the template.</li>
+        <li>Changes auto-save after a short pause; <strong>Save</strong> saves right away.</li>
       </ul>
     `
   },
   pdf_designer: {
     title: 'PDF Designer',
     html: `
-      <p>Reorder sections, hide fields, rename labels and set font sizes <strong>per PDF export type</strong> (advance, schedule, post-show, invoices). Layouts apply globally.</p>
+      <p>Changes how the exported PDFs are laid out, <strong>per PDF type</strong>, for every show (admins and content admins).</p>
       <ul style="${_HELP_UL}">
-        <li>Pick a type tab, drag sections, expand to toggle fields; the live preview on the right renders against a recent show of your choice.</li>
-        <li><strong>Save</strong> applies for everyone; <strong>Reset to defaults</strong> is per type.</li>
+        <li><strong>Type tabs</strong> — Advance, Schedule, Postnotes, Asset Invoice, Post Show Invoice. Your last tab and preview show are remembered on this device.</li>
+        <li>Each section row: drag <strong>⠿</strong> to reorder, the checkbox shows or hides it (sections tagged <em>required</em> can't be hidden), type a new <strong>label</strong> (blank = the default), pick a <strong>font size</strong> (default or 6–12 pt), and tick <strong>page-break before</strong> to start it on a new page.</li>
+        <li><strong>▸</strong> opens a section's fields: drag to reorder, untick to hide, type to rename.</li>
+        <li><strong>Save</strong> applies the layout for everyone and refreshes the preview; <strong>Reset to defaults</strong> restores the current type (asks first; audit-logged).</li>
+        <li><strong>Preview show</strong> — the PDF on the right is the <em>saved</em> layout rendered for one of the 10 most recent shows; it refreshes when you save or pick another show.</li>
       </ul>
     `
   },
   nav_editor: {
     title: 'Sidebar Editor',
     html: `
-      <p>Controls the sidebar below Home <strong>for every user</strong>.</p>
+      <p>Arranges the sidebar <strong>for every user</strong> (admin only). <strong>Home</strong>, <strong>Shows</strong>, <strong>My Shows</strong> and <strong>Search</strong> always stay at the top (followed by the current show's tabs on a show page); everything below them is laid out here.</p>
       <ul style="${_HELP_UL}">
-        <li>Drag rows (or ↑ ↓) to reorder; add section labels; per-row Indent, Hide, and rename.</li>
-        <li><strong>Spacing</strong> — Compact / Comfortable link padding.</li>
-        <li>Hiding is cosmetic only — each item's audience is fixed in code and permissions never change here. Settings can be moved but never hidden.</li>
+        <li>Drag a row, or use <strong>↑ ↓</strong>, to reorder.</li>
+        <li>Type in a row's box to <strong>rename</strong> it (blank = the default name); <strong>Indent</strong> shows it as a sub-item of the row above; <strong>Hide</strong> takes it out of the sidebar.</li>
+        <li><strong>+ Add Section</strong> adds a section label (a group heading; ✕ removes it). A label only shows when a visible item follows it, so people who can't see any item under it never see it.</li>
+        <li><strong>Visible to</strong> on each row says who can see that item. It's fixed in code: hiding is cosmetic, never changes who can open a page, and nothing here can widen access. Settings can be moved but never hidden.</li>
+        <li><strong>Spacing</strong> — Compact or Comfortable link spacing.</li>
+        <li><strong>Save</strong> applies the layout for everyone; <strong>Reset to Default</strong> restores the built-in layout right away (asks first).</li>
       </ul>
     `
   },
   snapshots: {
     title: 'DB Snapshots',
     html: `
-      <p>Inspect hourly/daily database backups, diff them against live data, and recover pieces without a full restore.</p>
+      <p>Inspect the hourly and daily database backups kept on <strong>this server</strong>, compare them with live data, and put back rows or a whole show without a full restore (admin only).</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Tables &amp; Diff</strong> — per-table changed / removed / added rows since the snapshot; cherry-pick rows to restore.</li>
-        <li><strong>Per-Show Restore</strong> — roll one show (advance, schedule, labor, assets, comments…) back to the snapshot; deleted shows can be resurrected.</li>
-        <li>Everything is preview → confirm → one transaction, fully audit-logged. Users, sessions, sent-email history and audit logs are inspect-only by design.</li>
+        <li><strong>Snapshots on this server</strong> — hourly (last 24) and daily (last 30) backups with their age and size; <strong>Inspect</strong> opens one. Each app server keeps its own copies.</li>
+        <li><strong>Tables &amp; Diff</strong> — every table's row count in the snapshot and live; <strong>Diff</strong> lists the changed, removed and added rows. Tick rows and <strong>Preview restore of selected…</strong> to put them back.</li>
+        <li><strong>Per-Show Restore</strong> — pick a show and <strong>Preview restore…</strong> to roll it back to the snapshot (show record, advance, schedule, notes, performances, comments, attachments, labor, assets). Shows deleted since can be brought back.</li>
+        <li>Every restore is preview → <strong>Apply restore</strong>, in one transaction, audit-logged row by row. If the data changed after the preview, it refuses and asks you to preview again.</li>
+        <li>Tables marked <em>inspect-only</em> (users, sessions, sent-email history, audit log, performance stats…) can be compared but never restored.</li>
       </ul>
     `
   },
   prism: {
     title: 'Prism Sync',
     html: `
-      <p>Pulls the building schedule from Prism FM into a <strong>staging area</strong> — nothing in 321Theater changes until you import.</p>
+      <p>Pulls the building schedule from Prism FM into a <strong>staging area</strong> — nothing in 321Theater changes until you import (admin only; reached from Settings → Modules).</p>
       <ul style="${_HELP_UL}">
-        <li><strong>⟳ Sync Now</strong>, <strong>Test Connection</strong>, and <strong>Raw API Fetch</strong> (read-only debug dump).</li>
-        <li>Staged events: search, state filter (New / Imported / Ignored), <strong>Import selected</strong> (creates real shows + performances, skips duplicates), Ignore, Restore to New.</li>
-        <li>Untick a venue's <strong>Visible</strong> box to hide its events from staging (reversible).</li>
-        <li>Imported shows carry a live Hold/Confirmed tag on the home board — the only thing a sync ever changes on a real show.</li>
-        <li>The page's own <strong>"HOW THIS PAGE WORKS"</strong> panel has the full walkthrough, and Sync History keeps per-run debug logs.</li>
+        <li><strong>⟳ Sync Now</strong>, <strong>Test Connection</strong>, and <strong>Raw API Fetch</strong> (read-only debug dump of the next 7 days).</li>
+        <li><strong>Environment</strong> — live checks of the bridge scripts, Node.js, the Prism SDK, the API token and the database, plus the last successful sync and the auto-sync status.</li>
+        <li><strong>Settings</strong> — enable the module, <strong>Auto-sync daily</strong> and its hour, <strong>Auto-import new events</strong>, the API token, lookahead days, bridge timeout and which Prism statuses to pull (Hold / Confirmed / In Settlement / Settled); <strong>Save Settings</strong>.</li>
+        <li><strong>Events found in Prism</strong>: state filter (All / New / Imported / Ignored), <strong>Hide past</strong>, <strong>Show hidden venues</strong>; tick events, then <strong>Import selected → 321T</strong> (creates real shows + performances, skips duplicates), <strong>Ignore</strong> or <strong>Restore to New</strong>. <strong>{ }</strong> on a row shows its raw Prism data.</li>
+        <li><strong>Venues &amp; Stages</strong> — untick an entry's <strong>Visible</strong> box to hide its events from staging (reversible).</li>
+        <li>Imported shows carry a live Hold / Confirmed tag on their show card — the only thing a sync ever changes on a real show.</li>
+        <li>The page's own <strong>How this page works</strong> panel has the full walkthrough, and <strong>Sync History</strong> keeps per-run debug logs.</li>
+      </ul>
+    `
+  },
+  spot: {
+    title: 'Spot Sound Levels',
+    html: `
+      <p>Links Spot's dB meters to venues so each performance's sound levels — and Spot's PDF report — are pulled in after the show (admin only). This page works while the module is off; switch it on in Settings → Modules.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Test Connection</strong> checks the saved URL and key; <strong>⟳ Pull Due Now</strong> pulls every performance that's due right away (module must be on).</li>
+        <li><strong>How this works</strong> (click to expand) — how each performance's time window is worked out, when pulls happen, and where the results go.</li>
+        <li><strong>Connection &amp; Automation</strong> — Spot URL, API key (never shown; leave blank to keep the saved one, or clear it), venue timezone; switches for automatic pulls after each show, filing Spot's PDF under the show's Files, taking the end time from the production schedule and detecting the real curtain up / down; grace after the end, default show length, detection window and step, catch-up days and max attempts. <strong>Save Settings</strong>.</li>
+        <li><strong>Venue Sensors</strong> — <strong>⟳ Load sensors from Spot</strong>, tick the sensors in each venue and <strong>Save</strong> that venue. <strong>★</strong> marks the sensor used to detect curtain times.</li>
+        <li><strong>Performances</strong> — recent and upcoming performances with their window, sensors and status; <strong>Pull now</strong> / <strong>Re-pull</strong> on a row, <strong>⟳ Refresh</strong>. <strong>Recent Pulls</strong> lists the last pulls with their result.</li>
+        <li>Levels show on the show's Post Show tab and print on the Post-Show Notes PDF. Automatic pulls run only on the cluster's primary server.</li>
       </ul>
     `
   },
@@ -1168,7 +1238,7 @@ const _HELP_PAGES = {
 const _HELP_ROUTES = [
   ['/shows', 'shows'], ['/dashboard', 'shows'], ['/my-shows', 'my_shows'], ['/shows/archived', 'archived_shows'], ['/piano-tuning', 'piano_tuning'], ['/shows/new', 'new_show'],
   ['/settings/shows', 'manage_shows'], ['/settings/pdf-templates', 'pdf_templates'],
-  ['/settings/technicians/archived', 'archived_technicians'],
+  ['/settings/spot', 'spot'], ['/settings/technicians/archived', 'archived_technicians'],
   ['/settings', 'settings'],
   ['/admin/merge-shows', 'merge_shows'], ['/admin/audit', 'audit_log'],
   ['/admin/performance', 'performance'], ['/admin/navigation', 'nav_editor'],

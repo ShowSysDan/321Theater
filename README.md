@@ -200,6 +200,7 @@ Version history:
    - [Email](#email)
    - [Public Show Page](#public-show-page)
 5. [Admin & Settings Guide](#admin--settings-guide)
+   - [Settings at a Glance](#settings-at-a-glance)
    - [Asset Manager](#asset-manager)
    - [Asset Approvals](#asset-approvals)
    - [Importing from RentalWorks](#importing-from-rentalworks)
@@ -209,13 +210,18 @@ Version history:
    - [Asset DB Tools](#asset-db-tools)
    - [Reports](#reports)
    - [Pay Rate Levels & Labor Estimating](#pay-rate-levels--labor-estimating)
+   - [Job Positions & Categories](#job-positions--categories)
+   - [Labor Day Presets](#labor-day-presets)
+   - [Technicians & the Archive](#technicians--the-archive)
    - [Contacts](#contacts)
    - [Arts Groups](#arts-groups)
    - [Users & Roles](#users--roles)
+   - [Devices per User](#devices-per-user)
    - [View As (Role Preview)](#view-as-role-preview)
    - [Registration Approval](#registration-approval)
    - [Show Archiving](#show-archiving)
    - [Form Field Customisation](#form-field-customisation)
+   - [Schedule Day Templates](#schedule-day-templates)
    - [PDF Form Templates](#pdf-form-templates)
    - [Notification Bell](#notification-bell)
    - [Performance Stats](#performance-stats)
@@ -225,6 +231,7 @@ Version history:
    - [In-App Updates](#in-app-updates)
    - [Venues](#venues)
    - [WiFi Defaults](#wifi-defaults)
+   - [Paperwork Time Format](#paperwork-time-format)
    - [Organisation Logo](#organisation-logo)
    - [Venue Branding (Logos & Paperwork Colors)](#venue-branding-logos--paperwork-colors)
    - [Upload Size Limit](#upload-size-limit)
@@ -232,12 +239,20 @@ Version history:
    - [Email Activity, Send Errors & Resend](#email-activity-send-errors--resend)
    - [AI Extraction (Ollama)](#ai-extraction-ollama)
    - [AI Session Concurrency](#ai-session-concurrency)
+   - [Audit Log & Undo](#audit-log--undo)
    - [Syslog Settings](#syslog-settings)
    - [Database Backups](#database-backups)
    - [File Manager](#file-manager)
    - [God Mode](#god-mode)
    - [Feature Modules](#feature-modules)
    - [Prism FM Integration](#prism-fm-integration)
+   - [Spot Sound Levels](#spot-sound-levels)
+   - [Database & File Storage](#database--file-storage)
+   - [Public Dashboards (admin list)](#public-dashboards-admin-list)
+   - [DB Snapshots](#db-snapshots)
+   - [Merge Duplicate Shows](#merge-duplicate-shows)
+   - [Sidebar Editor (Navigation)](#sidebar-editor-navigation)
+   - [PDF Designer](#pdf-designer)
 6. [Database Configuration](#database-configuration)
    - [PostgreSQL (Dual-Schema)](#postgresql-dual-schema)
    - [Server Config (.env)](#server-config-env)
@@ -746,6 +761,54 @@ For shareable gear views, see public [Asset Availability Dashboards](#asset-avai
 
 ## Admin & Settings Guide
 
+### Settings at a Glance
+
+**Settings** is in the sidebar for everyone (an admin can move it in the
+Sidebar Editor but never hide it). Its tab bar depends on who you are: everyone gets **Users** (the account list, read-only
+unless you're an admin) and **My Account** (change your password); staff and
+admins also get **Contacts**, **Shows**, **Form Fields**, **Arts Groups** and
+**PDF Designer**; schedulers (and staff / admins) get **Job Positions** and
+**Technicians**; everything else is admin only. Some tabs are links to a page
+of their own. On the mobile site the tab row wraps and wide tables scroll
+sideways. Each page's **?** button (sidebar footer) has a short help entry;
+the Settings one has a line for every tab.
+
+| Tab | Who | What's there | Details |
+|-----|-----|--------------|---------|
+| Contacts | Staff, admins | Shared contact directory; admins set who receives which PDF emails | [Contacts](#contacts) |
+| Users | Everyone (admins edit) | Accounts, roles, extra permissions, password resets, devices, lock / delete | [Users & Roles](#users--roles), [Devices per User](#devices-per-user) |
+| Shows → | Staff, admins | Manage Shows page: archive / restore, auto-archive days | [Show Archiving](#show-archiving) |
+| Form Fields | Staff, admins | Advance Fields, Schedule Fields, Day Templates, PDF Form Templates → | [Form Field Customisation](#form-field-customisation), [Schedule Day Templates](#schedule-day-templates), [PDF Form Templates](#pdf-form-templates) |
+| Arts Groups | Staff, admins | Touring companies / resident groups and their contacts | [Arts Groups](#arts-groups) |
+| PDF Designer → | Staff, admins | Section order, labels, font sizes and page breaks of exported PDFs | [PDF Designer](#pdf-designer) |
+| Job Positions | Schedulers, staff, admins | Venues (read-only), skill categories, positions, Labor Day Presets | [Job Positions & Categories](#job-positions--categories), [Labor Day Presets](#labor-day-presets) |
+| Technicians | Schedulers, staff, admins | Pay rate levels, technician list + archive, per-crew billable items | [Technicians & the Archive](#technicians--the-archive), [Pay Rate Levels & Labor Estimating](#pay-rate-levels--labor-estimating) |
+| Registrations | Admins | Self-registered accounts waiting for approval (count on the tab) | [Registration Approval](#registration-approval) |
+| System | Admins | Sub-tabs: Messages, Updates, Branding & Paperwork, Server & Logs, Backups, Files, Database, AI, Cluster | see the rows below |
+| Email | Admins | Sending method + SMTP, auto-emails, send hour, no-labor alerts, message content, Next Scheduled Send, Email Send Errors, Email Activity | [Email Settings](#email-settings), [Email Activity, Send Errors & Resend](#email-activity-send-errors--resend) |
+| Audit Log → | Admins | Every tracked change, with diff and Undo | [Audit Log & Undo](#audit-log--undo) |
+| God Mode | Admins | Who is on a show page now; last login / connection per user | [God Mode](#god-mode) |
+| Performance → | Admins | Page and query timing: History, Day / hours, Live | [Performance Stats](#performance-stats) |
+| DB Snapshots → | Admins | Inspect backups, diff with live, restore rows or a show | [DB Snapshots](#db-snapshots) |
+| Dashboards | Admins | Every dashboard with a public link: Copy, View, Make Private | [Public Dashboards (admin list)](#public-dashboards-admin-list) |
+| Modules | Admins | Optional modules on / off, plus Open settings → for Piano Tuning, Spot Sound Levels, Prism Sync | [Feature Modules](#feature-modules) |
+| Sidebar Editor → | Admins | Order, group, rename, indent or hide sidebar items | [Sidebar Editor (Navigation)](#sidebar-editor-navigation) |
+| Merge Duplicates → | Admins | Fold a duplicate show into the real one | [Merge Duplicate Shows](#merge-duplicate-shows) |
+| My Account | Everyone | Change your password (theme = sun button in the sidebar) | — |
+
+**System sub-tabs:** **Messages** ([Site-Wide Messages](#site-wide-messages),
+[Maintenance Notices](#maintenance-notices)) · **Updates**
+([In-App Updates](#in-app-updates)) · **Branding & Paperwork**
+([WiFi Defaults](#wifi-defaults), [Paperwork Time Format](#paperwork-time-format),
+[Organisation Logo](#organisation-logo),
+[Venue Branding](#venue-branding-logos--paperwork-colors)) · **Server & Logs**
+([Syslog Settings](#syslog-settings)) · **Backups**
+([Database Backups](#database-backups)) · **Files**
+([Upload Size Limit](#upload-size-limit), [File Manager](#file-manager)) ·
+**Database** ([Database & File Storage](#database--file-storage)) · **AI**
+([AI Extraction](#ai-extraction-ollama)) · **Cluster**
+([Cluster Heartbeat & Leader Election](#cluster-heartbeat--leader-election)).
+
 ### Asset Manager
 
 **ASSETS → Asset Manager** (`/assets`) — admins, content admins and users with the **Asset Manager** flag. The catalog is a four-column finder on the **Assets** tab:
@@ -854,7 +917,7 @@ Done. Import complete.
 
 #### Notes
 
-- The script writes to the PostgreSQL database configured in `.env` inside ONE transaction: any error rolls the whole import back. (Take a `pg_dump` first if you want a restore point, or use Settings → Backups → Run Backup Now.)
+- The script writes to the PostgreSQL database configured in `.env` inside ONE transaction: any error rolls the whole import back. (Take a `pg_dump` first if you want a restore point, or use Settings → System → Backups → Run Backup Now.)
 - Run `python3 import_assets.py --dry-run` first to preview the import without modifying the database.
 - If the Asset Manager already has data, the script will abort unless you pass `--force`.
 - Re-running with `--force` will skip rows that would create duplicate category or type names — existing records are left unchanged.
@@ -933,7 +996,8 @@ Click a column heading to sort; every table exports to **CSV**. **PDF** renders 
 
 ### Pay Rate Levels & Labor Estimating
 
-Settings → Staffing manages the labor cost inputs:
+Settings → **Technicians** (pay rate levels, per-crew billable items) and
+Settings → **Job Positions** (positions) manage the labor cost inputs:
 
 - **Pay Rate Levels** — named hourly rates (e.g. L1, L2, External) assigned to technicians. Each level has an **In Estimate** checkbox: when on (the default), the level's rate is a candidate for the pre-show labor estimate. The estimate bills each unscheduled position at the **highest** rate among the checked levels (unless the position carries its own special rate). Uncheck a level to keep it in the system for testing without letting it inflate estimates — e.g. a deliberately high "Super Technician" test level. Toggling is admin-only and is recorded in the Audit Log and syslog (`PAY_LEVEL_ESTIMATE_TOGGLE`).
 - **Job Positions** — a position's optional **Rate ($/hr)** override is its *special rate*; when set it always wins over the pay-level/estimate rate for that position, both in estimates and in actual billing.
@@ -942,9 +1006,86 @@ Settings → Staffing manages the labor cost inputs:
 
 See [Labor Requests](#labor-requests) for how these feed a show's estimate, and the Export tab's **Pre-Show Estimate PDF** for the combined labor + asset quote.
 
+### Job Positions & Categories
+
+Settings → **Job Positions** (schedulers, staff and admins).
+
+- **Venues** — read-only; the list is taken from the venues on existing shows.
+- **Categories** — skill groupings (Audio, Lighting, Video…): type a name and
+  **Add**; **✎** renames, **×** deletes.
+- **Job Positions** — add a position with its **venue** (or All Venues),
+  **category**, name and an optional **rate ($/hr)** (the position's special
+  rate, see [Pay Rate Levels & Labor Estimating](#pay-rate-levels--labor-estimating)).
+  Tick **Training / class only** for a position that is tracked in the Skill
+  Tracker but never offered on labor requests or in the scheduler (shown as
+  *Training* in the TYPE column). **✎** edits a row in place, **×** deletes.
+- **Labor Day Presets** — on the same tab; see below.
+
+### Labor Day Presets
+
+Settings → Job Positions → **Labor Day Presets** (schedulers, staff and
+admins). A preset is a standing set of position calls — e.g. the crew a show
+night always needs — that a show's Labor Requests tab adds to a day with
+**Tools ▾ → Apply preset**.
+
+- **+ New Preset** (or **Edit** on a preset in the list) opens the editor: a
+  name, then one row per position with **Qty**, **In**, **Lunch 1** start/end,
+  **Lunch 2** start/end, **Out** and **Notes** (24-hour times; leave times
+  blank to fill them in on the show). **+ Add Position**, **×** removes a row,
+  **Save Preset**. **Delete** removes a preset.
+- Applying a preset appends *quantity* request lines per row to that day;
+  it never changes or removes the day's existing requests. Presets are
+  audit-logged (and undoable from the Audit Log).
+
+### Technicians & the Archive
+
+Settings → **Technicians** (schedulers, staff and admins) has three panels:
+
+- **Pay Rate Levels** — name + hourly rate, **Add Level**; ✎ edit, × delete;
+  the **In Estimate** checkbox (see
+  [Pay Rate Levels & Labor Estimating](#pay-rate-levels--labor-estimating)).
+- **Technicians** — add a technician by name with an optional rate level;
+  **✎** renames or changes the level in place.
+  - **Archive** is how someone who has left is removed: they leave this
+    list, the Skill Tracker and every scheduling picker, but every past
+    shift, report and PDF still names them (Reports list them as
+    *Name (archived)*), and their skills are kept.
+  - **×** (delete) is only for a mistaken entry: it's refused for anyone who
+    ever worked a shift.
+  - **Archived technicians (n)** opens `/settings/technicians/archived`: a
+    searchable card per archived technician with their rate level, archive
+    date, skills (and training), notes and how many shows / overhead shifts
+    they worked over which dates. **Work history** opens Reports → Labor Lines
+    filtered to them (for Reports users), **Restore** returns them to the list
+    and scheduling, and **Delete** appears only for someone with no shifts.
+    The Post-Show tab's *Worked by* picker still lists archived technicians
+    (under *Archived*) so a past show can be settled.
+- **Per-Crew Billable Items** — flat per-crew charges (e.g. parking): name +
+  cost per crew, **Add Item**; ✎ / ×. Each show opts in from its Post-Show
+  tab; a selected item bills its cost times the number of crew with actual
+  hours.
+
 ### Contacts
 
-Add, edit, delete dpc contacts. Fields: name, title, department, phone, email. Contacts appear in dropdowns on advance and schedule forms.
+Settings → **Contacts** (staff and admins). The dpc contact directory: name,
+title, department, phone, email. Contacts fill the contact dropdowns on the
+advance and schedule forms and are the recipients of the PDF emails.
+
+- **Search** and the **department** filter narrow the list; **+ Add Contact**,
+  **✎** edit and **×** delete.
+- A **USER** badge marks a contact that mirrors a user account (see
+  [Contacts ↔ Users](#contacts--users)); its name and email follow the user.
+- **Email recipients (admin only).** The **ALL / ADVANCE / PROD / POST**
+  columns show which PDF emails a contact receives: all of them (legacy
+  general recipient), Advance Sheet, Production Schedule, or Post-Show report.
+  Set them in the ✎ dialog, together with a **venue filter** (only emails for
+  shows at the ticked venues; none ticked = all venues, shown as a
+  *VENUES: n* tag) and a **show / event filter** (advance and production
+  schedule emails for shows only or events only, shown as *SHOWS ONLY* /
+  *EVENTS ONLY*). A contact needs an email address *and* a ticked column to
+  receive anything.
+- The **?** next to *Contacts Directory* opens the email-routing table: which
+  email goes to whom, and which ones go to users rather than contacts.
 
 ### Arts Groups
 
@@ -957,19 +1098,41 @@ Each group stores a primary contact (name, email, phone), free-text notes, and o
 | Role | Access |
 |------|--------|
 | `admin` | Full access: all shows, settings, user management |
-| `staff` | Like user, plus content-admin power (form fields, contacts, technicians) |
-| `user` | Access controlled by group membership |
+| `staff` | Like user, plus content-admin power (contacts, form fields, arts groups, PDF Designer, technicians, Manage Shows) and the Labor Scheduler |
+| `user` | View and edit every show (advance, schedule, labor requests, assets, notes) |
+| Read-only | Picked as a role in the dialogs; stored as `user` + the `is_readonly` flag |
 
 **Extra permission flags** (toggled per-user in the Edit User modal, independent of role):
 
 | Flag | Effect |
 |------|--------|
 | `is_readonly` | View-only; mutating endpoints respond 403 |
-| `is_scheduler` | Grants access to the Labor Scheduler page |
+| `is_scheduler` | Grants access to the Labor Scheduler page, Job Positions / Technicians settings and labor presets |
 | `is_asset_manager` | Grants access to Asset Manager, Approvals, Retired Archive, Asset DB Tools and the asset tabs of Reports |
+| `is_piano_manager` | Piano Tuning Manager: works the Piano Tuning request list (vendor, schedule, cost) |
 | `is_document_viewer` | Read-only viewer locked to `/viewer`; sees only allowed venues & doc types (optionally also the Labor Overview and a Show Calendar) |
 
-Add users via Settings → Users. Admins can reset passwords.
+**Settings → Users.** Admins add an account at the top (username, display
+name, email, a temporary password of 8+ characters with an uppercase letter
+and a punctuation mark, and a role). Each row shows the role and flag badges
+(Scheduler, Asset Mgr, Piano Mgr, Doc Viewer, the other-app flags, Locked,
+must-change-password), when the account was created, and **Last Active** —
+hover it for the exact last activity, last login, and whether the person came
+in on the internal network or through the gateway. Admin buttons per row:
+
+- **Edit** — display name, email, role, the extra permissions above, the
+  Document Viewer limits (below) and the *Other applications* flags.
+- **Reset PW** — set a new password for the person.
+- **Devices** — the browsers and screens the person has used (see
+  [Devices per User](#devices-per-user)).
+- **Require PW Change** / **Cancel PW Change** — they must pick a new password
+  at their next sign-in.
+- **Lock** / **Unlock** — a locked account can't sign in; its data is kept.
+- **Delete** — removes the account (their show comments are kept under their
+  name).
+
+You can't lock, delete or force a password change on your own account.
+Non-admins see the user list without these buttons.
 
 #### Cross-application account flags (`is_app_user` / `is_app_admin`)
 
@@ -1007,59 +1170,100 @@ A stricter variant of read-only for external stakeholders (touring crew, vendors
 
 The viewer's PDF route reuses the existing `export_advance` / `export_schedule` / `export_postnotes` builders — same documents, same content, just gated by both the user's group ACL and the viewer's venue + doc-type allow-lists.
 
+### Devices per User
+
+Settings → Users → **Devices** (admin) lists the browsers and screens a person
+has used: one row per browser per screen size, with the browser, operating
+system, device type (phone / tablet / desktop), screen and window size,
+display scale, touch, the site mode it used (mobile / desktop), locale and time
+zone, when it was last and first seen, and how many visits; hover a row for
+the full user-agent string. Each browser
+reports itself when the person opens the app, at most once every 6 hours, and
+rows are kept 180 days. It's troubleshooting information only ("it looks wrong
+on my phone"), and never changes what anyone can do.
+
 ### View As (Role Preview)
 
-Admins can preview the site from another role's perspective without logging out. The **VIEW SITE AS** control appears at the bottom of the sidebar (admin only).
+Admins can preview the site from another role's perspective without logging out. The **View site as…** dropdown sits at the bottom of the sidebar, above your name (admin only).
 
 | Preview Mode | Simulates |
 |---|---|
-| **C.Admin** | Content Admin (can edit form fields, manage messages) |
-| **User** | Standard user |
-| **R/O** | Read-only user (view-only, no edits) |
+| **Staff** | Staff / content admin (contacts, form fields, technicians, Manage Shows, Labor Scheduler) |
+| **Regular User** | Standard user |
+| **Read-only** | Read-only user (view-only, no edits) |
+| **Scheduler** | A user with the Scheduler permission |
+| **Asset Manager** | A user with the Asset Manager permission |
+| **Piano Tuning Manager** | A user with the Piano Tuning Manager permission |
 
-An amber banner appears at the top of every page while in preview mode. Click **Exit Preview** (or **RETURN TO ADMIN** in the sidebar) to restore full admin access. The real session is preserved — no actual role change occurs in the database.
+An amber banner appears at the top of every page while in preview mode (and the sidebar shows *viewing as …* under your name). Anything you change takes effect as if you had that role. Click **Exit Preview** (or **↩ RETURN TO ADMIN** in the sidebar) to restore full admin access. The real session is preserved — no actual role change occurs in the database.
 
 ### Registration Approval
 
 New users can self-register at `/register`. The flow:
 1. User fills out registration form and completes the Dino CAPTCHA (score ≥ 1 to pass)
 2. A confirmation email is sent — user must click the link to verify their address
-3. Admin sees pending requests in Settings → Registrations (with badge count)
-4. Admin selects a role and clicks **Approve** (or **Deny**)
+3. Admin sees pending requests in Settings → Registrations (with badge count): username, display name, email, when it was requested and whether the email is confirmed (**↻ Refresh** reloads the list)
+4. Admin selects a role (User / Staff / Admin) and clicks **Approve** (or **Deny**)
 5. User receives an approval email and can log in
 
 **Forgot password:** Available at `/forgot-password`. Sends a 2-hour reset link via email. Also requires CAPTCHA.
 
 ### Show Archiving
 
-Archiving hides a show from the active dashboard without deleting anything; an
-archived show can be restored at any time.
+Archiving takes a show off the **Shows** board (`/shows`) without deleting
+anything; an archived show can be restored at any time.
 
 - **Automatic** — a show archives itself a set number of days after its last
   date: the latest of its performance dates, its load-out date and its legacy
   show date. The number of days is set at the top of Settings → **Shows**
   (admin; `auto_archive_days`, default **3**, 0 = the day after the last
-  date). Until then the show stays on the dashboard marked **PAST**, with the
-  day it will archive in the badge's tooltip (and in the Shows list). Shows
-  with an undated performance, or no dates at all, never auto-archive.
-- **Manual** — Settings → **Shows** (admin/staff) lists every show with search
-  and status filters, plus per-show **Archive** / **Restore** buttons. The
-  dashboard also offers **Restore** on recently archived shows. A restored
-  show gets the same number of days again, counted from the restore
+  date). Until then the show stays on the Shows board marked **PAST**, with
+  the day it will archive in the badge's tooltip (and in the Manage Shows
+  list). Shows with an undated performance, or no dates at all, never
+  auto-archive.
+- **Manual** — Settings → **Shows** (the **Manage Shows** page, admin/staff)
+  lists every show, active and archived, with a search box (name, venue,
+  year), a status filter, a TEST badge on test/demo shows, the date(s) and
+  number of performances, who created it, and per-show **Archive** /
+  **Restore** buttons. The board's **Archived** tab (`/shows/archived`) also
+  lists archived shows with **Restore** (and, for admins, **Delete**). A
+  restored show gets the same number of days again, counted from the restore
   (`shows.restored_on`) — before 3.6.0 a restored past show was re-archived
   within a minute.
 
-There is no delete from this page — hard deletion exists only behind the
-admin-only bulk API and requires explicit confirmation.
+There is no delete on Manage Shows — deleting a show for good is admin-only
+(the Archived page's **Delete**, or the bulk API with an explicit
+confirmation).
 
 ### Form Field Customisation
 
-Settings → Form Fields (admin or content_admin).
+Settings → Form Fields (admin or content_admin). Four sub-tabs: **Advance
+Fields**, **Schedule Fields**, **Day Templates** (see
+[Schedule Day Templates](#schedule-day-templates)) and **PDF Form Templates →**
+(its own page, see [PDF Form Templates](#pdf-form-templates)).
 
-- Drag rows to reorder fields
-- Edit field label, type, conditional logic, width
-- Add fields and sections
+**Advance Fields:**
+
+- **+ Add Section**; each section has **Edit** (label, key, icon, collapsible
+  and its default open/closed state, and an optional linked asset category)
+  and **Delete**
+- Drag the **⠿** handle to reorder sections or fields
+- Each field row shows its label, key, type and condition, with **Edit** and
+  **×**
+- A field's settings: label, key, type, section, options (one per line, for
+  dropdowns), placeholder, **width hint** (full, half, third, quarter, sixth),
+  **conditional show-when**, **change alerts**, an **AI hint** for AI
+  Extract, *collapsible notes field*, **Hide from PDF exports**, and
+  type-specific extras (a yes/no can display as a button toggle, a contact
+  dropdown can be limited to one department, a file upload can be button-only)
 - Changes are immediate across all shows
+
+**Schedule Fields** are the *Venue & Tech Info* fields on every Production
+Schedule (and its PDF): **+ Add Field**, label, key, type (text or
+textarea), half / full width, an optional **link to an advance field** (the
+value is then copied from the advance and is read-only on the schedule), and
+*Render in the Show Contacts section* to list it beside the dpc contacts
+instead. Drag ⠿ to reorder.
 
 Field types: `text`, `textarea`, `date`, `time`, `number`, `yes_no`, `select`, `checkbox`, `contact_dropdown`, `arts_group_dropdown`, `file_upload`, `notes`, `pdf_form`, `piano_tuning`
 
@@ -1079,12 +1283,28 @@ Conditional: `field_key=Value` (e.g. `runner_needed=Yes`)
 
 **Change Alerts (per field)** — any non-`notes`/non-`pdf_form`/non-`piano_tuning` field can be configured to alert one or more **departments** and/or named **contacts** when its value changes. Alerts are debounced: a background job runs every 10 minutes and only sends after the value has been quiet for 5 minutes, so rapid retypes and toggle-backs don't fire duplicate emails. Recipients linked to a system user also get an in-app notification.
 
+### Schedule Day Templates
+
+Settings → Form Fields → **Day Templates** (admin or content_admin).
+Pre-built timelines (Load In Day, Concert Day…) that a Production Schedule day
+applies from its header's **Tools ▾ → Apply template** (replace or merge when
+the day already has rows).
+
+- **+ New Template** opens the editor: a name and rows of **Start**, **End**,
+  **Description** and **Notes**; **+ Add Row**, **×** removes a row, then
+  **Save Template**.
+- Each template in the list has **Edit** and **Delete**.
+- A template can also be saved straight from a show: the Production Schedule's
+  **Tools ▾ → Save day as template…** (admins and content admins).
+
 ### PDF Form Templates
 
 Settings → Form Fields → **PDF Form Templates →** (admin or content_admin).
 
-- Upload a PDF (any flat / non-fillable PDF works)
-- Drag rectangles onto the page to place fields; click an existing field to rename, change type, or resize
+- **Upload New Template** — a name, the PDF (any flat / non-fillable PDF works) and an optional description; **Upload PDF** opens the builder
+- The **Existing Templates** list shows each template's pages, placed fields and last update, with **Open builder**, **PDF** (the original file) and **×** (delete — re-point any `pdf_form` fields that use it first)
+- In the builder, click the title to rename the template; **Default new-field type** sets the type of the next field you draw
+- Drag rectangles onto the page to place fields; click an existing field to rename, change type, or resize (drag a corner), or **Delete field**
 - Field types: `text`, `multiline`, `date` (selectable), `today` (auto-fills with today's date), `checkbox`, `signature` (cursive)
 - **Pull from advance** — each PDF field can be linked to an advance form field by key. On every show, the PDF field is pre-filled with that show's current advance value. Users can still override it; their override is persisted to the submission.
 - Use the **View advance field keys** button in the builder sidebar to see every available `field_key` + label without leaving the page
@@ -1111,10 +1331,11 @@ Coalescing: an unread notification with the same kind, show and key (`field_key`
 ### Performance Stats
 
 **Settings → Performance** (`/admin/performance`, admin):
-- **History:** per-page response and DB times over 7 days to 3 years, Today, or a custom range, with a per-day trend and the slowest queries.
-- **Day / hours:** one day, hour by hour, for any hour window, from `perf_hourly_stats` (kept 90 days).
-- **Live:** every finished request from every worker on every server, a few seconds after it happens. It has filter, Hide polling, ≥ 250 ms, Pause and Clear, plus running avg/p95. Capture writes to `perf_request_log` (kept 2 days) and runs only while a Live page is open: the page renews `perf_live_until` every minute, and capture lapses 10 minutes after the last renewal.
-- **Reset stats…** deletes the stats (daily, hourly, slow queries, live log) for a date range or everything. It is audit-logged (`PERF_STATS_RESET`).
+- **History:** per-page response and DB times over 7 days to 3 years, Today, or a custom range (**Apply range**). Four tiles (requests, avg response, avg DB time per request, share of time in the DB), a per-day DB-vs-app chart, the **By Page** table (requests, avg / min / max, avg DB, DB %, queries per request and each page's slowest query — click it to see the SQL), and **Slowest Individual Queries** (every query of `perf_slow_query_ms`, default 100 ms, or more; kept 90 days, top 25 in the period).
+- **Day / hours:** one day, hour by hour, for any hour window (**Show**), from `perf_hourly_stats` (kept 90 days).
+- **Live:** every finished request from every worker on every server, a few seconds after it happens (time, method, page, path, status, total and DB time, queries). It has a filter box, **Hide polling**, **≥ 250 ms only**, **Pause** and **Clear**, plus running avg/p95. Capture writes to `perf_request_log` (kept 2 days) and runs only while a Live page is open: the page renews `perf_live_until` every minute, and capture lapses 10 minutes after the last renewal. **Stop capture** switches it off at once; a dot on the **Live** tab means capture is currently on.
+- **Reset stats…** deletes the stats (daily, hourly, slow queries, live log) for a date range (**Reset these days**) or **Reset everything**. It is audit-logged (`PERF_STATS_RESET`).
+- Each worker flushes its numbers about once a minute, so History and Day / hours lag by up to a minute.
 
 ### Contacts ↔ Users
 
@@ -1142,7 +1363,16 @@ are managed per-field in Settings → Form Fields.
 
 Settings → System → Branding & Paperwork → **WiFi Defaults**
 
-Set default WiFi SSID and password. Appears on Schedule PDFs as text and QR code.
+Set default WiFi SSID and password (**Save WiFi Settings**). Appears on Schedule PDFs as text and QR code whenever a show doesn't set its own.
+
+### Paperwork Time Format
+
+Settings → System → Branding & Paperwork → **Paperwork Time Format**
+
+Tick **Show 12-hour hint on PDFs** (and **Save**) to print a smaller 12-hour
+time after each 24-hour time on the advance, schedule, post-show notes and
+labor / invoice PDFs — e.g. `17:15 (5:15 PM)`. The app itself always works in
+24-hour time; this only changes PDF output.
 
 ### Organisation Logo
 
@@ -1192,17 +1422,34 @@ Maximum file attachment size (default 20 MB, max 500 MB).
 
 ### Email Settings
 
-Settings → Email. Configure outbound email for sending schedule PDFs to contacts.
+Settings → Email (admin). Configure outbound email for every message the app sends (PDFs to contacts, alerts, account emails).
 
 | Setting | Description |
 |---------|-------------|
-| Provider | `smtp` (relay) or `direct` (MX delivery) |
+| Sending method (Email Mode) | **SMTP Relay** or **Direct Send (MX Lookup)** — **Save Email Mode** |
 | SMTP Host / Port | Mail server address and port (default 587) |
-| SMTP User / Pass | Authentication credentials |
+| Security | **STARTTLS** (port 587) or **SSL/TLS** (port 465) |
+| Username / Password | Authentication credentials |
 | From Address | Sender address |
-| Use TLS | Enable STARTTLS (recommended) |
-| EHLO Hostname | Custom EHLO hostname for direct delivery |
-| Display Name | Friendly name shown in the From field |
+| Test send to | Where **Send Test Email** goes |
+| Display Name / EHLO Hostname | Direct Send only: the friendly From name and a custom EHLO hostname |
+
+**Save SMTP** stores the relay settings; **Send Test Email** sends a sample in
+the branded layout.
+
+**Message Content** — the subject line and body text of every PDF email, both
+the automatic sends and manual *Email PDF* sends from a show. Leave a box blank
+for the built-in default. Variables are filled in per show: `{show_name}`,
+`{show_date}`, `{venue}`, `{pm_name}`, `{type_label}` (Advance Sheet /
+Production Schedule / Post-Show Report), `{pdf_filename}`, `{sender}`,
+`{sent_datetime}`, `{sent_date}`, `{sent_time}`, `{app_name}`. **Save Message
+Content**.
+
+**Next Scheduled Send** — a preview of what the automatic PDF emails will send
+next (which shows, which PDF, when), worked out from the saved settings,
+active shows and what has already been sent. **Refresh** after saving changes.
+It uses the same planner as the real send, but it doesn't prove that SMTP
+works — use Send Test Email for that.
 
 The Email tab also hosts the automated-send schedules: **Advance Sheet** and **Production Schedule** auto-emails, the shared **send hour**, and **Labor — No-Request Alerts**. The labor alert warns schedulers (users with the Scheduler permission) about active shows that are approaching their date with **no labor requested yet**, so they can follow up. Configure an enable toggle plus up to two day-before windows (default 14 and 7 days out, the second is optional — 0 disables it). Each show alerts once per window — a single digest email to every scheduler with an address lists all the due shows (the breakdown), **and** each show also gets its own in-app notification linking to its Labor Requests — and a show that already has any labor requested is skipped. Alerts fire at the shared send hour; the same leader-gating and skip-when-PostgreSQL-is-unreachable safeguards as the PDF auto-emails apply, and each send writes a `NO_LABOR_ALERT_SENT` syslog line.
 
@@ -1223,11 +1470,11 @@ The **Send Test Email** button sends a sample in the branded layout, so you can 
 
 ### AI Extraction (Ollama)
 
-Settings → AI. Connect to a local [Ollama](https://ollama.com) instance for AI-powered data extraction from uploaded documents (PDF, DOCX, XLSX, RTF, TXT). Configure the Ollama server URL and enable/disable the feature. The AI can pre-populate advance form fields from uploaded rider documents.
+Settings → System → AI. Connect to a local [Ollama](https://ollama.com) instance for AI-powered data extraction from uploaded documents (PDF, DOCX, XLSX, RTF, TXT). Tick **Enable AI extraction**, set the **Ollama URL** and **Model**, and use **Test Connection**. The AI suggests values for advance fields that have an **AI Hint** (Settings → Form Fields) from an uploaded rider or tech spec. **System Prompt** — your own instructions sent before every extraction (blank = the default; **Reset to Default**); the field list and document text are always appended automatically.
 
 ### AI Session Concurrency
 
-Settings → AI → **Max Concurrent AI Sessions**. Limits how many AI extraction jobs can run simultaneously across all Gunicorn workers (stored in DB, shared across processes). Default: 2. The AI extract button is dynamically disabled in the UI when all slots are busy.
+Settings → System → AI → **Max Concurrent AI Sessions**. Limits how many AI extraction jobs can run simultaneously across all Gunicorn workers (stored in DB, shared across processes). Default: 2. The AI extract button is dynamically disabled in the UI when all slots are busy.
 
 ### Site-Wide Messages
 
@@ -1237,11 +1484,13 @@ Settings → System → Messages. Create banners for logged-in users.
 |-------|-------------|
 | Type | `MOTD` (message of the day), `Maintenance` (scheduled downtime notice), `Alert` (urgent) |
 | Dismissible by | `user` (anyone can dismiss) or `admin` (only admins, persists for regular users) |
+| Title / Body | The banner text; the body may contain HTML |
 | Show from / Expires at | Local wall-clock times; the banner appears / hides automatically |
+| Active | Untick to switch the banner off without deleting it |
 | Show to | Audience groups — **Admins**, **Staff**, **Users**, **Doc Viewers** (or All users). A user sees a banner only if their group is picked. Doc Viewers are their own group even though their role is usually `user`. |
 | Also show on the sign-in page | Also shows the message on the login screen, before anyone signs in (it's still a normal banner after sign-in). Only for messages shown to **All users**, since there's no group to match before sign-in. |
 
-Messages are fetched via `/api/messages` on every page load and appear as dismissible flash banners at the top of the main content area. Admins can deactivate a message for **all** users at once with the **✕ All** button.
+Messages are fetched via `/api/messages` on every page load and appear as dismissible flash banners at the top of the main content area. The list shows each message's type, title (and audience when it isn't everyone), status (Active / Scheduled / Expired / Inactive), expiry and creation date. **👁 n · ✓ n** opens the read receipts: who has seen and who has dismissed it. **✎** edits, **✕ All** deactivates the message for **all** users at once, **×** deletes it.
 
 #### Maintenance Notices
 
@@ -1255,7 +1504,7 @@ Editing a notice can re-send it as an update. When the work is done, **✓ Work 
 
 ### In-App Updates
 
-Settings → Updates. Pull the latest release from git and auto-restart the service.
+Settings → System → **Updates** (admin). Pull the latest release from git and auto-restart the service.
 
 1. Click **Auto-Detect** to identify the systemd service name (or enter it manually)
 2. Click **Check for Updates** to see pending commits and changed files
@@ -1270,7 +1519,9 @@ The update progress log is displayed live in the browser. If the service restart
 
 ### Audit Log & Undo
 
-Settings → Audit Log (admin) lists every tracked change with who, when, and a before/after snapshot. An **Undo** button appears only on entries the app knows how to reverse safely. That's an explicit, reviewed list of actions (`_UNDO_ACTIONS` in app.py, 3.3.1), not a guess from the action's name:
+Settings → **Audit Log** (`/admin/audit`, admin) lists every tracked change, newest first: time, user, action, the record it touched, show / detail and the client IP. Filter by **user**, **show**, **action** (e.g. `FORM_SAVE`) and a **from / to date** (**Filter**, **Clear**); 50 entries per page with **← Prev / Next →**. The **▾** button on an entry shows its BEFORE / AFTER snapshot side by side, and **God Mode** (top right) jumps to who is signed in right now.
+
+An **Undo** button (curved arrow) appears only on entries the app knows how to reverse safely. That's an explicit, reviewed list of actions (`_UNDO_ACTIONS` in app.py, 3.3.1), not a guess from the action's name:
 
 - **Added** entries (contacts, form fields/sections, schedule templates, labor presets, arts groups and their contacts, position categories, job positions, labor requests, pay levels, crew members, warehouse locations, asset categories and types, external rentals, site messages, overhead projects/groups/requests/templates): Undo deletes the row, **but is refused while anything still points at it** (e.g. an asset category that now holds asset types, or a job position used on a labor request), because the delete would take those records with it or blank them.
 - **Edited** entries (contacts, form fields/sections, arts groups and contacts, position categories, job positions, pay levels, crew members, warehouse locations, asset categories): Undo puts back the recorded "before" values.
@@ -1280,7 +1531,9 @@ Each entry can be undone once, and the undo is itself logged (`ACTION_UNDONE`). 
 
 ### Syslog Settings
 
-Settings → System → Server & Logs. Send audit events to a remote syslog server via UDP.
+Settings → System → Server & Logs. Send audit events to a remote syslog server via UDP: tick **Enable Syslog**, set the **host**, **UDP port**, **facility** (LOG_LOCAL0–7, LOG_USER, LOG_DAEMON) and **Message Format**, then **Save Syslog Settings**. The panel also lists the events that are logged.
+
+The same sub-tab's **Server Settings** holds the **App Port** stored in the database (**Save Port**); restart the service after changing it (for the systemd service, re-run `sudo ./install.sh` to apply a new port).
 
 Every line carries a standard syslog header with the app name **321Theater** and the sending server's hostname, so the syslog server files it under that app. **Message Format** picks the header: **BSD (RFC 3164)** by default, or **IETF (RFC 5424)** if your syslog server prefers it (switch if the app name shows up blank). Saved changes reach every worker on every server within a minute; no restart needed.
 
@@ -1288,7 +1541,7 @@ Events: LOGIN/LOGOUT · SHOW_CREATE/ARCHIVE/DELETE/RESTORE · FORM_SAVE · PDF_E
 
 ### Database Backups
 
-Settings → Backups. Automatic hourly (keeps 24) and daily at midnight (keeps 30) `pg_dump` backups (compressed `.sql.gz`) in `backups/` on each app server. Click **Run Backup Now** for an immediate backup, or **↓ Download** to save one. Settings → DB Snapshots can inspect, diff, and surgically restore rows or whole shows from any of them.
+Settings → System → Backups (admin). Automatic hourly (keeps 24) and daily at midnight (keeps 30) `pg_dump` backups (compressed `.sql.gz`) in `backups/` on each app server. The panel lists the 10 newest hourly and daily backups on the server you're connected to. Click **Run Backup Now** for an immediate backup, or **↓ Download** to save one. Settings → DB Snapshots can inspect, diff, and surgically restore rows or whole shows from any of them.
 
 **Full restore** (replaces everything, so stop the app first):
 ```bash
@@ -1300,18 +1553,30 @@ sudo systemctl start 321theater
 
 ### File Manager
 
-Settings → Files (admin only). View and delete all file attachments across all shows.
+Settings → System → Files (admin only). Every file attached to any show,
+with its show, type, name, size, where it's stored (S3 / database), who
+uploaded it and when, and the total size at the top. Deleting a file never
+destroys it straight away:
+
+- **×** archives a live file: it disappears from the show page but stays here,
+  tagged **ARCHIVED** (database copies are compressed; an S3 copy is kept).
+  Any editor can also archive a file from the show itself.
+- **↩** restores an archived file to its show.
+- **✕** permanently deletes an archived file (its bytes in the database and
+  S3). Only archived files can be purged, so a live file can never be
+  destroyed by accident. Archived files sort first, as the first candidates
+  when freeing space.
 
 ### God Mode
 
-Settings → God Mode (admin only).
+Settings → God Mode (admin only; also linked from the top of the Audit Log).
 
-- **Active Sessions** — users on a show page in the last 5 minutes (user, show, tab, last seen)
-- **User Last Login** — last login timestamp per user
+- **Active Sessions** — users on a show page in the last 5 minutes (user, show, tab, last seen); **Refresh** reloads it.
+- **User Last Login** — per user: role, last login, and the last connection (internal network or the gateway, with the IP and time)
 
 ### Feature Modules
 
-Settings → System → **Modules** (admin only).
+Settings → **Modules** (admin only; a top-level Settings tab since 3.30.0).
 
 The on/off switchboard for the app's optional, self-contained feature modules.
 Ticking a module's checkbox saves immediately — **no restart needed**, and the
@@ -1333,6 +1598,14 @@ Current modules:
 |--------|---------|---------------|
 | Security Sign-In Sheets | On | The per-show personnel list + sign-in sheet PDF ([user guide](#security-sign-in-sheet)) |
 | Piano Tuning | On | Tuning requests, the manager's list, schedule rows and tuning charges ([user guide](#piano-tuning)) |
+| Spot Sound Levels | Off | Pulling each performance's dB levels and Spot's PDF report into the show ([Spot Sound Levels](#spot-sound-levels)) |
+
+Modules with a page of their own have an **Open settings →** button on their
+row: Piano Tuning (the Piano Tuning list) and Spot Sound Levels
+(`/settings/spot`). **Prism Sync** is listed under them as an *integration*:
+it has no checkbox here (it's switched on and off on its own page) but the
+same **Open settings →** link to `/prism`. Those pages link back with
+**← Modules**.
 
 This panel is the first step of gradually pulling app features out into
 sandboxed modules (each lives in its own Python file, wired into `app.py` by a
@@ -1341,7 +1614,7 @@ appear here as that work continues.
 
 ### Prism FM Integration
 
-Settings → Prism Sync (admin only). Pulls the building schedule from **Prism**
+Settings → Modules → Prism Sync → **Open settings →** (`/prism`, admin only). Pulls the building schedule from **Prism**
 (the venue's primary scheduling system) into a staging area, from which
 selected events can be imported as normal 321T shows. The module is
 **sandboxed**: syncing only writes to its own staging tables — nothing in
@@ -1351,6 +1624,13 @@ selected events can be imported as normal 321T shows. The module is
 token) is documented in [`prism_bridge/README.md`](prism_bridge/README.md),
 including the troubleshooting workaround for the SDK 1.1.2 `genres` query
 error. The page's Environment panel verifies every prerequisite live.
+
+**Settings panel** (on the page): *Enable Prism module*, *Auto-sync daily* +
+**Sync hour**, *Auto-import new events*, the **API token**, **Lookahead
+(days)**, **Bridge timeout (s)**, which event statuses to pull, and an
+advanced bridge-directory override (blank = the app's `prism_bridge/`).
+**Save Settings**. The events list has a state filter (All / New / Imported /
+Ignored), **Hide past** and **Show hidden venues**.
 
 **Syncing.** *Sync Now*, or a daily leader-gated auto-sync at a configurable
 hour, fetches every event from today out to the configured lookahead (default
@@ -1370,8 +1650,9 @@ skipped. *Ignore* dismisses; *Restore to New* un-dismisses (it only flips the
 staging state — it never touches shows).
 
 **Prism status tag.** Imported shows carry their Prism event status
-(`HOLD` / `CONFIRMED` / `IN SETTLEMENT` / `SETTLED`) as a colored tag on the
-homepage show cards (`shows.prism_status`). The sync keeps it current — when
+(`HOLD` / `CONFIRMED` / `IN SETTLEMENT` / `SETTLED`) as a colored tag on
+their show cards on the Shows board and in their lane header on the Home day
+timeline (`shows.prism_status`). The sync keeps it current — when
 a hold is confirmed in Prism, the next sync updates the tag automatically.
 This is the only field the sync ever writes to a real show.
 
@@ -1398,6 +1679,177 @@ live venues fetch; *Raw API Fetch* shows the exact request and raw response
 for the next 7 days; the `{ }` button on any staged row shows its raw Prism
 payload; and an expandable *How this page works* panel on the page itself
 documents all of the above for operators.
+
+### Spot Sound Levels
+
+Settings → Modules → Spot Sound Levels → **Open settings →**
+(`/settings/spot`, admin only). An optional module (off by default) that links
+Spot's dB meters (sound-level monitors, read over Spot's HTTP API) to venues and, after
+every performance, pulls that performance's sound levels and Spot's PDF report
+into the show. The settings page works while the module is off, so you can set
+it up first; the header shows **MODULE OFF** until it's switched on in
+Settings → Modules.
+
+- **Test Connection** checks the saved URL and API key; **⟳ Pull Due Now**
+  pulls every performance that's due right away (only while the module is on).
+- **How this works** (expandable) explains the rules below.
+- **Connection & Automation** — **Spot URL** (with or without `/api/v1`; use
+  `https://` off the trusted network), **API key** (write-only: blank keeps
+  the saved key, and there's a *Clear stored key* option), **Venue timezone**,
+  and switches for *Pull automatically after each show*, *File Spot's PDF
+  under the show's Files*, *End time from the production schedule* and
+  *Detect actual curtain up/down*; plus **Grace after end**, **Default show
+  length**, **Detection window (±)**, **Detection min step (dB)**, **Catch up
+  (days back)** and **Max attempts**. **Save Settings**.
+- **Venue Sensors** — **⟳ Load sensors from Spot**, then tick the sensors
+  that belong to each venue and **Save** that venue. Venues are matched to the
+  show's venue ignoring case and extra spaces. **★** picks the sensor whose
+  levels decide the curtain times (blank = Spot's first dB sensor).
+- **Performances** — recent and upcoming performances with their time window,
+  linked sensors and status (e.g. *Not set up* when the venue has no sensors);
+  **Pull now** / **Re-pull** per row, **⟳ Refresh**. **Recent Pulls** lists
+  the last pulls with status, attempts, who ran them and details.
+
+**Window.** A performance starts at its date + time from the advance. It ends
+at the end time of the production-schedule row that starts at the performance
+time (e.g. 19:30–22:15 Show), or else after the default show length. With
+curtain detection on, Spot looks for the real curtain up/down within the
+detection window and reports on those.
+
+**When.** Every 5 minutes the cluster's primary server (never more than one
+server; never a test server) pulls every performance that ended more than the
+grace period ago (plus the detection window when detection is on). A pulled
+performance isn't pulled again unless its times or sensors change; failures
+retry with back-off up to the attempt limit. Test/demo shows are skipped.
+
+**Where it lands.** The numbers (Leq, Max, L10/L50/L90, Avg per sensor) show
+on the show's Post Show tab and print on the Post-Show Notes PDF; Spot's PDF
+is filed under the show's Files (a re-pull archives the earlier report).
+
+### Database & File Storage
+
+Settings → System → **Database** (admin only), three panels:
+
+- **Database Status** — the backend (PostgreSQL), host / database, the app
+  and shared schema names, a *TEST INSTANCE* note on a test server, which
+  `.env` file to edit to change credentials, the CLI helpers
+  (`python3 app_config.py`, `python3 init_db.py`), and **Test Connection**.
+  Connection settings live only in `.env` (see
+  [Server Config (.env)](#server-config-env)).
+- **File Storage (SeaweedFS / S3)** — where show uploads, PDF exports and
+  asset photos are stored. **Config source**: the server's `.env` (`S3_*`
+  keys; the default) or *These settings* (saved in the database, with several
+  S3 gateway **endpoints** tried in order — **+ Add endpoint** — and automatic
+  failover), plus **Access key**, **Secret key** (write-only: blank keeps the
+  saved one) and **Bucket**. *Active right now* shows what's in effect;
+  **Save**; **Test Connection** tests every endpoint separately, so a dead
+  gateway shows even while another covers for it.
+- **File Redundancy (S3 ⇄ Database)** — *Save new files to both S3 and the
+  database* (dual-write), **Read files from** S3 first or the database first
+  (the other copy is the automatic fallback), **Save**; a table of each file
+  type (show attachments, exported PDF versions, asset type photos, external
+  rental PDFs, PDF form templates) with how many live in S3 only, the
+  database only, or both, and the database size. Tick the types to include,
+  then **Copy S3 → Database**, **Copy Database → S3** or **Verify Both
+  Copies**: these run in the background on the server (you can leave the
+  page), only ever copy (never move or delete), skip files already copied,
+  check every copy by SHA-256, and are listed with their progress and errors
+  below. One run at a time across all servers.
+
+See [Where stored data lives](#where-stored-data-lives) for what is kept where
+and the steps for moving every file into PostgreSQL.
+
+### Public Dashboards (admin list)
+
+Settings → **Dashboards** (admin only). **Load** lists every dashboard,
+public ones first: name, owner, its public link with **Copy** (public
+dashboards only), layout, **View** (opens it), and **Make Private** for a
+public one — which switches its public link off at once. Dashboards themselves
+are built from **Dashboards** in the sidebar.
+
+### DB Snapshots
+
+Settings → **DB Snapshots** (`/admin/snapshots`, admin only). Inspect the
+hourly and daily backups (see [Database Backups](#database-backups)) kept on
+*the server you're connected to*, compare them with live data, and put back
+individual rows or a whole show without a full restore. A snapshot is read
+by the app itself; it is never loaded into PostgreSQL.
+
+- **Snapshots on this server** — every backup (hourly = last 24, daily =
+  last 30) with when it was taken, its age, kind and size; **Inspect** opens
+  one.
+- **Tables & Diff** — every table with its row count in the snapshot and
+  live. **Diff** lists the changed, removed and added rows (matched by primary
+  key); tick rows and **Preview restore of selected…**; **← All tables** goes
+  back.
+- **Per-Show Restore** — pick a show and **Preview restore…** to roll it back
+  to how it was in the snapshot: show record, advance fields, schedule, notes,
+  performances, comments, attachments, labor and assets. Shows deleted since
+  can be resurrected.
+- **Preview → Apply restore.** The preview lists every row change by table;
+  **Apply restore** runs it in one transaction, audit-logs every row with its
+  before-image, and refuses (asks you to preview again) if the data changed
+  after the preview.
+- Tables marked **inspect-only** — users, sessions, tokens, audit log,
+  sent-email history, performance stats, cluster state — can be compared but
+  never restored: restoring sent-email history would re-send advance emails,
+  and the user table is shared with other apps.
+
+### Merge Duplicate Shows
+
+Settings → **Merge Duplicates** (`/admin/merge-shows`, admin only). Folds an
+accidental duplicate into the real show.
+
+1. Pick **Keep this show (survives)** and **Duplicate (absorbed & deleted)**
+   (archived shows are listed too).
+2. The preview shows **what moves to the keeper** — labor requests,
+   post-show labor, assets, external rentals, performances, comments and
+   files, counted for each show — and the **advance fields**: blank fields on
+   the keeper are filled from the duplicate, and where both have a value the
+   keeper's is kept.
+3. Type **MERGE** and click **Merge & Delete Duplicate**. Everything moves,
+   the duplicate is deleted, and you land on the keeper.
+
+Labor keeps its date, so a second day becomes its own day block. The Labor
+Scheduler is never changed.
+
+### Sidebar Editor (Navigation)
+
+Settings → **Sidebar Editor** (`/admin/navigation`, admin only) arranges the
+sidebar for **every** user. **Home**, **Shows**, **My Shows** and **Search**
+are fixed at the top (with the current show's tabs below them on a show
+page); everything after them is laid out here.
+
+- Drag a row, or use **↑ ↓**, to reorder.
+- Each item row has a name box (blank = the default name), **Indent** (shows
+  it as a sub-item of the row above) and **Hide**.
+- **+ Add Section** adds a section label (a group heading; **✕** removes it).
+  A label is skipped for anyone who can't see any item under it.
+- Each row's **Visible to** text says who can see that item. That's fixed in
+  code: hiding is cosmetic, never changes who can open a page, and nothing
+  here can widen access. **Settings** can be moved but never hidden.
+- **Spacing** — Compact or Comfortable link spacing.
+- **Save** applies the layout for everyone; **Reset to Default** restores the
+  built-in layout straight away (after a confirmation).
+
+### PDF Designer
+
+Settings → **PDF Designer** (`/admin/pdf-designer`, admins and content
+admins). Changes the layout of the exported PDFs **per PDF type**, for every
+show: **Advance**, **Schedule**, **Postnotes**, **Asset Invoice** and **Post
+Show Invoice**.
+
+- Each **section** row: drag **⠿** to reorder, the checkbox shows or hides it
+  (sections tagged *required* can't be hidden), a **label** box (blank = the
+  default heading), a **font size** (default or 6–12 pt) and **page-break
+  before**.
+- **▸** opens a section's **fields**: drag to reorder, untick to hide, type to
+  rename.
+- **Save** stores the layout for everyone; **Reset to defaults** puts the
+  current type back (after a confirmation; audit-logged).
+- **Preview show** picks one of the 10 most recent shows; the PDF on the right
+  is the *saved* layout rendered for it and refreshes after each Save. The
+  last type and show you used are remembered on this device.
 
 ---
 
