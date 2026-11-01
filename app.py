@@ -6435,7 +6435,9 @@ def _render_show_board(mine=False):
         today_shows.sort(key=lambda t: (_tag_order.get(t['tags'][0], 9), (t['name'] or '').lower()))
 
     db.close()
-    restricted = session.get('is_restricted', False)
+    # `restricted` = view only: hides New Show, which new_show() refuses for
+    # read-only accounts (is_restricted itself is always False now).
+    restricted = bool(session.get('is_restricted') or session.get('is_readonly'))
 
     # Group active shows by venue for column layout
     _venue_map = {}
@@ -6912,7 +6914,11 @@ def archived_shows_page():
                     key=lambda v: (v == 'Unassigned', v.lower()))
     return render_template('archived_shows.html', shows=shows, venues=venues,
                            active_count=active_count,
-                           restricted=session.get('is_restricted', False),
+                           # Restore = the roles restore_show() accepts:
+                           # admin, or staff that isn't read-only.
+                           can_restore=(session.get('user_role') == 'admin'
+                                        or (session.get('user_role') == 'staff'
+                                            and not session.get('is_readonly'))),
                            user=get_current_user())
 
 
@@ -7093,7 +7099,11 @@ def show_page(show_id):
     db.close()
 
     form_sections = get_form_fields_for_template()
-    restricted = session.get('is_restricted', False)
+    # `restricted` (Jinja) / RESTRICTED (JS) = view only: every use hides or
+    # disables an editing control whose save route refuses read-only
+    # accounts. is_restricted itself is always False now, so it must carry
+    # is_readonly or read-only users get controls that only 403.
+    restricted = bool(session.get('is_restricted') or session.get('is_readonly'))
     can_edit_advance = (
         not session.get('is_readonly')
         and not restricted

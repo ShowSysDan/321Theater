@@ -189,7 +189,7 @@
   <p>You're not the production manager or a covering PM on any active show.<br>
     <span class="text-dim" style="font-size:13px">Shows match on the PM contact linked to your account. <a href="{{ url_for('dashboard') }}">All shows →</a></span></p>
   {% else %}
-  <p>No active shows. <a href="{{ url_for('new_show') }}">Create one →</a></p>
+  <p>No active shows.{% if not restricted %} <a href="{{ url_for('new_show') }}">Create one →</a>{% endif %}</p>
   {% endif %}
 </div>
 {% endif %}

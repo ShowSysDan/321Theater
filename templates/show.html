@@ -290,7 +290,8 @@
       <span class="show-mode-label">{{ 'Event Mode' if (show.show_mode == 'event') else 'Show Mode' }}</span>
     </button>
     {% endif %}
-    {% if session.get('user_role') in ('admin','staff') or session.get('is_content_admin') %}
+    {# Roles toggle_show_test_mode() accepts: admin, or staff not read-only. #}
+    {% if session.get('user_role') == 'admin' or (session.get('user_role') == 'staff' and not session.get('is_readonly')) %}
     <button type="button" class="btn btn-ghost btn-sm" id="test-mode-btn"
             data-is-test="{{ '1' if show.is_test else '0' }}"
             title="Flag as test / demo so reports can exclude this show"
@@ -3366,10 +3367,12 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       <div class="ml-auto" style="display:flex;gap:6px">
         <a href="/shows/{{ show.id }}/post-show-invoice.pdf" target="_blank" class="btn btn-sm btn-ghost" title="Final invoice: internal & external assets + actual labor + costs">Final Invoice PDF</a>
         <a href="{{ url_for('export_postnotes', show_id=show.id) }}" class="btn btn-sm btn-ghost" target="_blank">Export PDF</a>
+        {% if not restricted %}{# email_pdf() refuses read-only accounts #}
         <button class="btn btn-sm btn-ghost" type="button" title="Generate post-show report and email to recipients"
                 onclick="emailPdf({{ show.id }}, 'postnotes', this)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="14" height="14" style="margin-right:4px;vertical-align:middle"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>Email
         </button>
+        {% endif %}
       </div>
     </div>
     <div class="form-section-body">
@@ -3646,9 +3649,12 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       <div class="export-card-foot">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a href="{{ url_for('export_advance', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Export → v{{ (show.advance_version or 0) + 1 }}</a>
+          {# Email: email_pdf() refuses read-only accounts (mails the list). #}
+          {% if not restricted %}
           <button class="btn btn-ghost btn-sm" title="Email to report recipients" onclick="emailPdf({{ show.id }}, 'advance', this)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="14" height="14" style="margin-right:3px;vertical-align:middle"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>Email
           </button>
+          {% endif %}
         </div>
         {% if show.advance_version > 0 %}<span class="version-badge">Current: v{{ show.advance_version }}</span>{% endif %}
       </div>
@@ -3666,9 +3672,11 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       <div class="export-card-foot">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a href="{{ url_for('export_schedule', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Export → v{{ (show.schedule_version or 0) + 1 }}</a>
+          {% if not restricted %}
           <button class="btn btn-ghost btn-sm" title="Email to report recipients" onclick="emailPdf({{ show.id }}, 'schedule', this)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="14" height="14" style="margin-right:3px;vertical-align:middle"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>Email
           </button>
+          {% endif %}
         </div>
         {% if show.schedule_version > 0 %}<span class="version-badge">Current: v{{ show.schedule_version }}</span>{% endif %}
       </div>
@@ -3687,9 +3695,11 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       <div class="export-card-foot">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a href="{{ url_for('export_postnotes', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Export → v{{ _postnotes_v + 1 }}</a>
+          {% if not restricted %}
           <button class="btn btn-ghost btn-sm" type="button" title="Email to post-show report recipients" onclick="emailPdf({{ show.id }}, 'postnotes', this)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="14" height="14" style="margin-right:3px;vertical-align:middle"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>Email
           </button>
+          {% endif %}
         </div>
         {% if _postnotes_v > 0 %}<span class="version-badge">Current: v{{ _postnotes_v }}</span>{% endif %}
       </div>
@@ -3795,6 +3805,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       {% endif %}
     </div>
     <div class="form-section-body">
+      {% if not restricted %}
       <div id="upload-zone" class="upload-zone"
            ondrop="handleFileDrop(event)" ondragover="handleFileDragOver(event)" ondragleave="handleFileDragLeave(event)">
         <span class="upload-zone-hint">Drop a file here to attach it to this show</span>
@@ -3805,6 +3816,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
           <span id="upload-progress-label" style="font-size:11px;color:var(--text-muted);margin-top:4px;display:block;text-align:center">0%</span>
         </div>
       </div>
+      {% endif %}
       <div id="attachments-list">
         <p class="text-dim" style="font-size:12px;margin:0">Loading...</p>
       </div>
@@ -6603,7 +6615,7 @@ async function emailPdf(showId, pdfType, btn) {
     if (typeof saveActive === 'function') saveActive();
     else if (typeof saveAdvance === 'function') saveAdvance();
   });
-  nav.appendChild(saveBtn);
+  if (!RESTRICTED) nav.appendChild(saveBtn);   // view only: nothing to save
 
   function setActive(activeBtn) {
     nav.querySelectorAll('.form-side-nav-link').forEach(b => {
