@@ -747,50 +747,86 @@ const _HELP_PAGES = {
   labor_overview: {
     title: 'Labor Overview',
     html: `
-      <p><strong>Read-only</strong> week-at-a-glance of all scheduled labor — show crews and overhead/project crews together. Weeks always start Monday.</p>
+      <p><strong>Read-only</strong> look at seven days of scheduled labor — show crews and overhead/project crews together, one card per day.</p>
       <ul style="${_HELP_UL}">
-        <li>Navigate with ← Prev Week / Today / Next Week →, or jump to any date.</li>
-        <li>Each day card lists Show or Project, Role, Call, both meal windows, Wrap, Tech and PM.</li>
-        <li>Overhead rows carry an <strong>OH</strong> badge; training shifts a blue <strong>Training</strong> badge; a <strong>day</strong> badge next to a PM means a covering PM for that date only.</li>
-        <li>Group and per-day notes appear as highlighted rows above the crew lines.</li>
+        <li><strong>Opens on today</strong> and shows the next 7 days (it starts on yesterday instead while a shift from yesterday is still running past midnight). The day marked <strong>TODAY</strong> has an orange outline.</li>
+        <li><strong>← Prev Week / Next Week →</strong> step 7 days; <strong>Today</strong> goes back to the start. <strong>Jump to</strong> + <strong>Go</strong> shows the Monday–Sunday week holding the date you pick.</li>
+        <li>Each day lists Show or Project, Venue / Client, Role, Call, Meal 1 and Meal 2 start/end, Wrap, Tech Name (<em>unassigned</em> when nobody is scheduled) and PM / Contact. Days with nothing say <em>No labor scheduled</em>.</li>
+        <li>Click a show name to open its Labor Requests tab; click a project name to open Overhead &amp; Project Crew.</li>
+        <li>Overhead rows carry an <strong>OH</strong> badge; training shifts a blue <strong>Training</strong> badge; a <strong>day</strong> badge next to a PM means a covering PM (Day PM) for that date only.</li>
+        <li>The show's labor notes and that day's notes appear as highlighted rows above its crew lines.</li>
+        <li>Document viewers see this page only when their account allows it; for them the names aren't links.</li>
       </ul>
     `
   },
   labor_scheduler: {
     title: 'Labor Scheduler',
     html: `
-      <p>Assign technicians to every requested shift (schedulers, staff and admins).</p>
+      <p>Assign technicians to every requested shift (schedulers, staff and admins). Every labor line in the date range, grouped by show, then by day.</p>
       <ul style="${_HELP_UL}">
-        <li>Load a <strong>From / To</strong> range, or jump Prev / This / Next week (Mon–Sun).</li>
-        <li>Per line: <strong>SCHED ✓</strong> (counts as staffed), <strong>IN TRAINING</strong>, Position, In, Lunch, Out and the <strong>Tech</strong> picker. Rows save individually; <strong>Save All</strong> is in the header.</li>
-        <li><strong>+ Add show</strong> — quick-create a show so you can schedule before the PM builds the advance.</li>
-        <li><strong>"Add labor to existing show…"</strong> pulls in a show with no lines yet; <strong>Shows without labor</strong> lists everything still empty.</li>
-        <li>Overhead/project groups (▦) are scheduled here too, with their own date column.</li>
+        <li>Pick a <strong>From / To</strong> range and press <strong>Load</strong>, or jump <strong>← Prev Week / This Week / Next Week →</strong> (Mon–Sun).</li>
+        <li>Per line: <strong>SCHED ✓</strong> (confirmed — counts as staffed), <strong>IN TRAINING</strong> (an extra person shadowing; doesn't replace the staffed tech), Position, In, Lunch 1 and Lunch 2 (start <strong>S</strong> over end <strong>E</strong>), Out, and <strong>TECH</strong>: the PM's requested name (<strong>REQ</strong>, read-only) over the <strong>SCHED</strong> picker. The picker lists <em>Qualified</em> techs for the position first, then <em>Others</em>. <strong>×</strong> removes the line.</li>
+        <li>Every change saves on its own as you make it; <strong>Save All</strong> (header) re-saves every row on the page.</li>
+        <li>Show header: PM tag, <strong>Open show →</strong>, <strong>+ Add Day</strong> and the <strong>Show labor notes</strong> box (shared with the show page and the Labor Overview).</li>
+        <li>Day header: its date (change it to move every line in the day), <strong>Day PM</strong> (a covering PM for that date; blank = the show's PM), <strong>day notes</strong> and <strong>+ Add Line</strong>.</li>
+        <li><strong>+ Add show</strong> — quick-create a show (name, PM, date, time, venue) so you can schedule before the PM builds the advance. <strong>+ Add labor to existing show…</strong> pulls in a show in the range with no lines yet.</li>
+        <li><strong>Shows without labor</strong> (header) lists every active show that has no labor requested yet.</li>
+        <li>Overhead/project groups (<strong>OH / PROJECT</strong>) are scheduled here too, with their own date column, project notes and + Add Line.</li>
+        <li>On a phone the grid scrolls sideways.</li>
+      </ul>
+    `
+  },
+  labor_no_labor: {
+    title: 'Shows Without Labor',
+    html: `
+      <p>Every active show that has no labor requested yet — the same list the scheduled no-labor alert email watches. The count at the top says how many need labor (or <em>All caught up</em>).</p>
+      <ul style="${_HELP_UL}">
+        <li>Each row: show, date, how far away it is (Today, Tomorrow, in N days, N days ago, No date), venue, PM, and <strong>Add labor ↗</strong>, which opens that show's Labor Requests tab in a new tab.</li>
+        <li>Upcoming and undated shows are listed by default; <strong>Include past shows</strong> / <strong>Hide past shows</strong> switches.</li>
+        <li>The venue picker shows one venue; with <em>All venues</em>, tick venues under <strong>Hide</strong> to leave them out.</li>
+        <li><strong>← Labor Scheduler</strong> goes back.</li>
       </ul>
     `
   },
   crew_tracker: {
     title: 'Skill Tracker',
     html: `
-      <p>Which technicians are qualified for which positions.</p>
+      <p>Which technicians are qualified for which positions: one row per active technician, one column per job position, grouped by position category.</p>
       <ul style="${_HELP_UL}">
-        <li>Dots: empty = not qualified, half blue = <strong>in training</strong>, filled = <strong>qualified</strong>.</li>
-        <li><strong>✎</strong> (if you can edit) — clicking a position cycles none → training → qualified; every click saves immediately. The same modal holds per-tech training notes.</li>
-        <li>Sort A–Z / Z–A / by category; filter to show-positions or training-classes only; the skill filter shows who's qualified for one position.</li>
+        <li>Dots: empty = not qualified, half blue = <strong>in training</strong>, filled = <strong>qualified</strong>. Qualified techs are listed first in the Labor Scheduler's tech picker for that position.</li>
+        <li><strong>✎</strong> next to a name (admins, schedulers and content admins) opens <em>Edit Qualifications</em>: click a position to cycle none → in training → qualified; every click saves immediately. The <strong>Training notes</strong> box at the bottom saves as you type.</li>
+        <li><strong>Sort A–Z / Sort Z–A / Sort by Category</strong> reorder the rows. The positions filter shows <em>All positions</em>, <em>Show positions only</em> or <em>Training / classes only</em>; the skill filter (<em>Show all skills</em>) keeps only the techs qualified for one position.</li>
         <li>Training/class columns are blue-tinted — they never appear in labor requests or the scheduler.</li>
+        <li><strong>Manage Technicians</strong> / <strong>Manage Positions</strong> open those Settings tabs. Archived technicians aren't listed here; see Settings → Technicians → <em>Archived technicians</em>.</li>
+      </ul>
+    `
+  },
+  archived_technicians: {
+    title: 'Archived Technicians',
+    html: `
+      <p>Technicians who have left. They're hidden from the technician list, the Skill Tracker and the scheduling pickers, but their skills, notes and every shift they worked are kept, and they still appear in Reports. Archive someone from Settings → Technicians.</p>
+      <ul style="${_HELP_UL}">
+        <li>Each card shows the pay level, the date they were archived, their skills (<em>· training</em> = in training), how many shows and overhead shifts they worked and over what dates, and their training notes.</li>
+        <li><strong>Search</strong> matches a name or a skill.</li>
+        <li><strong>Work history</strong> opens Reports → Labor Lines filtered to that technician, every date (shown when they worked shifts and you can see labor reports).</li>
+        <li><strong>Restore</strong> puts them back on the technician list, the Skill Tracker and the pickers.</li>
+        <li><strong>Delete</strong> appears only for someone who never worked a shift, and removes them for good.</li>
       </ul>
     `
   },
   overhead_crew: {
     title: 'Overhead & Project Crew',
     html: `
-      <p>Labor that isn't tied to a show — internal work and projects, billed to a project catalog.</p>
+      <p>Labor that isn't tied to a show — internal work and projects, billed to a project catalog. Days are listed closest date first; set <strong>From / To</strong> and press <strong>Load</strong> to change the range.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Projects</strong> modal — the shared catalog: client, billing code, color, contact, notes.</li>
-        <li><strong>Recurring Templates</strong> + <strong>Generate from Templates</strong> — e.g. "2× Overhead Tech, Mon–Fri 8–17" stamped across a date range.</li>
-        <li><strong>+ Add Day</strong> → sub-groups per project, each with Quick Fill, + Add Labor Line, Change Date and its own contact/notes.</li>
-        <li><strong>Project Hour Totals</strong> — collapsible summary; range totals follow the date filter, lifetime totals don't.</li>
+        <li><strong>Projects</strong> — the shared catalog: name, client / department, billing code, color, active, description, default contact and notes. <strong>Archive</strong> drops a project from the pickers; its past days keep their data.</li>
+        <li><strong>Recurring Templates</strong> — e.g. "2× Overhead Tech, Mon–Fri 8–17": project, position, quantity, times, weekdays and optional start/end dates. <strong>Run Now</strong> stamps one template across the From / To range; <strong>Generate from Templates</strong> runs every active template for that range.</li>
+        <li><strong>+ Add Day</strong> asks for a date, then a project (or a new one) for its first <strong>sub-group</strong>. A day header has <strong>+ Sub-group</strong> and <strong>Delete Day</strong>.</li>
+        <li>Each sub-group: <strong>↺ Project</strong> (relink), <strong>▾ Quick Fill</strong> (set the same times on every line), <strong>+ Add Labor Line</strong>, <strong>Change Date</strong>, <strong>×</strong> (delete), plus its own contact and notes (blank = the project's defaults).</li>
+        <li>Each line: position, In, Lunch 1 / Lunch 2 (start <strong>S</strong> over end <strong>E</strong>), Out, hours, and the requested tech (<strong>REQ</strong>). <strong>✓</strong> and the scheduled tech (<strong>SCHED</strong>) are filled in on the Labor Scheduler and are read-only here.</li>
+        <li><strong>Project Hour Totals</strong> — collapsible summary; range totals follow the From / To filter, lifetime totals cover every day ever logged.</li>
         <li>Line, group and day totals (lines / hours / cost) update live as you edit.</li>
+        <li>Read-only accounts can look but not change anything.</li>
       </ul>
     `
   },
@@ -799,22 +835,26 @@ const _HELP_PAGES = {
     html: `
       <p>Bill several shows or events on <strong>one</strong> invoice — labor, assets, and attached third-party rental PDFs.</p>
       <ul style="${_HELP_UL}">
-        <li>Tick shows in the table (search / venue / status filters — defaults to Active). Selected shows become removable chips.</li>
-        <li><strong>Generate Combined Invoice</strong> opens the PDF: shows in date order, per-show subtotals, one grand total, rental PDFs appended at the end.</li>
+        <li>Tick shows in the <strong>All Shows</strong> table. Search matches name, company, venue or year; the venue and status filters narrow it (status starts on <em>Active</em>; pick <em>Archived</em> or <em>All statuses</em> for older shows). Ticked shows appear as removable chips under <strong>Selected Shows</strong>; <strong>Clear selection</strong> empties it.</li>
+        <li><strong>NOT SETTLED</strong> marks a show whose labor hasn't been settled (Post-Show → Settle Now): the invoice bills no labor for it and says "Labor not settled yet". <strong>TEST</strong> marks a test/demo show.</li>
+        <li><strong>Generate Combined Invoice</strong> opens the PDF in a new tab: shows in date order, each with its actual labor, internal assets and external costs (piano tunings included), per-show subtotals, one grand total, and any third-party rental PDFs appended at the end.</li>
       </ul>
     `
   },
   assets_admin: {
     title: 'Asset Manager',
     html: `
-      <p>The equipment catalog: <strong>Categories → Groups → Types → Details</strong>, plus a Systems &amp; Packages tab.</p>
+      <p>The equipment catalog (admins, content admins and Asset Managers). The <strong>Assets</strong> tab is four columns: <strong>Categories → Groups → Types → Details</strong>; each column's <strong>+ Add</strong> adds one there. A second tab holds <strong>Systems &amp; Packages</strong>.</p>
       <ul style="${_HELP_UL}">
-        <li>Search types/manufacturers/models; sort by name, units, or cost.</li>
-        <li>Type details: daily/weekly rates, reserve (spare) count, supplier, photo, storage location, <strong>📅 Calendar</strong> of per-day availability, and the unit list (barcodes, add units, remove-from-service with reason, unit logs).</li>
-        <li><strong>Company Rates</strong> (Edit type) — special day/week rates per <em>Performance Company</em>, picked from the Arts Groups list (what the advance form's Performance Company field uses). A show with that company is priced at them; the type's card shows "+ N company rates".</li>
-        <li><strong>Bulk: Hide from Advance Picker</strong> — mass-toggle which types show up in the show page's Add Asset dialog (search and browse alike). Components of a system or package are still listed by name in that dialog's details, since they rent as part of the kit.</li>
-        <li><strong>⚠ Overbooked</strong> appears when demand exceeds usable units anywhere.</li>
-        <li><strong>Systems &amp; Packages</strong> — bundles of component types with per-component quantities.</li>
+        <li>Search types / manufacturers / models; the order menu sorts by name, unit count or cost.</li>
+        <li><strong>Type details</strong>: photo, rate, storage location, units and reserve (spare) count, <strong>Edit Type</strong>, <strong>📅 Calendar</strong> (per-day availability, ‹ Prev / Next › by month) and <em>Part of</em> (the systems/packages that include it). Below: the unit list — add units (count + optional barcode), search by barcode, sort.</li>
+        <li><strong>Edit Type</strong>: name, category, parent group, manufacturer, model, storage location, reserve count, supplier; options <em>Consumable</em> (billed per item), <em>Track by quantity</em>, <em>Allow unit selection</em> (a PM can pin a specific S/N), <em>System</em>, <em>Package</em>, <em>Hide from advance picker</em>; photo; daily and weekly rate; <strong>Retire This Type…</strong>.</li>
+        <li><strong>Company rates</strong> (Edit Type) — special day/week rates per <em>Performance Company</em> (from the Arts Groups list), each with optional From / Through months. A show with that company is priced at them; the type shows "+ N company rates". The header's <strong>Company Rates</strong> button lists every one (filter by company and period, search, <strong>Download CSV</strong>).</li>
+        <li><strong>Unit details</strong> (click a unit): <strong>Info</strong> — barcode/serial, condition, year purchased, purchase value, depreciation years and start date (shows remaining value), warranty, replacement cost; <strong>Retire Unit</strong>, <strong>Maintenance…</strong> (reason + notes) and <strong>Back in Service</strong>. <strong>Log</strong> — dated Note / Damage / Service / Usage entries (completed piano tunings add a Service entry).</li>
+        <li><strong>✎ Bulk: Hide from Advance Picker</strong> — tick types (or a whole category / group) to hide them from the show page's Add Asset dialog; then <strong>Save</strong>. Hidden types can still be added from Approvals. Components of a system or package are still listed by name in that dialog's details, since they rent as part of the kit.</li>
+        <li><strong>⚠ Overbooked</strong> appears when an item's busiest-day demand across all shows exceeds its usable units; it lists those items.</li>
+        <li><strong>Systems &amp; Packages</strong> — bundles of component types with per-component quantities (<strong>+ New</strong> opens the type editor with System ticked; then <strong>+ Add</strong> components).</li>
+        <li>Header: <strong>Show Retired</strong> (list retired types and units inline), <strong>Retired Archive</strong>, <strong>DB Tools</strong>, <strong>Warehouse Locations</strong> (the storage-location list), <strong>+ New Category</strong>. Types and units are never deleted, only retired.</li>
       </ul>
     `
   },
@@ -823,9 +863,10 @@ const _HELP_PAGES = {
     html: `
       <p>Approval queue for upcoming shows' asset lists, keyed on load-in date (default window: today + 6 weeks — same as the sidebar badge).</p>
       <ul style="${_HELP_UL}">
-        <li>Adjust the FROM/TO window, use the presets, or page « Prev / Next » by the window's span.</li>
-        <li>Each show card: <strong>✓ Approve / Unapprove</strong>, Open show, + Add Asset, + External Rental.</li>
-        <li>Inline edits: rental dates (bounded to the show's engagement, First Call → Final Out) and the <strong>per-show unit-price override</strong> — this is the <em>only</em> place prices can be overridden; ↻ restores the captured rate-card price.</li>
+        <li>Adjust the FROM/TO window and press <strong>Apply</strong>, use the presets (<em>Past 3 weeks</em>, <em>Today + 3 weeks</em>, <em>Today + 6 weeks</em>), or page « Prev / Next » by the window's span. <strong>Hide shows with no requests</strong> leaves out shows with no gear yet.</li>
+        <li>Each show card: status badge (Approved, ⚠ Pending, No requests, Past), the show's total, <strong>Open show ↗</strong>, <strong>+ Add Asset</strong>, <strong>+ External Rental</strong> (description, cost, optional quote PDF) and <strong>✓ Approve</strong> / <strong>Unapprove</strong>. Any change to the gear afterwards sends the show back to Pending.</li>
+        <li>Inline edits: rental dates (bounded to the show's engagement, First Call → Final Out) and the <strong>per-show unit-price override</strong> — this is the <em>only</em> place prices can be overridden; ↻ restores the captured rate-card price. <strong>×</strong> removes a line.</li>
+        <li><strong>+ Add Asset</strong> searches every item (hidden-from-picker items included), then asks for unit, quantity, unit price, dates and notes. When the add would overbook, an <strong>Availability Override</strong> warning appears and <strong>Add to Show</strong> asks you to confirm — this page is the only place gear can be overbooked on purpose.</li>
         <li>Past shows (violet) stay editable for last-second cost corrections.</li>
       </ul>
     `
@@ -833,19 +874,20 @@ const _HELP_PAGES = {
   reports: {
     title: 'Reports',
     html: `
-      <p><strong>Reports across the whole app.</strong> The filter bar (date range on each show's date, venue, Arts Group) applies to every tab; test/demo shows are left out. <strong>More filters</strong> narrows to one show, shows that had an item or category booked (groups count their child items, systems their components), or used a job position or technician. You see the tabs your permissions allow.</p>
+      <p><strong>Reports across the whole app.</strong> The filter bar (FROM / TO on each show's date — show date, else load-in, else first performance — venue, Arts Group) applies to every tab; test/demo shows are left out. The presets (<em>This month</em>, <em>This year</em>, <em>Last 12 months</em>, <em>Next 12 months</em>, <em>All time</em>) fill the dates; <strong>Run</strong> reloads the tab. <strong>More filters</strong> narrows to one show, shows that had an item or category booked (groups count their child items, systems their components), or used a job position or technician; <strong>Clear</strong> resets them. You see the tabs your permissions allow: asset tabs for admins, content admins and Asset Managers; labor tabs for labor schedulers; Piano Tuning for piano managers.</p>
       <ul style="${_HELP_UL}">
         <li><strong>Overview</strong>: shows by venue, month and status, the money by area (assets, external costs, settled labor, piano tunings), and the list of matching shows.</li>
+        <li><strong>Advance Fields</strong>: pick one advance form field and see what every matching show answered. Narrow by <strong>Answer</strong> (each answer given, with its show count) or <strong>Answer contains</strong>, and choose shows <em>With an answer</em>, <em>All</em> or <em>Not answered</em>, then <strong>Apply</strong> — e.g. Runner = Yes at one venue for a season.</li>
         <li><strong>Arts Groups</strong>: for each company, its shows, how often it rented gear, its top items and what it spent. Click a row for every item it rented and its shows.</li>
         <li><strong>Assets</strong>: for each item type, times rented, unit-days, revenue, last use and utilization; idle gear is listed too. Click a row for the individual units.</li>
-        <li><strong>Item History</strong>: pick one item (a group counts everything under it) or one unit, and see every show that rented it.</li>
+        <li><strong>Item History</strong>: pick one item (a group counts everything under it) and optionally one unit, and see every show that rented it. An item's drill-down on the Assets tab links here too.</li>
         <li><strong>Rental Lines</strong>: every asset line, with category and type filters.</li>
         <li><strong>Labor &amp; Techs</strong>: for each technician, scheduled, settled, training and overhead shifts and hours; for each position, requested against filled.</li>
         <li><strong>Labor Lines</strong>: every shift, with its scheduled tech and, once settled, the actual times and Worked by. Example: Had item = a projector plus Position = Video Tech lists who was the video tech.</li>
         <li><strong>Break Exceptions</strong>: settled shifts whose lunch was not taken, shorter or longer than scheduled, added, or moved, broken down by tech, position and show.</li>
         <li><strong>Estimate vs Settlement</strong>: for each settled show, labor estimate against the Final Invoice labor, biggest increases first.</li>
         <li><strong>Piano Tuning</strong>: tunings and cost by vendor, month, Arts Group, requester and piano.</li>
-        <li><strong>PDF</strong> prints the current tab with its filters (the drill-down dialogs have their own PDF button). Every table has <strong>CSV</strong>. Labor money is always the settlement figure, so only settled shows count.</li>
+        <li><strong>PDF</strong> prints the current tab with its filters (the drill-down dialogs have their own PDF button). Click a column heading to sort; every table has <strong>CSV</strong>. Labor money is always the settlement figure, so only settled shows count.</li>
       </ul>
     `
   },
@@ -864,8 +906,8 @@ const _HELP_PAGES = {
     html: `
       <p>Raw, audited row access for fixing asset records the normal finder can't reach.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Integrity Scan</strong> — canned anomaly checks (orphaned types, duplicate names, broken references…), each with jump links.</li>
-        <li><strong>Browse &amp; Edit</strong> — categories, types, units, show lines, system members, locations, logs, maintenance; search by name/barcode/id.</li>
+        <li><strong>Integrity Scan</strong> — canned anomaly checks (ERROR / WARN / INFO: orphaned types, duplicate names, broken references…); <strong>details</strong> on a finding jumps to its rows, <strong>↻ Re-run</strong> scans again.</li>
+        <li><strong>Browse &amp; Edit</strong> — pick a table (categories, types, units, show lines, system members, locations, logs, maintenance); search by name/barcode or exact id; ‹ Prev / Next › page through. Type rows carry a role badge (GROUP / LEAF / STANDALONE / SYSTEM) and their reference counts.</li>
         <li>Row actions: ✎ Edit, ⇄ Merge duplicate types, ⤵ Move children, ✕ Delete (two-step force confirm).</li>
         <li>Every change is audit-logged with before/after snapshots and can be undone from the Audit Log.</li>
       </ul>
@@ -969,21 +1011,25 @@ const _HELP_PAGES = {
   dashboards: {
     title: 'Dashboards',
     html: `
-      <p>Asset-availability and skill-coverage dashboards — yours plus everyone's public ones.</p>
+      <p>Asset-availability and skill-coverage dashboards — yours first, plus everyone's public ones. Each card shows its widgets and, if public, its link; click a card to open it.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>+ New Dashboard</strong> — pick a layout (Reservation Timeline, Asset Type Calendar, Combined, By Category, By Show, Shows Calendar, Skills Overview).</li>
-        <li>Tick <strong>"publicly accessible"</strong> to get a no-login <code>/d/&lt;link&gt;</code> URL to share; admins can force a dashboard private again from Settings → Dashboards.</li>
-        <li>You can delete dashboards you own (×).</li>
+        <li><strong>+ New Dashboard</strong> — a name and a first widget (Reservation Timeline, Asset Type Calendar, Combined, By Category, By Show, Shows Calendar, Skills Overview). Add more widgets from inside the dashboard.</li>
+        <li>Tick <strong>"Make this dashboard publicly accessible"</strong> to get a no-login <code>/d/&lt;link&gt;</code> URL to share (read-only accounts can't). <strong>PUBLIC</strong> marks those cards; admins can list them and make one private again from Settings → Dashboards.</li>
+        <li>Another person's public dashboard shows their name; only its owner can change it. You can delete dashboards you own (×).</li>
       </ul>
     `
   },
   dashboard_view: {
     title: 'Dashboard',
     html: `
-      <p>A widget board of availability views.</p>
+      <p>A board of availability widgets, stacked top to bottom. Most widgets have their own <strong>Date range</strong> (today + 90 days to start; the Shows Calendar starts on this month).</p>
       <ul style="${_HELP_UL}">
-        <li><strong>+ Add Widget</strong> (owner only) — timelines, availability calendars, per-category/per-show views, shows calendar, skill coverage.</li>
-        <li><strong>Refresh</strong> reloads every widget. If the dashboard is public, the shareable URL is shown in a banner.</li>
+        <li><strong>Reservation Timeline</strong> — one bar per reservation (show + quantity) across its rental window, grouped by category. <strong>−</strong> / <strong>+</strong> zoom, <strong>Fit</strong> fits the range, <strong>Today</strong> scrolls to today; click a bar to open the show.</li>
+        <li><strong>Asset Type Calendar</strong> — pick an item; each day shows how many are free (<em>N avail</em>, <em>N left</em> when low, <em>FULL</em>). Click a day with reservations to see the shows; ‹ › change the month.</li>
+        <li><strong>All Assets</strong>, <strong>Assets by Category</strong> — total units, in maintenance, reserved and available per item for the range. <strong>Assets by Show</strong> — each show's lines with quantity and price.</li>
+        <li><strong>Shows Calendar</strong> — a week-at-a-glance count plus a month grid of Load-In (↓), Show day (★) and Load-Out (↑) chips.</li>
+        <li><strong>Skill Coverage</strong> — for every position, how many technicians are qualified, with a list of positions nobody covers.</li>
+        <li><strong>+ Add Widget</strong> and the <strong>×</strong> on each widget are for the owner only (a dashboard keeps at least one). <strong>Refresh</strong> reloads every widget. If the dashboard is public, its shareable URL is shown in a banner.</li>
       </ul>
     `
   },
@@ -1002,13 +1048,13 @@ const _HELP_PAGES = {
     html: `
       <p><strong>The running list of piano tunings</strong> requested from show pages (Advance tab → Piano Tuning). For admins and users with the <em>Piano Tuning Manager</em> permission.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Open</strong> = Requested and Scheduled. The status buttons filter; search matches show, piano, vendor and PM.</li>
-        <li><strong>Mark scheduled</strong> — one click: it's with the vendor (the PM can no longer edit or cancel it). Setting the tuning date does the same.</li>
+        <li><strong>Open</strong> = Requested, Seen / In progress and Scheduled. The status buttons (with counts) filter; search matches show, piano, vendor and PM.</li>
+        <li><strong>Mark seen</strong> — tells the requester you're on it (bell notice) and takes it off the sidebar badge. <strong>Mark scheduled</strong> — it's with the vendor (the PM can no longer edit or cancel it). Setting the tuning date does the same. <strong>Completed</strong> (on a scheduled tuning) closes it and adds a Service entry to that piano unit's log (Asset Manager → unit → Log).</li>
         <li><strong>⚠ Cancellation requested</strong> — the PM asked to cancel (reason shown). <strong>Cancel tuning</strong> once it's off with the vendor, or <strong>Decline cancel</strong> if it can't be (the PM is emailed).</li>
         <li><strong>+ Add House Tuning</strong>: log a tuning that isn't for a show (maintenance, a rehearsal, a recording). It stays off every show's schedule and invoices; its cost counts in Reports.</li>
-        <li><strong>Unit (S/N)</strong> — pick the exact instrument, not just the model. It shows wherever the piano is named (schedule row, charge, emails, reports), so each piano's tuning history is per S/N. ⚠ <em>unit not pinned</em> means the show books the model but not that unit.</li>
+        <li><strong>Unit (S/N)</strong> — pick the exact instrument, not just the model. It shows wherever the piano is named (schedule row, charge, emails, reports), so each piano's tuning history is per S/N. ⚠ <em>unit not pinned on Assets tab</em> means the show books the model but not that unit — <strong>Pin unit</strong> names it on the show's Assets line when that can be done safely (or says why not). ⚠ <em>not on show's Assets tab</em> means the show hasn't booked the piano at all.</li>
         <li><strong>Vendors</strong> — the vendor list with each one's typical price, contact and notes. Picking a vendor in Manage fills an empty cost with its typical price. Archive a vendor to drop it from the list; past tunings keep it.</li>
-        <li><strong>Manage</strong> — vendor, tuning date + start time, cost, paperwork and notes. Setting the tuning date marks it <strong>Scheduled</strong>, puts a read-only 🎹 row on that day of the show's production schedule and emails the requester.</li>
+        <li><strong>Manage</strong> — status, vendor, piano and unit, needed-on date and tuned-by time, tuning date + start time, cost, paperwork PDF, the PM's notes and your manager notes. Setting the tuning date marks it <strong>Scheduled</strong>, puts a read-only 🎹 row on that day of the show's production schedule and emails the requester.</li>
         <li><strong>Cost</strong> appears on the show's <strong>Final Invoice</strong> and the Combined Invoice under External Assets &amp; Costs. Cancelled tunings are never billed and their schedule row is removed.</li>
         <li>The <strong>bell</strong> notifies you of new requests, PM changes and cancellation requests. Click one to open that tuning. Requesters get a notification when their tuning is scheduled, moved, completed or cancelled.</li>
       </ul>
@@ -1068,18 +1114,20 @@ const _HELP_PAGES = {
     html: `
       <p>Read-only show documents, limited to the venues and document types your account allows (shown under the title).</p>
       <ul style="${_HELP_UL}">
-        <li>Shows are grouped by venue; <strong>Open →</strong> shows that show's available PDFs.</li>
+        <li>Shows are grouped by venue, with date and time. <strong>Open →</strong> lists that show's available documents (Advance, Production Schedule, Post-show Notes); click one to open that PDF in a new tab.</li>
         <li>The search box filters across all venues at once.</li>
+        <li>The sidebar also has <strong>Show Calendar</strong> and <strong>Labor Overview</strong> when your account allows them, <strong>My Account</strong> (change your password) and <strong>Log out</strong>.</li>
       </ul>
     `
   },
   viewer_calendar: {
     title: 'Show Calendar',
     html: `
-      <p>Read-only calendar of the shows your account can see.</p>
+      <p>Read-only calendar of the shows your account can see (only when your account has the Show Calendar turned on).</p>
       <ul style="${_HELP_UL}">
-        <li>Chips per day: <strong>↓ Load-In</strong> (blue), <strong>★ Show day</strong> (green), <strong>↑ Load-Out</strong> (amber); click one to open that show's documents.</li>
-        <li>Navigate with ‹ Prev / Next › / Today or an explicit From / To range.</li>
+        <li><strong>Week at a glance</strong> counts the shows on each of seven days, starting today when today is in the range (otherwise its first week); below it, a month grid.</li>
+        <li>Chips per day: <strong>↓ Load-In</strong> (blue), <strong>★ Show day</strong> (green), <strong>↑ Load-Out</strong> (amber); click one to open that show's documents. A busy day shows three and <em>+N more</em>.</li>
+        <li>Navigate with ‹ Prev / Next › (a month at a time) / Today, or set an explicit From / To range.</li>
       </ul>
     `
   },
@@ -1088,7 +1136,7 @@ const _HELP_PAGES = {
     html: `
       <p>Change your own password here. (Theme is the sun/moon button in the sidebar.)</p>
       <ul style="${_HELP_UL}">
-        <li>The button enables once the new password meets every rule in the checklist.</li>
+        <li>Enter your current password, then the new one twice. <strong>Change Password</strong> enables once the new password meets every rule in the checklist.</li>
         <li>Forgot your current password? Ask an administrator to reset it.</li>
       </ul>
     `
@@ -1101,11 +1149,13 @@ const _HELP_PAGES = {
 const _HELP_ROUTES = [
   ['/shows', 'shows'], ['/dashboard', 'shows'], ['/my-shows', 'my_shows'], ['/shows/archived', 'archived_shows'], ['/piano-tuning', 'piano_tuning'], ['/shows/new', 'new_show'],
   ['/settings/shows', 'manage_shows'], ['/settings/pdf-templates', 'pdf_templates'],
+  ['/settings/technicians/archived', 'archived_technicians'],
   ['/settings', 'settings'],
   ['/admin/merge-shows', 'merge_shows'], ['/admin/audit', 'audit_log'],
   ['/admin/performance', 'performance'], ['/admin/navigation', 'nav_editor'],
   ['/admin/pdf-designer', 'pdf_designer'], ['/admin/snapshots', 'snapshots'],
   ['/labor-overview', 'labor_overview'], ['/labor-scheduler', 'labor_scheduler'],
+  ['/labor-scheduler/no-labor', 'labor_no_labor'],
   ['/crew', 'crew_tracker'], ['/overhead-crew', 'overhead_crew'],
   ['/combined-invoice', 'combined_invoice'],
   ['/assets/approvals', 'asset_approvals'], ['/assets/retired', 'assets_retired'],
