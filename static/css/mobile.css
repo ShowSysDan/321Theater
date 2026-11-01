@@ -321,3 +321,18 @@ html.mobile-view .oh-summary-table th, html.mobile-view .oh-summary-table td { w
    instead of running past the card's clipped edge. */
 html.mobile-view .sched-day-header { flex-wrap: wrap; row-gap: 8px; }
 html.mobile-view .sched-day-header .sched-day-notes { flex: 1 1 100%; min-width: 0; }
+
+/* ══ #Tags + Search (3.35.0) — phone layout ═════════════════════════════ */
+html.mobile-view .find-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
+html.mobile-view .find-tags-group { grid-column: 1 / -1; }
+html.mobile-view .find-venue-group { grid-column: 1 / -1; }
+/* Filters fold behind the Filters button so the results show first. */
+html.mobile-view .find-more-btn { display: inline-flex; gap: 4px; margin-left: auto; }
+html.mobile-view .find-filters:not(.find-open) .find-more { display: none; }
+html.mobile-view .find-row-main .find-q-wrap { flex: 1 1 100%; }
+html.mobile-view .find-row-opts { gap: 8px 12px; }
+html.mobile-view .find-results { grid-template-columns: 1fr; }
+html.mobile-view .find-toolbar .find-tags-filter-wrap { flex: 1 1 100%; }
+html.mobile-view .tag-group.show-card { padding: 10px 12px; }
+html.mobile-view .show-tags-strip { margin-top: 6px; }
+html.mobile-view .tag-chip { line-height: 1.9; }   /* bigger touch target */

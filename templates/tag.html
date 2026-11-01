@@ -1,0 +1,62 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{% block title %}#{{ tag }} — 3·2·1→Theater{% endblock %}
+
+{% macro snippet(segs) -%}
+{%- for kind, text, t in segs -%}
+{%- if kind == 'hit' -%}<mark class="find-hit">{{ text }}</mark>
+{%- elif kind == 'tag' -%}<span class="tag-link-text">{{ text }}</span>
+{%- else -%}{{ text }}{%- endif -%}
+{%- endfor -%}
+{%- endmacro %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <a href="{{ url_for('tags_index') }}" class="back-link">← All tags</a>
+    <h1 class="page-title tag-page-title">#{{ tag }}</h1>
+    <p class="page-sub">
+      {% if total %}{{ total }} mention{{ '' if total == 1 else 's' }} in {{ groups|length }} show{{ '' if groups|length == 1 else 's' }}{% if capped %} (showing the first {{ total }}){% endif %} · newest first · each line opens the show at that spot
+      {% else %}No show mentions #{{ tag }} right now{% endif %}
+    </p>
+  </div>
+  <div class="header-actions">
+    <a class="btn btn-ghost btn-sm" href="{{ url_for('search_page', tag=tag) }}">Search with this tag</a>
+  </div>
+</div>
+
+{% if groups %}
+<div class="tag-groups">
+  {% for g in groups %}
+  <section class="tag-group show-card{% if g.is_event %} show-card-event{% endif %}{% if g.status == 'archived' %} show-card-past{% endif %}{% if g.is_test %} show-card-test{% endif %}">
+    <div class="tag-group-head">
+      <a class="show-card-name tag-group-name" href="{{ g.url }}">{{ g.name }}</a>
+      {% if g.status == 'archived' %}<span class="past-badge" title="Archived show">ARCHIVED</span>{% endif %}
+      {% if g.is_event %}<span class="event-badge" title="Event mode">EVENT</span>{% endif %}
+      {% if g.is_test %}<span class="test-badge" title="Test / demo — excluded from reports">TEST</span>{% endif %}
+      <div class="show-meta tag-group-meta"><span class="mono">{{ g.dates_label }}</span>{% if g.venue %} · {{ g.venue }}{% endif %}{% if g.company %} · {{ g.company }}{% endif %}</div>
+    </div>
+    <ul class="tag-occ-list">
+      {% for o in g.occurrences %}
+      <li>
+        <a class="tag-occ" href="{{ o.link }}">
+          <span class="tag-occ-label">{{ o.label }}</span>
+          <span class="tag-occ-snippet">{{ snippet(o.snippet) }}</span>
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+  <p>Nothing is tagged <span class="mono">#{{ tag }}</span> at the moment — the tag may have been edited out of every show.<br>
+    <a href="{{ url_for('tags_index') }}">See all tags →</a></p>
+</div>
+{% endif %}
+{% endblock %}

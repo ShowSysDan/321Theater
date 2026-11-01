@@ -101,6 +101,11 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="22" height="22"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
     <a class="m-brand" href="{{ url_for('viewer_home') if session.get('is_document_viewer') else url_for('dashboard') }}">3·2·1→THEATER{% if test_mode %} <span class="test-instance-badge">TEST</span>{% endif %}</a>
+    {% if not session.get('is_document_viewer') %}
+    <a class="m-icon-btn" href="{{ url_for('search_page') }}" aria-label="Search"{% if request.endpoint == 'search_page' %} aria-current="page"{% endif %}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.2" y2="16.2"/></svg>
+    </a>
+    {% endif %}
     <button type="button" class="m-icon-btn" onclick="openHelp()" aria-label="Help">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="20" height="20"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
     </button>
@@ -190,6 +195,11 @@
       <a href="{{ url_for('my_shows') }}" class="nav-item {% if request.endpoint == 'my_shows' %}active{% endif %}"{% if request.endpoint == 'my_shows' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M16 3l1.5 1.5L20 2"/></svg>
         My Shows
+      </a>
+      {% set _find_active = request.endpoint in ('search_page', 'tags_index', 'tag_page') %}
+      <a href="{{ url_for('search_page') }}" class="nav-item {% if _find_active %}active{% endif %}"{% if _find_active %} aria-current="page"{% endif %}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.2" y2="16.2"/></svg>
+        Search
       </a>
 
       {% if request.endpoint in ['show_page'] and show is defined %}
@@ -396,6 +406,7 @@
 {% endif %}
 
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script src="{{ url_for('static', filename='js/tags.js') }}"></script>
 {% if user %}
 <script>
 /* Browser / screen record for troubleshooting (3.33.0): once per browser
@@ -572,6 +583,7 @@ const _HELP_PAGES = {
         <li><strong>History</strong> — browse saved versions of the form and restore one.</li>
         <li><strong>Piano Tuning</strong> (below Backline) — <strong>+ Request Tuning</strong> sends a request to the piano tuning manager (the piano — picked from the Asset Manager's Piano category — date/time needed and notes; tunings are always on the stage). A warning shows when the picked piano isn't on the show's Assets tab yet. Edit or cancel it until the manager starts on it; after that, <strong>Request cancellation</strong> asks them to cancel it with the vendor (they're emailed and either cancel it or decline, and you're told if it stays on); once they set the tuning time it appears on the Production Schedule as a read-only 🎹 row, and its cost goes on the Final Invoice.</li>
         <li>The presence indicator shows who else is on this show; other people's edits merge in live (updated fields flash briefly).</li>
+        <li><strong>#tags</strong> — type <code>#</code> and a word (letters, digits, <code>_</code>, <code>-</code>; e.g. <code>#pyro</code>, <code>#load-in</code>) in a text or notes box — Advance fields, schedule rows and Venue &amp; Tech info, labor notes, Post Show notes, comments, Assets line notes, piano tuning notes, file descriptions. Clickable chips appear under the box, and the <strong>Tags</strong> line under the show name lists every tag in the show; a chip opens the tag's page with every show that uses it.</li>
       </ul>
     `
   },
@@ -651,6 +663,7 @@ const _HELP_PAGES = {
       <p>Team discussion pinned to this show.</p>
       <ul style="${_HELP_UL}">
         <li>Type <strong>@name</strong> for the mention autocomplete — mentioned users get a notification.</li>
+        <li>A <strong>#tag</strong> in a comment becomes a link to that tag's page (every show that uses it).</li>
         <li>You can edit (✏) and delete (×) your own comments; deletes are soft.</li>
         <li>Admins can restore deleted comments and view/restore a comment's edit history.</li>
       </ul>
@@ -972,6 +985,44 @@ const _HELP_PAGES = {
       </ul>
     `
   },
+  search: {
+    title: 'Search',
+    html: `
+      <p><strong>Find any show — active or archived.</strong> Every filter you set narrows the results; the address bar keeps them, so you can bookmark or share a search and Back steps through your changes.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Search box</strong> — matches the show name, venue, Arts Group and PM names (every word must match). Tick <strong>Also search inside show content</strong> to look through Advance text fields, schedule rows, notes, comments, labor / asset notes and file descriptions too; each hit shows a snippet that opens the show at that spot.</li>
+        <li><strong>PM</strong> — the show's Production Manager <em>or</em> a covering Day PM on any labor day. <strong>Me</strong> = the contact linked to your account.</li>
+        <li><strong>Edited by</strong> — shows that person changed (forms, comments, labor, assets, files…), with how many edits and when the last one was. Opening a show without changing anything doesn't count; Advance / Schedule / Post Show changes count from their version history, which keeps each show's last 100 versions.</li>
+        <li><strong>Tags</strong> — pick one or more <code>#tags</code> (suggestions as you type); a show must have all of them.</li>
+        <li><strong>Venue</strong>, <strong>From / To</strong> — dates match when the show's load-in → load-out span or any performance touches the range.</li>
+        <li><strong>Active / Archived / All</strong>, <strong>Include test shows</strong> (off by default) and <strong>Sort</strong>.</li>
+        <li>Each card says <em>why</em> it matched. At most 200 shows are listed — narrow the filters if you see "Showing the first…".</li>
+      </ul>
+    `
+  },
+  tags: {
+    title: 'Tags',
+    html: `
+      <p>Every <code>#tag</code> written anywhere in a show, with how many times it's used. Type <code>#</code> and a word in any show text box to make one — letters, digits, <code>_</code> and <code>-</code>; capitals don't matter (<code>#Pyro</code> = <code>#pyro</code>).</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Filter</strong> — narrows the list as you type.</li>
+        <li><strong>Most used / A–Z</strong> — sort order (remembered in this browser).</li>
+        <li>Click a tag for every show and spot that uses it. Counts can take up to 30 seconds to catch up with a brand-new tag.</li>
+        <li>Not tags: a <code>#</code> after a letter or number (<code>Truck #2</code>, <code>x#1</code>), inside a web address, or followed by a number.</li>
+      </ul>
+    `
+  },
+  tag_page: {
+    title: 'Tag',
+    html: `
+      <p>Everything tagged with this <code>#tag</code>, grouped by show (newest first; archived and test shows are badged).</p>
+      <ul style="${_HELP_UL}">
+        <li>Each line names where the tag is — e.g. <em>Advance › Special Notes</em>, <em>Schedule › Mon 11/2 09:00</em>, <em>Comment by …</em>, <em>Labor › Day notes</em> — with the text around it.</li>
+        <li>Click a line to open the show right at that spot: the tab opens, the field or row scrolls into view and flashes.</li>
+        <li><strong>Search with this tag</strong> opens Search pre-filtered, so you can add a PM, dates or more tags.</li>
+      </ul>
+    `
+  },
   viewer_home: {
     title: 'Documents',
     html: `
@@ -1024,6 +1075,7 @@ const _HELP_ROUTES = [
   ['/dashboards', 'dashboards'],
   ['/viewer/calendar', 'viewer_calendar'], ['/viewer/account', 'viewer_account'],
   ['/viewer', 'viewer_home'],
+  ['/search', 'search'], ['/tags', 'tags'], ['/tags/', 'tag_page'],
 ];
 
 function _helpKeyForLocation() {

@@ -198,13 +198,13 @@
           {% if r.group_notes %}
           <div>
             <span class="lo-notes-tag">{{ r.name }} — Notes</span>
-            <span class="lo-notes-text">{{ r.group_notes }}</span>
+            <span class="lo-notes-text">{{ r.group_notes | tagify if r.kind == 'show' else r.group_notes }}</span>
           </div>
           {% endif %}
           {% if r.day_notes %}
           <div>
             <span class="lo-notes-tag lo-day-notes-tag">{{ r.name }} — Day Notes</span>
-            <span class="lo-notes-text">{{ r.day_notes }}</span>
+            <span class="lo-notes-text">{{ r.day_notes | tagify if r.kind == 'show' else r.day_notes }}</span>
           </div>
           {% endif %}
         </td>

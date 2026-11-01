@@ -784,6 +784,7 @@ CREATE TABLE IF NOT EXISTS form_history (
     summary_json TEXT DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_form_history_show_type ON form_history(show_id, form_type);
+CREATE INDEX IF NOT EXISTS idx_form_history_saved_by ON form_history(saved_by);
 
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
