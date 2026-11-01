@@ -9418,11 +9418,14 @@ def _advance_attachments_fingerprint(db, show_id):
     )
 
 
-def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
+def _build_advance_pdf(show_id, exported_by_id=None, base_url=None, preview=False):
     """
     Build the advance PDF.  Works both in a request context (base_url=None reads
     from request.url_root) and in a background context (pass base_url='/').
     exported_by_id defaults to session['user_id'] when not supplied.
+    preview=True (PDF Designer) renders the current content WITHOUT versioning:
+    no export_log row, no version bump, no reuse of a stored export — returns
+    (html, current_version, show, pdf_bytes, None, False).
     """
     # Only consult the Flask session when there's a request to read it from.
     # Background callers (scheduled emails run in an APScheduler thread with an
@@ -9522,27 +9525,34 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
                                    layout=layout,
                                    export_date=export_date)
 
-    # Reuse the previous version's bytes when nothing that lands in the document
-    # has changed, so repeat clicks don't spawn redundant versions.
-    content_hash = _pdf_content_hash(
-        _render(_HASH_VERSION_SENTINEL, _HASH_DATE_SENTINEL), extra=attach_fp)
-    db = get_db()
-    cached_row, cached_bytes = _find_reusable_export(db, show_id, 'advance', content_hash)
-    if cached_row:
-        db.close()
-        syslog_logger.info(
-            f"PDF_EXPORT_REUSED show_id={show_id} type=advance v={cached_row['version']} by={exported_by_id}"
-        )
-        return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
+    if preview:
+        # PDF Designer preview: render what an export would print now, but
+        # never cut a version or reuse a stored one (a stored export would
+        # hide the layout change being previewed).
+        new_v = show['advance_version'] or 0
+        log_id = None
+    else:
+        # Reuse the previous version's bytes when nothing that lands in the
+        # document has changed, so repeat clicks don't spawn redundant versions.
+        content_hash = _pdf_content_hash(
+            _render(_HASH_VERSION_SENTINEL, _HASH_DATE_SENTINEL), extra=attach_fp)
+        db = get_db()
+        cached_row, cached_bytes = _find_reusable_export(db, show_id, 'advance', content_hash)
+        if cached_row:
+            db.close()
+            syslog_logger.info(
+                f"PDF_EXPORT_REUSED show_id={show_id} type=advance v={cached_row['version']} by={exported_by_id}"
+            )
+            return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
 
-    new_v = (show['advance_version'] or 0) + 1
-    db.execute('UPDATE shows SET advance_version=%s WHERE id=%s', (new_v, show_id))
-    log_cur = db.execute(
-        "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
-        "VALUES (%s, 'advance', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
-    log_id = log_cur.fetchone()['id']
-    db.commit()
-    db.close()
+        new_v = (show['advance_version'] or 0) + 1
+        db.execute('UPDATE shows SET advance_version=%s WHERE id=%s', (new_v, show_id))
+        log_cur = db.execute(
+            "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
+            "VALUES (%s, 'advance', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
+        log_id = log_cur.fetchone()['id']
+        db.commit()
+        db.close()
 
     html = _render(new_v, datetime.now().strftime('%B %d, %Y at %I:%M %p'))
 
@@ -9571,6 +9581,10 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
         except Exception as e:
             app.logger.error(f"PDF append failed for show {show_id}: {e}")
 
+    if preview:
+        syslog_logger.info(
+            f"PDF_DESIGNER_PREVIEW show_id={show_id} type=advance by={exported_by_id}")
+        return html, new_v, dict(show), pdf_bytes, None, False
     _stash_export_bytes(log_id, pdf_bytes)
     syslog_logger.info(
         f"PDF_EXPORT show_id={show_id} type=advance v={new_v} by={exported_by_id}"
@@ -9921,11 +9935,13 @@ def _render_attachment_wrapper_pdf(data, mime, filename, section_label,
         return None
 
 
-def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
+def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None, preview=False):
     """
     Build the schedule PDF.  Works both in a request context (base_url=None reads
     from request.url_root) and in a background context (pass base_url='/').
     exported_by_id defaults to session['user_id'] when not supplied.
+    preview=True (PDF Designer): render without versioning — no export_log row,
+    no version bump, no stored-export reuse; returns log_id None, is_new False.
     """
     # Only consult the Flask session when there's a request to read it from.
     # Background callers (scheduled emails run in an APScheduler thread with an
@@ -10094,23 +10110,29 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
     # Reuse the previous version's bytes when nothing in the document changed.
     # The hash is taken on the un-fitted HTML: the page-aware fit below is a
     # pure function of that content, so equal hashes still mean equal PDFs.
-    content_hash = _pdf_content_hash(_render(_HASH_VERSION_SENTINEL, _HASH_DATE_SENTINEL))
-    cached_row, cached_bytes = _find_reusable_export(db, show_id, 'schedule', content_hash)
-    if cached_row:
+    if preview:
+        # PDF Designer preview: never version, never reuse a stored export.
         db.close()
-        syslog_logger.info(
-            f"PDF_EXPORT_REUSED show_id={show_id} type=schedule v={cached_row['version']} by={exported_by_id}"
-        )
-        return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
+        new_v = show['schedule_version'] or 0
+        log_id = None
+    else:
+        content_hash = _pdf_content_hash(_render(_HASH_VERSION_SENTINEL, _HASH_DATE_SENTINEL))
+        cached_row, cached_bytes = _find_reusable_export(db, show_id, 'schedule', content_hash)
+        if cached_row:
+            db.close()
+            syslog_logger.info(
+                f"PDF_EXPORT_REUSED show_id={show_id} type=schedule v={cached_row['version']} by={exported_by_id}"
+            )
+            return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
 
-    new_v = (show['schedule_version'] or 0) + 1
-    db.execute('UPDATE shows SET schedule_version=%s WHERE id=%s', (new_v, show_id))
-    log_cur = db.execute(
-        "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
-        "VALUES (%s, 'schedule', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
-    log_id = log_cur.fetchone()['id']
-    db.commit()
-    db.close()
+        new_v = (show['schedule_version'] or 0) + 1
+        db.execute('UPDATE shows SET schedule_version=%s WHERE id=%s', (new_v, show_id))
+        log_cur = db.execute(
+            "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
+            "VALUES (%s, 'schedule', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
+        log_id = log_cur.fetchone()['id']
+        db.commit()
+        db.close()
 
     _export_date = datetime.now().strftime('%B %d, %Y at %I:%M %p')
     html = _render(new_v, _export_date)
@@ -10128,6 +10150,10 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
         app.logger.error(f"PDF_GENERATION_FAILED show_id={show_id} type=schedule error={e}")
         pdf_bytes = None
 
+    if preview:
+        syslog_logger.info(
+            f"PDF_DESIGNER_PREVIEW show_id={show_id} type=schedule by={exported_by_id}")
+        return html, new_v, dict(show), pdf_bytes, None, False
     _stash_export_bytes(log_id, pdf_bytes)
     syslog_logger.info(
         f"PDF_EXPORT show_id={show_id} type=schedule v={new_v} by={exported_by_id}"
@@ -10493,11 +10519,13 @@ def email_pdf(show_id, pdf_type):
     }), 202
 
 
-def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
+def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None, preview=False):
     """Build the post-show notes PDF. Versions and logs to export_log so the
     same machinery (history download, S3 archival, scheduled email) works
     identically to advance/schedule. Returns (html, version, show_dict,
-    pdf_bytes, log_id)."""
+    pdf_bytes, log_id).
+    preview=True (PDF Designer): render without versioning (no export_log row,
+    no version bump, no stored-export reuse); returns log_id None, is_new False."""
     # Only consult the Flask session when there's a request to read it from.
     # Background callers (scheduled emails run in an APScheduler thread with an
     # app context but NO request context) pass exported_by_id explicitly, or
@@ -10553,23 +10581,29 @@ def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
                                export_date=export_date)
 
     # Reuse the previous version's bytes when nothing in the document changed.
-    content_hash = _pdf_content_hash(_render(_HASH_VERSION_SENTINEL, _HASH_DATE_SENTINEL))
-    cached_row, cached_bytes = _find_reusable_export(db, show_id, 'postnotes', content_hash)
-    if cached_row:
+    if preview:
+        # PDF Designer preview: never version, never reuse a stored export.
         db.close()
-        syslog_logger.info(
-            f"PDF_EXPORT_REUSED show_id={show_id} type=postnotes v={cached_row['version']} by={exported_by_id}"
-        )
-        return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
+        new_v = show['postnotes_version'] or 0
+        log_id = None
+    else:
+        content_hash = _pdf_content_hash(_render(_HASH_VERSION_SENTINEL, _HASH_DATE_SENTINEL))
+        cached_row, cached_bytes = _find_reusable_export(db, show_id, 'postnotes', content_hash)
+        if cached_row:
+            db.close()
+            syslog_logger.info(
+                f"PDF_EXPORT_REUSED show_id={show_id} type=postnotes v={cached_row['version']} by={exported_by_id}"
+            )
+            return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
 
-    new_v = (show['postnotes_version'] or 0) + 1
-    db.execute('UPDATE shows SET postnotes_version=%s WHERE id=%s', (new_v, show_id))
-    log_cur = db.execute(
-        "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
-        "VALUES (%s, 'postnotes', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
-    log_id = log_cur.fetchone()['id']
-    db.commit()
-    db.close()
+        new_v = (show['postnotes_version'] or 0) + 1
+        db.execute('UPDATE shows SET postnotes_version=%s WHERE id=%s', (new_v, show_id))
+        log_cur = db.execute(
+            "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
+            "VALUES (%s, 'postnotes', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
+        log_id = log_cur.fetchone()['id']
+        db.commit()
+        db.close()
 
     html = _render(new_v, datetime.now().strftime('%B %d, %Y at %I:%M %p'))
     try:
@@ -10579,6 +10613,10 @@ def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
         app.logger.error(f"PDF_GENERATION_FAILED show_id={show_id} type=postnotes error={e}")
         pdf_bytes = None
 
+    if preview:
+        syslog_logger.info(
+            f"PDF_DESIGNER_PREVIEW show_id={show_id} type=postnotes by={exported_by_id}")
+        return html, new_v, dict(show), pdf_bytes, None, False
     _stash_export_bytes(log_id, pdf_bytes)
     syslog_logger.info(
         f"PDF_EXPORT show_id={show_id} type=postnotes v={new_v} by={exported_by_id}"
@@ -13624,7 +13662,11 @@ def pdf_designer_preview(pdf_type):
     if not show:
         return ('show not found', 404)
 
-    # Tuple-returning builders (advance, schedule, postnotes): unpack 5-tuple.
+    # Tuple-returning builders (advance, schedule, postnotes) return a 6-tuple
+    # (html, version, show, pdf_bytes, log_id, is_new). preview=True renders
+    # the current content with the SAVED layout and writes nothing: no
+    # export_log row, no version bump, no reuse of a stored export (a stored
+    # export would hide the layout change being previewed).
     tuple_builders = {
         'advance': _build_advance_pdf,
         'postnotes': _build_postnotes_pdf,
@@ -13639,7 +13681,8 @@ def pdf_designer_preview(pdf_type):
     pdf_bytes = None
     try:
         if pdf_type in tuple_builders:
-            _html, _ver, _show, pdf_bytes, _log_id = tuple_builders[pdf_type](show_id)
+            _html, _ver, _show, pdf_bytes, _log_id, _is_new = tuple_builders[pdf_type](
+                show_id, preview=True)
         elif pdf_type in response_builders:
             sub_resp = response_builders[pdf_type](show_id)
             if hasattr(sub_resp, 'data'):
