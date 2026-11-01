@@ -2640,6 +2640,14 @@ span.ab-dim { margin-top: 0; }
   html:not(.mobile-view) .ab-hero { gap: 10px; padding: 12px; }
   html:not(.mobile-view) .ab-photo { width: 64px; height: 64px; }
 }
+/* …and the narrow Items column moves an item's "N on show" chip to a second
+   line (under the name, past the thumb's 34 px + gap), or the chip and the
+   + button squeeze the name to nothing. 80 px = thumb + 2 gaps + button. */
+@media (max-width: 800px) {
+  html:not(.mobile-view) .ab-col-types .ab-item { flex-wrap: wrap; row-gap: 3px; }
+  html:not(.mobile-view) .ab-col-types .ab-item .ab-row-main { flex-basis: calc(100% - 80px); }
+  html:not(.mobile-view) .ab-col-types .ab-item .ab-onshow { order: 1; margin-left: 43px; }
+}
 
 /* ══ #Tags + Search (3.35.0) ═══════════════════════════════════════════════
    find_module.py + tags.js + templates/search.html, tags.html, tag.html.

@@ -741,7 +741,11 @@ async function openAddAsset(showId, defaultStart, defaultEnd) {
 }
 
 function closeApprAssetSearch() { document.getElementById('appr-asset-search-modal').style.display = 'none'; }
-function closeApprAssetAdd()    { document.getElementById('appr-asset-add-modal').style.display = 'none'; _apprAvailData = null; }
+function closeApprAssetAdd() {
+  document.getElementById('appr-asset-add-modal').style.display = 'none';
+  ++_apprAvailSeq;   // a late availability response must not touch the closed dialog
+  _apprAvailData = null;
+}
 
 function filterApprAssets() {
   const q   = document.getElementById('appr-asset-search-input').value;
@@ -895,6 +899,7 @@ async function _refreshApprAvailability() {
   const availDiv = document.getElementById('appr-avail-info');
   if (!typeId || !availDiv) return;
   if (_apprCurrentIsSystem) {
+    ++_apprAvailSeq;   // drop a still-pending response for the item picked before
     _apprAvailData = null;
     availDiv.innerHTML = '<span style="color:var(--accent)">System — no unit limit.</span>';
     updateApprAddState();

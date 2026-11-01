@@ -20757,7 +20757,9 @@ def asset_category_delete(cat_id):
 
 # What the PM-facing catalog (/api/asset-types without a manager's
 # include_hidden) sends per type: picker data only. A new column the show
-# page's Add Asset browser needs goes here — never supplier / storage data.
+# page's Add Asset browser needs goes here — never supplier name/contact,
+# S3 keys (photo_s3_key), content hashes or timestamps. storage_location
+# stays: the browser's Details pane shows it as "Stored at".
 _ASSET_PICKER_COLS = (
     'id', 'category_id', 'parent_type_id', 'name', 'manufacturer', 'model',
     'storage_location', 'rental_cost', 'weekly_rate', 'reserve_count',
@@ -20787,7 +20789,7 @@ def asset_types_api():
 
     Only a manager asking with include_hidden gets every column; everyone
     else gets the picker-level `_ASSET_PICKER_COLS` (no supplier name /
-    contact, storage keys or hashes — this is the PM-facing catalog).
+    contact, S3 keys or hashes — this is the PM-facing catalog).
     """
     include_hidden = request.args.get('include_hidden') == '1'
     is_manager = (
