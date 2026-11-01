@@ -311,6 +311,11 @@
       header tint to both window edges. ─────────────────────────────── */
 .public-dash { margin: 0 auto; }
 .public-dash .page-header { border-image-outset: 0 100vw 12px 100vw; }
+/* ≤900px the column's side padding drops to 16px (style.css); the header
+   bar's bleed must match it or the page scrolls sideways (iPad portrait). */
+@media (max-width: 900px) {
+  html:not(.mobile-view) .public-dash .page-header { margin-left: -16px; margin-right: -16px; padding-left: 16px; padding-right: 16px; }
+}
 </style>
 {% endblock %}
 
@@ -319,8 +324,9 @@
   <div>
     <h1 class="page-title">{{ dash.name }}</h1>
     <p class="page-sub">
-      {% set wcount = config.get('widgets', [])|length %}
-      {{ wcount if wcount else 1 }} widget{{ 's' if wcount != 1 else '' }}
+      {# A legacy single-layout dashboard (no widgets list) shows one widget. #}
+      {% set wcount = (config.get('widgets') or [])|length or 1 %}
+      {{ wcount }} widget{{ 's' if wcount != 1 else '' }}
     </p>
   </div>
   <div style="display:flex;gap:8px;align-items:center">
@@ -364,8 +370,8 @@ const CAN_EDIT    = {{ 'true' if (not public) and dash.user_id == user.id else '
 // endpoints are authorized by this dashboard's public slug instead.
 const PUBLIC_SLUG = '{{ dash.public_slug if (public and dash.public_slug) else "" }}';
 const SLUG_Q      = PUBLIC_SLUG ? ('&slug=' + encodeURIComponent(PUBLIC_SLUG)) : '';
-// Signed-out visitor: show names and asset links lead only to the sign-in
-// page, so they render as plain text.
+// Signed-out visitor (a document viewer gets the same page): show names and
+// asset links lead only to the sign-in page, so they render as plain text.
 const ANON        = {{ 'false' if user else 'true' }};
 
 /* Load widgets from config, backward-compatible with old single-layout dashboards */
@@ -675,7 +681,7 @@ function renderByCategory(data) {
 function renderByShow(data) {
   const byShow = data.by_show || [];
   if (!byShow.length) return '<div style="padding:40px;text-align:center;color:var(--text-dim)">' +
-    (ANON ? 'Assets by show are shown to signed-in users only.'
+    (ANON ? 'Assets by Show is not part of the public view.'
           : 'No shows with asset reservations in this date range.') + '</div>';
   let html = '';
   for (const show of byShow) {
