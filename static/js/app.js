@@ -4374,15 +4374,18 @@ document.addEventListener('click', (e) => {
   panel.hidden = true;
 });
 
-// Start the badge polling once the page is ready.
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => {
-    refreshNotifBadge();
-    _notifPollTimer = setInterval(refreshNotifBadge, _NOTIF_POLL_MS);
-  });
-} else {
+// Start the badge polling once the page is ready — only where base.html drew
+// the bell (not for document viewers, whose gate 403s the poll, nor on the
+// sign-in pages).
+function _startNotifPolling() {
+  if (!document.getElementById('notif-bell-btn')) return;
   refreshNotifBadge();
   _notifPollTimer = setInterval(refreshNotifBadge, _NOTIF_POLL_MS);
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _startNotifPolling);
+} else {
+  _startNotifPolling();
 }
 
 /* ═══════════════════════════════════════════════════════════════

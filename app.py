@@ -2383,6 +2383,14 @@ _VIEWER_ALLOWED_ENDPOINTS = frozenset({
     # page; before 3.2.0 the gate 403'd this, so viewers never saw a banner.
     # get_active_messages() still filters by audience (Doc Viewers group).
     'get_messages_api', 'dismiss_message',
+    # Session-expiry watchdog (app.js _initSessionWatch, every page): viewers'
+    # sessions expire like anyone's. Both carry no show data; status stays
+    # side-effect-free. Before this the gate 403'd them, so viewers got no
+    # warning and a 403 in the console on every page.
+    'api_session_status', 'api_session_extend',
+    # "Mobile site / Desktop site" footer link: a cookie-only UI preference
+    # that isn't even login-gated (the login page has the switch too).
+    'set_view_mode',
 })
 
 
