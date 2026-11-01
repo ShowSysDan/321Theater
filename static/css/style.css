@@ -2691,6 +2691,7 @@ tr.tag-focus-target > td { background: rgba(245,127,32,.16); }
 .tag-pill:hover { border-color: rgba(232,130,47,.5); background: var(--bg-card-hover); text-decoration: none; }
 .tag-pill[hidden] { display: none; }
 .tag-pill-count { font-weight: 400; font-size: 11px; color: var(--text-dim); }
+.find-cap-note { font-size: 12px; margin: -6px 0 14px; }
 
 /* /tags/<tag> */
 .tag-page-title { font-family: var(--font-mono); }

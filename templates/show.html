@@ -1998,7 +1998,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           <td style="font-size:11px;white-space:nowrap">${rentalCell}</td>
           <td>$${Number(a.locked_price).toFixed(2)}</td>
           <td>$${lineTotal}</td>
-          <td style="font-size:11px;color:var(--text-dim)" data-tag-focus="asset:${a.id}">${renderTaggedText(a.notes||'')}</td>
+          <td style="font-size:11px;color:var(--text-dim)" data-tag-focus="asset:${a.id}">${a.is_hidden ? esc(a.notes||'') : renderTaggedText(a.notes||'')}</td>
           ${IS_ADMIN ? `<td>
             ${IS_ADMIN ? `<button class="btn btn-xs btn-ghost" onclick="toggleAssetHidden(${a.id},${a.is_hidden})" title="${a.is_hidden?'Unhide':'Hide'}">${a.is_hidden?'Show':'Hide'}</button>` : ''}
             <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="removeAsset(${a.id})">✕</button>

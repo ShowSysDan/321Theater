@@ -50,13 +50,18 @@
     return s && s.length <= TAG_MAX && TAG_NAME.test(s) ? s : null;
   }
 
-  /** Distinct lowercase tags in order of first appearance. */
-  function extract(text) {
-    var out = [], re = tagRe(), m, s = String(text == null ? '' : text);
+  /** Distinct lowercase tags in order of first appearance; stops after `max`
+      when given. Dedupes with a prototype-less hash (not indexOf), so it
+      stays linear however many tags one box holds. */
+  function extract(text, max) {
+    var out = [], seen = Object.create(null), re = tagRe(), m, s = String(text == null ? '' : text);
     if (s.indexOf('#') < 0) return out;
     while ((m = re.exec(s))) {
       var t = m[2].toLowerCase();
-      if (t.length <= TAG_MAX && out.indexOf(t) < 0) out.push(t);
+      if (t.length > TAG_MAX || seen[t]) continue;
+      seen[t] = 1;
+      out.push(t);
+      if (max && out.length >= max) break;
     }
     return out;
   }
@@ -142,20 +147,24 @@
     return list;
   }
 
-  var chipState = new WeakMap();   // control → {sig, strip}; dies with the control
+  var chipState = new WeakMap();   // control → {val, sig, strip}; dies with the control
+  var CHIP_MAX = 30;               // chips under one control; more → a '+ more' chip
 
   /** Redraw one control's chip strip; returns true when it changed. */
   function refreshChips(ctrl) {
-    var tags = extract(ctrl.value);
-    var sig = tags.join(' ');
+    var val = ctrl.value;
     var st = chipState.get(ctrl);
     var strip = st && st.strip;
-    if (st && st.sig === sig && (!strip || (strip.isConnected && strip.previousElementSibling === ctrl))) {
-      return false;
-    }
+    var placed = !strip || (strip.isConnected && strip.previousElementSibling === ctrl);
+    if (st && st.val === val && placed) return false;   // untouched since the last pass
+    var tags = extract(val, CHIP_MAX + 1);
+    var more = tags.length > CHIP_MAX;
+    if (more) tags = tags.slice(0, CHIP_MAX);
+    var sig = tags.join(' ') + (more ? ' +' : '');
+    if (st && st.sig === sig && placed) { st.val = val; return false; }
     if (!tags.length) {
       if (strip) strip.remove();
-      chipState.set(ctrl, {sig: '', strip: null});
+      chipState.set(ctrl, {val: val, sig: '', strip: null});
       return !!(st && st.sig);
     }
     if (!strip) {
@@ -164,9 +173,9 @@
     }
     strip.innerHTML = tags.map(function (t) {
       return '<a class="tag-chip" href="' + href(t) + '" title="Everything tagged #' + esc(t) + '">#' + esc(t) + '</a>';
-    }).join('');
+    }).join('') + (more ? '<a class="tag-chip tag-chip-more" href="/tags" title="This box holds more tags — see every tag">+ more</a>' : '');
     if (ctrl.nextElementSibling !== strip) ctrl.insertAdjacentElement('afterend', strip);
-    chipState.set(ctrl, {sig: sig, strip: strip});
+    chipState.set(ctrl, {val: val, sig: sig, strip: strip});
     return !st || st.sig !== sig;
   }
 
@@ -180,12 +189,15 @@
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
         if (!d || my !== stripSeq) return;
-        var tags = d.tags || [];
+        // The server sends the 40 most used (find_module.SHOW_STRIP_MAX) +
+        // `total` distinct tags.
+        var tags = (d.tags || []).slice(0, 40);
+        var rest = Math.max(+d.total || 0, tags.length) - tags.length;
         if (!tags.length) { host.hidden = true; host.innerHTML = ''; return; }
-        host.innerHTML = '<span class="show-tags-label">Tags</span>' + tags.slice(0, 40).map(function (t) {
+        host.innerHTML = '<span class="show-tags-label">Tags</span>' + tags.map(function (t) {
           return '<a class="tag-chip" href="' + href(t.tag) + '" title="' + t.n + ' mention' + (t.n === 1 ? '' : 's') +
             ' in this show — open the tag page">#' + esc(t.tag) + (t.n > 1 ? ' <span class="tag-chip-n">' + t.n + '</span>' : '') + '</a>';
-        }).join('') + (tags.length > 40 ? '<a class="tag-chip tag-chip-more" href="/tags">+' + (tags.length - 40) + '</a>' : '');
+        }).join('') + (rest > 0 ? '<a class="tag-chip tag-chip-more" href="/tags">+' + rest + '</a>' : '');
         host.hidden = false;
       })
       .catch(function () {});
@@ -302,7 +314,8 @@
     if (!f || !onShowPage()) return;
     var i = f.indexOf(':');
     var kind = i < 0 ? f : f.slice(0, i), ref = i < 0 ? '' : f.slice(i + 1);
-    var spec = FOCUS[kind];
+    // Own keys only: ?focus=constructor / __proto__ must not find Object's.
+    var spec = Object.prototype.hasOwnProperty.call(FOCUS, kind) ? FOCUS[kind] : null;
     if (!spec || !/^[A-Za-z0-9_.:-]{0,100}$/.test(ref)) { clearFocusParam(); return; }
     if (typeof activeTab !== 'undefined' && activeTab !== spec.tab && typeof switchTab === 'function') switchTab(spec.tab);
     // Lazy tabs (labor, comments, assets, files, the piano panel) render
