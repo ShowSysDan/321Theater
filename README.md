@@ -179,7 +179,9 @@ Version history:
 2. [Installation](#installation)
 3. [First Login](#first-login)
 4. [User Guide](#user-guide)
-   - [Dashboard](#dashboard)
+   - [Home (Day Timeline)](#home-day-timeline)
+   - [Shows Board](#shows-board)
+   - [Search & Tags](#search--tags)
    - [Advance Sheet](#advance-sheet)
    - [Production Schedule](#production-schedule)
    - [Post-Show Notes](#post-show-notes)
@@ -310,41 +312,119 @@ Default credentials: **admin / admin123**
 
 ## User Guide
 
-### Dashboard
+### Home (Day Timeline)
 
-Lists all active and archived shows. Click a show to open it. **New Show** creates a new show.
+`/` — everything happening on one day, at a glance (3.35.0; the list of shows moved to the [Shows Board](#shows-board) at `/shows`). Each show or event with anything on the day gets a column ("lane") — a day inside its load-in → load-out span or a performance, production-schedule rows, or crew — and the lanes sit side by side on one time axis, so overlaps are easy to see.
 
-**Venue filter:** every venue shows by default (the **All venues** pill is lit). Click a venue pill to show **only** that venue; click more pills to add venues, click a lit pill to drop it, or click **All venues** to go back to everything. The archived list (and its count) follows the pick too, and it combines with the search box and date range.
+- **Time axis** — runs top to bottom from 06:00 (earlier when something starts earlier) to midnight, and further when the day runs late (up to 06:00 the next morning). The axis and the lane headers stay in place while you scroll down or sideways.
+- **Lane header** — the show name (click it to open the show), venue, *Day n/m* of the show's schedule, badges (EVENT, TEST, DARK when the day is marked dark on the Schedule tab, the Prism status), the day's PM with call / email buttons (the covering PM when one is set for that day, tagged COVER), and the performance or event times. Schedule rows and crew lines without a usable time (TBD…) are listed under *N without a time*.
+- **Schedule** blocks are the day's production-schedule rows; **Crew** bars are its labor lines (position · technician, in → out, lunches hatched). Items that overlap sit side by side. Dashed means not confirmed: a schedule row with no end time, or a crew line that isn't scheduled or filled yet. Click a schedule block to open that row on the show's Production Schedule; a crew bar opens the show's Labor Requests.
+- **Overhead & Project Crew** — the day's overhead and project lines get a lane of their own (hidden while a venue filter is on); its blocks open the Overhead & Project Crew page.
+- Anything still running after midnight from the day before shows at the top, marked *from the previous day*; times on another day carry their date (`11/2 01:30`).
+- **NOW** — a red line at your device's current time while you look at today (it moves every 30 s); finished items fade. The page refreshes itself every minute while it's open (it pauses in a background tab), and a page left on today rolls over to the next day at 06:00.
+- **‹ Today ›** and the date picker change the day. The address keeps `?date=YYYY-MM-DD`, so a day can be bookmarked or shared.
+- **Venue** chips (shown when two or more venues have something that day) work like the Shows Board's venue pills. **Test shows** is off by default and shows how many are hidden. **− / +** zoom changes the height per hour. All three are remembered in this browser.
+- Hover or Tab to a block for its full details. A day with nothing on it says so, with a link to the Shows Board. On phones the Home header scrolls away so the timeline gets the whole screen.
+
+### Shows Board
+
+`/shows` — the show board, which was the home page until 3.35.0 (the old `/dashboard` address still lands here). Every active show is a card in its venue's column (shows with no venue go under *Unassigned*); click a card to open the show.
+
+- **Header** — today's date and how many shows are on the boards today, the **Active** / **Archived** tabs with their counts, and **New Show** (read-only accounts can't create shows).
+- **Happening Today** — the shows with something on today: any day from load-in to load-out, or a performance. Each card is tagged *Show Day*, *Performance*, *Load-In*, *In Production* (a day in between) or *Load-Out* (plus EVENT / TEST / the Prism status) and lists the venue, today's PM (the covering PM when one is set for today, tagged *cover*), the performance times (▷) and today's crew call times (◷).
+- **Search box** — filters the cards by show name or venue as you type. When nothing matches, **Search the archive →** runs the same words on archived shows and **Search everything →** opens [Search](#search--tags).
+- **Date range** — keeps only cards whose show date falls inside it.
+- **Venue filter** — every venue shows by default (the **All venues** pill is lit). Click a venue pill to show **only** that venue; click more pills to add venues, click a lit pill to drop it, or click **All venues** to go back to everything. It combines with the search box and date range.
+- **Layout** — *Columns (scroll)* (venues side by side, with a second scrollbar above the columns) or *Stacked (top→bottom)*, and *Normal* or *Slim* cards; saved to your account. The mobile site always stacks.
+- **Cards** — the show name and its date(s) and time(s) (every performance of a multi-performance show), with a coloured left edge: orange = show, teal = event, slate = past; a dashed edge marks a test show. Badges: **EVENT**, **TEST** (excluded from reports), the Prism Hold/Confirmed tag, and **PAST**.
 
 **PAST badge:** a show whose last date — its last performance or load-out, whichever is later — has gone by stays on the board marked **PAST**; hover the badge for the day it will move to the archive. See [Show Archiving](#show-archiving).
 
+**New Show** (`/shows/new`) asks only for the show name; **Create Show →** opens the new show's Advance Sheet, where everything else is filled in. Schedulers can also quick-create a show from the [Labor Scheduler](#labor-scheduler).
+
+**My Shows** (`/my-shows`, in the sidebar) is the same board narrowed to the *active* shows where you are the **Production Manager** on the Advance Sheet or the covering **Day PM** on any labor day. It matches on the contact linked to your user account (see [Contacts ↔ Users](#contacts--users)), or your display name when no contact is linked; if a show you run is missing, check the PM name on its Advance Sheet. Happening Today lists only your shows, and there is no Archived tab or New Show button.
+
+**Archived shows** (`/shows/archived`, the board's **Archived** tab) lists every archived show, newest first, with its own search (show name, venue, Arts Group), date range and venue pills. **View** opens the show (marked ARCHIVED); **Restore** (staff and admins) puts it back on the board and restarts its archive clock; admins can also **Delete** a show permanently, with everything on it (it asks first).
+
+### Search & Tags
+
+**Search** (`/search`, in the sidebar; the 🔍 in the phone header) finds any show, active or archived. Every filter you set narrows the results. The address bar keeps them, so a search can be bookmarked or shared, and Back steps through your changes. Document viewers don't have Search or Tags.
+
+- **Search box** — matches the show name, venue, Arts Group and PM names; every word must match. Tick **Also search inside show content** to also look through the show's text: Advance text and notes fields, schedule rows and Venue & Tech info, labor and Post Show notes, comments, asset line notes, external rental descriptions, piano tuning notes and file descriptions. Each hit shows a snippet; click it to open the show at that spot.
+- **PM** — the show's Production Manager *or* a covering Day PM on any labor day. **Me** = the contact linked to your account.
+- **Edited by** — shows that person changed (forms, comments, labor, assets, files…), with the number of edits and when the last one was. Opening a show without changing anything doesn't count. Advance, Schedule and Post Show changes are counted from their version history, which keeps each show's last 100 versions.
+- **Tags** — up to five `#tags`, with suggestions as you type (Enter, space or comma adds one; × or Backspace removes one). A show must have all of them.
+- **Venue** and **From / To** — dates match when the show's load-in → load-out span or any performance touches the range.
+- **Active / Archived / All** (default All), **Include test shows** (default off), **Sort** (newest first, oldest first, name, or last edited — the default when Edited by is set) and **Clear all**.
+- Each result card says *why* it matched: PM, edits, tags, text snippets, "+N more matches inside". At most 200 shows are listed; narrow the filters when you see "Showing the first …". On phones the filters fold behind a **Filters** button that shows how many are set.
+
+**#tags.** Type `#` and a word in any free-text box of a show: Advance text and notes fields, schedule rows and Venue & Tech info, the show's labor notes, labor day notes and request notes, Post Show notes and actual-labor line notes, comments, Assets line notes, external rental descriptions, piano tuning notes and file descriptions. A tag is a letter followed by letters, digits, `_` or `-` (`#pyro`, `#load-in`), up to 50 characters, and capitals don't matter (`#Pyro` = `#pyro`). A `#` straight after a letter or digit (`Truck #2`, `x#1`), inside a web address, or followed by a digit is not a tag. Tags appear as clickable chips under the box, and the **Tags** line under the show name lists every tag in the show with its count. Nothing extra is stored: tags are read from the text itself, so editing or deleting the text removes the tag.
+
+- **All tags** (`/tags`, the **All tags** button on Search) — every tag with how many times it's used (hover a tag for the number of shows), a filter box, and **Most used / A–Z** sorting (remembered in this browser). Counts can take up to 30 seconds to catch up with a brand-new tag.
+- **A tag's page** (`/tags/<tag>`, click any tag chip) — every place the tag is used, grouped by show (newest first; archived and test shows are badged). Each line names where it is (e.g. *Advance › Special Notes*, *Schedule › Sun 11/1 19:30*, *Labor › Show labor notes*, *Comment by …*) with the text around it. Click a line to open the show right at that spot: the tab opens and the field or row scrolls into view and flashes. **Search with this tag** opens Search pre-filtered, so you can add a PM, dates or more tags.
+
 ### Advance Sheet
 
-Contains all pre-show information: show details, contacts, arrival & parking, security, hospitality, audio, video, backline, stage, wardrobe, special elements, and labor needs.
+All pre-show information for one show: engagement and show dates, show details, contacts, arrival & parking, security, hospitality, audio, video, backline, stage, wardrobe, special elements, and more. Admins set up the sections and fields in [Form Field Customisation](#form-field-customisation).
 
-**Saving:** Changes are auto-saved as you type. The **Save** button forces an immediate save.
+**Show header (on every tab):** the show name with its date, venue and badges (ARCHIVED, TEST), *Last saved by …*, the **Tags** line (every `#tag` in the show — see [Search & Tags](#search--tags)), avatars of who else has the show open, and these buttons:
 
-**Conditional fields:** Fields appear/hide based on related field values (e.g. "Rentalworks Order #" appears when "Rental Works?" = Yes).
+- **History** — saved versions of the Advance Sheet, Production Schedule or Post-Show Notes; it opens on the tab you're on, and a picker at the top switches forms. Each version shows who saved it, when, and a summary (fields changed, rows added / removed / edited); **Changes ▾** lists exactly what changed, **View** shows the whole version, and **Restore…** previews what the restore will change before you confirm. One person's quick additions are grouped into one version; any removal or replacement starts a new one. A large removal is flagged. The last 100 versions are kept.
+- **Show Mode / Event Mode** — switches the show to an event: a teal accent and EVENT badge on Home and the Shows Board, and contacts set to receive only show or only event emails (Settings → Contacts) follow it.
+- **Mark as test / Unmark test** (admins, staff and content admins) — flags a test/demo show: a TEST badge, left out of reports, and hidden on Home and in Search unless test shows are included.
+- **AI Extract** (only when AI is enabled) — upload a rider or tech spec, or pick an attachment, then review the suggested values and apply the ones you want. See [AI Extraction (Ollama)](#ai-extraction-ollama).
+- **Save** — saves at once (Ctrl+S / Cmd+S does too).
 
-**Contacts:** Contact dropdowns populate from the Contacts list in Settings.
+**Saving:** changes auto-save about 1.5 s after you stop typing. On desktop a **Sections** rail on the right edge jumps to any section and ends with 💾 *Save Advance*.
 
-**Load-In / Load-Out:** When this window is left blank and the show has performance dates, the earliest show date is assumed as load-in and the latest as load-out (a single show date makes them the same day). Typing a load-in date also fills a still-blank load-out to match. These only fill blank fields, so a window you set yourself is never overwritten.
+**Engagement (First Call → Final Out):** the whole time in the building, from the first billed call through the end of load-out (stored as the load-in / load-out date and time). Set it first: it decides which days the Production Schedule and labor list, bounds the show dates and asset rental dates, and prices rentals (the weekly rate applies at 7+ days). A warning appears when a show date falls outside it. When it's blank and the show has performance dates, the earliest show date is taken as First Call and the latest as Final Out (a single date makes them the same day). Picking a First Call date also fills a still-blank Final Out date. These only fill blank fields, so dates you set yourself are never overwritten.
 
-**Venues / Radio Channels:** If configured in Settings, these show as dropdowns instead of free-text fields.
+**Show Dates & Times:** **+ Add Show Time** adds a performance (date + 24-hour time; two shows on one day are two rows); **Edit** and **×** per row.
 
-**Version History:** Click **History** to view, preview, and restore previous snapshots.
+**Sections and fields:** click a section heading to fold or open it (remembered in this browser; a section with anything filled in opens by itself). Notes boxes open from their **▸ label**. Field kinds:
+- Text, dates and numbers; **Yes / No** as a dropdown or a NO–YES slider; checklists where you tick several options.
+- **Contact pickers** — drawn from the Contacts list in Settings (per department). **Venues / Radio Channels** become dropdowns when they're configured in Settings.
+- **Arts Group** — pick one or choose **+ Add new…** and type a name; new names are added to the Arts Groups list when the form saves. The *Performance Company* field is normally this picker; its value decides [company asset rates](#assets-tab).
+- **Instruction blocks** — grey read-only text from the admins (screen only, never printed).
+- **File fields** — **⤴ Upload file** (with an optional description); PDFs, images and Word documents are appended to the Advance Sheet PDF on export. The files also appear under Export & Files → Attachments.
+- **PDF forms** — **Fill out form →** opens a fillable PDF in a popup; the status reads *Not started*, *Draft saved* or *Filled*, and **Download filled PDF** gets the stamped copy. See [PDF Form Templates](#pdf-form-templates).
+- **Piano Tuning panel** — see [Piano Tuning](#piano-tuning).
 
-**Real-time collaboration:** Multiple users can work simultaneously. Changes sync every 5 seconds and each user's active field is highlighted.
+**Conditional fields:** fields (and individual dropdown options) appear or hide based on other answers (e.g. "Rentalworks Order #" appears when "Rental Works?" = Yes).
 
+**Real-time collaboration:** several people can work on the same show at once. Other people's saved edits merge into your form every 2 seconds and the changed field flashes; in a field you're typing in, their value arrives when you leave it, unless you changed it yourself. A name chip with typing dots marks the field someone else is in.
 ### Production Schedule
 
-**Venue & Tech Info** — WiFi network/code, parking/security info. Radio Channel and Mix Position are read-only from the Advance Sheet.
+The day-of timeline, venue & tech info and show contacts. Edits save automatically, and several people can edit at once: other people's changes merge in every few seconds, cell by cell. A cell you've changed keeps your edit, and the row or field you're in gets their change when you leave it.
 
-**Timeline** — Time rows with Start, End, Description, Notes. Times are auto-normalised to 24-hour format on blur (e.g. "4pm" → "16:00", "1600" → "16:00"). Rows auto-sort by start time after each edit and after a template is applied (so the timeline always reads chronologically). Empty days render with no placeholder row.
+**Venue & Tech Info** — WiFi network/code (from the global WiFi settings), parking/security info and any other fields an admin adds under Settings → Form Fields → Schedule Fields. Fields marked *From Advance Sheet* (Radio Channel, Mix Position, First Call, Final Out…) are read-only mirrors; edit them on the Advance tab.
 
-**Schedule templates** — Apply a saved template via the dropdown in the timeline header. If the day already has entries, you'll be prompted with **Replace / Merge / Cancel**: *Replace* wipes the existing rows, *Merge* appends the template rows after the existing ones and re-sorts by start time.
+**Day tabs** — one timeline per calendar date of the engagement and the performances (**DAY 1 · 10/31**, **DAY 2 · 11/01**…), each headed *TIMELINE — DAY n: date* with that day's performance times. A **⚠ OFF-DATE** tab appears when rows were saved on a date that is no longer one of the show's days (because the dates changed). Those rows are kept so nothing is lost and never print; copy them to a real day (that day's **Tools → Copy from day**) or delete them.
 
-**Show Contacts** — All dpc contacts (PM, Hospitality, Programming, Event Manager, Education, Guest Services, Runner) are read-only, pulled from the Advance Sheet. Security Email is editable.
+**Day PM** — the bar under each dated day's heading picks the production manager on duty that day: blank means the show's PM from the Advance Sheet, or pick a covering PM from the Production contacts. It shows the PM's title, phone and email (tagged *covering* for a cover), saves as soon as you pick, and updates live for everyone. It is the same setting as **Day PM** on the [Labor Requests](#labor-requests) tab, so changing it in either place changes both, and it prints on the Production Schedule PDF (each day's "PM on duty" line, marked "(covering)" for a cover; content admins can hide or relabel that line in PDF Designer) and on the [Security Sign-In Sheet](#security-sign-in-sheet). Read-only users see it but can't change it.
+
+**Timeline rows** — Start, End, Description, Notes. Times are normalised to 24-hour format when you leave the cell (e.g. "4pm" → "16:00", "1600" → "16:00"), and changing a Start re-sorts the day so the timeline always reads in order. Drag the ⠿ handle to reorder, **×** deletes a row, and **+ Add Row** (in the day header and under the table) appends one. Empty days render with no placeholder row. Emptying a schedule that had rows asks you to confirm first.
+
+**After midnight** — for a time after midnight on the same show day, type `1+00:30` (`+0030` and `24:30` are turned into that too). It sorts after the evening's rows and prints with the next date (`11/2 00:30`) on the PDF, Home and everywhere else schedule times appear.
+
+**Piano tuning rows** — a scheduled [piano tuning](#piano-tuning) puts a read-only 🎹 row on its day; it changes only through the tuning itself.
+
+**Tools ▾ above the day tabs** (the line beside it reminds you of the `1+00:30` format; read-only accounts don't get Tools menus):
+- **Import from another show…** — search for a show that has a production schedule, choose which of its days go onto which of this show's days (**Show rows** previews them), and choose whether to **add to** or **replace** the rows already there.
+- **Save day as template…** (admins and content admins) — save one day's rows as a named day template; using an existing template's name replaces that template.
+- **History** — every saved version of the schedule, with what changed (the same list as the header's **History**).
+
+**Tools ▾ in each day's header:**
+- **Apply template** — insert a saved day template. If the day already has rows you choose **Replace existing** (wipe them) or **Merge (append)** (add the template rows, then re-sort by start time). Templates are managed in Settings → Form Fields → Day Templates, or saved from a day here.
+- **Copy from day** — replace this day's rows with a copy of another day's (piano tuning rows stay put).
+- **Pull show time(s)** — insert a SHOW START row for each performance that day (only on days with performance times).
+- **Sort by time** — reorder the day's rows by start time.
+
+The menus work from the keyboard too: Enter or ↓ opens, ↑ / ↓ move, Esc closes. (Before 3.35.0 these were separate *Apply template…*, *Copy from…* and *⇅ Sort* controls on each day.)
+
+**Dark day — omit from print** (multi-day shows) — a checkbox in the day header that leaves that day off the printed Production Schedule; the other days keep their Day numbers. The day shows a DARK badge on Home.
+
+**Show Contacts** — the artist / tour contact fields (Schedule Fields an admin marked "Render in the Show Contacts section"), the dpc contacts (PM, Hospitality, Programming, Event Manager, Education, Guest Services, Runner — read-only, pulled from the Advance Sheet) and the editable **Security Email**.
 
 **PDF header dates** — the Production Schedule and Advance Sheet PDFs spell out every show (performance) date in the header, with back-to-back days collapsed into a range: *Friday, October 2, 2026*; *Friday, October 2 – Sunday, October 4, 2026*; *Friday, October 2 – Sunday, October 4 & Friday, October 9, 2026*. The year prints once when every date shares it (a run over New Year's prints it on each date).
 
@@ -352,11 +432,23 @@ Contains all pre-show information: show details, contacts, arrival & parking, se
 
 ### Post-Show Notes
 
-Record production manager (read-only from advance), crew call time, show notes, house notes, equipment issues, and miscellaneous notes. A collapsible schedule timeline is shown for reference.
+The **Post Show** tab records what actually happened and settles the labor bill.
+
+**Notes** — the production manager (read-only, from the Advance Sheet), Crew Called, Cast Count and Crew Count, and four notes areas: Show Notes (Tour/Client), House Notes, Equipment / Maintenance Issues and Miscellaneous. They save automatically, other people's edits merge in live, and the header's **History** keeps their versions. A collapsible **Production Schedule (Reference)** sits at the bottom of the tab.
+
+**Header buttons** — **Final Invoice PDF**, **Export PDF** (the Post-Show Notes report) and **Email** (generates the report and sends it to its recipients from Settings → Contacts).
+
+**Sound Levels (Spot)** — only when an admin has the Spot module on ([Feature Modules](#feature-modules)). Sound levels for each performance are pulled from the venue's Spot sensors automatically after the show: the measured window, then per sensor Leq, Max, L10, L50, L90, Avg and the time of the maximum, plus a **Spot PDF** filed under Export & Files. **Pull now** / **Re-pull** fetches them again (not for read-only accounts). The levels are added to the Post-Show Notes PDF when there are any.
+
+**Per-Crew Billable Extras** — shown only when extras (e.g. parking) are set up in Settings. Tick the per-crew charges that apply to this show; **Fold extras into the hourly rate** hides those charge lines and spreads each charge across the crew member's worked hours instead, here and on the Final Invoice PDF. It's the same setting as on the Labor Requests tab's estimate.
 
 The tab's **Actual Labor (billing)** grid bills settlement from actual hours worked.
 
-**Settle Now:** nothing is copied from the labor schedule into the settlement until someone presses **Settle Now** on this tab — normally once the show is over — so the settlement always starts from the *final* schedule (before 3.6.0 the schedule was copied the first time anyone opened the show, often weeks early, and later changes to people or times never reached it). Settle Now pulls every scheduled line with its position, technician and times filled in and records who settled it and when; after that the button becomes **Re-sync from Schedule**, which only adds lines scheduled since. Until a show is settled, its Final Invoice (and its part of a Combined Invoice) bills **no labor** and says "Labor not settled yet"; the Export & Files card and the Combined Invoice builder warn too.
+**Settle Now:** nothing is copied from the labor schedule into the settlement until someone presses **Settle Now** on this tab — normally once the show is over — so the settlement always starts from the *final* schedule (before 3.6.0 the schedule was copied the first time anyone opened the show, often weeks early, and later changes to people or times never reached it). Settle Now pulls every scheduled line with its position, technician and times filled in and records who settled it and when; after that the button becomes **Re-sync from Schedule**, which only adds lines scheduled since and keeps your edits. Until a show is settled, its Final Invoice (and its part of a Combined Invoice) bills **no labor** and says "Labor not settled yet"; the Export & Files card and the Combined Invoice builder warn too.
+
+**Editing lines:** change what actually happened — the times, hours, rate and cost recompute — and **✕** removes a line. **+ Add Line** adds a line for extra crew. Edits here bill the client and never change the labor schedule.
+
+**+ Add Hours:** bills hours worked outside the schedule (e.g. prep work weeks out): pick the technician and position (the rate resolves automatically), the date, the hours and a **required justification**. Added hours always bill at straight time and never count toward the 40-hour overtime week.
 
 **Worked by:** each line has a **Worked by** technician picker (pre-filled with the scheduled tech) to record who actually worked it. It's for tracking only — never printed on paperwork, and changing it doesn't change the line's rate — but overtime is counted per technician, so it follows this pick.
 
@@ -364,21 +456,27 @@ The time fields read like a shift, left to right: **In, Lunch 1 start, Lunch 1 e
 
 When one technician's actuals pass **40 hours within one Monday–Sunday work week** on the show/event, the excess bills at **time and a half** — the grid shows each affected shift's straight-time portion, adds a read-only **Overtime (1.5×)** block, and keeps the on-page total in lockstep with the Final Invoice PDF (both come from the same server-side math). Hidden per-crew charges (e.g. parking folded into the rate) are still recovered exactly once at 1× — the OT premium never touches them.
 
-Click **Export PDF** to generate a Post-Show Notes PDF.
-
 ### Labor Requests
 
-Labor is organised into **day blocks**. Click **+ Add Day**, pick a work date, then **+ Add Request** inside the day to add labor rows (position, in time, lunch 1, lunch 2, out time, requested technician). Each lunch column stacks its start (S) over its end (E), so a row reads like a shift from left to right and the Tab key follows the same order; the Labor Scheduler and Overhead & Project Crew grids use the same layout. Each day block's header has its own date picker — changing it retimes every row under that day.
+Labor is organised into **day blocks**. Click **+ Add Day**, pick a work date, then **+ Add Request** inside the day to add labor rows (position, in time, lunch 1, lunch 2, out time, requested technician). Each lunch column stacks its start (S) over its end (E), so a row reads like a shift from left to right and the Tab key follows the same order; the Labor Scheduler and Overhead & Project Crew grids use the same layout. Rows save one at a time as you edit, and **×** deletes a row. The **Requested Tech** picker defaults to *— Any technician —* and lists the technicians qualified for the row's position first. Each day block's header has its own date picker — changing it moves every row under that day.
 
-For multi-day runs, fill out day 1 completely, then click **Clone to…** on the day's header to duplicate every row to day 2 / 3 / …. **Delete Day** removes the day and all rows on it.
+**Day Tools ▾ menu** (each day's header; 3.35.0 — these used to be separate buttons):
+- **Apply preset** — append a labor preset's standing positions to the day (presets are set up in Settings → Job Positions; existing rows are kept).
+- **Clone to…** — for multi-day runs, fill out day 1 completely, then clone every row (position, times, requested tech) to day 2 / 3 / ….
+- **Sort by call time** — order the day's requests by In time, blank times last; the order is saved for everyone.
+- **Delete Day** — remove the day and all its rows (asks first).
 
-The **SCHED** checkbox and **SCHEDULED TECH** column inside each day are read-only — they are set by the scheduler via the [Labor Scheduler](#labor-scheduler) page. PMs can see who has been confirmed for each position but cannot edit the scheduler's entries. Restricted (read-only) users can view but not modify labor requests.
+**Quick Fill** — the bar at the top: enter In / Lunch / Out times once, tick the rows to change (the checkbox in a day's header ticks the whole day), then **Apply to Selected**, or **Apply to All** for every row on the tab.
 
-**Estimated Labor Cost (client quoting before scheduling):** below the day blocks, the **Estimated Labor Cost** box prices the requested labor even before any technician is scheduled — useful for quoting a client. Each line is billed at its position's **special rate** if the position has one, otherwise at the **highest standard technician rate** (see [Pay Rate Levels & Labor Estimating](#pay-rate-levels--labor-estimating) for which rates count). Lines that are not yet scheduled are tagged **"est."**; once a tech is assigned, that line automatically shows the assigned tech's real rate. The **Per-Crew Billable Extras** picker and the **Fold extras into the hourly rate** toggle sit right above the box (the same settings shown on the Post-Show tab) so extras like parking are included in the estimate. Use **Labor Estimate PDF** in the box header to export the estimate as a branded quote.
+**Show Labor Notes** — free text for split-shift instructions, task lists and other scheduler notes; it saves when you leave the box and shows on the Labor Scheduler and Labor Overview.
+
+The **SCHED** checkbox and **SCHEDULED TECH** column inside each day are read-only — they are set by the scheduler via the [Labor Scheduler](#labor-scheduler) page. PMs can see who has been confirmed for each position but cannot edit the scheduler's entries. Read-only users can view but not modify labor requests.
+
+**Estimated Labor Cost (client quoting before scheduling):** below the day blocks, the **Estimated Labor Cost** box prices the requested labor even before any technician is scheduled — useful for quoting a client. Each line is billed at its position's **special rate** if the position has one, otherwise at the **highest standard technician rate** (see [Pay Rate Levels & Labor Estimating](#pay-rate-levels--labor-estimating) for which rates count). Lines that are not yet scheduled are tagged **"est."**; once a tech is assigned, that line automatically shows the assigned tech's real rate. Day subtotals and the estimated total follow; **Refresh** recalculates. The **Per-Crew Billable Extras** picker and the **Fold extras into the hourly rate** toggle sit right above the box when extras are set up (the same settings shown on the Post-Show tab) so extras like parking are included in the estimate. Use **Labor Estimate PDF** in the box header to export the estimate as a branded quote.
 
 **Overtime (40 hours per work week):** hours a single technician works beyond **40 within one Monday–Sunday work week** on a show/event bill at **time and a half**, accumulated by total hours in the week — never by days worked — with the accumulator resetting every Monday. The estimate splits the crossing shift and adds a highlighted **Overtime (1.5×)** line right below it; the same split appears on the Labor Estimate and Pre-Show Estimate PDFs. Before anything is scheduled, "one technician" is approximated per position slot (the Nth line of a position each day is assumed to be the same tech across the run); a requested name or a scheduled crew member makes the grouping exact. The 1.5× premium applies to the labor rate only — per-crew extras such as parking (even when folded into the hourly rate) are flat pass-throughs and are never multiplied.
 
-**PM on duty & day notes (per day):** each day-block header also has a **Day PM** picker and a **day notes** field. Use Day PM when another PM covers the show for a day (long runs, PM out for a day) — the picker draws from the same Production contacts as the show's PRODUCTION MANAGER field. Both values follow the day if it is re-dated and surface on the [Labor Scheduler](#labor-scheduler) and the Labor Overview, where the covering PM replaces the show's PM (with a "day" badge) and the day notes render beside the show's labor notes.
+**PM on duty & day notes (per day):** each day-block header also has a **Day PM** picker and a **day notes** field. Use Day PM when another PM covers the show for a day (long runs, PM out for a day) — the picker draws from the same Production contacts as the show's PRODUCTION MANAGER field; blank means the show's PM. It is the same setting as the **Day PM** bar on the [Production Schedule](#production-schedule) tab (3.35.0: change it in either place), and the PM on duty prints on each day of the Production Schedule PDF and on the [Security Sign-In Sheet](#security-sign-in-sheet). Both values follow the day if it is re-dated and surface on the [Labor Scheduler](#labor-scheduler) and the Labor Overview, where the covering PM replaces the show's PM (with a "day" badge) and the day notes render beside the show's labor notes. A covering PM also puts the show on that person's **My Shows** and shows on Home and the Shows Board's Happening Today for that day.
 
 ### Labor Scheduler
 
@@ -405,14 +503,25 @@ The scheduler endpoint accepts an `include_show_ids=` query param to surface the
 
 ### Assets Tab
 
-The **Assets** tab on every show allows content admins to:
-- **Search** the asset inventory and add items to the show
-- Set **quantity**, **rental period** (defaults to show production dates), and **unit price** (locked at time of reservation — subsequent database price changes do not affect existing reservations)
-- **Edit a line's rental period in place** (date-only range). Dates are bounded to the show's production window — load-in → load-out from the advance page — both in the picker and server-side. Changing the period **re-locks the unit price** for the new duration using the rate-card formula, re-checks availability/unit conflicts, and resets approval. The Asset Approvals portal has the same in-place date editors on every requested line
-- Add **external rental line items** with optional PDF attachment (vendor quote, contract, etc.)
-- View the combined **total cost** for internal + external rentals
-- Export an **Asset Estimate PDF** (the header button) — a branded estimate/quote of internal assets + external rentals for the client (formerly labelled "Invoice PDF")
-- **Hide** specific items from production managers (admin only) — useful when e.g. an admin needs to confirm a lens before adding it
+The **Assets** tab lists the show's gear (internal assets) and external rentals. Anyone who can edit the show can change it; read-only accounts see the list only. The header shows the **approval badge** (*⚠ AWAITING APPROVAL*, or *✓ APPROVED* with who and when — any change to the gear resets it), the running **Total** (gear + external rentals), **Asset Estimate PDF** (a branded estimate/quote of internal assets + external rentals for the client; formerly "Invoice PDF"), **+ Add Asset** and **+ External Rental**.
+
+**+ Add Asset** opens a catalog browser (3.35.0; it replaced the old flat search list). The header shows the show's rental window (First Call → Final Out).
+- **Search** — the box on top searches item name, model, manufacturer and category, best matches first: **↑ / ↓** move, **Enter** opens the add step for the highlighted item, **Esc** clears the search, and **Esc** again closes the dialog.
+- **Browse** — with the search empty, click through **Categories → Groups → Items**, the same tree as the Asset Manager. Loose items sit under *Individual items*; systems and packages under *Systems & Packages*. On a phone it shows one list at a time with a back button. The dialog remembers the last category and group you used.
+- **Details** — picking an item shows its photo, manufacturer · model, storage location, the rate this show pays (its Performance Company rate when there is one), live availability for the rental window, its units (S/N) and what it's part of; a system or package lists its components and how many it can supply. Items already booked on the show are marked *N on show*.
+- **Add to show…** (or double-click, **Enter**, or the row's **+**) opens the add step: optionally pin a specific unit (S/N), set the quantity, rental start / end and notes. The unit price is filled from the rate card and locked; the dialog shows the price breakdown and availability, and an add that would overbook is blocked.
+- Some gear is kept out of this picker by the asset manager (*Hide from Advance Picker* in the Asset Manager); ask them if you can't find something.
+
+**On the list:**
+- **Qty** and the **rental period** can be changed in place. A line pinned to one unit stays at quantity 1. Dates are bounded to the show's engagement — First Call → Final Out from the advance page — both in the picker and server-side. Changing the period **re-locks the unit price** for the new duration using the rate-card formula, re-checks availability and unit conflicts, and resets approval. The Asset Approvals portal has the same in-place date editors on every requested line.
+- **Unit price is locked** when the line is added — later rate-card changes don't touch existing lines — and is read-only here; only the Asset Approvals portal (sidebar → Asset Manager → Approvals) can override it per show.
+- **Hide / Show** — a hidden line is left off the Advance PDF, the Asset Estimate and invoices and the Approvals list; only admins still see it on this tab (tagged HIDDEN).
+- **✕** removes a line.
+- Line tags: **UNIT …** (pinned to that unit / S/N), **COMPANY RATE** (priced at the show's Performance Company rate), **HIDDEN**, and **⚠ OVERBOOKED** (the type is short for those dates; the row is tinted red).
+
+**Company rates:** if the show's *Performance Company* (Advance Sheet) has special rates in the Asset Manager, new lines are priced at them and tagged **COMPANY RATE**. When the company changes later, a banner offers to **Re-price** the lines priced for a different company (hand-set approver prices are left alone; approval resets).
+
+**External rentals:** **+ External Rental** adds a description, cost and optional rental PDF (vendor quote, contract…); **✎** edits and **✕** removes one, and **View PDF** opens its file. A *🎹 Piano Tuning* line is a piano tuning's charge: the piano tuning manager sets its cost and paperwork, and it isn't part of asset approval.
 
 Availability is checked in real time when adding items. Items that are over-allocated or in maintenance show their status clearly.
 
@@ -450,27 +559,37 @@ While a request is *Requested* or *Seen*, the PM can still edit or cancel it, un
 
 ### Comments
 
-Show-specific comment thread with `@mention` autocomplete. Visible to all authorised users. Admins can view comment edit history.
+A discussion thread on each show (the **Comments** tab, with a count badge), oldest first, visible to everyone who can open the show.
+
+- Type in the box and click **Post** (up to 2,000 characters). Read-only accounts can read but not post.
+- Type **@** and a name for the user autocomplete; the `@name` is highlighted in the comment. A mention does **not** send a notification.
+- A `#tag` in a comment becomes a link to that tag's page (see [Search & Tags](#search--tags)). Web addresses stay plain text.
+- Authors can edit (✏) and delete (×) their own comments; an edited comment says *(edited)*. Deleting is soft.
+- Admins can edit or delete any comment, see deleted comments (struck through, with who deleted them) and **Restore** them, and open a comment's edit **History** to put an earlier version back.
+- When a user account is deleted, their comments stay, under the name they had.
 
 ### Export & Files
 
 | Action | Description |
 |--------|-------------|
-| Export Advance → vN | Generates Advance Sheet PDF |
-| Export Schedule → vN | Generates Production Schedule PDF with timeline, contacts, WiFi QR code, and logo |
-| Export PDF (postnotes tab) | Generates Post-Show Notes PDF |
+| Export Advance → vN | Generates Advance Sheet PDF (files from Advance file fields are appended) |
+| Export Schedule → vN | Generates Production Schedule PDF with timeline, contacts, WiFi QR code, and logo; each day prints its PM on duty, and days marked **Dark day** are left out |
+| Export Post-Show Report → vN | Generates the Post-Show Notes PDF (the same as **Export PDF** on the Post Show tab) |
+| Email (Advance / Schedule / Post-Show cards) | Generates the PDF and emails it to the recipients set for that document in Settings → Contacts (filtered by venue and by Show / Event mode) |
 | Final Invoice PDF | Generates the post-show billing invoice (internal & external assets + actual labor + costs). Also available on the Post Show tab. Until the show's labor is settled (Post Show → **Settle Now**) it bills no labor, says "Labor not settled yet", and the card shows a warning. To bill several shows on one invoice, use Combined Invoice in the sidebar (under Settings) — its show list tags unsettled shows **NOT SETTLED** |
 | Generate Pre-Show Estimate | Generates a combined **labor + asset estimate/quote** PDF — the client-facing counterpart to the Final Invoice, produced before anything is scheduled. Labor uses position special rates or the highest standard tech rate; assets use reserved quantities and locked prices |
-| Security Sign-In Sheet | Exports the sign-in sheet PDF for the security desk; names are managed on the show's **Sign-In Sheet** tab (see [Security Sign-In Sheet](#security-sign-in-sheet)). Card and tab only appear while the module is enabled in Settings → System → Modules |
+| Security Sign-In Sheet | **Export PDF** prints the sign-in sheet PDF for the security desk; **Edit Names** opens the show's **Sign-In Sheet** tab (see [Security Sign-In Sheet](#security-sign-in-sheet)). Card and tab only appear while the module is enabled in Settings → System → Modules |
 | ↓ Download (history) | Re-downloads a previously generated PDF |
 
-PDFs are stored in S3 (SeaweedFS) when it's configured, otherwise in the database — use the **↓ Download** button in Export History to re-download without generating a new version.
+**Versions:** exporting again when nothing has changed hands back the same stored PDF and version number; any change to what the PDF would show makes the next version. The tab's **vN** badge shows the highest Advance / Schedule version.
 
-**Attachments:** Drag-and-drop or click **+ Attach File**. Upload progress bar shown. Files are stored in S3 when configured, otherwise in the database.
+**Export History** lists the last 10 exports (type, version, who, when). PDFs are stored in S3 (SeaweedFS) when it's configured, otherwise in the database — use the **↓ Download** button in Export History to re-download without generating a new version.
+
+**Attachments:** Drag-and-drop or click **+ Attach File**. Upload progress bar shown. Each file shows its size, uploader and date, plus its description and a *↳ field* badge when it came from an Advance file field. Files are stored in S3 when configured, otherwise in the database. Anyone who can edit the show can remove a file (**×**); removing **archives** it (nothing is destroyed), and an admin can restore or purge it in Settings → System → Files. Admins can also move a file to another show (**⇄**).
 
 **File redundancy (admin, Settings → System → Database → File Redundancy):** files can be kept in S3, the database, or both. *Save new files to both* keeps a database copy of every new upload/PDF; *Read files from* picks which copy is tried first (the other is the automatic fallback). The **Copy S3 → Database**, **Copy Database → S3** and **Verify Both Copies** tools run in the background, only ever copy (never delete the source), skip files already copied, check every copy by SHA-256, and log each step to syslog as `FILE_MIGRATE_*`. Database copies also make every `pg_dump` backup larger.
 
-**Read Receipts:** Tracks who opened the advance at which version.
+**Read Receipts:** the **Advance Read By** box lists who has opened the advance and at which version.
 
 ### Security Sign-In Sheet
 
@@ -480,6 +599,19 @@ venue logo), then one numbered row per expected person with blank **Signature**
 and **Time In** columns, plus eight blank "Additional personnel" walk-up rows
 for anyone who wasn't on the list. On a long list the column header repeats on
 every printed page.
+
+**Multi-day shows and events** print one initials column per day instead of
+Signature / Time In. The days come from the engagement (First Call → Final Out)
+and the performance dates; a very long run continues in a second table.
+
+**Production contact for security (3.35.0):** the top of the sheet prints the
+production manager on duty — name, phone and email — so the desk knows who to
+call. That's the show's PM from the Advance Sheet, or a day's covering PM set
+with **Day PM** on the [Production Schedule](#production-schedule) or
+[Labor Requests](#labor-requests) tab. A multi-day sheet lists each run of days
+with its PM and marks a covered day's column with the cover PM's name. The tab
+shows the same information read-only in its **Production Contact for Security**
+box (tagged COVERING for a cover).
 
 It lives on the show page as the **Sign-In Sheet** tab (between Labor Requests and
 Assets, on the mobile tab strip too). The **Export & Files** tab keeps a
@@ -502,8 +634,10 @@ saved list directly and whose **Edit Names** button jumps to the tab.
    **+ Add Row**, or start over with **Clear All**.
 4. Click **Save**. The list is stored per show (up to 500 names); an
    "Unsaved changes" note and a `Save *` marker show whenever the list on
-   screen differs from what's saved. The PDF always prints the **saved** list —
-   exporting with unsaved edits pops a warning first.
+   screen differs from what's saved. If someone else saved the list after you
+   opened the tab, your save applies only your own additions and removals on
+   top of theirs. The PDF always prints the **saved** list — exporting with
+   unsaved edits pops a warning first.
 5. Click **Export PDF** (top of the Sign-In Sheet tab, or from the Export & Files card) and print.
 
 **Permissions:** anyone with access to the show can edit the list; read-only
