@@ -137,6 +137,8 @@
       if (!dayShown()) {
         data = null;
         hideTip();
+        testCount.textContent = '';   // nor its '(N hidden)' count or venue chips
+        renderVenueChips();
         showEmpty('This day could not be loaded. It will try again in a minute.');
         renderContext();
       }
@@ -196,9 +198,12 @@
 
   // The axis stops at RANGE_CAP (06:00 next day), so an item starting at or
   // after it ('1+07:00', '2+00:30') has nowhere to go on this day — it would
-  // be drawn below the grid. Left off; the next day's view carries a '1+'
-  // row as a from_prev item at its real time.
+  // be drawn below the grid. Left off the grid and listed in the lane header
+  // instead (laterList): the next day's view carries only the day before's
+  // rows, so a '2+06:00'+ row would otherwise show on no day at all. (Crew
+  // bars can't get here: the server drops in-times past midnight.)
   function onAxis(list) { return (list || []).filter(i => i.start < RANGE_CAP); }
+  function offAxis(list) { return (list || []).filter(i => i.start >= RANGE_CAP); }
 
   function visibleLanes() {
     const shows = (data && data.shows) || [];
@@ -482,6 +487,7 @@
       h.appendChild(pf);
     }
     untimedList(h, s.schedule_untimed || [], s.crew_untimed || [], s);
+    laterList(h, offAxis(s.schedule), s);
     h.appendChild(colLabels(l));
     return h;
   }
@@ -529,6 +535,24 @@
       const who = (r.position && r.position !== '—' ? r.position + ' · ' : '') + r.tech;
       const a = el('a', null, 'Crew: ' + who + (r.in_text ? ' (' + r.in_text + ')' : ''));
       a.href = s ? '/shows/' + s.id + '?tab=staffing' : '/overhead-crew';
+      li.appendChild(a);
+      ul.appendChild(li);
+    });
+    d.appendChild(ul);
+    h.appendChild(d);
+  }
+
+  // Schedule rows past the end of the axis (see onAxis) — same look as the
+  // 'without a time' list, each linking to its row on the Schedule tab.
+  function laterList(h, rows, s) {
+    if (!rows.length) return;
+    const d = el('details', 'tl-untimed');
+    d.appendChild(el('summary', null, rows.length + ' after ' + hhmm(RANGE_CAP) + ' next day'));
+    const ul = el('ul');
+    rows.forEach(r => {
+      const li = el('li');
+      const a = el('a', null, [r.start_label, r.desc || r.notes].filter(Boolean).join(' · ') || '(blank)');
+      a.href = '/shows/' + s.id + '?tab=schedule&focus=sched:' + r.id;
       li.appendChild(a);
       ul.appendChild(li);
     });
@@ -720,9 +744,9 @@
     else if (selVenues.has(v)) selVenues.delete(v);
     else selVenues.add(v);
     lsSet(LS_VENUES, JSON.stringify(Array.from(selVenues)));
-    // Mid day-change the next day's render applies the filter (and keeps its
-    // auto-scroll).
-    if (dayShown()) { pendingScroll = null; render(); }
+    // Mid day-change (or after a failed one) only the chips change; the next
+    // day's render applies the filter (and keeps its auto-scroll).
+    if (dayShown()) { pendingScroll = null; render(); } else renderVenueChips();
   });
 
   // ── tooltip ───────────────────────────────────────────────────────────
