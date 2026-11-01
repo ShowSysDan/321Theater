@@ -658,6 +658,287 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+/* ── Tools menus (action-menu component) ───────────────────────────
+   A "Tools ▾" button that opens a role="menu" list of actions. Markup —
+   ToolsMenu.html() and show.html's tools_menu() macro render the same:
+     <div class="tools-menu" data-tools="<provider>">
+       <button type="button" class="btn btn-sm btn-ghost tools-menu-btn"
+               aria-haspopup="menu" aria-expanded="false">…Tools ▾</button>
+       <div class="tools-menu-panel" role="menu" aria-label="…" hidden></div>
+     </div>
+   - Items are built at OPEN time by the provider registered under the
+     wrapper's data-tools name: ToolsMenu.register(name, wrap => items).
+     An item is {label, onSelect(wrap), danger, disabled, title}, a
+     {separator: true}, a {group: 'Heading', items: [...], empty: 'text'}
+     section, or a {note: 'text'} line. So a list is never stale.
+   - The panel stays INSIDE the wrapper (handlers can still use
+     closest('.labor-day') etc.) but is position:fixed, placed from the
+     trigger's rect, so overflow:hidden cards don't clip it.
+   - ONE set of document/window listeners serves every menu (delegation):
+     headers re-rendered on every tab switch never accumulate listeners.
+   - Closes on outside press, Esc (focus back to the trigger), Tab, item
+     activation, another menu opening, or its trigger scrolling away. */
+window.ToolsMenu = (function () {
+  const providers = {};
+  let open = null;            // {wrap, btn, panel, defs}
+
+  function register(name, fn) { providers[name] = fn; }
+
+  function html(provider, opts) {
+    opts = opts || {};
+    const title = opts.title || 'Tools';
+    // Extra data-* attributes for the provider: {perfTimes: [...]} →
+    // data-perf-times="[...]" (non-strings are JSON-encoded).
+    const data = Object.entries(opts.data || {}).map(([k, v]) =>
+      ` data-${k.replace(/[A-Z]/g, c => '-' + c.toLowerCase())}="${_esc(typeof v === 'string' ? v : JSON.stringify(v))}"`).join('');
+    return `<div class="tools-menu" data-tools="${_esc(provider)}"${data}>` +
+      `<button type="button" class="btn btn-sm btn-ghost tools-menu-btn" aria-haspopup="menu" aria-expanded="false" title="${_esc(title)}">` +
+      `<span class="tools-menu-label">${_esc(opts.label || 'Tools')}</span><span class="tools-menu-busy" hidden></span>` +
+      `<span class="tools-menu-caret" aria-hidden="true">▾</span></button>` +
+      `<div class="tools-menu-panel" role="menu" aria-label="${_esc(title)}" hidden></div></div>`;
+  }
+
+  function _items() {
+    return open ? Array.from(open.panel.querySelectorAll('.tools-menu-item:not([aria-disabled="true"])')) : [];
+  }
+
+  // Focus an item without scrolling the page; keep it visible inside a
+  // panel that scrolls (a long template list).
+  function _focusItem(el) {
+    el.focus({preventScroll: true});
+    const p = open && open.panel;
+    if (!p || p.scrollHeight <= p.clientHeight) return;
+    const top = el.offsetTop, bottom = top + el.offsetHeight;
+    if (top < p.scrollTop) p.scrollTop = top;
+    else if (bottom > p.scrollTop + p.clientHeight) p.scrollTop = bottom - p.clientHeight;
+  }
+
+  function close(focusTrigger) {
+    if (!open) return;
+    const {btn, panel} = open;
+    open = null;
+    panel.hidden = true;
+    panel.textContent = '';          // rebuilt on the next open; drops the item closures
+    panel.style.maxHeight = '';
+    btn.setAttribute('aria-expanded', 'false');
+    if (focusTrigger && btn.isConnected) btn.focus();
+  }
+
+  function _build(panel, defs) {
+    const flat = [];                 // index → def, for activation
+    const addItem = (parent, d, sub) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'tools-menu-item' + (sub ? ' tools-menu-sub' : '') + (d.danger ? ' is-danger' : '');
+      b.setAttribute('role', 'menuitem');
+      b.tabIndex = -1;
+      b.textContent = d.label;
+      if (d.title) b.title = d.title;
+      if (d.disabled) b.setAttribute('aria-disabled', 'true');
+      b.dataset.i = String(flat.length);
+      flat.push(d);
+      parent.appendChild(b);
+    };
+    const addNote = (parent, text) => {
+      const n = document.createElement('div');
+      n.className = 'tools-menu-note';
+      n.setAttribute('role', 'presentation');
+      n.textContent = text;
+      parent.appendChild(n);
+    };
+    let lastWasSep = true;           // no leading / doubled separators
+    (defs || []).forEach(d => {
+      if (!d) return;
+      if (d.separator) {
+        if (lastWasSep) return;
+        const s = document.createElement('div');
+        s.className = 'tools-menu-sep';
+        s.setAttribute('role', 'separator');
+        panel.appendChild(s);
+        lastWasSep = true;
+        return;
+      }
+      if (d.group && !(d.items || []).length && !d.empty) return;   // nothing to list
+      lastWasSep = false;
+      if (d.group) {
+        const g = document.createElement('div');
+        g.className = 'tools-menu-group';
+        g.setAttribute('role', 'group');
+        g.setAttribute('aria-label', d.group);
+        const h = document.createElement('div');
+        h.className = 'tools-menu-heading';
+        h.setAttribute('aria-hidden', 'true');
+        h.textContent = d.group;
+        g.appendChild(h);
+        const list = d.items || [];
+        if (list.length) list.forEach(it => addItem(g, it, true));
+        else if (d.empty) addNote(g, d.empty);
+        panel.appendChild(g);
+      } else if (d.note) {
+        addNote(panel, d.note);
+      } else {
+        addItem(panel, d, false);
+      }
+    });
+    const last = panel.lastElementChild;
+    if (last && last.classList.contains('tools-menu-sep')) last.remove();
+    if (!flat.length && !panel.firstChild) addNote(panel, 'Nothing to do here yet.');
+    return flat;
+  }
+
+  function place() {
+    if (!open) return;
+    const {btn, panel} = open;
+    if (!btn.isConnected) { close(false); return; }
+    const r = btn.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth || window.innerWidth;
+    const vh = window.innerHeight;
+    const m = 8, gap = 4;
+    // The trigger scrolled out of sight (or its pane was hidden): close
+    // rather than leave a menu floating over unrelated content.
+    if (r.bottom < 0 || r.top > vh || (!r.width && !r.height)) { close(false); return; }
+    panel.style.maxWidth = `${Math.max(160, Math.min(360, vw - 2 * m))}px`;
+    panel.style.maxHeight = '';
+    const natural = panel.scrollHeight + 2;
+    const below = vh - r.bottom - gap - m;
+    const above = r.top - gap - m;
+    let top, maxH = null;
+    if (natural <= below) top = r.bottom + gap;
+    else if (natural <= above) top = r.top - gap - natural;
+    else if (below >= above) { maxH = below; top = r.bottom + gap; }
+    else { maxH = above; top = m; }
+    if (maxH !== null) panel.style.maxHeight = `${Math.max(120, Math.floor(maxH))}px`;
+    const w = panel.offsetWidth;
+    // Right-align with the trigger (menus sit at the right of a header);
+    // fall back to left-aligned, then clamp inside the viewport.
+    let left = r.right - w;
+    if (left < m) left = r.left;
+    left = Math.max(m, Math.min(left, vw - w - m));
+    panel.style.top = `${Math.round(Math.max(m, top))}px`;
+    panel.style.left = `${Math.round(left)}px`;
+  }
+
+  function show(wrap, focusWhich) {
+    const btn = wrap.querySelector('.tools-menu-btn');
+    const panel = wrap.querySelector('.tools-menu-panel');
+    if (!btn || !panel || btn.disabled) return;
+    close(false);
+    const fn = providers[wrap.dataset.tools];
+    let defs = [];
+    try { defs = fn ? (fn(wrap) || []) : []; } catch (e) { console.error('ToolsMenu provider failed', e); }
+    panel.textContent = '';
+    const flat = _build(panel, defs);
+    open = {wrap, btn, panel, defs: flat};
+    btn.setAttribute('aria-expanded', 'true');
+    panel.style.visibility = 'hidden';
+    panel.hidden = false;
+    place();
+    if (!open) return;               // place() closed it (trigger off-screen)
+    panel.style.visibility = '';
+    const items = _items();
+    if (items.length) _focusItem(focusWhich === 'last' ? items[items.length - 1] : items[0]);
+  }
+
+  function activate(item) {
+    if (!open || item.getAttribute('aria-disabled') === 'true') return;
+    const def = open.defs[parseInt(item.dataset.i, 10)];
+    const wrap = open.wrap;
+    close(true);                     // close first: a prompt()/confirm() must not sit under it
+    if (def && typeof def.onSelect === 'function') {
+      try {
+        const res = def.onSelect(wrap);
+        if (res && typeof res.catch === 'function') res.catch(e => console.error(e));
+      } catch (e) { console.error(e); }
+    }
+  }
+
+  /* Busy state for long-running tools (e.g. a labor clone): disables the
+     trigger and swaps its label for `text`; null restores it. The label
+     span is never rewritten, so nothing has to remember literal text. */
+  function setBusy(wrap, text) {
+    if (!wrap) return;
+    const btn = wrap.querySelector('.tools-menu-btn');
+    if (!btn) return;
+    if (open && open.wrap === wrap) close(false);
+    const label = btn.querySelector('.tools-menu-label');
+    const busy = btn.querySelector('.tools-menu-busy');
+    btn.disabled = !!text;
+    if (text) btn.setAttribute('aria-busy', 'true'); else btn.removeAttribute('aria-busy');
+    if (busy) { busy.textContent = text || ''; busy.hidden = !text; }
+    if (label) label.hidden = !!text;
+    wrap.classList.toggle('is-busy', !!text);
+  }
+
+  // ── The one set of global listeners ──
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    const trigger = t.closest('.tools-menu-btn');
+    if (trigger) {
+      const wrap = trigger.closest('.tools-menu');
+      if (!wrap) return;
+      e.preventDefault();
+      if (open && open.wrap === wrap) close(false);
+      else show(wrap, 'first');
+      return;
+    }
+    const item = t.closest('.tools-menu-item');
+    if (item && open && open.panel.contains(item)) { e.preventDefault(); activate(item); }
+  });
+  // Outside press closes (pointerdown: iOS doesn't send click for taps on
+  // non-interactive elements, and a stopPropagation()'d click elsewhere
+  // can't keep a menu open). Capture so nothing can swallow it.
+  document.addEventListener('pointerdown', (e) => {
+    if (!open) return;
+    const t = e.target;
+    if (t instanceof Node && open.wrap.contains(t) && open.wrap.isConnected) return;
+    close(false);
+  }, true);
+  document.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    // Closed menu, focus on its trigger: ArrowDown / ArrowUp open it.
+    if (t.classList.contains('tools-menu-btn') && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      const wrap = t.closest('.tools-menu');
+      if (wrap && !(open && open.wrap === wrap)) {
+        e.preventDefault();
+        show(wrap, e.key === 'ArrowUp' ? 'last' : 'first');
+        return;
+      }
+    }
+    if (!open) return;
+    if (e.key === 'Escape') {
+      if (open.wrap.contains(t)) { e.preventDefault(); e.stopPropagation(); }
+      close(open.wrap.contains(t));
+      return;
+    }
+    if (!open.panel.contains(t) && t !== open.btn) return;
+    const items = _items();
+    const idx = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!items.length) return;
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      const next = idx < 0 ? (step > 0 ? 0 : items.length - 1) : (idx + step + items.length) % items.length;
+      _focusItem(items[next]);
+    } else if (e.key === 'Home' || e.key === 'End') {
+      if (!items.length) return;
+      e.preventDefault();
+      _focusItem(items[e.key === 'Home' ? 0 : items.length - 1]);
+    } else if (e.key === 'Tab') {
+      close(false);
+    }
+  }, true);
+  window.addEventListener('resize', place);
+  window.addEventListener('scroll', (e) => {
+    // Scrolling inside the menu itself (a long list) must not re-place it.
+    if (open && e.target instanceof Node && open.panel.contains(e.target)) return;
+    place();
+  }, true);
+
+  return {register, html, close, setBusy, isOpen: () => !!open};
+})();
+
 /* ── Toast Notification ─────────────────────────────────────────── */
 function showSaveToast(msg, type) {
   const toast = document.getElementById('save-toast');
@@ -1256,16 +1537,16 @@ function _renderScheduleDays(days) {
     fallback.dataset.perfId = days[0].primary_perf_id || '';
     const tbody = fallback.querySelector('tbody');
     if (tbody) tbody.id = `schedule-rows-${firstKey}`;
-    // The fallback pane's footer buttons were rendered with dayKey=null —
-    // re-bind them to the new date_key so clicking "+ Add Row" targets the
-    // promoted day's tbody. (The header is fully replaced below by
-    // _updateDayPaneHeader, which handles the toolbar buttons.)
+    // The fallback pane's footer button was rendered with dayKey=null —
+    // re-bind it to the new date_key so clicking "+ Add Row" targets the
+    // promoted day's tbody. (The header — Tools menu included — is fully
+    // replaced below by _updateDayPaneHeader; the menus read the pane's
+    // data-day-key when they open.)
     const footer = fallback.querySelector('.form-section-footer');
     if (footer) {
       const dk = JSON.stringify(firstKey);
       footer.innerHTML = `
         <button type="button" class="btn btn-ghost btn-sm" onclick='addScheduleRow(${dk})'>+ Add Row</button>
-        <button type="button" class="btn btn-ghost btn-sm" onclick='sortSchedRowsByTime(${dk})'>⇅ Sort by time</button>
       `;
     }
     existing[firstKey] = fallback;
@@ -1317,7 +1598,6 @@ function _renderScheduleDays(days) {
   });
 
   _syncDayTabs(form, days);
-  _syncCopyDropdowns(days);
   // A dark-day checkbox that first appears now (new pane, or a 1-day show
   // becoming multi-day) needs a baseline, or every save would post it.
   if (typeof _schedMetaBaseline !== 'undefined') {
@@ -1363,6 +1643,71 @@ function _applyDarkDays() {
   });
 }
 
+/* ── Schedule Tools menus (tab toolbar + each day header) ───────────
+   Who gets them: not restricted AND not read-only (window.CAN_USE_SHOW_TOOLS,
+   show.html) — the same gate as the Jinja markup. Items are built when a
+   menu opens, from the editor as it is NOW: window.SCHED_TEMPLATES (a
+   template saved a minute ago is listed), the other days as the day tabs
+   list them, the pane's current data-day-key (a promoted fallback
+   pane included) and the day's performance times (the header's
+   data-perf-times, re-rendered with every structure sync). Each item calls
+   the same handler the old buttons / selects did. */
+function _showToolsOk() {
+  return !RESTRICTED && window.CAN_USE_SHOW_TOOLS !== false;
+}
+
+ToolsMenu.register('sched-tab', () => {
+  const defs = [{label: 'Import from another show…',
+                 title: 'Copy another show\'s production schedule into this one',
+                 onSelect: () => openSchedImport()}];
+  if (window.CAN_EDIT_SCHED_TEMPLATES) {
+    defs.push({label: 'Save day as template…',
+               title: 'Save a day of this schedule as a reusable template',
+               onSelect: () => openSaveSchedTemplate()});
+  }
+  defs.push({separator: true});
+  defs.push({label: 'History', title: 'Every saved version of this schedule, with what changed',
+             onSelect: () => openHistory('schedule')});
+  return defs;
+});
+
+ToolsMenu.register('sched-day', (wrap) => {
+  const pane = wrap.closest('.sched-day-pane');
+  const key = pane ? (pane.dataset.dayKey || null) : null;
+  let times = [];
+  try { times = JSON.parse(wrap.dataset.perfTimes || '[]'); } catch (_) { times = []; }
+  if (!Array.isArray(times)) times = [];
+  const defs = [];
+  const templates = window.SCHED_TEMPLATES || [];
+  if (templates.length) {
+    defs.push({group: 'Apply template', items: templates.map(t => ({
+      label: t.name || 'Untitled', title: 'Apply this template to this day',
+      onSelect: () => applySchedTemplate(t.id, key)}))});
+  }
+  // The OTHER days, as the day tabs list them right now (the tab strip only
+  // shows when the show has more than one day — same rule as the old select).
+  const tabStrip = document.querySelector('#schedule-form .sched-day-tabs');
+  const others = (tabStrip && tabStrip.style.display !== 'none')
+    ? Array.from(tabStrip.querySelectorAll('.sched-day-tab[data-day-key]'))
+        .map(b => ({key: b.dataset.dayKey, label: b.textContent.replace(/\s+/g, ' ').trim()}))
+        .filter(o => o.key && o.key !== key && document.getElementById(`schedule-rows-${o.key}`))
+    : [];
+  if (others.length) {
+    defs.push({group: 'Copy from day', items: others.map(o => ({
+      label: o.label, title: 'Replace this day\'s rows with a copy of that day\'s',
+      onSelect: () => copySchedDay(o.key, key)}))});
+  }
+  defs.push({separator: true});
+  if (times.length) {
+    defs.push({label: times.length > 1 ? 'Pull show times' : 'Pull show time',
+               title: 'Insert a SHOW START row for each performance on this day',
+               onSelect: () => pullAdvanceTime(key, times)});
+  }
+  defs.push({label: 'Sort by time', title: 'Sort rows by start time',
+             onSelect: () => sortSchedRowsByTime(key)});
+  return defs;
+});
+
 function _buildPaneHeader(d, dayNum, totalDays) {
   const perfTimes = (d.perfs || []).filter(p => p.perf_time).map(p => parseTimeToHHMM(p.perf_time));
   const dateLabel = (totalDays > 1 || d.orphan) ? ` — ${_esc(_schedDayLabel(d, false))}` : '';
@@ -1372,30 +1717,13 @@ function _buildPaneHeader(d, dayNum, totalDays) {
   const keyArg = JSON.stringify(d.date_key);
   let actions = '';
   if (!RESTRICTED) {
-    const templates = window.SCHED_TEMPLATES || [];
-    const tmplDrop = templates.length ? `
-      <select class="field-input sched-tmpl-select" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
-              onchange='applySchedTemplate(this.value, ${keyArg}); this.value=""'>
-        <option value="">Apply template…</option>
-        ${templates.map(t => `<option value="${_esc(t.id)}">${_esc(t.name)}</option>`).join('')}
-      </select>` : '';
-    // Copy-from dropdown is populated by _syncCopyDropdowns so it always
-    // reflects the current day list.
-    const copyDrop = totalDays > 1 ? `
-      <select class="field-input sched-copy-from" data-self-key="${_esc(d.date_key)}"
-              style="width:auto;font-size:11px;padding:3px 6px;height:auto"
-              onchange='copySchedDay(this.value, ${keyArg}); this.value=""'>
-        <option value="">Copy from…</option>
-      </select>` : '';
-    const pullTimeBtn = perfTimes.length ? `
-      <button type="button" class="btn btn-sm btn-ghost"
-              onclick='pullAdvanceTime(${keyArg}, ${JSON.stringify(perfTimes)})'>Pull time${perfTimes.length > 1 ? 's' : ''}</button>` : '';
+    // Same markup as show.html's day header: the per-day Tools menu (built
+    // when it opens — ToolsMenu 'sched-day') + the visible "+ Add Row".
+    const tools = _showToolsOk()
+      ? ToolsMenu.html('sched-day', {title: 'Day tools', data: {perfTimes}}) : '';
     actions = `
-      <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-wrap:wrap">
-        ${tmplDrop}
-        ${copyDrop}
-        ${pullTimeBtn}
-        <button type="button" class="btn btn-sm btn-ghost" onclick='sortSchedRowsByTime(${keyArg})' title="Sort rows by start time">⇅ Sort</button>
+      <div class="sched-day-actions">
+        ${tools}
         <button type="button" class="btn btn-sm btn-ghost" onclick='addScheduleRow(${keyArg})'>+ Add Row</button>
       </div>`;
   }
@@ -1434,7 +1762,7 @@ function _setOrphanNote(pane, d) {
   note.className = 'sched-orphan-note';
   note.innerHTML = `<strong>${_esc(d.perf_date || d.date_key)} is outside this show's dates</strong>
     (load-in → load-out and performances). These rows are kept here so nothing is lost — copy them
-    to a real day ("Copy from…" on that day) or delete them. They don't print on the schedule PDF.`;
+    to a real day (that day's Tools → Copy from day) or delete them. They don't print on the schedule PDF.`;
   sec.querySelector('.form-section-header')?.insertAdjacentElement('afterend', note);
 }
 
@@ -1450,7 +1778,6 @@ function _buildDayPane(d, dayNum, totalDays) {
   const footer  = RESTRICTED ? '' : `
       <div class="form-section-footer">
         <button type="button" class="btn btn-ghost btn-sm" onclick='addScheduleRow(${keyArg})'>+ Add Row</button>
-        <button type="button" class="btn btn-ghost btn-sm" onclick='sortSchedRowsByTime(${keyArg})'>⇅ Sort by time</button>
       </div>`;
   wrapper.innerHTML = `
     <div class="form-section">
@@ -1529,20 +1856,6 @@ function _syncDayTabs(form, days) {
     const show = k === activeKey;
     p.classList.toggle('hidden', !show);
     p.style.display = show ? '' : 'none';
-  });
-}
-
-function _syncCopyDropdowns(days) {
-  if (days.length <= 1) return;
-  document.querySelectorAll('.sched-day-pane .sched-copy-from').forEach(sel => {
-    const selfKey = sel.dataset.selfKey || '';
-    const opts = ['<option value="">Copy from…</option>'];
-    days.forEach((d, idx) => {
-      if (d.date_key === selfKey) return;
-      const label = `${d.orphan ? 'Off-date' : 'Day ' + (d.day_num || idx + 1)}${d.perf_date ? ' (' + _shortDateLabel(d.perf_date) + ')' : ''}`;
-      opts.push(`<option value="${_esc(d.date_key)}">${_esc(label)}</option>`);
-    });
-    sel.innerHTML = opts.join('');
   });
 }
 
@@ -1917,7 +2230,7 @@ function openSaveSchedTemplate() {
       <label class="field-label">Template name</label>
       <input type="text" class="field-input" data-name maxlength="120" placeholder="e.g. Orchestra concert — single day">
       <p class="text-dim" style="margin:0;font-size:12px">Saves the day's rows (times, descriptions, notes) as a
-        schedule template anyone can apply from "Apply template…". Piano tuning rows are left out.
+        schedule template anyone can apply from a day's Tools → Apply template. Piano tuning rows are left out.
         Using an existing template's name replaces that template.</p>`,
     `<button type="button" class="btn btn-ghost" data-close>Cancel</button>
      <button type="button" class="btn btn-primary" data-go>Save template</button>`, 480);
@@ -1937,13 +2250,12 @@ function openSaveSchedTemplate() {
                                   body: JSON.stringify({name, rows})});
       const d = await r.json().catch(() => ({}));
       if (!r.ok || !d.success) throw new Error(d.error || `HTTP ${r.status}`);
+      // The day Tools menus read window.SCHED_TEMPLATES when they open, so
+      // the new (or renamed) template is listed straight away.
       if (!existing) {
         window.SCHED_TEMPLATES = (window.SCHED_TEMPLATES || []).concat([{id: d.id, name}]);
-        document.querySelectorAll('.sched-tmpl-select').forEach(sel => {
-          const o = document.createElement('option');
-          o.value = d.id; o.textContent = name;
-          sel.appendChild(o);
-        });
+      } else {
+        existing.name = name;
       }
       ov.remove();
       showSaveToast(`✓ Template “${name}” saved (${rows.length} rows)`);

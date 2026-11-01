@@ -16488,24 +16488,54 @@ def delete_labor_request(show_id, rid):
     return jsonify({'success': True})
 
 
+_LABOR_REORDER_MAX = 2000
+
+
 @app.route('/shows/<int:show_id>/labor-requests/reorder', methods=['POST'])
 @login_required
 def reorder_labor_requests(show_id):
+    """Set the show's labor-request order: ``{"request_ids": [id, …]}`` →
+    sort_order = position × 10 (Labor Requests tab → a day's Tools → Sort by
+    call time, 3.35.0). The client sends the FULL show order (every day,
+    top to bottom) so the other days keep theirs. Every id must be a
+    distinct int belonging to THIS show — a list naming a row that is gone
+    (or another show's) is refused with 409 so the page reloads instead of
+    half-applying."""
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
-    data = request.get_json(force=True) or {}
-    request_ids = data.get('request_ids', [])
+    data = request.get_json(force=True, silent=True)
+    ids = data.get('request_ids') if isinstance(data, dict) else None
+    if (not isinstance(ids, list) or len(ids) > _LABOR_REORDER_MAX
+            or not all(type(i) is int and 0 < i < 2 ** 31 for i in ids)
+            or len(set(ids)) != len(ids)):
+        return jsonify({'success': False, 'error': 'Invalid request list.'}), 400
+    if not ids:
+        return jsonify({'success': True, 'count': 0})
     db = get_db()
-    for i, rid in enumerate(request_ids):
-        db.execute(
-            'UPDATE labor_requests SET sort_order=%s WHERE id=%s AND show_id=%s',
-            (i * 10, rid, show_id)
-        )
-    db.commit()
-    db.close()
-    return jsonify({'success': True})
+    try:
+        found = db.execute(
+            'SELECT COUNT(*) AS n FROM labor_requests WHERE show_id=%s AND id = ANY(%s)',
+            (show_id, ids)).fetchone()['n']
+        if found != len(ids):
+            return jsonify({'success': False, 'stale': True,
+                            'error': 'The labor requests changed since this page loaded '
+                                     '(someone added or removed one). The list will '
+                                     'reload — then sort again.'}), 409
+        db.execute("""
+            UPDATE labor_requests lr SET sort_order = v.ord
+            FROM unnest(%s::int[], %s::int[]) AS v(id, ord)
+            WHERE lr.id = v.id AND lr.show_id = %s
+        """, (ids, [i * 10 for i in range(len(ids))], show_id))
+        log_audit(db, 'LABOR_REQUEST_REORDER', 'show', show_id, show_id=show_id,
+                  detail=f'{len(ids)} requests')
+        db.commit()
+    finally:
+        db.close()
+    syslog_logger.info(f"LABOR_REQUEST_REORDER show_id={show_id} count={len(ids)} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'count': len(ids)})
 
 
 # ─── Labor Scheduler ─────────────────────────────────────────────────────────
