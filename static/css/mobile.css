@@ -447,3 +447,12 @@ html.mobile-view #tab-assets > .form-section-header { flex-wrap: wrap; }
 html.mobile-view #tab-assets > .form-section-header > .ml-auto {
   flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; max-width: 100%;
 }
+
+/* ── Header / toolbar rows wrap on phones (3.35.0 phone sweep) ────────────
+   A page header's action row (e.g. the Sidebar Editor: density + Reset +
+   Save) and the Skill Tracker toolbar (sort, position + skill filters,
+   legend) were single non-wrapping flex rows, so those pages scrolled
+   sideways on a phone. Let them wrap. */
+html.mobile-view .page-header > div { flex-wrap: wrap; }
+html.mobile-view .tracker-toolbar { flex-wrap: wrap; row-gap: 8px; }
+html.mobile-view .tracker-toolbar select { max-width: 100%; }
