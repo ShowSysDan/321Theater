@@ -321,3 +321,11 @@ html.mobile-view .oh-summary-table th, html.mobile-view .oh-summary-table td { w
    instead of running past the card's clipped edge. */
 html.mobile-view .sched-day-header { flex-wrap: wrap; row-gap: 8px; }
 html.mobile-view .sched-day-header .sched-day-notes { flex: 1 1 100%; min-width: 0; }
+
+/* Day PM (3.35.0): the schedule's Day PM bar stacks — picker full width,
+   contact line under it; the Sign-In Sheet PM rows put the dates on top. */
+html.mobile-view .sched-daypm { padding: 8px 12px; }
+html.mobile-view .sched-daypm-select { flex: 1 1 auto; min-width: 0; max-width: none; }
+html.mobile-view .sched-daypm-contact { flex: 1 1 100%; }
+html.mobile-view .sec-pm-row { flex-direction: column; gap: 2px; }
+html.mobile-view .sec-pm-days { min-width: 0; }

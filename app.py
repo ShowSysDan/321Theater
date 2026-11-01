@@ -6654,6 +6654,8 @@ def show_page(show_id):
     # by either a performance or the load-in → load-out window).
     performances, schedule_days = _build_schedule_days(db, show_id, show,
                                                        include_orphans=True)
+    # Day PM bar per dated schedule day (3.35.0): who's on duty + contact.
+    sched_day_pm = _schedule_day_pm(db, show_id, schedule_days)
 
     # Export log
     exports = db.execute("""
@@ -6749,6 +6751,9 @@ def show_page(show_id):
                                                      or bool(session.get('is_content_admin'))),
                            schedule_meta=schedule_meta,
                            sched_meta_fields=get_schedule_meta_fields(),
+                           sched_day_pm=sched_day_pm,
+                           # PUT /labor-days refuses readonly + restricted
+                           day_pm_can_edit=not (restricted or session.get('is_readonly')),
                            notes_data=notes_data,
                            exports=exports,
                            contacts_by_dept=contacts_by_dept,
@@ -7126,7 +7131,9 @@ def _apply_schedule_ops(db, show_id, ops):
 def _schedule_sync_hash(db, show_id):
     """ONE query: a digest of the show's schedule rows, Venue & Tech fields and
     day structure (load range + performance dates). The 3 s poll compares it
-    before building anything (3.32.2); None when the show is gone."""
+    before building anything (3.32.2); None when the show is gone. 3.35.0
+    adds the Day PM inputs (show_labor_days.cover_pm + the show's PRODUCTION
+    MANAGER advance value) so a Day PM picked anywhere reaches open editors."""
     row = db.execute("""
         SELECT md5(
             coalesce((SELECT string_agg(id || '|' || coalesce(day_date, '') || '|' || coalesce(perf_id::text, '')
@@ -7139,9 +7146,48 @@ def _schedule_sync_hash(db, show_id):
             || '#' || coalesce(s.load_in_date::text, '') || '/' || coalesce(s.load_out_date::text, '')
             || '#' || coalesce((SELECT string_agg(coalesce(perf_date::text, '') || ':' || id, ',' ORDER BY id)
                                 FROM show_performances WHERE show_id = s.id), '')
+            || '#' || coalesce((SELECT string_agg(work_date::text || '=' || cover_pm, E'\\n' ORDER BY work_date)
+                                FROM show_labor_days
+                                WHERE show_id = s.id AND coalesce(cover_pm, '') <> ''), '')
+            || '#' || coalesce((SELECT field_value FROM advance_data
+                                WHERE show_id = s.id AND field_key = 'production_manager'), '')
         ) AS h
         FROM shows s WHERE s.id = %s""", (show_id,)).fetchone()
     return row['h'][:16] if row else None
+
+
+def _schedule_day_pm(db, show_id, days):
+    """Day PM (3.35.0) for the schedule editor: {'show_pm': card|None,
+    'days': {iso: card|None}} for every DATED editor day (off-date days
+    included; never a dateless __null_* day or the no-days fallback pane).
+    Each card is the PM on duty that day — the covering PM
+    (show_labor_days.cover_pm, is_cover True) else the show PM — from the
+    shared _pm_contacts_for_show resolver."""
+    dates = [d['date_key'] for d in days if _sched_day_date(d.get('date_key'))]
+    return _pm_contacts_for_show(db, show_id, dates)
+
+
+@app.template_filter('tel_href')
+def _tel_href(phone):
+    """'tel:' link for a contact phone ('407-555-0101 x12' → tel:4075550101),
+    or '' when it doesn't hold a dialable number (then print it unlinked).
+    Mirrors app.js LaborDays.telHref."""
+    s = str(phone or '').strip()
+    s = re.split(r'(?i)\s*(?:x|ext\.?|extension|#|,|;)\s*\d*\s*$', s)[0]
+    digits = ''.join(ch for ch in s if ch.isdigit())
+    if not 3 <= len(digits) <= 20:
+        return ''
+    return 'tel:' + ('+' if s.startswith('+') else '') + digits
+
+
+@app.template_filter('mailto_href')
+def _mailto_href(email):
+    """'mailto:' link for a plain address, or '' when it isn't one.
+    Mirrors app.js LaborDays.mailtoHref."""
+    s = str(email or '').strip()
+    if len(s) > 254 or not re.match(r'^[^\s@<>"\'(),;:\\]+@[^\s@<>"\'(),;:\\]+\.[^\s@<>"\'(),;:\\]+$', s):
+        return ''
+    return 'mailto:' + s
 
 
 def _schedule_live_state(db, show_id, h):
@@ -7161,7 +7207,8 @@ def _schedule_live_state(db, show_id, h):
             out.append({'id': r['id'], 'day': key, 'start_time': r['start_time'] or '',
                         'end_time': r['end_time'] or '', 'description': r['description'] or '',
                         'notes': r['notes'] or '', 'piano_id': r['piano_tuning_id']})
-    return {'hash': h, 'rows': out, 'meta': meta}
+    return {'hash': h, 'rows': out, 'meta': meta,
+            'day_pm': _schedule_day_pm(db, show_id, days)}
 
 
 @app.route('/shows/<int:show_id>/sync/schedule')
@@ -9609,6 +9656,17 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
             schedule_days = lit
     dark_count = run_days - len(schedule_days)
 
+    # PM on duty per printed day (3.35.0): the day's covering PM, else the
+    # show PM, with phone/email — keyed by each day's ISO date string (a
+    # performance day's perf_date is a date object). Resolved here, before
+    # any _render, so the content hash covers it. A dateless day gets the
+    # show PM; a day with no PM at all prints nothing.
+    _day_isos = [_iso_pdf(d['perf'].get('perf_date')) for d in schedule_days]
+    _pm = _pm_contacts_for_show(db, show_id, [i for i in _day_isos if i])
+    for d, iso in zip(schedule_days, _day_isos):
+        d['pm'] = _pm['days'].get(iso) if iso else _pm['show_pm']
+    show_pm_card = _pm['show_pm']
+
     # Crew call times — unique in_times from labor_requests, sorted. Training /
     # shadow shifts are excluded so they never surface on show paperwork.
     labor_in_times = db.execute(
@@ -9637,6 +9695,7 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
                                advance_data=advance_data,
                                contact_map=contact_map,
                                contact_name_map=contact_name_map,
+                               show_pm_card=show_pm_card,
                                logo_data=logo_data,
                                wifi_ssid=wifi_ssid,
                                wifi_pass=wifi_pass,
@@ -30101,10 +30160,11 @@ prism_module.register(
 # ─── Security sign-in sheets (sandboxed) ──────────────────────────────────────
 # Per-show personnel list + the venue-themed sign-in sheet PDF that sits at
 # the security desk. All logic lives in security_module.py +
-# templates/security_signin.html + templates/pdf/security_signin_pdf.html
-# behind this one call. The whole feature toggles at Settings → System →
-# Modules (module_enabled('security_signin')); the module owns only the
-# security_signin_names table.
+# templates/pdf/security_signin_pdf.html (the editor is the show page's
+# Sign-In Sheet tab) behind this one call. The whole feature toggles at
+# Settings → Modules (module_enabled('security_signin')); the module owns only
+# the security_signin_names table and reads the PM on duty (3.35.0) only
+# through pm_contacts_for_show.
 
 security_module.register(
     app,
@@ -30120,6 +30180,7 @@ security_module.register(
     safe_content_disposition=_safe_content_disposition,
     show_span_dates=_show_span_dates,
     pdf_font_config=_wp_font_config,
+    pm_contacts_for_show=_pm_contacts_for_show,
 )
 
 

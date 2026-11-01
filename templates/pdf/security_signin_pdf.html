@@ -26,6 +26,8 @@
 {% set C1_ON_SOFT = _vc.on_primary_soft if _vc else 'rgba(255,255,255,0.85)' %}
 {% set C1_TEXT = _vc.primary_text if _vc else '#1a4a7a' %}
 {% set C2_ON = _vc.on_primary_accent if _vc else '#f0c44a' %}
+{% set C1_BORDER = _vc.primary_border if _vc else '#bcd0e4' %}
+{% set C2_TEXT = _vc.secondary_text if _vc else '#B8840A' %}
 
 <style>
   @page { size: A4; margin: 16mm 14mm 16mm 14mm; }
@@ -59,6 +61,16 @@
   .initials-note { margin-top: 8px; font-size: 9px; color: #777; }
 
   .empty { color: #888; font-size: 11px; padding: 24px 0 8px; text-align: center; }
+
+  /* Production manager on duty (3.35.0) — who the desk calls. */
+  .pm-strip { margin-top: 10px; background: {{ C1_BG }}; border: 1px solid {{ C1_BORDER }}; border-left: 4px solid {{ C2 }}; padding: 7px 10px; font-size: 10.5px; color: #1a1a1a; }
+  .pm-strip .pm-head { font-size: 8.5px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: {{ C1_TEXT }}; margin-right: 6px; }
+  .pm-strip .pm-line { margin-top: 3px; }
+  .pm-strip .pm-days { font-weight: 700; color: {{ C1_TEXT }}; margin-right: 4px; }
+  .pm-strip .pm-name { font-weight: 700; }
+  .pm-strip .pm-cover { color: {{ C2_TEXT }}; font-weight: 700; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .pm-strip .pm-sep { color: #888; padding: 0 2px; }
+  th.day-col .day-pm { display: block; margin-top: 2px; font-size: 7px; font-weight: 600; letter-spacing: 0; text-transform: none; white-space: normal; color: {{ C2_ON }}; }
   .footer { margin-top: 18px; border-top: 1px solid #e0e0e0; padding-top: 8px; font-size: 9px; color: #aaa; text-align: center; }
 </style>
 </head>
@@ -85,17 +97,45 @@
     <span>Generated {{ generated_date }}</span>
   </div>
 
+  {# Production manager on duty (3.35.0): the day's covering PM, else the
+     show PM, from the injected pm_contacts_for_show. Single-day sheet: one
+     line; multi-day: one line per run of days with the same PM. Nothing
+     prints when no day has a PM. #}
+  {% macro pm_bits(c) -%}
+    <span class="pm-name">{{ c.name }}</span>{% if c.is_cover %} <span class="pm-cover">covering</span>{% endif %}
+    {%- if c.title and not day_groups %} <span class="pm-sep">·</span> {{ c.title }}{% endif %}
+    {%- if c.phone %} <span class="pm-sep">·</span> {{ c.phone }}{% endif %}
+    {%- if c.email %} <span class="pm-sep">·</span> {{ c.email }}{% endif %}
+  {%- endmacro %}
+  {% if day_groups %}
+  {% if pm_runs is defined and pm_runs | selectattr('pm') | list %}
+  <div class="pm-strip">
+    <span class="pm-head">Production manager on duty</span>
+    {% for r in pm_runs %}
+    <div class="pm-line"><span class="pm-days">{{ r.label }}:</span> {% if r.pm %}{{ pm_bits(r.pm) }}{% else %}—{% endif %}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% elif pm_single is defined and pm_single %}
+  <div class="pm-strip"><span class="pm-head">Production manager on duty:</span> {{ pm_bits(pm_single) }}</div>
+  {% endif %}
+
   {% if day_groups %}
   {# ── Multi-day: one initials column per day; a long run wraps into a
         follow-on table (same names) for the remaining days. ── #}
   {% for group in day_groups %}
   {% set ncols = 2 + group | length %}
+  {# A covered day's header carries the cover PM's name: equal-width day
+     columns then, so that name can't widen its column (3.35.0). #}
+  {% set _pmd = pm_by_date if (pm_by_date is defined and pm_by_date) else {} %}
+  {% set _cov = namespace(any=false) %}
+  {% for c in group %}{% set _p = _pmd.get(c.iso) %}{% if _p and _p.is_cover %}{% set _cov.any = true %}{% endif %}{% endfor %}
   <table>
     <thead>
       <tr>
         <th style="text-align:right">#</th>
         <th>Name</th>
-        {% for c in group %}<th class="day-col">{{ c.label }}</th>{% endfor %}
+        {% for c in group %}{% set _dpm = _pmd.get(c.iso) %}<th class="day-col"{% if _cov.any %} style="width: {{ (58 / (group | length)) | round(2) }}%"{% endif %}>{{ c.label }}{% if _dpm and _dpm.is_cover %}<span class="day-pm">PM: {{ _dpm.name }}</span>{% endif %}</th>{% endfor %}
       </tr>
     </thead>
     <tbody>

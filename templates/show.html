@@ -812,7 +812,43 @@ window.CAN_EDIT_SCHED_TEMPLATES = {{ 'true' if can_edit_sched_templates else 'fa
 // Mutable so the labor-tab dropdowns can react to live venue edits on the
 // Advance Sheet. Read everywhere via window.SHOW_VENUE.
 window.SHOW_VENUE = {{ show.venue | tojson }};
+// Day PM bar (3.35.0): {show_pm: card, days: {iso: card}} + whether this
+// user may change it (PUT /labor-days refuses readonly + restricted).
+window.SCHED_DAY_PM = {{ sched_day_pm | tojson }};
+window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
 </script>
+
+{# Contact line for a PM card (3.35.0) — app.js LaborDays.contactInto() is
+   the JS twin; keep the two in step. #}
+{% macro pm_contact_line(card) -%}
+{% if card -%}
+<span class="pmc-name">{{ card.name }}</span>
+{%- if card.title %}<span class="pmc-title">{{ card.title }}</span>{% endif %}
+{%- if card.phone %}{% set _tel = card.phone | tel_href %}{% if _tel %}<a class="pmc-phone" href="{{ _tel }}">{{ card.phone }}</a>{% else %}<span class="pmc-phone">{{ card.phone }}</span>{% endif %}{% endif %}
+{%- if card.email %}{% set _mt = card.email | mailto_href %}{% if _mt %}<a class="pmc-email" href="{{ _mt }}">{{ card.email }}</a>{% else %}<span class="pmc-email">{{ card.email }}</span>{% endif %}{% endif %}
+{%- if card.is_cover %}<span class="pmc-cover">covering</span>{% endif %}
+{%- else -%}
+<span class="pmc-none">No production manager set</span>
+{%- endif %}
+{%- endmacro %}
+
+{# Day PM bar between a dated schedule day's header and its table (3.35.0).
+   app.js _schedDayPmBar() builds the same DOM for panes added later. The
+   picker is NOT schedule meta: it saves show_labor_days.cover_pm through
+   PUT /shows/<id>/labor-days (the Labor Requests tab's "Day PM"). #}
+{% macro sched_day_pm_bar(iso, card, show_pm, can_edit) -%}
+{% set _cover = card.name if (card and card.is_cover) else '' %}
+<div class="sched-daypm" data-date="{{ iso }}">
+  <label class="sched-daypm-label" for="sched-daypm-{{ iso }}">Day PM</label>
+  <select id="sched-daypm-{{ iso }}" class="field-input field-input-sm sched-daypm-select"
+          title="Production manager on duty this day — blank = the show's PM. Same setting as Day PM on the Labor Requests tab."
+          {% if not can_edit %}disabled{% endif %}>
+    <option value="">— Show PM{% if show_pm %} ({{ show_pm.name }}){% endif %} —</option>
+    {% if _cover %}<option value="{{ _cover }}" selected>{{ _cover }}</option>{% endif %}
+  </select>
+  <span class="sched-daypm-contact">{{ pm_contact_line(card) }}</span>
+</div>
+{%- endmacro %}
 
 <div id="tab-schedule" class="tab-pane {% if tab == 'schedule' %}active{% endif %}">
 <form id="schedule-form" autocomplete="off">
@@ -975,6 +1011,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
         ("Copy from…" on that day) or delete them. They don't print on the schedule PDF.
       </div>
       {% endif %}
+      {% if d.date_key in sched_day_pm.days %}{{ sched_day_pm_bar(d.date_key, sched_day_pm.days[d.date_key], sched_day_pm.show_pm, day_pm_can_edit) }}{% endif %}
       <div class="form-section-body no-pad">
         <table class="schedule-table">
           <thead>
@@ -1289,8 +1326,21 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         The sign-in sheet that sits at the security desk on show day: each saved name prints with blank
         Signature / Time In columns, plus extra walk-up rows. A multi-day show/event prints one
         <strong>initials column per day</strong> instead (days come from load-in → load-out and the
-        performance dates). The PDF uses this venue's paperwork colors and logo.
+        performance dates). The <strong>production manager on duty</strong> — name, phone and email —
+        prints at the top so the desk knows who to call. The PDF uses this venue's paperwork colors and logo.
       </p>
+    </div>
+  </div>
+
+  {# Read-only (3.35.0): the PM contact the sheet prints, from GET …/security/names. #}
+  <div class="form-section" id="sec-pm-section" style="margin-bottom:16px">
+    <div class="form-section-header"><span class="section-icon">◈</span> PRODUCTION CONTACT FOR SECURITY</div>
+    <div class="form-section-body">
+      <p class="text-dim" style="font-size:12px;margin:0">
+        Prints on the sign-in sheet. It's the show's <strong>Production Manager</strong> (Advance Sheet), or
+        a day's covering PM — set <strong>Day PM</strong> on the Production Schedule or Labor Requests tab.
+      </p>
+      <div id="sec-pm-rows" class="sec-pm-rows"><span class="text-dim">Loading…</span></div>
     </div>
   </div>
 
@@ -1405,22 +1455,55 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     refreshMeta();
   }
 
-  // Called by switchTab() on every activation; fetches once.
+  /* Production contact for security (3.35.0): the PM on duty per run of
+     days (the same data the PDF prints). DOM + textContent only; the contact
+     line comes from LaborDays.contactInto (tel:/mailto: links). */
+  const pmRowsEl = document.getElementById('sec-pm-rows');
+  function renderPm(j) {
+    if (!pmRowsEl) return;
+    pmRowsEl.textContent = '';
+    const runs = Array.isArray(j.pm_days) ? j.pm_days : [];
+    const row = (label, card) => {
+      const div = document.createElement('div');
+      div.className = 'sec-pm-row';
+      if (label) {
+        const d = document.createElement('span');
+        d.className = 'sec-pm-days';
+        d.textContent = label;
+        div.appendChild(d);
+      }
+      const c = document.createElement('span');
+      c.className = 'sec-pm-contact';
+      LaborDays.contactInto(c, card, 'No production manager set');
+      div.appendChild(c);
+      pmRowsEl.appendChild(div);
+    };
+    if (runs.length > 1) runs.forEach(r => row(r.label, r.pm));
+    else row(runs.length ? runs[0].label : '', runs.length ? runs[0].pm : j.show_pm);
+  }
+  let loadSeq = 0;
+
+  // Called by switchTab() on every activation.
   window.loadSecurityTab = async function () {
-    // Re-fetch on every visit unless this page holds unsaved edits, so names
-    // others saved meanwhile show up (3.32.0).
-    if (loaded && JSON.stringify(names) !== savedNames) return;
+    // Fetch on every visit: the PM contact is always refreshed; names others
+    // saved meanwhile replace the list unless this page holds unsaved edits
+    // (3.32.0).
+    const seq = ++loadSeq;
     try {
       const r = await fetch(`/shows/${SHOW_ID}/security/names`);
       const j = await r.json();
       if (!j.success) throw new Error(j.error || 'load failed');
-      if (loaded && dirty()) return;   // typed into while the fetch was in flight
+      if (seq !== loadSeq) return;     // a newer visit's fetch owns the render
+      renderPm(j);
+      if (loaded && dirty()) return;   // unsaved edits here (or typed into while the fetch was in flight)
       names = j.names || [];
       savedNames = JSON.stringify(names);
       loaded = true;
       render();
     } catch (e) {
-      emptyEl.textContent = 'Could not load the name list — reload the page to retry.';
+      if (seq !== loadSeq) return;
+      if (!loaded) emptyEl.textContent = 'Could not load the name list — reload the page to retry.';
+      if (pmRowsEl && !pmRowsEl.querySelector('.sec-pm-row')) pmRowsEl.textContent = 'Could not load the PM contact.';
     }
   };
 
@@ -2932,7 +3015,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         </div>
         <h3 class="export-card-title">Security Sign-In Sheet</h3>
       </div>
-      <p class="export-card-desc">Personnel sign-in sheet for the security desk — names are managed on this show's <strong>Sign-In Sheet</strong> tab.</p>
+      <p class="export-card-desc">Personnel sign-in sheet for the security desk, with the production manager on duty and their phone / email — names are managed on this show's <strong>Sign-In Sheet</strong> tab.</p>
       <div class="export-card-foot">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a href="{{ url_for('security_signin_pdf', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Export PDF</a>
@@ -4223,6 +4306,10 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         window._laborDaysMap[workDate] = { cover_pm: data.day.cover_pm, day_notes: data.day.day_notes };
       } else {
         delete window._laborDaysMap[workDate];
+      }
+      // Same value as the Production Schedule's Day PM bar (3.35.0).
+      if ('cover_pm' in payload && typeof window.schedDayPmExternal === 'function') {
+        window.schedDayPmExternal(workDate, (data.day && data.day.cover_pm) || '');
       }
       return true;
     } catch (e) { return false; }
