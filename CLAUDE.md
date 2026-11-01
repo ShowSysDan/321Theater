@@ -1406,6 +1406,28 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   write nothing (no export_log row, no version bump, no stored-export
   reuse). The designer preview must always pass it.
 
+## Public dashboards + read-only accounts (3.35.0)
+- `/d/<slug>` (`public_dashboard`): signed out — and for document viewers,
+  who get the same anonymous render — base.html renders `auth_content`, so
+  dashboard_view.html renders its body via `{{ self.content() }}` inside
+  `<main class="main-content public-dash">` (never `.app-layout`: that starts
+  app.js's session watchdog). The anonymous page gets only
+  `_PUBLIC_DASH_TYPE_KEYS` from asset_types (never costs / supplier /
+  storage); `ANON` renders show names and asset links as plain text;
+  `saveWidgets()` runs only with `CAN_EDIT`. Viewers reach the widget data
+  endpoints (`_PUBLIC_DASH_DATA_ENDPOINTS`) only with a `?slug=`, and
+  `_dashboard_full_access()` (signed in AND not a viewer) decides the full
+  data shape. `localIsoDate()` / `localTodayIso()` are defined in base.html's
+  head for signed-out pages too.
+- Read-only: `show_page` / `_render_show_board` compute
+  `restricted = is_restricted or is_readonly` (is_restricted_user() is always
+  False), which drives Jinja `restricted` and the JS `RESTRICTED` — every use
+  of it gates an EDIT control. Role-gated buttons use the route's own rule
+  (`can_restore`, Mark as test, Settings → Shows `can_write`). View-only text
+  fields are `readonly` (scroll / select / copy), not `disabled`; blur
+  parsers and presence handlers skip readOnly targets. Never gate on
+  `is_app_*`.
+
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.
 At the end of any change that touches code/config, **state plainly which
