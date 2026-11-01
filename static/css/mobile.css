@@ -438,3 +438,12 @@ html.mobile-view .tl-item-time { font-size: 9.5px; }
 html.mobile-view .tl-item-sub { font-size: 10px; }
 html.mobile-view .tl-hour { right: 5px; font-size: 10px; }
 html.mobile-view .tl-tip { max-width: calc(100vw - 24px); }
+
+/* ── Assets tab header on phones (3.35.0) ─────────────────────────────────
+   GEAR & ASSETS + total + three buttons (Estimate PDF / + Add Asset /
+   + External Rental) never wrapped, so the page scrolled sideways (544px on
+   a 390px phone). Let the header and its button group wrap instead. */
+html.mobile-view #tab-assets > .form-section-header { flex-wrap: wrap; }
+html.mobile-view #tab-assets > .form-section-header > .ml-auto {
+  flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; max-width: 100%;
+}
