@@ -3068,7 +3068,9 @@ function _schedDayPmMerge(st) {
     const card = dp.days[iso] || null;
     const cover = (card && card.is_cover && card.name) || '';
     const sel = bar.querySelector('.sched-daypm-select');
-    if (sel && sel === document.activeElement && sel.value !== cover) {
+    // Compare as the server stores it (whitespace collapsed), so a picked
+    // name the save normalised isn't "different" on every poll.
+    if (sel && sel === document.activeElement && sel.value.split(/\s+/).filter(Boolean).join(' ') !== cover) {
       _schedDayPmPending[iso] = card;
       out.skipped++;
       return;
@@ -5904,17 +5906,25 @@ window.LaborDays = {
 
   /* Link targets for a contact's phone / email — '' when the value isn't
      dialable / an address (it then prints unlinked). Mirrors app.py's
-     tel_href / mailto_href Jinja filters. */
+     tel_href / mailto_href Jinja filters — keep the two in step. The phone
+     dials its FIRST number (first run of digits + separators with 3+
+     digits: no extension, no second number; 3–15 digits), and both regexes
+     are linear (no backtracking) on any input. */
   telHref(phone) {
-    let s = String(phone || '').trim();
-    s = s.replace(/\s*(?:x|ext\.?|extension|#|,|;)\s*\d*\s*$/i, '');
-    const digits = s.replace(/\D/g, '');
-    if (digits.length < 3 || digits.length > 20) return '';
-    return 'tel:' + (s.charAt(0) === '+' ? '+' : '') + digits;
+    const s = String(phone || '').trim();
+    if (s.length > 100) return '';
+    for (const run of s.match(/\+?\(?[0-9][0-9().\s-]*/g) || []) {
+      const digits = run.replace(/[^0-9]/g, '');
+      if (digits.length >= 3) {
+        return digits.length > 15 ? '' : 'tel:' + (run.charAt(0) === '+' ? '+' : '') + digits;
+      }
+    }
+    return '';
   },
   mailtoHref(email) {
     const s = String(email || '').trim();
-    if (s.length > 254 || !/^[^\s@<>"'(),;:\\]+@[^\s@<>"'(),;:\\]+\.[^\s@<>"'(),;:\\]+$/.test(s)) return '';
+    // No ? & = % / # in the address: they would add headers (?bcc=…) to the link.
+    if (s.length > 254 || !/^[^\s@<>"'(),;:\\?&=%\/#]+@[^\s@<>"'(),;:\\?&=%\/#]+\.[^\s@<>"'(),;:\\?&=%\/#]+$/.test(s)) return '';
     return 'mailto:' + s;
   },
 
