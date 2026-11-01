@@ -1692,6 +1692,9 @@ html[data-theme="light"] .modal-overlay {
 
 /* ── Notification Bell + Panel ───────────────────────────────────── */
 .notif-bell-btn { position: relative; }
+/* display:flex below would beat the [hidden] attribute, so with nothing unread
+   every bell showed an orange "0" (refreshNotifBadge sets hidden). */
+.notif-bell-badge[hidden] { display: none; }
 .notif-bell-badge {
   position: absolute;
   top: -2px;
