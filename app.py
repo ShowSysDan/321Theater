@@ -2195,6 +2195,13 @@ def _refresh_session_roles():
     now = datetime.utcnow().timestamp()
     if now - last_check < 300:  # 5 minutes
         return
+    # The session watchdog's status poll must stay side-effect-free: a
+    # refresh marks the session modified, which slides expires_at, so the
+    # watchdog's own poll kept a session alive (on a document viewer's page
+    # it is the only poll). There, only END a deleted/locked account's
+    # session (the endpoint then answers authenticated=false); a live one is
+    # left for the next real request to refresh.
+    status_poll = request.endpoint == 'api_session_status'
     try:
         db = get_db()
         try:
@@ -2207,12 +2214,16 @@ def _refresh_session_roles():
             ).fetchone()
             if not user:
                 session.clear()
-                return redirect(url_for('login'))
+                return None if status_poll else redirect(url_for('login'))
             # An account locked mid-session is booted on the next refresh (≤5 min).
             if user['is_locked']:
                 session.clear()
+                if status_poll:
+                    return None
                 flash('This account has been locked. Contact an administrator.', 'error')
                 return redirect(url_for('login'))
+            if status_poll:
+                return None
             # Refresh last-connection so the path stays current if a user moves
             # between the LAN and the gateway mid-session (same session cookie).
             _record_connection(db, session['user_id'])
@@ -5640,7 +5651,9 @@ def logout():
 def api_session_status():
     """Seconds until THIS app's session dies. Deliberately read-only toward
     the session: reading flask.session never marks it modified, so this poll
-    writes no cookie and no app_sessions row. Answers JSON for logged-out
+    writes no cookie and no app_sessions row (_refresh_session_roles skips
+    its 5-minute refresh here and only ends a deleted/locked account's
+    session). Answers JSON for logged-out
     callers too (authenticated=false is the watchdog's death signal) — a
     @login_required redirect-to-HTML would break the fetch()."""
     out = {
