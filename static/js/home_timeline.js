@@ -13,7 +13,9 @@
   - ONE interval (30 s): moves the NOW line and refetches once a minute while
     the tab is visible; stopped while hidden and on pagehide.
   - Fetches are sequence-guarded (and the previous one aborted), so a slow
-    response can never paint over a newer day.
+    response can never paint over a newer day. render() / updateNow() draw
+    only when `data` is the picked day (dayShown()), so a zoom / venue chip /
+    resize while a new day loads can't relabel the old one.
   - All user text goes in with textContent / attributes — never innerHTML.
   - Listeners are delegated on #tl-scroll (added once), so re-rendering never
     stacks handlers.
@@ -64,8 +66,11 @@
     return String(Math.floor(r / 60)).padStart(2, '0') + ':' + String(r % 60).padStart(2, '0');
   }
   function venueKey(s) { return s.venue || 'Unassigned'; }
-  function safeTel(p) { const t = String(p || '').replace(/[^0-9+]/g, ''); return t.length >= 3 ? 'tel:' + t : ''; }
-  function safeMail(e) { const t = String(e || '').trim(); return /^[^\s@<>"',;:]+@[^\s@<>"',;:]+$/.test(t) ? 'mailto:' + t : ''; }
+  // PM contact links use the ONE shared rule (app.js LaborDays.telHref /
+  // mailtoHref = the Jinja tel_href / mailto_href filters), so a number with
+  // an extension dials the same here as on the show page. '' = no link.
+  function telHref(p) { return window.LaborDays && LaborDays.telHref ? LaborDays.telHref(p) : ''; }
+  function mailHref(e) { return window.LaborDays && LaborDays.mailtoHref ? LaborDays.mailtoHref(e) : ''; }
 
   // ── state ─────────────────────────────────────────────────────────────
   const initial = root.dataset.initialDate || '';
@@ -127,8 +132,23 @@
       if (seq !== fetchSeq || (err && err.name === 'AbortError')) return;
       lastFetch = Date.now();
       setStatus((err && err.message) || 'Could not load the day.', true);
+      // A failed day change must not leave the previous day's grid under the
+      // new date (a failed refresh of the SAME day keeps the last good view).
+      if (!dayShown()) {
+        data = null;
+        hideTip();
+        testCount.textContent = '';   // nor its '(N hidden)' count or venue chips
+        renderVenueChips();
+        showEmpty('This day could not be loaded. It will try again in a minute.');
+        renderContext();
+      }
     });
   }
+
+  // The grid on screen belongs to `data`. While another day loads (go() has
+  // moved curDate), nothing may redraw it: a zoom / venue chip / resize would
+  // paint the old day under the new date and use up the new day's auto-scroll.
+  function dayShown() { return !!data && data.date === curDate; }
 
   function go(iso, opts) {
     if (!ISO_RE.test(iso)) return;
@@ -176,10 +196,19 @@
     return most;
   }
 
+  // The axis stops at RANGE_CAP (06:00 next day), so an item starting at or
+  // after it ('1+07:00', '2+00:30') has nowhere to go on this day — it would
+  // be drawn below the grid. Left off the grid and listed in the lane header
+  // instead (laterList): the next day's view carries only the day before's
+  // rows, so a '2+06:00'+ row would otherwise show on no day at all. (Crew
+  // bars can't get here: the server drops in-times past midnight.)
+  function onAxis(list) { return (list || []).filter(i => i.start < RANGE_CAP); }
+  function offAxis(list) { return (list || []).filter(i => i.start >= RANGE_CAP); }
+
   function visibleLanes() {
     const shows = (data && data.shows) || [];
     const lanes = shows.filter(s => selVenues.size === 0 || selVenues.has(venueKey(s)))
-      .map(s => ({ kind: 'show', show: s, sched: s.schedule || [], crew: s.crew || [] }));
+      .map(s => ({ kind: 'show', show: s, sched: onAxis(s.schedule), crew: onAxis(s.crew) }));
     lanes.sort((a, b) => {
       const sa = a.show, sb = b.show;
       if (sa.is_test !== sb.is_test) return sa.is_test ? 1 : -1;
@@ -193,7 +222,7 @@
       return fa - fb || sa.name.localeCompare(sb.name);
     });
     if (data && data.overhead && selVenues.size === 0) {
-      lanes.push({ kind: 'oh', oh: data.overhead, sched: [], crew: data.overhead.crew || [] });
+      lanes.push({ kind: 'oh', oh: data.overhead, sched: [], crew: onAxis(data.overhead.crew) });
     }
     return lanes;
   }
@@ -219,29 +248,54 @@
   }
 
   // ── render ────────────────────────────────────────────────────────────
+  // 'Today · Sunday, November 1 · 3 happening'. The relative prefix follows
+  // the browser clock, so tick() refreshes it too (midnight passes between
+  // data changes). With no data (a failed load) it names the picked day.
+  function dayLabel(iso) {
+    const p = iso.split('-').map(Number);
+    try { return new Date(p[0], p[1] - 1, p[2]).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }); }
+    catch (_) { return iso; }
+  }
+  function renderContext() {
+    const today = localTodayIso();
+    const rel = curDate === today ? 'Today · '
+      : curDate === isoAdd(today, -1) ? 'Yesterday · '
+      : curDate === isoAdd(today, 1) ? 'Tomorrow · ' : '';
+    let t = null;
+    if (dayShown()) {
+      const n = (data.shows || []).length;
+      t = rel + data.label + ' · ' + (n ? n + ' happening' : 'nothing scheduled');
+    } else if (!data) {
+      t = rel + dayLabel(curDate);
+    }
+    // aria-live region: write only a real change, or every tick re-announces it.
+    if (t != null && ctxEl.textContent !== t) ctxEl.textContent = t;
+  }
+
+  function showEmpty(msg) {
+    scroller.hidden = true;
+    emptyEl.hidden = false;
+    emptyText.textContent = msg;
+    geom = null; nowEl = null;
+    itemInfo.clear();
+    setHead(null);
+  }
+
   function render() {
+    if (!dayShown()) { syncControls(); return; }
     hideTip();
     syncControls();
     renderVenueChips();
-    const shows = data.shows || [];
-    const n = shows.length;
-    const rel = curDate === localTodayIso() ? 'Today · '
-      : curDate === isoAdd(localTodayIso(), -1) ? 'Yesterday · '
-      : curDate === isoAdd(localTodayIso(), 1) ? 'Tomorrow · ' : '';
-    ctxEl.textContent = rel + data.label + ' · ' + (n ? n + ' happening' : 'nothing scheduled');
+    renderContext();
+    const n = (data.shows || []).length;
     testCount.textContent = (!includeTest && data.test_hidden) ? ' (' + data.test_hidden + ' hidden)' : '';
 
     const lanes = visibleLanes();
     if (!lanes.length) {
-      scroller.hidden = true;
-      emptyEl.hidden = false;
       let msg = 'Nothing on the schedule for ' + data.label + '.';
       if (n && selVenues.size) msg = 'Nothing at the selected venue' + (selVenues.size === 1 ? '' : 's') + ' on ' + data.label + '.';
       if (data.test_hidden && !includeTest) msg += ' (' + data.test_hidden + ' test show' + (data.test_hidden === 1 ? '' : 's') + ' hidden.)';
-      emptyText.textContent = msg;
-      geom = null; nowEl = null;
-      itemInfo.clear();
-      setHead(null);
+      showEmpty(msg);
       return;
     }
     emptyEl.hidden = true;
@@ -417,7 +471,7 @@
       nm.title = [s.pm.name, s.pm.title, s.pm.phone, s.pm.email].filter(Boolean).join(' · ');
       pm.appendChild(nm);
       if (s.pm.is_cover) pm.appendChild(badge('tl-cover', 'cover', 'Covering PM for this day'));
-      const tel = safeTel(s.pm.phone), mail = safeMail(s.pm.email);
+      const tel = telHref(s.pm.phone), mail = mailHref(s.pm.email);
       if (tel) pm.appendChild(contactLink(tel, 'Call ' + s.pm.name + ' (' + s.pm.phone + ')', 'phone'));
       if (mail) pm.appendChild(contactLink(mail, 'Email ' + s.pm.name + ' (' + s.pm.email + ')', 'mail'));
     } else {
@@ -433,6 +487,7 @@
       h.appendChild(pf);
     }
     untimedList(h, s.schedule_untimed || [], s.crew_untimed || [], s);
+    laterList(h, offAxis(s.schedule), s);
     h.appendChild(colLabels(l));
     return h;
   }
@@ -480,6 +535,24 @@
       const who = (r.position && r.position !== '—' ? r.position + ' · ' : '') + r.tech;
       const a = el('a', null, 'Crew: ' + who + (r.in_text ? ' (' + r.in_text + ')' : ''));
       a.href = s ? '/shows/' + s.id + '?tab=staffing' : '/overhead-crew';
+      li.appendChild(a);
+      ul.appendChild(li);
+    });
+    d.appendChild(ul);
+    h.appendChild(d);
+  }
+
+  // Schedule rows past the end of the axis (see onAxis) — same look as the
+  // 'without a time' list, each linking to its row on the Schedule tab.
+  function laterList(h, rows, s) {
+    if (!rows.length) return;
+    const d = el('details', 'tl-untimed');
+    d.appendChild(el('summary', null, rows.length + ' after ' + hhmm(RANGE_CAP) + ' next day'));
+    const ul = el('ul');
+    rows.forEach(r => {
+      const li = el('li');
+      const a = el('a', null, [r.start_label, r.desc || r.notes].filter(Boolean).join(' · ') || '(blank)');
+      a.href = '/shows/' + s.id + '?tab=schedule&focus=sched:' + r.id;
       li.appendChild(a);
       ul.appendChild(li);
     });
@@ -620,7 +693,7 @@
   }
 
   function updateNow() {
-    if (!geom || !nowEl) return;
+    if (!geom || !nowEl || !dayShown()) return;   // the grid is still the previous day
     const today = localTodayIso();
     const nm = nowOnView();
     const shown = nm != null && nm >= geom.start && nm <= geom.end;
@@ -671,8 +744,9 @@
     else if (selVenues.has(v)) selVenues.delete(v);
     else selVenues.add(v);
     lsSet(LS_VENUES, JSON.stringify(Array.from(selVenues)));
-    pendingScroll = null;
-    if (data) render();
+    // Mid day-change (or after a failed one) only the chips change; the next
+    // day's render applies the filter (and keeps its auto-scroll).
+    if (dayShown()) { pendingScroll = null; render(); } else renderVenueChips();
   });
 
   // ── tooltip ───────────────────────────────────────────────────────────
@@ -803,12 +877,16 @@
   function tick() {
     if (document.hidden) return;
     const today = localTodayIso();
-    // A page following "today" rolls over once the new day's view starts.
-    if (followToday && curDate !== today && isoAdd(curDate, 1) === today && nowMinutes() >= RANGE_START) {
+    // A page following "today" moves on to it: from the day before only once
+    // the new day's view starts (06:00 — until then the old day's
+    // after-midnight hours are the ones in use), from anything else (2+ days
+    // behind after a sleep / hidden tab, or a clock change) at once.
+    if (followToday && curDate !== today && (isoAdd(curDate, 1) !== today || nowMinutes() >= RANGE_START)) {
       go(today, { follow: true });
       return;
     }
     updateNow();
+    renderContext();               // 'Today ·' becomes 'Yesterday ·' at midnight
     if (todayBtn) todayBtn.disabled = curDate === today;
     if (Date.now() - lastFetch >= REFRESH_MS - 1000) load({ silent: true });
   }
