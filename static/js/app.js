@@ -1076,7 +1076,7 @@ function bindAdvanceForm() {
   };
   form.addEventListener('focusin', e => {
     const el = e.target.closest('.adv-field[data-key]');
-    const key = el ? el.dataset.key : null;
+    const key = el && !el.readOnly ? el.dataset.key : null;   // readonly = view only, not editing
     if (key !== _focusedField) { _focusedField = key; pushPresence(); }
   });
   form.addEventListener('focusout', () => {
@@ -2647,7 +2647,7 @@ function _schedServerRow(r) {
   if (RESTRICTED) {
     tr.querySelector('.drag-col')?.remove();
     tr.querySelector('.row-del-btn')?.closest('td')?.remove();
-    tr.querySelectorAll('.sched-cell').forEach(i => { i.disabled = true; });
+    tr.querySelectorAll('.sched-cell').forEach(i => { i.readOnly = true; });   // not disabled: long text stays scrollable
   }
   return tr;
 }
@@ -4795,7 +4795,8 @@ function renderComments(comments) {
     if (!isDeleted && (c.is_own || isAdmin)) {
       actions.push(`<button class="comment-delete-btn" onclick="deleteComment(${c.id})" title="Delete">×</button>`);
     }
-    if (!isDeleted && (c.is_own || isAdmin)) {
+    // Edit: edit_comment() refuses read-only accounts (delete_comment() doesn't).
+    if (!isDeleted && (c.is_own || isAdmin) && !(typeof RESTRICTED !== 'undefined' && RESTRICTED)) {
       actions.push(`<button class="comment-edit-btn" onclick="startEditComment(${c.id})" title="Edit" style="background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:.85em;padding:0 4px">✏</button>`);
     }
     if (isDeleted && isAdmin) {
@@ -5427,6 +5428,7 @@ function _bindScheduleTimeParsing() {
     const tr = td.closest('tr.schedule-row');
     if (!tr) return;
     const cells = tr.querySelectorAll('.sched-cell');
+    if (e.target.readOnly) return;   // view only / piano row: never rewrite (it would save)
     if (e.target === cells[0] || e.target === cells[1]) {
       const parsed = _schedParseTime(e.target.value);
       if (parsed !== e.target.value) {

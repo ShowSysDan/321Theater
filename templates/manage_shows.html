@@ -61,7 +61,7 @@
           <th style="text-align:center" title="Number of performances">Perfs</th>
           <th>Status</th>
           <th>Created by</th>
-          <th style="width:100px;text-align:right">Action</th>
+          {% if can_write %}<th style="width:100px;text-align:right">Action</th>{% endif %}
         </tr>
       </thead>
       <tbody>
@@ -92,6 +92,7 @@
             {% endif %}
           </td>
           <td class="text-dim">{{ s.creator or '—' }}</td>
+          {% if can_write %}
           <td style="text-align:right">
             {% if s.status == 'archived' %}
             <form method="post" action="{{ url_for('restore_show', show_id=s.id) }}" style="display:inline">
@@ -106,6 +107,7 @@
             </form>
             {% endif %}
           </td>
+          {% endif %}
         </tr>
         {% endfor %}
       </tbody>

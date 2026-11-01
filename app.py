@@ -10894,6 +10894,10 @@ def manage_shows():
                            archived_count=archived_count,
                            auto_archive_days=grace,
                            auto_archive_days_max=AUTO_ARCHIVE_DAYS_MAX,
+                           # Archive / Restore: staff_or_admin_required's
+                           # _readonly_guard refuses read-only staff.
+                           can_write=(session.get('user_role') == 'admin'
+                                      or not session.get('is_readonly')),
                            user=get_current_user())
 
 

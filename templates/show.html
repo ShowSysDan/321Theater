@@ -150,7 +150,7 @@
 
     {% elif field.field_type == 'select' and field.allow_multi %}
       <div class="multi-check-popover{% if restricted %} multi-check-disabled{% endif %}">
-        <button type="button" class="field-input multi-check-trigger" aria-haspopup="listbox" aria-expanded="false" {% if restricted %}disabled{% endif %}>
+        <button type="button" class="field-input multi-check-trigger" aria-haspopup="listbox" aria-expanded="false">
           <span class="multi-check-summary">— Select —</span>
           <span class="multi-check-caret" aria-hidden="true">▾</span>
         </button>
@@ -240,12 +240,13 @@
                 rows="3" placeholder="{{ field.placeholder }}" {% if restricted %}disabled{% endif %}>{{ cur }}</textarea>
 
     {% else %}
-      {# text / date / time / number #}
+      {# text / date / time / number. View only: text is readonly, not disabled,
+         so a value longer than the box can still be scrolled / selected. #}
       <input type="{{ field.field_type }}" class="field-input adv-field"
              data-key="{{ field.field_key }}"
              value="{{ cur }}"
              placeholder="{{ field.placeholder }}"
-             {% if restricted %}disabled{% endif %}>
+             {% if restricted %}{{ 'readonly' if field.field_type == 'text' else 'disabled' }}{% endif %}>
     {% endif %}
   </div>
 
@@ -884,7 +885,7 @@ window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
           {% elif f.field_type == 'textarea' %}
             <textarea class="field-input field-textarea sched-meta" data-key="{{ f.field_key }}" rows="3" {% if restricted %}disabled{% endif %}>{{ meta(f.field_key) }}</textarea>
           {% else %}
-            <input type="text" class="field-input sched-meta" data-key="{{ f.field_key }}" value="{{ meta(f.field_key) }}" {% if restricted %}disabled{% endif %}>
+            <input type="text" class="field-input sched-meta" data-key="{{ f.field_key }}" value="{{ meta(f.field_key) }}" {% if restricted %}readonly{% endif %}>
           {% endif %}
         </div>
         {% else %}
@@ -1025,10 +1026,10 @@ window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
             {% else %}
             <tr class="schedule-row" data-row-id="{{ row.id }}">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
-              <td><input type="text" class="sched-cell" maxlength="40" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" maxlength="40" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}readonly{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}readonly{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Description" value="{{ row.description }}" {% if restricted %}readonly{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}readonly{% endif %}></td>
               {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)" title="Remove">×</button></td>{% endif %}
             </tr>
             {% endif %}
@@ -1079,10 +1080,10 @@ window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
             {% else %}
             <tr class="schedule-row" data-row-id="{{ row.id }}">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
-              <td><input type="text" class="sched-cell" maxlength="40" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" maxlength="40" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}readonly{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}readonly{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Description" value="{{ row.description }}" {% if restricted %}readonly{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}readonly{% endif %}></td>
               {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>{% endif %}
             </tr>
             {% endif %}
@@ -1116,7 +1117,7 @@ window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
           {% elif f.field_type == 'textarea' %}
             <textarea class="field-input field-textarea sched-meta" data-key="{{ f.field_key }}" rows="3" {% if restricted %}disabled{% endif %}>{{ meta(f.field_key) }}</textarea>
           {% else %}
-            <input type="text" class="field-input sched-meta" data-key="{{ f.field_key }}" value="{{ meta(f.field_key) }}" {% if restricted %}disabled{% endif %}>
+            <input type="text" class="field-input sched-meta" data-key="{{ f.field_key }}" value="{{ meta(f.field_key) }}" {% if restricted %}readonly{% endif %}>
           {% endif %}
         </div>
         {% else %}
@@ -1147,7 +1148,7 @@ window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
         <div class="field-group">
           <label class="field-label">SECURITY EMAIL</label>
           <input type="text" class="field-input sched-meta" data-key="security_email"
-                 value="{{ meta('security_email', 'security@drphillipscenter.org') }}" {% if restricted %}disabled{% endif %}>
+                 value="{{ meta('security_email', 'security@drphillipscenter.org') }}" {% if restricted %}readonly{% endif %}>
         </div>
       </div>
     </div>
@@ -4825,7 +4826,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
                 onchange="onLaborDayPmChange(this)"></select>
       </span>
       <input type="text" class="field-input field-input-sm labor-day-notes"
-             value="${_esc(dayInfo.day_notes || '')}" ${RESTRICTED ? 'disabled' : ''}
+             value="${_esc(dayInfo.day_notes || '')}" ${RESTRICTED ? 'readonly' : ''}
              placeholder="Day notes — shown on the scheduler &amp; Labor Overview"
              title="Notes for this show on this day only"
              onchange="onLaborDayNotesChange(this)">
@@ -5928,7 +5929,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       just.maxLength = 500; just.placeholder = 'Justification (required)';
       just.dataset.field = 'notes';
       just.value = r.notes || '';
-      if (RESTRICTED) just.disabled = true;
+      if (RESTRICTED) just.readOnly = true;
       just.addEventListener('change', () => _savePostShowLabor(r.id, { notes: just.value }, tr));
       wrap.appendChild(crewSel); wrap.appendChild(just);
       infoTd.appendChild(wrap);
