@@ -69,6 +69,7 @@ import security_module  # security sign-in sheets — wired up near the bottom
 import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
 import spot_module  # Spot sound-level integration — wired up near the bottom
 import file_store  # S3 <-> PostgreSQL file redundancy + migration — wired up near the bottom
+from init_db import pg_name_key  # SQL twin of _name_key (idx_contacts_name_key's text)
 
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, session, jsonify, make_response, abort, send_file,
@@ -7514,22 +7515,9 @@ def _apply_schedule_ops(db, show_id, ops):
     return created
 
 
-def _schedule_sync_hash(db, show_id):
-    """ONE query: a digest of the show's schedule rows, Venue & Tech fields and
-    day structure (load range + performance dates). The 3 s poll compares it
-    before building anything (3.32.2); None when the show is gone. 3.35.0
-    adds the Day PM inputs (show_labor_days.cover_pm + the show's PRODUCTION
-    MANAGER advance value) so a Day PM picked anywhere reaches open editors.
-    Cover rows count only inside the editor's date window `w` (load range,
-    performance dates, off-date rows' days — an index range, so cover rows on
-    other dates cost a poll nothing). schedule_rows.day_date is TEXT and a
-    legacy one can be junk ('2026-13-45'), so it is never cast: the CASE
-    builds a date from regex-checked parts of its first 10 chars (what
-    _as_date reads; a bad day-of-month just rolls over, harmless for a
-    window bound). The PM contacts those names resolve
-    to (+ the PM department that ranks duplicates) are in it too, so a
-    corrected phone / email / title reaches open editors' Day PM bars."""
-    row = db.execute("""
+# Built once (see _schedule_sync_hash): the name keys are init_db.pg_name_key,
+# the exact text idx_contacts_name_key indexes.
+_SCHEDULE_SYNC_HASH_SQL = """
         SELECT md5(
             coalesce((SELECT string_agg(id || '|' || coalesce(day_date, '') || '|' || coalesce(perf_id::text, '')
                                         || '|' || coalesce(start_time, '') || '|' || coalesce(end_time, '')
@@ -7550,9 +7538,8 @@ def _schedule_sync_hash(db, show_id):
                                                   || '|' || coalesce(c.email, '') || '|' || coalesce(c.user_id::text, ''),
                                                   E'\\n' ORDER BY c.id)
                                 FROM contacts c
-                                WHERE lower(btrim(regexp_replace(c.name, '[[:space:]]+', ' ', 'g')))
-                                      = ANY(array_append(cv.keys, lower(btrim(regexp_replace(
-                                                pmv.v, '[[:space:]]+', ' ', 'g')))))), '')
+                                WHERE """ + pg_name_key('c.name') + """
+                                      = ANY(array_append(cv.keys, """ + pg_name_key('pmv.v') + """))), '')
         ) AS h
         FROM shows s
         CROSS JOIN LATERAL (
@@ -7569,14 +7556,34 @@ def _schedule_sync_hash(db, show_id):
         ) w
         CROSS JOIN LATERAL (
             SELECT string_agg(work_date::text || '=' || cover_pm, E'\\n' ORDER BY work_date) AS covers,
-                   array_agg(DISTINCT lower(btrim(regexp_replace(cover_pm, '[[:space:]]+', ' ', 'g')))) AS keys
+                   array_agg(DISTINCT """ + pg_name_key('cover_pm') + """) AS keys
             FROM show_labor_days
             WHERE show_id = s.id AND coalesce(cover_pm, '') <> ''
               AND work_date BETWEEN w.lo AND w.hi
         ) cv
         LEFT JOIN LATERAL (SELECT field_value AS v FROM advance_data
                            WHERE show_id = s.id AND field_key = 'production_manager') pmv ON TRUE
-        WHERE s.id = %s""", (show_id,)).fetchone()
+        WHERE s.id = %s"""
+
+
+def _schedule_sync_hash(db, show_id):
+    """ONE query: a digest of the show's schedule rows, Venue & Tech fields and
+    day structure (load range + performance dates). The 3 s poll compares it
+    before building anything (3.32.2); None when the show is gone. 3.35.0
+    adds the Day PM inputs (show_labor_days.cover_pm + the show's PRODUCTION
+    MANAGER advance value) so a Day PM picked anywhere reaches open editors.
+    Cover rows count only inside the editor's date window `w` (load range,
+    performance dates, off-date rows' days — an index range, so cover rows on
+    other dates cost a poll nothing). schedule_rows.day_date is TEXT and a
+    legacy one can be junk ('2026-13-45'), so it is never cast: the CASE
+    builds a date from regex-checked parts of its first 10 chars (what
+    _as_date reads; a bad day-of-month just rolls over, harmless for a
+    window bound). The PM contacts those names resolve
+    to (+ the PM department that ranks duplicates) are in it too, so a
+    corrected phone / email / title reaches open editors' Day PM bars —
+    matched by pg_name_key (= _name_key, NBSP & co. included), the text
+    idx_contacts_name_key indexes, so the lookup never scans contacts."""
+    row = db.execute(_SCHEDULE_SYNC_HASH_SQL, (show_id,)).fetchone()
     return row['h'][:16] if row else None
 
 
@@ -7592,18 +7599,37 @@ def _schedule_day_pm(db, show_id, days):
 
 
 # Contact field caps (add_contact / edit_contact). The link filters below
-# also refuse anything longer than the phone cap (legacy rows).
+# also refuse a phone / email longer than its cap (legacy rows).
 _CONTACT_NAME_MAX = 200
 _CONTACT_TITLE_MAX = 200
 _CONTACT_PHONE_MAX = 100
 _CONTACT_EMAIL_MAX = 254
-# One run of a phone number: optional '+' / '(', a digit, then digits and the
-# usual separators. A single greedy class — nothing to backtrack, so linear
-# on any input (the 3.35.0 extension-stripping regex was quadratic).
-_TEL_RUN_RE = re.compile(r'\+?\(?[0-9][0-9().\s-]*')
-# Address chars: no whitespace, quotes, brackets or separators, and none of
+# Contact text as both link filters (and their app.js twins) read it.
+# Python's and JS's whitespace differ only in controls (\x1c-\x1f, \x85)
+# and the BOM, so those become plain spaces first; every class below spells
+# its spaces out (_LINK_WS, never \s) — the twins then agree on any input.
+_LINK_CTRL_RE = re.compile(r'[\x00-\x1f\x7f-\x9f\ufeff]')
+_LINK_WS = r' \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000'
+# One run of a phone number: optional '+' ('+ 1 …' too) / '(', a digit,
+# then digits and separators — ASCII and Unicode dashes / minus (Word's
+# '407–555–0101'), dots / middle dot, brackets, spaces — and '/' only
+# right before a digit ('407/555-0101'). One choice per character, nothing
+# to backtrack: linear on any input (the 3.35.0 extension-stripping regex
+# was quadratic).
+_TEL_RUN_RE = re.compile(r'(?:\+ ?)?\(?[0-9](?:[0-9().\-\u00b7\u2010-\u2015\u2212\uff0d'
+                         + _LINK_WS + r']|/(?=[0-9]))*')
+# Address chars: no spaces, quotes, brackets or separators, and none of
 # ? & = % / # — they would add headers (?bcc=…&body=…) to the mailto: link.
-_MAILTO_RE = re.compile(r'^[^\s@<>"\'(),;:\\?&=%/#]+@[^\s@<>"\'(),;:\\?&=%/#]+\.[^\s@<>"\'(),;:\\?&=%/#]+$')
+_MAILTO_PART = r'[^@<>"\'(),;:\\?&=%/#' + _LINK_WS + r']+'
+_MAILTO_RE = re.compile('^' + _MAILTO_PART + '@' + _MAILTO_PART + r'\.' + _MAILTO_PART + '$')
+
+
+def _link_text(value, cap):
+    """`value` as the link filters read it (controls / BOM → spaces, then
+    stripped), or None when it's over `cap` characters — code points, which
+    is what app.js LaborDays._linkText counts too."""
+    s = _LINK_CTRL_RE.sub(' ', str(value or '')).strip()
+    return s if len(s) <= cap else None
 
 
 @app.template_filter('tel_href')
@@ -7612,15 +7638,18 @@ def _tel_href(phone):
     or '' when it doesn't hold a dialable number (then print it unlinked).
     Dials the FIRST number only: the first run of digits + separators with
     3+ digits, so an extension ('x12', 'ext. 3', '#5') or a second number
-    ('… / 321-…', '…, …', '… or …', 'c 407-… o 407-…') never joins it; more
-    than 15 digits (the E.164 maximum) isn't a number. Mirrors app.js
+    ('… / 321-…', '…, …', '… or …', 'c 407-… o 407-…') never joins it, and
+    a '/' joins only a prefix of under 7 digits ('407/555-0101'), never a
+    second number or alternate ending ('407-555-0101/0102'); more than 15
+    digits (the E.164 maximum) isn't a number. Mirrors app.js
     LaborDays.telHref — keep the two in step."""
-    s = str(phone or '').strip()
-    if len(s) > _CONTACT_PHONE_MAX:
-        return ''
-    for m in _TEL_RUN_RE.finditer(s):
+    for m in _TEL_RUN_RE.finditer(_link_text(phone, _CONTACT_PHONE_MAX) or ''):
         run = m.group(0)
-        digits = re.sub(r'[^0-9]', '', run)
+        digits = ''
+        for part in run.split('/'):
+            if len(digits) >= 7:
+                break
+            digits += re.sub(r'[^0-9]', '', part)
         if len(digits) >= 3:
             if len(digits) > 15:
                 return ''
@@ -7632,8 +7661,8 @@ def _tel_href(phone):
 def _mailto_href(email):
     """'mailto:' link for a plain address, or '' when it isn't one.
     Mirrors app.js LaborDays.mailtoHref — keep the two in step."""
-    s = str(email or '').strip()
-    if len(s) > _CONTACT_EMAIL_MAX or not _MAILTO_RE.match(s):
+    s = _link_text(email, _CONTACT_EMAIL_MAX)
+    if not s or not _MAILTO_RE.match(s):
         return ''
     return 'mailto:' + s
 

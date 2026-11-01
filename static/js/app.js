@@ -5906,15 +5906,28 @@ window.LaborDays = {
 
   /* Link targets for a contact's phone / email — '' when the value isn't
      dialable / an address (it then prints unlinked). Mirrors app.py's
-     tel_href / mailto_href Jinja filters — keep the two in step. The phone
-     dials its FIRST number (first run of digits + separators with 3+
-     digits: no extension, no second number; 3–15 digits), and both regexes
-     are linear (no backtracking) on any input. */
+     tel_href / mailto_href Jinja filters (_link_text, _TEL_RUN_RE,
+     _MAILTO_RE) — keep the two in step: the same text gives the same link
+     on both sides. The phone dials its FIRST number (first run of digits +
+     separators with 3+ digits: no extension, no second number; a '/' joins
+     only a prefix under 7 digits; 3–15 digits), and both regexes are linear
+     (no backtracking) on any input. Spaces are spelled out, never \s
+     (Python's and JS's \s differ). */
+  // Controls / BOM → spaces, then trimmed; null when over `max` code points
+  // (what Python's len() counts; .length counts UTF-16 units).
+  _linkText(v, max) {
+    const s = String(v || '').replace(/[\x00-\x1f\x7f-\x9f\ufeff]/g, ' ').trim();
+    return s.length <= max || (s.length <= 2 * max && [...s].length <= max) ? s : null;
+  },
   telHref(phone) {
-    const s = String(phone || '').trim();
-    if (s.length > 100) return '';
-    for (const run of s.match(/\+?\(?[0-9][0-9().\s-]*/g) || []) {
-      const digits = run.replace(/[^0-9]/g, '');
+    const s = this._linkText(phone, 100) || '';
+    const runs = s.match(/(?:\+ ?)?\(?[0-9](?:[0-9().\-\u00b7\u2010-\u2015\u2212\uff0d \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\/(?=[0-9]))*/g) || [];
+    for (const run of runs) {
+      let digits = '';
+      for (const part of run.split('/')) {
+        if (digits.length >= 7) break;
+        digits += part.replace(/[^0-9]/g, '');
+      }
       if (digits.length >= 3) {
         return digits.length > 15 ? '' : 'tel:' + (run.charAt(0) === '+' ? '+' : '') + digits;
       }
@@ -5922,9 +5935,9 @@ window.LaborDays = {
     return '';
   },
   mailtoHref(email) {
-    const s = String(email || '').trim();
+    const s = this._linkText(email, 254);
     // No ? & = % / # in the address: they would add headers (?bcc=…) to the link.
-    if (s.length > 254 || !/^[^\s@<>"'(),;:\\?&=%\/#]+@[^\s@<>"'(),;:\\?&=%\/#]+\.[^\s@<>"'(),;:\\?&=%\/#]+$/.test(s)) return '';
+    if (!s || !/^[^@<>"'(),;:\\?&=%\/# \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+@[^@<>"'(),;:\\?&=%\/# \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+\.[^@<>"'(),;:\\?&=%\/# \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/.test(s)) return '';
     return 'mailto:' + s;
   },
 
