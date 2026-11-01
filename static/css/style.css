@@ -2829,18 +2829,24 @@ a.pmc-phone:hover, a.pmc-email:hover { text-decoration: underline; }
    single scroll container for both). Lanes: --tl-accent is the lane's flag
    (orange show, teal event, slate once past). Lunch breaks are the one
    hatched pattern (a data mark, not surface texture). Phone rules live in
-   mobile.css under the same heading. */
+   mobile.css under the same heading.
+   .tl-toolbar / .tl-zoom / .tl-inner / .tl-corner / .tl-axis / .tl-lane are
+   ALSO the Dashboards Reservation Timeline's classes (dashboard_view.html,
+   public /d/<slug> too), so those rules are scoped to Home's own boxes with
+   :where(.tl-phead) / :where(.tl-scroll) — :where() adds no specificity, so
+   the cascade inside Home is unchanged. Scope any new rule on a generic
+   .tl-* name the same way. */
 .tl-phead .phead-row { align-items: center; }
 .tl-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .tl-nav .btn { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; }
 .tl-nav #tl-date { width: 148px; }
-.tl-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; padding: 14px 0 14px; }
+:where(.tl-phead) .tl-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; padding: 14px 0 14px; }
 .tl-venues { flex: 1 1 260px; min-width: 0; }
 .tl-venues[hidden] { display: none; }
 .tl-pill-count { font-family: var(--font-mono); font-weight: 600; opacity: .7; }
 .tl-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-dim); cursor: pointer; white-space: nowrap; }
-.tl-zoom { display: inline-flex; gap: 4px; }
-.tl-zoom .btn { min-width: 32px; font: 600 15px/1 var(--font-mono); padding: 5px 8px; }
+:where(.tl-phead) .tl-zoom { display: inline-flex; gap: 4px; }
+:where(.tl-phead) .tl-zoom .btn { min-width: 32px; font: 600 15px/1 var(--font-mono); padding: 5px 8px; }
 .tl-legend { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11.5px; color: var(--text-dim); }
 .tl-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .tl-key { display: inline-block; width: 14px; height: 10px; border-radius: 3px; border: 1px solid var(--border-light); }
@@ -2860,12 +2866,12 @@ html:not(.mobile-view) .main-content:has(> #tl-root) { padding-bottom: 18px; }
   box-shadow: var(--hl), var(--lift); overscroll-behavior: contain;
 }
 .tl-scroll[hidden] { display: none; }
-.tl-inner { position: relative; min-width: 100%; }
+:where(.tl-scroll) .tl-inner { position: relative; min-width: 100%; }
 
 /* Header row: sticky top; the corner also sticks left. */
 .tl-headrow { position: sticky; top: 0; z-index: 6; display: flex; align-items: stretch;
   background: var(--bg-card); border-bottom: 1px solid var(--line-strong); }
-.tl-corner { position: sticky; left: 0; z-index: 7; flex: 0 0 auto; background: var(--bg-card); border-right: 1px solid var(--border); }
+:where(.tl-scroll) .tl-corner { position: sticky; left: 0; z-index: 7; flex: 0 0 auto; background: var(--bg-card); border-right: 1px solid var(--border); }
 .tl-lanehead {
   --tl-accent: var(--accent);
   flex: 0 0 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px;
@@ -2908,7 +2914,7 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 
 /* Body: hour lines behind, axis sticky left, lanes, NOW line on top. */
 .tl-bodyrow { position: relative; display: flex; }
-.tl-axis { position: sticky; left: 0; z-index: 4; flex: 0 0 auto; background: var(--bg-card); border-right: 1px solid var(--border); }
+:where(.tl-scroll) .tl-axis { position: sticky; left: 0; z-index: 4; flex: 0 0 auto; background: var(--bg-card); border-right: 1px solid var(--border); }
 .tl-hour { position: absolute; right: 7px; transform: translateY(-50%); font: 500 11px var(--font-mono); color: var(--text-dim); white-space: nowrap; }
 .tl-hour:first-child { transform: none; }
 .tl-hour-next { color: var(--text-muted); }
@@ -2916,9 +2922,9 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 .tl-hline { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid var(--border); pointer-events: none; }
 .tl-hline.tl-half { border-top-style: dashed; opacity: .55; }
 .tl-hline.tl-midnight { border-top: 2px solid var(--line-strong); }
-.tl-lane { --tl-accent: var(--accent); position: relative; z-index: 1; flex: 0 0 auto; display: flex; gap: 6px;
+:where(.tl-scroll) .tl-lane { --tl-accent: var(--accent); position: relative; z-index: 1; flex: 0 0 auto; display: flex; gap: 6px;
   padding: 0 6px; border-left: 1px solid var(--border); }
-.tl-axis + .tl-lane { border-left: 0; }
+:where(.tl-scroll) .tl-axis + .tl-lane { border-left: 0; }
 .tl-lane-event { --tl-accent: var(--event); }
 .tl-lane-test { --tl-accent: #9b72cf; }
 .tl-lane-oh { --tl-accent: var(--text-dim); }
