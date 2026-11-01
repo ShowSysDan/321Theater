@@ -609,7 +609,10 @@ const _HELP_PAGES = {
     html: `
       <p>Gear rentals and external rentals for this show.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>+ Add Asset</strong> — search the catalog, optionally pin a specific unit, set quantity and rental dates. Availability is checked live; overbooking is blocked.</li>
+        <li><strong>+ Add Asset</strong> — opens the catalog with the <strong>search box on top</strong>: type a name, model, manufacturer or category for a ranked list (<strong>↑</strong> <strong>↓</strong> to move, <strong>Enter</strong> to add, <strong>Esc</strong> clears, <strong>Esc</strong> again closes).</li>
+        <li><strong>Browse</strong> — with the search empty, click through <strong>Categories → Groups → Items</strong> like the Asset Manager (on a phone, one list at a time with a back button). Loose items sit under <em>Individual items</em>; systems and packages under <em>Systems &amp; Packages</em>. The dialog remembers the last category and group you used.</li>
+        <li><strong>Details</strong> — picking an item shows its photo, manufacturer · model, where it's stored, the rate this show pays (its Performance Company rate when there is one), live availability for the show's rental window (load-in → load-out), its units (S/N) and what it's part of. A system or package lists what's in it and how many it can supply. <strong>Add to show…</strong> (or double-click, or <strong>Enter</strong>, or the row's <strong>+</strong>) opens the add step: optionally pin a specific unit, set quantity and rental dates. Overbooking is blocked.</li>
+        <li>Some gear is kept out of this picker by the asset manager; ask them if you can't find something.</li>
         <li><strong>Unit price is read-only here</strong> — it comes from the rate card; only the Approvals portal can override it per show.</li>
         <li><strong>Company rates</strong> — if the show's <em>Performance Company</em> (Advance Sheet) has special rates in the Asset Manager, those are used and the line shows a <strong>COMPANY RATE</strong> tag. Change the company later and a banner offers to <strong>Re-price</strong> the lines priced for the old one (hand-set approver prices are left alone).</li>
         <li><strong>+ External Rental</strong> — description, cost, optional rental PDF.</li>
@@ -759,7 +762,7 @@ const _HELP_PAGES = {
         <li>Search types/manufacturers/models; sort by name, units, or cost.</li>
         <li>Type details: daily/weekly rates, reserve (spare) count, supplier, photo, storage location, <strong>📅 Calendar</strong> of per-day availability, and the unit list (barcodes, add units, remove-from-service with reason, unit logs).</li>
         <li><strong>Company Rates</strong> (Edit type) — special day/week rates per <em>Performance Company</em>, picked from the Arts Groups list (what the advance form's Performance Company field uses). A show with that company is priced at them; the type's card shows "+ N company rates".</li>
-        <li><strong>Bulk: Hide from Advance Picker</strong> — mass-toggle which types show up in the show-page asset search.</li>
+        <li><strong>Bulk: Hide from Advance Picker</strong> — mass-toggle which types show up in the show page's Add Asset dialog (search and browse alike). Components of a system or package are still listed by name in that dialog's details, since they rent as part of the kit.</li>
         <li><strong>⚠ Overbooked</strong> appears when demand exceeds usable units anywhere.</li>
         <li><strong>Systems &amp; Packages</strong> — bundles of component types with per-component quantities.</li>
       </ul>

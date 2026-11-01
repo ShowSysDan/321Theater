@@ -1592,24 +1592,52 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
 </div>{# end tab-assets #}
 
-{# ── Asset Search Modal ───────────────────────────────────────────────────── #}
+{# ── Asset Search / Browse Modal (3.35.0) ─────────────────────────────────── #}
+{# Search on top (primary); an empty query shows a Category → Group → Item →
+   Details browser like the Asset Manager's finder. Built ONLY from
+   GET /api/asset-types (no params — that is what keeps hide_from_pm types
+   out for everyone on the show page). Rows are drawn by the Assets IIFE
+   below (_ab* helpers); one delegated listener handles every row/button. #}
 <div id="asset-search-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAssetSearch()">
-  <div class="modal-card" style="max-width:720px;max-height:90vh;display:flex;flex-direction:column">
-    <div class="modal-header">
-      Add Asset to Show
-      <button onclick="closeAssetSearch()" class="modal-close">×</button>
+  <div class="modal-card ab-card" role="dialog" aria-modal="true" aria-labelledby="ab-title">
+    <div class="modal-header ab-header">
+      <span id="ab-title">Add Asset to Show</span>
+      <span id="ab-window" class="ab-window"></span>
+      <button type="button" onclick="closeAssetSearch()" class="modal-close" aria-label="Close">×</button>
     </div>
-    <div class="modal-body" style="overflow-y:auto;flex:1">
-      <div style="display:flex;gap:8px;margin-bottom:12px">
-        <input type="text" id="asset-search-input" class="field-input" placeholder="Search by name, category, manufacturer…" oninput="filterAssetSearch()" style="flex:1">
-        <select id="asset-cat-filter" class="field-input" style="width:160px" onchange="filterAssetSearch()">
-          <option value="">All Categories</option>
-          {% for cat in asset_categories %}
-          <option value="{{ cat.id }}">{{ cat.name }}</option>
-          {% endfor %}
-        </select>
+    <div class="ab-searchbar">
+      <div class="ab-search-wrap">
+        <svg class="ab-search-ico" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M6.5 1a5.5 5.5 0 014.38 8.83l3.9 3.9a.75.75 0 01-1.06 1.06l-3.9-3.9A5.5 5.5 0 116.5 1zm0 1.5a4 4 0 100 8 4 4 0 000-8z"/></svg>
+        <input type="text" id="asset-search-input" class="field-input" placeholder="Search name, model, brand…"
+               autocomplete="off" spellcheck="false" maxlength="80" oninput="filterAssetSearch()"
+               role="combobox" aria-expanded="false" aria-controls="ab-results" aria-autocomplete="list"
+               aria-label="Search the asset catalog">
+        <button type="button" id="ab-search-clear" class="ab-search-clear" aria-label="Clear search" hidden>×</button>
       </div>
-      <div id="asset-search-results" style="min-height:120px"></div>
+      <div id="ab-hint" class="ab-hint">Type to search · or browse below</div>
+    </div>
+    <nav id="ab-crumbs" class="ab-crumbs" aria-label="Browse path"></nav>
+    <div id="ab-browser" class="ab-browser" data-pane="cats">
+      <section class="ab-col ab-col-cats" aria-label="Categories">
+        <div class="ab-col-hdr">Categories</div>
+        <div id="ab-cats" class="ab-col-body"><p class="ab-empty">Loading…</p></div>
+      </section>
+      <section class="ab-col ab-col-groups" aria-label="Groups">
+        <div class="ab-col-hdr" id="ab-groups-hdr">Groups</div>
+        <div id="ab-groups" class="ab-col-body"></div>
+      </section>
+      <section class="ab-col ab-col-types" aria-label="Items">
+        <div class="ab-col-hdr" id="ab-types-hdr">Items</div>
+        <div id="ab-types" class="ab-col-body" role="listbox" aria-label="Items"></div>
+      </section>
+      <section class="ab-col ab-col-results" aria-label="Search results">
+        <div class="ab-col-hdr" id="ab-results-hdr">Results</div>
+        <div id="ab-results" class="ab-col-body" role="listbox" aria-label="Search results"></div>
+      </section>
+      <section class="ab-col ab-col-detail" aria-label="Details">
+        <div class="ab-col-hdr" id="ab-detail-hdr">Details</div>
+        <div id="ab-detail" class="ab-col-body"></div>
+      </section>
     </div>
   </div>
 </div>
@@ -1808,10 +1836,14 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
   };
 
   // Load asset types lazily
+  // NO query params on purpose: the bare call is what filters hide_from_pm
+  // types out (for managers too) — keep it that way on the show page.
   async function _loadAssetTypes() {
     if (_allAssetTypes !== null) return _allAssetTypes;
     const r = await fetch('/api/asset-types', {headers:{'X-Requested-With':'XMLHttpRequest'}});
-    _allAssetTypes = await r.json();
+    const list = r.ok ? await r.json() : null;
+    if (!Array.isArray(list)) throw new Error('Asset catalog unavailable');  // retried on next open
+    _allAssetTypes = list;
     return _allAssetTypes;
   }
 
@@ -1836,6 +1868,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     _companyRates = data.company_rates || {};
     _companyRatePeriods = data.company_rate_periods || null;
     _perfCompany = data.performance_company || '';
+    _abNoteOnShow(data.assets);   // "N on show" in the Add Asset browser
     renderAssets(data.assets || [], data.external_rentals || []);
     renderApprovalBadge(data.approval || {approved: false});
     // The Piano Tuning panel warns about pianos not on the Assets tab.
@@ -1999,94 +2032,797 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     return esc(String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'"));
   }
 
-  // ── Asset Search ─────────────────────────────────────────────────────────
+  // ── Add Asset browser (3.35.0) ───────────────────────────────────────────
+  // Search stays PRIMARY: the box sits on top, is focused on open, and typing
+  // shows one ranked flat list (↑↓ move, Enter adds, Esc clears, Esc again
+  // closes). An empty query is a multi-pane browser like the Asset Manager's
+  // finder: Categories → Groups → Items → Details (phones: one pane at a
+  // time under a breadcrumb — mobile.css keys off #ab-browser[data-pane]).
+  // The catalog is ONLY GET /api/asset-types with NO params: that is what
+  // keeps hide_from_pm types out for everyone here. Never ask for
+  // ?include_hidden=1 from the show page and never call the manager-only
+  // /settings/* lists. Rows carry data-ab + numeric data-id; ONE delegated
+  // click / dblclick / keydown listener on the dialog handles them all.
+  const _ASSET_PERFS = {{ performances | tojson }};
+  const _AB_STORE = 'show.assetBrowser.v1';   // last category / group
+  const _AB_RESULT_CAP = 200;
+  // ONE wording for a kit (system OR package) in the browser and the add
+  // dialog — a package used to read "Consumable — unlimited stock".
+  function _kitAvailMsg(t) {
+    const kind = (t && t.is_system) ? 'System' : ((t && t.is_package) ? 'Package' : 'System / package');
+    return `${kind} — books its components from inventory; the add is blocked if a component is short for these dates.`;
+  }
+  function _catalogType(id) {
+    return (_allAssetTypes || []).find(x => Number(x.id) === Number(id)) || null;
+  }
+  const _ab = {
+    tree: null, treeSrc: null,
+    cat: null, group: null, type: null,   // browse selection (type = id)
+    q: '', results: [], hi: -1,           // search state (hi = highlighted index)
+    pane: 'cats', browsePane: 'cats',     // phone: which pane is showing
+    win: {start: '', end: ''},            // default rental window (open time)
+    detailSeq: 0, detailTimer: 0, detailShown: undefined, openSeq: 0,
+    onShow: {},                           // type_id → qty already on this show
+    norm: new Map(),                      // type id → normalised search fields
+  };
+
+  function _abIsKit(t) { return !!(t && (t.is_system || t.is_package)); }
+  const _abByName = (a, b) => String(a.name || '').localeCompare(
+    String(b.name || ''), undefined, {numeric: true, sensitivity: 'base'});
+
+  // The default rental window selectAssetType() pre-fills: the Advance
+  // Sheet's live load-in / load-out, else the first / last performance.
+  function _defaultAssetWindow() {
+    const li = document.getElementById('load-in-date')?.value || '';
+    const lo = document.getElementById('load-out-date')?.value || '';
+    const p = Array.isArray(_ASSET_PERFS) ? _ASSET_PERFS : [];
+    return {
+      start: li || (p.length ? p[0].perf_date : '') || '',
+      end:   lo || (p.length ? p[p.length - 1].perf_date : '') || '',
+    };
+  }
+
+  // Qty of each type already booked on this show (fed by loadAssetsTab).
+  function _abNoteOnShow(assets) {
+    const m = {};
+    (assets || []).forEach(a => {
+      if (a && a.asset_type_id != null) m[a.asset_type_id] = (m[a.asset_type_id] || 0) + (Number(a.quantity) || 0);
+    });
+    _ab.onShow = m;
+  }
+
+  function _abFmtDate(iso) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso || '')) return '';
+    const [y, m, d] = iso.split('-').map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString(undefined, {weekday: 'short', month: 'short', day: 'numeric'});
+  }
+  function _abWindowLabel(w) {
+    if (!w.start && !w.end) return '';
+    if (!w.end || !w.start || w.start === w.end) return _abFmtDate(w.start || w.end);
+    return `${_abFmtDate(w.start)} – ${_abFmtDate(w.end)}`;
+  }
+  const _abMoney = v => `$${(Number(v) || 0).toFixed(2)}`;
+  // The rate this show would pay: its Performance Company card in effect on
+  // the default rental start (_companyRateOn), else the standard card.
+  function _abRate(t, start) {
+    const cr = _companyRateOn(t.id, start || undefined);
+    const daily = cr ? cr.daily : t.rental_cost;
+    const weekly = cr ? cr.weekly : t.weekly_rate;
+    const text = t.is_consumable ? `${_abMoney(daily)}/item`
+      : (Number(weekly) > 0 ? `${_abMoney(daily)}/day · ${_abMoney(weekly)}/wk` : `${_abMoney(daily)}/day`);
+    return {text, company: cr ? (cr.company || 'Company') : ''};
+  }
+  function _abBadges(t) {
+    let b = '';
+    if (t.is_system) b += '<span class="ab-badge ab-badge-kit">SYSTEM</span>';
+    else if (t.is_package) b += '<span class="ab-badge ab-badge-kit">PACKAGE</span>';
+    if (t.is_consumable) b += '<span class="ab-badge">CONSUMABLE</span>';
+    if (t.allow_unit_selection && !_abIsKit(t)) b += '<span class="ab-badge" title="A specific unit (S/N) can be picked">BY UNIT</span>';
+    return b;
+  }
+  function _abPath(t) {
+    const grp = _abIsKit(t) ? 'Systems & Packages' : (t.parent_type_id ? (t.parent_name || '') : '');
+    return [t.category_name || '', grp].filter(Boolean).join(' › ');
+  }
+  const _AB_ICO = {
+    folder: '<svg class="ab-ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M1.5 3A1.5 1.5 0 013 1.5h3.879a1.5 1.5 0 011.06.44l.622.621A1.5 1.5 0 009.621 3H13A1.5 1.5 0 0114.5 4.5v8A1.5 1.5 0 0113 14H3a1.5 1.5 0 01-1.5-1.5V3z"/></svg>',
+    kits: '<svg class="ab-ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 1l6.5 3v8L8 15l-6.5-3V4L8 1zm0 1.6L3.4 4.7 8 6.8l4.6-2.1L8 2.6zM3 6v5.1l4.25 1.95V7.95L3 6zm10 0L8.75 7.95v5.1L13 11.1V6z"/></svg>',
+    solo: '<svg class="ab-ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M3 2.5h10A1.5 1.5 0 0114.5 4v8a1.5 1.5 0 01-1.5 1.5H3A1.5 1.5 0 011.5 12V4A1.5 1.5 0 013 2.5zM4 5v1.5h1.5V5H4zm3 0v1.5h5V5H7zM4 8v1.5h1.5V8H4zm3 0v1.5h5V8H7zm-3 3v1h1.5v-1H4zm3 0v1h5v-1H7z"/></svg>',
+  };
+
+  // Category (API order = sort_order) → group → type. Groups are rebuilt
+  // from the children's parent_type_id / parent_name (the API never returns
+  // group rows); parentless non-kit types are "Individual items" and kits
+  // (is_system || is_package) "Systems & Packages" — both pickable.
+  function _abTree() {
+    if (_ab.tree && _ab.treeSrc === _allAssetTypes) return _ab.tree;
+    const cats = [], catMap = new Map(), byId = new Map();
+    _ab.norm.clear();
+    (_allAssetTypes || []).forEach(t => {
+      byId.set(t.id, t);
+      let c = catMap.get(t.category_id);
+      if (!c) {
+        c = {id: t.category_id, name: t.category_name || 'Other', count: 0,
+             groupMap: new Map(), solo: [], kits: [], groups: []};
+        catMap.set(t.category_id, c);
+        cats.push(c);
+      }
+      c.count++;
+      if (_abIsKit(t)) c.kits.push(t);
+      else if (t.parent_type_id) {
+        const key = 'g' + Number(t.parent_type_id);
+        let g = c.groupMap.get(key);
+        if (!g) { g = {key, name: t.parent_name || 'Group', types: []}; c.groupMap.set(key, g); }
+        g.types.push(t);
+      } else c.solo.push(t);
+    });
+    cats.forEach(c => {
+      c.groups = [...c.groupMap.values()].sort(_abByName);
+      if (c.solo.length) c.groups.push({key: 'solo', name: 'Individual items', pseudo: 'solo', types: c.solo});
+      if (c.kits.length) c.groups.push({key: 'kits', name: 'Systems & Packages', pseudo: 'kits', types: c.kits});
+    });
+    _ab.tree = {cats, catMap, byId};
+    _ab.treeSrc = _allAssetTypes;
+    return _ab.tree;
+  }
+  function _abCurCat() { return _abTree().catMap.get(_ab.cat) || null; }
+  function _abCurGroup() {
+    const c = _abCurCat();
+    return c ? (c.groups.find(g => g.key === _ab.group) || null) : null;
+  }
+  function _abBrowseType() {
+    const g = _abCurGroup();
+    return g ? (g.types.find(t => t.id === _ab.type) || null) : null;
+  }
+
+  // ── Search: rank name prefix > name contains > model > manufacturer >
+  //    category / group; multi-word queries match word by word after that.
+  function _abNormStr(s) {
+    return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  }
+  function _abFields(t) {
+    let f = _ab.norm.get(t.id);
+    if (!f) {
+      const name = _abNormStr(t.name), model = _abNormStr(t.model);
+      f = {name, model, mfr: _abNormStr(t.manufacturer),
+           where: _abNormStr([t.category_name, t.parent_name].filter(Boolean).join(' ')),
+           cname: name.replace(/[^a-z0-9]+/g, ''), cmodel: model.replace(/[^a-z0-9]+/g, '')};
+      _ab.norm.set(t.id, f);
+    }
+    return f;
+  }
+  function _abWordTier(f, w) {
+    if (f.name.startsWith(w)) return 0;
+    if (f.name.includes(w)) return 1;
+    if (f.model.includes(w)) return 2;
+    if (f.mfr.includes(w)) return 3;
+    if (f.where.includes(w)) return 4;
+    return -1;
+  }
+  function _abScore(f, q, words, cq) {
+    if (f.name.startsWith(q)) return 0;
+    const i = f.name.indexOf(q);
+    if (i > 0) return /[a-z0-9]/.test(f.name.charAt(i - 1)) ? 1.5 : 1;   // word start ranks first
+    if (f.model.includes(q)) return 2;
+    if (f.mfr.includes(q)) return 3;
+    if (f.where.includes(q)) return 4;
+    // "sm58" finds "SM-58"; "beta58" finds "Beta 58A"
+    if (cq.length > 1 && f.cname.includes(cq)) return 1.8;
+    if (cq.length > 1 && f.cmodel.includes(cq)) return 2.5;
+    if (words.length > 1) {
+      let sum = 0;
+      for (const w of words) {
+        const s = _abWordTier(f, w);
+        if (s < 0) return -1;
+        sum += s;
+      }
+      return 5 + sum / words.length / 10;
+    }
+    return -1;
+  }
+  function _abSearch(qRaw) {
+    const q = _abNormStr(qRaw).trim().replace(/\s+/g, ' ');
+    if (!q) return [];
+    const words = q.split(' ').filter(Boolean);
+    const cq = q.replace(/[^a-z0-9]+/g, '');
+    const scored = [];
+    (_allAssetTypes || []).forEach(t => {
+      const s = _abScore(_abFields(t), q, words, cq);
+      if (s >= 0) scored.push([s, t]);
+    });
+    scored.sort((a, b) => (a[0] - b[0]) || _abByName(a[1], b[1]));
+    return scored.map(x => x[1]);
+  }
+  // Name with the typed text marked — every piece escaped.
+  function _abMark(name, qRaw) {
+    const s = String(name || '');
+    const q = String(qRaw || '').trim().toLowerCase();
+    const low = s.toLowerCase();
+    const i = q ? low.indexOf(q) : -1;
+    if (i < 0 || low.length !== s.length) return esc(s);
+    return esc(s.slice(0, i)) + '<mark>' + esc(s.slice(i, i + q.length)) + '</mark>' + esc(s.slice(i + q.length));
+  }
+
+  // ── Rendering (all text through esc(); ids are numbers) ──────────────────
+  function _abRoving(host) {
+    // One tabbable row per column (the active one, else the first).
+    if (host && !host.querySelector('.ab-row[tabindex="0"]')) {
+      const first = host.querySelector('.ab-row');
+      if (first) first.setAttribute('tabindex', '0');
+    }
+  }
+  function _abRenderCats() {
+    const tr = _abTree();
+    const host = document.getElementById('ab-cats');
+    if (!tr.cats.length) {
+      host.innerHTML = '<p class="ab-empty">No assets are available to add.</p>';
+      return;
+    }
+    host.innerHTML = tr.cats.map(c => {
+      const on = c.id === _ab.cat;
+      return `<button type="button" class="ab-row ab-folder${on ? ' active' : ''}" data-ab="cat" data-id="${Number(c.id)}" tabindex="${on ? 0 : -1}" aria-pressed="${on}">${_AB_ICO.folder}<span class="ab-row-name">${esc(c.name)}</span><span class="ab-count">${c.count}</span><span class="ab-chev" aria-hidden="true">›</span></button>`;
+    }).join('');
+    _abRoving(host);
+  }
+  function _abRenderGroups() {
+    const c = _abCurCat();
+    const host = document.getElementById('ab-groups');
+    document.getElementById('ab-groups-hdr').textContent = c ? c.name : 'Groups';
+    if (!c) { host.innerHTML = '<p class="ab-empty">Pick a category</p>'; return; }
+    host.innerHTML = c.groups.map(g => {
+      const on = g.key === _ab.group;
+      return `<button type="button" class="ab-row ab-folder${g.pseudo ? ' ab-pseudo' : ''}${on ? ' active' : ''}" data-ab="group" data-key="${esc(g.key)}" tabindex="${on ? 0 : -1}" aria-pressed="${on}">${_AB_ICO[g.pseudo || 'folder']}<span class="ab-row-name">${esc(g.name)}</span><span class="ab-count">${g.types.length}</span><span class="ab-chev" aria-hidden="true">›</span></button>`;
+    }).join('');
+    _abRoving(host);
+  }
+  function _abTypeRow(t, o) {
+    const id = Number(t.id);
+    const kit = _abIsKit(t);
+    const thumb = t.has_photo
+      ? `<img class="ab-thumb" src="/asset-types/${id}/photo" alt="" loading="lazy" decoding="async">`
+      : `<span class="ab-thumb ab-thumb-ph" aria-hidden="true">${kit ? '▣' : '◈'}</span>`;
+    const sub = [t.manufacturer, t.model].filter(Boolean).join(' · ');
+    const rate = _abRate(t, _ab.win.start);
+    const on = _ab.onShow[id];
+    return `<div class="ab-row ab-item${o.active ? ' active' : ''}" role="option" id="${o.rowId}" data-ab="type" data-id="${id}" tabindex="${o.tab}" aria-selected="${!!o.active}">${thumb}<span class="ab-row-main"><span class="ab-row-name">${o.nameHtml || esc(t.name)}${_abBadges(t)}</span>${o.path ? `<span class="ab-row-path">${esc(o.path)}</span>` : ''}<span class="ab-row-sub">${sub ? esc(sub) + ' · ' : ''}${esc(rate.text)}${rate.company ? ' · company rate' : ''}</span></span>${on ? `<span class="ab-onshow" title="Already booked on this show">${on} on show</span>` : ''}<button type="button" class="ab-add-btn" data-ab="add" data-id="${id}" tabindex="-1" title="Add to show…" aria-label="Add ${esc(t.name)} to show">+</button></div>`;
+  }
+  function _abRenderTypes() {
+    const g = _abCurGroup();
+    const host = document.getElementById('ab-types');
+    document.getElementById('ab-types-hdr').textContent = g ? g.name : 'Items';
+    if (!g) {
+      host.innerHTML = `<p class="ab-empty">${_abCurCat() ? 'Pick a group' : ''}</p>`;
+      return;
+    }
+    host.innerHTML = g.types.map(t => _abTypeRow(t, {
+      rowId: 'ab-t-' + Number(t.id), active: t.id === _ab.type, tab: t.id === _ab.type ? 0 : -1,
+    })).join('');
+    _abRoving(host);
+  }
+  function _abRenderResults() {
+    const host = document.getElementById('ab-results');
+    const res = _ab.results;
+    document.getElementById('ab-results-hdr').textContent =
+      res.length ? `${res.length} result${res.length === 1 ? '' : 's'}` : 'Results';
+    if (!res.length) {
+      host.innerHTML = `<p class="ab-empty">No items match “${esc(_ab.q.trim())}”.<br>Clear the search to browse by category. Some gear can only be added by the asset manager.</p>`;
+      return;
+    }
+    const shown = res.slice(0, _AB_RESULT_CAP);
+    host.innerHTML = shown.map((t, i) => _abTypeRow(t, {
+      rowId: 'ab-r-' + Number(t.id), active: i === _ab.hi, tab: -1,
+      path: _abPath(t), nameHtml: _abMark(t.name, _ab.q),
+    })).join('') + (res.length > shown.length
+      ? `<p class="ab-empty">Showing the first ${shown.length} of ${res.length} — keep typing to narrow it down.</p>` : '');
+  }
+  function _abSetActive(host, pred) {
+    if (!host) return null;
+    let hit = null;
+    host.querySelectorAll('.ab-row').forEach(r => {
+      const on = pred(r);
+      r.classList.toggle('active', on);
+      r.setAttribute(r.getAttribute('role') === 'option' ? 'aria-selected' : 'aria-pressed', String(on));
+      r.setAttribute('tabindex', on ? '0' : '-1');
+      if (on) hit = r;
+    });
+    _abRoving(host);
+    return hit;
+  }
+
+  // ── Breadcrumb (phones show it; one pane at a time) ──────────────────────
+  function _abSetPane(p) {
+    _ab.pane = p;
+    if (!_ab.q.trim()) _ab.browsePane = p;
+    document.getElementById('ab-browser').dataset.pane = p;
+    _abRenderCrumbs();
+    if (p === 'detail') _abRefreshDetail();
+  }
+  function _abRenderCrumbs() {
+    const nav = document.getElementById('ab-crumbs');
+    if (!nav) return;
+    const crumb = (pane, label) => `<button type="button" class="ab-crumb" data-ab="pane" data-pane="${pane}">${esc(label)}</button>`;
+    const cur = label => `<span class="ab-crumb-cur">${esc(label)}</span>`;
+    const sep = '<span class="ab-crumb-sep" aria-hidden="true">›</span>';
+    if (_ab.q.trim()) {
+      const n = _ab.results.length;
+      if (_ab.pane === 'detail') {
+        const t = _ab.results[_ab.hi];
+        nav.innerHTML = `<button type="button" class="ab-back" data-ab="pane" data-pane="results">‹ Results</button>${t ? cur(t.name) : ''}`;
+      } else {
+        nav.innerHTML = cur(`${n} result${n === 1 ? '' : 's'}`);
+      }
+      return;
+    }
+    const c = _abCurCat(), g = _abCurGroup(), t = _abBrowseType();
+    const order = ['cats', 'groups', 'types', 'detail'];
+    const depth = Math.max(0, order.indexOf(_ab.pane));
+    const parts = [];
+    parts.push(depth === 0 ? cur('All categories') : crumb('cats', 'All'));
+    if (depth >= 1 && c) parts.push(depth === 1 ? cur(c.name) : crumb('groups', c.name));
+    if (depth >= 2 && g) parts.push(depth === 2 ? cur(g.name) : crumb('types', g.name));
+    if (depth >= 3 && t) parts.push(cur(t.name));
+    const back = depth > 0
+      ? `<button type="button" class="ab-back" data-ab="pane" data-pane="${order[depth - 1]}" aria-label="Back">‹</button>` : '';
+    nav.innerHTML = back + parts.join(sep);
+  }
+
+  // ── Detail pane ──────────────────────────────────────────────────────────
+  function _abDetailTarget() {
+    return _ab.q.trim() ? (_ab.results[_ab.hi] || null) : _abBrowseType();
+  }
+  // Renders the detail for the current target only while its pane is on
+  // screen (phones show one pane at a time); a hidden pane is redrawn when
+  // it is opened, so arrowing through results there fetches nothing.
+  function _abRefreshDetail(force) {
+    const col = document.querySelector('#ab-browser .ab-col-detail');
+    if (!col || getComputedStyle(col).display === 'none') {
+      clearTimeout(_ab.detailTimer);
+      ++_ab.detailSeq;
+      _ab.detailShown = undefined;
+      return;
+    }
+    const t = _abDetailTarget();
+    const id = t ? t.id : null;
+    if (!force && id === _ab.detailShown) return;
+    _ab.detailShown = id;
+    _abRenderDetail(t);
+  }
+  function _abRenderDetail(t) {
+    const host = document.getElementById('ab-detail');
+    clearTimeout(_ab.detailTimer);
+    const seq = ++_ab.detailSeq;
+    const winLbl = _abWindowLabel(_ab.win);
+    if (!t) {
+      host.innerHTML = `<div class="ab-detail-empty"><p>${_ab.q.trim() ? 'No item selected.' : 'Pick an item to see its photo, rate and availability.'}</p>${winLbl
+        ? `<p>Availability is checked for this show's rental window:<br><strong>${esc(winLbl)}</strong></p>`
+        : '<p>No rental window yet — set load-in / load-out on the Advance Sheet.</p>'}</div>`;
+      return;
+    }
+    const id = Number(t.id);
+    const kit = _abIsKit(t);
+    const rate = _abRate(t, _ab.win.start);
+    const sub = [t.manufacturer, t.model].filter(Boolean).join(' · ');
+    const on = _ab.onShow[id];
+    const photo = t.has_photo
+      ? `<img class="ab-photo" src="/asset-types/${id}/photo" alt="${esc(t.name)}" loading="lazy" decoding="async">`
+      : `<div class="ab-photo ab-photo-ph" aria-hidden="true">${kit ? '▣' : '◈'}</div>`;
+    host.innerHTML = `<div class="ab-detail">
+      <div class="ab-d-body">
+        <div class="ab-hero">${photo}
+          <div class="ab-hero-text">
+            <div class="ab-d-name">${esc(t.name)}</div>
+            ${_abBadges(t) ? `<div class="ab-d-badges">${_abBadges(t)}</div>` : ''}
+            ${sub ? `<div class="ab-d-sub">${esc(sub)}</div>` : ''}
+            <div class="ab-d-path">${esc(_abPath(t))}</div>
+            ${_ab.q.trim() ? `<div class="ab-d-path"><button type="button" class="ab-link" data-ab="reveal" data-id="${id}">Show in folder</button></div>` : ''}
+          </div>
+        </div>
+        <dl class="ab-facts">
+          <div><dt>Rate</dt><dd>${esc(rate.text)}${rate.company ? ` <span class="ab-co">${esc(rate.company)} company rate</span>` : ''}</dd></div>
+          ${t.storage_location ? `<div><dt>Stored at</dt><dd>${esc(t.storage_location)}</dd></div>` : ''}
+          ${on ? `<div><dt>On this show</dt><dd>${on} already booked</dd></div>` : ''}
+        </dl>
+        <div class="ab-section">
+          <div class="ab-sec-hdr">Availability${winLbl ? ` · ${esc(winLbl)}` : ''}</div>
+          <div id="ab-avail">${winLbl ? 'Checking…' : 'Loading…'}</div>
+        </div>
+        <div id="ab-extra"></div>
+      </div>
+      <div class="ab-d-actions">
+        <button type="button" class="btn btn-primary" data-ab="add" data-id="${id}">Add to show…</button>
+      </div>
+    </div>`;
+    // Debounced so arrowing through a list doesn't fire a request per row;
+    // sequence-guarded so a slow answer for an earlier row never lands.
+    _ab.detailTimer = setTimeout(() => _abLoadDetail(t, seq), 120);
+  }
+  async function _abLoadDetail(t, seq) {
+    const w = _ab.win;
+    const hasWin = !!(w.start && w.end);
+    const qs = hasWin ? `?start=${encodeURIComponent(w.start)}&end=${encodeURIComponent(w.end)}` : '';
+    const getJson = url => fetch(url, {headers: {'X-Requested-With': 'XMLHttpRequest'}})
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))));
+    const kit = _abIsKit(t);
+    const id = Number(t.id);
+    let main, partOf = [];
+    try {
+      [main, partOf] = await Promise.all([
+        getJson(kit ? `/api/asset-types/${id}/components${qs}` : `/api/asset-types/${id}/availability${qs}`),
+        kit ? Promise.resolve([]) : getJson(`/settings/asset-types/${id}/used-in`).catch(() => []),
+      ]);
+    } catch (e) {
+      if (seq === _ab.detailSeq) {
+        const el = document.getElementById('ab-avail');
+        if (el) el.textContent = "Couldn't check availability right now.";
+      }
+      return;
+    }
+    if (seq !== _ab.detailSeq) return;   // a newer selection owns the pane
+    const availEl = document.getElementById('ab-avail');
+    const extraEl = document.getElementById('ab-extra');
+    if (!availEl || !extraEl) return;
+    const tr = _abTree();
+    if (kit) {
+      const comps = Array.isArray(main.components) ? main.components : [];
+      const sets = main.sets_available;
+      let a = '';
+      if (hasWin) {
+        a = (sets === null || sets === undefined)
+          ? '<strong class="ab-ok">No stock limit</strong> on its components.'
+          : `<strong class="${sets > 2 ? 'ab-ok' : sets > 0 ? 'ab-low' : 'ab-none'}">${sets > 0 ? `Can supply ${sets}` : 'None available'}</strong> for these dates.`;
+      }
+      availEl.innerHTML = a + `<div class="ab-dim">${esc(_kitAvailMsg(t))}</div>`;
+      if (comps.length) {
+        extraEl.innerHTML = `<div class="ab-section"><div class="ab-sec-hdr">In this ${t.is_system ? 'system' : 'package'} · ${comps.length}</div><ul class="ab-comps">${comps.map(c => {
+          const cid = Number(c.id);
+          const vis = tr.byId.has(cid);
+          const name = vis
+            ? `<button type="button" class="ab-link" data-ab="goto" data-id="${cid}">${esc(c.name)}</button>`
+            : esc(c.name);
+          const meta = [c.manufacturer, c.model].filter(Boolean).join(' · ');
+          let av = '';
+          if (hasWin && c.available !== null && c.available !== undefined) {
+            const need = Number(c.quantity) || 1;
+            av = `<span class="ab-comp-av ${c.available >= need ? 'ab-ok' : 'ab-none'}">${Number(c.available)} available</span>`;
+          }
+          return `<li><span class="ab-qty">${Number(c.quantity) || 1}×</span><span class="ab-comp-name">${name}${meta ? `<span class="ab-dim ab-comp-meta">${esc(meta)}</span>` : ''}</span>${av}</li>`;
+        }).join('')}</ul></div>`;
+      } else {
+        extraEl.innerHTML = '<div class="ab-section ab-dim">No components listed yet.</div>';
+      }
+      return;
+    }
+    // Ordinary type: stock + units for the window, then "Part of".
+    const av = main || {};
+    if (av.kit) {
+      availEl.textContent = _kitAvailMsg(t);
+    } else if (av.unlimited) {
+      availEl.innerHTML = '<strong class="ab-ok">Consumable — no stock limit.</strong>';
+    } else if (!hasWin) {
+      availEl.innerHTML = `${Number(av.total_items) || 0} in stock${av.in_maintenance ? ` · ${Number(av.in_maintenance)} in maintenance` : ''}.<div class="ab-dim">Set load-in / load-out on the Advance Sheet to check dates.</div>`;
+    } else {
+      const n = Number(av.available) || 0;
+      const cls = n > 2 ? 'ab-ok' : (n > 0 ? 'ab-low' : 'ab-none');
+      const head = n > 0 ? `${n} available` : (n < 0 ? `None available — overbooked by ${-n}` : 'None available');
+      availEl.innerHTML = `<strong class="${cls}">${head}</strong> of ${Number(av.total_items) || 0}` +
+        `<div class="ab-dim">${Number(av.in_maintenance) || 0} in maintenance · ${Number(av.reserve_count) || 0} held in reserve · ${Number(av.total_reserved) || 0} booked (peak day)</div>`;
+    }
+    let extra = '';
+    const units = Array.isArray(av.units) ? av.units : [];
+    if (av.allow_unit_selection && units.length) {
+      const free = units.filter(u => u.available).length;
+      const maint = units.filter(u => u.in_maintenance).length;
+      const booked = units.length - free - maint;
+      const CAP = 40;
+      const chips = units.slice(0, CAP).map(u => {
+        const b = (u.bookings && u.bookings[0]) || {};
+        const cls = u.in_maintenance ? 'ab-unit-maint' : (u.booked ? 'ab-unit-booked' : 'ab-unit-free');
+        const tip = u.in_maintenance ? 'In maintenance' : (u.booked ? `Booked${b.show_name ? ' for ' + b.show_name : ''}` : 'Free for these dates');
+        return `<span class="ab-unit ${cls}" title="${esc(tip)}">${esc(u.barcode || '#' + Number(u.id))}</span>`;
+      }).join('') + (units.length > CAP ? `<span class="ab-dim">+${units.length - CAP} more</span>` : '');
+      extra += `<div class="ab-section"><div class="ab-sec-hdr">Units · ${units.length}</div>` +
+        `<div>${free} free${booked ? ` · ${booked} booked` : ''}${maint ? ` · ${maint} in maintenance` : ''} — pick a specific unit (S/N) in the next step.</div>` +
+        `<div class="ab-units">${chips}</div></div>`;
+    }
+    const kits = (Array.isArray(partOf) ? partOf : []).filter(p => tr.byId.has(Number(p.id)));
+    if (kits.length) {
+      extra += `<div class="ab-section"><div class="ab-sec-hdr">Part of</div><div class="ab-partof">${kits.map(p =>
+        `<button type="button" class="ab-link" data-ab="goto" data-id="${Number(p.id)}">${esc(p.name)}</button><span class="ab-badge ab-badge-kit">${p.is_package && !p.is_system ? 'PACKAGE' : 'SYSTEM'}</span>`
+      ).join('<br>')}</div></div>`;
+    }
+    extraEl.innerHTML = extra;
+  }
+
+  // ── Selection / navigation ───────────────────────────────────────────────
+  function _abSelectCat(id, advance) {
+    if (_ab.cat !== id) { _ab.cat = id; _ab.group = null; _ab.type = null; }
+    const c = _abCurCat();
+    if (c && !_ab.group && c.groups.length === 1) _ab.group = c.groups[0].key;   // a lone group opens itself
+    _abSaveState();
+    _abSetActive(document.getElementById('ab-cats'), r => Number(r.dataset.id) === _ab.cat);
+    _abRenderGroups();
+    _abRenderTypes();
+    _abRefreshDetail();
+    if (advance) _abSetPane(_ab.group && c && c.groups.length === 1 ? 'types' : 'groups');
+    else _abRenderCrumbs();
+  }
+  function _abSelectGroup(key, advance) {
+    if (_ab.group !== key) { _ab.group = key; _ab.type = null; }
+    _abSaveState();
+    _abSetActive(document.getElementById('ab-groups'), r => r.dataset.key === _ab.group);
+    _abRenderTypes();
+    _abRefreshDetail();
+    if (advance) _abSetPane('types'); else _abRenderCrumbs();
+  }
+  function _abSelectType(id, advance) {
+    _ab.type = id;
+    _abSetActive(document.getElementById('ab-types'), r => Number(r.dataset.id) === id);
+    _abRefreshDetail();
+    if (advance) _abSetPane('detail'); else _abRenderCrumbs();
+  }
+  function _abSetHi(i, focusRow) {
+    const host = document.getElementById('ab-results');
+    const rows = host.querySelectorAll('.ab-row');
+    if (!rows.length) return;
+    _ab.hi = Math.max(0, Math.min(rows.length - 1, i));
+    const row = _abSetActive(host, r => r === rows[_ab.hi]);
+    if (row) {
+      row.scrollIntoView({block: 'nearest'});
+      if (focusRow) row.focus();
+      document.getElementById('asset-search-input').setAttribute('aria-activedescendant', row.id);
+    }
+    _abRefreshDetail();
+  }
+  // Jump to a type in the browser (from a search result or a component /
+  // "Part of" link): clears the search and opens its category + group.
+  function _abReveal(id) {
+    const tr = _abTree();
+    const t = tr.byId.get(id);
+    if (!t) return;
+    const c = tr.catMap.get(t.category_id);
+    const g = c && c.groups.find(x => x.types.includes(t));
+    if (!c || !g) return;
+    const inp = document.getElementById('asset-search-input');
+    inp.value = '';
+    _abApplyQuery('');
+    _ab.cat = c.id; _ab.group = g.key; _ab.type = t.id;
+    _abSaveState();
+    _abRenderCats(); _abRenderGroups(); _abRenderTypes();
+    _abSetPane('detail');
+    _abRefreshDetail(true);
+    ['ab-cats', 'ab-groups', 'ab-types'].forEach(h =>
+      document.querySelector(`#${h} .ab-row.active`)?.scrollIntoView({block: 'nearest'}));
+  }
+  function _abAdd(id) {
+    const t = _abTree().byId.get(id);
+    if (!t) return;
+    selectAssetType(t.id, t.name, t.rental_cost || 0, t.weekly_rate || 0,
+                    _abIsKit(t) ? 1 : 0, t.is_consumable ? 1 : 0);
+  }
+  function _abLoadState() {
+    try {
+      const s = JSON.parse(localStorage.getItem(_AB_STORE) || 'null');
+      return (s && typeof s === 'object') ? s : null;
+    } catch (e) { return null; }
+  }
+  function _abSaveState() {
+    try { localStorage.setItem(_AB_STORE, JSON.stringify({cat: _ab.cat, group: _ab.group})); } catch (e) { /* private mode */ }
+  }
+  // Returns true when a remembered selection (this page or localStorage)
+  // was restored, false when it fell back to the first category.
+  function _abRestoreSelection() {
+    const tr = _abTree();
+    if (_ab.cat == null) {
+      const s = _abLoadState();
+      if (s) { _ab.cat = Number(s.cat); _ab.group = typeof s.group === 'string' ? s.group : null; }
+    }
+    let remembered = tr.catMap.has(_ab.cat);
+    if (!remembered) {
+      _ab.cat = tr.cats.length ? tr.cats[0].id : null;
+      _ab.group = null; _ab.type = null;
+    }
+    const c = _abCurCat();
+    if (c && !c.groups.some(g => g.key === _ab.group)) {
+      _ab.group = c.groups.length === 1 ? c.groups[0].key : null;
+    }
+    if (_ab.type != null && !_abBrowseType()) _ab.type = null;
+    return remembered;
+  }
+
+  function _abApplyQuery(q) {
+    const had = !!_ab.q.trim();
+    _ab.q = q || '';
+    const on = !!_ab.q.trim();
+    const inp = document.getElementById('asset-search-input');
+    document.getElementById('ab-browser').classList.toggle('ab-searching', on);
+    document.getElementById('ab-search-clear').hidden = !_ab.q;
+    document.getElementById('ab-hint').textContent = on
+      ? '↑ ↓ to move · Enter to add · Esc to clear'
+      : 'Type to search · or browse below';
+    inp.setAttribute('aria-expanded', String(on));
+    if (on) {
+      _ab.results = _abSearch(_ab.q);
+      _ab.hi = _ab.results.length ? 0 : -1;
+      _abRenderResults();
+      const first = document.querySelector('#ab-results .ab-row');
+      if (first) inp.setAttribute('aria-activedescendant', first.id);
+      else inp.removeAttribute('aria-activedescendant');
+      document.getElementById('ab-results').scrollTop = 0;
+      _abSetPane('results');
+      _abRefreshDetail();
+    } else {
+      _ab.results = []; _ab.hi = -1;
+      inp.removeAttribute('aria-activedescendant');
+      if (had) { _abSetPane(_ab.browsePane); _abRefreshDetail(); }
+    }
+  }
+
   window.openAssetSearch = async function() {
-    document.getElementById('asset-search-modal').style.display = 'flex';
-    document.getElementById('asset-search-input').value = '';
-    document.getElementById('asset-cat-filter').value = '';
-    await _loadAssetTypes();
-    renderAssetSearchResults('', '');
-    setTimeout(() => document.getElementById('asset-search-input').focus(), 100);
+    const modal = document.getElementById('asset-search-modal');
+    const inp = document.getElementById('asset-search-input');
+    modal.style.display = 'flex';
+    inp.value = '';
+    _abApplyQuery('');
+    _ab.win = _defaultAssetWindow();
+    const lbl = _abWindowLabel(_ab.win);
+    document.getElementById('ab-window').textContent = lbl ? `Rental window: ${lbl}` : '';
+    const seq = ++_ab.openSeq;
+    setTimeout(() => { if (modal.style.display !== 'none') inp.focus(); }, 60);
+    try {
+      await _loadAssetTypes();
+    } catch (e) {
+      if (seq === _ab.openSeq) {
+        document.getElementById('ab-cats').innerHTML = '<p class="ab-empty">Couldn\'t load the asset catalog. Close this and try again.</p>';
+      }
+      return;
+    }
+    if (seq !== _ab.openSeq || modal.style.display === 'none') return;
+    const remembered = _abRestoreSelection();
+    _abRenderCats(); _abRenderGroups(); _abRenderTypes();
+    // Phones reopen where you were (or at the category list the first time).
+    _abSetPane(!remembered ? 'cats' : (_ab.group ? 'types' : 'groups'));
+    _abRefreshDetail(true);
+    // A query typed while the catalog was loading still counts.
+    if (inp.value) _abApplyQuery(inp.value);
+    ['ab-cats', 'ab-groups', 'ab-types'].forEach(h =>
+      document.querySelector(`#${h} .ab-row.active`)?.scrollIntoView({block: 'nearest'}));
   };
 
   window.closeAssetSearch = function() {
     document.getElementById('asset-search-modal').style.display = 'none';
+    clearTimeout(_ab.detailTimer);
+    ++_ab.detailSeq;            // drop any in-flight detail fetch
+    _ab.detailShown = undefined;
   };
 
   window.filterAssetSearch = function() {
-    const q = document.getElementById('asset-search-input').value;
-    const cat = document.getElementById('asset-cat-filter').value;
-    renderAssetSearchResults(q, cat);
+    _abApplyQuery(document.getElementById('asset-search-input').value);
   };
 
-  async function renderAssetSearchResults(q, catId) {
-    const types = await _loadAssetTypes();
-    const container = document.getElementById('asset-search-results');
-    const lq = (q || '').toLowerCase().trim();
-    const filtered = types.filter(t => {
-      if (catId && String(t.category_id) !== String(catId)) return false;
-      if (!lq) return true;
-      const haystack = [t.name, t.category_name, t.manufacturer, t.model, t.parent_name].join(' ').toLowerCase();
-      return haystack.includes(lq);
-    });
-
-    if (filtered.length === 0) {
-      container.innerHTML = '<p style="padding:20px;text-align:center;color:var(--text-dim);font-size:13px">No items found.</p>';
-      return;
-    }
-
-    const renderCard = (t) => {
-      const label = t.name;  // Description is always the primary title
-      const sub = [t.manufacturer, t.model].filter(Boolean).join(' ');
-      // This show's Performance Company rate replaces the standard one.
-      const cr = _companyRates[String(t.id)];
-      const daily = cr ? cr.daily : t.rental_cost;
-      const weekly = cr ? cr.weekly : t.weekly_rate;
-      const rateLabel = (t.is_consumable
-        ? `$${Number(daily||0).toFixed(2)}/item`
-        : (weekly > 0
-            ? `$${Number(daily||0).toFixed(2)}/day · $${Number(weekly||0).toFixed(2)}/wk`
-            : `$${Number(daily||0).toFixed(2)}/day`))
-        + (cr ? ' · company rate' : '');
-      const systemBadge = t.is_system ? '<span style="font-size:9px;font-weight:700;background:rgba(245,127,32,0.2);color:#F57F20;border-radius:3px;padding:1px 5px;margin-left:4px;letter-spacing:.04em">SYSTEM</span>' : '';
-      return `<button class="btn btn-ghost btn-sm" style="text-align:left;white-space:normal;align-items:flex-start;flex-direction:column;gap:2px;width:100%;min-width:0" onclick="selectAssetType(${t.id}, '${escJsAttr(label)}', ${t.rental_cost || 0}, ${t.weekly_rate || 0}, ${t.is_system ? 1 : 0}, ${t.is_consumable ? 1 : 0})">
-        <div style="font-weight:500">${esc(label)}${systemBadge}</div>
-        ${sub ? `<div style="font-size:10px;color:var(--text-dim)">${esc(sub)}</div>` : ''}
-        <div style="font-size:10px;color:var(--text-dim)">${rateLabel}${t.is_consumable ? ' · consumable' : ''}${t.is_system ? ' · system' : ''}</div>
-      </button>`;
-    };
-
-    const byName = (a, b) => (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' });
-    const gridStyle = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px;align-items:stretch';
-
-    let html = '<div style="display:flex;flex-direction:column;gap:12px">';
-    if (lq) {
-      // Search mode: flat alphabetical list.
-      const sorted = filtered.slice().sort(byName);
-      html += `<div style="${gridStyle}">`;
-      sorted.forEach(t => { html += renderCard(t); });
-      html += '</div>';
-    } else {
-      // Browse mode: grouped by category, alphabetized within each group and
-      // by category heading so the layout is predictable.
-      const byCat = {};
-      filtered.forEach(t => {
-        const k = t.category_name || '';
-        if (!byCat[k]) byCat[k] = [];
-        byCat[k].push(t);
-      });
-      const cats = Object.keys(byCat).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-      for (const cat of cats) {
-        const items = byCat[cat].slice().sort(byName);
-        html += `<div><div style="font-size:10px;font-weight:600;letter-spacing:.08em;color:var(--text-dim);margin-bottom:4px;text-transform:uppercase">${esc(cat)}</div>`;
-        html += `<div style="${gridStyle}">`;
-        items.forEach(t => { html += renderCard(t); });
-        html += '</div></div>';
+  // ONE set of delegated listeners for the whole dialog (bound once).
+  (function _abBind() {
+    const card = document.querySelector('#asset-search-modal .ab-card');
+    if (!card) return;
+    const inp = document.getElementById('asset-search-input');
+    card.addEventListener('click', e => {
+      const el = e.target.closest('[data-ab]');
+      if (!el || !card.contains(el)) return;
+      const id = Number(el.dataset.id);
+      switch (el.dataset.ab) {
+        case 'cat': _abSelectCat(id, true); break;
+        case 'group': _abSelectGroup(el.dataset.key, true); break;
+        case 'type':
+          if (el.closest('#ab-results')) {
+            const rows = [...document.querySelectorAll('#ab-results .ab-row')];
+            _abSetHi(rows.indexOf(el));
+            _abSetPane('detail');
+          } else _abSelectType(id, true);
+          break;
+        case 'add': e.stopPropagation(); _abAdd(id); break;
+        case 'goto': case 'reveal': _abReveal(id); break;
+        case 'pane': _abSetPane(el.dataset.pane); break;
       }
-    }
-    html += '</div>';
-    container.innerHTML = html;
-  }
+    });
+    document.getElementById('ab-search-clear').addEventListener('click', () => {
+      inp.value = '';
+      _abApplyQuery('');
+      inp.focus();
+    });
+    card.addEventListener('dblclick', e => {
+      const row = e.target.closest('.ab-row[data-ab="type"]');
+      if (row && !e.target.closest('.ab-add-btn')) _abAdd(Number(row.dataset.id));
+    });
+    const focusCol = (hostId) => {
+      const host = document.getElementById(hostId);
+      const row = host && (host.querySelector('.ab-row.active') || host.querySelector('.ab-row'));
+      if (row) row.focus();
+      return row;
+    };
+    const onEsc = e => {
+      e.preventDefault();
+      if (inp.value) { inp.value = ''; _abApplyQuery(''); inp.focus(); }
+      else closeAssetSearch();
+    };
+    // Esc also works when focus fell out of the dialog (a phone pane switch
+    // hides the row that had focus, which drops focus to <body>).
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      const modal = document.getElementById('asset-search-modal');
+      if (modal && modal.style.display !== 'none' && !card.contains(e.target)
+          && (e.target === document.body || modal.contains(e.target))) onEsc(e);
+    });
+    card.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { onEsc(e); return; }
+      if (e.target === inp) {
+        if (!_ab.q.trim()) {
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            focusCol(_ab.type != null ? 'ab-types' : (_ab.group ? 'ab-groups' : 'ab-cats'));
+          }
+          return;
+        }
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          _abSetHi(_ab.hi + (e.key === 'ArrowDown' ? 1 : -1));
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          const t = _ab.results[_ab.hi];
+          if (t) _abAdd(t.id);
+        }
+        return;
+      }
+      const row = e.target.closest && e.target.closest('.ab-row');
+      if (!row || e.target !== row) return;
+      const kind = row.dataset.ab;
+      const inResults = !!row.closest('#ab-results');
+      const sib = dir => {
+        const rows = [...row.parentElement.querySelectorAll('.ab-row')];
+        return rows[rows.indexOf(row) + dir] || null;
+      };
+      const activate = r => {
+        if (!r) return;
+        r.focus();
+        if (r.dataset.ab === 'cat') _abSelectCat(Number(r.dataset.id), false);
+        else if (r.dataset.ab === 'group') _abSelectGroup(r.dataset.key, false);
+        else if (inResults) _abSetHi([...r.parentElement.querySelectorAll('.ab-row')].indexOf(r), true);
+        else _abSelectType(Number(r.dataset.id), false);
+      };
+      switch (e.key) {
+        case 'ArrowDown': case 'ArrowUp':
+          e.preventDefault();
+          activate(sib(e.key === 'ArrowDown' ? 1 : -1));
+          break;
+        case 'Home': case 'End': {
+          e.preventDefault();
+          const rows = row.parentElement.querySelectorAll('.ab-row');
+          activate(e.key === 'Home' ? rows[0] : rows[rows.length - 1]);
+          break;
+        }
+        case 'ArrowRight':
+          e.preventDefault();
+          if (kind === 'cat') { _abSelectCat(Number(row.dataset.id), true); activate(focusCol('ab-groups')); }
+          else if (kind === 'group') { _abSelectGroup(row.dataset.key, true); activate(focusCol('ab-types')); }
+          break;
+        case 'ArrowLeft':
+          e.preventDefault();
+          if (kind === 'type' && !inResults) { focusCol('ab-groups'); _abSetPane('groups'); }
+          else if (kind === 'group') { focusCol('ab-cats'); _abSetPane('cats'); }
+          break;
+        case 'Enter':
+          e.preventDefault();
+          if (kind === 'cat') { _abSelectCat(Number(row.dataset.id), true); focusCol('ab-groups'); }
+          else if (kind === 'group') { _abSelectGroup(row.dataset.key, true); focusCol('ab-types'); }
+          else if (kind === 'type') _abAdd(Number(row.dataset.id));
+          break;
+        case ' ':
+          if (kind === 'type') { e.preventDefault(); activate(row); }
+          break;
+        default:
+          // Type-to-search from anywhere in the browser.
+          if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) inp.focus();
+      }
+    });
+  })();
 
   // ── Asset Add Detail ──────────────────────────────────────────────────────
   window.selectAssetType = async function(typeId, label, price, weeklyRate, isSystem, isConsumable) {
@@ -2106,11 +2842,8 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
 
     // Default rental dates: prefer load-in/out dates, fall back to performances
-    const loadInDate  = document.getElementById('load-in-date')?.value  || '';
-    const loadOutDate = document.getElementById('load-out-date')?.value || '';
-    const perfs = {{ performances | tojson }};
-    const defaultStart = loadInDate  || (perfs.length > 0 ? perfs[0].perf_date          : '') || '';
-    const defaultEnd   = loadOutDate || (perfs.length > 0 ? perfs[perfs.length-1].perf_date : '') || '';
+    // (_defaultAssetWindow — the Add Asset browser checks the same window).
+    const {start: defaultStart, end: defaultEnd} = _defaultAssetWindow();
     const addStartInp = document.getElementById('asset-add-start');
     const addEndInp   = document.getElementById('asset-add-end');
     addStartInp.value = defaultStart;
@@ -2136,8 +2869,10 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     closeAssetSearch();
     document.getElementById('asset-add-modal').style.display = 'flex';
 
-    // Load availability (re-runs whenever the rental dates change)
-    _currentAssetIsSystem = !!isSystem;
+    // Load availability (re-runs whenever the rental dates change). A package
+    // is a kit exactly like a system (3.35.0): callers that only pass
+    // is_system still get the kit path when the catalog says package.
+    _currentAssetIsSystem = !!isSystem || _abIsKit(_catalogType(typeId));
     await _refreshAssetAvailability();
   };
 
@@ -2151,7 +2886,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     if (!typeId || !availDiv) return;
     if (_currentAssetIsSystem) {
       _currentAvailData = null;
-      availDiv.innerHTML = '<span style="color:var(--accent)">System — deducts its component quantities from inventory; the add is blocked if a component is short for these dates.</span>';
+      availDiv.innerHTML = `<span style="color:var(--accent)">${esc(_kitAvailMsg(_catalogType(typeId)))}</span>`;
       _updateAddAssetBlockState();
       return;
     }
@@ -2170,7 +2905,10 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       const av = await r.json();
       if (seq !== _availFetchSeq) return; // superseded by a newer date change
       _currentAvailData = av;
-      if (av.unlimited) {
+      if (av.kit) {
+        // The server says kit (system OR package) — never "consumable".
+        availDiv.innerHTML = `<span style="color:var(--accent)">${esc(_kitAvailMsg(_catalogType(typeId)))}</span>`;
+      } else if (av.unlimited) {
         availDiv.textContent = 'Consumable — unlimited stock.';
       } else {
         const avClass = av.available > 2 ? 'color:#48BB78' : (av.available > 0 ? 'color:#FBBF24' : 'color:#FC8181');
