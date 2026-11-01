@@ -4757,14 +4757,10 @@ window._psSettlement = {{ post_show_settlement | tojson }};
   const _LABOR_PUT_FIELDS = ['position_id', 'in_time', 'out_time', 'break_start', 'break_end',
                              'break2_start', 'break2_end', 'requested_name'];
   const _LABOR_TIME_FIELDS = ['in_time', 'break_start', 'break_end', 'break2_start', 'break2_end', 'out_time'];
-  /* A time cell as HH:MM ("7pm" → 19:00, "930" → 09:30), '' when blank, or
-     null when it isn't a time — the server refuses free text. */
-  function _laborTimeValue(raw) {
-    const s = String(raw || '').trim();
-    if (!s) return '';
-    const v = String(parseTimeToHHMM(s) || '');
-    return /^([01]\d|2[0-3]):[0-5]\d$/.test(v) ? v : null;
-  }
+  /* A time cell as HH:MM ("7pm" → 19:00, "930" → 09:30, "12:5" → 12:05),
+     '' when blank, or null when it isn't a time — the server refuses free
+     text. One parser for every labor editor: app.js laborTimeHHMM(). */
+  function _laborTimeValue(raw) { return laborTimeHHMM(raw); }
   /* Before a save: normalise the row's EDITED time cells; one that still
      isn't a time goes back to the saved value (else it would fail every
      later save of the row) and a toast says so. */
@@ -4981,12 +4977,22 @@ window._psSettlement = {{ post_show_settlement | tojson }};
   /* ── Per-day covering PM + day notes (show_labor_days) ─────────────────── */
   let _pmNamesList = null;
 
+  /* Re-read every day's PM / notes → true. An error reply (503 / 403 come
+     back as JSON too) keeps the map this page has → false, so a caller
+     never acts on an empty map that only means "couldn't ask". */
   async function _loadLaborDays() {
     try {
       const r = await fetch(`/shows/${SHOW_ID}/labor-days`);
       const data = await r.json();
-      window._laborDaysMap = data.days || {};
-    } catch (e) { window._laborDaysMap = window._laborDaysMap || {}; }
+      if (!r.ok || !data || typeof data.days !== 'object' || data.days === null) {
+        throw new Error(String(r.status));
+      }
+      window._laborDaysMap = data.days;
+      return true;
+    } catch (e) {
+      window._laborDaysMap = window._laborDaysMap || {};
+      return false;
+    }
   }
 
   async function _loadPMNames() {
@@ -5023,6 +5029,9 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     }
   }
 
+  /* PUT one day's PM / notes → true; false once a toast has said why (the
+     server's own message, e.g. the per-show day cap), so callers add no
+     toast of their own on failure. */
   async function _saveLaborDay(workDate, payload) {
     if (!workDate) { showSaveToast('✗ Set the day\'s date first', 'error'); return false; }
     try {
@@ -5031,8 +5040,11 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(Object.assign({ work_date: workDate }, payload)),
       });
-      if (!r.ok) return false;
-      const data = await r.json();
+      const data = await r.json().catch(() => null);
+      if (!r.ok || !data) {
+        showSaveToast('✗ ' + ((data && data.error) || 'Save failed'), 'error');
+        return false;
+      }
       window._laborDaysMap = window._laborDaysMap || {};
       if (data.day && (data.day.cover_pm || data.day.day_notes)) {
         window._laborDaysMap[workDate] = { cover_pm: data.day.cover_pm, day_notes: data.day.day_notes };
@@ -5044,20 +5056,21 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         window.schedDayPmExternal(workDate, (data.day && data.day.cover_pm) || '');
       }
       return true;
-    } catch (e) { return false; }
+    } catch (e) { showSaveToast('✗ Network error', 'error'); return false; }
   }
 
+  /* A failed save puts the control back to what the server holds. */
   async function onLaborDayPmChange(select) {
-    const block = select.closest('.labor-day');
-    const ok = await _saveLaborDay(block.dataset.workDate, { cover_pm: select.value });
-    showSaveToast(ok ? '✓ Day PM saved' : '✗ Save failed', ok ? undefined : 'error');
+    const date = select.closest('.labor-day').dataset.workDate;
+    if (await _saveLaborDay(date, { cover_pm: select.value })) showSaveToast('✓ Day PM saved');
+    else _buildLaborDayPmSelect(select, ((window._laborDaysMap || {})[date] || {}).cover_pm || '');
   }
   window.onLaborDayPmChange = onLaborDayPmChange;
 
   async function onLaborDayNotesChange(input) {
-    const block = input.closest('.labor-day');
-    const ok = await _saveLaborDay(block.dataset.workDate, { day_notes: input.value.trim() });
-    showSaveToast(ok ? '✓ Day notes saved' : '✗ Save failed', ok ? undefined : 'error');
+    const date = input.closest('.labor-day').dataset.workDate;
+    if (await _saveLaborDay(date, { day_notes: input.value.trim() })) showSaveToast('✓ Day notes saved');
+    else input.value = ((window._laborDaysMap || {})[date] || {}).day_notes || '';
   }
   window.onLaborDayNotesChange = onLaborDayNotesChange;
 
@@ -6461,7 +6474,12 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     const date = block.dataset.workDate || '';
     const rows = Array.from(block.querySelectorAll('tbody tr'));
     const label = date ? _dayLabel(date) : 'Unscheduled';
-    if (date) await _loadLaborDays();   // someone may have set a Day PM since
+    // Someone may have set a Day PM since — and a day whose PM / notes
+    // can't be checked is never deleted (they'd be left behind, unseen).
+    if (date && !(await _loadLaborDays())) {
+      alert("Couldn't check this day's Day PM / notes — nothing was deleted. Try again in a moment.");
+      return;
+    }
     const info = (date && (window._laborDaysMap || {})[date]) || {};
     const hasInfo = !!(info.cover_pm || info.day_notes);
     if (rows.length || hasInfo) {

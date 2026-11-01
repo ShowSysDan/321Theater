@@ -771,7 +771,8 @@
       body: JSON.stringify(payload),
     });
     if (!r.ok) {
-      showSaveToast('✗ Save failed', 'error');
+      const d = await r.json().catch(() => ({}));
+      showSaveToast('✗ ' + ((d && typeof d.error === 'string' && d.error) || 'Save failed'), 'error');
       return null;
     }
     showSaveToast('✓ Saved');
@@ -814,17 +815,30 @@
     await putSchedulerUpdate(tr, { position_id: parseInt(select.value) || null });
   }
 
+  /* Time cell class → column, in shift order. */
+  const _TIME_COLS = [['sched-in', 'in_time'], ['sched-bstart', 'break_start'],
+                      ['sched-bend', 'break_end'], ['sched-b2start', 'break2_start'],
+                      ['sched-b2end', 'break2_end'], ['sched-out', 'out_time']];
+
+  /* Save ONE edited time cell, normalised to HH:MM ("7pm" → 19:00). A cell
+     that isn't a time goes back to its saved value with a toast — the server
+     refuses free text (labor times feed billing) — and the row's other cells
+     are never re-sent, so an old free-text cell can't block this save. The
+     input's defaultValue is the saved value. */
   async function onTimeChange(input) {
     const tr = input.closest('tr');
-    const payload = {
-      in_time:      tr.querySelector('.sched-in').value.trim(),
-      break_start:  tr.querySelector('.sched-bstart').value.trim(),
-      break_end:    tr.querySelector('.sched-bend').value.trim(),
-      break2_start: tr.querySelector('.sched-b2start')?.value.trim() || '',
-      break2_end:   tr.querySelector('.sched-b2end')?.value.trim()   || '',
-      out_time:     tr.querySelector('.sched-out').value.trim(),
-    };
-    await putSchedulerUpdate(tr, payload);
+    const col = (_TIME_COLS.find(([cls]) => input.classList.contains(cls)) || [])[1];
+    if (!tr || !col) return;
+    const raw = input.value.trim();
+    const v = laborTimeHHMM(raw);
+    if (v === null) {
+      showSaveToast(`✗ "${raw}" isn't a time — use HH:MM (24-hour)`, 'error');
+      input.value = input.defaultValue;
+      return;
+    }
+    input.value = v;
+    const res = await putSchedulerUpdate(tr, { [col]: v });
+    if (res && res.success) input.defaultValue = v;
   }
 
   async function addRow(btn, showId) {
@@ -947,16 +961,18 @@
 
   async function onDayPmChange(select) {
     const block = select.closest('.sched-day-block');
-    const ok = await LaborDays.save(block.dataset.showId, block.dataset.workDate,
-                                    { cover_pm: select.value });
-    showSaveToast(ok ? '✓ Day PM saved' : '✗ Save failed', ok ? undefined : 'error');
+    const res = await LaborDays.save(block.dataset.showId, block.dataset.workDate,
+                                     { cover_pm: select.value });
+    if (res.success) showSaveToast('✓ Day PM saved');
+    else showSaveToast('✗ ' + (res.error || 'Save failed'), 'error');
   }
 
   async function onDayNotesChange(input) {
     const block = input.closest('.sched-day-block');
-    const ok = await LaborDays.save(block.dataset.showId, block.dataset.workDate,
-                                    { day_notes: input.value.trim() });
-    showSaveToast(ok ? '✓ Day notes saved' : '✗ Save failed', ok ? undefined : 'error');
+    const res = await LaborDays.save(block.dataset.showId, block.dataset.workDate,
+                                     { day_notes: input.value.trim() });
+    if (res.success) showSaveToast('✓ Day notes saved');
+    else showSaveToast('✗ ' + (res.error || 'Save failed'), 'error');
   }
 
   /* When a day-block is re-dated, its PM/notes travel with it. */
@@ -990,12 +1006,19 @@
       const isScheduled = tr.querySelector('.sched-check')?.checked ? true : false;
       const crewId = tr.querySelector('.sched-tech')?.value || null;
       const positionId = parseInt(tr.querySelector('.sched-pos')?.value) || null;
-      const in_time     = tr.querySelector('.sched-in')?.value.trim()      || '';
-      const break_start = tr.querySelector('.sched-bstart')?.value.trim()  || '';
-      const break_end   = tr.querySelector('.sched-bend')?.value.trim()    || '';
-      const break2_start= tr.querySelector('.sched-b2start')?.value.trim() || '';
-      const break2_end  = tr.querySelector('.sched-b2end')?.value.trim()   || '';
-      const out_time    = tr.querySelector('.sched-out')?.value.trim()     || '';
+      // HH:MM where the cell reads as a time; anything else goes as typed —
+      // the server keeps an unchanged old value and refuses new free text.
+      const tv = cls => {
+        const raw = tr.querySelector('.' + cls)?.value.trim() || '';
+        const v = laborTimeHHMM(raw);
+        return v === null ? raw : v;
+      };
+      const in_time     = tv('sched-in');
+      const break_start = tv('sched-bstart');
+      const break_end   = tv('sched-bend');
+      const break2_start= tv('sched-b2start');
+      const break2_end  = tv('sched-b2end');
+      const out_time    = tv('sched-out');
       const r = await fetch(`${_endpointFor(tr)}/${rid}`, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},

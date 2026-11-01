@@ -3030,7 +3030,7 @@ function _schedDayPmChange(sel) {
     const res = await LaborDays.save(SHOW_ID, iso, {cover_pm: want});
     _schedDayPmSeq++;
     if (!res || !res.success) {
-      showSaveToast('✗ Day PM not saved', 'error');
+      showSaveToast('✗ ' + ((res && res.error) || 'Day PM not saved'), 'error');
       if (cur.value === want) {                      // put back what the server holds
         const b = cur.closest('.sched-daypm');
         if (b) { cur.blur(); _schedDayPmRender(b); }
@@ -4035,23 +4035,36 @@ async function saveLaborPreset() {
   const name = document.getElementById('labor-preset-name').value.trim();
   if (!name) { alert('Preset name is required.'); return; }
   const rows = [];
+  let bad = null;   // the first time cell that isn't a time
   document.querySelectorAll('#labor-preset-rows .labor-preset-row').forEach(tr => {
-    const cells = tr.querySelectorAll('.lp-cell');
     const posId = tr.querySelector('.lp-pos')?.value || '';
     if (!posId) return;   // a row without a position is meaningless — skip it
+    // Times as HH:MM, like the Labor tab ("7pm" → 19:00); the server
+    // refuses anything else.
+    const t = Array.from(tr.querySelectorAll('.lp-cell')).map(cell => {
+      const v = laborTimeHHMM(cell.value);
+      if (v === null) { if (!bad) bad = cell; return ''; }
+      cell.value = v;
+      return v;
+    });
     rows.push({
       position_id:  posId,
       quantity:     tr.querySelector('.lp-qty')?.value || 1,
       // Cells are in shift order: in, lunch 1 start/end, lunch 2 start/end, out.
-      in_time:      cells[0]?.value || '',
-      break_start:  cells[1]?.value || '',
-      break_end:    cells[2]?.value || '',
-      break2_start: cells[3]?.value || '',
-      break2_end:   cells[4]?.value || '',
-      out_time:     cells[5]?.value || '',
+      in_time:      t[0] || '',
+      break_start:  t[1] || '',
+      break_end:    t[2] || '',
+      break2_start: t[3] || '',
+      break2_end:   t[4] || '',
+      out_time:     t[5] || '',
       notes:        tr.querySelector('.lp-notes')?.value || '',
     });
   });
+  if (bad) {
+    bad.focus();
+    alert(`"${bad.value.trim()}" isn't a time — use HH:MM (24-hour), or clear it.`);
+    return;
+  }
   if (!rows.length) { alert('Add at least one position.'); return; }
   const url = _editLaborPresetId
     ? `/settings/labor-presets/${_editLaborPresetId}/edit`
@@ -5390,6 +5403,18 @@ function parseTimeToHHMM(str) {
   return String(hours).padStart(2, '0') + ':' + String(minutes).padStart(2, '0');
 }
 
+/* A labor time cell (Labor tab, Labor Scheduler, labor presets) → 'HH:MM'
+   (24-hour), '' when blank, or null when it isn't a time — the server's
+   _labor_time() refuses anything else (billing reads HH:MM only).
+   "7pm" → 19:00, "930" → 09:30, "8" → 08:00, "12:5" → 12:05. */
+function laborTimeHHMM(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return '';
+  const m = /^(\d{1,2}):(\d)$/.exec(s);
+  const v = String(parseTimeToHHMM(m ? `${m[1]}:0${m[2]}` : s) || '');
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(v) ? v : null;
+}
+
 /* Schedule time cell → canonical text. Next-day items of a long show day
    (3.30.0) are written "1+00:30": "+0030", "1+30" style input and "24:30"
    become that; the PDF prints them with the next date ("3/2 00:30"). */
@@ -5966,18 +5991,22 @@ window.LaborDays = {
   },
 
   /* Partial upsert of one day's covering PM / notes. Returns the parsed JSON
-     response, or null on failure. A day left with no PM and no notes is
-     deleted server-side. */
+     response ({success: true, day}), or {success: false, error} on failure —
+     error = the server's message when it sent one (e.g. the per-show day
+     cap), else ''. A day left with no PM and no notes is deleted
+     server-side. */
   async save(showId, workDate, payload) {
-    if (!showId || !workDate) return null;
+    if (!showId || !workDate) return {success: false, error: ''};
     try {
       const r = await fetch(`/shows/${showId}/labor-days`, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(Object.assign({ work_date: workDate }, payload)),
       });
-      return r.ok ? await r.json() : null;
-    } catch (e) { return null; }
+      const d = await r.json().catch(() => null);
+      if (r.ok && d) return d;
+      return {success: false, error: (d && typeof d.error === 'string' && d.error) || ''};
+    } catch (e) { return {success: false, error: ''}; }
   },
 
   /* When a day-block is re-dated, its PM/notes travel with it. */

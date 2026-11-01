@@ -18743,10 +18743,17 @@ def api_labor_scheduler_update(rid):
     """Update only the scheduling fields on a labor request."""
     if session.get('is_readonly'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': 'Invalid request.'}), 400
+    try:
+        work_date = _labor_work_date(data.get('work_date'))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work date.'}), 400
     db = get_db()
     row = db.execute(
-        'SELECT show_id, scheduled_crew_member_id FROM labor_requests WHERE id=%s', (rid,)
+        'SELECT show_id, scheduled_crew_member_id, ' + ', '.join(_LABOR_TIME_LABELS) +
+        ' FROM labor_requests WHERE id=%s', (rid,)
     ).fetchone()
     if not row:
         db.close()
@@ -18783,12 +18790,25 @@ def api_labor_scheduler_update(rid):
         updates.append('scheduled_crew_member_id=%s')
         params.append(cmid)
         detail_parts.append(f"crew_id={cmid}")
-    for field in ('in_time', 'out_time', 'break_start', 'break_end',
-                  'break2_start', 'break2_end'):
-        if field in data:
-            updates.append(f'{field}=%s')
-            params.append(_normalize_perf_time((data[field] or '').strip()))
-            detail_parts.append(f"{field}={data[field]}")
+    # Times must read as HH:MM (or blank), like every labor write path. A
+    # cell sent back exactly as stored is kept as is: the scheduler's Save
+    # All re-sends every cell, and an old free-text value must not block the
+    # row's other changes.
+    for field, label in _LABOR_TIME_LABELS.items():
+        if field not in data:
+            continue
+        raw = data[field]
+        if isinstance(raw, str) and raw.strip() and raw.strip() == (row[field] or '').strip():
+            val = row[field]
+        else:
+            val = _labor_time(raw)
+            if val is None:
+                db.close()
+                return jsonify({'success': False,
+                                'error': f'"{label}" is not a time — use HH:MM (24-hour).'}), 400
+        updates.append(f'{field}=%s')
+        params.append(val)
+        detail_parts.append(f"{field}={val}")
     if 'notes' in data:
         updates.append('notes=%s')
         params.append((data['notes'] or '').strip())
@@ -18797,10 +18817,9 @@ def api_labor_scheduler_update(rid):
         # Re-dating a line (e.g. correcting a mis-dated row, or moving a whole
         # day-block in the scheduler). Empty string clears it back to NULL, in
         # which case it falls back to the show's date in list queries.
-        wd = (data.get('work_date') or '').strip() or None
         updates.append('work_date=%s')
-        params.append(wd)
-        detail_parts.append(f"work_date={wd}")
+        params.append(work_date)
+        detail_parts.append(f"work_date={work_date}")
 
     if not updates:
         db.close()
@@ -18858,12 +18877,21 @@ def api_labor_scheduler_delete(rid):
 @scheduler_required
 def api_labor_scheduler_add():
     """Add a new labor request from the scheduler view."""
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': 'Invalid request.'}), 400
     show_id = data.get('show_id')
     if not show_id:
         return jsonify({'success': False, 'error': 'show_id required'}), 400
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    times, err = _labor_times(data, require_all=True)
+    if err:
+        return jsonify({'success': False, 'error': err}), 400
+    try:
+        work_date = _labor_work_date(data.get('work_date'))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work date.'}), 400
     db = get_db()
     max_order = db.execute(
         'SELECT MAX(sort_order) FROM labor_requests WHERE show_id=%s', (show_id,)
@@ -18875,13 +18903,10 @@ def api_labor_scheduler_add():
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (show_id,
           data.get('position_id') or None,
-          data.get('work_date') or None,
-          _normalize_perf_time(data.get('in_time', '')),
-          _normalize_perf_time(data.get('out_time', '')),
-          _normalize_perf_time(data.get('break_start', '')),
-          _normalize_perf_time(data.get('break_end', '')),
-          _normalize_perf_time(data.get('break2_start', '')),
-          _normalize_perf_time(data.get('break2_end', '')),
+          work_date,
+          times['in_time'], times['out_time'],
+          times['break_start'], times['break_end'],
+          times['break2_start'], times['break2_end'],
           data.get('requested_name', ''), max_order + 10))
     rid = cur.fetchone()['id']
     log_audit(db, 'LABOR_REQUEST_ADD', 'labor_request', rid, show_id=show_id, detail='via scheduler')
