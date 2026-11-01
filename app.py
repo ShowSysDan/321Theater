@@ -29063,9 +29063,17 @@ def api_admin_dashboards():
     return jsonify(result)
 
 
+# Asset-type fields a signed-out /d/<slug> visitor's page carries — only what
+# the widgets draw (never costs, supplier contacts, storage, flags).
+_PUBLIC_DASH_TYPE_KEYS = ('id', 'category_id', 'category_name', 'name',
+                          'manufacturer', 'model', 'reserve_count')
+
+
 @app.route('/d/<slug>')
 def public_dashboard(slug):
-    """Public dashboard — no login required."""
+    """Public dashboard — no login required. Signed out, base.html renders the
+    page's auth_content (no sidebar, polls or beacons); signed in, the same
+    view-only dashboard sits in the user's normal chrome."""
     db = get_db()
     d = db.execute(
         'SELECT * FROM asset_dashboards WHERE public_slug=%s AND is_public=1', (slug,)
@@ -29082,13 +29090,17 @@ def public_dashboard(slug):
     """).fetchall()
     db.close()
     config = json.loads(d['config_json'] or '{}')
+    user = get_current_user()
+    asset_types = [dict(t) for t in types]
+    if not user:
+        asset_types = [{k: t.get(k) for k in _PUBLIC_DASH_TYPE_KEYS} for t in asset_types]
     return render_template('dashboard_view.html',
                            dash=dict(d),
                            categories=[dict(c) for c in cats],
-                           asset_types=[dict(t) for t in types],
+                           asset_types=asset_types,
                            config=config,
                            public=True,
-                           user=None)
+                           user=user)
 
 
 # ─── Asset Reports ─────────────────────────────────────────────────────────────
