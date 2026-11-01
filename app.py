@@ -2404,6 +2404,18 @@ _VIEWER_ALLOWED_ENDPOINTS = frozenset({
     # "Mobile site / Desktop site" footer link: a cookie-only UI preference
     # that isn't even login-gated (the login page has the switch too).
     'set_view_mode',
+    # A public dashboard link (/d/<slug>) opens for anyone; a viewer gets the
+    # same signed-out page a visitor with no account gets.
+    'public_dashboard',
+})
+
+# Widget-data endpoints behind a public dashboard. A viewer may call them only
+# with a ?slug= (checked by _dashboard_data_access_ok like an anonymous call),
+# and gets the anonymous data shape (_dashboard_full_access is False).
+_PUBLIC_DASH_DATA_ENDPOINTS = frozenset({
+    'assets_availability_bulk', 'api_dashboard_shows_calendar',
+    'api_dashboard_skills_summary', 'api_dashboard_asset_calendar',
+    'api_dashboard_reservation_timeline',
 })
 
 
@@ -2422,6 +2434,9 @@ def _viewer_gate():
     # Optional per-user grant: document viewers may also reach the Show Calendar
     # page (and its data endpoint) when their account has it enabled.
     if ep in ('viewer_calendar', 'viewer_shows_calendar') and session.get('viewer_show_calendar'):
+        return None
+    # A public dashboard's widgets (the endpoint itself checks the slug).
+    if ep in _PUBLIC_DASH_DATA_ENDPOINTS and request.args.get('slug'):
         return None
     if ep.startswith('static'):
         return None
@@ -22720,8 +22735,9 @@ def assets_availability_bulk():
                 'available':   info.get('available'),
             }
 
-    # By-show summary (for 'by_show' layout) — requires login for access control
-    if not session.get('user_id'):
+    # By-show summary (for 'by_show' layout) — requires login for access
+    # control; never for a document viewer (public-link data only).
+    if not _dashboard_full_access():
         db.close()
         return jsonify({'by_type': by_type, 'by_show': []})
 
@@ -28928,14 +28944,21 @@ def _build_shows_calendar_days(db, accessible, date_from, date_to):
     return days
 
 
+def _dashboard_full_access():
+    """Signed in AND not a document viewer: the caller gets the full widget
+    data (Assets by Show, per-user show access). A viewer — like a visitor
+    with no account — sees only what a public dashboard link shows."""
+    return bool(session.get('user_id')) and not session.get('is_document_viewer')
+
+
 def _dashboard_data_access_ok():
     """Guard for the dashboard/asset widget-data endpoints. These feed both
     the logged-in dashboards AND the anonymous public dashboard (/d/<slug>),
     so allow a request when EITHER the caller is signed in OR it carries the
     ?slug= of a genuinely public dashboard. Without this, anyone who can
     reach the server could pull crew/asset/show aggregates with no account
-    and no slug."""
-    if session.get('user_id'):
+    and no slug. A document viewer is checked by slug like a visitor."""
+    if _dashboard_full_access():
         return True
     slug = request.args.get('slug', '')
     if not slug:
@@ -28958,7 +28981,7 @@ def api_dashboard_shows_calendar():
     date_from = request.args.get('from', '')
     date_to   = request.args.get('to', '')
     db = get_db()
-    accessible = get_accessible_shows(session['user_id']) if session.get('user_id') else None
+    accessible = get_accessible_shows(session['user_id']) if _dashboard_full_access() else None
     days = _build_shows_calendar_days(db, accessible, date_from, date_to)
     db.close()
     return jsonify({'days': days})
@@ -29352,9 +29375,17 @@ def api_admin_dashboards():
     return jsonify(result)
 
 
+# Asset-type fields a signed-out /d/<slug> visitor's page carries — only what
+# the widgets draw (never costs, supplier contacts, storage, flags).
+_PUBLIC_DASH_TYPE_KEYS = ('id', 'category_id', 'category_name', 'name',
+                          'manufacturer', 'model', 'reserve_count')
+
+
 @app.route('/d/<slug>')
 def public_dashboard(slug):
-    """Public dashboard — no login required."""
+    """Public dashboard — no login required. Signed out, base.html renders the
+    page's auth_content (no sidebar, polls or beacons); signed in, the same
+    view-only dashboard sits in the user's normal chrome."""
     db = get_db()
     d = db.execute(
         'SELECT * FROM asset_dashboards WHERE public_slug=%s AND is_public=1', (slug,)
@@ -29371,13 +29402,19 @@ def public_dashboard(slug):
     """).fetchall()
     db.close()
     config = json.loads(d['config_json'] or '{}')
+    # A document viewer gets the signed-out page (no viewer chrome, and the
+    # widgets fetch the anonymous data shape — see _dashboard_full_access).
+    user = None if session.get('is_document_viewer') else get_current_user()
+    asset_types = [dict(t) for t in types]
+    if not user:
+        asset_types = [{k: t.get(k) for k in _PUBLIC_DASH_TYPE_KEYS} for t in asset_types]
     return render_template('dashboard_view.html',
                            dash=dict(d),
                            categories=[dict(c) for c in cats],
-                           asset_types=[dict(t) for t in types],
+                           asset_types=asset_types,
                            config=config,
                            public=True,
-                           user=None)
+                           user=user)
 
 
 # ─── Asset Reports ─────────────────────────────────────────────────────────────

@@ -25,6 +25,17 @@
      _resolve_view_mode() in app.py. #}
   <link rel="stylesheet" href="{{ url_for('static', filename='css/mobile.css') }}">
   {% endif %}
+  <script>
+  // Today's date as YYYY-MM-DD in the BROWSER's time zone. Defined here (not
+  // app.js) because some pages' scripts run before app.js loads — and on
+  // signed-out pages too (the public dashboard /d/<slug> uses them).
+  // new Date().toISOString().slice(0,10) is the UTC date, which after
+  // ~8 pm in Orlando is already tomorrow.
+  window.localIsoDate = function (d) {
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
+           String(d.getDate()).padStart(2, '0');
+  };
+  window.localTodayIso = function () { return localIsoDate(new Date()); };</script>
   {% if user %}
   {# Hover preloading (Speculation Rules, Chromium): when a link is hovered the
      browser prefetches the page in the background so the click renders almost
@@ -43,16 +54,7 @@
        /static, /api      not page navigations
      Add class="no-prefetch" to any future link that must never be prefetched
      (e.g. a GET that mutates state — though those should be POSTs anyway). #}
-  <script>window.__PAGE_RENDERED_AT = {{ page_rendered_at }};
-  // Today's date as YYYY-MM-DD in the BROWSER's time zone. Defined here (not
-  // app.js) because some pages' scripts run before app.js loads.
-  // new Date().toISOString().slice(0,10) is the UTC date, which after
-  // ~8 pm in Orlando is already tomorrow.
-  window.localIsoDate = function (d) {
-    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
-           String(d.getDate()).padStart(2, '0');
-  };
-  window.localTodayIso = function () { return localIsoDate(new Date()); };</script>
+  <script>window.__PAGE_RENDERED_AT = {{ page_rendered_at }};</script>
   <script type="speculationrules">
   {% raw %}{
     "prefetch": [{
@@ -1105,7 +1107,7 @@ const _HELP_PAGES = {
       <p>Asset-availability and skill-coverage dashboards — yours first, plus everyone's public ones. Each card shows its widgets and, if public, its link; click a card to open it.</p>
       <ul style="${_HELP_UL}">
         <li><strong>+ New Dashboard</strong> — a name and a first widget (Reservation Timeline, Asset Type Calendar, Combined, By Category, By Show, Shows Calendar, Skills Overview). Add more widgets from inside the dashboard.</li>
-        <li>Tick <strong>"Make this dashboard publicly accessible"</strong> to get a no-login <code>/d/&lt;link&gt;</code> URL to share (read-only accounts can't). <strong>PUBLIC</strong> marks those cards; admins can list them and make one private again from Settings → Dashboards.</li>
+        <li>Tick <strong>"Make this dashboard publicly accessible"</strong> to get a no-login <code>/d/&lt;link&gt;</code> URL to share (read-only accounts can't). Anyone with the link sees the widgets view-only — signed out, without the app's menu; <em>Assets by Show</em> and links to shows are for signed-in users. <strong>PUBLIC</strong> marks those cards; admins can list them and make one private again from Settings → Dashboards.</li>
         <li>Another person's public dashboard shows their name; only its owner can change it. You can delete dashboards you own (×).</li>
       </ul>
     `
@@ -1120,7 +1122,7 @@ const _HELP_PAGES = {
         <li><strong>All Assets</strong>, <strong>Assets by Category</strong> — total units, in maintenance, reserved and available per item for the range. <strong>Assets by Show</strong> — each show's lines with quantity and price.</li>
         <li><strong>Shows Calendar</strong> — a week-at-a-glance count plus a month grid of Load-In (↓), Show day (★) and Load-Out (↑) chips.</li>
         <li><strong>Skill Coverage</strong> — for every position, how many technicians are qualified, with a list of positions nobody covers.</li>
-        <li><strong>+ Add Widget</strong> and the <strong>×</strong> on each widget are for the owner only (a dashboard keeps at least one). <strong>Refresh</strong> reloads every widget. If the dashboard is public, its shareable URL is shown in a banner.</li>
+        <li><strong>+ Add Widget</strong> and the <strong>×</strong> on each widget are for the owner only (a dashboard keeps at least one). <strong>Refresh</strong> reloads every widget. If the dashboard is public, its shareable URL is shown in a banner; opening that <code>/d/…</code> link shows the same widgets view-only (no editing, even for the owner).</li>
       </ul>
     `
   },
@@ -1271,8 +1273,9 @@ function _helpKeyForLocation() {
     const tab = new URLSearchParams(window.location.search).get('tab') || 'advance';
     return _HELP_PAGES['show_' + tab] ? 'show_' + tab : 'show_advance';
   }
-  // /dashboards/<id> is a dashboard view, /dashboards is the list.
-  if (/^\/dashboards\/\d+/.test(path)) return 'dashboard_view';
+  // /dashboards/<id> (and a public /d/<slug> link) is a dashboard view,
+  // /dashboards is the list.
+  if (/^\/(dashboards\/\d+|d\/)/.test(path)) return 'dashboard_view';
   let best = null, bestLen = 0;
   for (const [prefix, key] of _HELP_ROUTES) {
     if (path.startsWith(prefix) && prefix.length > bestLen) { best = key; bestLen = prefix.length; }

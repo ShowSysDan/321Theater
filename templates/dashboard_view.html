@@ -306,6 +306,16 @@
   margin-bottom: 12px;
   flex-wrap: wrap;
 }
+
+/* ── Signed-out public view (no sidebar): centre the column and run the
+      header tint to both window edges. ─────────────────────────────── */
+.public-dash { margin: 0 auto; }
+.public-dash .page-header { border-image-outset: 0 100vw 12px 100vw; }
+/* ≤900px the column's side padding drops to 16px (style.css); the header
+   bar's bleed must match it or the page scrolls sideways (iPad portrait). */
+@media (max-width: 900px) {
+  html:not(.mobile-view) .public-dash .page-header { margin-left: -16px; margin-right: -16px; padding-left: 16px; padding-right: 16px; }
+}
 </style>
 {% endblock %}
 
@@ -314,16 +324,17 @@
   <div>
     <h1 class="page-title">{{ dash.name }}</h1>
     <p class="page-sub">
-      {% set wcount = config.get('widgets', [])|length %}
-      {{ wcount if wcount else 1 }} widget{{ 's' if wcount != 1 else '' }}
+      {# A legacy single-layout dashboard (no widgets list) shows one widget. #}
+      {% set wcount = (config.get('widgets') or [])|length or 1 %}
+      {{ wcount }} widget{{ 's' if wcount != 1 else '' }}
     </p>
   </div>
   <div style="display:flex;gap:8px;align-items:center">
-    {% if not public %}
-    {% if dash.user_id == user.id %}
+    {% if not public and dash.user_id == user.id %}
     <button class="btn btn-ghost btn-sm" onclick="openAddWidget()">+ Add Widget</button>
     {% endif %}
     <button class="btn btn-ghost btn-sm" onclick="reloadAll()">Refresh</button>
+    {% if user %}
     <a href="/dashboards" class="btn btn-ghost btn-sm">← Dashboards</a>
     {% endif %}
   </div>
@@ -338,6 +349,17 @@
 <div id="widgets-container"></div>
 {% endblock %}
 
+{# Signed out (/d/<slug>), base.html renders this block instead of `content`:
+   the same dashboard with no app chrome — and no .app-layout, so app.js
+   starts no session watchdog. #}
+{% block auth_content %}
+{% if public %}
+<main class="main-content public-dash">
+{{ self.content() }}
+</main>
+{% endif %}
+{% endblock %}
+
 {% block scripts %}
 <script>
 const ASSET_TYPES = {{ asset_types | tojson }};
@@ -348,6 +370,9 @@ const CAN_EDIT    = {{ 'true' if (not public) and dash.user_id == user.id else '
 // endpoints are authorized by this dashboard's public slug instead.
 const PUBLIC_SLUG = '{{ dash.public_slug if (public and dash.public_slug) else "" }}';
 const SLUG_Q      = PUBLIC_SLUG ? ('&slug=' + encodeURIComponent(PUBLIC_SLUG)) : '';
+// Signed-out visitor (a document viewer gets the same page): show names and
+// asset links lead only to the sign-in page, so they render as plain text.
+const ANON        = {{ 'false' if user else 'true' }};
 
 /* Load widgets from config, backward-compatible with old single-layout dashboards */
 {% set raw_widgets = config.get('widgets') %}
@@ -655,7 +680,9 @@ function renderByCategory(data) {
 
 function renderByShow(data) {
   const byShow = data.by_show || [];
-  if (!byShow.length) return '<div style="padding:40px;text-align:center;color:var(--text-dim)">No shows with asset reservations in this date range.</div>';
+  if (!byShow.length) return '<div style="padding:40px;text-align:center;color:var(--text-dim)">' +
+    (ANON ? 'Assets by Show is not part of the public view.'
+          : 'No shows with asset reservations in this date range.') + '</div>';
   let html = '';
   for (const show of byShow) {
     html += `<div class="form-section" style="margin-bottom:16px">
@@ -898,22 +925,22 @@ function renderAssetCalendarMonth(data, year, month, idx) {
     const ds = `${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
     const isToday = ds === todayStr;
     const dayData = dayMap[ds];
-    const assetHref = `/assets?type_id=${data.type_id}`;
+    const go = ANON ? '' : ` onclick="location.href='/assets?type_id=${data.type_id}'" title="View asset"`;
     let chip = '';
     if (data.unlimited) {
-      chip = `<div class="ac-chip ac-inf" onclick="location.href='${assetHref}'" title="View asset">∞ avail</div>`;
+      chip = `<div class="ac-chip ac-inf"${go}>∞ avail</div>`;
     } else if (dayData !== undefined) {
       const avail = dayData.available;
       const rsv   = dayData.reserved || 0;
       const hasShows = rsv > 0 && (dayData.shows || []).length > 0;
       if (avail === null) {
-        chip = `<div class="ac-chip ac-inf" onclick="location.href='${assetHref}'" title="View asset">∞</div>`;
+        chip = `<div class="ac-chip ac-inf"${go}>∞</div>`;
       } else if (avail <= 0) {
-        chip = `<div class="ac-chip ac-none" onclick="location.href='${assetHref}'" title="View asset">FULL</div>`;
+        chip = `<div class="ac-chip ac-none"${go}>FULL</div>`;
       } else if (avail <= 2) {
-        chip = `<div class="ac-chip ac-warn" onclick="location.href='${assetHref}'" title="View asset">${avail} left</div>`;
+        chip = `<div class="ac-chip ac-warn"${go}>${avail} left</div>`;
       } else {
-        chip = `<div class="ac-chip ac-ok" onclick="location.href='${assetHref}'" title="View asset">${avail} avail</div>`;
+        chip = `<div class="ac-chip ac-ok"${go}>${avail} avail</div>`;
       }
       if (rsv > 0) {
         const rsvClick = hasShows ? ` onclick="openDayPopup(${idx},'${ds}')" title="Show reserved"` : '';
@@ -928,7 +955,7 @@ function renderAssetCalendarMonth(data, year, month, idx) {
   for (let i = lastDow + 1; i < 7; i++) html += '<div class="dash-cal-cell other-month"></div>';
   html += '</div>';
   html += `<div style="margin-top:8px;display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--text-dim)">
-    <span><span style="display:inline-block;width:24px;height:11px;border-radius:2px;background:rgba(34,197,94,.2);vertical-align:middle;margin-right:4px"></span>Available (click → Assets)</span>
+    <span><span style="display:inline-block;width:24px;height:11px;border-radius:2px;background:rgba(34,197,94,.2);vertical-align:middle;margin-right:4px"></span>Available${ANON ? '' : ' (click → Assets)'}</span>
     <span><span style="display:inline-block;width:24px;height:11px;border-radius:2px;background:rgba(251,191,36,.2);vertical-align:middle;margin-right:4px"></span>Low (≤2)</span>
     <span><span style="display:inline-block;width:24px;height:11px;border-radius:2px;background:rgba(239,68,68,.15);vertical-align:middle;margin-right:4px"></span>Full/over</span>
     <span><span style="display:inline-block;width:24px;height:11px;border-radius:2px;background:rgba(148,163,184,.12);vertical-align:middle;margin-right:4px"></span>Reserved (click → shows)</span>
@@ -965,8 +992,8 @@ function openDayPopup(idx, dateStr) {
     shows.forEach(s => {
       const row = document.createElement('div');
       row.style.cssText = 'margin-bottom:8px;padding:8px 10px;background:var(--bg-hover);border-radius:4px;display:flex;justify-content:space-between;align-items:center';
-      const link = document.createElement('a');
-      link.href = '/shows/' + s.id;
+      const link = document.createElement(ANON ? 'span' : 'a');
+      if (!ANON) link.href = '/shows/' + s.id;
       link.style.cssText = 'font-size:12px;font-weight:600;color:var(--accent);text-decoration:none';
       link.textContent = s.name;
       link.addEventListener('click', () => overlay.remove());
@@ -1312,9 +1339,10 @@ function drawTimeline(idx) {
         const top   = PAD + p.lane * LANE_H;
         const color = tlColor(p.r.show_id);
         const tip = `${p.r.show_name} — qty ${p.r.quantity}${p.r.unit ? ' · unit ' + p.r.unit : ''} · ${p.r.start} → ${p.r.end}`;
-        html += `<a class="tl-bar" href="/shows/${p.r.show_id}" title="${escHtml(tip)}"
-          style="left:${left}px;width:${width}px;top:${top}px;background:${color}">`
-          + `${escHtml(p.r.show_name)} <span class="tl-qty">${p.r.unit ? escHtml(p.r.unit) : '×' + p.r.quantity}</span></a>`;
+        const tag = ANON ? 'span' : 'a';
+        html += `<${tag} class="tl-bar"${ANON ? '' : ` href="/shows/${p.r.show_id}"`} title="${escHtml(tip)}"
+          style="left:${left}px;width:${width}px;top:${top}px;background:${color}${ANON ? ';cursor:default' : ''}">`
+          + `${escHtml(p.r.show_name)} <span class="tl-qty">${p.r.unit ? escHtml(p.r.unit) : '×' + p.r.quantity}</span></${tag}>`;
       }
       html += '</div></div>';
     }
@@ -1325,7 +1353,7 @@ function drawTimeline(idx) {
         + 'Each bar is one reservation (show × quantity) spanning its rental window. '
         + 'Bars stack when reservations overlap. Scroll horizontally to move through time — '
         + 'the date range above follows the view and loads more dates at each edge. '
-        + 'Zoom with the controls; click a bar to open the show.'
+        + 'Zoom with the controls' + (ANON ? '.' : '; click a bar to open the show.')
         + (todayX !== null ? ' The accent line marks today.' : '')
         + '</div>';
   contentEl.innerHTML = html;
@@ -1373,6 +1401,7 @@ async function removeWidget(idx) {
 }
 
 async function saveWidgets() {
+  if (!CAN_EDIT) return;   // owner only; a public / shared view changes nothing
   await fetch(`/dashboards/${DASH_ID}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

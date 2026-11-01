@@ -30,6 +30,8 @@ html.mobile-view .main-content {
   width: 100%;
   padding: 14px 12px calc(84px + env(safe-area-inset-bottom));
 }
+/* Signed-out public dashboard (/d/<slug>): no tab bar to clear. */
+html.mobile-view .main-content.public-dash { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
 
 /* ── Top header ──────────────────────────────────────────────────────────── */
 html.mobile-view .m-header {

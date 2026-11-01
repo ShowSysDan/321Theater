@@ -51,7 +51,7 @@ AUDIENCE_LABELS = {
 # sidebar short. Don't re-add them here without being asked.
 NAV_CATALOG = [
     {'key': 'dashboards', 'label': 'Dashboards', 'endpoint': 'dashboards_list',
-     'active': ('dashboards_list', 'dashboard_view'), 'audience': 'all',
+     'active': ('dashboards_list', 'dashboard_view', 'public_dashboard'), 'audience': 'all',
      'icon': '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>'},
     {'key': 'crew_tracker', 'label': 'Skill Tracker', 'endpoint': 'crew_tracker',
      'active': ('crew_tracker',), 'audience': 'all',
