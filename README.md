@@ -611,7 +611,7 @@ Access via **SYSTEM → Dashboards** (`/dashboards`). Build personal or public b
 
 ### Piano Tuning
 
-An optional module (Settings → System → Modules, on by default). PMs request tunings from the show page; the **Piano Tuning manager** (admins, plus users with the Piano Tuning Manager permission) works them from **SYSTEM → Piano Tuning** (`/piano-tuning`).
+An optional module (Settings → Modules, on by default). PMs request tunings from the show page; the **Piano Tuning manager** (admins, plus users with the Piano Tuning Manager permission) works them from **SYSTEM → Piano Tuning** (`/piano-tuning`).
 
 **Requesting (PMs):** the *Piano Tuning* panel sits wherever the `piano_tuning` field is placed on the advance form. **+ Request Tuning** asks for the piano (model, and optionally the exact unit / S/N), the date and time it's needed, and notes. If the model isn't on the show's Assets tab yet, sending the request books it there first, pinned to the chosen S/N when that item allows unit selection. It goes through the normal availability check, pricing and asset approval.
 
@@ -660,7 +660,7 @@ A discussion thread on each show (the **Comments** tab, with a count badge), old
 | Email (Advance / Schedule / Post-Show cards) | Generates the PDF and emails it to the recipients set for that document in Settings → Contacts (filtered by venue and by Show / Event mode) |
 | Final Invoice PDF | Generates the post-show billing invoice (internal & external assets + actual labor + costs). Also available on the Post Show tab. Until the show's labor is settled (Post Show → **Settle Now**) it bills no labor, says "Labor not settled yet", and the card shows a warning. To bill several shows on one invoice, use Combined Invoice in the sidebar (under Settings) — its show list tags unsettled shows **NOT SETTLED** |
 | Generate Pre-Show Estimate | Generates a combined **labor + asset estimate/quote** PDF — the client-facing counterpart to the Final Invoice, produced before anything is scheduled. Labor uses position special rates or the highest standard tech rate; assets use reserved quantities and locked prices |
-| Security Sign-In Sheet | **Export PDF** prints the sign-in sheet PDF for the security desk; **Edit Names** opens the show's **Sign-In Sheet** tab (see [Security Sign-In Sheet](#security-sign-in-sheet)). Card and tab only appear while the module is enabled in Settings → System → Modules |
+| Security Sign-In Sheet | **Export PDF** prints the sign-in sheet PDF for the security desk; **Edit Names** opens the show's **Sign-In Sheet** tab (see [Security Sign-In Sheet](#security-sign-in-sheet)). Card and tab only appear while the module is enabled in Settings → Modules |
 | ↓ Download (history) | Re-downloads a previously generated PDF |
 
 **Versions:** exporting again when nothing has changed hands back the same stored PDF and version number; any change to what the PDF would show makes the next version. The tab's **vN** badge shows the highest Advance / Schedule version.
