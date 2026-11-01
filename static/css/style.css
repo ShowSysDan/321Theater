@@ -3017,3 +3017,25 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 .tl-tip-flag { margin-top: 2px; font-size: 11.5px; color: var(--text-dim); font-style: italic; }
 .tl-tip-hint { margin-top: 6px; font-size: 11px; color: var(--text-muted); }
 @media (prefers-reduced-motion: reduce) { .tl-item { transition: none; } }
+
+/* ── Narrow desktop (≤900px) header bleed (3.35.1) ─────────────────────────
+   The header bar bleeds sideways by the column's side padding (see "Frosted
+   page header" above: margin 0 -48px, padding 24px 48px). At ≤900px the
+   column padding drops to 16px, so the 48px bleed overflowed the column by
+   32px and every page scrolled sideways in desktop mode on an iPad in
+   portrait or a narrow window. Keep the bleed equal to the column padding.
+   Phones (html.mobile-view) have their own bleed in mobile.css. */
+@media (max-width: 900px) {
+  html:not(.mobile-view) .phead,
+  html:not(.mobile-view) .page-header {
+    margin-left: -16px; margin-right: -16px;
+    padding-left: 16px; padding-right: 16px;
+  }
+}
+
+/* ── Read-only accounts (3.35.1) ───────────────────────────────────────────
+   html.readonly-view is set by base.html when the account can read but every
+   write is refused (inject_version's readonly_view). Write controls on pages
+   a read-only account can open carry .rv-hide. Display only — the server's
+   _readonly_guard is the authority. */
+html.readonly-view .rv-hide { display: none !important; }

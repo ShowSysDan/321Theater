@@ -5,7 +5,7 @@
 #}
 <!DOCTYPE html>
 {% set _tpref = (user.theme if user and user.theme in ('dark', 'light', 'auto') else ('auto' if not user or not user.theme else 'dark')) %}
-<html lang="en" data-theme="{{ _tpref if _tpref != 'auto' else 'dark' }}" data-theme-pref="{{ _tpref }}"{% if is_mobile_view or test_mode %} class="{{ 'mobile-view' if is_mobile_view }}{{ ' test-mode' if test_mode }}"{% endif %}>
+<html lang="en" data-theme="{{ _tpref if _tpref != 'auto' else 'dark' }}" data-theme-pref="{{ _tpref }}"{% if is_mobile_view or test_mode or readonly_view %} class="{{ 'mobile-view' if is_mobile_view }}{{ ' test-mode' if test_mode }}{{ ' readonly-view' if readonly_view }}"{% endif %}>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
@@ -35,7 +35,10 @@
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
            String(d.getDate()).padStart(2, '0');
   };
-  window.localTodayIso = function () { return localIsoDate(new Date()); };</script>
+  window.localTodayIso = function () { return localIsoDate(new Date()); };
+  // Read-only account (inject_version's readonly_view = _readonly_guard's
+  // rule): pages hide their write controls when true. Display only.
+  window.READONLY_VIEW = {{ 'true' if readonly_view else 'false' }};</script>
   {% if user %}
   {# Hover preloading (Speculation Rules, Chromium): when a link is hovered the
      browser prefetches the page in the background so the click renders almost

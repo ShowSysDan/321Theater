@@ -528,8 +528,16 @@ def inject_version():
     # guard: a page served from the browser's prefetch cache compares this
     # stamp against a fresh response's Date header — same clock on both sides,
     # so client clock skew can't cause false reloads (see base.html + app.js).
+    # readonly_view: the account can read but every write is refused — the
+    # exact rule of _readonly_guard (read-only flag, admins never read-only).
+    # Pages use it (Jinja `readonly_view`, JS window.READONLY_VIEW, CSS
+    # html.readonly-view) to hide write controls; it is display only, the
+    # server checks stay the authority.
+    readonly_view = bool(has_request_context() and session.get('user_id')
+                         and session.get('is_readonly')
+                         and session.get('user_role') != 'admin')
     return {'app_version': APP_VERSION, 'page_rendered_at': int(time.time()),
-            'test_mode': TEST_MODE}
+            'test_mode': TEST_MODE, 'readonly_view': readonly_view}
 
 
 # ── Mobile view mode ──────────────────────────────────────────────────────────

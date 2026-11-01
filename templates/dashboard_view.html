@@ -311,11 +311,7 @@
       header tint to both window edges. ─────────────────────────────── */
 .public-dash { margin: 0 auto; }
 .public-dash .page-header { border-image-outset: 0 100vw 12px 100vw; }
-/* ≤900px the column's side padding drops to 16px (style.css); the header
-   bar's bleed must match it or the page scrolls sideways (iPad portrait). */
-@media (max-width: 900px) {
-  html:not(.mobile-view) .public-dash .page-header { margin-left: -16px; margin-right: -16px; padding-left: 16px; padding-right: 16px; }
-}
+/* The ≤900px header bleed is handled app-wide in style.css (3.35.1). */
 </style>
 {% endblock %}
 
