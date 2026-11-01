@@ -21792,6 +21792,80 @@ def asset_type_availability(type_id):
     return jsonify(result)
 
 
+@app.route('/api/asset-types/<int:type_id>/components')
+@login_required
+def asset_type_components(type_id):
+    """What's inside a System / Package, for the show page's Add Asset
+    browser detail pane (3.35.0). Any signed-in user may call it (the picker
+    is PM-facing; /settings/asset-types/<id>/members is manager-only), so it
+    returns ONLY picker-level data: component id / name / manufacturer /
+    model / category and the per-kit quantity — never units, purchase,
+    depreciation or supplier data.
+
+    Components flagged hide_from_pm ARE listed: they rent as part of the kit
+    and the add is checked against their stock, so the PM should see what's
+    in the box (the browser lists them as plain text, not links). A kit that
+    is itself hidden from the picker or retired is 404 to non-managers, the
+    same visibility /api/asset-types applies.
+
+    With ?start=&end= (ISO dates) every component carries `available` for
+    that window (None when it can't run short) and `sets_available` is how
+    many of the kit those components cover — the arithmetic
+    _system_component_shortages() blocks an add on. A non-kit type returns
+    an empty list."""
+    is_manager = (
+        session.get('user_role') == 'admin'
+        or session.get('is_content_admin')
+        or session.get('is_asset_manager')
+    )
+
+    def _iso_arg(name):
+        v = (request.args.get(name) or '').strip()[:10]
+        try:
+            return date.fromisoformat(v).isoformat() if v else None
+        except ValueError:
+            return None
+    start, end = _iso_arg('start'), _iso_arg('end')
+    if not (start and end and start <= end):
+        start = end = None
+
+    db = get_db()
+    try:
+        kit = db.execute(
+            'SELECT id, is_system, is_package, is_retired, hide_from_pm '
+            'FROM asset_types WHERE id = %s', (type_id,)).fetchone()
+        if not kit or ((kit['is_retired'] or kit['hide_from_pm']) and not is_manager):
+            abort(404)
+        if not (kit['is_system'] or kit['is_package']):
+            return jsonify({'components': [], 'sets_available': None,
+                            'window': None})
+        rows = db.execute("""
+            SELECT at.id, at.name, at.manufacturer, at.model,
+                   ac.name AS category_name, COALESCE(m.quantity, 1) AS quantity
+            FROM asset_type_system_members m
+            JOIN asset_types at ON at.id = m.component_type_id
+            JOIN asset_categories ac ON ac.id = at.category_id
+            WHERE m.system_type_id = %s
+            ORDER BY m.sort_order, at.name
+        """, (type_id,)).fetchall()
+        comps = [dict(r) for r in rows]
+        sets = None
+        if start and comps:
+            avail = _get_asset_availability_many(
+                db, [c['id'] for c in comps], start, end)
+            for c in comps:
+                av = avail.get(c['id']) or {}
+                limited = not av.get('unlimited') and av.get('available') is not None
+                c['available'] = max(0, av['available']) if limited else None
+                if limited:
+                    can = max(0, av['available']) // max(1, c['quantity'])
+                    sets = can if sets is None else min(sets, can)
+    finally:
+        db.close()
+    return jsonify({'components': comps, 'sets_available': sets,
+                    'window': {'start': start, 'end': end} if start else None})
+
+
 @app.route('/api/assets/availability')
 def assets_availability_bulk():
     """Return availability summary for all asset types, plus by-show data.

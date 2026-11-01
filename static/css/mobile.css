@@ -321,3 +321,49 @@ html.mobile-view .oh-summary-table th, html.mobile-view .oh-summary-table td { w
    instead of running past the card's clipped edge. */
 html.mobile-view .sched-day-header { flex-wrap: wrap; row-gap: 8px; }
 html.mobile-view .sched-day-header .sched-day-notes { flex: 1 1 100%; min-width: 0; }
+
+/* Add Asset browser (3.35.0): one pane at a time — categories, groups,
+   items, details (or search results) — under a breadcrumb with a back
+   button. #ab-browser[data-pane] picks the pane; search stays on top. */
+html.mobile-view .ab-card {
+  width: calc(100vw - 16px) !important; max-width: calc(100vw - 16px) !important;
+  height: 88dvh; max-height: 88dvh !important; min-height: 0;
+  margin: 0 8px; overflow: hidden !important;
+}
+html.mobile-view .ab-header { flex-wrap: wrap; row-gap: 2px; padding: 12px 14px; }
+html.mobile-view .ab-window { order: 3; flex: 1 1 100%; margin-left: 0; }
+html.mobile-view .ab-searchbar { padding: 10px 12px; }
+html.mobile-view .ab-hint { display: none; }
+html.mobile-view .ab-crumbs {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0; min-height: 46px; padding: 4px 12px;
+  border-bottom: 1px solid var(--border); overflow-x: auto; white-space: nowrap; font-size: 13px;
+  -webkit-overflow-scrolling: touch;
+}
+html.mobile-view .ab-back {
+  flex-shrink: 0; min-width: 44px; min-height: 36px; padding: 0 12px; border: 1px solid var(--border-light);
+  border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: 14px; font-weight: 600;
+}
+html.mobile-view .ab-crumb {
+  flex-shrink: 0; min-height: 36px; padding: 0 2px; border: 0; background: none; font: inherit;
+  color: var(--orange-text, var(--accent));
+}
+html.mobile-view .ab-crumb-sep { color: var(--text-muted); }
+html.mobile-view .ab-crumb-cur { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+html.mobile-view .ab-browser .ab-col { display: none; flex: 1 1 auto; width: 100%; min-width: 0; border-right: 0; }
+html.mobile-view .ab-browser[data-pane="cats"] .ab-col-cats,
+html.mobile-view .ab-browser[data-pane="groups"] .ab-col-groups,
+html.mobile-view .ab-browser[data-pane="types"] .ab-col-types,
+html.mobile-view .ab-browser[data-pane="results"] .ab-col-results,
+html.mobile-view .ab-browser[data-pane="detail"] .ab-col-detail { display: flex; }
+html.mobile-view .ab-col-hdr { display: none; }
+html.mobile-view .ab-row { min-height: 52px; padding: 10px 14px; font-size: 15px; }
+html.mobile-view .ab-row-path, html.mobile-view .ab-row-sub { font-size: 12px; }
+html.mobile-view .ab-thumb { width: 40px; height: 40px; }
+html.mobile-view .ab-add-btn { visibility: visible; width: 44px; height: 44px; font-size: 20px; }
+html.mobile-view .ab-photo { width: 80px; height: 80px; }
+html.mobile-view .ab-hero { padding: 14px 14px 10px; }
+html.mobile-view .ab-section { margin: 10px 12px 0; }
+html.mobile-view .ab-facts { padding: 0 14px 4px; font-size: 14px; }
+html.mobile-view .ab-link { min-height: 32px; }
+html.mobile-view .ab-d-actions { padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
+html.mobile-view .ab-d-actions .btn { flex: 1 1 auto; min-height: 46px; justify-content: center; text-align: center; }
