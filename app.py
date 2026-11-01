@@ -5501,7 +5501,7 @@ def _render_login():
 
 def _login_route():
     if 'user_id' in session:
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
 
     if request.method == 'POST':
         username = request.form.get('username', '').strip()
@@ -5539,7 +5539,7 @@ def _login_route():
             # (if any) becomes orphaned; the leader-gated run_hourly_maintenance
             # job sweeps expired app_sessions rows (this per-sid path only
             # deletes a row when that same sid is presented again).
-            next_url = request.form.get('next') or url_for('dashboard')
+            next_url = request.form.get('next') or url_for('index')
             session.clear()
             try:
                 session.sid = _secrets_mod.token_urlsafe(32)
@@ -5554,7 +5554,7 @@ def _login_route():
             syslog_logger.info(
                 f"LOGIN user={username} ip={request.remote_addr} via={_cpath}")
             # Prevent open redirect — only allow relative paths
-            next_url = _safe_local_path(next_url) or url_for('dashboard')
+            next_url = _safe_local_path(next_url) or url_for('index')
             # Force password change if still using default
             try:
                 _must_change = user['must_change_password']
@@ -6127,7 +6127,7 @@ def admin_view_as_reset():
 def force_change_password():
     """Force password change screen (shown after login when must_change_password is set)."""
     if not session.get('must_change_password'):
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     # user=None on purpose: the template fills base.html's auth_content
     # block (login-card layout), which base only renders when `user` is
     # falsy. Passing the real user selects the app-layout branch instead,
@@ -6151,7 +6151,7 @@ def force_change_password():
         session.pop('must_change_password', None)
         syslog_logger.info(f"FORCED_PASSWORD_CHANGE user_id={session['user_id']}")
         flash('Password changed successfully.', 'success')
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     return render_template('force_change_password.html', user=None)
 
 
@@ -6164,18 +6164,36 @@ def _enforce_password_change():
             return redirect(url_for('force_change_password'))
 
 
-# ─── Dashboard ────────────────────────────────────────────────────────────────
+# ─── Home (day timeline) + Shows board ───────────────────────────────────────
+# 3.35.0: '/' is the Home day timeline (home.html + static/js/home_timeline.js,
+# data from /api/timeline); the show board moved to '/shows' and keeps its
+# endpoint name 'dashboard', so every "back to the board" link still works.
 
 @app.route('/')
 @login_required
 def index():
-    return redirect(url_for('dashboard'))
+    """Home: everything happening on one day — every show/event's production
+    schedule and crew shifts side by side on one time axis. The page itself
+    is a shell; home_timeline.js loads the day from /api/timeline (the
+    BROWSER's today unless ?date= is given)."""
+    auto_archive_past_shows()     # the board did this on every Home view
+    day = _tl_parse_date(request.args.get('date'))
+    return render_template('home.html', user=get_current_user(),
+                           initial_date=day.isoformat() if day else '')
+
+
+@app.route('/shows')
+@login_required
+def dashboard():
+    """The show board (Home until 3.35.0)."""
+    return _render_show_board(mine=False)
 
 
 @app.route('/dashboard')
 @login_required
-def dashboard():
-    return _render_show_board(mine=False)
+def dashboard_legacy():
+    """The board's pre-3.35.0 URL — kept for bookmarks."""
+    return redirect(url_for('dashboard'))
 
 
 def _my_pm_names(db, user_id):
@@ -6222,8 +6240,9 @@ def my_shows():
 
 
 def _render_show_board(mine=False):
-    """Home dashboard; mine=True is the My Shows view — the same board
-    narrowed to the active shows I PM or cover (no archive section)."""
+    """The Shows board (/shows — Home until 3.35.0); mine=True is the My
+    Shows view — the same board narrowed to the active shows I PM or cover
+    (no archive count)."""
     auto_archive_past_shows()
     accessible = get_accessible_shows(session['user_id'])
     db = get_db()
@@ -6245,18 +6264,9 @@ def _render_show_board(mine=False):
             WHERE s.status = 'active'
             ORDER BY {_eff_date} ASC NULLS LAST
         """).fetchall()
-        # No LIMIT: the dashboard search is client-side over rendered cards, so
-        # every archived show must be present or it's unfindable. (A LIMIT here
-        # also interacted badly with PG's DESC NULLS FIRST default — undated
-        # shows crowded dated ones out of the window.)
-        archived = db.execute(f"""
-            SELECT s.*, u.display_name as creator,
-              (SELECT COUNT(*) FROM show_performances WHERE show_id=s.id) as perf_count,
-              {_eff_date} as show_date
-            FROM shows s LEFT JOIN users u ON s.created_by = u.id
-            WHERE s.status = 'archived'
-            ORDER BY {_eff_date} DESC NULLS LAST
-        """).fetchall()
+        # Archived shows live on /shows/archived; the board only counts them.
+        archived_count = db.execute(
+            "SELECT COUNT(*) AS n FROM shows WHERE status = 'archived'").fetchone()['n']
     else:
         if accessible:
             placeholders = ','.join(['%s'] * len(accessible))
@@ -6268,17 +6278,12 @@ def _render_show_board(mine=False):
                 WHERE s.status = 'active' AND s.id IN ({placeholders})
                 ORDER BY {_eff_date} ASC NULLS LAST
             """, accessible).fetchall()
-            archived = db.execute(f"""
-                SELECT s.*, u.display_name as creator,
-                  (SELECT COUNT(*) FROM show_performances WHERE show_id=s.id) as perf_count,
-                  {_eff_date} as show_date
-                FROM shows s LEFT JOIN users u ON s.created_by = u.id
-                WHERE s.status = 'archived' AND s.id IN ({placeholders})
-                ORDER BY {_eff_date} DESC NULLS LAST
-            """, accessible).fetchall()
+            archived_count = db.execute(
+                f"SELECT COUNT(*) AS n FROM shows WHERE status = 'archived' "
+                f"AND id IN ({placeholders})", accessible).fetchone()['n']
         else:
             active = []
-            archived = []
+            archived_count = 0
 
     # Attach full performance list per show (for multi-date display on card)
     def _norm_date(v):
@@ -6314,10 +6319,10 @@ def _render_show_board(mine=False):
             out.append(d)
         return out
 
-    # Archived shows live on their own page (/shows/archived, 3.12.1); Home
-    # only shows how many there are on the "Archived" button.
-    archived_count = 0 if mine else len(archived)
-    archived = []
+    # Archived shows live on their own page (/shows/archived, 3.12.1); the
+    # board only shows how many there are on the "Archived" tab.
+    if mine:
+        archived_count = 0
     active = _attach_perfs(active)
 
     # PAST badge (3.6.0): an active show whose last date has gone by stays on
@@ -6336,26 +6341,26 @@ def _render_show_board(mine=False):
         on = _show_archive_on(last, s.get('restored_on'), _grace) if s['is_past'] else None
         s['archives_on_label'] = f"{on.strftime('%a %b')} {on.day}" if on else ''
 
-    # ── "Happening Today" — shows where today falls in load-in/out, matches the
-    # show date, or matches any performance date. For each, surface the venue,
-    # production manager (from advance_data), and today's crew call times.
+    # ── "Happening Today" — shows whose schedule span (load-in → load-out ∪
+    # performance dates, _schedule_span_dates — so a show with only a load-in
+    # date counts too) or effective show date includes today. For each,
+    # surface the venue, today's PM (the covering PM when one is set for
+    # today, else the show's PM — _pm_contacts_many) and today's crew calls.
     today_iso = date.today().isoformat()
-    today_show_ids = {s['id'] for s in active
-                      if (s.get('show_date') == today_iso)
-                      or (s.get('load_in_date') and s.get('load_out_date')
-                          and s['load_in_date'] <= today_iso <= s['load_out_date'])
-                      or any((p.get('perf_date') == today_iso) for p in s.get('performances') or [])}
+
+    def _on_today(s):
+        if s.get('show_date') == today_iso:
+            return True
+        return today_iso in _schedule_span_dates(
+            s.get('load_in_date'), s.get('load_out_date'),
+            [p.get('perf_date') for p in s.get('performances') or []])
+    today_show_ids = {s['id'] for s in active if _on_today(s)}
 
     today_shows = []
     if today_show_ids:
         ids_ph = ','.join(['%s'] * len(today_show_ids))
         ids_params = list(today_show_ids)
-        pm_rows = db.execute(
-            f"SELECT show_id, field_value FROM advance_data "
-            f"WHERE field_key='production_manager' AND show_id IN ({ids_ph})",
-            ids_params,
-        ).fetchall()
-        pm_by_show = {r['show_id']: (r['field_value'] or '').strip() for r in pm_rows}
+        pm_cards = _pm_contacts_many(db, ids_params, [today_iso])
 
         # Crew call times = unique in_times from labor_requests scheduled for
         # today (work_date) or for shows whose show_date is today when
@@ -6386,10 +6391,9 @@ def _render_show_board(mine=False):
                 tags.append('Load-In')
             elif s.get('load_out_date') == today_iso:
                 tags.append('Load-Out')
-            elif (s.get('load_in_date') and s.get('load_out_date')
-                  and s['load_in_date'] < today_iso < s['load_out_date']
-                  and not tags):
-                tags.append('In Production')
+            elif not tags:
+                tags.append('In Production')    # a day inside the span
+            pm_card = (pm_cards.get(s['id']) or {}).get('days', {}).get(today_iso)
 
             today_shows.append({
                 'id': s['id'],
@@ -6398,7 +6402,8 @@ def _render_show_board(mine=False):
                 'is_test': s.get('is_test') or 0,
                 'show_mode': s.get('show_mode') or 'show',
                 'prism_status': s.get('prism_status'),
-                'pm': pm_by_show.get(s['id'], ''),
+                'pm': pm_card['name'] if pm_card else '',
+                'pm_is_cover': bool(pm_card and pm_card['is_cover']),
                 'crew_calls': sorted(calls_by_show.get(s['id'], set())),
                 'perf_times': [p.get('perf_time') for p in todays_perfs if p.get('perf_time')],
                 'tags': tags or ['Today'],
@@ -6440,7 +6445,6 @@ def _render_show_board(mine=False):
 
     return render_template('dashboard.html',
                            active_shows=active,
-                           archived_shows=archived,
                            venue_groups=venue_groups,
                            today_shows=today_shows,
                            today_iso=today_iso,
@@ -6462,6 +6466,388 @@ def _long_day_label(d):
     """'Thursday, October 1' — English names on purpose (strftime %A/%B are
     locale-bound, same reason the syslog header avoids %b)."""
     return f'{_EN_DAYS[d.weekday()]}, {_EN_MONTHS[d.month - 1]} {d.day}'
+
+
+# ─── Home day timeline data (3.35.0) ─────────────────────────────────────────
+# GET /api/timeline?date=YYYY-MM-DD feeds the Home page (home.html +
+# static/js/home_timeline.js): every show/event happening on the day, side by
+# side on one time axis — its production schedule rows (grouped exactly as
+# the Schedule tab groups them) and its crew shifts — plus one lane for
+# Overhead & Project Crew. Every time is MINUTES FROM THE DAY'S MIDNIGHT:
+# next-day schedule times ('1+00:30', '24:30') and overnight shifts (out ≤
+# in) run past 1440, and the previous day's items that are still running
+# after midnight come along clipped to start at 0 (`from_prev`). `t_start` /
+# `t_end` keep the true (unclipped) times and the labels print them, with
+# the date in front when they're not on the viewed day ('11/2 01:30').
+
+_TL_DATE_MIN = date(2000, 1, 1)
+_TL_DATE_MAX = date(2100, 12, 31)
+_TL_POINT_MIN = 30          # a schedule row with no end time: 30 min…
+_TL_POINT_MAX_GAP = 180     # …or up to the next row's start when that's ≤ 3 h
+_TL_OPEN_SHIFT_MIN = 60     # a shift with an in time but no out time
+_TL_AMPM_RE = re.compile(r'^(\d{1,2})(?::?(\d{2}))?\s*([aApP])\.?\s*[mM]?\.?$')
+_TL_HEX_RE = re.compile(r'^#[0-9a-fA-F]{3,8}$')
+
+
+def _tl_parse_date(raw):
+    """A ?date= value as a date, or None (missing, malformed, out of range)."""
+    s = str(raw or '').strip()
+    if len(s) != 10:
+        return None
+    try:
+        d = date.fromisoformat(s)
+    except ValueError:
+        return None
+    return d if _TL_DATE_MIN <= d <= _TL_DATE_MAX else None
+
+
+def _tl_minutes(value):
+    """Minutes from the day's midnight for a schedule or labor time — '19:30',
+    '1930', '7:30 pm', next-day '1+00:30' / '24:30' (+1440 per day). None when
+    it isn't a time (free text such as 'TBD' or 'After show')."""
+    off, t = _sched_time_offset(value)
+    s = str(t or '').strip()
+    if not s or len(s) > 12:
+        return None
+    p = _parse_24h_time(s)
+    if p is None:
+        m = _TL_AMPM_RE.match(s)
+        if not m:
+            return None
+        h, mi = int(m.group(1)), int(m.group(2) or 0)
+        if not (1 <= h <= 12 and mi < 60):
+            return None
+        p = (h % 12 + (12 if m.group(3) in 'pP' else 0), mi)
+    return off * 1440 + p[0] * 60 + p[1]
+
+
+def _tl_label(minutes, day):
+    """'19:30' for a time on `day`; '11/2 01:30' (the schedtime filter's
+    next-day form) for one before or after it."""
+    d_off, rem = divmod(int(minutes), 1440)
+    hm = hhmm_filter(f'{rem // 60:02d}:{rem % 60:02d}')
+    if not d_off:
+        return hm
+    nd = day + timedelta(days=d_off)
+    return f'{nd.month}/{nd.day} {hm}'
+
+
+def _tl_schedule_items(rows, day, shift):
+    """One editor day's schedule rows → (timed, untimed) timeline items on
+    the viewed `day`. `shift` is 0 for the day's own rows, -1440 for the
+    previous day's, which are kept only while they run past midnight."""
+    from bisect import bisect_right
+    parsed = [(r, _tl_minutes(r.get('start_time')), _tl_minutes(r.get('end_time')))
+              for r in rows]
+    starts = sorted({s for _, s, _ in parsed if s is not None})
+    timed, untimed = [], []
+    for r, s, e in parsed:
+        base = {'id': r['id'],
+                'desc': (r.get('description') or '').strip()[:300],
+                'notes': (r.get('notes') or '').strip()[:500],
+                'piano': bool(r.get('piano_tuning_id'))}
+        if s is None:
+            if shift == 0 and (base['desc'] or base['notes']
+                               or (r.get('start_time') or '').strip()):
+                untimed.append(dict(base,
+                                    start_text=str(r.get('start_time') or '').strip()[:40],
+                                    end_text=str(r.get('end_time') or '').strip()[:40]))
+            continue
+        point = False
+        if e is not None and e < s and e + 1440 > s:
+            e += 1440          # 22:00–01:00 without '1+': runs past midnight
+        if e is None or e <= s:
+            j = bisect_right(starts, s)          # first start after this one
+            nxt = starts[j] if j < len(starts) else None
+            e = nxt if nxt is not None and nxt - s <= _TL_POINT_MAX_GAP else s + _TL_POINT_MIN
+            point = True
+        ts, te = s + shift, e + shift
+        if te <= 0:
+            continue           # the previous day's row ended by midnight
+        timed.append(dict(base, start=max(ts, 0), end=te, t_start=ts, t_end=te,
+                          start_label=_tl_label(ts, day), end_label=_tl_label(te, day),
+                          point=point, from_prev=shift != 0, sort=r.get('sort_order') or 0))
+    timed.sort(key=lambda i: (i['start'], i['end'], i['sort'], i['id']))
+    for i in timed:
+        i.pop('sort', None)
+    return timed, untimed
+
+
+def _tl_shift_item(r, day, shift):
+    """A labor line (show or overhead) → a crew bar on the viewed `day`, or
+    None when it has no usable in time / doesn't reach that day. `shift` as
+    in _tl_schedule_items. Overnight = out ≤ in (the same rule as
+    _calc_hours); lunches after midnight move with it."""
+    i = _tl_minutes(r.get('in_time'))
+    if i is None or i >= 1440:
+        return None
+    o = _tl_minutes(r.get('out_time'))
+    open_end = o is None
+    if open_end:
+        o = i + _TL_OPEN_SHIFT_MIN
+    elif o <= i:
+        o += 1440
+    breaks = []
+    for bs_key, be_key in (('break_start', 'break_end'), ('break2_start', 'break2_end')):
+        bs, be = _tl_minutes(r.get(bs_key)), _tl_minutes(r.get(be_key))
+        if bs is None or be is None:
+            continue
+        if bs < i:
+            bs += 1440
+        if be <= bs:
+            be += 1440
+        bs, be = max(bs, i), min(be, o)
+        if be > bs:
+            breaks.append({'start': bs + shift, 'end': be + shift,
+                           'label': f'{_tl_label(bs + shift, day)}–{_tl_label(be + shift, day)}'})
+    ts, te = i + shift, o + shift
+    if te <= 0:
+        return None
+    sched = r.get('scheduled_tech') or ''
+    req = (r.get('requested_name') or '').strip()
+    tech = sched or req or 'Unfilled'
+    return {'id': r['id'],
+            'position': (r.get('position_name') or '').strip() or '—',
+            'tech': tech[:120],
+            'tech_state': 'scheduled' if sched else ('requested' if req else 'unfilled'),
+            'scheduled': bool(r.get('is_scheduled')),
+            'training': bool(r.get('is_training_shift')),
+            'start': max(ts, 0), 'end': te, 't_start': ts, 't_end': te,
+            'start_label': _tl_label(ts, day),
+            'end_label': '' if open_end else _tl_label(te, day),
+            'open_end': open_end, 'breaks': breaks, 'from_prev': shift != 0}
+
+
+def _tl_untimed_shift(r):
+    """A labor line with no usable in time, for the lane's 'no time' list."""
+    sched = r.get('scheduled_tech') or ''
+    req = (r.get('requested_name') or '').strip()
+    return {'id': r['id'],
+            'position': (r.get('position_name') or '').strip() or '—',
+            'tech': (sched or req or 'Unfilled')[:120],
+            'in_text': str(r.get('in_time') or '').strip()[:40],
+            'out_text': str(r.get('out_time') or '').strip()[:40]}
+
+
+def _timeline_day(db, day, include_test=False, accessible=None):
+    """The /api/timeline payload for one day (see the section comment)."""
+    d_iso = day.isoformat()
+    prev = day - timedelta(days=1)
+    p_iso = prev.isoformat()
+    where, params = [], [d_iso, p_iso, p_iso, d_iso, p_iso, d_iso]
+    if accessible is not None:
+        where.append('s.id = ANY(%s)')
+        params.append(list(accessible) or [0])
+    # Candidates for the day AND the day before (its after-midnight items):
+    # the date envelope (load-in / show date / performances ↔ load-out) is a
+    # cheap superset of the exact span checked below; schedule rows / labor
+    # on either day bring their show in too (labor: Labor Overview's rule —
+    # an archived show's labor only while it's scheduled).
+    shows = db.execute(f"""
+        SELECT s.id, s.name, s.venue, s.show_mode, s.is_test, s.prism_status,
+               s.status, s.show_date, s.load_in_date, s.load_out_date
+        FROM shows s
+        LEFT JOIN (SELECT show_id, MIN(perf_date) AS pmin, MAX(perf_date) AS pmax
+                   FROM show_performances WHERE perf_date IS NOT NULL
+                   GROUP BY show_id) pe ON pe.show_id = s.id
+        WHERE ((LEAST(s.load_in_date, pe.pmin, s.show_date) <= %s
+                AND GREATEST(s.load_out_date, pe.pmax, s.show_date) >= %s)
+               OR EXISTS (SELECT 1 FROM schedule_rows sr WHERE sr.show_id = s.id
+                          AND sr.day_date IN (%s, %s))
+               OR EXISTS (SELECT 1 FROM labor_requests lr WHERE lr.show_id = s.id
+                          AND COALESCE(lr.work_date, s.show_date) IN (%s, %s)
+                          AND (COALESCE(s.status, 'active') != 'archived'
+                               OR lr.is_scheduled = 1)))
+          {''.join(' AND ' + w for w in where)}
+        ORDER BY s.id
+    """, params).fetchall()
+    shows = [dict(r) for r in shows]
+    ids = [s['id'] for s in shows]
+
+    perfs_by, rows_by, legacy, labor_by, dark = {}, {}, set(), {}, set()
+    if ids:
+        for p in db.execute(
+                'SELECT id, show_id, perf_date, perf_time FROM show_performances '
+                'WHERE show_id = ANY(%s) ORDER BY show_id, '
+                'CASE WHEN perf_date IS NULL THEN 1 ELSE 0 END, perf_date, perf_time, id',
+                (ids,)).fetchall():
+            pd = _as_date(p['perf_date'])
+            perfs_by.setdefault(p['show_id'], []).append(
+                {'id': p['id'], 'perf_date': pd.isoformat() if pd else None,
+                 'perf_time': p['perf_time'] or ''})
+        for r in db.execute(
+                'SELECT id, show_id, perf_id, day_date, sort_order, start_time, '
+                'end_time, description, notes, piano_tuning_id FROM schedule_rows '
+                'WHERE show_id = ANY(%s) AND (day_date IN (%s, %s) OR day_date IS NULL) '
+                'ORDER BY show_id, sort_order, id', (ids, p_iso, d_iso)).fetchall():
+            r = dict(r)
+            rows_by.setdefault(r['show_id'], []).append(r)
+            if not r['day_date']:
+                legacy.add(r['show_id'])
+        for r in db.execute(f"""
+                SELECT lr.id, lr.show_id, COALESCE(lr.work_date, s.show_date) AS work_date,
+                       jp.name AS position_name, lr.in_time, lr.out_time,
+                       lr.break_start, lr.break_end, lr.break2_start, lr.break2_end,
+                       lr.is_scheduled, COALESCE(lr.is_training_shift, 0) AS is_training_shift,
+                       cm.name AS scheduled_tech, lr.requested_name
+                FROM labor_requests lr
+                JOIN shows s ON s.id = lr.show_id
+                LEFT JOIN job_positions jp ON jp.id = lr.position_id
+                LEFT JOIN crew_members cm ON cm.id = lr.scheduled_crew_member_id
+                WHERE lr.show_id = ANY(%s)
+                  AND (COALESCE(s.status, 'active') != 'archived' OR lr.is_scheduled = 1)
+                  AND COALESCE(lr.work_date, s.show_date) IN (%s, %s)
+                ORDER BY lr.sort_order, lr.id
+                """, (ids, p_iso, d_iso)).fetchall():
+            wd = _as_date(r['work_date'])
+            if wd:
+                labor_by.setdefault((r['show_id'], wd.isoformat()), []).append(dict(r))
+        dark = {r['show_id'] for r in db.execute(
+            "SELECT show_id FROM schedule_meta WHERE show_id = ANY(%s) "
+            "AND field_key = %s AND field_value = '1'",
+            (ids, DARK_DAY_PREFIX + d_iso)).fetchall()}
+
+    out_shows, test_hidden = [], 0
+    for s in shows:
+        sid = s['id']
+        perfs = perfs_by.get(sid, [])
+        span = _schedule_span_dates(s['load_in_date'], s['load_out_date'],
+                                    [p['perf_date'] for p in perfs])
+        eff = _as_date(s['show_date']) or next(
+            (_as_date(p['perf_date']) for p in perfs if p['perf_date']), None)
+        on_day = d_iso in span or (eff == day)
+
+        # Schedule rows by editor day — legacy rows (no day_date) need the
+        # editor's own day list to land where the Schedule tab shows them.
+        rows = rows_by.get(sid, [])
+        if sid in legacy:
+            _, sdays = _build_schedule_days(db, sid, s, include_orphans=True)
+            by_day = _schedule_rows_by_editor_day(rows, sdays)
+        else:
+            by_day = {}
+            for r in rows:
+                by_day.setdefault(_as_date(r['day_date']).isoformat()
+                                  if _as_date(r['day_date']) else '', []).append(r)
+            # The editor shows a piano row only on one of the show's days.
+            real = set(span) | {k for k, rs in by_day.items()
+                                if any(not x['piano_tuning_id'] for x in rs)}
+            by_day = {k: rs for k, rs in by_day.items() if k in real}
+        sched, untimed = _tl_schedule_items(by_day.get(d_iso, []), day, 0)
+        carry, _ = _tl_schedule_items(by_day.get(p_iso, []), day, -1440)
+
+        crew, crew_untimed = [], []
+        for r in labor_by.get((sid, d_iso), []):
+            it = _tl_shift_item(r, day, 0)
+            if it:
+                crew.append(it)
+            else:
+                crew_untimed.append(_tl_untimed_shift(r))
+        crew_carry = [it for it in (_tl_shift_item(r, day, -1440)
+                                    for r in labor_by.get((sid, p_iso), [])) if it]
+
+        if not (on_day or sched or untimed or carry or crew or crew_untimed or crew_carry):
+            continue
+        if s['is_test'] and not include_test:
+            test_hidden += 1
+            continue
+
+        dated = sorted(set(span))
+        undated = sum(1 for p in perfs if not p['perf_date'])
+        day_num = dated.index(d_iso) + 1 if d_iso in dated else None
+        perf_today = []
+        for p in perfs:
+            if p['perf_date'] == d_iso:
+                m = _tl_minutes(p['perf_time'])
+                perf_today.append({'label': (hhmm_filter(p['perf_time']) or '')[:40],
+                                   'minutes': m if m is not None and m < 1440 else None})
+        items = sorted(carry + sched, key=lambda i: (i['start'], i['end'], i['id']))
+        out_shows.append({
+            'id': sid, 'name': s['name'] or '—', 'venue': (s['venue'] or '').strip(),
+            'show_mode': s['show_mode'] or 'show', 'is_test': bool(s['is_test']),
+            'prism_status': s['prism_status'] or '', 'status': s['status'] or 'active',
+            'on_day': on_day, 'dark': sid in dark,
+            'day_num': day_num, 'day_total': len(dated) + undated if day_num else None,
+            'performances': perf_today,
+            'schedule': items, 'schedule_untimed': untimed,
+            'crew': sorted(crew_carry + crew, key=lambda i: (i['start'], i['end'], i['id'])),
+            'crew_untimed': crew_untimed,
+            'pm': None,
+        })
+
+    if out_shows:
+        cards = _pm_contacts_many(db, [s['id'] for s in out_shows], [d_iso])
+        for s in out_shows:
+            c = (cards.get(s['id']) or {}).get('days', {}).get(d_iso)
+            if c:
+                s['pm'] = {'name': c['name'], 'title': c['title'], 'phone': c['phone'],
+                           'email': c['email'], 'is_cover': c['is_cover']}
+
+    # Overhead & Project Crew — one lane of its own.
+    oh_crew, oh_untimed, projects = [], [], {}
+    for r in db.execute("""
+            SELECT r.id, r.work_date, g.id AS group_id,
+                   COALESCE(p.name, g.name, 'General') AS project_name,
+                   p.color AS project_color, jp.name AS position_name,
+                   r.in_time, r.out_time, r.break_start, r.break_end,
+                   r.break2_start, r.break2_end, r.is_scheduled,
+                   COALESCE(r.is_training_shift, 0) AS is_training_shift,
+                   cm.name AS scheduled_tech, r.requested_name
+            FROM overhead_labor_requests r
+            JOIN overhead_labor_groups g ON g.id = r.group_id
+            LEFT JOIN overhead_projects p ON p.id = g.project_id
+            LEFT JOIN job_positions jp ON jp.id = r.position_id
+            LEFT JOIN crew_members cm ON cm.id = r.scheduled_crew_member_id
+            WHERE r.work_date IN (%s, %s)
+            ORDER BY r.work_date, project_name, r.sort_order, r.id
+            """, (p_iso, d_iso)).fetchall():
+        r = dict(r)
+        wd = _as_date(r['work_date'])
+        is_prev = bool(wd and wd < day)
+        color = (r['project_color'] or '').strip()
+        color = color if _TL_HEX_RE.match(color) else ''
+        it = _tl_shift_item(r, day, -1440 if is_prev else 0)
+        extra = {'project': (r['project_name'] or 'General')[:120], 'color': color}
+        if it:
+            it.update(extra)
+            oh_crew.append(it)
+        elif not is_prev:
+            oh_untimed.append(dict(_tl_untimed_shift(r), **extra))
+        else:
+            continue
+        projects.setdefault(extra['project'], color)
+    overhead = None
+    if oh_crew or oh_untimed:
+        oh_crew.sort(key=lambda i: (i['start'], i['end'], i['id']))
+        overhead = {'crew': oh_crew, 'crew_untimed': oh_untimed,
+                    'projects': [{'name': k, 'color': v} for k, v in projects.items()]}
+
+    return {'success': True, 'date': d_iso, 'label': _long_day_label(day),
+            'prev': p_iso, 'next': (day + timedelta(days=1)).isoformat(),
+            'include_test': bool(include_test), 'test_hidden': test_hidden,
+            'shows': out_shows, 'overhead': overhead}
+
+
+@app.route('/api/timeline')
+@login_required
+def api_timeline():
+    """Home timeline data for ?date=YYYY-MM-DD (default: the server's today —
+    the page always sends the browser's). include_test=1 adds test shows.
+    Read-only; document viewers never get here (_viewer_gate)."""
+    raw = request.args.get('date')
+    if raw:
+        day = _tl_parse_date(raw)
+        if not day:
+            return jsonify({'success': False, 'error': 'Invalid date.'}), 400
+    else:
+        day = date.today()
+    accessible = get_accessible_shows(session['user_id'])
+    db = get_db()
+    try:
+        data = _timeline_day(db, day, include_test=request.args.get('include_test') == '1',
+                             accessible=accessible)
+    finally:
+        db.close()
+    return jsonify(data)
 
 
 @app.route('/shows/archived')
@@ -10228,7 +10614,7 @@ def export_postnotes(show_id):
 @login_required
 def viewer_home():
     if not session.get('is_document_viewer'):
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     user_id = session['user_id']
     is_viewer, venues_allow, doc_types_allow = get_document_viewer_settings(user_id)
     accessible = viewer_accessible_shows(user_id)
@@ -10333,7 +10719,7 @@ def viewer_calendar():
     viewer_show_calendar grant. Shows only the shows their venue allow-list
     permits (same set as their /viewer documents page)."""
     if not session.get('is_document_viewer'):
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     if not session.get('viewer_show_calendar'):
         return redirect(url_for('viewer_home'))
     is_viewer, venues_allow, _ = get_document_viewer_settings(session['user_id'])
@@ -26917,7 +27303,7 @@ _EMAIL_RE = re.compile(r'^[^@\s<>"\'(),;:\\]+@[^@\s<>"\'(),;:\\]+\.[^@\s<>"\'(),
 
 def _register_route():
     if session.get('user_id'):
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     error = None
     if request.method == 'POST':
         username = request.form.get('username', '').strip().lower()
@@ -27144,7 +27530,7 @@ def deny_registration(reg_id):
 
 def _forgot_password_route():
     if session.get('user_id'):
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     sent = False
     error = None
     if request.method == 'POST':
@@ -27211,7 +27597,7 @@ else:
 @app.route('/reset-password/<token>', methods=['GET', 'POST'])
 def reset_password(token):
     if session.get('user_id'):
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     db = get_db()
     rec = db.execute(
         'SELECT * FROM password_reset_tokens WHERE token=%s AND used=0', (token,)
