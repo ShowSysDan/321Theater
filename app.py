@@ -7317,6 +7317,50 @@ def _normalize_perf_time(raw):
     return s
 
 
+# Labor request / preset time columns, in shift order, with their UI names.
+_LABOR_TIME_LABELS = {'in_time': 'In', 'break_start': 'Lunch 1 start',
+                      'break_end': 'Lunch 1 end', 'break2_start': 'Lunch 2 start',
+                      'break2_end': 'Lunch 2 end', 'out_time': 'Out'}
+_LABOR_TIME_RE = re.compile(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]')
+
+
+def _labor_time(raw):
+    """A labor time normalised to 'HH:MM' (24-hour), '' when blank, or None
+    when it isn't a time. _normalize_perf_time hands unreadable text back
+    unchanged, so writers must refuse None: labor times feed the billing
+    engine (strptime '%H:%M') and the editors' value="…" attributes."""
+    if raw is None:
+        return ''
+    if not isinstance(raw, str):
+        return None
+    v = _normalize_perf_time(raw)
+    return v if (not v or _LABOR_TIME_RE.fullmatch(v)) else None
+
+
+def _labor_times(data, require_all=False):
+    """({col: 'HH:MM' | ''} for the labor time columns in `data` — every
+    column when require_all, a missing one as '' — , error | None)."""
+    out = {}
+    for col, label in _LABOR_TIME_LABELS.items():
+        if col not in data and not require_all:
+            continue
+        v = _labor_time(data.get(col))
+        if v is None:
+            return None, f'"{label}" is not a time — use HH:MM (24-hour).'
+        out[col] = v
+    return out, None
+
+
+def _labor_work_date(raw):
+    """A labor line's work_date: '' / None → None (Unscheduled), an ISO date
+    → 'YYYY-MM-DD'. Raises ValueError for anything else (was a PG 500)."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    if not isinstance(raw, str):
+        raise ValueError('work_date')
+    return date.fromisoformat(raw.strip()).isoformat()
+
+
 def _perf_to_json(row):
     """Serialize a performance row with perf_date as YYYY-MM-DD string."""
     d = dict(row)
@@ -14408,9 +14452,12 @@ def delete_schedule_template(tid):
 # that inserts every row in one transaction.
 
 def _clean_preset_rows(rows):
-    """Normalize incoming preset rows: clamp quantity, normalize times."""
+    """Normalize incoming preset rows: clamp quantity, normalize times.
+    Raises ValueError (message for the user) for a time that isn't HH:MM."""
     out = []
-    for r in rows or []:
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
         try:
             pid = int(r.get('position_id')) if r.get('position_id') else None
         except (TypeError, ValueError):
@@ -14419,17 +14466,11 @@ def _clean_preset_rows(rows):
             qty = max(1, min(50, int(r.get('quantity') or 1)))
         except (TypeError, ValueError):
             qty = 1
-        out.append({
-            'position_id':  pid,
-            'quantity':     qty,
-            'in_time':      _normalize_perf_time(r.get('in_time', '')),
-            'out_time':     _normalize_perf_time(r.get('out_time', '')),
-            'break_start':  _normalize_perf_time(r.get('break_start', '')),
-            'break_end':    _normalize_perf_time(r.get('break_end', '')),
-            'break2_start': _normalize_perf_time(r.get('break2_start', '')),
-            'break2_end':   _normalize_perf_time(r.get('break2_end', '')),
-            'notes':        (r.get('notes') or '').strip(),
-        })
+        times, err = _labor_times(r, require_all=True)
+        if err:
+            raise ValueError(err)
+        out.append(dict(times, position_id=pid, quantity=qty,
+                        notes=str(r.get('notes') or '').strip()))
     return out
 
 
@@ -14487,7 +14528,10 @@ def add_labor_preset():
     name = (data.get('name') or '').strip()
     if not name:
         return jsonify({'success': False, 'error': 'Name required.'}), 400
-    rows = _clean_preset_rows(data.get('rows'))
+    try:
+        rows = _clean_preset_rows(data.get('rows'))
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
     db = get_db()
     max_o = db.execute('SELECT MAX(sort_order) FROM labor_presets').fetchone()[0] or 0
     cur = db.execute('INSERT INTO labor_presets (name, sort_order) VALUES (%s,%s) RETURNING id',
@@ -14507,7 +14551,10 @@ def edit_labor_preset(pid):
     name = (data.get('name') or '').strip()
     if not name:
         return jsonify({'success': False, 'error': 'Name required.'}), 400
-    rows = _clean_preset_rows(data.get('rows'))
+    try:
+        rows = _clean_preset_rows(data.get('rows'))
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
     db = get_db()
     if not db.execute('SELECT id FROM labor_presets WHERE id=%s', (pid,)).fetchone():
         db.close(); return jsonify({'success': False, 'error': 'Preset not found.'}), 404
@@ -14565,6 +14612,9 @@ def apply_labor_preset(show_id, pid):
     ).fetchone()[0] or 0
     created = 0
     for r in rows:
+        # A preset saved before times were validated may hold free text:
+        # it's applied blank, never copied onto the show.
+        t = {c: _labor_time(r[c]) or '' for c in _LABOR_TIME_LABELS}
         for _ in range(max(1, r['quantity'] or 1)):
             max_order += 10
             db.execute("""
@@ -14574,9 +14624,9 @@ def apply_labor_preset(show_id, pid):
                                             requested_name, notes, sort_order)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, '', %s, %s)
             """, (show_id, r['position_id'], wd,
-                  r['in_time'] or '', r['out_time'] or '',
-                  r['break_start'] or '', r['break_end'] or '',
-                  r['break2_start'] or '', r['break2_end'] or '',
+                  t['in_time'], t['out_time'],
+                  t['break_start'], t['break_end'],
+                  t['break2_start'], t['break2_end'],
                   r['notes'] or '', max_order))
             created += 1
     log_audit(db, 'LABOR_PRESET_APPLY', 'show', show_id, show_id=show_id,
@@ -16842,35 +16892,57 @@ def get_show_labor_days(show_id):
     return jsonify({'days': days})
 
 
+_LABOR_DAYS_MAX_PER_SHOW = 400
+
+
 @app.route('/shows/<int:show_id>/labor-days', methods=['PUT'])
 @login_required
 def save_show_labor_day(show_id):
     """Upsert one day's covering PM / notes. Partial update: only the keys
     present in the payload change. A day whose PM and notes are both empty is
-    deleted (no cruft rows)."""
+    deleted (no cruft rows). The show row is locked first, so two editors
+    saving the same day (the Labor tab's PM vs notes, the schedule's Day PM
+    bar) can't put back each other's stale column."""
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     if session.get('is_restricted') or session.get('is_readonly'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict) or any(
+            k in data and data[k] is not None and not isinstance(data[k], str)
+            for k in ('work_date', 'cover_pm', 'day_notes')):
+        return jsonify({'success': False, 'error': 'Invalid request.'}), 400
     try:
-        wd = date.fromisoformat(str(data.get('work_date') or '').strip()).isoformat()
+        wd = date.fromisoformat((data.get('work_date') or '').strip()).isoformat()
     except ValueError:
         return jsonify({'success': False, 'error': 'Invalid work_date.'}), 400
     db = get_db()
+    # NO KEY UPDATE: serializes the day savers without blocking FK inserts
+    # that reference the show (presence polls, labor rows).
+    if not db.execute('SELECT id FROM shows WHERE id=%s FOR NO KEY UPDATE',
+                      (show_id,)).fetchone():
+        db.close()
+        return jsonify({'success': False, 'error': 'Show not found.'}), 404
     existing = db.execute(
         'SELECT cover_pm, day_notes FROM show_labor_days '
         'WHERE show_id=%s AND work_date=%s', (show_id, wd)).fetchone()
     # Length caps (3.35.0): cover_pm is a contact name; day notes are a line.
-    cover_pm = (' '.join(str(data.get('cover_pm') or '').split())[:200]
+    cover_pm = (' '.join((data.get('cover_pm') or '').split())[:200]
                 if 'cover_pm' in data
                 else ((existing['cover_pm'] or '') if existing else ''))
-    day_notes = (str(data.get('day_notes') or '').strip()[:2000] if 'day_notes' in data
+    day_notes = ((data.get('day_notes') or '').strip()[:2000] if 'day_notes' in data
                  else ((existing['day_notes'] or '') if existing else ''))
     if not cover_pm and not day_notes:
         db.execute('DELETE FROM show_labor_days WHERE show_id=%s AND work_date=%s',
                    (show_id, wd))
     else:
+        if not existing and db.execute(
+                'SELECT COUNT(*) AS n FROM show_labor_days WHERE show_id=%s',
+                (show_id,)).fetchone()['n'] >= _LABOR_DAYS_MAX_PER_SHOW:
+            db.close()
+            return jsonify({'success': False,
+                            'error': f'A show can hold a Day PM / notes on at most '
+                                     f'{_LABOR_DAYS_MAX_PER_SHOW} days.'}), 400
         db.execute("""
             INSERT INTO show_labor_days
                 (show_id, work_date, cover_pm, day_notes, updated_by, updated_at)
@@ -16920,7 +16992,16 @@ def add_labor_request(show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': 'Invalid request.'}), 400
+    times, err = _labor_times(data, require_all=True)
+    if err:
+        return jsonify({'success': False, 'error': err}), 400
+    try:
+        work_date = _labor_work_date(data.get('work_date'))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work date.'}), 400
     db = get_db()
     max_order = db.execute(
         'SELECT MAX(sort_order) FROM labor_requests WHERE show_id=%s', (show_id,)
@@ -16932,13 +17013,10 @@ def add_labor_request(show_id):
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
     """, (show_id,
           data.get('position_id') or None,
-          data.get('work_date') or None,
-          _normalize_perf_time(data.get('in_time', '')),
-          _normalize_perf_time(data.get('out_time', '')),
-          _normalize_perf_time(data.get('break_start', '')),
-          _normalize_perf_time(data.get('break_end', '')),
-          _normalize_perf_time(data.get('break2_start', '')),
-          _normalize_perf_time(data.get('break2_end', '')),
+          work_date,
+          times['in_time'], times['out_time'],
+          times['break_start'], times['break_end'],
+          times['break2_start'], times['break2_end'],
           data.get('requested_name', ''),
           (data.get('notes') or '').strip(),
           max_order + 10))
@@ -16958,21 +17036,30 @@ def update_labor_request(show_id, rid):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': 'Invalid request.'}), 400
+    # Times must read as HH:MM (or blank) — free text is refused, never stored.
+    times, err = _labor_times(data)
+    if err:
+        return jsonify({'success': False, 'error': err}), 400
+    try:
+        work_date = _labor_work_date(data.get('work_date'))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work date.'}), 400
     # Only the columns the request carries (3.32.0). Writing every column
     # blanked `notes` on every show-page save (the page never sends it — the
     # Labor Scheduler owns it) and let a stale tab put back old times/names.
-    sets, params = [], []
+    vals = dict(times)
+    if 'work_date' in data:
+        vals['work_date'] = work_date
     for col, conv in (('position_id', lambda v: v or None),
-                      ('work_date', lambda v: v or None),
-                      ('in_time', _normalize_perf_time), ('out_time', _normalize_perf_time),
-                      ('break_start', _normalize_perf_time), ('break_end', _normalize_perf_time),
-                      ('break2_start', _normalize_perf_time), ('break2_end', _normalize_perf_time),
                       ('requested_name', lambda v: v or ''),
                       ('notes', lambda v: (v or '').strip())):
         if col in data:
-            sets.append(f'{col}=%s')
-            params.append(conv(data.get(col) or ''))
+            vals[col] = conv(data.get(col) or '')
+    sets = [f'{col}=%s' for col in vals]
+    params = list(vals.values())
     if not sets:
         return jsonify({'success': True})
     db = get_db()
@@ -17011,13 +17098,14 @@ _LABOR_REORDER_MAX = 2000
 @app.route('/shows/<int:show_id>/labor-requests/reorder', methods=['POST'])
 @login_required
 def reorder_labor_requests(show_id):
-    """Set the show's labor-request order: ``{"request_ids": [id, …]}`` →
-    sort_order = position × 10 (Labor Requests tab → a day's Tools → Sort by
-    call time, 3.35.0). The client sends the FULL show order (every day,
-    top to bottom) so the other days keep theirs. Every id must be a
-    distinct int belonging to THIS show — a list naming a row that is gone
-    (or another show's) is refused with 409 so the page reloads instead of
-    half-applying."""
+    """Set ONE day's labor-request order: ``{"work_date": "YYYY-MM-DD" | "",
+    "request_ids": [id, …]}`` (Labor Requests tab → a day's Tools → Sort by
+    call time, 3.35.0). sort_order is one sequence per show, so the server
+    rebuilds it from ITS order and drops that day's rows, in the listed
+    order, into the slots they already hold — every other day keeps what
+    the server has, never what a stale tab had. The ids must be exactly the
+    day's rows ('' = Unscheduled): a row someone else added, removed or
+    re-dated → 409, and the page reloads instead of half-applying."""
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     if session.get('is_readonly') or session.get('is_restricted'):
@@ -17028,29 +17116,48 @@ def reorder_labor_requests(show_id):
             or not all(type(i) is int and 0 < i < 2 ** 31 for i in ids)
             or len(set(ids)) != len(ids)):
         return jsonify({'success': False, 'error': 'Invalid request list.'}), 400
-    if not ids:
-        return jsonify({'success': True, 'count': 0})
+    stale = {'success': False, 'stale': True,
+             'error': 'The labor requests on this day changed since this page loaded '
+                      '(someone added, removed or moved one). The list will reload — '
+                      'then sort again.'}
+    if 'work_date' not in data:
+        # A page loaded before per-day sorting posts the whole show's order,
+        # which would put back a stale order on every other day.
+        return jsonify(dict(stale, error='This page is out of date — reload it, '
+                                         'then sort again.')), 409
+    try:
+        wd = _as_date(_labor_work_date(data.get('work_date')))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work date.'}), 400
     db = get_db()
     try:
-        found = db.execute(
-            'SELECT COUNT(*) AS n FROM labor_requests WHERE show_id=%s AND id = ANY(%s)',
-            (show_id, ids)).fetchone()['n']
-        if found != len(ids):
-            return jsonify({'success': False, 'stale': True,
-                            'error': 'The labor requests changed since this page loaded '
-                                     '(someone added or removed one). The list will '
-                                     'reload — then sort again.'}), 409
-        db.execute("""
-            UPDATE labor_requests lr SET sort_order = v.ord
-            FROM unnest(%s::int[], %s::int[]) AS v(id, ord)
-            WHERE lr.id = v.id AND lr.show_id = %s
-        """, (ids, [i * 10 for i in range(len(ids))], show_id))
-        log_audit(db, 'LABOR_REQUEST_REORDER', 'show', show_id, show_id=show_id,
-                  detail=f'{len(ids)} requests')
+        # Lock the show's rows (in id order, so two sorts can't deadlock).
+        rows = db.execute(
+            'SELECT id, work_date, sort_order FROM labor_requests '
+            'WHERE show_id=%s ORDER BY id FOR UPDATE', (show_id,)).fetchall()
+        day = {r['id'] for r in rows if _as_date(r['work_date']) == wd}
+        if day != set(ids):
+            return jsonify(stale), 409
+        # Server order = the list order (ORDER BY sort_order, id; NULLs last).
+        rows.sort(key=lambda r: (r['sort_order'] is None, r['sort_order'] or 0, r['id']))
+        it = iter(ids)
+        seq = [next(it) if r['id'] in day else r['id'] for r in rows]
+        old = {r['id']: r['sort_order'] for r in rows}
+        moved = [(rid, i * 10) for i, rid in enumerate(seq) if old[rid] != i * 10]
+        if moved:
+            db.execute("""
+                UPDATE labor_requests lr SET sort_order = v.ord
+                FROM unnest(%s::int[], %s::int[]) AS v(id, ord)
+                WHERE lr.id = v.id AND lr.show_id = %s
+            """, ([m[0] for m in moved], [m[1] for m in moved], show_id))
+            log_audit(db, 'LABOR_REQUEST_REORDER', 'show', show_id, show_id=show_id,
+                      detail=f'{wd.isoformat() if wd else "unscheduled"}: '
+                             f'{len(ids)} requests')
         db.commit()
     finally:
         db.close()
-    syslog_logger.info(f"LABOR_REQUEST_REORDER show_id={show_id} count={len(ids)} "
+    syslog_logger.info(f"LABOR_REQUEST_REORDER show_id={show_id} "
+                       f"date={wd.isoformat() if wd else '-'} count={len(ids)} "
                        f"by={session.get('username')}")
     return jsonify({'success': True, 'count': len(ids)})
 
@@ -18708,10 +18815,17 @@ def api_labor_scheduler_update(rid):
     """Update only the scheduling fields on a labor request."""
     if session.get('is_readonly'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': 'Invalid request.'}), 400
+    try:
+        work_date = _labor_work_date(data.get('work_date'))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work date.'}), 400
     db = get_db()
     row = db.execute(
-        'SELECT show_id, scheduled_crew_member_id FROM labor_requests WHERE id=%s', (rid,)
+        'SELECT show_id, scheduled_crew_member_id, ' + ', '.join(_LABOR_TIME_LABELS) +
+        ' FROM labor_requests WHERE id=%s', (rid,)
     ).fetchone()
     if not row:
         db.close()
@@ -18748,12 +18862,25 @@ def api_labor_scheduler_update(rid):
         updates.append('scheduled_crew_member_id=%s')
         params.append(cmid)
         detail_parts.append(f"crew_id={cmid}")
-    for field in ('in_time', 'out_time', 'break_start', 'break_end',
-                  'break2_start', 'break2_end'):
-        if field in data:
-            updates.append(f'{field}=%s')
-            params.append(_normalize_perf_time((data[field] or '').strip()))
-            detail_parts.append(f"{field}={data[field]}")
+    # Times must read as HH:MM (or blank), like every labor write path. A
+    # cell sent back exactly as stored is kept as is: the scheduler's Save
+    # All re-sends every cell, and an old free-text value must not block the
+    # row's other changes.
+    for field, label in _LABOR_TIME_LABELS.items():
+        if field not in data:
+            continue
+        raw = data[field]
+        if isinstance(raw, str) and raw.strip() and raw.strip() == (row[field] or '').strip():
+            val = row[field]
+        else:
+            val = _labor_time(raw)
+            if val is None:
+                db.close()
+                return jsonify({'success': False,
+                                'error': f'"{label}" is not a time — use HH:MM (24-hour).'}), 400
+        updates.append(f'{field}=%s')
+        params.append(val)
+        detail_parts.append(f"{field}={val}")
     if 'notes' in data:
         updates.append('notes=%s')
         params.append((data['notes'] or '').strip())
@@ -18762,10 +18889,9 @@ def api_labor_scheduler_update(rid):
         # Re-dating a line (e.g. correcting a mis-dated row, or moving a whole
         # day-block in the scheduler). Empty string clears it back to NULL, in
         # which case it falls back to the show's date in list queries.
-        wd = (data.get('work_date') or '').strip() or None
         updates.append('work_date=%s')
-        params.append(wd)
-        detail_parts.append(f"work_date={wd}")
+        params.append(work_date)
+        detail_parts.append(f"work_date={work_date}")
 
     if not updates:
         db.close()
@@ -18823,12 +18949,21 @@ def api_labor_scheduler_delete(rid):
 @scheduler_required
 def api_labor_scheduler_add():
     """Add a new labor request from the scheduler view."""
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': 'Invalid request.'}), 400
     show_id = data.get('show_id')
     if not show_id:
         return jsonify({'success': False, 'error': 'show_id required'}), 400
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    times, err = _labor_times(data, require_all=True)
+    if err:
+        return jsonify({'success': False, 'error': err}), 400
+    try:
+        work_date = _labor_work_date(data.get('work_date'))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work date.'}), 400
     db = get_db()
     max_order = db.execute(
         'SELECT MAX(sort_order) FROM labor_requests WHERE show_id=%s', (show_id,)
@@ -18840,13 +18975,10 @@ def api_labor_scheduler_add():
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (show_id,
           data.get('position_id') or None,
-          data.get('work_date') or None,
-          _normalize_perf_time(data.get('in_time', '')),
-          _normalize_perf_time(data.get('out_time', '')),
-          _normalize_perf_time(data.get('break_start', '')),
-          _normalize_perf_time(data.get('break_end', '')),
-          _normalize_perf_time(data.get('break2_start', '')),
-          _normalize_perf_time(data.get('break2_end', '')),
+          work_date,
+          times['in_time'], times['out_time'],
+          times['break_start'], times['break_end'],
+          times['break2_start'], times['break2_end'],
           data.get('requested_name', ''), max_order + 10))
     rid = cur.fetchone()['id']
     log_audit(db, 'LABOR_REQUEST_ADD', 'labor_request', rid, show_id=show_id, detail='via scheduler')
