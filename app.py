@@ -30197,6 +30197,30 @@ security_module.register(
 )
 
 
+# ─── #Tags + Search (sandboxed, 3.35.0) ───────────────────────────────────────
+# The #tag index (a query over every show text source — nothing stored), the
+# /tags + /tags/<tag> pages, the /search page and their JSON APIs, plus the
+# `tagify` Jinja filter. All logic lives in find_module.py + templates/
+# tags.html, tag.html, search.html + static/js/tags.js behind this one call.
+# Read-only: it owns no table and never writes.
+import find_module  # noqa: E402
+
+find_module.register(
+    app,
+    get_db=get_db,
+    get_current_user=get_current_user,
+    login_required=login_required,
+    can_access_show=can_access_show,
+    get_accessible_shows=get_accessible_shows,
+    my_pm_names=_my_pm_names,
+    pm_contacts_many=_pm_contacts_many,
+    name_key=_name_key,
+    as_date=_as_date,
+    ts_out=_ts_out,
+    get_distinct_venues=_get_distinct_venues,
+)
+
+
 # ─── Spot sound levels (sandboxed) ────────────────────────────────────────────
 # Venue → Spot sensor mapping (Settings → Spot) and the post-show pull of each
 # performance's dB levels + Spot's PDF report. All logic lives in

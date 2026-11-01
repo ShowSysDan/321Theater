@@ -268,6 +268,7 @@
       {% if last_saved_at %} · {{ (last_saved_at|string)[:16].replace('T',' ') }}{% endif %}
     </p>
     {% endif %}
+    <div id="show-tags-strip" class="show-tags-strip" hidden></div>{# #tags in this show — filled by tags.js #}
   </div>
   <div class="header-actions" id="save-indicator">
     {# Presence badge — populated by JS sync poll #}
@@ -625,7 +626,7 @@
                 ? `<span class="piano-cancel-flag" title="${esc(t.cancel_request_note || '')}">Cancellation requested</span>
                    <button type="button" class="btn btn-xs btn-ghost" onclick="withdrawPianoCancel(${t.id})">Withdraw</button>`
                 : `<button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="requestPianoCancel(${t.id})" title="Ask the piano tuning manager to cancel it with the vendor">Request cancellation</button>`) : '')}</td>
-        </tr>${t.notes ? `<tr class="piano-notes-row"><td></td><td colspan="5" class="text-dim" style="font-size:11px;white-space:pre-wrap">${esc(t.notes)}</td></tr>` : ''}`;
+        </tr>${t.notes ? `<tr class="piano-notes-row"><td></td><td colspan="5" class="text-dim" style="font-size:11px;white-space:pre-wrap" data-tag-focus="piano:${t.id}">${renderTaggedText(t.notes)}</td></tr>` : ''}`;
       }).join('')}</tbody></table></div>`;
   }
   window.loadPianoTunings = loadPiano;
@@ -1942,7 +1943,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           <td style="font-size:11px;white-space:nowrap">${rentalCell}</td>
           <td>$${Number(a.locked_price).toFixed(2)}</td>
           <td>$${lineTotal}</td>
-          <td style="font-size:11px;color:var(--text-dim)">${esc(a.notes||'')}</td>
+          <td style="font-size:11px;color:var(--text-dim)" data-tag-focus="asset:${a.id}">${renderTaggedText(a.notes||'')}</td>
           ${IS_ADMIN ? `<td>
             ${IS_ADMIN ? `<button class="btn btn-xs btn-ghost" onclick="toggleAssetHidden(${a.id},${a.is_hidden})" title="${a.is_hidden?'Unhide':'Hide'}">${a.is_hidden?'Show':'Hide'}</button>` : ''}
             <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="removeAsset(${a.id})">✕</button>
@@ -1986,7 +1987,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       extRentals.forEach(er => {
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td>${esc(er.description)}</td>
+          <td data-tag-focus="rental:${er.id}">${er.piano_tuning_id ? esc(er.description) : renderTaggedText(er.description)}</td>
           <td>$${Number(er.cost).toFixed(2)}</td>
           <td>${er.pdf_filename ? `<a href="/shows/${SHOW_ID}/external-rentals/${er.id}/pdf" target="_blank" style="font-size:11px">View PDF</a>` : '—'}</td>
           ${IS_ADMIN ? `<td style="white-space:nowrap">${er.piano_tuning_id

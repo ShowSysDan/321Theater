@@ -4370,10 +4370,12 @@ function _esc(str) {
 }
 
 function _renderCommentBody(text) {
-  const escaped = _esc(text).replace(/\n/g,'<br>');
-  // Highlight @mentions
-  return escaped.replace(/@([\w][\w .'-]*?)(?=\s|$|<br>)/g,
-    '<span class="comment-mention">@$1</span>');
+  // 3.35.0: URL | #tag | @mention are tokenized on the RAW text by tags.js
+  // (Tags.richHtml — each segment escaped, #tags link to their tag page,
+  // @mentions keep their highlight, URLs stay plain text). Never regex over
+  // the escaped HTML: '&#39;' would read as a tag and URLs swallowed entities.
+  if (window.Tags && typeof Tags.richHtml === 'function') return Tags.richHtml(text);
+  return _esc(text == null ? '' : text).replace(/\n/g, '<br>');
 }
 
 async function submitComment() {
