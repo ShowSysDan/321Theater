@@ -2961,8 +2961,11 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 .tl-lanehead.tl-lane-empty .tl-lh-name { font-size: 13px; }
 :where(.tl-scroll) .tl-lane.tl-lane-empty { background: color-mix(in srgb, var(--text-dim) 4%, transparent); }
 .tl-col-none { position: absolute; top: 8px; left: 0; right: 0; text-align: center; font-size: 10.5px; color: var(--text-muted); font-style: italic; }
-.tl-perf { position: absolute; left: 0; right: 0; height: 0; border-top: 1px dashed var(--tl-accent); opacity: .7; pointer-events: none; z-index: 0; }
+.tl-perf { position: absolute; left: 0; right: 0; height: 0; border-top: 1px dashed color-mix(in srgb, var(--tl-accent) 70%, transparent); pointer-events: none; }   /* no z-index / opacity (either makes a stacking context): the line sits behind items, its label (z 2) above them */
 .tl-perf::before { content: ""; position: absolute; left: 0; top: -5px; border: 5px solid transparent; border-left: 7px solid var(--tl-accent); }
+.tl-perf-label { position: absolute; z-index: 2; left: 9px; top: -7px; padding: 0 4px; border-radius: 3px; background: var(--bg-card);
+  font: 700 9px/13px var(--font-mono); letter-spacing: .06em; color: var(--tl-accent); white-space: nowrap; }
+.tl-key-perf { width: 14px; height: 0; border: 0; border-radius: 0; border-top: 2px dashed var(--accent); }
 
 /* Items: schedule blocks + crew bars. */
 .tl-item {

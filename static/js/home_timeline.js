@@ -651,6 +651,8 @@
         const m = el('div', 'tl-perf');
         m.style.top = Math.round((p.minutes - range.start) * ppm) + 'px';
         m.title = (l.show.show_mode === 'event' ? 'Event start ' : 'Performance ') + p.label;
+        // Labelled, so the dashed line reads as the show time, not a stray rule.
+        m.appendChild(el('span', 'tl-perf-label', (l.show.show_mode === 'event' ? 'EVENT ' : 'PERF ') + p.label));
         lane.appendChild(m);
       });
     }
