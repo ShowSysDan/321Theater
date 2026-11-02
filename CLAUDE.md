@@ -1401,9 +1401,10 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   `_link_text` / `_linkText` normalisation, length caps — the old regex was
   quadratic); contact text via `LaborDays.contactInto` (textContent only).
 - Schedule PDF: the PM is resolved in `_build_schedule_pdf` before any
-  render, printed as `<tr class="day-pm-row">` in each day's thead (never
-  `data-sched-row`); nothing for a day with no PM (PM-less shows stay
-  byte-identical); layout section `day_pm`. Sign-In Sheet: security_module
+  render, printed as `<tr class="day-pm-row">` in a day's thead (never
+  `data-sched-row`) ONLY when that day has a covering PM who isn't the show
+  PM (3.43.0, the user's call — the show PM is in the header block); every
+  other day prints nothing; layout section `day_pm`. Sign-In Sheet: security_module
   reads the PM only via the injected `pm_contacts_for_show` dep.
 
 ## Add Asset browser (3.35.0) — search-first, browsable, PM-safe
