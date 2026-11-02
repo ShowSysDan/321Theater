@@ -1310,6 +1310,10 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   hysteresis (`FOLD_SLACK`); and if the open grid overflowed sideways,
   `.tl-inner` stays wider than the box so the horizontal scrollbar can't
   vanish. Keep all four.
+  3.39.0: scroll fold WINS over time fold (rail is thinner). Lane headers
+  are compact: `.tl-lh-meta` (badges + venue), `.tl-lh-pm` (PM + contacts +
+  `.tl-lh-perf`), each one nowrap line with ellipsis + `title`; the missing
+  column note lives in the label row. Default zoom index 1 (48 px/h).
 - The `.tl-*` class names are shared with dashboard_view.html's Reservation
   Timeline: Home's rules on those names are scoped `:where(.tl-phead)` /
   `:where(.tl-scroll)` in style.css and mobile.css — keep new ones scoped.

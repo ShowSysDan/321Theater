@@ -2935,6 +2935,30 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 .tl-lh-colswrap .tl-lh-cols { margin-top: 0; }
 .tl-lh-colnone { font-size: 11px; font-style: italic; color: var(--text-muted); }
 
+/* 3.39.0: compact lane headers — name / badges + venue / PM + contacts +
+   show time, each ONE line cut with an ellipsis (full text in tooltips). */
+:where(.tl-scroll) .tl-lanehead { position: relative; gap: 2px; padding: 6px 8px 0; }
+:where(.tl-scroll) .tl-lh-top { min-width: 0; }
+:where(.tl-scroll) .tl-lh-name { display: block; min-width: 0; font-size: 13px; line-height: 1.3;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
+.tl-lh-meta { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 11.5px; line-height: 16px; white-space: nowrap; overflow: hidden; }
+.tl-lh-meta .tl-lh-badges { display: inline-flex; flex: 0 0 auto; flex-wrap: nowrap; gap: 3px; }
+.tl-lh-meta .tl-lh-venue { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
+:where(.tl-scroll) .tl-lh-pm { flex-wrap: nowrap; gap: 4px; font-size: 11.5px; line-height: 20px; white-space: nowrap; overflow: hidden; }
+:where(.tl-scroll) .tl-lh-pmname { min-width: 0; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
+:where(.tl-scroll) .tl-lh-pm .tl-contact { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 5px; }
+:where(.tl-scroll) .tl-lh-pm .tl-contact svg { width: 11px; height: 11px; }
+:where(.tl-scroll) .tl-lh-perf { display: inline-flex; flex: 0 0 auto; flex-wrap: nowrap; gap: 4px; margin-left: 4px; font-size: 11.5px; }
+:where(.tl-scroll) .tl-lh-perf .mono { font-size: 11.5px; }
+:where(.tl-scroll) .tl-lh-label { font-size: 9px; }
+:where(.tl-scroll) .tl-lh-projects { flex-wrap: nowrap; overflow: hidden; white-space: nowrap; }
+:where(.tl-scroll) .tl-untimed { font-size: 11px; line-height: 16px; }
+:where(.tl-scroll) .tl-lh-cols { padding: 4px 4px 3px; }
+:where(.tl-scroll) .tl-lh-cols > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-lh-cols .tl-lh-colnone { font: italic 400 10px var(--font-main); letter-spacing: 0; text-transform: none; color: var(--text-muted); }
+/* the fold pill on an OPEN finished lane: a small ✕ in the corner */
+.tl-wrap-toggle.tl-wrap-mini { position: absolute; top: 5px; right: 5px; order: 0; margin: 0; padding: 0 5px; font-size: 10px; line-height: 16px; z-index: 1; }
+
 /* Body: hour lines behind, axis sticky left, lanes, NOW line on top. */
 .tl-bodyrow { position: relative; display: flex; }
 :where(.tl-scroll) .tl-axis { position: sticky; left: 0; z-index: 4; flex: 0 0 auto; background: var(--bg-card); border-right: 1px solid var(--border); }

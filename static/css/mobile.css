@@ -439,6 +439,8 @@ html.mobile-view .tl-lanehead { padding: 7px 6px 0; font-size: 11.5px; gap: 2px;
 html.mobile-view .tl-lh-name { font-size: 13px; }
 html.mobile-view .tl-lh-venue, html.mobile-view .tl-lh-pm, html.mobile-view .tl-lh-perf { font-size: 11px; }
 html.mobile-view .tl-contact { width: 30px; height: 30px; }
+html.mobile-view :where(.tl-scroll) .tl-lh-pm .tl-contact { width: 24px; height: 24px; }   /* 3.39.0: compact header row */
+html.mobile-view :where(.tl-scroll) .tl-lh-pm { line-height: 24px; }
 html.mobile-view :where(.tl-scroll) .tl-lane { gap: 4px; padding: 0 4px; }
 html.mobile-view .tl-lh-cols { gap: 4px; }
 html.mobile-view .tl-item { font-size: 11px; padding: 2px 4px; }

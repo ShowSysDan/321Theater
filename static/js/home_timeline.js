@@ -90,7 +90,7 @@
   let showMode = lsGet(LS_SHOW);
   if (SHOW_MODES.indexOf(showMode) < 0) showMode = 'all';
   let zoomIdx = parseInt(lsGet(LS_ZOOM), 10);
-  if (!(zoomIdx >= 0 && zoomIdx < ZOOMS.length)) zoomIdx = IS_MOBILE ? 2 : 3;
+  if (!(zoomIdx >= 0 && zoomIdx < ZOOMS.length)) zoomIdx = 1;   // 48 px/h (3.39.0: was 60 / 72)
   const selVenues = new Set();
   try {
     const v = JSON.parse(lsGet(LS_VENUES) || '[]');
@@ -512,8 +512,10 @@
       h.dataset.href = '/overhead-crew';
       const a = el('a', 'tl-lh-name', 'Overhead & Project Crew');
       a.href = '/overhead-crew';
+      a.title = 'Overhead & Project Crew';
       h.appendChild(a);
       const pj = el('div', 'tl-lh-projects');
+      pj.title = (l.oh.projects || []).map(p => p.name).join(', ');
       (l.oh.projects || []).slice(0, 12).forEach(p => {
         const c = el('span', 'tl-proj', p.name);
         if (p.color) c.style.setProperty('--tl-proj', p.color);
@@ -530,10 +532,14 @@
     const top = el('div', 'tl-lh-top');
     const a = el('a', 'tl-lh-name', s.name);
     a.href = '/shows/' + s.id + '?tab=advance';
+    a.title = s.name;
     top.appendChild(a);
     h.appendChild(top);
 
-    const badges = el('div', 'tl-lh-badges');
+    // Compact header (3.39.0): name / badges + venue / PM + contacts + show
+    // time — each ONE line, cut with an ellipsis (full text in the tooltip).
+    const meta = el('div', 'tl-lh-meta');
+    const badges = el('span', 'tl-lh-badges');
     if (s.day_num && s.day_total > 1) badges.appendChild(badge('tl-badge tl-badge-day', 'DAY ' + s.day_num + '/' + s.day_total,
       'Day ' + s.day_num + ' of ' + s.day_total + ' of this show\u2019s schedule'));
     if (s.show_mode === 'event') badges.appendChild(badge('event-badge', 'EVENT', 'Event mode'));
@@ -542,9 +548,10 @@
       String(s.prism_status).toUpperCase(), 'Prism event status'));
     if (s.dark) badges.appendChild(badge('tl-badge tl-badge-dark', 'DARK', 'Marked dark on the Schedule tab — left off the schedule PDF'));
     if (s.status === 'archived') badges.appendChild(badge('past-badge', 'ARCHIVED', 'This show is archived'));
-    if (badges.childNodes.length) h.appendChild(badges);
-
-    h.appendChild(el('div', 'tl-lh-venue', s.venue || 'No venue'));
+    if (badges.childNodes.length) meta.appendChild(badges);
+    meta.appendChild(el('span', 'tl-lh-venue', s.venue || 'No venue'));
+    meta.title = s.venue || 'No venue';
+    h.appendChild(meta);
     const pm = el('div', 'tl-lh-pm');
     if (s.pm) {
       pm.appendChild(el('span', 'tl-lh-label', 'PM'));
@@ -559,14 +566,16 @@
       pm.appendChild(el('span', 'tl-lh-label', 'PM'));
       pm.appendChild(el('em', 'tl-lh-none', 'none set'));
     }
-    h.appendChild(pm);
     const perfs = (s.performances || []).filter(p => p.label);
     if (perfs.length) {
-      const pf = el('div', 'tl-lh-perf');
-      pf.appendChild(el('span', 'tl-lh-label', s.show_mode === 'event' ? 'Event' : 'Perf'));
+      const pf = el('span', 'tl-lh-perf');
+      const what = s.show_mode === 'event' ? 'Event' : 'Perf';
+      pf.title = what + ' ' + perfs.map(p => p.label).join(', ');
+      pf.appendChild(el('span', 'tl-lh-label', what));
       pf.appendChild(el('span', 'mono', perfs.map(p => p.label).join(', ')));
-      h.appendChild(pf);
+      pm.appendChild(pf);
     }
+    h.appendChild(pm);
     untimedList(h, showMode === 'crew' ? [] : (s.schedule_untimed || []),
       showMode === 'sched' ? [] : (s.crew_untimed || []), s);
     if (showMode !== 'crew') laterList(h, offAxis(s.schedule), s);
@@ -643,17 +652,16 @@
   }
 
   // A sub-column this lane has nothing for is left out, not drawn empty —
-  // the header says so on its own line, just above the column labels.
+  // the label row says so after the one it has ("Schedule · no crew").
   function colLabels(l) {
-    const missing = (!l.sw && l.kind === 'show' && showMode !== 'crew') ? 'No schedule'
-      : (!l.cw && showMode !== 'sched') ? 'No crew' : '';
-    if (missing) {
-      const wrap = el('div', 'tl-lh-colswrap');
-      wrap.appendChild(el('div', 'tl-lh-colnone', missing));
-      wrap.appendChild(colLabelRow(l));
-      return wrap;
+    const row = colLabelRow(l);
+    const missing = (!l.sw && l.kind === 'show' && showMode !== 'crew') ? 'no schedule'
+      : (!l.cw && showMode !== 'sched') ? 'no crew' : '';
+    if (missing && row.lastChild) {
+      row.lastChild.appendChild(el('span', 'tl-lh-colnone', ' \u00b7 ' + missing));
+      row.lastChild.title = row.lastChild.textContent;
     }
-    return colLabelRow(l);
+    return row;
   }
   function colLabelRow(l) {
     const row = el('div', 'tl-lh-cols');
@@ -852,7 +860,9 @@
       const finished = has && nm != null && l.lastEnd <= nm;
       const timeFold = finished && !reopened.has(curDate + '|' + l.key);
       const scrollFold = has && (l.reason === 'scroll' ? l.lastEnd <= topMin : l.lastEnd <= topMin - FOLD_SLACK);
-      const reason = timeFold ? 'time' : (scrollFold ? 'scroll' : '');
+      // Scrolled past wins (the thinner rail): a wrapped lane whose blocks
+      // are above the view needn't keep its 'Wrapped' column either.
+      const reason = scrollFold ? 'scroll' : (timeFold ? 'time' : '');
       const fold = !!reason;
       // Scrolled past: a thin rail (name runs down it); wrapped: the slim column.
       const w = reason === 'scroll' ? W.rail : (fold ? W.done : l.w);
@@ -881,9 +891,10 @@
           pill.textContent = '↑ ' + (IS_MOBILE ? end : 'Ends ' + end);
           pill.title = 'Its last block (ends ' + end + ') is above — click to scroll up to it';
         } else {
-          pill.textContent = '✕ Fold';
+          pill.textContent = '✕';
           pill.title = 'Fold this finished lane';
         }
+        pill.classList.toggle('tl-wrap-mini', !fold);
         pill.setAttribute('aria-expanded', fold ? 'false' : 'true');
       }
       const wb = l.bodyEl && l.bodyEl.querySelector('.tl-wrap-body');
