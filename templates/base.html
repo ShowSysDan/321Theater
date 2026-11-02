@@ -801,6 +801,7 @@ const _HELP_PAGES = {
         <li><strong>+ Add show</strong> — quick-create a show (name, PM, date, time, venue) so you can schedule before the PM builds the advance. <strong>+ Add labor to existing show…</strong> pulls in a show in the range with no lines yet.</li>
         <li><strong>Shows without labor</strong> (header) lists every active show that has no labor requested yet.</li>
         <li>Overhead/project groups (<strong>OH / PROJECT</strong>) are scheduled here too, with their own date column, project notes and + Add Line.</li>
+        <li>A read-only account sees the page <strong>VIEW ONLY</strong>: the same lines, techs, PMs and notes, with no add, save or remove controls.</li>
         <li>On a phone the grid scrolls sideways.</li>
       </ul>
     `
@@ -813,6 +814,7 @@ const _HELP_PAGES = {
         <li>Each row: show, date, how far away it is (Today, Tomorrow, in N days, N days ago, No date), venue, PM, and <strong>Add labor ↗</strong>, which opens that show's Labor Requests tab in a new tab.</li>
         <li>Upcoming and undated shows are listed by default; <strong>Include past shows</strong> / <strong>Hide past shows</strong> switches.</li>
         <li>The venue picker shows one venue; with <em>All venues</em>, tick venues under <strong>Hide</strong> to leave them out.</li>
+        <li>A read-only account (<strong>VIEW ONLY</strong>) gets <strong>Open show ↗</strong> in place of Add labor.</li>
         <li><strong>← Labor Scheduler</strong> goes back.</li>
       </ul>
     `
@@ -823,7 +825,7 @@ const _HELP_PAGES = {
       <p>Which technicians are qualified for which positions: one row per active technician, one column per job position, grouped by position category.</p>
       <ul style="${_HELP_UL}">
         <li>Dots: empty = not qualified, half blue = <strong>in training</strong>, filled = <strong>qualified</strong>. Qualified techs are listed first in the Labor Scheduler's tech picker for that position.</li>
-        <li><strong>✎</strong> next to a name (admins, schedulers and content admins) opens <em>Edit Qualifications</em>: click a position to cycle none → in training → qualified; every click saves immediately. The <strong>Training notes</strong> box at the bottom saves as you type.</li>
+        <li><strong>✎</strong> next to a name (admins, schedulers and content admins) opens <em>Edit Qualifications</em>: click a position to cycle none → in training → qualified; every click saves immediately. The <strong>Training notes</strong> box at the bottom saves as you type. A read-only account (<strong>VIEW ONLY</strong>) gets <strong>View</strong> instead: the same qualifications and training notes, nothing to change.</li>
         <li><strong>Sort A–Z / Sort Z–A / Sort by Category</strong> reorder the rows. The positions filter shows <em>All positions</em>, <em>Show positions only</em> or <em>Training / classes only</em>; the skill filter (<em>Show all skills</em>) keeps only the techs qualified for one position.</li>
         <li>Training/class columns are blue-tinted — they never appear in labor requests or the scheduler.</li>
         <li><strong>Manage Technicians</strong> / <strong>Manage Positions</strong> open those Settings tabs. Archived technicians aren't listed here; see Settings → Technicians → <em>Archived technicians</em>.</li>
@@ -840,6 +842,7 @@ const _HELP_PAGES = {
         <li><strong>Work history</strong> opens Reports → Labor Lines filtered to that technician, every date (shown when they worked shifts and you can see labor reports).</li>
         <li><strong>Restore</strong> puts them back on the technician list, the Skill Tracker and the pickers.</li>
         <li><strong>Delete</strong> appears only for someone who never worked a shift, and removes them for good.</li>
+        <li>A read-only account (<strong>VIEW ONLY</strong>) sees every card but no Restore or Delete.</li>
       </ul>
     `
   },
@@ -855,7 +858,7 @@ const _HELP_PAGES = {
         <li>Each line: position, In, Lunch 1 / Lunch 2 (start <strong>S</strong> over end <strong>E</strong>), Out, hours, and the requested tech (<strong>REQ</strong>). <strong>✓</strong> and the scheduled tech (<strong>SCHED</strong>) are filled in on the Labor Scheduler and are read-only here.</li>
         <li><strong>Project Hour Totals</strong> — collapsible summary; range totals follow the From / To filter, lifetime totals cover every day ever logged.</li>
         <li>Line, group and day totals (lines / hours / cost) update live as you edit.</li>
-        <li>Read-only accounts can look but not change anything.</li>
+        <li>Read-only accounts see the page <strong>VIEW ONLY</strong>: they can look (Projects and Recurring Templates open each entry with <strong>View</strong>) but not change anything.</li>
       </ul>
     `
   },
@@ -971,7 +974,7 @@ const _HELP_PAGES = {
   settings: {
     title: 'Settings',
     html: `
-      <p>The tabs you see depend on your role. <strong>Everyone</strong> gets Users and My Account; <strong>staff and admins</strong> also get Contacts, Shows, Form Fields, Arts Groups and PDF Designer; <strong>schedulers</strong> (and staff / admins) get Job Positions and Technicians; the rest is <strong>admin only</strong>. Tabs that open their own page have their own help there. On phones the tab row wraps and wide tables scroll sideways. More detail: README → <em>Admin &amp; Settings Guide</em>.</p>
+      <p>The tabs you see depend on your role. <strong>Everyone</strong> gets Users and My Account; <strong>staff and admins</strong> also get Contacts, Shows, Form Fields, Arts Groups and PDF Designer; <strong>schedulers</strong> (and staff / admins) get Job Positions and Technicians; the rest is <strong>admin only</strong>. A <strong>read-only</strong> account sees its tabs <strong>VIEW ONLY</strong>: every list, with labor presets, day templates and arts groups opening with <strong>View</strong>, but no add, edit or delete. Tabs that open their own page have their own help there. On phones the tab row wraps and wide tables scroll sideways. More detail: README → <em>Admin &amp; Settings Guide</em>.</p>
       <p style="margin:10px 0 0"><strong>People &amp; directory</strong></p>
       <ul style="${_HELP_UL}">
         <li><strong>Contacts</strong> — the directory behind contact dropdowns and emails: search, department filter, <strong>+ Add Contact</strong>, ✎ edit, × delete (a <strong>USER</strong> row mirrors a user account; change it under Users). Admins also see the <strong>ALL / ADVANCE / PROD / POST</strong> columns — which PDF emails each contact receives — and set them in ✎ along with a venue filter and a shows-only / events-only filter. The <strong>?</strong> by the title explains who gets which email.</li>
@@ -995,7 +998,7 @@ const _HELP_PAGES = {
       <p style="margin:10px 0 0"><strong>Labor</strong></p>
       <ul style="${_HELP_UL}">
         <li><strong>Job Positions</strong> — venues (read-only, taken from show data), skill <strong>categories</strong>, <strong>positions</strong> (venue, category, optional special rate, training-only), and <strong>Labor Day Presets</strong> (<strong>+ New Preset</strong>: positions × quantity with times and notes, applied to a labor day from its Tools menu).</li>
-        <li><strong>Technicians</strong> — <strong>pay rate levels</strong> (<em>In Estimate</em> decides which rates the pre-show estimate may use), the technician list (✎ name / rate level, <strong>Archive</strong> someone who has left, × only for a mistaken entry with no shifts; <strong>Archived technicians</strong> opens their page), and <strong>per-crew billable items</strong> (e.g. parking).</li>
+        <li><strong>Technicians</strong> — <strong>pay rate levels</strong> (<em>In Estimate</em> decides which rates the pre-show estimate may use; only admins change rate levels), the technician list (✎ name / rate level, <strong>Archive</strong> someone who has left, × only for a mistaken entry with no shifts; <strong>Archived technicians</strong> opens their page), and <strong>per-crew billable items</strong> (e.g. parking).</li>
       </ul>
       <p style="margin:10px 0 0"><strong>Email</strong> (admin)</p>
       <ul style="${_HELP_UL}">

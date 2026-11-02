@@ -3039,3 +3039,13 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
    a read-only account can open carry .rv-hide. Display only — the server's
    _readonly_guard is the authority. */
 html.readonly-view .rv-hide { display: none !important; }
+
+/* The VIEW ONLY badge every view-only page shows (page title, or the start of
+   a .rv-note line on a Settings tab). One rule — don't copy it into a page. */
+.rv-badge {
+  background: #4A5568; color: #fff; font-size: 10px; padding: 1px 6px;
+  border-radius: 3px; margin-left: 8px; font-family: var(--font-cond);
+  letter-spacing: 0.08em; vertical-align: middle; white-space: nowrap;
+}
+.rv-note { font-size: 12px; color: var(--text-dim); margin: 0 0 14px; }
+.rv-note .rv-badge { margin: 0 8px 0 0; }

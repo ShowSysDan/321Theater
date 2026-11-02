@@ -12136,9 +12136,11 @@ def settings():
     ).fetchall()] if _is_ca else []
 
     # Arts groups (touring companies / artists) — global free-text dropdown
-    # used by the arts_group_dropdown form field type.
+    # used by the arts_group_dropdown form field type. The tab's table shows
+    # each group's primary contact (it read '—' for everyone without these).
     arts_groups = [dict(r) for r in db3.execute(
-        'SELECT id, name, sort_order FROM arts_groups ORDER BY sort_order, name'
+        'SELECT id, name, sort_order, primary_contact_name, primary_contact_email, '
+        'primary_contact_phone FROM arts_groups ORDER BY sort_order, name'
     ).fetchall()] if _is_ca else []
 
     # Job positions data for settings tab — visible to content admins AND schedulers
@@ -19391,6 +19393,11 @@ def _overhead_log(action, **kw):
 @login_required
 def overhead_crew_page():
     """Render the Overhead & Project Crew running schedule."""
+    # can_edit mirrors _overhead_write_check() — the rule every overhead write
+    # route applies — which refuses ANY read-only account, admins included.
+    # So it is deliberately stricter than readonly_view (_readonly_guard's
+    # rule, which exempts admins): a read-only admin gets the view-only page
+    # here rather than editors whose every save would be refused.
     return render_template(
         'overhead_crew.html',
         user=get_current_user(),

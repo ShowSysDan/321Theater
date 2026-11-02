@@ -3852,24 +3852,33 @@ async function deleteSection(sid) {
 let _editSchedTmplId = null;
 
 function openSchedTemplateModal(tid) {
+  // A read-only account (base.html's READONLY_VIEW) only views an existing
+  // template: text readonly (still selectable), no example placeholders, no ×.
+  const ro = window.READONLY_VIEW === true;
+  if (ro && !tid) return;
   _editSchedTmplId = tid;
   const modal = document.getElementById('sched-template-modal');
   if (!modal) return;
-  document.getElementById('sched-tmpl-name').value = '';
+  const nameInp = document.getElementById('sched-tmpl-name');
+  nameInp.value = '';
   const tbody = document.getElementById('sched-tmpl-rows');
-  tbody.innerHTML = `<tr class="schedule-row">
+  tbody.innerHTML = ro ? '' : `<tr class="schedule-row">
     <td><input type="text" class="sched-cell tmpl-cell" placeholder="8:00am"></td>
     <td><input type="text" class="sched-cell tmpl-cell" placeholder="10:00am"></td>
     <td><input type="text" class="sched-cell tmpl-cell" placeholder="Load In"></td>
     <td><input type="text" class="sched-cell tmpl-cell" placeholder="Notes"></td>
     <td><button type="button" class="row-del-btn" onclick="this.closest('tr').remove()">×</button></td>
   </tr>`;
+  if (ro) { nameInp.readOnly = true; nameInp.placeholder = ''; }
   if (tid) {
     fetch(`/api/schedule-templates/${tid}`).then(r => r.json()).then(d => {
-      document.getElementById('sched-tmpl-name').value = d.name || '';
+      nameInp.value = d.name || '';
       tbody.innerHTML = '';
       (d.rows || []).forEach(r => _appendTmplRow(tbody, r));
-      if (!d.rows || d.rows.length === 0) _appendTmplRow(tbody, {});
+      if (ro) {
+        tbody.querySelectorAll('input').forEach(i => { i.readOnly = true; i.placeholder = ''; });
+        tbody.querySelectorAll('.row-del-btn').forEach(b => b.remove());
+      } else if (!d.rows || d.rows.length === 0) _appendTmplRow(tbody, {});
     });
   }
   modal.style.display = '';
@@ -3899,6 +3908,7 @@ function closeSchedTemplateModal() {
 }
 
 async function saveSchedTemplate() {
+  if (window.READONLY_VIEW) return;
   const name = document.getElementById('sched-tmpl-name').value.trim();
   if (!name) { alert('Template name is required.'); return; }
   const rows = [];
@@ -3927,6 +3937,7 @@ async function saveSchedTemplate() {
 }
 
 async function deleteSchedTemplate(tid) {
+  if (window.READONLY_VIEW) return;
   if (!confirm('Delete this template?')) return;
   const resp = await fetch(`/settings/schedule-templates/${tid}/delete`, {method:'POST'});
   const d = await resp.json();
@@ -3968,10 +3979,13 @@ function _lpPositionOptions(selectedId) {
 async function loadLaborPresets() {
   const el = document.getElementById('labor-preset-list');
   if (!el) return;
+  // A read-only account (base.html's READONLY_VIEW) gets View, no Delete.
+  const ro = window.READONLY_VIEW === true;
   try {
     const presets = await (await fetch('/api/labor-presets')).json();
     if (!presets.length) {
-      el.innerHTML = '<p class="text-dim" style="font-size:12px">No presets yet. Click + New Preset to create one.</p>';
+      el.innerHTML = '<p class="text-dim" style="font-size:12px">No presets yet.' +
+        (ro ? '' : ' Click + New Preset to create one.') + '</p>';
       return;
     }
     el.innerHTML = presets.map(p => `
@@ -3979,8 +3993,9 @@ async function loadLaborPresets() {
         <span style="font-size:12px;font-weight:600">${_esc(p.name)}</span>
         <span class="text-dim" style="font-size:11px">${p.row_count} position${p.row_count === 1 ? '' : 's'}</span>
         <div class="action-btns ml-auto">
+          ${ro ? `<button class="btn btn-xs btn-ghost" onclick="openLaborPresetModal(${p.id})">View</button>` : `
           <button class="btn btn-xs btn-ghost" onclick="openLaborPresetModal(${p.id})">Edit</button>
-          <button class="btn btn-xs btn-danger-ghost" onclick="deleteLaborPreset(${p.id})">Delete</button>
+          <button class="btn btn-xs btn-danger-ghost" onclick="deleteLaborPreset(${p.id})">Delete</button>`}
         </div>
       </div>`).join('');
   } catch (_) {
@@ -3989,6 +4004,8 @@ async function loadLaborPresets() {
 }
 
 async function openLaborPresetModal(pid) {
+  const ro = window.READONLY_VIEW === true;   // view an existing preset only
+  if (ro && !pid) return;
   _editLaborPresetId = pid;
   const modal = document.getElementById('labor-preset-modal');
   if (!modal) return;
@@ -4003,7 +4020,16 @@ async function openLaborPresetModal(pid) {
       (d.rows || []).forEach(r => _appendLaborPresetRow(tbody, r));
     } catch (_) {}
   }
-  if (!tbody.children.length) _appendLaborPresetRow(tbody, {});
+  if (!tbody.children.length && !ro) _appendLaborPresetRow(tbody, {});
+  if (ro) {
+    // Read-only: text stays selectable, pickers are locked, rows can't go.
+    modal.querySelectorAll('#labor-preset-name, #labor-preset-rows input').forEach(i => {
+      i.readOnly = true;
+      i.placeholder = '';   // an example time would read like a saved one
+    });
+    modal.querySelectorAll('#labor-preset-rows select').forEach(s => { s.disabled = true; });
+    modal.querySelectorAll('#labor-preset-rows .row-del-btn').forEach(b => b.remove());
+  }
   modal.style.display = '';
 }
 
@@ -4036,6 +4062,7 @@ function closeLaborPresetModal() {
 }
 
 async function saveLaborPreset() {
+  if (window.READONLY_VIEW) return;
   const name = document.getElementById('labor-preset-name').value.trim();
   if (!name) { alert('Preset name is required.'); return; }
   const rows = [];
@@ -4086,6 +4113,7 @@ async function saveLaborPreset() {
 }
 
 async function deleteLaborPreset(pid) {
+  if (window.READONLY_VIEW) return;
   if (!confirm('Delete this preset? Shows it was already applied to keep their labor lines.')) return;
   const resp = await fetch(`/settings/labor-presets/${pid}/delete`, {method:'POST'});
   const d = await resp.json();

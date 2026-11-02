@@ -43,9 +43,13 @@
 {% endblock %}
 
 {% block content %}
+{# View-only for any read-only account, admins included: adding labor
+   happens on the show page, which is view-only for every read-only account
+   (show_page's `restricted`), so readonly_view (admins exempt) is widened. #}
+{% set nl_view_only = readonly_view or session.get('is_readonly') %}
 <div class="page-header">
   <div>
-    <h1 class="page-title">Shows Without Labor</h1>
+    <h1 class="page-title">Shows Without Labor{% if nl_view_only %}<span class="rv-badge" title="Your account is read-only: you can see these shows but not add labor">VIEW ONLY</span>{% endif %}</h1>
     <p class="page-sub">Active shows that have no labor requested yet — the same signal the scheduler alert watches.</p>
   </div>
   <div class="header-actions">
@@ -143,8 +147,9 @@
           <td class="text-dim">{{ s.venue or '—' }}</td>
           <td class="text-dim">{{ s.pm_name or '—' }}</td>
           <td style="text-align:right">
+            {# View-only accounts can't add labor: the same link just opens the show. #}
             <a href="{{ url_for('show_page', show_id=s.id, tab='staffing') }}"
-               class="btn btn-xs btn-primary" target="_blank">Add labor ↗</a>
+               class="btn btn-xs {{ 'btn-ghost' if nl_view_only else 'btn-primary' }}" target="_blank">{{ 'Open show ↗' if nl_view_only else 'Add labor ↗' }}</a>
           </td>
         </tr>
         {% endfor %}

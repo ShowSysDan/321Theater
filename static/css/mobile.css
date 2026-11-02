@@ -154,6 +154,9 @@ html.mobile-view .form-row.cols-2,
 html.mobile-view .form-row.cols-3,
 html.mobile-view .form-row.cols-4,
 html.mobile-view .form-row.cols-5 { grid-template-columns: 1fr; }
+/* Settings → Job Positions: venues / categories stack above the positions
+   table (the inline 280px column left that card ~60px wide on a phone). */
+html.mobile-view .positions-grid { grid-template-columns: 1fr !important; }
 html.mobile-view .adv-form-grid { grid-template-columns: 1fr !important; }
 html.mobile-view .adv-form-grid [style*="grid-column"] { grid-column: 1 / -1 !important; }
 html.mobile-view .history-drawer { width: 100% !important; right: 0; }
