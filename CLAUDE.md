@@ -1289,41 +1289,31 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   localStorage `home_tl_show`) decides which items exist BEFORE
   `computeRange` and the empty test; Schedule hides the Overhead lane.
   Width constants live in `W` (`minLane` keeps one-column headers readable).
-- Wrapped lanes (3.37.0): `applyWrapped(nowOnView())` (from `updateNow`)
-  folds a non-empty lane whose last drawn `t_end` ≤ NOW to the rail (`W.rail`, 3.41.0) —
-  widths animate via CSS transitions on .tl-inner / .tl-lanehead / .tl-lane
-  (`.tl-noanim` suppresses them on a full render). Never fold without a real
-  NOW (past days stay open). Lanes/heads are `overflow: clip`, never
-  `hidden` (hidden would break the items' sticky labels). Reopened lanes =
-  in-memory `reopened` set keyed `date|lane`.
-  3.38.0 adds the SCROLL fold: a lane whose `lastEnd` (items' t_end AND
-  performance minutes) ≤ the minute at the top of the box
-  (`scrollTopMinute()`) becomes a `W.rail` rail (`.tl-done-scroll`, name
-  vertical); re-checked once per frame on scroll; opens itself when
-  scrolled back; its click scrolls up instead of toggling `reopened`. Time
-  fold wins over scroll fold. render() applies the fold for the restored
-  scroll position BEFORE removing `.tl-noanim`.
+- Folding lanes (3.42.0 — the 3.37–3.41 clock-based "Wrapped" fold is
+  GONE, the user's call: only scroll folds). `applyWrapped()` (scroll, once
+  per frame; also from updateNow/render) folds a non-empty lane whose
+  `lastEnd` (items' t_end AND performance minutes) ≤ the minute at the top
+  of the box (`scrollTopMinute()`), with hysteresis `FOLD_SLACK` (fold 20
+  min past, open as soon as it's back). Folded = `W.rail` rail
+  (`.tl-done`, name vertical, ↑ badge), parked at the far right via flex
+  `order` on head + body (`laneOrder`: `parked` 2, empty 1, busy 0; DOM
+  order = original sort so it returns home). Animation = Web Animations
+  API only (no CSS width transitions on lanes): fold = squeeze width
+  in place (320 ms) THEN `reorderLanes('slide')` FLIP; open = full width +
+  FLIP slide back; reduced motion = 'fade'; a `.tl-noanim` render = 'none'.
+  `parked` is set only when the slide starts, so a lane still squeezing
+  never jumps. Click a rail → smooth-scroll up to its last block.
   NO-FLICKER RULES (3.38.1): a fold must never change the grid's vertical
   geometry, or the browser re-anchors the scroll and the fold flips back in
   a loop. So: the header row gets `min-height` = its all-open height at
-  render; `.tl-scroll` has `overflow-anchor: none`; scroll folds have
-  hysteresis (`FOLD_SLACK`); and if the open grid overflowed sideways,
-  `.tl-inner` stays wider than the box so the horizontal scrollbar can't
-  vanish. Keep all four.
-  3.39.0: scroll fold WINS over time fold (rail is thinner). Lane headers
-  are compact: `.tl-lh-meta` (badges + venue), `.tl-lh-pm` (PM + contacts +
-  `.tl-lh-perf`), each one nowrap line with ellipsis + `title`; the missing
-  column note lives in the label row. Default zoom index 1 (48 px/h).
-  3.40.0: folded lanes go to the far right via flex `order` on the lane's
-  head + body (busy 0, empty 1, folded 2; DOM order = original sort, so a
-  lane returns to its place). An order change is a FLIP in applyWrapped:
-  measure lefts, `.tl-nowidth` (widths jump so the measure is final), set
-  translateX(old−new), then transition to 0; the lane whose fold changed
-  gets `.tl-flipping` (lifted). Never on a `.tl-noanim` render or with
-  reduced motion.
-  3.41.0: the slim "Wrapped" column (W.done) is gone — EVERY fold is the
-  `W.rail` rail (`.tl-done` carries the rail layout; `.tl-done-scroll` only
-  recolours the badge ↑). No hatching on folded lanes.
+  render; `.tl-scroll` has `overflow-anchor: none`; `FOLD_SLACK`; and if
+  the open grid overflowed sideways, `.tl-inner` stays wider than the box
+  so the horizontal scrollbar can't vanish. Lanes/heads are `overflow:
+  clip`, never `hidden` (hidden breaks the items' sticky labels). Keep all.
+  Lane headers (3.39.0) are compact: `.tl-lh-meta` (badges + venue),
+  `.tl-lh-pm` (PM + contacts + `.tl-lh-perf`), each one nowrap line with
+  ellipsis + `title`; the missing-column note lives in the label row.
+  Default zoom index 1 (48 px/h).
 - The `.tl-*` class names are shared with dashboard_view.html's Reservation
   Timeline: Home's rules on those names are scoped `:where(.tl-phead)` /
   `:where(.tl-scroll)` in style.css and mobile.css — keep new ones scoped.

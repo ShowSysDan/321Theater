@@ -103,15 +103,13 @@
   let geom = null;                  // {start, end, ppm} of the current render
   let nowEl = null, headEl = null;
   const itemInfo = new Map();       // data-k → tooltip details (rebuilt per render)
-  // Wrapped lanes (3.37.0): once everything a lane draws has ended (NOW past
-  // its last end), it slides shut to a slim "Wrapped" column. `laneRecs` =
-  // the current render's lanes with their nodes; `reopened` = lanes the user
-  // opened again ('<date>|<key>', this page only).
+  // Folding lanes (3.42.0): a lane whose blocks have all scrolled out of
+  // view above collapses to a thin rail at the far right, and opens again
+  // when scrolled back. `laneRecs` = the current render's lanes + nodes.
   let laneRecs = [], innerEl = null, l0Overflow = false;
-  // Scroll fold hysteresis (minutes): fold once scrolled this far past a
-  // lane's last block; open again as soon as that block is back in view.
+  // Fold hysteresis (minutes): fold once scrolled this far past a lane's
+  // last block; open again as soon as that block is back in view.
   const FOLD_SLACK = 20;
-  const reopened = new Set();
 
   // ── data ──────────────────────────────────────────────────────────────
   function setStatus(msg, isError) {
@@ -403,6 +401,7 @@
         if (p.minutes != null) l.lastEnd = Math.max(l.lastEnd, p.minutes);
       });
       l.done = false;
+      l.parked = false;
     });
     inner.style.setProperty('--tl-axis-w', AXIS_W + 'px');
 
@@ -479,7 +478,7 @@
     }
     // Fold for the scroll position just set, still without the slide; then
     // let later folds animate.
-    applyWrapped(nowOnView());
+    applyWrapped();
     void inner.offsetWidth;
     inner.classList.remove('tl-noanim');
     if (focusKey) {
@@ -494,19 +493,9 @@
     return b;
   }
 
-  // The "Wrapped" pill a finished lane carries (hidden until it's finished);
-  // it folds / unfolds the lane.
-  function wrapToggle(l) {
-    const b = el('button', 'tl-wrap-toggle');
-    b.type = 'button';
-    b.dataset.lane = l.key;
-    b.hidden = true;
-    return b;
-  }
   function laneHead(l) {
     const h = el('div', 'tl-lanehead' + (l.empty ? ' tl-lane-empty' : ''));
     h.style.width = l.w + 'px';
-    if (!l.empty) h.appendChild(wrapToggle(l));
     if (l.kind === 'oh') {
       h.classList.add('tl-lane-oh');
       h.dataset.href = '/overhead-crew';
@@ -689,9 +678,7 @@
       w.dataset.lane = l.key;
       w.tabIndex = -1;                      // the header pill is the keyboard path
       const wi = el('span', 'tl-wrap-inner');
-      wi.appendChild(el('span', 'tl-wrap-check', '\u2713'));
-      wi.appendChild(el('span', 'tl-wrap-text', 'Wrapped'));
-      wi.appendChild(el('span', 'tl-wrap-time', ''));
+      wi.appendChild(el('span', 'tl-wrap-check', '\u2191'));
       w.appendChild(wi);
       lane.appendChild(w);
     }
@@ -831,137 +818,143 @@
     scroller.querySelectorAll('.tl-item').forEach(n => {
       n.classList.toggle('tl-past', Number(n.dataset.end) <= cutoff);
     });
-    applyWrapped(nm);
+    applyWrapped();
   }
 
   // Fold lanes whose last item has ended. Only against a real NOW (today, or
   // yesterday's after-midnight hours) — a past day's lanes stay open, or the
   // whole grid would fold. Widths animate (CSS transition on width); the
   // items fade out under the slim column.
-  // Two reasons a lane folds to the thin rail (`W.rail`, sent to the far right):
-  //  - 'time':   NOW is past its last block (only against a real NOW, so a
-  //              past day isn't folded wholesale) — "✓ Wrapped hh:mm";
-  //              a click reopens it (`reopened`) until reload.
-  //  - 'scroll': the box is scrolled below its last block, so nothing of it
-  //              is on screen — "↑ Ends hh:mm"; it opens again by itself
-  //              when scrolled back up, and a click scrolls up to it.
-  // Width changes are horizontal only, so a fold never moves the vertical
-  // position (no feedback loop with the scroll that caused it).
+  // A lane folds to the thin rail (`W.rail`, sent to the far right) once
+  // the box is scrolled below its last block (or show time), so nothing of
+  // it is on screen; it opens again by itself when scrolled back up, and a
+  // click on the rail scrolls up to it. Hysteresis: fold FOLD_SLACK minutes
+  // past the end, open as soon as the end is back in view. Widths change
+  // horizontally only, so a fold never moves the vertical position (and the
+  // header row is frozen at render) — no feedback loop with the scroll.
   function scrollTopMinute() {
     if (!geom) return -Infinity;
     return geom.start + scroller.scrollTop / geom.ppm;
   }
-  function applyWrapped(nm) {
+  function wantsFold(l, topMin) {
+    if (l.empty || !(l.lastEnd > -Infinity)) return false;
+    return l.done ? l.lastEnd <= topMin : l.lastEnd <= topMin - FOLD_SLACK;
+  }
+  // Order: busy 0, empty 1, folded 2 (flex `order`; DOM order = the
+  // original sort, so a lane goes back to its own place when it opens).
+  // `parked` = it has finished moving there (a lane still squeezing shut
+  // keeps its place until its slide).
+  function laneOrder(l) { return l.parked ? 2 : (l.empty ? 1 : 0); }
+
+  // Apply every lane's order; mode 'slide' animates the move (FLIP via the
+  // Web Animations API: measure, re-lay out, translateX(old−new) → 0),
+  // 'fade' blinks the moved lanes (reduced motion), 'none' just moves.
+  // `lift` = lanes that changed fold state (ride above the rest).
+  function reorderLanes(mode, lift) {
+    const nodes = l => [l.headEl, l.bodyEl].filter(Boolean);
+    let before = null;
+    if (mode !== 'none') {
+      laneRecs.forEach(l => nodes(l).forEach(n => {
+        if (n._tlMove) { try { n._tlMove.finish(); } catch (_) { /* gone */ } }
+      }));
+      before = new Map();
+      laneRecs.forEach(l => { if (l.headEl) before.set(l, l.headEl.getBoundingClientRect().left); });
+    }
+    laneRecs.forEach(l => nodes(l).forEach(n => { n.style.order = String(laneOrder(l)); }));
+    if (!before) return;
+    laneRecs.forEach(l => {
+      if (!l.headEl || !before.has(l)) return;
+      const dx = before.get(l) - l.headEl.getBoundingClientRect().left;
+      if (Math.abs(dx) < 1) return;
+      const lifted = lift.indexOf(l) >= 0;
+      nodes(l).forEach(n => {
+        if (lifted) n.classList.add('tl-flipping');
+        const anim = n.animate(mode === 'fade'
+          ? [{ opacity: 0.2 }, { opacity: 1 }]
+          : [{ transform: 'translateX(' + dx + 'px)' }, { transform: 'translateX(0)' }],
+          { duration: mode === 'fade' ? 220 : 480, easing: 'cubic-bezier(.22, .8, .24, 1)' });
+        n._tlMove = anim;
+        const end = () => { if (n._tlMove === anim) { n._tlMove = null; n.classList.remove('tl-flipping'); } };
+        anim.onfinish = end;
+        anim.oncancel = end;
+      });
+    });
+  }
+
+  let foldTimer = 0, pendingFold = [];
+  function applyWrapped() {
     if (!innerEl || !dayShown()) return;
     const topMin = scrollTopMinute();
-    let changed = false, total = 0;
-    // 3.40.0: folded lanes move to the far right (flex `order`: busy 0,
-    // empty 1, folded 2 — stable within each group). An order change slides
-    // the lanes to their new places (FLIP: measure, re-lay out instantly,
-    // then animate the translateX back to 0).
-    const animate = !innerEl.classList.contains('tl-noanim') && !REDUCED_MOTION();
-    const laneOrder = (l, fold) => (fold ? 2 : (l.empty ? 1 : 0));
-    let flipFrom = null;
-    if (animate) {
-      const moves = laneRecs.some(l => {
-        if (!l.headEl || l.empty) return false;
-        const has = l.lastEnd > -Infinity;
-        const fin = has && nm != null && l.lastEnd <= nm;
-        const sf = has && (l.reason === 'scroll' ? l.lastEnd <= topMin : l.lastEnd <= topMin - FOLD_SLACK);
-        const fold = sf || (fin && !reopened.has(curDate + '|' + l.key));
-        return laneOrder(l, fold) !== laneOrder(l, !!l.done);
-      });
-      if (moves) {
-        flipFrom = new Map();
-        laneRecs.forEach(l => { if (l.headEl) flipFrom.set(l, l.headEl.getBoundingClientRect().left); });
-        innerEl.classList.add('tl-nowidth');   // final widths at once, so the measure is true
-      }
-    }
+    const canAnim = !innerEl.classList.contains('tl-noanim') && typeof Element.prototype.animate === 'function';
+    const reduce = canAnim && REDUCED_MOTION();
+    const folding = [], unfolding = [];
+    let total = 0;
     laneRecs.forEach(l => {
-      const has = !l.empty && l.lastEnd > -Infinity;
-      const finished = has && nm != null && l.lastEnd <= nm;
-      const timeFold = finished && !reopened.has(curDate + '|' + l.key);
-      const scrollFold = has && (l.reason === 'scroll' ? l.lastEnd <= topMin : l.lastEnd <= topMin - FOLD_SLACK);
-      // Scrolled past wins (the thinner rail): a wrapped lane whose blocks
-      // are above the view needn't keep its 'Wrapped' column either.
-      const reason = scrollFold ? 'scroll' : (timeFold ? 'time' : '');
-      const fold = !!reason;
-      // Folded either way = the thin rail (name runs down it), at the far right.
-      const w = fold ? W.rail : l.w;
-      total += w;
-      if (finished === l.finished && reason === l.reason) return;
-      if (flipFrom && fold !== !!l.done) l._moved = true;   // lifted while it slides
-      l.finished = finished;
-      l.reason = reason;
+      const fold = wantsFold(l, topMin);
+      total += fold ? W.rail : l.w;
+      if (fold === !!l.done) return;
       l.done = fold;
-      changed = true;
+      (fold ? folding : unfolding).push(l);
       [l.headEl, l.bodyEl].forEach(n => {
         if (!n) return;
-        n.style.width = w + 'px';
-        n.style.order = String(laneOrder(l, fold));
         n.classList.toggle('tl-done', fold);
-        n.classList.toggle('tl-done-scroll', reason === 'scroll');
-        n.classList.toggle('tl-finished', finished);
+        n.classList.toggle('tl-done-scroll', fold);
       });
-      const end = hhmm(l.lastEnd);
-      const pill = l.headEl && l.headEl.querySelector('.tl-wrap-toggle');
-      if (pill) {
-        pill.hidden = !(finished || fold);
-        // Phones: the slim column fits only the time.
-        if (reason === 'time') {
-          pill.textContent = '✓ ' + (IS_MOBILE ? end : 'Wrapped ' + end);
-          pill.title = 'Everything here has finished — click to open the lane again';
-        } else if (reason === 'scroll') {
-          pill.textContent = '↑ ' + (IS_MOBILE ? end : 'Ends ' + end);
-          pill.title = 'Its last block (ends ' + end + ') is above — click to scroll up to it';
-        } else {
-          pill.textContent = '✕';
-          pill.title = 'Fold this finished lane';
-        }
-        pill.classList.toggle('tl-wrap-mini', !fold);
-        pill.setAttribute('aria-expanded', fold ? 'false' : 'true');
-      }
       const wb = l.bodyEl && l.bodyEl.querySelector('.tl-wrap-body');
-      if (wb) {
-        wb.querySelector('.tl-wrap-check').textContent = reason === 'scroll' ? '↑' : '✓';
-        wb.querySelector('.tl-wrap-text').textContent = reason === 'scroll' ? 'Above' : 'Wrapped';
-        wb.querySelector('.tl-wrap-time').textContent = reason === 'scroll' ? 'ends ' + end : end;
-        wb.title = reason === 'scroll' ? 'Ends ' + end + ' — click to scroll up to it'
-          : 'Wrapped at ' + end + ' — click to open the lane again';
-      }
+      if (wb) wb.title = 'Ends ' + hhmm(l.lastEnd) + ' — click to scroll up to it';
+      if (l.headEl) l.headEl.title = fold ? (l.kind === 'oh' ? 'Overhead & Project Crew' : l.show.name) + ' — ends ' + hhmm(l.lastEnd) : '';
     });
-    if (changed) {
-      let iw = AXIS_W + total;
-      if (l0Overflow) iw = Math.max(iw, scroller.clientWidth + 1);
+    if (!folding.length && !unfolding.length) return;
+    let iw = AXIS_W + total;
+    if (l0Overflow) iw = Math.max(iw, scroller.clientWidth + 1);
+    const setW = (l, w) => [l.headEl, l.bodyEl].forEach(n => { if (n) n.style.width = w + 'px'; });
+
+    const stopSqueeze = l => [l.headEl, l.bodyEl].forEach(n => {
+      if (n && n._tlSqueeze) { try { n._tlSqueeze.cancel(); } catch (_) { /* gone */ } n._tlSqueeze = null; }
+    });
+    if (!canAnim || reduce) {
+      folding.concat(unfolding).forEach(l => { stopSqueeze(l); setW(l, l.done ? W.rail : l.w); l.parked = l.done; });
       innerEl.style.width = iw + 'px';
+      reorderLanes(canAnim ? 'fade' : 'none', folding.concat(unfolding));
+      return;
     }
-    if (flipFrom) {
-      laneRecs.forEach(l => {
-        if (!l.headEl || !flipFrom.has(l)) return;
-        const dx = flipFrom.get(l) - l.headEl.getBoundingClientRect().left;
-        if (Math.abs(dx) < 1) return;
+    // Opening: back to its place at full width, sliding in from the right.
+    if (unfolding.length) {
+      unfolding.forEach(l => { stopSqueeze(l); setW(l, l.w); l.parked = false; });
+      innerEl.style.width = Math.max(iw, innerEl.offsetWidth) + 'px';
+      reorderLanes('slide', unfolding);
+    }
+    // Folding, step 1: squeeze shut where it stands (the lanes beside it
+    // close in); step 2 (when every squeeze is done): slide to the right.
+    if (folding.length) {
+      folding.forEach(l => {
         [l.headEl, l.bodyEl].forEach(n => {
-          n.style.transition = 'none';
-          n.style.transform = 'translateX(' + dx + 'px)';
-          if (l._moved) n.classList.add('tl-flipping');
+          if (!n) return;
+          const from = n.getBoundingClientRect().width;
+          n.style.width = W.rail + 'px';
+          if (n._tlSqueeze) { try { n._tlSqueeze.cancel(); } catch (_) { /* gone */ } }
+          n._tlSqueeze = n.animate([{ width: from + 'px' }, { width: W.rail + 'px' }],
+            { duration: 320, easing: 'cubic-bezier(.4, 0, .2, 1)' });
         });
       });
-      laneRecs.forEach(l => { l._moved = false; });
-      void innerEl.offsetWidth;
-      innerEl.classList.remove('tl-nowidth');
-      laneRecs.forEach(l => {
-        [l.headEl, l.bodyEl].forEach(n => {
-          if (!n || !n.style.transform) return;
-          n.style.transition = 'transform .5s cubic-bezier(.22, .8, .24, 1)';
-          n.style.transform = '';
-          n.addEventListener('transitionend', function done(e) {
-            if (e.target !== n || e.propertyName !== 'transform') return;
-            n.removeEventListener('transitionend', done);
-            n.style.transition = '';
-            n.classList.remove('tl-flipping');
-          });
-        });
-      });
+      pendingFold = pendingFold.concat(folding);
+      clearTimeout(foldTimer);
+      foldTimer = setTimeout(() => {
+        foldTimer = 0;
+        const go = pendingFold.filter(l => l.done && laneRecs.indexOf(l) >= 0);
+        pendingFold = [];
+        if (!dayShown() || !innerEl || !go.length) return;
+        // Only lanes still folded move (a quick scroll back may have opened one).
+        go.forEach(l => { l.parked = true; });
+        reorderLanes('slide', go);
+        let t = 0;
+        laneRecs.forEach(l => { t += l.done ? W.rail : l.w; });
+        let w2 = AXIS_W + t;
+        if (l0Overflow) w2 = Math.max(w2, scroller.clientWidth + 1);
+        innerEl.style.width = w2 + 'px';
+      }, 330);
+    } else {
+      innerEl.style.width = iw + 'px';
     }
   }
   function REDUCED_MOTION() {
@@ -969,28 +962,23 @@
   }
 
   scroller.addEventListener('click', e => {
-    const b = e.target.closest('.tl-wrap-toggle, .tl-wrap-body');
-    if (!b) return;
+    const b = e.target.closest('.tl-wrap-body');
+    if (!b || !geom) return;
     e.preventDefault();
     hideTip();
     const l = laneRecs.find(x => x.key === b.dataset.lane);
-    if (l && l.reason === 'scroll' && geom) {
-      // Bring its last block into view (two-thirds down); the scroll opens it.
-      const y = (l.lastEnd - geom.start) * geom.ppm - scroller.clientHeight * 2 / 3;
-      try { scroller.scrollTo({ top: Math.max(0, y), behavior: 'smooth' }); }
-      catch (_) { scroller.scrollTop = Math.max(0, y); }
-      return;
-    }
-    const k = curDate + '|' + b.dataset.lane;
-    if (reopened.has(k)) reopened.delete(k); else reopened.add(k);
-    applyWrapped(nowOnView());
+    if (!l) return;
+    // Bring its last block into view (two-thirds down); the scroll opens it.
+    const y = (l.lastEnd - geom.start) * geom.ppm - scroller.clientHeight * 2 / 3;
+    try { scroller.scrollTo({ top: Math.max(0, y), behavior: 'smooth' }); }
+    catch (_) { scroller.scrollTop = Math.max(0, y); }
   });
 
   // Scroll folds: re-check at most once a frame.
   let foldRaf = 0;
   scroller.addEventListener('scroll', () => {
     if (foldRaf) return;
-    foldRaf = requestAnimationFrame(() => { foldRaf = 0; applyWrapped(nowOnView()); });
+    foldRaf = requestAnimationFrame(() => { foldRaf = 0; applyWrapped(); });
   }, { passive: true });
 
   // ── venue chips ───────────────────────────────────────────────────────
