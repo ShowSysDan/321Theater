@@ -44,8 +44,8 @@
   // nothing timed in the current view is one narrow column (`empty`), parked
   // at the right-hand end.
   const W = IS_MOBILE
-    ? { sched: 80, schedCol: 56, crew: 58, crewCol: 32, pad: 4, max: 360, empty: 96, minLane: 104 }
-    : { sched: 112, schedCol: 84, crew: 112, crewCol: 40, pad: 6, max: 640, empty: 150, minLane: 136 };
+    ? { sched: 80, schedCol: 56, crew: 58, crewCol: 32, pad: 4, max: 360, empty: 96, minLane: 104, done: 96 }
+    : { sched: 112, schedCol: 84, crew: 112, crewCol: 40, pad: 6, max: 640, empty: 150, minLane: 136, done: 132 };
   const RANGE_START = 6 * 60, RANGE_END = 24 * 60, RANGE_CAP = 30 * 60;
   const MIN_ITEM_PX = 18;
   const TICK_MS = 30000, REFRESH_MS = 60000;
@@ -103,6 +103,12 @@
   let geom = null;                  // {start, end, ppm} of the current render
   let nowEl = null, headEl = null;
   const itemInfo = new Map();       // data-k → tooltip details (rebuilt per render)
+  // Wrapped lanes (3.37.0): once everything a lane draws has ended (NOW past
+  // its last end), it slides shut to a slim "Wrapped" column. `laneRecs` =
+  // the current render's lanes with their nodes; `reopened` = lanes the user
+  // opened again ('<date>|<key>', this page only).
+  let laneRecs = [], innerEl = null;
+  const reopened = new Set();
 
   // ── data ──────────────────────────────────────────────────────────────
   function setStatus(msg, isError) {
@@ -382,6 +388,14 @@
     itemInfo.clear();
     const inner = el('div', 'tl-inner');
     inner.style.width = (AXIS_W + lanes.reduce((a, l) => a + l.w, 0)) + 'px';
+    innerEl = inner;
+    laneRecs = lanes;
+    lanes.forEach(l => {
+      l.key = l.kind === 'oh' ? 'oh' : 's' + l.show.id;
+      l.lastEnd = -Infinity;
+      l.sched.concat(l.crew).forEach(i => { l.lastEnd = Math.max(l.lastEnd, i.t_end); });
+      l.done = false;
+    });
     inner.style.setProperty('--tl-axis-w', AXIS_W + 'px');
 
     // Header row: corner + one header per lane (sticky top).
@@ -389,7 +403,7 @@
     const corner = el('div', 'tl-corner');
     corner.style.width = AXIS_W + 'px';
     head.appendChild(corner);
-    lanes.forEach(l => head.appendChild(laneHead(l)));
+    lanes.forEach(l => { l.headEl = laneHead(l); head.appendChild(l.headEl); });
 
     // Body: axis + gridlines + lanes + NOW line.
     const body = el('div', 'tl-bodyrow');
@@ -413,7 +427,7 @@
       }
     }
     body.appendChild(axis);
-    lanes.forEach((l, idx) => body.appendChild(laneBody(l, idx, ppm, range)));
+    lanes.forEach((l, idx) => { l.bodyEl = laneBody(l, idx, ppm, range); body.appendChild(l.bodyEl); });
     nowEl = el('div', 'tl-now');
     nowEl.appendChild(el('span', 'tl-now-label'));
     nowEl.hidden = true;
@@ -424,9 +438,12 @@
     scroller.textContent = '';
     scroller.appendChild(inner);
     setHead(head);
+    inner.classList.add('tl-noanim');      // first paint: no slide
     syncHeadHeight();
     fitHeight();
     updateNow();
+    void inner.offsetWidth;
+    inner.classList.remove('tl-noanim');
 
     // Scroll: first paint of a day → now (today) or the first item; a refresh
     // or zoom keeps the same time in the middle of the box.
@@ -458,9 +475,19 @@
     return b;
   }
 
+  // The "Wrapped" pill a finished lane carries (hidden until it's finished);
+  // it folds / unfolds the lane.
+  function wrapToggle(l) {
+    const b = el('button', 'tl-wrap-toggle');
+    b.type = 'button';
+    b.dataset.lane = l.key;
+    b.hidden = true;
+    return b;
+  }
   function laneHead(l) {
     const h = el('div', 'tl-lanehead' + (l.empty ? ' tl-lane-empty' : ''));
     h.style.width = l.w + 'px';
+    if (!l.empty) h.appendChild(wrapToggle(l));
     if (l.kind === 'oh') {
       h.classList.add('tl-lane-oh');
       h.dataset.href = '/overhead-crew';
@@ -629,6 +656,18 @@
     lane.style.width = l.w + 'px';
     if (l.kind === 'oh') lane.classList.add('tl-lane-oh');
     else laneVariant(lane, l.show);
+    if (!l.empty) {
+      const w = el('button', 'tl-wrap-body');
+      w.type = 'button';
+      w.dataset.lane = l.key;
+      w.tabIndex = -1;                      // the header pill is the keyboard path
+      const wi = el('span', 'tl-wrap-inner');
+      wi.appendChild(el('span', 'tl-wrap-check', '\u2713'));
+      wi.appendChild(el('span', 'tl-wrap-text', 'Wrapped'));
+      wi.appendChild(el('span', 'tl-wrap-time', ''));
+      w.appendChild(wi);
+      lane.appendChild(w);
+    }
     if (l.empty) {
       lane.appendChild(el('span', 'tl-col-none',
         showMode === 'sched' ? 'no schedule' : showMode === 'crew' ? 'no crew' : 'nothing timed'));
@@ -765,7 +804,60 @@
     scroller.querySelectorAll('.tl-item').forEach(n => {
       n.classList.toggle('tl-past', Number(n.dataset.end) <= cutoff);
     });
+    applyWrapped(nm);
   }
+
+  // Fold lanes whose last item has ended. Only against a real NOW (today, or
+  // yesterday's after-midnight hours) — a past day's lanes stay open, or the
+  // whole grid would fold. Widths animate (CSS transition on width); the
+  // items fade out under the slim column.
+  function applyWrapped(nm) {
+    if (!innerEl) return;
+    let changed = false, total = 0;
+    laneRecs.forEach(l => {
+      const finished = nm != null && !l.empty && l.lastEnd > -Infinity && l.lastEnd <= nm;
+      const fold = finished && !reopened.has(curDate + '|' + l.key);
+      const w = fold ? W.done : l.w;
+      total += w;
+      if (finished !== l.finished || fold !== l.done) {
+        l.finished = finished;
+        l.done = fold;
+        changed = true;
+        [l.headEl, l.bodyEl].forEach(n => {
+          if (!n) return;
+          n.style.width = w + 'px';
+          n.classList.toggle('tl-done', fold);
+          n.classList.toggle('tl-finished', finished);
+        });
+        const label = 'Wrapped ' + hhmm(l.lastEnd);
+        const pill = l.headEl && l.headEl.querySelector('.tl-wrap-toggle');
+        if (pill) {
+          pill.hidden = !finished;
+          // Phones: the slim column fits only the time.
+          pill.textContent = fold ? '\u2713 ' + (IS_MOBILE ? hhmm(l.lastEnd) : label) : '\u2715 Fold';
+          pill.title = fold ? 'Everything here has finished \u2014 click to open the lane again' : 'Fold this finished lane';
+          pill.setAttribute('aria-expanded', fold ? 'false' : 'true');
+        }
+        const t = l.bodyEl && l.bodyEl.querySelector('.tl-wrap-time');
+        if (t) t.textContent = hhmm(l.lastEnd);
+        if (l.bodyEl) {
+          const wb = l.bodyEl.querySelector('.tl-wrap-body');
+          if (wb) wb.title = 'Wrapped at ' + hhmm(l.lastEnd) + ' \u2014 click to open the lane again';
+        }
+      }
+    });
+    if (changed) innerEl.style.width = (AXIS_W + total) + 'px';
+  }
+
+  scroller.addEventListener('click', e => {
+    const b = e.target.closest('.tl-wrap-toggle, .tl-wrap-body');
+    if (!b) return;
+    e.preventDefault();
+    const k = curDate + '|' + b.dataset.lane;
+    if (reopened.has(k)) reopened.delete(k); else reopened.add(k);
+    hideTip();
+    applyWrapped(nowOnView());
+  });
 
   // ── venue chips ───────────────────────────────────────────────────────
   function renderVenueChips() {

@@ -2954,6 +2954,47 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 .tl-lane.tl-lane-dark .tl-col { opacity: .45; }
 .tl-col { position: relative; flex: 0 0 auto; }
 .tl-col-crew { border-left: 1px dashed var(--border); padding-left: 0; }
+/* 3.37.0: wrapped lanes. When everything a lane draws has ended, it slides
+   shut (width transition on header + body + the grid) and its blocks fade
+   out under a slim "✓ Wrapped hh:mm" column; the pill / column reopens it. */
+:where(.tl-scroll) .tl-inner, :where(.tl-scroll) .tl-lanehead, :where(.tl-scroll) .tl-lane {
+  transition: width .55s cubic-bezier(.22, .8, .24, 1); }
+:where(.tl-scroll) .tl-noanim, :where(.tl-scroll) .tl-noanim * { transition: none !important; }
+/* clip (not hidden): hidden would make each lane the scroll container for the items' sticky labels */
+:where(.tl-scroll) .tl-lanehead, :where(.tl-scroll) .tl-lane { overflow: clip; }
+:where(.tl-scroll) .tl-lane .tl-col, :where(.tl-scroll) .tl-lane .tl-perf, :where(.tl-scroll) .tl-lanehead .tl-lh-cols {
+  transition: opacity .35s ease .1s, transform .55s cubic-bezier(.22, .8, .24, 1); }
+:where(.tl-scroll) .tl-lane.tl-done .tl-col, :where(.tl-scroll) .tl-lane.tl-done .tl-perf {
+  opacity: 0; transform: scaleX(.6); transform-origin: left center; pointer-events: none; transition-delay: 0s; }
+:where(.tl-scroll) .tl-lanehead.tl-done .tl-lh-cols { opacity: 0; transition-delay: 0s; }
+:where(.tl-scroll) .tl-lanehead.tl-done { background: color-mix(in srgb, var(--past) 7%, transparent); }
+:where(.tl-scroll) .tl-lanehead.tl-done .tl-lh-name { color: var(--text) !important; }
+:where(.tl-scroll) .tl-lanehead.tl-done .tl-lh-pm, :where(.tl-scroll) .tl-lanehead.tl-done .tl-lh-perf,
+:where(.tl-scroll) .tl-lanehead.tl-done .tl-untimed, :where(.tl-scroll) .tl-lanehead.tl-done .tl-lh-badges { display: none; }
+.tl-wrap-toggle { align-self: flex-start; order: -1; margin-bottom: 2px; padding: 1px 7px; border-radius: 999px; cursor: pointer;
+  font: 700 9.5px/1.6 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; white-space: nowrap;
+  color: var(--text-dim); background: color-mix(in srgb, var(--past) 18%, transparent); border: 1px solid color-mix(in srgb, var(--past) 45%, transparent);
+  animation: tl-pop .4s cubic-bezier(.3, 1.5, .5, 1); }
+.tl-wrap-toggle[hidden] { display: none; }
+.tl-wrap-toggle:hover, .tl-wrap-toggle:focus-visible { color: var(--ink); border-color: var(--line-strong); }
+.tl-lanehead.tl-done .tl-wrap-toggle { color: var(--ink); }
+.tl-wrap-body { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+  gap: 6px; padding: 18px 0 0; border: 0; margin: 0; background: transparent; color: var(--text-dim); cursor: pointer;
+  opacity: 0; pointer-events: none; transition: opacity .35s ease; }
+.tl-lane.tl-done .tl-wrap-body { opacity: 1; pointer-events: auto; transition-delay: .3s;
+  background: repeating-linear-gradient(135deg, transparent 0 10px, color-mix(in srgb, var(--past) 7%, transparent) 10px 11px); }
+.tl-lane.tl-done .tl-wrap-body:hover { color: var(--ink); background-color: color-mix(in srgb, var(--past) 6%, transparent); }
+.tl-wrap-inner { position: sticky; top: calc(var(--tl-head-h, 0px) + 14px); display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.tl-wrap-check { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; font-size: 13px; font-weight: 700;
+  color: #fff; background: var(--past); box-shadow: 0 0 0 3px color-mix(in srgb, var(--past) 25%, transparent); }
+.tl-wrap-text { font: 700 10px var(--font-mono); letter-spacing: .14em; text-transform: uppercase; }
+.tl-wrap-time { font: 600 11px var(--font-mono); color: var(--text-muted); }
+.tl-lane.tl-done .tl-wrap-check { animation: tl-pop .5s cubic-bezier(.3, 1.5, .5, 1) .3s both; }
+@keyframes tl-pop { from { transform: scale(.4); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  :where(.tl-scroll) .tl-inner, :where(.tl-scroll) .tl-lanehead, :where(.tl-scroll) .tl-lane,
+  :where(.tl-scroll) .tl-lane *, .tl-wrap-toggle { transition: none !important; animation: none !important; }
+}
 /* 3.36.0: a lane with nothing timed in the current view — one narrow
    column at the right-hand end, quieter than the busy lanes. */
 .tl-lanehead.tl-lane-empty { opacity: .78; }
