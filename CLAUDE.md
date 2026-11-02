@@ -1428,6 +1428,35 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   parsers and presence handlers skip readOnly targets. Never gate on
   `is_app_*`.
 
+## View-only manager pages (3.35.1) — match each page to its routes' rule
+- `readonly_view` (inject_version) = `_readonly_guard`'s rule: is_readonly AND
+  not admin. Exposed as Jinja `readonly_view`, `window.READONLY_VIEW`,
+  `html.readonly-view` and the `.rv-hide` utility. Display only — the server
+  stays the authority.
+- A read-only account may still carry is_scheduler / is_asset_manager /
+  is_piano_manager, which opens those pages. Each such page hides its write
+  controls in Jinja AND turns its write handlers into no-ops under
+  `window.READONLY_VIEW`, shows `<span class="rv-badge">VIEW ONLY</span>`
+  (Settings tabs: a `.rv-note` line) — the shared rules in style.css, never a
+  per-page copy. Searches / filters / exports stay live.
+- **The app has two read-only rules — keep each page on its routes' one.**
+  `_readonly_guard` (role decorators) exempts admins; raw
+  `session.get('is_readonly')` checks (Labor Scheduler row PUT + create-show,
+  `/shows/<id>/labor-notes`, `/labor-days`, `_overhead_write_check`,
+  `show_advance_editor_required`, ~40 show-data routes) refuse read-only
+  admins too. So labor_scheduler.html `sched_view_only` / no-labor
+  `nl_view_only` = `readonly_view or session.is_readonly`, and overhead's
+  `can_edit = not is_readonly`. Pay-rate routes are `@admin_required`, so
+  their controls gate on `user.role == 'admin'`. Known gap (the owner's call,
+  not decided): a read-only admin on Asset Approvals still sees edits whose
+  routes 403, and the scheduler's add/DELETE line routes still let them write.
+- Piano: the three `@login_required` write routes (update / pin-unit /
+  cancel-request) call `_piano_readonly_refusal()` first, because
+  `_is_piano_manager()` never looks at is_readonly.
+- Asset Manager: `_roLockFields()` locks fields for read-only accounts and
+  turns an EMPTY date/month input into text showing "—" — only call it on
+  DOM rebuilt on each open.
+
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.
 At the end of any change that touches code/config, **state plainly which
