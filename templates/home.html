@@ -35,6 +35,11 @@
   </div>
   <div class="tl-toolbar">
     <div class="dash-venue-pills tl-venues" id="tl-venues" role="group" aria-label="Filter by venue"></div>
+    <div class="find-seg tl-show-seg" id="tl-show" role="group" aria-label="Show on the timeline">
+      <button type="button" class="find-seg-btn active" data-show="all" aria-pressed="true" title="Production schedule and crew">All</button>
+      <button type="button" class="find-seg-btn" data-show="sched" aria-pressed="false" title="Production schedule rows only">Schedule</button>
+      <button type="button" class="find-seg-btn" data-show="crew" aria-pressed="false" title="Crew shifts only (with Overhead &amp; Project Crew)">Crew</button>
+    </div>
     <label class="tl-check" title="Test / demo shows are left off unless this is ticked">
       <input type="checkbox" id="tl-include-test"> Test shows<span id="tl-test-count" class="mono"></span>
     </label>
@@ -47,6 +52,7 @@
       <span><i class="tl-key tl-key-crew"></i>Crew</span>
       <span><i class="tl-key tl-key-break"></i>Lunch</span>
       <span><i class="tl-key tl-key-open"></i>Not confirmed</span>
+      <span><i class="tl-key tl-key-perf"></i>Show / event time</span>
     </div>
   </div>
 </header>

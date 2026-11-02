@@ -431,6 +431,7 @@ html.mobile-view .tl-venues { flex: 1 1 100%; flex-wrap: nowrap; overflow-x: aut
 html.mobile-view .tl-venues::-webkit-scrollbar { display: none; }
 html.mobile-view .tl-venues .venue-pill { flex-shrink: 0; min-height: 32px; }
 html.mobile-view .tl-legend { display: none; }
+html.mobile-view .tl-show-seg .find-seg-btn { min-height: 34px; padding: 6px 10px; }
 html.mobile-view :where(.tl-phead) .tl-zoom { margin-left: auto; }
 html.mobile-view :where(.tl-phead) .tl-zoom .btn { min-width: 40px; min-height: 34px; }
 html.mobile-view .tl-scroll { margin: 0 -12px; border-radius: 0; border-left: 0; border-right: 0; overscroll-behavior: auto; }
