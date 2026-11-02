@@ -1259,7 +1259,18 @@ input[type=checkbox].oh-check:disabled {
 /* ── Modals ──────────────────────────────────────────────────────── */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 .modal-overlay.hidden { display: none; }
-.modal-card { background: var(--bg-card); border: 1px solid var(--border-light); border-radius: var(--radius-lg); width: 480px; max-width: 90vw; overflow: hidden; }
+.modal-card { background: var(--bg-card); border: 1px solid var(--border-light); border-radius: var(--radius-lg); width: 480px; max-width: 90vw; overflow: hidden;
+  /* 3.43.1: every dialog fits the window — header + footer stay put and the
+     body scrolls, so a long dialog (schedule template with many rows) never
+     pushes Save off-screen. Cards with no .modal-body scroll as a whole. */
+  max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); display: flex; flex-direction: column; overflow-y: auto; }
+.modal-card > form { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.modal-card > .modal-header, .modal-card > .modal-footer,
+.modal-card > form > .modal-footer { flex-shrink: 0; }
+.modal-card > .modal-body, .modal-card > form > .modal-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+/* Body children keep their natural height (an inner overflow box would
+   otherwise be squeezed to nothing); the body itself is the scroller. */
+.modal-card > .modal-body > *, .modal-card > form > .modal-body > * { flex-shrink: 0; }
 .modal-card.modal-card-wide { width: 640px; }
 .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 22px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 16px; }
 .modal-close { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--text-muted); }
