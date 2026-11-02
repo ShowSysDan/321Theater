@@ -146,18 +146,44 @@
   }
   .sched-day-pm { min-width: 140px; }
   .sched-day-notes { flex: 1; min-width: 140px; font-size: 12px; }
+  /* Locked cells (view-only — see sched_view_only / RO):
+     read-only text reads as text, not as a field waiting for input (it stays
+     selectable / copyable). Only locked cells carry readonly / disabled. */
+  #scheduler-results .sched-time-input[readonly],
+  #scheduler-results .sched-day-notes[readonly] {
+    background: transparent; border-color: transparent;
+  }
+  #scheduler-results .sched-time-input[readonly]::placeholder { color: transparent; }
+  #scheduler-results .sched-training-dot:disabled { cursor: default; }
+  /* Locked pickers (Position, SCHED tech, Day PM) and the day's date read as
+     plain text: no chevron, box or calendar icon inviting a click. */
+  #scheduler-results select:disabled,
+  #scheduler-results .sched-day-date[readonly] {
+    -webkit-appearance: none; appearance: none;
+    background: transparent; border-color: transparent;
+    opacity: 1; color: var(--text); cursor: default;
+  }
+  #scheduler-results .sched-day-date[readonly]::-webkit-calendar-picker-indicator { display: none; }
 </style>
 {% endblock %}
 
 {% block content %}
+{# View-only for ANY read-only account, admins included: this page's writes
+   (PUT /api/labor-scheduler/<id>, create-show, show labor notes, Day PM /
+   day notes, overhead lines) refuse every read-only account, so the shared
+   readonly_view (which exempts admins, like _readonly_guard) is widened
+   here — a read-only admin would otherwise get editors that only 403. #}
+{% set sched_view_only = readonly_view or session.get('is_readonly') %}
 <div class="page-header">
   <div>
-    <h1 class="page-title">Labor Scheduler</h1>
+    <h1 class="page-title">Labor Scheduler{% if sched_view_only %}<span class="rv-badge" title="Your account is read-only: you can see the schedule but not change it">VIEW ONLY</span>{% endif %}</h1>
   </div>
   <div class="header-actions">
     <a href="{{ url_for('labor_scheduler_no_labor') }}" class="btn btn-ghost"
        title="Active shows that have no labor requested yet">Shows without labor</a>
+    {% if not sched_view_only %}
     <button class="btn btn-primary" onclick="window.__scheduler.saveAll()">Save All</button>
+    {% endif %}
   </div>
 </div>
 
@@ -181,6 +207,7 @@
         <button type="button" class="btn btn-ghost btn-sm" onclick="window.__scheduler.shiftWeek(1)" title="Jump forward one work week (Mon–Sun)">Next Week →</button>
       </div>
       <span id="sched-status" class="text-dim" style="font-size:12px"></span>
+      {% if not sched_view_only %}
       <div style="flex:1"></div>
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
         <button class="btn btn-ghost" onclick="window.__scheduler.openAddShow()">+ Add show</button>
@@ -189,12 +216,14 @@
           <option value="">Add labor to existing show…</option>
         </select>
       </div>
+      {% endif %}
     </div>
   </div>
 </div>
 
 <div id="scheduler-results"></div>
 
+{% if not sched_view_only %}
 <!-- ── Add-show modal (opens from the page header) ──────────────────────── -->
 <div id="add-show-modal" class="modal-overlay" style="display:none"
      onclick="if(event.target===this)window.__scheduler.closeAddShow()">
@@ -242,9 +271,18 @@
     </div>
   </div>
 </div>
+{% endif %}
 
 <script>
 (function() {
+  /* View-only (sched_view_only above — any read-only account, admins
+     included): the grid is drawn with every control locked and the write
+     handlers below are no-ops, so looking around never sends a save (the
+     server refuses them anyway). Locked text is readonly (still selectable /
+     copyable); checkboxes, selects and buttons are disabled or not drawn. */
+  const RO = {{ 'true' if sched_view_only else 'false' }};
+  const _dis = RO ? 'disabled' : '';
+  const _ro  = RO ? 'readonly' : '';
   let _crewMembers = null;
   let _positions   = null;
   /* Shows we've explicitly pulled in (created or picked) that have zero
@@ -424,49 +462,49 @@
       : `<td style="font-size:12px;color:var(--text-dim)">${escapeHtml(lr.work_date || '—')}</td>`;
     tr.innerHTML = `
       <td class="sched-check-cell">
-        <input type="checkbox" class="sched-check" ${lr.is_scheduled ? 'checked' : ''}
+        <input type="checkbox" class="sched-check" ${lr.is_scheduled ? 'checked' : ''} ${_dis}
                onchange="window.__scheduler.onScheduledToggle(this)">
       </td>
       <td class="sched-training-cell">
         <button type="button" class="sched-training-dot ${lr.is_training_shift ? 'active' : ''}"
                 title="Training shift — this tech is shadowing/learning on this position"
                 aria-label="Toggle training shift"
-                aria-pressed="${lr.is_training_shift ? 'true' : 'false'}"
+                aria-pressed="${lr.is_training_shift ? 'true' : 'false'}" ${_dis}
                 onclick="window.__scheduler.onTrainingShiftToggle(this)"></button>
       </td>
       ${dateCell}
       <td>
-        <select class="field-input field-input-sm sched-pos" style="min-width:150px"
+        <select class="field-input field-input-sm sched-pos" style="min-width:150px" ${_dis}
                 onchange="window.__scheduler.onPositionChange(this)">
         </select>
       </td>
-      <td><input type="text" class="sched-time-input sched-in"   value="${escapeHtml(lr.in_time||'')}"    placeholder="HH:MM" maxlength="5"
+      <td><input type="text" class="sched-time-input sched-in"   value="${escapeHtml(lr.in_time||'')}"    placeholder="HH:MM" maxlength="5" ${_ro}
                  onchange="window.__scheduler.onTimeChange(this)"></td>
       <td class="sched-stack-cell">
         <div class="sched-stack-row" title="Lunch 1 start">
           <span class="sched-stack-tag">S</span>
-          <input type="text" class="sched-time-input sched-bstart"  value="${escapeHtml(lr.break_start||'')}"  placeholder="HH:MM" maxlength="5"
+          <input type="text" class="sched-time-input sched-bstart"  value="${escapeHtml(lr.break_start||'')}"  placeholder="HH:MM" maxlength="5" ${_ro}
                  onchange="window.__scheduler.onTimeChange(this)">
         </div>
         <div class="sched-stack-row" title="Lunch 1 end">
           <span class="sched-stack-tag">E</span>
-          <input type="text" class="sched-time-input sched-bend"    value="${escapeHtml(lr.break_end||'')}"    placeholder="HH:MM" maxlength="5"
+          <input type="text" class="sched-time-input sched-bend"    value="${escapeHtml(lr.break_end||'')}"    placeholder="HH:MM" maxlength="5" ${_ro}
                  onchange="window.__scheduler.onTimeChange(this)">
         </div>
       </td>
       <td class="sched-stack-cell">
         <div class="sched-stack-row" title="Lunch 2 start">
           <span class="sched-stack-tag">S</span>
-          <input type="text" class="sched-time-input sched-b2start" value="${escapeHtml(lr.break2_start||'')}" placeholder="HH:MM" maxlength="5"
+          <input type="text" class="sched-time-input sched-b2start" value="${escapeHtml(lr.break2_start||'')}" placeholder="HH:MM" maxlength="5" ${_ro}
                  onchange="window.__scheduler.onTimeChange(this)">
         </div>
         <div class="sched-stack-row" title="Lunch 2 end">
           <span class="sched-stack-tag">E</span>
-          <input type="text" class="sched-time-input sched-b2end"   value="${escapeHtml(lr.break2_end||'')}"   placeholder="HH:MM" maxlength="5"
+          <input type="text" class="sched-time-input sched-b2end"   value="${escapeHtml(lr.break2_end||'')}"   placeholder="HH:MM" maxlength="5" ${_ro}
                  onchange="window.__scheduler.onTimeChange(this)">
         </div>
       </td>
-      <td><input type="text" class="sched-time-input sched-out"  value="${escapeHtml(lr.out_time||'')}"   placeholder="HH:MM" maxlength="5"
+      <td><input type="text" class="sched-time-input sched-out"  value="${escapeHtml(lr.out_time||'')}"   placeholder="HH:MM" maxlength="5" ${_ro}
                  onchange="window.__scheduler.onTimeChange(this)"></td>
       <td class="sched-stack-cell sched-tech-cell">
         <div class="sched-stack-row">
@@ -477,14 +515,14 @@
           <span class="sched-stack-tag">SCHED</span>
           <select class="field-input field-input-sm sched-tech"
                   data-position-id="${lr.position_id || ''}"
-                  data-selected-id="${lr.scheduled_crew_member_id || ''}"
+                  data-selected-id="${lr.scheduled_crew_member_id || ''}" ${_dis}
                   onchange="window.__scheduler.onCrewChange(this)">
           </select>
         </div>
       </td>
-      <td style="text-align:center">
+      ${RO ? '' : `<td style="text-align:center">
         <button class="btn btn-xs btn-danger-ghost" onclick="window.__scheduler.removeRow(this)" title="Remove line">×</button>
-      </td>
+      </td>`}
     `;
     // Build position select
     const posSel = tr.querySelector('.sched-pos');
@@ -521,20 +559,20 @@
     header.className = 'sched-day-header';
     header.innerHTML = `
       <span class="sched-day-label">${escapeHtml(schedDayLabel(date))}</span>
-      <input type="date" class="field-input field-input-sm sched-day-date" value="${date || ''}"
-             title="Work date for this day — changing it moves every line in this block"
+      <input type="date" class="field-input field-input-sm sched-day-date" value="${date || ''}" ${_ro}
+             title="${RO ? 'Work date for this day' : 'Work date for this day — changing it moves every line in this block'}"
              onchange="window.__scheduler.onDayDateChange(this)">
       <span class="sched-day-pm-wrap" title="PM on duty for this day — pick one when another PM covers the show for the day. Blank = the show's main PM.">
         <label>Day PM</label>
-        <select class="field-input field-input-sm sched-day-pm"
+        <select class="field-input field-input-sm sched-day-pm" ${_dis}
                 onchange="window.__scheduler.onDayPmChange(this)"></select>
       </span>
       <input type="text" class="field-input field-input-sm sched-day-notes"
-             value="${escapeHtml(dayInfo.day_notes || '')}"
-             placeholder="Day notes — shown on the Labor Overview &amp; here"
+             value="${escapeHtml(dayInfo.day_notes || '')}" ${_ro} ${RO && !dayInfo.day_notes ? 'style="display:none"' : ''}
+             placeholder="${RO ? '' : 'Day notes — shown on the Labor Overview &amp; here'}"
              title="Notes for this show on this day only"
              onchange="window.__scheduler.onDayNotesChange(this)">
-      <button class="btn btn-ghost btn-sm" style="white-space:nowrap" onclick="window.__scheduler.addRow(this, ${show.show_id})">+ Add Line</button>
+      ${RO ? '' : `<button class="btn btn-ghost btn-sm" style="white-space:nowrap" onclick="window.__scheduler.addRow(this, ${show.show_id})">+ Add Line</button>`}
     `;
     block.appendChild(header);
     LaborDays.buildPmSelect(header.querySelector('.sched-day-pm'), dayInfo.cover_pm || '');
@@ -554,7 +592,7 @@
           <th style="width:78px;white-space:nowrap" title="Lunch 2 — start (S) over end (E)">LUNCH 2</th>
           <th style="width:72px">OUT</th>
           <th style="min-width:200px">TECH</th>
-          <th style="width:40px"></th>
+          ${RO ? '' : '<th style="width:40px"></th>'}
         </tr>
       </thead>
     `;
@@ -584,7 +622,7 @@
           ${show.show_pm ? `<span class="scheduler-pm-tag" title="Production Manager">PM: ${escapeHtml(show.show_pm)}</span>` : ''}
           <a href="/shows/${show.show_id}?tab=staffing" class="show-link" target="_blank" rel="noopener">Open show →</a>
         </div>
-        <button class="btn btn-ghost btn-sm ml-auto" onclick="window.__scheduler.addDay(this, ${show.show_id}, '${show.show_date || ''}')">+ Add Day</button>
+        ${RO ? '' : `<button class="btn btn-ghost btn-sm ml-auto" onclick="window.__scheduler.addDay(this, ${show.show_id}, '${show.show_date || ''}')">+ Add Day</button>`}
       `;
       section.appendChild(header);
 
@@ -592,8 +630,8 @@
       notesBox.className = 'sched-notes-box';
       notesBox.innerHTML = `
         <label class="sched-notes-label">Show Labor Notes</label>
-        <textarea class="field-input sched-show-notes" data-show-id="${show.show_id}"
-                  placeholder="Notes from the show — split shifts, task lists, scheduling nuance."
+        <textarea class="field-input sched-show-notes" data-show-id="${show.show_id}" ${_ro}
+                  placeholder="${RO ? 'No show labor notes.' : 'Notes from the show — split shifts, task lists, scheduling nuance.'}"
                   onblur="window.__scheduler.saveShowNotes(this)" rows="2">${escapeHtml(show.show_labor_notes || '')}</textarea>
       `;
       section.appendChild(notesBox);
@@ -636,7 +674,7 @@
           </span>
           <a href="/overhead-crew" class="show-link" target="_blank" rel="noopener">Open overhead crew →</a>
         </div>
-        <button class="btn btn-ghost btn-sm ml-auto" onclick="window.__scheduler.addOverheadRow(this, ${g.group_id})">+ Add Line</button>
+        ${RO ? '' : `<button class="btn btn-ghost btn-sm ml-auto" onclick="window.__scheduler.addOverheadRow(this, ${g.group_id})">+ Add Line</button>`}
       `;
       section.appendChild(header);
 
@@ -644,8 +682,8 @@
       ohNotesBox.className = 'sched-notes-box';
       ohNotesBox.innerHTML = `
         <label class="sched-notes-label">Project Notes</label>
-        <textarea class="field-input sched-group-notes" data-group-id="${g.group_id}"
-                  placeholder="Notes from the project — split shifts, task lists, scheduling nuance."
+        <textarea class="field-input sched-group-notes" data-group-id="${g.group_id}" ${_ro}
+                  placeholder="${RO ? 'No project notes.' : 'Notes from the project — split shifts, task lists, scheduling nuance.'}"
                   onblur="window.__scheduler.saveGroupNotes(this)" rows="2">${escapeHtml(g.group_notes || '')}</textarea>
       `;
       section.appendChild(ohNotesBox);
@@ -666,7 +704,7 @@
             <th style="width:78px;white-space:nowrap" title="Lunch 2 — start (S) over end (E)">LUNCH 2</th>
             <th style="width:72px">OUT</th>
             <th style="min-width:200px">TECH</th>
-            <th style="width:40px"></th>
+            ${RO ? '' : '<th style="width:40px"></th>'}
           </tr>
         </thead>
       `;
@@ -757,6 +795,7 @@
   }
 
   async function putSchedulerUpdate(rowOrId, payload) {
+    if (RO) return null;
     let rid, base;
     if (typeof rowOrId === 'object') {
       rid  = rowOrId.dataset.rid;
@@ -771,7 +810,8 @@
       body: JSON.stringify(payload),
     });
     if (!r.ok) {
-      showSaveToast('✗ Save failed', 'error');
+      const d = await r.json().catch(() => ({}));
+      showSaveToast('✗ ' + ((d && typeof d.error === 'string' && d.error) || 'Save failed'), 'error');
       return null;
     }
     showSaveToast('✓ Saved');
@@ -814,17 +854,30 @@
     await putSchedulerUpdate(tr, { position_id: parseInt(select.value) || null });
   }
 
+  /* Time cell class → column, in shift order. */
+  const _TIME_COLS = [['sched-in', 'in_time'], ['sched-bstart', 'break_start'],
+                      ['sched-bend', 'break_end'], ['sched-b2start', 'break2_start'],
+                      ['sched-b2end', 'break2_end'], ['sched-out', 'out_time']];
+
+  /* Save ONE edited time cell, normalised to HH:MM ("7pm" → 19:00). A cell
+     that isn't a time goes back to its saved value with a toast — the server
+     refuses free text (labor times feed billing) — and the row's other cells
+     are never re-sent, so an old free-text cell can't block this save. The
+     input's defaultValue is the saved value. */
   async function onTimeChange(input) {
     const tr = input.closest('tr');
-    const payload = {
-      in_time:      tr.querySelector('.sched-in').value.trim(),
-      break_start:  tr.querySelector('.sched-bstart').value.trim(),
-      break_end:    tr.querySelector('.sched-bend').value.trim(),
-      break2_start: tr.querySelector('.sched-b2start')?.value.trim() || '',
-      break2_end:   tr.querySelector('.sched-b2end')?.value.trim()   || '',
-      out_time:     tr.querySelector('.sched-out').value.trim(),
-    };
-    await putSchedulerUpdate(tr, payload);
+    const col = (_TIME_COLS.find(([cls]) => input.classList.contains(cls)) || [])[1];
+    if (!tr || !col) return;
+    const raw = input.value.trim();
+    const v = laborTimeHHMM(raw);
+    if (v === null) {
+      showSaveToast(`✗ "${raw}" isn't a time — use HH:MM (24-hour)`, 'error');
+      input.value = input.defaultValue;
+      return;
+    }
+    input.value = v;
+    const res = await putSchedulerUpdate(tr, { [col]: v });
+    if (res && res.success) input.defaultValue = v;
   }
 
   async function addRow(btn, showId) {
@@ -863,6 +916,7 @@
 
   /* Quiet row PUT (no per-row toast) — used when re-dating a whole day-block. */
   async function _putRowQuiet(tr, payload) {
+    if (RO) return null;
     const r = await fetch(`${_endpointFor(tr)}/${tr.dataset.rid}`, {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
@@ -947,16 +1001,18 @@
 
   async function onDayPmChange(select) {
     const block = select.closest('.sched-day-block');
-    const ok = await LaborDays.save(block.dataset.showId, block.dataset.workDate,
-                                    { cover_pm: select.value });
-    showSaveToast(ok ? '✓ Day PM saved' : '✗ Save failed', ok ? undefined : 'error');
+    const res = await LaborDays.save(block.dataset.showId, block.dataset.workDate,
+                                     { cover_pm: select.value });
+    if (res.success) showSaveToast('✓ Day PM saved');
+    else showSaveToast('✗ ' + (res.error || 'Save failed'), 'error');
   }
 
   async function onDayNotesChange(input) {
     const block = input.closest('.sched-day-block');
-    const ok = await LaborDays.save(block.dataset.showId, block.dataset.workDate,
-                                    { day_notes: input.value.trim() });
-    showSaveToast(ok ? '✓ Day notes saved' : '✗ Save failed', ok ? undefined : 'error');
+    const res = await LaborDays.save(block.dataset.showId, block.dataset.workDate,
+                                     { day_notes: input.value.trim() });
+    if (res.success) showSaveToast('✓ Day notes saved');
+    else showSaveToast('✗ ' + (res.error || 'Save failed'), 'error');
   }
 
   /* When a day-block is re-dated, its PM/notes travel with it. */
@@ -990,12 +1046,19 @@
       const isScheduled = tr.querySelector('.sched-check')?.checked ? true : false;
       const crewId = tr.querySelector('.sched-tech')?.value || null;
       const positionId = parseInt(tr.querySelector('.sched-pos')?.value) || null;
-      const in_time     = tr.querySelector('.sched-in')?.value.trim()      || '';
-      const break_start = tr.querySelector('.sched-bstart')?.value.trim()  || '';
-      const break_end   = tr.querySelector('.sched-bend')?.value.trim()    || '';
-      const break2_start= tr.querySelector('.sched-b2start')?.value.trim() || '';
-      const break2_end  = tr.querySelector('.sched-b2end')?.value.trim()   || '';
-      const out_time    = tr.querySelector('.sched-out')?.value.trim()     || '';
+      // HH:MM where the cell reads as a time; anything else goes as typed —
+      // the server keeps an unchanged old value and refuses new free text.
+      const tv = cls => {
+        const raw = tr.querySelector('.' + cls)?.value.trim() || '';
+        const v = laborTimeHHMM(raw);
+        return v === null ? raw : v;
+      };
+      const in_time     = tv('sched-in');
+      const break_start = tv('sched-bstart');
+      const break_end   = tv('sched-bend');
+      const break2_start= tv('sched-b2start');
+      const break2_end  = tv('sched-b2end');
+      const out_time    = tv('sched-out');
       const r = await fetch(`${_endpointFor(tr)}/${rid}`, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
@@ -1034,7 +1097,8 @@
 
   /* Auto-format any .sched-time-input on blur: "1300" -> "13:00" */
   document.addEventListener('blur', e => {
-    if (e.target && e.target.classList && e.target.classList.contains('sched-time-input')) {
+    if (e.target && e.target.classList && e.target.classList.contains('sched-time-input')
+        && !e.target.readOnly) {
       const formatted = normalizeTime(e.target.value);
       if (formatted !== e.target.value) e.target.value = formatted;
     }
@@ -1169,9 +1233,16 @@
     if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
-  window.__scheduler = { onScheduledToggle, onTrainingShiftToggle, onCrewChange, onPositionChange, onTimeChange, addRow, addDay, onDayDateChange, addOverheadRow, removeRow, saveAll, saveShowNotes, saveGroupNotes,
-                         onDayPmChange, onDayNotesChange,
-                         openAddShow, closeAddShow, submitAddShow, onPickShow, thisWeek, shiftWeek };
+  const api = { onScheduledToggle, onTrainingShiftToggle, onCrewChange, onPositionChange, onTimeChange, addRow, addDay, onDayDateChange, addOverheadRow, removeRow, saveAll, saveShowNotes, saveGroupNotes,
+                onDayPmChange, onDayNotesChange,
+                openAddShow, closeAddShow, submitAddShow, onPickShow, thisWeek, shiftWeek };
+  // View-only: every handler that edits (or opens an editor) does nothing —
+  // the controls are locked above, this keeps a stray event from saving.
+  if (RO) ['onScheduledToggle', 'onTrainingShiftToggle', 'onCrewChange', 'onPositionChange',
+           'onTimeChange', 'addRow', 'addDay', 'onDayDateChange', 'addOverheadRow', 'removeRow',
+           'saveAll', 'saveShowNotes', 'saveGroupNotes', 'onDayPmChange', 'onDayNotesChange',
+           'openAddShow', 'submitAddShow', 'onPickShow'].forEach(k => { api[k] = () => {}; });
+  window.__scheduler = api;
   window.loadScheduler = loadScheduler;
 
   document.addEventListener('DOMContentLoaded', () => {

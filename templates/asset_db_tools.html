@@ -10,11 +10,14 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">Asset DB Tools</h1>
-    <p class="page-sub">Raw, audited access to the asset tables — for fixing rows the normal interface can't reach</p>
+    <p class="page-sub">Raw, audited access to the asset tables — for fixing rows the normal interface can't reach
+      {%- if readonly_view %}<span class="rv-badge" title="This account is read-only: everything can be viewed, nothing can be changed">VIEW ONLY</span>{% endif %}</p>
   </div>
   <div class="header-actions" style="align-items:center">
     <a href="/assets" class="btn btn-ghost btn-sm">← Asset Manager</a>
+    {% if user and user.role == 'admin' %}{# /admin/audit is admin-only — a link would 403 for anyone else #}
     <a href="/admin/audit" class="btn btn-ghost btn-sm" title="Every change made here is logged with before/after snapshots and can be undone from the audit log (admins)">Audit Log</a>
+    {% endif %}
   </div>
 </div>
 
@@ -25,6 +28,12 @@
   group (and disappears from the finder search); a parentless row with no children shows as an empty group.
   Edits and deletes here are <strong>audited with before/after snapshots</strong> — admins can undo them from the Audit Log.
 </div>
+{% if readonly_view %}
+<div style="background:rgba(74,85,104,.14);border:1px solid rgba(74,85,104,.5);border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:12px;line-height:1.5">
+  <strong>View only.</strong> This account is read-only, so the row tools (Edit, Merge, Move children, Delete, Unlink) are hidden —
+  every one of them writes. You can still run the integrity scan, open its findings and browse / search every table.
+</div>
+{% endif %}
 
 {# ── Integrity scan ── #}
 <div class="form-section" style="margin-bottom:20px">
@@ -41,7 +50,7 @@
 {# ── Table browser ── #}
 <div class="form-section">
   <div class="form-section-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-    <span class="section-icon">▦</span> BROWSE &amp; EDIT
+    <span class="section-icon">▦</span> {{ 'BROWSE' if readonly_view else 'BROWSE &amp; EDIT' }}
     <select id="dbt-table" class="field-input" style="width:230px;padding:5px 8px;font-size:12px" onchange="switchTable(this.value)"></select>
     <input type="text" id="dbt-search" class="field-input" placeholder="Search name / barcode… or exact id"
            style="flex:1;min-width:180px;padding:5px 8px;font-size:12px" oninput="onSearchInput()">
@@ -144,6 +153,10 @@
 <script>
 // ── Asset DB Tools ────────────────────────────────────────────────────────────
 const HDRS = {'X-Requested-With': 'XMLHttpRequest'};
+// Read-only account (base.html's window.READONLY_VIEW): every tool on this
+// page writes, so rows render without actions and the tool functions return
+// early. The integrity scan and the table browser (GETs) still work.
+const RO = window.READONLY_VIEW === true;
 const JSON_HDRS = Object.assign({'Content-Type': 'application/json'}, HDRS);
 
 let _meta = null;
@@ -365,10 +378,11 @@ function renderRows() {
   }
   let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;min-width:900px"><thead><tr>' +
     cols.map(c => '<th style="text-align:left;padding:6px 8px;font-size:10px;letter-spacing:.05em;color:var(--text-dim);border-bottom:1px solid var(--border);white-space:nowrap">' + esc(c.l).toUpperCase() + '</th>').join('') +
-    '<th style="border-bottom:1px solid var(--border)"></th></tr></thead><tbody>';
+    (RO ? '' : '<th style="border-bottom:1px solid var(--border)"></th>') + '</tr></thead><tbody>';
   _rows.forEach((row, i) => {
     html += '<tr style="border-bottom:1px solid var(--border)">' +
       cols.map(c => '<td style="padding:6px 8px;vertical-align:top">' + c.f(row) + '</td>').join('');
+    if (RO) { html += '</tr>'; return; }
     let actions = '';
     if (composite) {
       actions = '<button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="unlinkMember(' +
@@ -432,6 +446,7 @@ function fieldControl(col, kind, val) {
 }
 
 window.openEdit = function(i) {
+  if (RO) return;
   _editRow = _rows[i];
   const editable = _meta[_table].editable;
   document.getElementById('dbt-edit-title').textContent =
@@ -445,7 +460,7 @@ window.openEdit = function(i) {
 window.closeEditModal = function() { document.getElementById('dbt-edit-modal').style.display = 'none'; _editRow = null; };
 
 window.saveEdit = async function() {
-  if (!_editRow) return;
+  if (RO || !_editRow) return;
   const editable = _meta[_table].editable;
   const updates = {};
   document.querySelectorAll('#dbt-edit-fields [data-col]').forEach(el => {
@@ -480,6 +495,7 @@ window.saveEdit = async function() {
 
 // ── Delete ────────────────────────────────────────────────────────────────────
 window.openDelete = function(i) {
+  if (RO) return;
   _delRow = _rows[i];
   const label = _delRow.name || _delRow.barcode || ('row #' + _delRow.id);
   document.getElementById('dbt-del-summary').innerHTML =
@@ -494,7 +510,7 @@ window.openDelete = function(i) {
 window.closeDelModal = function() { document.getElementById('dbt-del-modal').style.display = 'none'; _delRow = null; };
 
 window.confirmDelete = async function(force) {
-  if (!_delRow) return;
+  if (RO || !_delRow) return;
   const r = await fetch('/assets/db-tools/api/rows/' + _table + '/' + _delRow.id + (force ? '?force=1' : ''), {
     method: 'DELETE', headers: HDRS,
   });
@@ -522,7 +538,7 @@ window.confirmDelete = async function(force) {
 };
 
 window.unlinkMember = async function(systemId, componentId) {
-  if (!confirm('Unlink component #' + componentId + ' from system #' + systemId + '?')) return;
+  if (RO || !confirm('Unlink component #' + componentId + ' from system #' + systemId + '?')) return;
   const r = await fetch('/settings/asset-types/' + systemId + '/members/' + componentId, {
     method: 'DELETE', headers: HDRS,
   });
@@ -533,6 +549,7 @@ window.unlinkMember = async function(systemId, componentId) {
 
 // ── Merge ─────────────────────────────────────────────────────────────────────
 window.openMerge = function(i) {
+  if (RO) return;
   _mergeSrc = _rows[i];
   document.getElementById('dbt-merge-src').innerHTML =
     'Source: <strong>#' + _mergeSrc.id + ' ' + esc(_mergeSrc.name) + '</strong>' +
@@ -548,7 +565,7 @@ window.openMerge = function(i) {
 window.closeMergeModal = function() { document.getElementById('dbt-merge-modal').style.display = 'none'; _mergeSrc = null; };
 
 window.confirmMerge = async function() {
-  if (!_mergeSrc) return;
+  if (RO || !_mergeSrc) return;
   const targetId = parseInt(document.getElementById('dbt-merge-target').value, 10);
   const r = await fetch('/assets/db-tools/api/asset-types/' + _mergeSrc.id + '/merge', {
     method: 'POST', headers: JSON_HDRS, body: JSON.stringify({target_id: targetId}),
@@ -567,6 +584,7 @@ window.confirmMerge = async function() {
 
 // ── Move children ─────────────────────────────────────────────────────────────
 window.openChildrenMove = function(i) {
+  if (RO) return;
   _childrenSrc = _rows[i];
   document.getElementById('dbt-children-src').innerHTML =
     'Move the <strong>' + _childrenSrc.ref_children + '</strong> child type(s) of <strong>#' +
@@ -580,7 +598,7 @@ window.openChildrenMove = function(i) {
 window.closeChildrenModal = function() { document.getElementById('dbt-children-modal').style.display = 'none'; _childrenSrc = null; };
 
 window.confirmChildrenMove = async function() {
-  if (!_childrenSrc) return;
+  if (RO || !_childrenSrc) return;
   const v = document.getElementById('dbt-children-target').value;
   const r = await fetch('/assets/db-tools/api/asset-types/' + _childrenSrc.id + '/reassign-children', {
     method: 'POST', headers: JSON_HDRS,

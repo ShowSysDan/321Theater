@@ -30,7 +30,7 @@
 {% block content %}
 <div class="page-header">
   <div>
-    <h1 class="page-title">Archived Technicians</h1>
+    <h1 class="page-title">Archived Technicians{% if readonly_view %}<span class="rv-badge" title="Your account is read-only: you can look up archived technicians but not restore or delete them">VIEW ONLY</span>{% endif %}</h1>
     <p class="page-sub">Technicians who have left. They're hidden from the technician list, the Skill Tracker and scheduling, but their skills and work history are kept.</p>
   </div>
   <div class="header-actions">
@@ -66,9 +66,11 @@
         {% if can_report and (t.shows or t.overhead_shifts) %}
         <a class="btn btn-xs btn-ghost" href="{{ url_for('reports_page') }}?tab=lines&tech={{ t.id }}" title="Every labor line they're on, all dates">Work history</a>
         {% endif %}
+        {% if not readonly_view %}
         <button class="btn btn-xs btn-ghost" onclick="restoreTech({{ t.id }})" title="Return to the technician list and scheduling">Restore</button>
         {% if not (t.shows or t.overhead_shifts) %}
         <button class="btn btn-xs btn-danger-ghost" onclick="deleteTech({{ t.id }})" title="Never worked a shift: delete permanently">Delete</button>
+        {% endif %}
         {% endif %}
       </div>
     </div>
@@ -117,7 +119,9 @@
   });
 })();
 
+// Read-only accounts get no Restore / Delete buttons; these refuse too.
 async function restoreTech(mid) {
+  if (window.READONLY_VIEW) return;
   const r = await fetch(`/settings/crew-members/${mid}/archive`, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({restore: true})
@@ -128,6 +132,7 @@ async function restoreTech(mid) {
 }
 
 async function deleteTech(mid) {
+  if (window.READONLY_VIEW) return;
   if (!confirm('Permanently delete this technician and their skill records? This cannot be undone.')) return;
   const r = await fetch(`/settings/crew-members/${mid}/delete`, {method: 'POST'});
   const d = await r.json();

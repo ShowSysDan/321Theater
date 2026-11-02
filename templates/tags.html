@@ -1,0 +1,142 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{% block title %}Tags — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <a href="{{ url_for('search_page') }}" class="back-link">← Search</a>
+    <h1 class="page-title">Tags</h1>
+    <p class="page-sub">Every <span class="mono">#tag</span> written in a show — Advance fields, schedule rows, notes, comments, labor and asset notes. Type <span class="mono">#</span> and a word anywhere to add one.</p>
+  </div>
+</div>
+
+{% if tags %}
+<div class="find-toolbar">
+  <div class="dash-search-wrap find-tags-filter-wrap">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15" class="dash-search-icon" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input type="search" id="tags-filter" class="dash-search-input" placeholder="Filter tags…" autocomplete="off" aria-label="Filter tags">
+  </div>
+  <div class="find-seg" role="group" aria-label="Sort tags">
+    <button type="button" class="find-seg-btn active" data-sort="count" aria-pressed="true">Most used</button>
+    <button type="button" class="find-seg-btn" data-sort="name" aria-pressed="false">A–Z</button>
+  </div>
+  <span class="text-dim find-count"><span id="tags-visible" class="mono">{{ tags|length }}</span> of <span class="mono">{{ total }}</span> tags</span>
+</div>
+{% if total > tags|length %}
+<p class="text-dim find-cap-note" id="tags-cap-note" data-default="Showing the {{ tags|length }} most used of {{ total }} tags — the filter searches all of them.">Showing the {{ tags|length }} most used of {{ total }} tags — the filter searches all of them.</p>
+{% endif %}
+
+<div class="tag-cloud" id="tag-cloud" data-total="{{ total }}">
+  {% for t in tags %}
+  <a class="tag-pill" href="{{ url_for('tag_page', tag=t.tag) }}" data-tag="{{ t.tag }}" data-n="{{ t.n }}" data-i="{{ loop.index0 }}"
+     title="{{ t.n }} mention{{ '' if t.n == 1 else 's' }} in {{ t.shows }} show{{ '' if t.shows == 1 else 's' }}">#{{ t.tag }} <span class="tag-pill-count">{{ t.n }}</span></a>
+  {% endfor %}
+</div>
+<p id="tags-none" class="text-dim" style="display:none;font-size:13px;padding:16px 0">No tags match.</p>
+{% else %}
+<div class="empty-state">
+  <p>No tags yet.<br><span class="text-dim" style="font-size:13px">Write <span class="mono">#something</span> in any show text box — an Advance note, a schedule row, a comment — and it shows up here.</span></p>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const input = document.getElementById('tags-filter');
+  const cloud = document.getElementById('tag-cloud');
+  if (!input || !cloud) return;
+  const pills = Array.from(cloud.querySelectorAll('.tag-pill'));
+  const visibleEl = document.getElementById('tags-visible');
+  const noneEl = document.getElementById('tags-none');
+  const noteEl = document.getElementById('tags-cap-note');
+  // Very many tags: only the most used are drawn (find_module.TAGS_INDEX_MAX),
+  // so a filter also asks the server, which searches every tag, and adds the
+  // matches that aren't drawn here.
+  const capped = (+cloud.dataset.total || 0) > pills.length;
+  const drawn = new Set(pills.map(p => p.dataset.tag));
+  let extras = [], seq = 0, timer = null, sortMode = 'count';
+  function counts(n, waiting) {
+    visibleEl.textContent = n;
+    noneEl.style.display = n || waiting ? 'none' : '';
+  }
+  function note(text) { if (noteEl) noteEl.textContent = text || noteEl.dataset.default; }
+  function pill(t, i) {
+    const a = document.createElement('a');
+    a.className = 'tag-pill';
+    a.href = window.Tags ? Tags.href(t.tag) : '/tags/' + encodeURIComponent(t.tag);
+    a.dataset.tag = t.tag; a.dataset.n = t.n; a.dataset.i = i;
+    a.title = t.n + ' mention' + (t.n === 1 ? '' : 's') + ' in ' + t.shows + ' show' + (t.shows === 1 ? '' : 's');
+    a.textContent = '#' + t.tag + ' ';
+    const c = document.createElement('span');
+    c.className = 'tag-pill-count';
+    c.textContent = t.n;
+    a.appendChild(c);
+    return a;
+  }
+  function searchAll(term) {
+    clearTimeout(timer);
+    const my = ++seq;
+    extras.forEach(p => p.remove());
+    extras = [];
+    note('');
+    if (!term) return;
+    timer = setTimeout(() => {
+      fetch('/api/tags?match=contains&limit=200&q=' + encodeURIComponent(term),
+            {headers: {'X-Requested-With': 'XMLHttpRequest'}})
+        .then(r => r.ok ? r.json() : null)
+        .then(d => {
+          if (!d || my !== seq) return;
+          (d.tags || []).forEach((t, k) => {
+            if (drawn.has(t.tag)) return;
+            const p = pill(t, pills.length + k);
+            extras.push(p);
+            cloud.appendChild(p);
+          });
+          if (sortMode === 'name') sortBy('name');
+          const shown = pills.filter(p => !p.hidden).length + extras.length;
+          const matched = Math.max(+d.matched || 0, shown);
+          counts(matched, false);
+          if (shown < matched) note('Showing ' + shown + ' of ' + matched + ' matching tags — keep typing to narrow it.');
+        })
+        .catch(() => { if (my === seq) counts(pills.filter(p => !p.hidden).length, false); });
+    }, 250);
+  }
+  function apply() {
+    const term = input.value.trim().toLowerCase().replace(/^#/, '');
+    let n = 0;
+    pills.forEach(p => {
+      const ok = !term || p.dataset.tag.includes(term);
+      p.hidden = !ok;
+      if (ok) n++;
+    });
+    counts(n, capped && !!term);
+    if (capped) searchAll(term);
+  }
+  function sortBy(mode) {
+    sortMode = mode;
+    const sorted = pills.concat(extras).sort(mode === 'name'
+      ? (a, b) => a.dataset.tag.localeCompare(b.dataset.tag)
+      : (a, b) => (+a.dataset.i) - (+b.dataset.i));
+    sorted.forEach(p => cloud.appendChild(p));
+    document.querySelectorAll('.find-seg-btn[data-sort]').forEach(b => {
+      const on = b.dataset.sort === mode;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    try { localStorage.setItem('tags_sort', mode); } catch (_) {}
+  }
+  input.addEventListener('input', apply);
+  document.querySelectorAll('.find-seg-btn[data-sort]').forEach(b =>
+    b.addEventListener('click', () => sortBy(b.dataset.sort)));
+  let saved = null;
+  try { saved = localStorage.getItem('tags_sort'); } catch (_) {}
+  if (saved === 'name') sortBy('name');
+})();
+</script>
+{% endblock %}

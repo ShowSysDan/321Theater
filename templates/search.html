@@ -1,0 +1,410 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{% block title %}Search — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Search</h1>
+    <p class="page-sub">Find shows by name, venue, Arts Group or PM — or by who edited them and the <span class="mono">#tags</span> in them. Filters combine; the address bar keeps them, so a search can be bookmarked or shared.</p>
+  </div>
+  <div class="header-actions">
+    <a class="btn btn-ghost btn-sm" href="{{ url_for('tags_index') }}">All tags</a>
+  </div>
+</div>
+
+<form class="form-section find-filters" id="find-form" autocomplete="off" onsubmit="return false" role="search">
+  <div class="form-section-body">
+    <div class="find-row find-row-main">
+      <div class="dash-search-wrap find-q-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15" class="dash-search-icon" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="search" id="find-q" class="dash-search-input" maxlength="200" placeholder="Show, venue, Arts Group or PM…" aria-label="Search text" autofocus>
+      </div>
+      <label class="find-check" title="Also look inside Advance text fields, schedule rows, notes, comments, labor / asset notes and file descriptions">
+        <input type="checkbox" id="find-content"> Also search inside show content
+      </label>
+      {# Phones only (mobile.css): the filters below fold away so results show first. #}
+      <button type="button" class="btn btn-ghost btn-sm find-more-btn" id="find-more-btn" aria-expanded="false" aria-controls="find-more">Filters <span class="find-more-count" id="find-more-count"></span></button>
+    </div>
+
+    <div class="find-more" id="find-more">
+    <div class="find-row find-grid">
+      <div class="field-group">
+        <label class="field-label" for="find-pm">PM</label>
+        <select id="find-pm" class="field-input">
+          <option value="">Any PM</option>
+          <option value="me">Me</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="find-editor">EDITED BY</label>
+        <select id="find-editor" class="field-input">
+          <option value="">Anyone</option>
+          <option value="me">Me</option>
+        </select>
+      </div>
+      <div class="field-group find-tags-group">
+        <label class="field-label" for="find-tag-input">TAGS <span class="text-dim find-label-note">(all of them)</span></label>
+        <div class="find-tags-box field-input" id="find-tags-box">
+          <span id="find-tag-chips" class="find-tag-chips"></span>
+          <input type="text" id="find-tag-input" class="find-tag-input" maxlength="51" placeholder="#tag" autocomplete="off"
+                 role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="find-tag-suggest">
+        </div>
+        <div class="find-suggest" id="find-tag-suggest" role="listbox" hidden></div>
+      </div>
+      <div class="field-group find-venue-group">
+        <label class="field-label" for="find-venue">VENUE</label>
+        <select id="find-venue" class="field-input">
+          <option value="">All venues</option>
+          {% for v in venues %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="find-from">FROM</label>
+        <input type="date" id="find-from" class="field-input" title="Shows whose dates (load-in → load-out, performances) touch this range">
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="find-to">TO</label>
+        <input type="date" id="find-to" class="field-input">
+      </div>
+    </div>
+
+    <div class="find-row find-row-opts">
+      <div class="find-seg" role="group" aria-label="Show status" id="find-status">
+        <button type="button" class="find-seg-btn" data-status="active" aria-pressed="false">Active</button>
+        <button type="button" class="find-seg-btn" data-status="archived" aria-pressed="false">Archived</button>
+        <button type="button" class="find-seg-btn active" data-status="all" aria-pressed="true">All</button>
+      </div>
+      <label class="find-check"><input type="checkbox" id="find-test"> Include test shows</label>
+      <label class="find-check find-sort">Sort
+        <select id="find-sort" class="field-input field-input-sm">
+          <option value="">Default</option>
+          <option value="date">Newest first</option>
+          <option value="date_asc">Oldest first</option>
+          <option value="name">Name</option>
+          <option value="edit">Last edited (with Edited by)</option>
+        </select>
+      </label>
+      <button type="button" class="btn btn-ghost btn-sm" id="find-clear">Clear all</button>
+    </div>
+    </div>{# /.find-more #}
+  </div>
+</form>
+
+<p class="find-summary text-dim" id="find-summary" aria-live="polite">Type a name, or pick a PM, an editor or a #tag to search.</p>
+<div class="find-results" id="find-results"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const MAX_TAGS = 5;
+  const TAG_OK = /^[a-z][a-z0-9_]*(?:-[a-z0-9_]+)*$/;
+  const q = $('find-q'), content = $('find-content'), pm = $('find-pm'), editor = $('find-editor'),
+        venue = $('find-venue'), dFrom = $('find-from'), dTo = $('find-to'), test = $('find-test'),
+        sort = $('find-sort'), tagInput = $('find-tag-input'), tagChips = $('find-tag-chips'),
+        suggest = $('find-tag-suggest'), results = $('find-results'), summary = $('find-summary');
+  let tags = [], status = 'all';
+  let seq = 0, timer = null, committed = null, lastWasTyping = false;
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+      ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+  }
+  function normTag(s) {
+    s = String(s || '').trim().replace(/^#/, '').toLowerCase();
+    return s && s.length <= 50 && TAG_OK.test(s) ? s : null;
+  }
+  function setSelect(sel, val, label) {
+    if (!val) { sel.value = ''; return; }
+    if (!Array.from(sel.options).some(o => o.value === val)) {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label || val;
+      sel.appendChild(o);
+    }
+    sel.value = val;
+  }
+  function setStatus(v) {
+    status = ['active', 'archived', 'all'].includes(v) ? v : 'all';
+    document.querySelectorAll('#find-status .find-seg-btn').forEach(b => {
+      const on = b.dataset.status === status;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+  function renderTagChips() {
+    tagChips.innerHTML = tags.map(t =>
+      `<span class="find-tag-chip">#${esc(t)}<button type="button" data-rm="${esc(t)}" aria-label="Remove #${esc(t)}">×</button></span>`).join('');
+    tagInput.placeholder = tags.length >= MAX_TAGS ? '' : (tags.length ? 'and…' : '#tag');
+    tagInput.disabled = tags.length >= MAX_TAGS;
+  }
+
+  /* ── URL ⇄ controls ──────────────────────────────────────────── */
+  function params() {
+    const p = new URLSearchParams();
+    const qv = q.value.trim();
+    if (qv) p.set('q', qv);
+    if (qv && content.checked) p.set('content', '1');
+    if (pm.value) p.set('pm', pm.value);
+    if (editor.value) p.set('editor', editor.value);
+    tags.forEach(t => p.append('tag', t));
+    if (venue.value) p.set('venue', venue.value);
+    if (dFrom.value) p.set('from', dFrom.value);
+    if (dTo.value) p.set('to', dTo.value);
+    if (status !== 'all') p.set('status', status);
+    if (test.checked) p.set('test', '1');
+    if (sort.value) p.set('sort', sort.value);
+    return p;
+  }
+  function fromUrl() {
+    const p = new URLSearchParams(location.search);
+    q.value = (p.get('q') || '').slice(0, 200);
+    content.checked = p.get('content') === '1';
+    setSelect(pm, p.get('pm') || '');
+    const ed = p.get('editor') || '';
+    setSelect(editor, ed, /^\d+$/.test(ed) ? `User #${ed}` : ed);
+    tags = [];
+    p.getAll('tag').forEach(v => String(v).split(/[\s,]+/).forEach(t => {
+      const n = normTag(t);
+      if (n && !tags.includes(n) && tags.length < MAX_TAGS) tags.push(n);
+    }));
+    renderTagChips();
+    setSelect(venue, p.get('venue') || '');
+    dFrom.value = /^\d{4}-\d{2}-\d{2}$/.test(p.get('from') || '') ? p.get('from') : '';
+    dTo.value = /^\d{4}-\d{2}-\d{2}$/.test(p.get('to') || '') ? p.get('to') : '';
+    setStatus(p.get('status') || 'all');
+    test.checked = p.get('test') === '1';
+    sort.value = ['date', 'date_asc', 'name', 'edit'].includes(p.get('sort')) ? p.get('sort') : '';
+  }
+  // Phones: how many of the folded filters are set, on the Filters button.
+  function paintMoreCount() {
+    const n = [pm.value, editor.value, tags.length, venue.value, dFrom.value || dTo.value,
+               status !== 'all', test.checked, sort.value].filter(Boolean).length;
+    $('find-more-count').textContent = n ? '· ' + n : '';
+  }
+  function commitUrl(typing) {
+    const qs = params().toString();
+    if (qs === committed) return;
+    const url = location.pathname + (qs ? '?' + qs : '');
+    // Typing replaces the entry it started; any other change is a new
+    // history step, so Back walks back through the filters.
+    if (typing && lastWasTyping) history.replaceState({find: 1}, '', url);
+    else history.pushState({find: 1}, '', url);
+    committed = qs;
+    lastWasTyping = !!typing;
+  }
+
+  /* ── Search ──────────────────────────────────────────────────── */
+  function schedule(typing) {
+    clearTimeout(timer);
+    timer = setTimeout(() => { commitUrl(typing); run(); }, typing ? 300 : 0);
+  }
+  async function run() {
+    const my = ++seq;
+    paintMoreCount();
+    const qs = params().toString();
+    if (!qs) {
+      results.innerHTML = '';
+      summary.textContent = 'Type a name, or pick a PM, an editor or a #tag to search.';
+      return;
+    }
+    summary.textContent = 'Searching…';
+    let d;
+    try {
+      const r = await fetch('/api/search?' + qs, {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+      d = await r.json();
+      if (!r.ok || !d.success) throw new Error(d.error || 'Search failed');
+    } catch (e) {
+      if (my !== seq) return;
+      summary.textContent = 'Search failed — ' + (e.message || 'network error');
+      return;
+    }
+    if (my !== seq) return;   // a newer search is on its way
+    render(d);
+  }
+  function relTime(iso) {
+    const d = typeof parseServerTime === 'function' ? parseServerTime(iso) : new Date(iso);
+    if (!d) return '';
+    const s = (Date.now() - d.getTime()) / 1000;
+    if (s < 90) return 'just now';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    if (s < 86400) return Math.round(s / 3600) + ' h ago';
+    if (s < 86400 * 30) return Math.round(s / 86400) + ' d ago';
+    return d.toLocaleDateString([], {month: 'short', day: 'numeric', year: 'numeric'});
+  }
+  function snippet(segs) {
+    return (segs || []).map(([k, t]) => k === 'hit' ? `<mark class="find-hit">${esc(t)}</mark>`
+      : k === 'tag' ? `<span class="tag-link-text">${esc(t)}</span>` : esc(t)).join('');
+  }
+  function chip(m) {
+    if (m.type === 'pm') {
+      const cover = m.cover_days && m.cover_days.length
+        ? ` <span class="find-why-note">(day cover · ${esc(m.cover_days.join(', '))})</span>` : '';
+      return `<span class="find-why find-why-pm">PM: ${esc(m.name)}${cover}</span>`;
+    }
+    if (m.type === 'editor') {
+      const when = m.at ? ` · <time datetime="${esc(m.at)}" title="${esc((parseServerTime(m.at) || new Date()).toLocaleString())}">${esc(relTime(m.at))}</time>` : '';
+      return `<span class="find-why find-why-editor">Edited by ${esc(m.name)} · ${m.n} edit${m.n === 1 ? '' : 's'}${when}</span>`;
+    }
+    if (m.type === 'tag') return `<a class="find-why tag-chip" href="/tags/${encodeURIComponent(m.tag)}">#${esc(m.tag)}</a>`;
+    if (m.type === 'meta') return `<span class="find-why">${esc(m.text)}</span>`;
+    if (m.type === 'more') return `<span class="find-why find-why-note">+${m.n} more match${m.n === 1 ? '' : 'es'} inside</span>`;
+    if (m.type === 'text') {
+      return `<a class="find-why find-why-text" href="${esc(m.link)}"><span class="find-why-label">${esc(m.label)}</span> <span class="find-why-snip">${snippet(m.snippet)}</span></a>`;
+    }
+    return '';
+  }
+  function render(d) {
+    if (d.idle) { results.innerHTML = ''; summary.textContent = 'Type a name, or pick a PM, an editor or a #tag to search.'; return; }
+    const bad = (d.bad_tags || []).length ? ` · ignored ${d.bad_tags.map(t => '“' + t + '”').join(', ')} (not a tag)` : '';
+    if (!d.results.length) {
+      results.innerHTML = '';
+      summary.textContent = 'No shows match.' + bad +
+        (q.value.trim() && !content.checked ? ' Tick “Also search inside show content” to look inside the shows’ fields, notes and comments too.' : '');
+      return;
+    }
+    summary.textContent = (d.truncated ? `Showing the first ${d.shown} of ${d.total} shows — narrow the filters to see the rest` : `${d.total} show${d.total === 1 ? '' : 's'}`) + bad;
+    results.innerHTML = d.results.map(s => {
+      const cls = ['show-card', 'find-card'];
+      if (s.is_event) cls.push('show-card-event');
+      if (s.status === 'archived') cls.push('show-card-past');
+      if (s.is_test) cls.push('show-card-test');
+      const badges = (s.status === 'archived' ? '<span class="past-badge" title="Archived show">ARCHIVED</span>' : '')
+        + (s.is_event ? '<span class="event-badge" title="Event mode">EVENT</span>' : '')
+        + (s.is_test ? '<span class="test-badge" title="Test / demo — excluded from reports">TEST</span>' : '');
+      const meta = [s.venue, s.company, s.pm ? 'PM: ' + s.pm : ''].filter(Boolean).map(esc).join(' · ');
+      const why = (s.matched || []).map(chip).join('');
+      return `<div class="${cls.join(' ')}">
+        <a class="show-card-link-overlay" href="${esc(s.url)}" aria-label="Open ${esc(s.name)}"></a>
+        <div class="show-card-name">${esc(s.name)}${badges}</div>
+        <div class="show-card-dates"><div>${esc(s.dates_label)}</div>${meta ? `<div class="show-meta">${meta}</div>` : ''}</div>
+        ${why ? `<div class="find-whys">${why}</div>` : ''}
+      </div>`;
+    }).join('');
+  }
+
+  /* ── Tag picker with autocomplete ────────────────────────────── */
+  let sugSeq = 0, sugTimer = null, sugItems = [], sugIdx = -1;
+  function addTag(raw) {
+    const n = normTag(raw);
+    tagInput.value = '';
+    closeSuggest();
+    if (!n || tags.includes(n) || tags.length >= MAX_TAGS) return;
+    tags.push(n);
+    renderTagChips();
+    schedule(false);
+    if (!tagInput.disabled) tagInput.focus();
+  }
+  function closeSuggest() {
+    suggest.hidden = true; suggest.innerHTML = ''; sugItems = []; sugIdx = -1;
+    tagInput.setAttribute('aria-expanded', 'false');
+  }
+  function paintSuggest() {
+    suggest.innerHTML = sugItems.map((t, i) =>
+      `<button type="button" role="option" class="find-suggest-item${i === sugIdx ? ' active' : ''}" data-tag="${esc(t.tag)}" aria-selected="${i === sugIdx}">#${esc(t.tag)} <span class="text-dim">${t.n}</span></button>`).join('');
+    suggest.hidden = !sugItems.length;
+    tagInput.setAttribute('aria-expanded', sugItems.length ? 'true' : 'false');
+  }
+  async function loadSuggest() {
+    const my = ++sugSeq;
+    const prefix = tagInput.value.trim().replace(/^#/, '');
+    try {
+      const r = await fetch('/api/tags?q=' + encodeURIComponent(prefix), {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+      const d = await r.json();
+      if (my !== sugSeq || document.activeElement !== tagInput) return;
+      sugItems = (d.tags || []).filter(t => !tags.includes(t.tag)).slice(0, 12);
+      sugIdx = -1;
+      paintSuggest();
+    } catch (_) { /* suggestions are optional */ }
+  }
+  tagInput.addEventListener('input', () => {
+    if (/[\s,]$/.test(tagInput.value)) { addTag(tagInput.value.replace(/[\s,]+$/, '')); return; }
+    clearTimeout(sugTimer);
+    sugTimer = setTimeout(loadSuggest, 150);
+  });
+  tagInput.addEventListener('focus', () => { clearTimeout(sugTimer); sugTimer = setTimeout(loadSuggest, 0); });
+  tagInput.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== tagInput) closeSuggest(); }, 150));
+  tagInput.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (!sugItems.length) return;
+      e.preventDefault();
+      sugIdx = (sugIdx + (e.key === 'ArrowDown' ? 1 : -1) + sugItems.length) % sugItems.length;
+      paintSuggest();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      addTag(sugIdx >= 0 ? sugItems[sugIdx].tag : tagInput.value);
+    } else if (e.key === 'Escape') {
+      closeSuggest();
+    } else if (e.key === 'Backspace' && !tagInput.value && tags.length) {
+      tags.pop(); renderTagChips(); schedule(false);
+    }
+  });
+  suggest.addEventListener('mousedown', e => e.preventDefault());   // keep focus in the input
+  suggest.addEventListener('click', e => {
+    const b = e.target.closest('[data-tag]');
+    if (b) addTag(b.dataset.tag);
+  });
+  tagChips.addEventListener('click', e => {
+    const b = e.target.closest('[data-rm]');
+    if (!b) return;
+    tags = tags.filter(t => t !== b.dataset.rm);
+    renderTagChips(); schedule(false);
+  });
+  $('find-tags-box').addEventListener('click', e => { if (e.target === e.currentTarget) tagInput.focus(); });
+  $('find-more-btn').addEventListener('click', () => {
+    const open = $('find-form').classList.toggle('find-open');
+    $('find-more-btn').setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+
+  /* ── Wiring ──────────────────────────────────────────────────── */
+  q.addEventListener('input', () => schedule(true));
+  content.addEventListener('change', () => schedule(false));
+  [pm, editor, venue, dFrom, dTo, test, sort].forEach(el => el.addEventListener('change', () => schedule(false)));
+  document.querySelectorAll('#find-status .find-seg-btn').forEach(b =>
+    b.addEventListener('click', () => { setStatus(b.dataset.status); schedule(false); }));
+  $('find-clear').addEventListener('click', () => {
+    q.value = ''; content.checked = false; pm.value = ''; editor.value = ''; venue.value = '';
+    dFrom.value = ''; dTo.value = ''; test.checked = false; sort.value = '';
+    tags = []; renderTagChips(); setStatus('all'); schedule(false); q.focus();
+  });
+  window.addEventListener('popstate', () => {
+    fromUrl();
+    committed = params().toString();
+    lastWasTyping = false;
+    run();
+  });
+
+  fromUrl();
+  committed = params().toString();
+  // PM + editor pickers fill in asynchronously; re-apply the URL's picks once
+  // their options exist, then run the first search.
+  const pmLoad = fetch('/api/production-managers').then(r => r.json()).then(d => {
+    (d.names || []).forEach(n => {
+      if (Array.from(pm.options).some(o => o.value === n)) return;
+      const o = document.createElement('option'); o.value = n; o.textContent = n; pm.appendChild(o);
+    });
+  }).catch(() => {});
+  const edLoad = fetch('/api/search/editors').then(r => r.json()).then(d => {
+    (d.users || []).forEach(u => {
+      const v = String(u.id);
+      const ex = Array.from(editor.options).find(o => o.value === v);
+      if (ex) { ex.textContent = u.name; return; }
+      const o = document.createElement('option'); o.value = v; o.textContent = u.name; editor.appendChild(o);
+    });
+  }).catch(() => {});
+  Promise.all([pmLoad, edLoad]).then(() => {
+    const p = new URLSearchParams(location.search);
+    setSelect(pm, p.get('pm') || '');
+    const ed = p.get('editor') || '';
+    setSelect(editor, ed, /^\d+$/.test(ed) ? `User #${ed}` : ed);
+  });
+  run();
+})();
+</script>
+{% endblock %}

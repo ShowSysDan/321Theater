@@ -1,0 +1,67 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{% block title %}Home — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+{# Home day timeline (3.35.0): everything happening on one day. This page is
+   a shell — static/js/home_timeline.js loads /api/timeline and draws one
+   lane per show/event (production schedule + crew shifts) on a shared time
+   axis, with a NOW line from the browser's clock. The show board is /shows. #}
+<header class="phead tl-phead">
+  <div class="phead-row">
+    <div class="phead-title">
+      <span class="phead-tile" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      </span>
+      <div>
+        <h1 class="page-title">Home</h1>
+        <p class="phead-context"><span id="tl-context" aria-live="polite">&nbsp;</span> <span id="tl-status" class="tl-status" role="status"></span></p>
+      </div>
+    </div>
+    <div class="tl-nav" role="group" aria-label="Choose a day">
+      <button type="button" class="btn btn-ghost btn-sm" id="tl-prev" title="Previous day" aria-label="Previous day">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" width="14" height="14" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <button type="button" class="btn btn-ghost btn-sm" id="tl-today">Today</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="tl-next" title="Next day" aria-label="Next day">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" width="14" height="14" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+      <input type="date" id="tl-date" class="field-input field-input-sm" aria-label="Pick a day" min="2000-01-01" max="2100-12-31">
+    </div>
+  </div>
+  <div class="tl-toolbar">
+    <div class="dash-venue-pills tl-venues" id="tl-venues" role="group" aria-label="Filter by venue"></div>
+    <label class="tl-check" title="Test / demo shows are left off unless this is ticked">
+      <input type="checkbox" id="tl-include-test"> Test shows<span id="tl-test-count" class="mono"></span>
+    </label>
+    <div class="tl-zoom" role="group" aria-label="Zoom">
+      <button type="button" class="btn btn-ghost btn-sm" id="tl-zoom-out" title="Zoom out (less height per hour)" aria-label="Zoom out">−</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="tl-zoom-in" title="Zoom in (more height per hour)" aria-label="Zoom in">+</button>
+    </div>
+    <div class="tl-legend" aria-hidden="true">
+      <span><i class="tl-key tl-key-sched"></i>Schedule</span>
+      <span><i class="tl-key tl-key-crew"></i>Crew</span>
+      <span><i class="tl-key tl-key-break"></i>Lunch</span>
+      <span><i class="tl-key tl-key-open"></i>Not confirmed</span>
+    </div>
+  </div>
+</header>
+
+<div id="tl-root" class="tl-root" data-initial-date="{{ initial_date }}">
+  <div id="tl-empty" class="empty-state tl-empty" hidden>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="44" height="44" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+    <p id="tl-empty-text">Nothing on the schedule for this day.</p>
+    <p class="tl-empty-links"><a href="{{ url_for('dashboard') }}">See all shows →</a></p>
+  </div>
+  <div id="tl-scroll" class="tl-scroll" aria-label="Day timeline" hidden></div>
+</div>
+<div id="tl-tip" class="tl-tip" role="tooltip" hidden></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/home_timeline.js') }}"></script>
+{% endblock %}

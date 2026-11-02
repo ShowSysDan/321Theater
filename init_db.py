@@ -416,6 +416,22 @@ def _seed_admin_user(db):
     return True
 
 
+# Person-name key in SQL: the twin of app._name_key() (' '.join(s.split())
+# .lower()). The whitespace class spells out Python's str.isspace() set —
+# [[:space:]] follows the database locale (C.UTF-8 misses the NBSP a name
+# pasted from Outlook carries) — so a name keys the same in SQL as in
+# Python. idx_contacts_name_key indexes exactly pg_name_key('name'), and
+# app._schedule_sync_hash matches contacts with it: both build the text
+# here, so they can't drift apart (a different text = no index use).
+_NAME_KEY_WS_SQL = (r"E'[\\t\\n\\v\\f\\r\\u001c-\\u001f \\u0085\\u00a0\\u1680"
+                    r"\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]+'")
+
+
+def pg_name_key(expr):
+    """SQL for the name key of text expression `expr` (see above)."""
+    return f"lower(btrim(regexp_replace({expr}, {_NAME_KEY_WS_SQL}, ' ', 'g')))"
+
+
 PG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -634,7 +650,11 @@ CREATE TABLE IF NOT EXISTS contacts (
 -- Authoritative dedup for the per-worker user→contact backfill race.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_user_unique
     ON contacts(user_id) WHERE user_id IS NOT NULL;
-
+""" + f"""
+-- Contacts by name key (PM cards): the schedule editor's 3 s poll hash
+-- looks the Day PM contacts up by it.
+CREATE INDEX IF NOT EXISTS idx_contacts_name_key ON contacts (({pg_name_key('name')}));
+""" + """
 CREATE TABLE IF NOT EXISTS export_log (
     id SERIAL PRIMARY KEY,
     show_id INTEGER REFERENCES shows(id) ON DELETE SET NULL,
@@ -784,6 +804,7 @@ CREATE TABLE IF NOT EXISTS form_history (
     summary_json TEXT DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_form_history_show_type ON form_history(show_id, form_type);
+CREATE INDEX IF NOT EXISTS idx_form_history_saved_by ON form_history(saved_by);
 
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,

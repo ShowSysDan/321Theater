@@ -400,6 +400,8 @@ async function switchTab(name) {
     saveTimer = null;
     pendingSave = saveActive();
   }
+  // A tab with no pane (stale link, module switched off) would hide them all.
+  if (!document.getElementById('tab-' + name) && document.getElementById('tab-advance')) name = 'advance';
   activeTab = name;
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -658,6 +660,287 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+/* ── Tools menus (action-menu component) ───────────────────────────
+   A "Tools ▾" button that opens a role="menu" list of actions. Markup —
+   ToolsMenu.html() and show.html's tools_menu() macro render the same:
+     <div class="tools-menu" data-tools="<provider>">
+       <button type="button" class="btn btn-sm btn-ghost tools-menu-btn"
+               aria-haspopup="menu" aria-expanded="false">…Tools ▾</button>
+       <div class="tools-menu-panel" role="menu" aria-label="…" hidden></div>
+     </div>
+   - Items are built at OPEN time by the provider registered under the
+     wrapper's data-tools name: ToolsMenu.register(name, wrap => items).
+     An item is {label, onSelect(wrap), danger, disabled, title}, a
+     {separator: true}, a {group: 'Heading', items: [...], empty: 'text'}
+     section, or a {note: 'text'} line. So a list is never stale.
+   - The panel stays INSIDE the wrapper (handlers can still use
+     closest('.labor-day') etc.) but is position:fixed, placed from the
+     trigger's rect, so overflow:hidden cards don't clip it.
+   - ONE set of document/window listeners serves every menu (delegation):
+     headers re-rendered on every tab switch never accumulate listeners.
+   - Closes on outside press, Esc (focus back to the trigger), Tab, item
+     activation, another menu opening, or its trigger scrolling away. */
+window.ToolsMenu = (function () {
+  const providers = {};
+  let open = null;            // {wrap, btn, panel, defs}
+
+  function register(name, fn) { providers[name] = fn; }
+
+  function html(provider, opts) {
+    opts = opts || {};
+    const title = opts.title || 'Tools';
+    // Extra data-* attributes for the provider: {perfTimes: [...]} →
+    // data-perf-times="[...]" (non-strings are JSON-encoded).
+    const data = Object.entries(opts.data || {}).map(([k, v]) =>
+      ` data-${k.replace(/[A-Z]/g, c => '-' + c.toLowerCase())}="${_esc(typeof v === 'string' ? v : JSON.stringify(v))}"`).join('');
+    return `<div class="tools-menu" data-tools="${_esc(provider)}"${data}>` +
+      `<button type="button" class="btn btn-sm btn-ghost tools-menu-btn" aria-haspopup="menu" aria-expanded="false" title="${_esc(title)}">` +
+      `<span class="tools-menu-label">${_esc(opts.label || 'Tools')}</span><span class="tools-menu-busy" hidden></span>` +
+      `<span class="tools-menu-caret" aria-hidden="true">▾</span></button>` +
+      `<div class="tools-menu-panel" role="menu" aria-label="${_esc(title)}" hidden></div></div>`;
+  }
+
+  function _items() {
+    return open ? Array.from(open.panel.querySelectorAll('.tools-menu-item:not([aria-disabled="true"])')) : [];
+  }
+
+  // Focus an item without scrolling the page; keep it visible inside a
+  // panel that scrolls (a long template list).
+  function _focusItem(el) {
+    el.focus({preventScroll: true});
+    const p = open && open.panel;
+    if (!p || p.scrollHeight <= p.clientHeight) return;
+    const top = el.offsetTop, bottom = top + el.offsetHeight;
+    if (top < p.scrollTop) p.scrollTop = top;
+    else if (bottom > p.scrollTop + p.clientHeight) p.scrollTop = bottom - p.clientHeight;
+  }
+
+  function close(focusTrigger) {
+    if (!open) return;
+    const {btn, panel} = open;
+    open = null;
+    panel.hidden = true;
+    panel.textContent = '';          // rebuilt on the next open; drops the item closures
+    panel.style.maxHeight = '';
+    btn.setAttribute('aria-expanded', 'false');
+    if (focusTrigger && btn.isConnected) btn.focus();
+  }
+
+  function _build(panel, defs) {
+    const flat = [];                 // index → def, for activation
+    const addItem = (parent, d, sub) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'tools-menu-item' + (sub ? ' tools-menu-sub' : '') + (d.danger ? ' is-danger' : '');
+      b.setAttribute('role', 'menuitem');
+      b.tabIndex = -1;
+      b.textContent = d.label;
+      if (d.title) b.title = d.title;
+      if (d.disabled) b.setAttribute('aria-disabled', 'true');
+      b.dataset.i = String(flat.length);
+      flat.push(d);
+      parent.appendChild(b);
+    };
+    const addNote = (parent, text) => {
+      const n = document.createElement('div');
+      n.className = 'tools-menu-note';
+      n.setAttribute('role', 'presentation');
+      n.textContent = text;
+      parent.appendChild(n);
+    };
+    let lastWasSep = true;           // no leading / doubled separators
+    (defs || []).forEach(d => {
+      if (!d) return;
+      if (d.separator) {
+        if (lastWasSep) return;
+        const s = document.createElement('div');
+        s.className = 'tools-menu-sep';
+        s.setAttribute('role', 'separator');
+        panel.appendChild(s);
+        lastWasSep = true;
+        return;
+      }
+      if (d.group && !(d.items || []).length && !d.empty) return;   // nothing to list
+      lastWasSep = false;
+      if (d.group) {
+        const g = document.createElement('div');
+        g.className = 'tools-menu-group';
+        g.setAttribute('role', 'group');
+        g.setAttribute('aria-label', d.group);
+        const h = document.createElement('div');
+        h.className = 'tools-menu-heading';
+        h.setAttribute('aria-hidden', 'true');
+        h.textContent = d.group;
+        g.appendChild(h);
+        const list = d.items || [];
+        if (list.length) list.forEach(it => addItem(g, it, true));
+        else if (d.empty) addNote(g, d.empty);
+        panel.appendChild(g);
+      } else if (d.note) {
+        addNote(panel, d.note);
+      } else {
+        addItem(panel, d, false);
+      }
+    });
+    const last = panel.lastElementChild;
+    if (last && last.classList.contains('tools-menu-sep')) last.remove();
+    if (!flat.length && !panel.firstChild) addNote(panel, 'Nothing to do here yet.');
+    return flat;
+  }
+
+  function place() {
+    if (!open) return;
+    const {btn, panel} = open;
+    if (!btn.isConnected) { close(false); return; }
+    const r = btn.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth || window.innerWidth;
+    const vh = window.innerHeight;
+    const m = 8, gap = 4;
+    // The trigger scrolled out of sight (or its pane was hidden): close
+    // rather than leave a menu floating over unrelated content.
+    if (r.bottom < 0 || r.top > vh || (!r.width && !r.height)) { close(false); return; }
+    panel.style.maxWidth = `${Math.max(160, Math.min(360, vw - 2 * m))}px`;
+    panel.style.maxHeight = '';
+    const natural = panel.scrollHeight + 2;
+    const below = vh - r.bottom - gap - m;
+    const above = r.top - gap - m;
+    let top, maxH = null;
+    if (natural <= below) top = r.bottom + gap;
+    else if (natural <= above) top = r.top - gap - natural;
+    else if (below >= above) { maxH = below; top = r.bottom + gap; }
+    else { maxH = above; top = m; }
+    if (maxH !== null) panel.style.maxHeight = `${Math.max(120, Math.floor(maxH))}px`;
+    const w = panel.offsetWidth;
+    // Right-align with the trigger (menus sit at the right of a header);
+    // fall back to left-aligned, then clamp inside the viewport.
+    let left = r.right - w;
+    if (left < m) left = r.left;
+    left = Math.max(m, Math.min(left, vw - w - m));
+    panel.style.top = `${Math.round(Math.max(m, top))}px`;
+    panel.style.left = `${Math.round(left)}px`;
+  }
+
+  function show(wrap, focusWhich) {
+    const btn = wrap.querySelector('.tools-menu-btn');
+    const panel = wrap.querySelector('.tools-menu-panel');
+    if (!btn || !panel || btn.disabled) return;
+    close(false);
+    const fn = providers[wrap.dataset.tools];
+    let defs = [];
+    try { defs = fn ? (fn(wrap) || []) : []; } catch (e) { console.error('ToolsMenu provider failed', e); }
+    panel.textContent = '';
+    const flat = _build(panel, defs);
+    open = {wrap, btn, panel, defs: flat};
+    btn.setAttribute('aria-expanded', 'true');
+    panel.style.visibility = 'hidden';
+    panel.hidden = false;
+    place();
+    if (!open) return;               // place() closed it (trigger off-screen)
+    panel.style.visibility = '';
+    const items = _items();
+    if (items.length) _focusItem(focusWhich === 'last' ? items[items.length - 1] : items[0]);
+  }
+
+  function activate(item) {
+    if (!open || item.getAttribute('aria-disabled') === 'true') return;
+    const def = open.defs[parseInt(item.dataset.i, 10)];
+    const wrap = open.wrap;
+    close(true);                     // close first: a prompt()/confirm() must not sit under it
+    if (def && typeof def.onSelect === 'function') {
+      try {
+        const res = def.onSelect(wrap);
+        if (res && typeof res.catch === 'function') res.catch(e => console.error(e));
+      } catch (e) { console.error(e); }
+    }
+  }
+
+  /* Busy state for long-running tools (e.g. a labor clone): disables the
+     trigger and swaps its label for `text`; null restores it. The label
+     span is never rewritten, so nothing has to remember literal text. */
+  function setBusy(wrap, text) {
+    if (!wrap) return;
+    const btn = wrap.querySelector('.tools-menu-btn');
+    if (!btn) return;
+    if (open && open.wrap === wrap) close(false);
+    const label = btn.querySelector('.tools-menu-label');
+    const busy = btn.querySelector('.tools-menu-busy');
+    btn.disabled = !!text;
+    if (text) btn.setAttribute('aria-busy', 'true'); else btn.removeAttribute('aria-busy');
+    if (busy) { busy.textContent = text || ''; busy.hidden = !text; }
+    if (label) label.hidden = !!text;
+    wrap.classList.toggle('is-busy', !!text);
+  }
+
+  // ── The one set of global listeners ──
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    const trigger = t.closest('.tools-menu-btn');
+    if (trigger) {
+      const wrap = trigger.closest('.tools-menu');
+      if (!wrap) return;
+      e.preventDefault();
+      if (open && open.wrap === wrap) close(false);
+      else show(wrap, 'first');
+      return;
+    }
+    const item = t.closest('.tools-menu-item');
+    if (item && open && open.panel.contains(item)) { e.preventDefault(); activate(item); }
+  });
+  // Outside press closes (pointerdown: iOS doesn't send click for taps on
+  // non-interactive elements, and a stopPropagation()'d click elsewhere
+  // can't keep a menu open). Capture so nothing can swallow it.
+  document.addEventListener('pointerdown', (e) => {
+    if (!open) return;
+    const t = e.target;
+    if (t instanceof Node && open.wrap.contains(t) && open.wrap.isConnected) return;
+    close(false);
+  }, true);
+  document.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    // Closed menu, focus on its trigger: ArrowDown / ArrowUp open it.
+    if (t.classList.contains('tools-menu-btn') && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      const wrap = t.closest('.tools-menu');
+      if (wrap && !(open && open.wrap === wrap)) {
+        e.preventDefault();
+        show(wrap, e.key === 'ArrowUp' ? 'last' : 'first');
+        return;
+      }
+    }
+    if (!open) return;
+    if (e.key === 'Escape') {
+      if (open.wrap.contains(t)) { e.preventDefault(); e.stopPropagation(); }
+      close(open.wrap.contains(t));
+      return;
+    }
+    if (!open.panel.contains(t) && t !== open.btn) return;
+    const items = _items();
+    const idx = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!items.length) return;
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      const next = idx < 0 ? (step > 0 ? 0 : items.length - 1) : (idx + step + items.length) % items.length;
+      _focusItem(items[next]);
+    } else if (e.key === 'Home' || e.key === 'End') {
+      if (!items.length) return;
+      e.preventDefault();
+      _focusItem(items[e.key === 'Home' ? 0 : items.length - 1]);
+    } else if (e.key === 'Tab') {
+      close(false);
+    }
+  }, true);
+  window.addEventListener('resize', place);
+  window.addEventListener('scroll', (e) => {
+    // Scrolling inside the menu itself (a long list) must not re-place it.
+    if (open && e.target instanceof Node && open.panel.contains(e.target)) return;
+    place();
+  }, true);
+
+  return {register, html, close, setBusy, isOpen: () => !!open};
+})();
+
 /* ── Toast Notification ─────────────────────────────────────────── */
 function showSaveToast(msg, type) {
   const toast = document.getElementById('save-toast');
@@ -795,7 +1078,7 @@ function bindAdvanceForm() {
   };
   form.addEventListener('focusin', e => {
     const el = e.target.closest('.adv-field[data-key]');
-    const key = el ? el.dataset.key : null;
+    const key = el && !el.readOnly ? el.dataset.key : null;   // readonly = view only, not editing
     if (key !== _focusedField) { _focusedField = key; pushPresence(); }
   });
   form.addEventListener('focusout', () => {
@@ -1070,12 +1353,19 @@ function bindScheduleForm() {
   if (!form) return;
   _schedInitBaseline();
   form.addEventListener('change', (e) => {
+    // Day PM picker (3.35.0) saves on its own (show_labor_days), never
+    // through the schedule autosave.
+    if (e.target.closest && e.target.closest('.sched-daypm')) { _schedDayPmChange(e.target); return; }
     if (e.target.classList && e.target.classList.contains('sched-dark')) _applyDarkDays();
     _maybeAutoSortAfterEdit(e.target);
     scheduleSave();
   });
   _applyDarkDays();
-  form.addEventListener('input',  () => scheduleSave());
+  _schedDayPmInit(form);
+  form.addEventListener('input',  (e) => {
+    if (e.target.closest && e.target.closest('.sched-daypm')) return;
+    scheduleSave();
+  });
   form.querySelectorAll('tr.schedule-row[data-row-id]').forEach(_schedBindRowFocus);
   form.addEventListener('focusout', () => setTimeout(_schedApplyMetaPending, 0));
   // Time cells are normalised on blur by _bindScheduleTimeParsing.
@@ -1256,16 +1546,16 @@ function _renderScheduleDays(days) {
     fallback.dataset.perfId = days[0].primary_perf_id || '';
     const tbody = fallback.querySelector('tbody');
     if (tbody) tbody.id = `schedule-rows-${firstKey}`;
-    // The fallback pane's footer buttons were rendered with dayKey=null —
-    // re-bind them to the new date_key so clicking "+ Add Row" targets the
-    // promoted day's tbody. (The header is fully replaced below by
-    // _updateDayPaneHeader, which handles the toolbar buttons.)
+    // The fallback pane's footer button was rendered with dayKey=null —
+    // re-bind it to the new date_key so clicking "+ Add Row" targets the
+    // promoted day's tbody. (The header — Tools menu included — is fully
+    // replaced below by _updateDayPaneHeader; the menus read the pane's
+    // data-day-key when they open.)
     const footer = fallback.querySelector('.form-section-footer');
     if (footer) {
       const dk = JSON.stringify(firstKey);
       footer.innerHTML = `
         <button type="button" class="btn btn-ghost btn-sm" onclick='addScheduleRow(${dk})'>+ Add Row</button>
-        <button type="button" class="btn btn-ghost btn-sm" onclick='sortSchedRowsByTime(${dk})'>⇅ Sort by time</button>
       `;
     }
     existing[firstKey] = fallback;
@@ -1292,6 +1582,7 @@ function _renderScheduleDays(days) {
   const ordered = days.map((d, idx) => {
     if (existing[d.date_key]) {
       _updateDayPaneHeader(existing[d.date_key], d, idx + 1, days.length);
+      _schedDayPmEnsure(existing[d.date_key]);   // e.g. the promoted fallback pane
       return existing[d.date_key];
     }
     return _buildDayPane(d, idx + 1, days.length);
@@ -1317,7 +1608,6 @@ function _renderScheduleDays(days) {
   });
 
   _syncDayTabs(form, days);
-  _syncCopyDropdowns(days);
   // A dark-day checkbox that first appears now (new pane, or a 1-day show
   // becoming multi-day) needs a baseline, or every save would post it.
   if (typeof _schedMetaBaseline !== 'undefined') {
@@ -1363,6 +1653,71 @@ function _applyDarkDays() {
   });
 }
 
+/* ── Schedule Tools menus (tab toolbar + each day header) ───────────
+   Who gets them: not restricted AND not read-only (window.CAN_USE_SHOW_TOOLS,
+   show.html) — the same gate as the Jinja markup. Items are built when a
+   menu opens, from the editor as it is NOW: window.SCHED_TEMPLATES (a
+   template saved a minute ago is listed), the other days as the day tabs
+   list them, the pane's current data-day-key (a promoted fallback
+   pane included) and the day's performance times (the header's
+   data-perf-times, re-rendered with every structure sync). Each item calls
+   the same handler the old buttons / selects did. */
+function _showToolsOk() {
+  return !RESTRICTED && window.CAN_USE_SHOW_TOOLS !== false;
+}
+
+ToolsMenu.register('sched-tab', () => {
+  const defs = [{label: 'Import from another show…',
+                 title: 'Copy another show\'s production schedule into this one',
+                 onSelect: () => openSchedImport()}];
+  if (window.CAN_EDIT_SCHED_TEMPLATES) {
+    defs.push({label: 'Save day as template…',
+               title: 'Save a day of this schedule as a reusable template',
+               onSelect: () => openSaveSchedTemplate()});
+  }
+  defs.push({separator: true});
+  defs.push({label: 'History', title: 'Every saved version of this schedule, with what changed',
+             onSelect: () => openHistory('schedule')});
+  return defs;
+});
+
+ToolsMenu.register('sched-day', (wrap) => {
+  const pane = wrap.closest('.sched-day-pane');
+  const key = pane ? (pane.dataset.dayKey || null) : null;
+  let times = [];
+  try { times = JSON.parse(wrap.dataset.perfTimes || '[]'); } catch (_) { times = []; }
+  if (!Array.isArray(times)) times = [];
+  const defs = [];
+  const templates = window.SCHED_TEMPLATES || [];
+  if (templates.length) {
+    defs.push({group: 'Apply template', items: templates.map(t => ({
+      label: t.name || 'Untitled', title: 'Apply this template to this day',
+      onSelect: () => applySchedTemplate(t.id, key)}))});
+  }
+  // The OTHER days, as the day tabs list them right now (the tab strip only
+  // shows when the show has more than one day — same rule as the old select).
+  const tabStrip = document.querySelector('#schedule-form .sched-day-tabs');
+  const others = (tabStrip && tabStrip.style.display !== 'none')
+    ? Array.from(tabStrip.querySelectorAll('.sched-day-tab[data-day-key]'))
+        .map(b => ({key: b.dataset.dayKey, label: b.textContent.replace(/\s+/g, ' ').trim()}))
+        .filter(o => o.key && o.key !== key && document.getElementById(`schedule-rows-${o.key}`))
+    : [];
+  if (others.length) {
+    defs.push({group: 'Copy from day', items: others.map(o => ({
+      label: o.label, title: 'Replace this day\'s rows with a copy of that day\'s',
+      onSelect: () => copySchedDay(o.key, key)}))});
+  }
+  defs.push({separator: true});
+  if (times.length) {
+    defs.push({label: times.length > 1 ? 'Pull show times' : 'Pull show time',
+               title: 'Insert a SHOW START row for each performance on this day',
+               onSelect: () => pullAdvanceTime(key, times)});
+  }
+  defs.push({label: 'Sort by time', title: 'Sort rows by start time',
+             onSelect: () => sortSchedRowsByTime(key)});
+  return defs;
+});
+
 function _buildPaneHeader(d, dayNum, totalDays) {
   const perfTimes = (d.perfs || []).filter(p => p.perf_time).map(p => parseTimeToHHMM(p.perf_time));
   const dateLabel = (totalDays > 1 || d.orphan) ? ` — ${_esc(_schedDayLabel(d, false))}` : '';
@@ -1372,30 +1727,13 @@ function _buildPaneHeader(d, dayNum, totalDays) {
   const keyArg = JSON.stringify(d.date_key);
   let actions = '';
   if (!RESTRICTED) {
-    const templates = window.SCHED_TEMPLATES || [];
-    const tmplDrop = templates.length ? `
-      <select class="field-input sched-tmpl-select" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
-              onchange='applySchedTemplate(this.value, ${keyArg}); this.value=""'>
-        <option value="">Apply template…</option>
-        ${templates.map(t => `<option value="${_esc(t.id)}">${_esc(t.name)}</option>`).join('')}
-      </select>` : '';
-    // Copy-from dropdown is populated by _syncCopyDropdowns so it always
-    // reflects the current day list.
-    const copyDrop = totalDays > 1 ? `
-      <select class="field-input sched-copy-from" data-self-key="${_esc(d.date_key)}"
-              style="width:auto;font-size:11px;padding:3px 6px;height:auto"
-              onchange='copySchedDay(this.value, ${keyArg}); this.value=""'>
-        <option value="">Copy from…</option>
-      </select>` : '';
-    const pullTimeBtn = perfTimes.length ? `
-      <button type="button" class="btn btn-sm btn-ghost"
-              onclick='pullAdvanceTime(${keyArg}, ${JSON.stringify(perfTimes)})'>Pull time${perfTimes.length > 1 ? 's' : ''}</button>` : '';
+    // Same markup as show.html's day header: the per-day Tools menu (built
+    // when it opens — ToolsMenu 'sched-day') + the visible "+ Add Row".
+    const tools = _showToolsOk()
+      ? ToolsMenu.html('sched-day', {title: 'Day tools', data: {perfTimes}}) : '';
     actions = `
-      <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-wrap:wrap">
-        ${tmplDrop}
-        ${copyDrop}
-        ${pullTimeBtn}
-        <button type="button" class="btn btn-sm btn-ghost" onclick='sortSchedRowsByTime(${keyArg})' title="Sort rows by start time">⇅ Sort</button>
+      <div class="sched-day-actions">
+        ${tools}
         <button type="button" class="btn btn-sm btn-ghost" onclick='addScheduleRow(${keyArg})'>+ Add Row</button>
       </div>`;
   }
@@ -1434,7 +1772,7 @@ function _setOrphanNote(pane, d) {
   note.className = 'sched-orphan-note';
   note.innerHTML = `<strong>${_esc(d.perf_date || d.date_key)} is outside this show's dates</strong>
     (load-in → load-out and performances). These rows are kept here so nothing is lost — copy them
-    to a real day ("Copy from…" on that day) or delete them. They don't print on the schedule PDF.`;
+    to a real day (that day's Tools → Copy from day) or delete them. They don't print on the schedule PDF.`;
   sec.querySelector('.form-section-header')?.insertAdjacentElement('afterend', note);
 }
 
@@ -1450,7 +1788,6 @@ function _buildDayPane(d, dayNum, totalDays) {
   const footer  = RESTRICTED ? '' : `
       <div class="form-section-footer">
         <button type="button" class="btn btn-ghost btn-sm" onclick='addScheduleRow(${keyArg})'>+ Add Row</button>
-        <button type="button" class="btn btn-ghost btn-sm" onclick='sortSchedRowsByTime(${keyArg})'>⇅ Sort by time</button>
       </div>`;
   wrapper.innerHTML = `
     <div class="form-section">
@@ -1473,6 +1810,7 @@ function _buildDayPane(d, dayNum, totalDays) {
       ${footer}
     </div>`;
   _setOrphanNote(wrapper, d);
+  _schedDayPmEnsure(wrapper);
   return wrapper;
 }
 
@@ -1529,20 +1867,6 @@ function _syncDayTabs(form, days) {
     const show = k === activeKey;
     p.classList.toggle('hidden', !show);
     p.style.display = show ? '' : 'none';
-  });
-}
-
-function _syncCopyDropdowns(days) {
-  if (days.length <= 1) return;
-  document.querySelectorAll('.sched-day-pane .sched-copy-from').forEach(sel => {
-    const selfKey = sel.dataset.selfKey || '';
-    const opts = ['<option value="">Copy from…</option>'];
-    days.forEach((d, idx) => {
-      if (d.date_key === selfKey) return;
-      const label = `${d.orphan ? 'Off-date' : 'Day ' + (d.day_num || idx + 1)}${d.perf_date ? ' (' + _shortDateLabel(d.perf_date) + ')' : ''}`;
-      opts.push(`<option value="${_esc(d.date_key)}">${_esc(label)}</option>`);
-    });
-    sel.innerHTML = opts.join('');
   });
 }
 
@@ -1917,7 +2241,7 @@ function openSaveSchedTemplate() {
       <label class="field-label">Template name</label>
       <input type="text" class="field-input" data-name maxlength="120" placeholder="e.g. Orchestra concert — single day">
       <p class="text-dim" style="margin:0;font-size:12px">Saves the day's rows (times, descriptions, notes) as a
-        schedule template anyone can apply from "Apply template…". Piano tuning rows are left out.
+        schedule template anyone can apply from a day's Tools → Apply template. Piano tuning rows are left out.
         Using an existing template's name replaces that template.</p>`,
     `<button type="button" class="btn btn-ghost" data-close>Cancel</button>
      <button type="button" class="btn btn-primary" data-go>Save template</button>`, 480);
@@ -1937,13 +2261,12 @@ function openSaveSchedTemplate() {
                                   body: JSON.stringify({name, rows})});
       const d = await r.json().catch(() => ({}));
       if (!r.ok || !d.success) throw new Error(d.error || `HTTP ${r.status}`);
+      // The day Tools menus read window.SCHED_TEMPLATES when they open, so
+      // the new (or renamed) template is listed straight away.
       if (!existing) {
         window.SCHED_TEMPLATES = (window.SCHED_TEMPLATES || []).concat([{id: d.id, name}]);
-        document.querySelectorAll('.sched-tmpl-select').forEach(sel => {
-          const o = document.createElement('option');
-          o.value = d.id; o.textContent = name;
-          sel.appendChild(o);
-        });
+      } else {
+        existing.name = name;
       }
       ov.remove();
       showSaveToast(`✓ Template “${name}” saved (${rows.length} rows)`);
@@ -2326,7 +2649,7 @@ function _schedServerRow(r) {
   if (RESTRICTED) {
     tr.querySelector('.drag-col')?.remove();
     tr.querySelector('.row-del-btn')?.closest('td')?.remove();
-    tr.querySelectorAll('.sched-cell').forEach(i => { i.disabled = true; });
+    tr.querySelectorAll('.sched-cell').forEach(i => { i.readOnly = true; });   // not disabled: long text stays scrollable
   }
   return tr;
 }
@@ -2345,12 +2668,12 @@ async function _pollScheduleSync() {
   const form = document.getElementById('schedule-form');
   if (!SHOW_ID || !form || !_schedReady || _schedSyncBusy || _saveChains.schedule) return;
   _schedSyncBusy = true;
-  const seq = _schedSaveSeq;
+  const seq = _schedSaveSeq, pmSeq = _schedDayPmSeq;
   try {
     const r = await fetch(`/shows/${SHOW_ID}/sync/schedule?h=${encodeURIComponent(_schedSyncHash)}`);
     if (!r.ok) return;
     const st = await r.json();
-    if (!st.success || st.same || seq !== _schedSaveSeq || _saveChains.schedule) return;
+    if (!st.success || st.same || seq !== _schedSaveSeq || pmSeq !== _schedDayPmSeq || _saveChains.schedule) return;
     const skipped = _schedMerge(form, st);
     // Rows/fields held back (focused here, or on a day this page has no pane
     // for yet) are delivered again by the next poll: commit the hash only
@@ -2518,6 +2841,9 @@ function _schedMerge(form, st) {
       changes++;
     }
   });
+  // Day PM per dated day (3.35.0) — show_labor_days, saved elsewhere.
+  const pm = _schedDayPmMerge(st);
+  skipped += pm.skipped; changes += pm.changes;
   _applyDarkDays();
   if (needStructure && typeof _syncScheduleStructure === 'function') _syncScheduleStructure();
   if (changes) showSaveToast('↓ Schedule updated');
@@ -2538,6 +2864,223 @@ function _schedPlaceByTime(tbody, serverRows) {
     });
     if (before) tbody.insertBefore(tr, before); else tbody.appendChild(tr);
   });
+}
+
+/* ── Day PM bar on the schedule editor (3.35.0) ──────────────────────────
+   Each DATED day pane (off-date days too; never a __null_* day or the
+   no-days fallback pane) has a bar between its header and its table: the
+   day's covering PM picker and the on-duty PM's contact. The value is
+   show_labor_days.cover_pm — the SAME setting as the Labor Requests tab's
+   "Day PM" — saved via LaborDays.save (PUT /labor-days), never through the
+   schedule autosave (the select carries no .sched-meta; bindScheduleForm
+   routes its events here). State = window.SCHED_DAY_PM {show_pm, days:
+   {iso: card}} (card = the PM on duty: cover, else show PM, is_cover says
+   which); the 3 s schedule poll carries `day_pm` so other people's / other
+   tabs' changes arrive live (a focused picker is left alone until blur). */
+let _schedDayPm = {show_pm: null, days: {}};
+let _schedDayPmSeq = 0;          // bumps on every Day PM save; a poll that raced one is discarded
+const _schedDayPmPending = {};   // iso -> server card held while that picker is focused
+
+function _schedDayPmIso(key) {
+  const k = String(key || '');
+  return /^\d{4}-\d{2}-\d{2}$/.test(k) ? k : '';
+}
+function _schedDayPmCover(iso) {
+  const c = _schedDayPm.days[iso];
+  return (c && c.is_cover && c.name) || '';
+}
+function _schedDayPmBlankLabel() {
+  const sp = _schedDayPm.show_pm;
+  return sp && sp.name ? `— Show PM (${sp.name}) —` : '— Show PM —';
+}
+/* The card shown for a picked value: blank → the show PM; a name → its
+   contact from the PM pool (or the server-resolved card already held). */
+function _schedDayPmCardFor(iso, name) {
+  name = String(name || '').split(/\s+/).filter(Boolean).join(' ');
+  if (!name) return _schedDayPm.show_pm ? Object.assign({}, _schedDayPm.show_pm, {is_cover: false}) : null;
+  const held = _schedDayPm.days[iso];
+  if (held && held.is_cover && held.name === name) return held;
+  const c = window.LaborDays && LaborDays.contactFor(name);
+  return {name, title: (c && c.title) || '', phone: (c && c.phone) || '', email: (c && c.email) || '',
+          is_cover: true, found: !!c};
+}
+
+function _schedDayPmBar(iso) {
+  const bar = document.createElement('div');
+  bar.className = 'sched-daypm';
+  bar.dataset.date = iso;
+  const lab = document.createElement('label');
+  lab.className = 'sched-daypm-label';
+  lab.textContent = 'Day PM';
+  const sel = document.createElement('select');
+  sel.className = 'field-input field-input-sm sched-daypm-select';
+  sel.id = 'sched-daypm-' + iso;
+  sel.title = "Production manager on duty this day — blank = the show's PM. Same setting as Day PM on the Labor Requests tab.";
+  sel.disabled = !window.SCHED_DAY_PM_EDIT;
+  lab.htmlFor = sel.id;
+  const contact = document.createElement('span');
+  contact.className = 'sched-daypm-contact';
+  bar.append(lab, sel, contact);
+  return bar;
+}
+
+/* Draw one bar from state: picker value + blank label + contact line. The
+   options are rebuilt only when they'd change, and never under the cursor. */
+function _schedDayPmRender(bar) {
+  const iso = bar.dataset.date;
+  const sel = bar.querySelector('.sched-daypm-select');
+  const cover = _schedDayPmCover(iso);
+  if (sel && sel !== document.activeElement) {
+    const blank = _schedDayPmBlankLabel();
+    const want = (LaborDays._pmNames || []).length + 1 + (cover && !(LaborDays._pmNames || []).includes(cover) ? 1 : 0);
+    if (sel.value !== cover || sel.options.length !== want || (sel.options[0] && sel.options[0].textContent !== blank)) {
+      LaborDays.buildPmSelect(sel, cover, blank);
+    }
+  }
+  const card = _schedDayPm.days[iso] !== undefined ? _schedDayPm.days[iso] : _schedDayPmCardFor(iso, cover);
+  LaborDays.contactInto(bar.querySelector('.sched-daypm-contact'), card);
+}
+
+/* Give a pane its bar when its key is an ISO date (new pane, promoted
+   fallback pane), or drop it when it isn't. Idempotent. */
+function _schedDayPmEnsure(pane) {
+  if (!pane) return;
+  const iso = _schedDayPmIso(pane.dataset.dayKey);
+  let bar = pane.querySelector('.sched-daypm');
+  if (bar && bar.dataset.date === iso) return;
+  if (bar) bar.remove();
+  if (!iso) return;
+  const body = pane.querySelector('.form-section > .form-section-body');
+  if (!body) return;
+  bar = _schedDayPmBar(iso);
+  body.parentElement.insertBefore(bar, body);
+  if (_schedDayPm.days[iso] === undefined) {
+    // A day this page had no card for: start from what's known (the Labor
+    // tab's map, else the show PM) and let the next poll bring the server's.
+    const known = window._laborDaysMap && window._laborDaysMap[iso];
+    _schedDayPm.days[iso] = _schedDayPmCardFor(iso, known ? known.cover_pm : '');
+    _schedSyncHash = '';
+  }
+  _schedDayPmRender(bar);
+}
+
+function _schedDayPmInit(form) {
+  const init = window.SCHED_DAY_PM || {};
+  _schedDayPm = {show_pm: init.show_pm || null, days: Object.assign({}, init.days || {})};
+  form.querySelectorAll('.sched-day-pane').forEach(_schedDayPmEnsure);
+  // A remote value held back while a picker had focus lands on blur.
+  form.addEventListener('focusout', (e) => {
+    if (e.target.classList && e.target.classList.contains('sched-daypm-select')) {
+      setTimeout(_schedDayPmApplyPending, 0);
+    }
+  });
+  if (!window.LaborDays) return;
+  LaborDays.pmNames().then(() => {
+    form.querySelectorAll('.sched-daypm').forEach(_schedDayPmRender);
+  });
+}
+
+/* Labor Requests tab twin: keep its map + "Day PM" select on the same value. */
+function _schedDayPmToLabor(iso, cover) {
+  const map = window._laborDaysMap;
+  if (map) {
+    const e = map[iso];
+    if (cover) map[iso] = {cover_pm: cover, day_notes: (e && e.day_notes) || ''};
+    else if (e && e.day_notes) e.cover_pm = '';
+    else delete map[iso];
+  }
+  document.querySelectorAll(`.labor-day[data-work-date="${iso}"] .labor-day-pm`).forEach(sel => {
+    if (sel === document.activeElement || sel.value === cover) return;
+    LaborDays.pmNames().then(() => { if (sel.value !== cover) LaborDays.buildPmSelect(sel, cover); });
+  });
+}
+
+/* A covering PM saved for `iso` (here, on the Labor tab, or by someone
+   else): update state + this page's pickers. */
+function _schedDayPmSet(iso, cover, card) {
+  iso = _schedDayPmIso(iso);
+  if (!iso) return false;
+  const before = _schedDayPmCover(iso);
+  const known = _schedDayPm.days[iso] !== undefined;
+  _schedDayPm.days[iso] = card !== undefined ? card : _schedDayPmCardFor(iso, cover);
+  const bar = document.querySelector(`#schedule-form .sched-daypm[data-date="${iso}"]`);
+  if (bar) _schedDayPmRender(bar);
+  const now = _schedDayPmCover(iso);
+  if (now !== before) _schedDayPmToLabor(iso, now);
+  return known && now !== before;
+}
+/* Called by show.html's Labor tab after it saves a day's PM. */
+window.schedDayPmExternal = function (iso, cover) {
+  _schedDayPmSeq++;
+  const bar = document.querySelector(`#schedule-form .sched-daypm[data-date="${_schedDayPmIso(iso)}"]`);
+  if (_schedDayPmSet(iso, cover || '') && bar) _flashField(bar);
+};
+
+function _schedDayPmChange(sel) {
+  if (!sel || !sel.classList.contains('sched-daypm-select')) return;
+  const bar = sel.closest('.sched-daypm');
+  const iso = bar ? _schedDayPmIso(bar.dataset.date) : '';
+  if (!iso || !SHOW_ID) return;
+  if (!window.SCHED_DAY_PM_EDIT) { _schedDayPmRender(bar); return; }
+  // Show the picked PM's contact right away; the save confirms it.
+  LaborDays.contactInto(bar.querySelector('.sched-daypm-contact'), _schedDayPmCardFor(iso, sel.value));
+  _serializedSave('daypm', async () => {
+    const cur = document.querySelector(`#schedule-form .sched-daypm[data-date="${iso}"] .sched-daypm-select`) || sel;
+    const want = cur.value;
+    if (want === _schedDayPmCover(iso)) return;      // a queued save already posted it
+    _schedDayPmSeq++;
+    const res = await LaborDays.save(SHOW_ID, iso, {cover_pm: want});
+    _schedDayPmSeq++;
+    if (!res || !res.success) {
+      showSaveToast('✗ ' + ((res && res.error) || 'Day PM not saved'), 'error');
+      if (cur.value === want) {                      // put back what the server holds
+        const b = cur.closest('.sched-daypm');
+        if (b) { cur.blur(); _schedDayPmRender(b); }
+      }
+      return;
+    }
+    _schedDayPmSet(iso, (res.day && res.day.cover_pm) || '');
+    showSaveToast('✓ Day PM saved');
+  });
+}
+
+function _schedDayPmApplyPending() {
+  Object.keys(_schedDayPmPending).forEach(iso => {
+    const bar = document.querySelector(`#schedule-form .sched-daypm[data-date="${iso}"]`);
+    const sel = bar && bar.querySelector('.sched-daypm-select');
+    if (sel && sel === document.activeElement) return;
+    const card = _schedDayPmPending[iso];
+    delete _schedDayPmPending[iso];
+    if (_saveChains.daypm) return;                   // our save wins; the poll re-delivers
+    if (_schedDayPmSet(iso, (card && card.is_cover && card.name) || '', card) && bar) _flashField(bar);
+  });
+}
+
+/* Poll merge: {skipped, changes}. Nothing is merged while one of this
+   page's Day PM saves is in flight (the next poll carries the result). */
+function _schedDayPmMerge(st) {
+  const dp = st && st.day_pm;
+  const out = {skipped: 0, changes: 0};
+  if (!dp || !dp.days) return out;
+  if (_saveChains.daypm) { out.skipped = 1; return out; }
+  _schedDayPm.show_pm = dp.show_pm || null;   // the blank option names the show PM
+  document.querySelectorAll('#schedule-form .sched-daypm').forEach(bar => {
+    const iso = bar.dataset.date;
+    if (!Object.prototype.hasOwnProperty.call(dp.days, iso)) return;   // a pane the server doesn't list
+    const card = dp.days[iso] || null;
+    const cover = (card && card.is_cover && card.name) || '';
+    const sel = bar.querySelector('.sched-daypm-select');
+    // Compare as the server stores it (whitespace collapsed), so a picked
+    // name the save normalised isn't "different" on every poll.
+    if (sel && sel === document.activeElement && sel.value.split(/\s+/).filter(Boolean).join(' ') !== cover) {
+      _schedDayPmPending[iso] = card;
+      out.skipped++;
+      return;
+    }
+    delete _schedDayPmPending[iso];
+    if (_schedDayPmSet(iso, cover, card)) { _flashField(bar); out.changes++; }
+  });
+  return out;
 }
 
 /* ── Post-Show Notes ──────────────────────────────────────────── */
@@ -3309,24 +3852,33 @@ async function deleteSection(sid) {
 let _editSchedTmplId = null;
 
 function openSchedTemplateModal(tid) {
+  // A read-only account (base.html's READONLY_VIEW) only views an existing
+  // template: text readonly (still selectable), no example placeholders, no ×.
+  const ro = window.READONLY_VIEW === true;
+  if (ro && !tid) return;
   _editSchedTmplId = tid;
   const modal = document.getElementById('sched-template-modal');
   if (!modal) return;
-  document.getElementById('sched-tmpl-name').value = '';
+  const nameInp = document.getElementById('sched-tmpl-name');
+  nameInp.value = '';
   const tbody = document.getElementById('sched-tmpl-rows');
-  tbody.innerHTML = `<tr class="schedule-row">
+  tbody.innerHTML = ro ? '' : `<tr class="schedule-row">
     <td><input type="text" class="sched-cell tmpl-cell" placeholder="8:00am"></td>
     <td><input type="text" class="sched-cell tmpl-cell" placeholder="10:00am"></td>
     <td><input type="text" class="sched-cell tmpl-cell" placeholder="Load In"></td>
     <td><input type="text" class="sched-cell tmpl-cell" placeholder="Notes"></td>
     <td><button type="button" class="row-del-btn" onclick="this.closest('tr').remove()">×</button></td>
   </tr>`;
+  if (ro) { nameInp.readOnly = true; nameInp.placeholder = ''; }
   if (tid) {
     fetch(`/api/schedule-templates/${tid}`).then(r => r.json()).then(d => {
-      document.getElementById('sched-tmpl-name').value = d.name || '';
+      nameInp.value = d.name || '';
       tbody.innerHTML = '';
       (d.rows || []).forEach(r => _appendTmplRow(tbody, r));
-      if (!d.rows || d.rows.length === 0) _appendTmplRow(tbody, {});
+      if (ro) {
+        tbody.querySelectorAll('input').forEach(i => { i.readOnly = true; i.placeholder = ''; });
+        tbody.querySelectorAll('.row-del-btn').forEach(b => b.remove());
+      } else if (!d.rows || d.rows.length === 0) _appendTmplRow(tbody, {});
     });
   }
   modal.style.display = '';
@@ -3356,6 +3908,7 @@ function closeSchedTemplateModal() {
 }
 
 async function saveSchedTemplate() {
+  if (window.READONLY_VIEW) return;
   const name = document.getElementById('sched-tmpl-name').value.trim();
   if (!name) { alert('Template name is required.'); return; }
   const rows = [];
@@ -3384,6 +3937,7 @@ async function saveSchedTemplate() {
 }
 
 async function deleteSchedTemplate(tid) {
+  if (window.READONLY_VIEW) return;
   if (!confirm('Delete this template?')) return;
   const resp = await fetch(`/settings/schedule-templates/${tid}/delete`, {method:'POST'});
   const d = await resp.json();
@@ -3425,10 +3979,13 @@ function _lpPositionOptions(selectedId) {
 async function loadLaborPresets() {
   const el = document.getElementById('labor-preset-list');
   if (!el) return;
+  // A read-only account (base.html's READONLY_VIEW) gets View, no Delete.
+  const ro = window.READONLY_VIEW === true;
   try {
     const presets = await (await fetch('/api/labor-presets')).json();
     if (!presets.length) {
-      el.innerHTML = '<p class="text-dim" style="font-size:12px">No presets yet. Click + New Preset to create one.</p>';
+      el.innerHTML = '<p class="text-dim" style="font-size:12px">No presets yet.' +
+        (ro ? '' : ' Click + New Preset to create one.') + '</p>';
       return;
     }
     el.innerHTML = presets.map(p => `
@@ -3436,8 +3993,9 @@ async function loadLaborPresets() {
         <span style="font-size:12px;font-weight:600">${_esc(p.name)}</span>
         <span class="text-dim" style="font-size:11px">${p.row_count} position${p.row_count === 1 ? '' : 's'}</span>
         <div class="action-btns ml-auto">
+          ${ro ? `<button class="btn btn-xs btn-ghost" onclick="openLaborPresetModal(${p.id})">View</button>` : `
           <button class="btn btn-xs btn-ghost" onclick="openLaborPresetModal(${p.id})">Edit</button>
-          <button class="btn btn-xs btn-danger-ghost" onclick="deleteLaborPreset(${p.id})">Delete</button>
+          <button class="btn btn-xs btn-danger-ghost" onclick="deleteLaborPreset(${p.id})">Delete</button>`}
         </div>
       </div>`).join('');
   } catch (_) {
@@ -3446,6 +4004,8 @@ async function loadLaborPresets() {
 }
 
 async function openLaborPresetModal(pid) {
+  const ro = window.READONLY_VIEW === true;   // view an existing preset only
+  if (ro && !pid) return;
   _editLaborPresetId = pid;
   const modal = document.getElementById('labor-preset-modal');
   if (!modal) return;
@@ -3460,7 +4020,16 @@ async function openLaborPresetModal(pid) {
       (d.rows || []).forEach(r => _appendLaborPresetRow(tbody, r));
     } catch (_) {}
   }
-  if (!tbody.children.length) _appendLaborPresetRow(tbody, {});
+  if (!tbody.children.length && !ro) _appendLaborPresetRow(tbody, {});
+  if (ro) {
+    // Read-only: text stays selectable, pickers are locked, rows can't go.
+    modal.querySelectorAll('#labor-preset-name, #labor-preset-rows input').forEach(i => {
+      i.readOnly = true;
+      i.placeholder = '';   // an example time would read like a saved one
+    });
+    modal.querySelectorAll('#labor-preset-rows select').forEach(s => { s.disabled = true; });
+    modal.querySelectorAll('#labor-preset-rows .row-del-btn').forEach(b => b.remove());
+  }
   modal.style.display = '';
 }
 
@@ -3493,26 +4062,40 @@ function closeLaborPresetModal() {
 }
 
 async function saveLaborPreset() {
+  if (window.READONLY_VIEW) return;
   const name = document.getElementById('labor-preset-name').value.trim();
   if (!name) { alert('Preset name is required.'); return; }
   const rows = [];
+  let bad = null;   // the first time cell that isn't a time
   document.querySelectorAll('#labor-preset-rows .labor-preset-row').forEach(tr => {
-    const cells = tr.querySelectorAll('.lp-cell');
     const posId = tr.querySelector('.lp-pos')?.value || '';
     if (!posId) return;   // a row without a position is meaningless — skip it
+    // Times as HH:MM, like the Labor tab ("7pm" → 19:00); the server
+    // refuses anything else.
+    const t = Array.from(tr.querySelectorAll('.lp-cell')).map(cell => {
+      const v = laborTimeHHMM(cell.value);
+      if (v === null) { if (!bad) bad = cell; return ''; }
+      cell.value = v;
+      return v;
+    });
     rows.push({
       position_id:  posId,
       quantity:     tr.querySelector('.lp-qty')?.value || 1,
       // Cells are in shift order: in, lunch 1 start/end, lunch 2 start/end, out.
-      in_time:      cells[0]?.value || '',
-      break_start:  cells[1]?.value || '',
-      break_end:    cells[2]?.value || '',
-      break2_start: cells[3]?.value || '',
-      break2_end:   cells[4]?.value || '',
-      out_time:     cells[5]?.value || '',
+      in_time:      t[0] || '',
+      break_start:  t[1] || '',
+      break_end:    t[2] || '',
+      break2_start: t[3] || '',
+      break2_end:   t[4] || '',
+      out_time:     t[5] || '',
       notes:        tr.querySelector('.lp-notes')?.value || '',
     });
   });
+  if (bad) {
+    bad.focus();
+    alert(`"${bad.value.trim()}" isn't a time — use HH:MM (24-hour), or clear it.`);
+    return;
+  }
   if (!rows.length) { alert('Add at least one position.'); return; }
   const url = _editLaborPresetId
     ? `/settings/labor-presets/${_editLaborPresetId}/edit`
@@ -3530,6 +4113,7 @@ async function saveLaborPreset() {
 }
 
 async function deleteLaborPreset(pid) {
+  if (window.READONLY_VIEW) return;
   if (!confirm('Delete this preset? Shows it was already applied to keep their labor lines.')) return;
   const resp = await fetch(`/settings/labor-presets/${pid}/delete`, {method:'POST'});
   const d = await resp.json();
@@ -3835,15 +4419,18 @@ document.addEventListener('click', (e) => {
   panel.hidden = true;
 });
 
-// Start the badge polling once the page is ready.
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => {
-    refreshNotifBadge();
-    _notifPollTimer = setInterval(refreshNotifBadge, _NOTIF_POLL_MS);
-  });
-} else {
+// Start the badge polling once the page is ready — only where base.html drew
+// the bell (not for document viewers, whose gate 403s the poll, nor on the
+// sign-in pages).
+function _startNotifPolling() {
+  if (!document.getElementById('notif-bell-btn')) return;
   refreshNotifBadge();
   _notifPollTimer = setInterval(refreshNotifBadge, _NOTIF_POLL_MS);
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _startNotifPolling);
+} else {
+  _startNotifPolling();
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -4253,7 +4840,8 @@ function renderComments(comments) {
     if (!isDeleted && (c.is_own || isAdmin)) {
       actions.push(`<button class="comment-delete-btn" onclick="deleteComment(${c.id})" title="Delete">×</button>`);
     }
-    if (!isDeleted && (c.is_own || isAdmin)) {
+    // Edit: edit_comment() refuses read-only accounts (delete_comment() doesn't).
+    if (!isDeleted && (c.is_own || isAdmin) && !(typeof RESTRICTED !== 'undefined' && RESTRICTED)) {
       actions.push(`<button class="comment-edit-btn" onclick="startEditComment(${c.id})" title="Edit" style="background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:.85em;padding:0 4px">✏</button>`);
     }
     if (isDeleted && isAdmin) {
@@ -4370,10 +4958,12 @@ function _esc(str) {
 }
 
 function _renderCommentBody(text) {
-  const escaped = _esc(text).replace(/\n/g,'<br>');
-  // Highlight @mentions
-  return escaped.replace(/@([\w][\w .'-]*?)(?=\s|$|<br>)/g,
-    '<span class="comment-mention">@$1</span>');
+  // 3.35.0: URL | #tag | @mention are tokenized on the RAW text by tags.js
+  // (Tags.richHtml — each segment escaped, #tags link to their tag page,
+  // @mentions keep their highlight, URLs stay plain text). Never regex over
+  // the escaped HTML: '&#39;' would read as a tag and URLs swallowed entities.
+  if (window.Tags && typeof Tags.richHtml === 'function') return Tags.richHtml(text);
+  return _esc(text == null ? '' : text).replace(/\n/g, '<br>');
 }
 
 async function submitComment() {
@@ -4849,6 +5439,18 @@ function parseTimeToHHMM(str) {
   return String(hours).padStart(2, '0') + ':' + String(minutes).padStart(2, '0');
 }
 
+/* A labor time cell (Labor tab, Labor Scheduler, labor presets) → 'HH:MM'
+   (24-hour), '' when blank, or null when it isn't a time — the server's
+   _labor_time() refuses anything else (billing reads HH:MM only).
+   "7pm" → 19:00, "930" → 09:30, "8" → 08:00, "12:5" → 12:05. */
+function laborTimeHHMM(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return '';
+  const m = /^(\d{1,2}):(\d)$/.exec(s);
+  const v = String(parseTimeToHHMM(m ? `${m[1]}:0${m[2]}` : s) || '');
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(v) ? v : null;
+}
+
 /* Schedule time cell → canonical text. Next-day items of a long show day
    (3.30.0) are written "1+00:30": "+0030", "1+30" style input and "24:30"
    become that; the PDF prints them with the next date ("3/2 00:30"). */
@@ -4883,6 +5485,7 @@ function _bindScheduleTimeParsing() {
     const tr = td.closest('tr.schedule-row');
     if (!tr) return;
     const cells = tr.querySelectorAll('.sched-cell');
+    if (e.target.readOnly) return;   // view only / piano row: never rewrite (it would save)
     if (e.target === cells[0] || e.target === cells[1]) {
       const parsed = _schedParseTime(e.target.value);
       if (parsed !== e.target.value) {
@@ -5330,26 +5933,104 @@ async function loadReadReceipts() {
    dropdown / save / re-date-move logic exists exactly once. */
 window.LaborDays = {
   _pmNames: null,
+  _pmContacts: null,   // [{name, title, phone, email}] — same pool (3.35.0)
+  _pmLoading: null,
 
   /* Contact names eligible as a covering "PM for the day" — same pool the
      show's PRODUCTION MANAGER advance field draws from. Cached per page. */
   async pmNames() {
     if (this._pmNames) return this._pmNames;
-    try {
-      const r = await fetch('/api/production-managers');
-      this._pmNames = (await r.json()).names || [];
-    } catch (e) { this._pmNames = []; }
-    return this._pmNames;
+    if (!this._pmLoading) {
+      this._pmLoading = (async () => {
+        try {
+          const j = await (await fetch('/api/production-managers')).json();
+          this._pmContacts = Array.isArray(j.contacts) ? j.contacts : [];
+          this._pmNames = j.names || [];
+        } catch (e) { this._pmNames = []; this._pmContacts = []; }
+        this._pmLoading = null;
+        return this._pmNames;
+      })();
+    }
+    return this._pmLoading;
   },
 
-  /* Fill a <select> with the PM pool. Blank option = use the show's main PM.
+  /* Contact details for a pool name (case/space-insensitive), or null —
+     a name outside the pool has none client-side; the server's PM cards
+     (_pm_contacts_many) resolve against every contact. */
+  contactFor(name) {
+    const k = String(name || '').split(/\s+/).filter(Boolean).join(' ').toLowerCase();
+    if (!k) return null;
+    return (this._pmContacts || []).find(c =>
+      String(c.name || '').split(/\s+/).filter(Boolean).join(' ').toLowerCase() === k) || null;
+  },
+
+  /* Link targets for a contact's phone / email — '' when the value isn't
+     dialable / an address (it then prints unlinked). Mirrors app.py's
+     tel_href / mailto_href Jinja filters (_link_text, _TEL_RUN_RE,
+     _MAILTO_RE) — keep the two in step: the same text gives the same link
+     on both sides. The phone dials its FIRST number (first run of digits +
+     separators with 3+ digits: no extension, no second number; a '/' joins
+     only a prefix under 7 digits; 3–15 digits), and both regexes are linear
+     (no backtracking) on any input. Spaces are spelled out, never \s
+     (Python's and JS's \s differ). */
+  // Controls / BOM → spaces, then trimmed; null when over `max` code points
+  // (what Python's len() counts; .length counts UTF-16 units).
+  _linkText(v, max) {
+    const s = String(v || '').replace(/[\x00-\x1f\x7f-\x9f\ufeff]/g, ' ').trim();
+    return s.length <= max || (s.length <= 2 * max && [...s].length <= max) ? s : null;
+  },
+  telHref(phone) {
+    const s = this._linkText(phone, 100) || '';
+    const runs = s.match(/(?:\+ ?)?\(?[0-9](?:[0-9().\-\u00b7\u2010-\u2015\u2212\uff0d \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|\/(?=[0-9]))*/g) || [];
+    for (const run of runs) {
+      let digits = '';
+      for (const part of run.split('/')) {
+        if (digits.length >= 7) break;
+        digits += part.replace(/[^0-9]/g, '');
+      }
+      if (digits.length >= 3) {
+        return digits.length > 15 ? '' : 'tel:' + (run.charAt(0) === '+' ? '+' : '') + digits;
+      }
+    }
+    return '';
+  },
+  mailtoHref(email) {
+    const s = this._linkText(email, 254);
+    // No ? & = % / # in the address: they would add headers (?bcc=…) to the link.
+    if (!s || !/^[^@<>"'(),;:\\?&=%\/# \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+@[^@<>"'(),;:\\?&=%\/# \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+\.[^@<>"'(),;:\\?&=%\/# \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/.test(s)) return '';
+    return 'mailto:' + s;
+  },
+
+  /* Render a PM card ({name, title, phone, email, is_cover}) into `el` as
+     the .pmc-* contact line — DOM + textContent only. The Jinja twin is
+     show.html's pm_contact_line macro. */
+  contactInto(el, card, emptyText) {
+    if (!el) return;
+    el.textContent = '';
+    const add = (tag, cls, text, href) => {
+      const n = document.createElement(tag);
+      n.className = cls;
+      n.textContent = text;
+      if (href) n.href = href;
+      el.appendChild(n);
+    };
+    if (!card || !card.name) { add('span', 'pmc-none', emptyText || 'No production manager set'); return; }
+    add('span', 'pmc-name', card.name);
+    if (card.title) add('span', 'pmc-title', card.title);
+    if (card.phone) { const h = this.telHref(card.phone); add(h ? 'a' : 'span', 'pmc-phone', card.phone, h); }
+    if (card.email) { const h = this.mailtoHref(card.email); add(h ? 'a' : 'span', 'pmc-email', card.email, h); }
+    if (card.is_cover) add('span', 'pmc-cover', 'covering');
+  },
+
+  /* Fill a <select> with the PM pool. Blank option = use the show's main PM
+     (`blankLabel` overrides its text, e.g. "— Show PM (Jane Doe) —").
      A saved name no longer in the pool stays visible as a ghost option. */
-  buildPmSelect(selectEl, selected) {
+  buildPmSelect(selectEl, selected, blankLabel) {
     if (!selectEl) return;
     selectEl.innerHTML = '';
     const def = document.createElement('option');
     def.value = '';
-    def.textContent = '— Show PM —';
+    def.textContent = blankLabel || '— Show PM —';
     selectEl.appendChild(def);
     (this._pmNames || []).forEach(name => {
       const opt = document.createElement('option');
@@ -5368,18 +6049,22 @@ window.LaborDays = {
   },
 
   /* Partial upsert of one day's covering PM / notes. Returns the parsed JSON
-     response, or null on failure. A day left with no PM and no notes is
-     deleted server-side. */
+     response ({success: true, day}), or {success: false, error} on failure —
+     error = the server's message when it sent one (e.g. the per-show day
+     cap), else ''. A day left with no PM and no notes is deleted
+     server-side. */
   async save(showId, workDate, payload) {
-    if (!showId || !workDate) return null;
+    if (!showId || !workDate) return {success: false, error: ''};
     try {
       const r = await fetch(`/shows/${showId}/labor-days`, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(Object.assign({ work_date: workDate }, payload)),
       });
-      return r.ok ? await r.json() : null;
-    } catch (e) { return null; }
+      const d = await r.json().catch(() => null);
+      if (r.ok && d) return d;
+      return {success: false, error: (d && typeof d.error === 'string' && d.error) || ''};
+    } catch (e) { return {success: false, error: ''}; }
   },
 
   /* When a day-block is re-dated, its PM/notes travel with it. */

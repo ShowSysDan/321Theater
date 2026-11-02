@@ -13,6 +13,12 @@
 {% macro meta(key, default='') %}{{ schedule_meta.get(key, default) }}{% endmacro %}
 {% macro note(key, default='') %}{{ notes_data.get(key, default) }}{% endmacro %}
 
+{# "Tools ▾" action menu (3.35.0) — the SAME markup as app.js ToolsMenu.html();
+   its items are built in JS when it opens (ToolsMenu.register(provider, …)). #}
+{% macro tools_menu(provider, title='Tools', perf_times=none) -%}
+<div class="tools-menu" data-tools="{{ provider }}"{% if perf_times is not none %} data-perf-times='{{ perf_times | tojson }}'{% endif %}><button type="button" class="btn btn-sm btn-ghost tools-menu-btn" aria-haspopup="menu" aria-expanded="false" title="{{ title }}"><span class="tools-menu-label">Tools</span><span class="tools-menu-busy" hidden></span><span class="tools-menu-caret" aria-hidden="true">▾</span></button><div class="tools-menu-panel" role="menu" aria-label="{{ title }}" hidden></div></div>
+{%- endmacro %}
+
 {% macro contact_select(key, label, dept) %}
 {% set _cv = advance_data.get(key, '') %}
 <div class="field-group">
@@ -144,7 +150,7 @@
 
     {% elif field.field_type == 'select' and field.allow_multi %}
       <div class="multi-check-popover{% if restricted %} multi-check-disabled{% endif %}">
-        <button type="button" class="field-input multi-check-trigger" aria-haspopup="listbox" aria-expanded="false" {% if restricted %}disabled{% endif %}>
+        <button type="button" class="field-input multi-check-trigger" aria-haspopup="listbox" aria-expanded="false">
           <span class="multi-check-summary">— Select —</span>
           <span class="multi-check-caret" aria-hidden="true">▾</span>
         </button>
@@ -234,12 +240,13 @@
                 rows="3" placeholder="{{ field.placeholder }}" {% if restricted %}disabled{% endif %}>{{ cur }}</textarea>
 
     {% else %}
-      {# text / date / time / number #}
+      {# text / date / time / number. View only: text is readonly, not disabled,
+         so a value longer than the box can still be scrolled / selected. #}
       <input type="{{ field.field_type }}" class="field-input adv-field"
              data-key="{{ field.field_key }}"
              value="{{ cur }}"
              placeholder="{{ field.placeholder }}"
-             {% if restricted %}disabled{% endif %}>
+             {% if restricted %}{{ 'readonly' if field.field_type == 'text' else 'disabled' }}{% endif %}>
     {% endif %}
   </div>
 
@@ -268,6 +275,7 @@
       {% if last_saved_at %} · {{ (last_saved_at|string)[:16].replace('T',' ') }}{% endif %}
     </p>
     {% endif %}
+    <div id="show-tags-strip" class="show-tags-strip" hidden></div>{# #tags in this show — filled by tags.js #}
   </div>
   <div class="header-actions" id="save-indicator">
     {# Presence badge — populated by JS sync poll #}
@@ -283,7 +291,8 @@
       <span class="show-mode-label">{{ 'Event Mode' if (show.show_mode == 'event') else 'Show Mode' }}</span>
     </button>
     {% endif %}
-    {% if session.get('user_role') in ('admin','staff') or session.get('is_content_admin') %}
+    {# Roles toggle_show_test_mode() accepts: admin, or staff not read-only. #}
+    {% if session.get('user_role') == 'admin' or (session.get('user_role') == 'staff' and not session.get('is_readonly')) %}
     <button type="button" class="btn btn-ghost btn-sm" id="test-mode-btn"
             data-is-test="{{ '1' if show.is_test else '0' }}"
             title="Flag as test / demo so reports can exclude this show"
@@ -625,7 +634,7 @@
                 ? `<span class="piano-cancel-flag" title="${esc(t.cancel_request_note || '')}">Cancellation requested</span>
                    <button type="button" class="btn btn-xs btn-ghost" onclick="withdrawPianoCancel(${t.id})">Withdraw</button>`
                 : `<button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="requestPianoCancel(${t.id})" title="Ask the piano tuning manager to cancel it with the vendor">Request cancellation</button>`) : '')}</td>
-        </tr>${t.notes ? `<tr class="piano-notes-row"><td></td><td colspan="5" class="text-dim" style="font-size:11px;white-space:pre-wrap">${esc(t.notes)}</td></tr>` : ''}`;
+        </tr>${t.notes ? `<tr class="piano-notes-row"><td></td><td colspan="5" class="text-dim" style="font-size:11px;white-space:pre-wrap" data-tag-focus="piano:${t.id}">${renderTaggedText(t.notes)}</td></tr>` : ''}`;
       }).join('')}</tbody></table></div>`;
   }
   window.loadPianoTunings = loadPiano;
@@ -809,13 +818,53 @@ const SCHED_TEMPLATES = {{ sched_templates | default([]) | tojson }};
 window.SCHED_PERFORMANCES = SCHED_PERFORMANCES;
 window.SCHED_TEMPLATES = SCHED_TEMPLATES;
 window.CAN_EDIT_SCHED_TEMPLATES = {{ 'true' if can_edit_sched_templates else 'false' }};
+// Tools menus (Production Schedule + Labor Requests): editors only — the
+// read-only and restricted roles can't save what the tools change.
+window.CAN_USE_SHOW_TOOLS = {{ 'false' if restricted or session.get('is_readonly') else 'true' }};
 // Mutable so the labor-tab dropdowns can react to live venue edits on the
 // Advance Sheet. Read everywhere via window.SHOW_VENUE.
 window.SHOW_VENUE = {{ show.venue | tojson }};
+// Day PM bar (3.35.0): {show_pm: card, days: {iso: card}} + whether this
+// user may change it (PUT /labor-days refuses readonly + restricted).
+window.SCHED_DAY_PM = {{ sched_day_pm | tojson }};
+window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
 </script>
+
+{# Contact line for a PM card (3.35.0) — app.js LaborDays.contactInto() is
+   the JS twin; keep the two in step. #}
+{% macro pm_contact_line(card) -%}
+{% if card -%}
+<span class="pmc-name">{{ card.name }}</span>
+{%- if card.title %}<span class="pmc-title">{{ card.title }}</span>{% endif %}
+{%- if card.phone %}{% set _tel = card.phone | tel_href %}{% if _tel %}<a class="pmc-phone" href="{{ _tel }}">{{ card.phone }}</a>{% else %}<span class="pmc-phone">{{ card.phone }}</span>{% endif %}{% endif %}
+{%- if card.email %}{% set _mt = card.email | mailto_href %}{% if _mt %}<a class="pmc-email" href="{{ _mt }}">{{ card.email }}</a>{% else %}<span class="pmc-email">{{ card.email }}</span>{% endif %}{% endif %}
+{%- if card.is_cover %}<span class="pmc-cover">covering</span>{% endif %}
+{%- else -%}
+<span class="pmc-none">No production manager set</span>
+{%- endif %}
+{%- endmacro %}
+
+{# Day PM bar between a dated schedule day's header and its table (3.35.0).
+   app.js _schedDayPmBar() builds the same DOM for panes added later. The
+   picker is NOT schedule meta: it saves show_labor_days.cover_pm through
+   PUT /shows/<id>/labor-days (the Labor Requests tab's "Day PM"). #}
+{% macro sched_day_pm_bar(iso, card, show_pm, can_edit) -%}
+{% set _cover = card.name if (card and card.is_cover) else '' %}
+<div class="sched-daypm" data-date="{{ iso }}">
+  <label class="sched-daypm-label" for="sched-daypm-{{ iso }}">Day PM</label>
+  <select id="sched-daypm-{{ iso }}" class="field-input field-input-sm sched-daypm-select"
+          title="Production manager on duty this day — blank = the show's PM. Same setting as Day PM on the Labor Requests tab."
+          {% if not can_edit %}disabled{% endif %}>
+    <option value="">— Show PM{% if show_pm %} ({{ show_pm.name }}){% endif %} —</option>
+    {% if _cover %}<option value="{{ _cover }}" selected>{{ _cover }}</option>{% endif %}
+  </select>
+  <span class="sched-daypm-contact">{{ pm_contact_line(card) }}</span>
+</div>
+{%- endmacro %}
 
 <div id="tab-schedule" class="tab-pane {% if tab == 'schedule' %}active{% endif %}">
 <form id="schedule-form" autocomplete="off">
+{% set show_tools_ok = not restricted and not session.get('is_readonly') %}
 
   {# ── Schedule Meta ─────────────────────────────────────────────────────── #}
   <div class="form-section">
@@ -836,7 +885,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
           {% elif f.field_type == 'textarea' %}
             <textarea class="field-input field-textarea sched-meta" data-key="{{ f.field_key }}" rows="3" {% if restricted %}disabled{% endif %}>{{ meta(f.field_key) }}</textarea>
           {% else %}
-            <input type="text" class="field-input sched-meta" data-key="{{ f.field_key }}" value="{{ meta(f.field_key) }}" {% if restricted %}disabled{% endif %}>
+            <input type="text" class="field-input sched-meta" data-key="{{ f.field_key }}" value="{{ meta(f.field_key) }}" {% if restricted %}readonly{% endif %}>
           {% endif %}
         </div>
         {% else %}
@@ -873,15 +922,13 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
     </div>
   </div>
 
-  {# ── Schedule tools (3.30.0) ──────────────────────────────────────────── #}
-  {% if not restricted %}
+  {# ── Schedule tools (3.30.0; one Tools menu since 3.35.0) ─────────────
+     Import from another show… / Save day as template… (admin + content
+     admin) / History — items built by app.js ToolsMenu 'sched-tab'. #}
+  {% if show_tools_ok %}
   <div class="sched-toolbar">
     <span class="sched-toolbar-tip text-dim" title="Prints on the schedule with the next date, e.g. 3/2 00:30">After midnight on the same show day? Type <code>1+00:30</code></span>
-    <button type="button" class="btn btn-ghost btn-sm" onclick="openSchedImport()" title="Copy another show's production schedule into this one">⇩ Import from another show…</button>
-    {% if can_edit_sched_templates %}
-    <button type="button" class="btn btn-ghost btn-sm" onclick="openSaveSchedTemplate()" title="Save a day of this schedule as a reusable template">☆ Save day as template…</button>
-    {% endif %}
-    <button type="button" class="btn btn-ghost btn-sm" onclick="openHistory('schedule')" title="Every saved version of this schedule, with what changed">History</button>
+    {{ tools_menu('sched-tab', 'Schedule tools') }}
   </div>
   {% endif %}
 
@@ -934,36 +981,11 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
         </label>
         {% endif %}
         {% if not restricted %}
-        <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-wrap:wrap">
-          {# Apply template dropdown #}
-          {% if sched_templates %}
-          <select class="field-input sched-tmpl-select" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
-                  onchange='applySchedTemplate(this.value, {{ d.date_key | tojson }}); this.value=""'>
-            <option value="">Apply template…</option>
-            {% for t in sched_templates %}
-            <option value="{{ t.id }}">{{ t.name }}</option>
-            {% endfor %}
-          </select>
-          {% endif %}
-          {# Copy from another day #}
-          {% if schedule_days | length > 1 %}
-          <select class="field-input sched-copy-from" data-self-key="{{ d.date_key }}" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
-                  onchange='copySchedDay(this.value, {{ d.date_key | tojson }}); this.value=""'>
-            <option value="">Copy from…</option>
-            {% for od in schedule_days %}
-            {% if od.date_key != d.date_key %}
-            <option value="{{ od.date_key }}">{% if od.orphan %}Off-date{% else %}Day {{ od.day_num }}{% endif %}{% if od.perf_date %} ({{ (od.perf_date|string)[5:] | replace('-','/') }}){% endif %}</option>
-            {% endif %}
-            {% endfor %}
-          </select>
-          {% endif %}
-          {# Pull show time — one button per day, inserts a SHOW START row for each time #}
-          {% set _times = d.perfs | selectattr('perf_time') | map(attribute='perf_time') | list %}
-          {% if _times %}
-          <button type="button" class="btn btn-sm btn-ghost"
-                  onclick='pullAdvanceTime({{ d.date_key | tojson }}, {{ _times | tojson }})'>Pull time{% if _times|length > 1 %}s{% endif %}</button>
-          {% endif %}
-          <button type="button" class="btn btn-sm btn-ghost" onclick='sortSchedRowsByTime({{ d.date_key | tojson }})' title="Sort rows by start time">⇅ Sort</button>
+        {# Day actions — the SAME markup as app.js _buildPaneHeader: a Tools
+           menu (Apply template / Copy from day / Pull show time(s) / Sort by
+           time — built when it opens, ToolsMenu 'sched-day') + "+ Add Row". #}
+        <div class="sched-day-actions">
+          {% if show_tools_ok %}{{ tools_menu('sched-day', 'Day tools', d.perfs | selectattr('perf_time') | map(attribute='perf_time') | map('hhmm') | list) }}{% endif %}
           <button type="button" class="btn btn-sm btn-ghost" onclick='addScheduleRow({{ d.date_key | tojson }})'>+ Add Row</button>
         </div>
         {% endif %}
@@ -972,9 +994,10 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
       <div class="sched-orphan-note">
         <strong>{{ d.perf_date }} is outside this show's dates</strong> (load-in → load-out and performances).
         These rows were saved on that day and are kept here so nothing is lost — copy them to a real day
-        ("Copy from…" on that day) or delete them. They don't print on the schedule PDF.
+        (that day's Tools → Copy from day) or delete them. They don't print on the schedule PDF.
       </div>
       {% endif %}
+      {% if d.date_key in sched_day_pm.days %}{{ sched_day_pm_bar(d.date_key, sched_day_pm.days[d.date_key], sched_day_pm.show_pm, day_pm_can_edit) }}{% endif %}
       <div class="form-section-body no-pad">
         <table class="schedule-table">
           <thead>
@@ -1003,10 +1026,10 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
             {% else %}
             <tr class="schedule-row" data-row-id="{{ row.id }}">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
-              <td><input type="text" class="sched-cell" maxlength="40" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" maxlength="40" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}readonly{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}readonly{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Description" value="{{ row.description }}" {% if restricted %}readonly{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}readonly{% endif %}></td>
               {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)" title="Remove">×</button></td>{% endif %}
             </tr>
             {% endif %}
@@ -1017,7 +1040,6 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
       {% if not restricted %}
       <div class="form-section-footer">
         <button type="button" class="btn btn-ghost btn-sm" onclick='addScheduleRow({{ d.date_key | tojson }})'>+ Add Row</button>
-        <button type="button" class="btn btn-ghost btn-sm" onclick='sortSchedRowsByTime({{ d.date_key | tojson }})'>⇅ Sort by time</button>
       </div>
       {% endif %}
     </div>
@@ -1029,17 +1051,8 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
       <div class="form-section-header">
         <span class="section-icon">◈</span> TIMELINE
         {% if not restricted %}
-        <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-wrap:wrap">
-          {% if sched_templates %}
-          <select class="field-input sched-tmpl-select" style="width:auto;font-size:11px;padding:3px 6px;height:auto"
-                  onchange="applySchedTemplate(this.value, null); this.value=''">
-            <option value="">Apply template…</option>
-            {% for t in sched_templates %}
-            <option value="{{ t.id }}">{{ t.name }}</option>
-            {% endfor %}
-          </select>
-          {% endif %}
-          <button type="button" class="btn btn-sm btn-ghost" onclick="sortSchedRowsByTime(null)" title="Sort rows by start time">⇅ Sort</button>
+        <div class="sched-day-actions">
+          {% if show_tools_ok %}{{ tools_menu('sched-day', 'Day tools', []) }}{% endif %}
           <button type="button" class="btn btn-sm btn-ghost" onclick="addScheduleRow(null)">+ Add Row</button>
         </div>
         {% endif %}
@@ -1067,10 +1080,10 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
             {% else %}
             <tr class="schedule-row" data-row-id="{{ row.id }}">
               {% if not restricted %}<td class="drag-col"><span class="row-drag-handle" title="Drag to reorder">⠿</span></td>{% endif %}
-              <td><input type="text" class="sched-cell" maxlength="40" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" maxlength="40" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Description" value="{{ row.description }}" {% if restricted %}disabled{% endif %}></td>
-              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}disabled{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="15:00" value="{{ row.start_time }}" {% if restricted %}readonly{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="40" placeholder="16:00" value="{{ row.end_time }}" {% if restricted %}readonly{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Description" value="{{ row.description }}" {% if restricted %}readonly{% endif %}></td>
+              <td><input type="text" class="sched-cell" maxlength="2000" placeholder="Notes" value="{{ row.notes }}" {% if restricted %}readonly{% endif %}></td>
               {% if not restricted %}<td><button type="button" class="row-del-btn" onclick="removeRow(this)">×</button></td>{% endif %}
             </tr>
             {% endif %}
@@ -1081,7 +1094,6 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
       {% if not restricted %}
       <div class="form-section-footer">
         <button type="button" class="btn btn-ghost btn-sm" onclick="addScheduleRow(null)">+ Add Row</button>
-        <button type="button" class="btn btn-ghost btn-sm" onclick="sortSchedRowsByTime(null)">⇅ Sort by time</button>
       </div>
       {% endif %}
     </div>
@@ -1105,7 +1117,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
           {% elif f.field_type == 'textarea' %}
             <textarea class="field-input field-textarea sched-meta" data-key="{{ f.field_key }}" rows="3" {% if restricted %}disabled{% endif %}>{{ meta(f.field_key) }}</textarea>
           {% else %}
-            <input type="text" class="field-input sched-meta" data-key="{{ f.field_key }}" value="{{ meta(f.field_key) }}" {% if restricted %}disabled{% endif %}>
+            <input type="text" class="field-input sched-meta" data-key="{{ f.field_key }}" value="{{ meta(f.field_key) }}" {% if restricted %}readonly{% endif %}>
           {% endif %}
         </div>
         {% else %}
@@ -1136,7 +1148,7 @@ window.SHOW_VENUE = {{ show.venue | tojson }};
         <div class="field-group">
           <label class="field-label">SECURITY EMAIL</label>
           <input type="text" class="field-input sched-meta" data-key="security_email"
-                 value="{{ meta('security_email', 'security@drphillipscenter.org') }}" {% if restricted %}disabled{% endif %}>
+                 value="{{ meta('security_email', 'security@drphillipscenter.org') }}" {% if restricted %}readonly{% endif %}>
         </div>
       </div>
     </div>
@@ -1289,8 +1301,21 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         The sign-in sheet that sits at the security desk on show day: each saved name prints with blank
         Signature / Time In columns, plus extra walk-up rows. A multi-day show/event prints one
         <strong>initials column per day</strong> instead (days come from load-in → load-out and the
-        performance dates). The PDF uses this venue's paperwork colors and logo.
+        performance dates). The <strong>production manager on duty</strong> — name, phone and email —
+        prints at the top so the desk knows who to call. The PDF uses this venue's paperwork colors and logo.
       </p>
+    </div>
+  </div>
+
+  {# Read-only (3.35.0): the PM contact the sheet prints, from GET …/security/names. #}
+  <div class="form-section" id="sec-pm-section" style="margin-bottom:16px">
+    <div class="form-section-header"><span class="section-icon">◈</span> PRODUCTION CONTACT FOR SECURITY</div>
+    <div class="form-section-body">
+      <p class="text-dim" style="font-size:12px;margin:0">
+        Prints on the sign-in sheet. It's the show's <strong>Production Manager</strong> (Advance Sheet), or
+        a day's covering PM — set <strong>Day PM</strong> on the Production Schedule or Labor Requests tab.
+      </p>
+      <div id="sec-pm-rows" class="sec-pm-rows"><span class="text-dim">Loading…</span></div>
     </div>
   </div>
 
@@ -1405,22 +1430,55 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     refreshMeta();
   }
 
-  // Called by switchTab() on every activation; fetches once.
+  /* Production contact for security (3.35.0): the PM on duty per run of
+     days (the same data the PDF prints). DOM + textContent only; the contact
+     line comes from LaborDays.contactInto (tel:/mailto: links). */
+  const pmRowsEl = document.getElementById('sec-pm-rows');
+  function renderPm(j) {
+    if (!pmRowsEl) return;
+    pmRowsEl.textContent = '';
+    const runs = Array.isArray(j.pm_days) ? j.pm_days : [];
+    const row = (label, card) => {
+      const div = document.createElement('div');
+      div.className = 'sec-pm-row';
+      if (label) {
+        const d = document.createElement('span');
+        d.className = 'sec-pm-days';
+        d.textContent = label;
+        div.appendChild(d);
+      }
+      const c = document.createElement('span');
+      c.className = 'sec-pm-contact';
+      LaborDays.contactInto(c, card, 'No production manager set');
+      div.appendChild(c);
+      pmRowsEl.appendChild(div);
+    };
+    if (runs.length > 1) runs.forEach(r => row(r.label, r.pm));
+    else row(runs.length ? runs[0].label : '', runs.length ? runs[0].pm : j.show_pm);
+  }
+  let loadSeq = 0;
+
+  // Called by switchTab() on every activation.
   window.loadSecurityTab = async function () {
-    // Re-fetch on every visit unless this page holds unsaved edits, so names
-    // others saved meanwhile show up (3.32.0).
-    if (loaded && JSON.stringify(names) !== savedNames) return;
+    // Fetch on every visit: the PM contact is always refreshed; names others
+    // saved meanwhile replace the list unless this page holds unsaved edits
+    // (3.32.0).
+    const seq = ++loadSeq;
     try {
       const r = await fetch(`/shows/${SHOW_ID}/security/names`);
       const j = await r.json();
       if (!j.success) throw new Error(j.error || 'load failed');
-      if (loaded && dirty()) return;   // typed into while the fetch was in flight
+      if (seq !== loadSeq) return;     // a newer visit's fetch owns the render
+      renderPm(j);
+      if (loaded && dirty()) return;   // unsaved edits here (or typed into while the fetch was in flight)
       names = j.names || [];
       savedNames = JSON.stringify(names);
       loaded = true;
       render();
     } catch (e) {
-      emptyEl.textContent = 'Could not load the name list — reload the page to retry.';
+      if (seq !== loadSeq) return;
+      if (!loaded) emptyEl.textContent = 'Could not load the name list — reload the page to retry.';
+      if (pmRowsEl && !pmRowsEl.querySelector('.sec-pm-row')) pmRowsEl.textContent = 'Could not load the PM contact.';
     }
   };
 
@@ -1592,24 +1650,52 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
 </div>{# end tab-assets #}
 
-{# ── Asset Search Modal ───────────────────────────────────────────────────── #}
+{# ── Asset Search / Browse Modal (3.35.0) ─────────────────────────────────── #}
+{# Search on top (primary); an empty query shows a Category → Group → Item →
+   Details browser like the Asset Manager's finder. Built ONLY from
+   GET /api/asset-types (no params — that is what keeps hide_from_pm types
+   out for everyone on the show page). Rows are drawn by the Assets IIFE
+   below (_ab* helpers); one delegated listener handles every row/button. #}
 <div id="asset-search-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAssetSearch()">
-  <div class="modal-card" style="max-width:720px;max-height:90vh;display:flex;flex-direction:column">
-    <div class="modal-header">
-      Add Asset to Show
-      <button onclick="closeAssetSearch()" class="modal-close">×</button>
+  <div class="modal-card ab-card" role="dialog" aria-modal="true" aria-labelledby="ab-title">
+    <div class="modal-header ab-header">
+      <span id="ab-title">Add Asset to Show</span>
+      <span id="ab-window" class="ab-window"></span>
+      <button type="button" onclick="closeAssetSearch()" class="modal-close" aria-label="Close">×</button>
     </div>
-    <div class="modal-body" style="overflow-y:auto;flex:1">
-      <div style="display:flex;gap:8px;margin-bottom:12px">
-        <input type="text" id="asset-search-input" class="field-input" placeholder="Search by name, category, manufacturer…" oninput="filterAssetSearch()" style="flex:1">
-        <select id="asset-cat-filter" class="field-input" style="width:160px" onchange="filterAssetSearch()">
-          <option value="">All Categories</option>
-          {% for cat in asset_categories %}
-          <option value="{{ cat.id }}">{{ cat.name }}</option>
-          {% endfor %}
-        </select>
+    <div class="ab-searchbar">
+      <div class="ab-search-wrap">
+        <svg class="ab-search-ico" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M6.5 1a5.5 5.5 0 014.38 8.83l3.9 3.9a.75.75 0 01-1.06 1.06l-3.9-3.9A5.5 5.5 0 116.5 1zm0 1.5a4 4 0 100 8 4 4 0 000-8z"/></svg>
+        <input type="text" id="asset-search-input" class="field-input" placeholder="Search name, model, brand…"
+               autocomplete="off" spellcheck="false" maxlength="80" oninput="filterAssetSearch()"
+               role="combobox" aria-expanded="false" aria-controls="ab-results" aria-autocomplete="list"
+               aria-label="Search the asset catalog">
+        <button type="button" id="ab-search-clear" class="ab-search-clear" aria-label="Clear search" hidden>×</button>
       </div>
-      <div id="asset-search-results" style="min-height:120px"></div>
+      <div id="ab-hint" class="ab-hint">Type to search · or browse below</div>
+    </div>
+    <nav id="ab-crumbs" class="ab-crumbs" aria-label="Browse path"></nav>
+    <div id="ab-browser" class="ab-browser" data-pane="cats">
+      <section class="ab-col ab-col-cats" aria-label="Categories">
+        <div class="ab-col-hdr">Categories</div>
+        <div id="ab-cats" class="ab-col-body"><p class="ab-empty">Loading…</p></div>
+      </section>
+      <section class="ab-col ab-col-groups" aria-label="Groups">
+        <div class="ab-col-hdr" id="ab-groups-hdr">Groups</div>
+        <div id="ab-groups" class="ab-col-body"></div>
+      </section>
+      <section class="ab-col ab-col-types" aria-label="Items">
+        <div class="ab-col-hdr" id="ab-types-hdr">Items</div>
+        <div id="ab-types" class="ab-col-body" role="listbox" aria-label="Items"></div>
+      </section>
+      <section class="ab-col ab-col-results" aria-label="Search results">
+        <div class="ab-col-hdr" id="ab-results-hdr">Results</div>
+        <div id="ab-results" class="ab-col-body" role="listbox" aria-label="Search results"></div>
+      </section>
+      <section class="ab-col ab-col-detail" aria-label="Details">
+        <div class="ab-col-hdr" id="ab-detail-hdr">Details</div>
+        <div id="ab-detail" class="ab-col-body"></div>
+      </section>
     </div>
   </div>
 </div>
@@ -1808,10 +1894,14 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
   };
 
   // Load asset types lazily
+  // NO query params on purpose: the bare call is what filters hide_from_pm
+  // types out (for managers too) — keep it that way on the show page.
   async function _loadAssetTypes() {
     if (_allAssetTypes !== null) return _allAssetTypes;
     const r = await fetch('/api/asset-types', {headers:{'X-Requested-With':'XMLHttpRequest'}});
-    _allAssetTypes = await r.json();
+    const list = r.ok ? await r.json() : null;
+    if (!Array.isArray(list)) throw new Error('Asset catalog unavailable');  // retried on next open
+    _allAssetTypes = list;
     return _allAssetTypes;
   }
 
@@ -1836,6 +1926,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     _companyRates = data.company_rates || {};
     _companyRatePeriods = data.company_rate_periods || null;
     _perfCompany = data.performance_company || '';
+    _abNoteOnShow(data.assets);   // "N on show" in the Add Asset browser
     renderAssets(data.assets || [], data.external_rentals || []);
     renderApprovalBadge(data.approval || {approved: false});
     // The Piano Tuning panel warns about pianos not on the Assets tab.
@@ -1909,7 +2000,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           <td style="font-size:11px;white-space:nowrap">${rentalCell}</td>
           <td>$${Number(a.locked_price).toFixed(2)}</td>
           <td>$${lineTotal}</td>
-          <td style="font-size:11px;color:var(--text-dim)">${esc(a.notes||'')}</td>
+          <td style="font-size:11px;color:var(--text-dim)" data-tag-focus="asset:${a.id}">${a.is_hidden ? esc(a.notes||'') : renderTaggedText(a.notes||'')}</td>
           ${IS_ADMIN ? `<td>
             ${IS_ADMIN ? `<button class="btn btn-xs btn-ghost" onclick="toggleAssetHidden(${a.id},${a.is_hidden})" title="${a.is_hidden?'Unhide':'Hide'}">${a.is_hidden?'Show':'Hide'}</button>` : ''}
             <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="removeAsset(${a.id})">✕</button>
@@ -1953,7 +2044,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       extRentals.forEach(er => {
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td>${esc(er.description)}</td>
+          <td data-tag-focus="rental:${er.id}">${er.piano_tuning_id ? esc(er.description) : renderTaggedText(er.description)}</td>
           <td>$${Number(er.cost).toFixed(2)}</td>
           <td>${er.pdf_filename ? `<a href="/shows/${SHOW_ID}/external-rentals/${er.id}/pdf" target="_blank" style="font-size:11px">View PDF</a>` : '—'}</td>
           ${IS_ADMIN ? `<td style="white-space:nowrap">${er.piano_tuning_id
@@ -1999,94 +2090,799 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     return esc(String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'"));
   }
 
-  // ── Asset Search ─────────────────────────────────────────────────────────
+  // ── Add Asset browser (3.35.0) ───────────────────────────────────────────
+  // Search stays PRIMARY: the box sits on top, is focused on open, and typing
+  // shows one ranked flat list (↑↓ move, Enter adds, Esc clears, Esc again
+  // closes). An empty query is a multi-pane browser like the Asset Manager's
+  // finder: Categories → Groups → Items → Details (phones: one pane at a
+  // time under a breadcrumb — mobile.css keys off #ab-browser[data-pane]).
+  // The catalog is ONLY GET /api/asset-types with NO params: that is what
+  // keeps hide_from_pm types out for everyone here. Never ask for
+  // ?include_hidden=1 from the show page and never call the manager-only
+  // /settings/* lists. Rows carry data-ab + numeric data-id; ONE delegated
+  // click / dblclick / keydown listener on the dialog handles them all.
+  const _ASSET_PERFS = {{ performances | tojson }};
+  const _AB_STORE = 'show.assetBrowser.v1';   // last category / group
+  const _AB_RESULT_CAP = 200;
+  // ONE wording for a kit (system OR package) in the browser and the add
+  // dialog — a package used to read "Consumable — unlimited stock".
+  function _kitAvailMsg(t) {
+    const kind = (t && t.is_system) ? 'System' : ((t && t.is_package) ? 'Package' : 'System / package');
+    return `${kind} — books its components from inventory; the add is blocked if a component is short for these dates.`;
+  }
+  function _catalogType(id) {
+    return (_allAssetTypes || []).find(x => Number(x.id) === Number(id)) || null;
+  }
+  const _ab = {
+    tree: null, treeSrc: null,
+    cat: null, group: null, type: null,   // browse selection (type = id)
+    q: '', results: [], hi: -1,           // search state (hi = highlighted index)
+    pane: 'cats', browsePane: 'cats',     // phone: which pane is showing
+    win: {start: '', end: ''},            // default rental window (open time)
+    detailSeq: 0, detailTimer: 0, detailShown: undefined, openSeq: 0,
+    onShow: {},                           // type_id → qty already on this show
+    norm: new Map(),                      // type id → normalised search fields
+  };
+
+  function _abIsKit(t) { return !!(t && (t.is_system || t.is_package)); }
+  // ONE collator: localeCompare(…, options) builds a new one per call, and
+  // _abSearch() sorts every match on each keystroke.
+  const _abColl = new Intl.Collator(undefined, {numeric: true, sensitivity: 'base'});
+  const _abByName = (a, b) => _abColl.compare(String(a.name || ''), String(b.name || ''));
+
+  // The default rental window selectAssetType() pre-fills: the Advance
+  // Sheet's live load-in / load-out, else the first / last performance.
+  function _defaultAssetWindow() {
+    const li = document.getElementById('load-in-date')?.value || '';
+    const lo = document.getElementById('load-out-date')?.value || '';
+    const p = Array.isArray(_ASSET_PERFS) ? _ASSET_PERFS : [];
+    return {
+      start: li || (p.length ? p[0].perf_date : '') || '',
+      end:   lo || (p.length ? p[p.length - 1].perf_date : '') || '',
+    };
+  }
+
+  // Qty of each type already booked on this show (fed by loadAssetsTab).
+  function _abNoteOnShow(assets) {
+    const m = {};
+    (assets || []).forEach(a => {
+      if (a && a.asset_type_id != null) m[a.asset_type_id] = (m[a.asset_type_id] || 0) + (Number(a.quantity) || 0);
+    });
+    _ab.onShow = m;
+  }
+
+  function _abFmtDate(iso) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso || '')) return '';
+    const [y, m, d] = iso.split('-').map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString(undefined, {weekday: 'short', month: 'short', day: 'numeric'});
+  }
+  function _abWindowLabel(w) {
+    if (!w.start && !w.end) return '';
+    if (!w.end || !w.start || w.start === w.end) return _abFmtDate(w.start || w.end);
+    return `${_abFmtDate(w.start)} – ${_abFmtDate(w.end)}`;
+  }
+  const _abMoney = v => `$${(Number(v) || 0).toFixed(2)}`;
+  // The rate this show would pay: its Performance Company card in effect on
+  // the default rental start (_companyRateOn), else the standard card.
+  function _abRate(t, start) {
+    const cr = _companyRateOn(t.id, start || undefined);
+    const daily = cr ? cr.daily : t.rental_cost;
+    const weekly = cr ? cr.weekly : t.weekly_rate;
+    const text = t.is_consumable ? `${_abMoney(daily)}/item`
+      : (Number(weekly) > 0 ? `${_abMoney(daily)}/day · ${_abMoney(weekly)}/wk` : `${_abMoney(daily)}/day`);
+    return {text, company: cr ? (cr.company || 'Company') : ''};
+  }
+  function _abBadges(t) {
+    let b = '';
+    if (t.is_system) b += '<span class="ab-badge ab-badge-kit">SYSTEM</span>';
+    else if (t.is_package) b += '<span class="ab-badge ab-badge-kit">PACKAGE</span>';
+    if (t.is_consumable) b += '<span class="ab-badge">CONSUMABLE</span>';
+    if (t.allow_unit_selection && !_abIsKit(t)) b += '<span class="ab-badge" title="A specific unit (S/N) can be picked">BY UNIT</span>';
+    return b;
+  }
+  function _abPath(t) {
+    const grp = _abIsKit(t) ? 'Systems & Packages' : (t.parent_type_id ? (t.parent_name || '') : '');
+    return [t.category_name || '', grp].filter(Boolean).join(' › ');
+  }
+  const _AB_ICO = {
+    folder: '<svg class="ab-ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M1.5 3A1.5 1.5 0 013 1.5h3.879a1.5 1.5 0 011.06.44l.622.621A1.5 1.5 0 009.621 3H13A1.5 1.5 0 0114.5 4.5v8A1.5 1.5 0 0113 14H3a1.5 1.5 0 01-1.5-1.5V3z"/></svg>',
+    kits: '<svg class="ab-ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 1l6.5 3v8L8 15l-6.5-3V4L8 1zm0 1.6L3.4 4.7 8 6.8l4.6-2.1L8 2.6zM3 6v5.1l4.25 1.95V7.95L3 6zm10 0L8.75 7.95v5.1L13 11.1V6z"/></svg>',
+    solo: '<svg class="ab-ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M3 2.5h10A1.5 1.5 0 0114.5 4v8a1.5 1.5 0 01-1.5 1.5H3A1.5 1.5 0 011.5 12V4A1.5 1.5 0 013 2.5zM4 5v1.5h1.5V5H4zm3 0v1.5h5V5H7zM4 8v1.5h1.5V8H4zm3 0v1.5h5V8H7zm-3 3v1h1.5v-1H4zm3 0v1h5v-1H7z"/></svg>',
+  };
+
+  // Category (API order = sort_order) → group → type. Groups are rebuilt
+  // from the children's parent_type_id / parent_name (the API never returns
+  // group rows); parentless non-kit types are "Individual items" and kits
+  // (is_system || is_package) "Systems & Packages" — both pickable.
+  function _abTree() {
+    if (_ab.tree && _ab.treeSrc === _allAssetTypes) return _ab.tree;
+    const cats = [], catMap = new Map(), byId = new Map();
+    _ab.norm.clear();
+    (_allAssetTypes || []).forEach(t => {
+      byId.set(t.id, t);
+      let c = catMap.get(t.category_id);
+      if (!c) {
+        c = {id: t.category_id, name: t.category_name || 'Other', count: 0,
+             groupMap: new Map(), solo: [], kits: [], groups: []};
+        catMap.set(t.category_id, c);
+        cats.push(c);
+      }
+      c.count++;
+      if (_abIsKit(t)) c.kits.push(t);
+      else if (t.parent_type_id) {
+        const key = 'g' + Number(t.parent_type_id);
+        let g = c.groupMap.get(key);
+        if (!g) { g = {key, name: t.parent_name || 'Group', types: []}; c.groupMap.set(key, g); }
+        g.types.push(t);
+      } else c.solo.push(t);
+    });
+    cats.forEach(c => {
+      c.groups = [...c.groupMap.values()].sort(_abByName);
+      if (c.solo.length) c.groups.push({key: 'solo', name: 'Individual items', pseudo: 'solo', types: c.solo});
+      if (c.kits.length) c.groups.push({key: 'kits', name: 'Systems & Packages', pseudo: 'kits', types: c.kits});
+    });
+    _ab.tree = {cats, catMap, byId};
+    _ab.treeSrc = _allAssetTypes;
+    return _ab.tree;
+  }
+  function _abCurCat() { return _abTree().catMap.get(_ab.cat) || null; }
+  function _abCurGroup() {
+    const c = _abCurCat();
+    return c ? (c.groups.find(g => g.key === _ab.group) || null) : null;
+  }
+  function _abBrowseType() {
+    const g = _abCurGroup();
+    return g ? (g.types.find(t => t.id === _ab.type) || null) : null;
+  }
+
+  // ── Search: rank name prefix > name contains > model > manufacturer >
+  //    category / group; multi-word queries match word by word after that.
+  function _abNormStr(s) {
+    return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  }
+  function _abFields(t) {
+    let f = _ab.norm.get(t.id);
+    if (!f) {
+      const name = _abNormStr(t.name), model = _abNormStr(t.model);
+      f = {name, model, mfr: _abNormStr(t.manufacturer),
+           where: _abNormStr([t.category_name, t.parent_name].filter(Boolean).join(' ')),
+           cname: name.replace(/[^a-z0-9]+/g, ''), cmodel: model.replace(/[^a-z0-9]+/g, '')};
+      _ab.norm.set(t.id, f);
+    }
+    return f;
+  }
+  function _abWordTier(f, w) {
+    if (f.name.startsWith(w)) return 0;
+    if (f.name.includes(w)) return 1;
+    if (f.model.includes(w)) return 2;
+    if (f.mfr.includes(w)) return 3;
+    if (f.where.includes(w)) return 4;
+    return -1;
+  }
+  function _abScore(f, q, words, cq) {
+    if (f.name.startsWith(q)) return 0;
+    const i = f.name.indexOf(q);
+    if (i > 0) return /[a-z0-9]/.test(f.name.charAt(i - 1)) ? 1.5 : 1;   // word start ranks first
+    if (f.model.includes(q)) return 2;
+    if (f.mfr.includes(q)) return 3;
+    if (f.where.includes(q)) return 4;
+    // "sm58" finds "SM-58"; "beta58" finds "Beta 58A"
+    if (cq.length > 1 && f.cname.includes(cq)) return 1.8;
+    if (cq.length > 1 && f.cmodel.includes(cq)) return 2.5;
+    if (words.length > 1) {
+      let sum = 0;
+      for (const w of words) {
+        const s = _abWordTier(f, w);
+        if (s < 0) return -1;
+        sum += s;
+      }
+      return 5 + sum / words.length / 10;
+    }
+    return -1;
+  }
+  function _abSearch(qRaw) {
+    const q = _abNormStr(qRaw).trim().replace(/\s+/g, ' ');
+    if (!q) return [];
+    const words = q.split(' ').filter(Boolean);
+    const cq = q.replace(/[^a-z0-9]+/g, '');
+    const scored = [];
+    (_allAssetTypes || []).forEach(t => {
+      const s = _abScore(_abFields(t), q, words, cq);
+      if (s >= 0) scored.push([s, t]);
+    });
+    scored.sort((a, b) => (a[0] - b[0]) || _abByName(a[1], b[1]));
+    return scored.map(x => x[1]);
+  }
+  // Name with the typed text marked — every piece escaped.
+  function _abMark(name, qRaw) {
+    const s = String(name || '');
+    const q = String(qRaw || '').trim().toLowerCase();
+    const low = s.toLowerCase();
+    const i = q ? low.indexOf(q) : -1;
+    if (i < 0 || low.length !== s.length) return esc(s);
+    return esc(s.slice(0, i)) + '<mark>' + esc(s.slice(i, i + q.length)) + '</mark>' + esc(s.slice(i + q.length));
+  }
+
+  // ── Rendering (all text through esc(); ids are numbers) ──────────────────
+  function _abRoving(host) {
+    // One tabbable row per column (the active one, else the first).
+    if (host && !host.querySelector('.ab-row[tabindex="0"]')) {
+      const first = host.querySelector('.ab-row');
+      if (first) first.setAttribute('tabindex', '0');
+    }
+  }
+  function _abRenderCats() {
+    const tr = _abTree();
+    const host = document.getElementById('ab-cats');
+    if (!tr.cats.length) {
+      host.innerHTML = '<p class="ab-empty">No assets are available to add.</p>';
+      return;
+    }
+    host.innerHTML = tr.cats.map(c => {
+      const on = c.id === _ab.cat;
+      return `<button type="button" class="ab-row ab-folder${on ? ' active' : ''}" data-ab="cat" data-id="${Number(c.id)}" tabindex="${on ? 0 : -1}" aria-pressed="${on}">${_AB_ICO.folder}<span class="ab-row-name">${esc(c.name)}</span><span class="ab-count">${c.count}</span><span class="ab-chev" aria-hidden="true">›</span></button>`;
+    }).join('');
+    _abRoving(host);
+  }
+  function _abRenderGroups() {
+    const c = _abCurCat();
+    const host = document.getElementById('ab-groups');
+    document.getElementById('ab-groups-hdr').textContent = c ? c.name : 'Groups';
+    if (!c) { host.innerHTML = '<p class="ab-empty">Pick a category</p>'; return; }
+    host.innerHTML = c.groups.map(g => {
+      const on = g.key === _ab.group;
+      return `<button type="button" class="ab-row ab-folder${g.pseudo ? ' ab-pseudo' : ''}${on ? ' active' : ''}" data-ab="group" data-key="${esc(g.key)}" tabindex="${on ? 0 : -1}" aria-pressed="${on}">${_AB_ICO[g.pseudo || 'folder']}<span class="ab-row-name">${esc(g.name)}</span><span class="ab-count">${g.types.length}</span><span class="ab-chev" aria-hidden="true">›</span></button>`;
+    }).join('');
+    _abRoving(host);
+  }
+  function _abTypeRow(t, o) {
+    const id = Number(t.id);
+    const kit = _abIsKit(t);
+    const thumb = t.has_photo
+      ? `<img class="ab-thumb" src="/asset-types/${id}/photo" alt="" loading="lazy" decoding="async">`
+      : `<span class="ab-thumb ab-thumb-ph" aria-hidden="true">${kit ? '▣' : '◈'}</span>`;
+    const sub = [t.manufacturer, t.model].filter(Boolean).join(' · ');
+    const rate = _abRate(t, _ab.win.start);
+    const on = _ab.onShow[id];
+    return `<div class="ab-row ab-item${o.active ? ' active' : ''}" role="option" id="${o.rowId}" data-ab="type" data-id="${id}" tabindex="${o.tab}" aria-selected="${!!o.active}">${thumb}<span class="ab-row-main"><span class="ab-row-name">${o.nameHtml || esc(t.name)}${_abBadges(t)}</span>${o.path ? `<span class="ab-row-path">${esc(o.path)}</span>` : ''}<span class="ab-row-sub">${sub ? esc(sub) + ' · ' : ''}${esc(rate.text)}${rate.company ? ' · company rate' : ''}</span></span>${on ? `<span class="ab-onshow" title="Already booked on this show">${on} on show</span>` : ''}<button type="button" class="ab-add-btn" data-ab="add" data-id="${id}" tabindex="-1" title="Add to show…" aria-label="Add ${esc(t.name)} to show">+</button></div>`;
+  }
+  function _abRenderTypes() {
+    const g = _abCurGroup();
+    const host = document.getElementById('ab-types');
+    document.getElementById('ab-types-hdr').textContent = g ? g.name : 'Items';
+    if (!g) {
+      host.innerHTML = `<p class="ab-empty">${_abCurCat() ? 'Pick a group' : ''}</p>`;
+      return;
+    }
+    host.innerHTML = g.types.map(t => _abTypeRow(t, {
+      rowId: 'ab-t-' + Number(t.id), active: t.id === _ab.type, tab: t.id === _ab.type ? 0 : -1,
+    })).join('');
+    _abRoving(host);
+  }
+  function _abRenderResults() {
+    const host = document.getElementById('ab-results');
+    const res = _ab.results;
+    document.getElementById('ab-results-hdr').textContent =
+      res.length ? `${res.length} result${res.length === 1 ? '' : 's'}` : 'Results';
+    if (!res.length) {
+      host.innerHTML = `<p class="ab-empty">No items match “${esc(_ab.q.trim())}”.<br>Clear the search to browse by category. Some gear can only be added by the asset manager.</p>`;
+      return;
+    }
+    const shown = res.slice(0, _AB_RESULT_CAP);
+    host.innerHTML = shown.map((t, i) => _abTypeRow(t, {
+      rowId: 'ab-r-' + Number(t.id), active: i === _ab.hi, tab: -1,
+      path: _abPath(t), nameHtml: _abMark(t.name, _ab.q),
+    })).join('') + (res.length > shown.length
+      ? `<p class="ab-empty">Showing the first ${shown.length} of ${res.length} — keep typing to narrow it down.</p>` : '');
+  }
+  function _abSetActive(host, pred) {
+    if (!host) return null;
+    let hit = null;
+    host.querySelectorAll('.ab-row').forEach(r => {
+      const on = pred(r);
+      r.classList.toggle('active', on);
+      r.setAttribute(r.getAttribute('role') === 'option' ? 'aria-selected' : 'aria-pressed', String(on));
+      r.setAttribute('tabindex', on ? '0' : '-1');
+      if (on) hit = r;
+    });
+    _abRoving(host);
+    return hit;
+  }
+
+  // ── Breadcrumb (phones show it; one pane at a time) ──────────────────────
+  function _abSetPane(p) {
+    _ab.pane = p;
+    if (!_ab.q.trim()) _ab.browsePane = p;
+    document.getElementById('ab-browser').dataset.pane = p;
+    _abRenderCrumbs();
+    if (p === 'detail') _abRefreshDetail();
+  }
+  function _abRenderCrumbs() {
+    const nav = document.getElementById('ab-crumbs');
+    if (!nav) return;
+    const crumb = (pane, label) => `<button type="button" class="ab-crumb" data-ab="pane" data-pane="${pane}">${esc(label)}</button>`;
+    const cur = label => `<span class="ab-crumb-cur">${esc(label)}</span>`;
+    const sep = '<span class="ab-crumb-sep" aria-hidden="true">›</span>';
+    if (_ab.q.trim()) {
+      const n = _ab.results.length;
+      if (_ab.pane === 'detail') {
+        const t = _ab.results[_ab.hi];
+        nav.innerHTML = `<button type="button" class="ab-back" data-ab="pane" data-pane="results">‹ Results</button>${t ? cur(t.name) : ''}`;
+      } else {
+        nav.innerHTML = cur(`${n} result${n === 1 ? '' : 's'}`);
+      }
+      return;
+    }
+    const c = _abCurCat(), g = _abCurGroup(), t = _abBrowseType();
+    const order = ['cats', 'groups', 'types', 'detail'];
+    const depth = Math.max(0, order.indexOf(_ab.pane));
+    const parts = [];
+    parts.push(depth === 0 ? cur('All categories') : crumb('cats', 'All'));
+    if (depth >= 1 && c) parts.push(depth === 1 ? cur(c.name) : crumb('groups', c.name));
+    if (depth >= 2 && g) parts.push(depth === 2 ? cur(g.name) : crumb('types', g.name));
+    if (depth >= 3 && t) parts.push(cur(t.name));
+    const back = depth > 0
+      ? `<button type="button" class="ab-back" data-ab="pane" data-pane="${order[depth - 1]}" aria-label="Back">‹</button>` : '';
+    nav.innerHTML = back + parts.join(sep);
+  }
+
+  // ── Detail pane ──────────────────────────────────────────────────────────
+  function _abDetailTarget() {
+    return _ab.q.trim() ? (_ab.results[_ab.hi] || null) : _abBrowseType();
+  }
+  // Renders the detail for the current target only while its pane is on
+  // screen (phones show one pane at a time); a hidden pane is redrawn when
+  // it is opened, so arrowing through results there fetches nothing.
+  function _abRefreshDetail(force) {
+    const col = document.querySelector('#ab-browser .ab-col-detail');
+    if (!col || getComputedStyle(col).display === 'none') {
+      clearTimeout(_ab.detailTimer);
+      ++_ab.detailSeq;
+      _ab.detailShown = undefined;
+      return;
+    }
+    const t = _abDetailTarget();
+    const id = t ? t.id : null;
+    if (!force && id === _ab.detailShown) return;
+    _ab.detailShown = id;
+    _abRenderDetail(t);
+  }
+  function _abRenderDetail(t) {
+    const host = document.getElementById('ab-detail');
+    clearTimeout(_ab.detailTimer);
+    const seq = ++_ab.detailSeq;
+    const winLbl = _abWindowLabel(_ab.win);
+    if (!t) {
+      host.innerHTML = `<div class="ab-detail-empty"><p>${_ab.q.trim() ? 'No item selected.' : 'Pick an item to see its photo, rate and availability.'}</p>${winLbl
+        ? `<p>Availability is checked for this show's rental window:<br><strong>${esc(winLbl)}</strong></p>`
+        : '<p>No rental window yet — set load-in / load-out on the Advance Sheet.</p>'}</div>`;
+      return;
+    }
+    const id = Number(t.id);
+    const kit = _abIsKit(t);
+    const rate = _abRate(t, _ab.win.start);
+    const sub = [t.manufacturer, t.model].filter(Boolean).join(' · ');
+    const on = _ab.onShow[id];
+    const photo = t.has_photo
+      ? `<img class="ab-photo" src="/asset-types/${id}/photo" alt="${esc(t.name)}" loading="lazy" decoding="async">`
+      : `<div class="ab-photo ab-photo-ph" aria-hidden="true">${kit ? '▣' : '◈'}</div>`;
+    host.innerHTML = `<div class="ab-detail">
+      <div class="ab-d-body">
+        <div class="ab-hero">${photo}
+          <div class="ab-hero-text">
+            <div class="ab-d-name">${esc(t.name)}</div>
+            ${_abBadges(t) ? `<div class="ab-d-badges">${_abBadges(t)}</div>` : ''}
+            ${sub ? `<div class="ab-d-sub">${esc(sub)}</div>` : ''}
+            <div class="ab-d-path">${esc(_abPath(t))}</div>
+            ${_ab.q.trim() ? `<div class="ab-d-path"><button type="button" class="ab-link" data-ab="reveal" data-id="${id}">Show in folder</button></div>` : ''}
+          </div>
+        </div>
+        <dl class="ab-facts">
+          <div><dt>Rate</dt><dd>${esc(rate.text)}${rate.company ? ` <span class="ab-co">${esc(rate.company)} company rate</span>` : ''}</dd></div>
+          ${t.storage_location ? `<div><dt>Stored at</dt><dd>${esc(t.storage_location)}</dd></div>` : ''}
+          ${on ? `<div><dt>On this show</dt><dd>${on} already booked</dd></div>` : ''}
+        </dl>
+        <div class="ab-section">
+          <div class="ab-sec-hdr">Availability${winLbl ? ` · ${esc(winLbl)}` : ''}</div>
+          <div id="ab-avail">${winLbl ? 'Checking…' : 'Loading…'}</div>
+        </div>
+        <div id="ab-extra"></div>
+      </div>
+      <div class="ab-d-actions">
+        <button type="button" class="btn btn-primary" data-ab="add" data-id="${id}">Add to show…</button>
+      </div>
+    </div>`;
+    // Debounced so arrowing through a list doesn't fire a request per row;
+    // sequence-guarded so a slow answer for an earlier row never lands.
+    _ab.detailTimer = setTimeout(() => _abLoadDetail(t, seq), 120);
+  }
+  async function _abLoadDetail(t, seq) {
+    const w = _ab.win;
+    const hasWin = !!(w.start && w.end);
+    const qs = hasWin ? `?start=${encodeURIComponent(w.start)}&end=${encodeURIComponent(w.end)}` : '';
+    const getJson = url => fetch(url, {headers: {'X-Requested-With': 'XMLHttpRequest'}})
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))));
+    const kit = _abIsKit(t);
+    const id = Number(t.id);
+    let main, partOf = [];
+    try {
+      [main, partOf] = await Promise.all([
+        getJson(kit ? `/api/asset-types/${id}/components${qs}` : `/api/asset-types/${id}/availability${qs}`),
+        kit ? Promise.resolve([]) : getJson(`/settings/asset-types/${id}/used-in`).catch(() => []),
+      ]);
+    } catch (e) {
+      if (seq === _ab.detailSeq) {
+        const el = document.getElementById('ab-avail');
+        if (el) el.textContent = "Couldn't check availability right now.";
+      }
+      return;
+    }
+    if (seq !== _ab.detailSeq) return;   // a newer selection owns the pane
+    const availEl = document.getElementById('ab-avail');
+    const extraEl = document.getElementById('ab-extra');
+    if (!availEl || !extraEl) return;
+    const tr = _abTree();
+    if (kit) {
+      const comps = Array.isArray(main.components) ? main.components : [];
+      const sets = main.sets_available;
+      let a = '';
+      if (hasWin) {
+        a = (sets === null || sets === undefined)
+          ? '<strong class="ab-ok">No stock limit</strong> on its components.'
+          : `<strong class="${sets > 2 ? 'ab-ok' : sets > 0 ? 'ab-low' : 'ab-none'}">${sets > 0 ? `Can supply ${sets}` : 'None available'}</strong> for these dates.`;
+      }
+      availEl.innerHTML = a + `<div class="ab-dim">${esc(_kitAvailMsg(t))}</div>`;
+      if (comps.length) {
+        extraEl.innerHTML = `<div class="ab-section"><div class="ab-sec-hdr">In this ${t.is_system ? 'system' : 'package'} · ${comps.length}</div><ul class="ab-comps">${comps.map(c => {
+          const cid = Number(c.id);
+          const vis = tr.byId.has(cid);
+          const name = vis
+            ? `<button type="button" class="ab-link" data-ab="goto" data-id="${cid}">${esc(c.name)}</button>`
+            : esc(c.name);
+          const meta = [c.manufacturer, c.model].filter(Boolean).join(' · ');
+          let av = '';
+          if (hasWin && c.available !== null && c.available !== undefined) {
+            const need = Number(c.quantity) || 1;
+            av = `<span class="ab-comp-av ${c.available >= need ? 'ab-ok' : 'ab-none'}">${Number(c.available)} available</span>`;
+          }
+          return `<li><span class="ab-qty">${Number(c.quantity) || 1}×</span><span class="ab-comp-name">${name}${meta ? `<span class="ab-dim ab-comp-meta">${esc(meta)}</span>` : ''}</span>${av}</li>`;
+        }).join('')}</ul></div>`;
+      } else {
+        extraEl.innerHTML = '<div class="ab-section ab-dim">No components listed yet.</div>';
+      }
+      return;
+    }
+    // Ordinary type: stock + units for the window, then "Part of".
+    const av = main || {};
+    if (av.kit) {
+      availEl.textContent = _kitAvailMsg(t);
+    } else if (av.unlimited) {
+      availEl.innerHTML = '<strong class="ab-ok">Consumable — no stock limit.</strong>';
+    } else if (!hasWin) {
+      availEl.innerHTML = `${Number(av.total_items) || 0} in stock${av.in_maintenance ? ` · ${Number(av.in_maintenance)} in maintenance` : ''}.<div class="ab-dim">Set load-in / load-out on the Advance Sheet to check dates.</div>`;
+    } else {
+      const n = Number(av.available) || 0;
+      const cls = n > 2 ? 'ab-ok' : (n > 0 ? 'ab-low' : 'ab-none');
+      const head = n > 0 ? `${n} available` : (n < 0 ? `None available — overbooked by ${-n}` : 'None available');
+      availEl.innerHTML = `<strong class="${cls}">${head}</strong> of ${Number(av.total_items) || 0}` +
+        `<div class="ab-dim">${Number(av.in_maintenance) || 0} in maintenance · ${Number(av.reserve_count) || 0} held in reserve · ${Number(av.total_reserved) || 0} booked (peak day)</div>`;
+    }
+    let extra = '';
+    const units = Array.isArray(av.units) ? av.units : [];
+    if (av.allow_unit_selection && units.length) {
+      const free = units.filter(u => u.available).length;
+      const maint = units.filter(u => u.in_maintenance).length;
+      const booked = units.length - free - maint;
+      const CAP = 40;
+      const chips = units.slice(0, CAP).map(u => {
+        const b = (u.bookings && u.bookings[0]) || {};
+        const cls = u.in_maintenance ? 'ab-unit-maint' : (u.booked ? 'ab-unit-booked' : 'ab-unit-free');
+        const tip = u.in_maintenance ? 'In maintenance' : (u.booked ? `Booked${b.show_name ? ' for ' + b.show_name : ''}` : 'Free for these dates');
+        return `<span class="ab-unit ${cls}" title="${esc(tip)}">${esc(u.barcode || '#' + Number(u.id))}</span>`;
+      }).join('') + (units.length > CAP ? `<span class="ab-dim">+${units.length - CAP} more</span>` : '');
+      extra += `<div class="ab-section"><div class="ab-sec-hdr">Units · ${units.length}</div>` +
+        `<div>${free} free${booked ? ` · ${booked} booked` : ''}${maint ? ` · ${maint} in maintenance` : ''} — pick a specific unit (S/N) in the next step.</div>` +
+        `<div class="ab-units">${chips}</div></div>`;
+    }
+    const kits = (Array.isArray(partOf) ? partOf : []).filter(p => tr.byId.has(Number(p.id)));
+    if (kits.length) {
+      extra += `<div class="ab-section"><div class="ab-sec-hdr">Part of</div><div class="ab-partof">${kits.map(p =>
+        `<button type="button" class="ab-link" data-ab="goto" data-id="${Number(p.id)}">${esc(p.name)}</button><span class="ab-badge ab-badge-kit">${p.is_package && !p.is_system ? 'PACKAGE' : 'SYSTEM'}</span>`
+      ).join('<br>')}</div></div>`;
+    }
+    extraEl.innerHTML = extra;
+  }
+
+  // ── Selection / navigation ───────────────────────────────────────────────
+  function _abSelectCat(id, advance) {
+    if (_ab.cat !== id) { _ab.cat = id; _ab.group = null; _ab.type = null; }
+    const c = _abCurCat();
+    if (c && !_ab.group && c.groups.length === 1) _ab.group = c.groups[0].key;   // a lone group opens itself
+    _abSaveState();
+    _abSetActive(document.getElementById('ab-cats'), r => Number(r.dataset.id) === _ab.cat);
+    _abRenderGroups();
+    _abRenderTypes();
+    _abRefreshDetail();
+    if (advance) _abSetPane(_ab.group && c && c.groups.length === 1 ? 'types' : 'groups');
+    else _abRenderCrumbs();
+  }
+  function _abSelectGroup(key, advance) {
+    if (_ab.group !== key) { _ab.group = key; _ab.type = null; }
+    _abSaveState();
+    _abSetActive(document.getElementById('ab-groups'), r => r.dataset.key === _ab.group);
+    _abRenderTypes();
+    _abRefreshDetail();
+    if (advance) _abSetPane('types'); else _abRenderCrumbs();
+  }
+  function _abSelectType(id, advance) {
+    _ab.type = id;
+    _abSetActive(document.getElementById('ab-types'), r => Number(r.dataset.id) === id);
+    _abRefreshDetail();
+    if (advance) _abSetPane('detail'); else _abRenderCrumbs();
+  }
+  function _abSetHi(i, focusRow) {
+    const host = document.getElementById('ab-results');
+    const rows = host.querySelectorAll('.ab-row');
+    if (!rows.length) return;
+    _ab.hi = Math.max(0, Math.min(rows.length - 1, i));
+    const row = _abSetActive(host, r => r === rows[_ab.hi]);
+    if (row) {
+      row.scrollIntoView({block: 'nearest'});
+      if (focusRow) row.focus();
+      document.getElementById('asset-search-input').setAttribute('aria-activedescendant', row.id);
+    }
+    _abRefreshDetail();
+  }
+  // Jump to a type in the browser (from a search result or a component /
+  // "Part of" link): clears the search and opens its category + group.
+  function _abReveal(id) {
+    const tr = _abTree();
+    const t = tr.byId.get(id);
+    if (!t) return;
+    const c = tr.catMap.get(t.category_id);
+    const g = c && c.groups.find(x => x.types.includes(t));
+    if (!c || !g) return;
+    const inp = document.getElementById('asset-search-input');
+    inp.value = '';
+    _abApplyQuery('');
+    _ab.cat = c.id; _ab.group = g.key; _ab.type = t.id;
+    _abSaveState();
+    _abRenderCats(); _abRenderGroups(); _abRenderTypes();
+    _abSetPane('detail');
+    _abRefreshDetail(true);
+    ['ab-cats', 'ab-groups', 'ab-types'].forEach(h =>
+      document.querySelector(`#${h} .ab-row.active`)?.scrollIntoView({block: 'nearest'}));
+  }
+  function _abAdd(id) {
+    const t = _abTree().byId.get(id);
+    if (!t) return;
+    selectAssetType(t.id, t.name, t.rental_cost || 0, t.weekly_rate || 0,
+                    _abIsKit(t) ? 1 : 0, t.is_consumable ? 1 : 0);
+  }
+  function _abLoadState() {
+    try {
+      const s = JSON.parse(localStorage.getItem(_AB_STORE) || 'null');
+      return (s && typeof s === 'object') ? s : null;
+    } catch (e) { return null; }
+  }
+  function _abSaveState() {
+    try { localStorage.setItem(_AB_STORE, JSON.stringify({cat: _ab.cat, group: _ab.group})); } catch (e) { /* private mode */ }
+  }
+  // Returns true when a remembered selection (this page or localStorage)
+  // was restored, false when it fell back to the first category.
+  function _abRestoreSelection() {
+    const tr = _abTree();
+    if (_ab.cat == null) {
+      const s = _abLoadState();
+      if (s) { _ab.cat = Number(s.cat); _ab.group = typeof s.group === 'string' ? s.group : null; }
+    }
+    let remembered = tr.catMap.has(_ab.cat);
+    if (!remembered) {
+      _ab.cat = tr.cats.length ? tr.cats[0].id : null;
+      _ab.group = null; _ab.type = null;
+    }
+    const c = _abCurCat();
+    if (c && !c.groups.some(g => g.key === _ab.group)) {
+      _ab.group = c.groups.length === 1 ? c.groups[0].key : null;
+    }
+    if (_ab.type != null && !_abBrowseType()) _ab.type = null;
+    return remembered;
+  }
+
+  function _abApplyQuery(q) {
+    const had = !!_ab.q.trim();
+    _ab.q = q || '';
+    const on = !!_ab.q.trim();
+    const inp = document.getElementById('asset-search-input');
+    document.getElementById('ab-browser').classList.toggle('ab-searching', on);
+    document.getElementById('ab-search-clear').hidden = !_ab.q;
+    document.getElementById('ab-hint').textContent = on
+      ? '↑ ↓ to move · Enter to add · Esc to clear'
+      : 'Type to search · or browse below';
+    inp.setAttribute('aria-expanded', String(on));
+    if (on) {
+      _ab.results = _abSearch(_ab.q);
+      _ab.hi = _ab.results.length ? 0 : -1;
+      _abRenderResults();
+      const first = document.querySelector('#ab-results .ab-row');
+      if (first) inp.setAttribute('aria-activedescendant', first.id);
+      else inp.removeAttribute('aria-activedescendant');
+      document.getElementById('ab-results').scrollTop = 0;
+      _abSetPane('results');
+      _abRefreshDetail();
+    } else {
+      _ab.results = []; _ab.hi = -1;
+      inp.removeAttribute('aria-activedescendant');
+      if (had) { _abSetPane(_ab.browsePane); _abRefreshDetail(); }
+    }
+  }
+
   window.openAssetSearch = async function() {
-    document.getElementById('asset-search-modal').style.display = 'flex';
-    document.getElementById('asset-search-input').value = '';
-    document.getElementById('asset-cat-filter').value = '';
-    await _loadAssetTypes();
-    renderAssetSearchResults('', '');
-    setTimeout(() => document.getElementById('asset-search-input').focus(), 100);
+    const modal = document.getElementById('asset-search-modal');
+    const inp = document.getElementById('asset-search-input');
+    modal.style.display = 'flex';
+    inp.value = '';
+    _abApplyQuery('');
+    _ab.win = _defaultAssetWindow();
+    const lbl = _abWindowLabel(_ab.win);
+    document.getElementById('ab-window').textContent = lbl ? `Rental window: ${lbl}` : '';
+    const seq = ++_ab.openSeq;
+    setTimeout(() => { if (modal.style.display !== 'none') inp.focus(); }, 60);
+    try {
+      await _loadAssetTypes();
+    } catch (e) {
+      if (seq === _ab.openSeq) {
+        document.getElementById('ab-cats').innerHTML = '<p class="ab-empty">Couldn\'t load the asset catalog. Close this and try again.</p>';
+      }
+      return;
+    }
+    if (seq !== _ab.openSeq || modal.style.display === 'none') return;
+    const remembered = _abRestoreSelection();
+    _abRenderCats(); _abRenderGroups(); _abRenderTypes();
+    // Phones reopen where you were (or at the category list the first time).
+    _abSetPane(!remembered ? 'cats' : (_ab.group ? 'types' : 'groups'));
+    _abRefreshDetail(true);
+    // A query typed while the catalog was loading still counts.
+    if (inp.value) _abApplyQuery(inp.value);
+    ['ab-cats', 'ab-groups', 'ab-types'].forEach(h =>
+      document.querySelector(`#${h} .ab-row.active`)?.scrollIntoView({block: 'nearest'}));
   };
 
   window.closeAssetSearch = function() {
     document.getElementById('asset-search-modal').style.display = 'none';
+    clearTimeout(_ab.detailTimer);
+    ++_ab.detailSeq;            // drop any in-flight detail fetch
+    _ab.detailShown = undefined;
   };
 
   window.filterAssetSearch = function() {
-    const q = document.getElementById('asset-search-input').value;
-    const cat = document.getElementById('asset-cat-filter').value;
-    renderAssetSearchResults(q, cat);
+    _abApplyQuery(document.getElementById('asset-search-input').value);
   };
 
-  async function renderAssetSearchResults(q, catId) {
-    const types = await _loadAssetTypes();
-    const container = document.getElementById('asset-search-results');
-    const lq = (q || '').toLowerCase().trim();
-    const filtered = types.filter(t => {
-      if (catId && String(t.category_id) !== String(catId)) return false;
-      if (!lq) return true;
-      const haystack = [t.name, t.category_name, t.manufacturer, t.model, t.parent_name].join(' ').toLowerCase();
-      return haystack.includes(lq);
-    });
-
-    if (filtered.length === 0) {
-      container.innerHTML = '<p style="padding:20px;text-align:center;color:var(--text-dim);font-size:13px">No items found.</p>';
-      return;
-    }
-
-    const renderCard = (t) => {
-      const label = t.name;  // Description is always the primary title
-      const sub = [t.manufacturer, t.model].filter(Boolean).join(' ');
-      // This show's Performance Company rate replaces the standard one.
-      const cr = _companyRates[String(t.id)];
-      const daily = cr ? cr.daily : t.rental_cost;
-      const weekly = cr ? cr.weekly : t.weekly_rate;
-      const rateLabel = (t.is_consumable
-        ? `$${Number(daily||0).toFixed(2)}/item`
-        : (weekly > 0
-            ? `$${Number(daily||0).toFixed(2)}/day · $${Number(weekly||0).toFixed(2)}/wk`
-            : `$${Number(daily||0).toFixed(2)}/day`))
-        + (cr ? ' · company rate' : '');
-      const systemBadge = t.is_system ? '<span style="font-size:9px;font-weight:700;background:rgba(245,127,32,0.2);color:#F57F20;border-radius:3px;padding:1px 5px;margin-left:4px;letter-spacing:.04em">SYSTEM</span>' : '';
-      return `<button class="btn btn-ghost btn-sm" style="text-align:left;white-space:normal;align-items:flex-start;flex-direction:column;gap:2px;width:100%;min-width:0" onclick="selectAssetType(${t.id}, '${escJsAttr(label)}', ${t.rental_cost || 0}, ${t.weekly_rate || 0}, ${t.is_system ? 1 : 0}, ${t.is_consumable ? 1 : 0})">
-        <div style="font-weight:500">${esc(label)}${systemBadge}</div>
-        ${sub ? `<div style="font-size:10px;color:var(--text-dim)">${esc(sub)}</div>` : ''}
-        <div style="font-size:10px;color:var(--text-dim)">${rateLabel}${t.is_consumable ? ' · consumable' : ''}${t.is_system ? ' · system' : ''}</div>
-      </button>`;
-    };
-
-    const byName = (a, b) => (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' });
-    const gridStyle = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px;align-items:stretch';
-
-    let html = '<div style="display:flex;flex-direction:column;gap:12px">';
-    if (lq) {
-      // Search mode: flat alphabetical list.
-      const sorted = filtered.slice().sort(byName);
-      html += `<div style="${gridStyle}">`;
-      sorted.forEach(t => { html += renderCard(t); });
-      html += '</div>';
-    } else {
-      // Browse mode: grouped by category, alphabetized within each group and
-      // by category heading so the layout is predictable.
-      const byCat = {};
-      filtered.forEach(t => {
-        const k = t.category_name || '';
-        if (!byCat[k]) byCat[k] = [];
-        byCat[k].push(t);
-      });
-      const cats = Object.keys(byCat).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-      for (const cat of cats) {
-        const items = byCat[cat].slice().sort(byName);
-        html += `<div><div style="font-size:10px;font-weight:600;letter-spacing:.08em;color:var(--text-dim);margin-bottom:4px;text-transform:uppercase">${esc(cat)}</div>`;
-        html += `<div style="${gridStyle}">`;
-        items.forEach(t => { html += renderCard(t); });
-        html += '</div></div>';
+  // ONE set of delegated listeners for the whole dialog (bound once).
+  (function _abBind() {
+    const card = document.querySelector('#asset-search-modal .ab-card');
+    if (!card) return;
+    const inp = document.getElementById('asset-search-input');
+    card.addEventListener('click', e => {
+      const el = e.target.closest('[data-ab]');
+      if (!el || !card.contains(el)) return;
+      const id = Number(el.dataset.id);
+      switch (el.dataset.ab) {
+        case 'cat': _abSelectCat(id, true); break;
+        case 'group': _abSelectGroup(el.dataset.key, true); break;
+        case 'type':
+          if (el.closest('#ab-results')) {
+            const rows = [...document.querySelectorAll('#ab-results .ab-row')];
+            _abSetHi(rows.indexOf(el));
+            _abSetPane('detail');
+          } else _abSelectType(id, true);
+          break;
+        case 'add': e.stopPropagation(); _abAdd(id); break;
+        case 'goto': case 'reveal': _abReveal(id); break;
+        case 'pane': _abSetPane(el.dataset.pane); break;
       }
-    }
-    html += '</div>';
-    container.innerHTML = html;
-  }
+    });
+    document.getElementById('ab-search-clear').addEventListener('click', () => {
+      inp.value = '';
+      _abApplyQuery('');
+      inp.focus();
+    });
+    card.addEventListener('dblclick', e => {
+      const row = e.target.closest('.ab-row[data-ab="type"]');
+      if (row && !e.target.closest('.ab-add-btn')) _abAdd(Number(row.dataset.id));
+    });
+    const focusCol = (hostId) => {
+      const host = document.getElementById(hostId);
+      const row = host && (host.querySelector('.ab-row.active') || host.querySelector('.ab-row'));
+      if (row) row.focus();
+      return row;
+    };
+    const onEsc = e => {
+      e.preventDefault();
+      if (inp.value) { inp.value = ''; _abApplyQuery(''); inp.focus(); }
+      else closeAssetSearch();
+    };
+    // Esc also works when focus fell out of the dialog (a phone pane switch
+    // hides the row that had focus, which drops focus to <body>).
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      const modal = document.getElementById('asset-search-modal');
+      if (modal && modal.style.display !== 'none' && !card.contains(e.target)
+          && (e.target === document.body || modal.contains(e.target))) onEsc(e);
+    });
+    card.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { onEsc(e); return; }
+      if (e.target === inp) {
+        if (!_ab.q.trim()) {
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            focusCol(_ab.type != null ? 'ab-types' : (_ab.group ? 'ab-groups' : 'ab-cats'));
+          }
+          return;
+        }
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          _abSetHi(_ab.hi + (e.key === 'ArrowDown' ? 1 : -1));
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          const t = _ab.results[_ab.hi];
+          if (t) _abAdd(t.id);
+        }
+        return;
+      }
+      const row = e.target.closest && e.target.closest('.ab-row');
+      if (!row || e.target !== row) return;
+      const kind = row.dataset.ab;
+      const inResults = !!row.closest('#ab-results');
+      const sib = dir => {
+        const rows = [...row.parentElement.querySelectorAll('.ab-row')];
+        return rows[rows.indexOf(row) + dir] || null;
+      };
+      const activate = r => {
+        if (!r) return;
+        r.focus();
+        if (r.dataset.ab === 'cat') _abSelectCat(Number(r.dataset.id), false);
+        else if (r.dataset.ab === 'group') _abSelectGroup(r.dataset.key, false);
+        else if (inResults) _abSetHi([...r.parentElement.querySelectorAll('.ab-row')].indexOf(r), true);
+        else _abSelectType(Number(r.dataset.id), false);
+      };
+      switch (e.key) {
+        case 'ArrowDown': case 'ArrowUp':
+          e.preventDefault();
+          activate(sib(e.key === 'ArrowDown' ? 1 : -1));
+          break;
+        case 'Home': case 'End': {
+          e.preventDefault();
+          const rows = row.parentElement.querySelectorAll('.ab-row');
+          activate(e.key === 'Home' ? rows[0] : rows[rows.length - 1]);
+          break;
+        }
+        case 'ArrowRight':
+          e.preventDefault();
+          if (kind === 'cat') { _abSelectCat(Number(row.dataset.id), true); activate(focusCol('ab-groups')); }
+          else if (kind === 'group') { _abSelectGroup(row.dataset.key, true); activate(focusCol('ab-types')); }
+          break;
+        case 'ArrowLeft':
+          e.preventDefault();
+          if (kind === 'type' && !inResults) { focusCol('ab-groups'); _abSetPane('groups'); }
+          else if (kind === 'group') { focusCol('ab-cats'); _abSetPane('cats'); }
+          break;
+        case 'Enter':
+          e.preventDefault();
+          if (kind === 'cat') { _abSelectCat(Number(row.dataset.id), true); focusCol('ab-groups'); }
+          else if (kind === 'group') { _abSelectGroup(row.dataset.key, true); focusCol('ab-types'); }
+          else if (kind === 'type') _abAdd(Number(row.dataset.id));
+          break;
+        case ' ':
+          if (kind === 'type') { e.preventDefault(); activate(row); }
+          break;
+        default:
+          // Type-to-search from anywhere in the browser.
+          if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) inp.focus();
+      }
+    });
+  })();
 
   // ── Asset Add Detail ──────────────────────────────────────────────────────
   window.selectAssetType = async function(typeId, label, price, weeklyRate, isSystem, isConsumable) {
@@ -2106,11 +2902,8 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
 
     // Default rental dates: prefer load-in/out dates, fall back to performances
-    const loadInDate  = document.getElementById('load-in-date')?.value  || '';
-    const loadOutDate = document.getElementById('load-out-date')?.value || '';
-    const perfs = {{ performances | tojson }};
-    const defaultStart = loadInDate  || (perfs.length > 0 ? perfs[0].perf_date          : '') || '';
-    const defaultEnd   = loadOutDate || (perfs.length > 0 ? perfs[perfs.length-1].perf_date : '') || '';
+    // (_defaultAssetWindow — the Add Asset browser checks the same window).
+    const {start: defaultStart, end: defaultEnd} = _defaultAssetWindow();
     const addStartInp = document.getElementById('asset-add-start');
     const addEndInp   = document.getElementById('asset-add-end');
     addStartInp.value = defaultStart;
@@ -2136,8 +2929,10 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     closeAssetSearch();
     document.getElementById('asset-add-modal').style.display = 'flex';
 
-    // Load availability (re-runs whenever the rental dates change)
-    _currentAssetIsSystem = !!isSystem;
+    // Load availability (re-runs whenever the rental dates change). A package
+    // is a kit exactly like a system (3.35.0): callers that only pass
+    // is_system still get the kit path when the catalog says package.
+    _currentAssetIsSystem = !!isSystem || _abIsKit(_catalogType(typeId));
     await _refreshAssetAvailability();
   };
 
@@ -2150,8 +2945,9 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     const availDiv = document.getElementById('asset-avail-info');
     if (!typeId || !availDiv) return;
     if (_currentAssetIsSystem) {
+      ++_availFetchSeq;   // drop a still-pending response for the item picked before
       _currentAvailData = null;
-      availDiv.innerHTML = '<span style="color:var(--accent)">System — deducts its component quantities from inventory; the add is blocked if a component is short for these dates.</span>';
+      availDiv.innerHTML = `<span style="color:var(--accent)">${esc(_kitAvailMsg(_catalogType(typeId)))}</span>`;
       _updateAddAssetBlockState();
       return;
     }
@@ -2170,7 +2966,10 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       const av = await r.json();
       if (seq !== _availFetchSeq) return; // superseded by a newer date change
       _currentAvailData = av;
-      if (av.unlimited) {
+      if (av.kit) {
+        // The server says kit (system OR package) — never "consumable".
+        availDiv.innerHTML = `<span style="color:var(--accent)">${esc(_kitAvailMsg(_catalogType(typeId)))}</span>`;
+      } else if (av.unlimited) {
         availDiv.textContent = 'Consumable — unlimited stock.';
       } else {
         const avClass = av.available > 2 ? 'color:#48BB78' : (av.available > 0 ? 'color:#FBBF24' : 'color:#FC8181');
@@ -2210,7 +3009,9 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         suffix = ` — booked${b.show_name ? ' for ' + b.show_name : ''}`;
         disabled = ' disabled';
       } else { suffix = ' — available'; }
-      html += `<option value="${u.id}"${disabled}>${label}${suffix}</option>`;
+      // Barcodes and show names are user text: escape them (Chromium's
+      // customizable <select> keeps <img> etc. inside an <option>).
+      html += `<option value="${Number(u.id)}"${disabled}>${esc(label + suffix)}</option>`;
     });
     unitSel.innerHTML = html;
     unitSel.value = '';
@@ -2236,6 +3037,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
   window.closeAssetAddModal = function() {
     document.getElementById('asset-add-modal').style.display = 'none';
+    ++_availFetchSeq;   // a late availability response must not touch the closed modal
     _currentAvailData = null;
   };
 
@@ -2572,10 +3374,12 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       <div class="ml-auto" style="display:flex;gap:6px">
         <a href="/shows/{{ show.id }}/post-show-invoice.pdf" target="_blank" class="btn btn-sm btn-ghost" title="Final invoice: internal & external assets + actual labor + costs">Final Invoice PDF</a>
         <a href="{{ url_for('export_postnotes', show_id=show.id) }}" class="btn btn-sm btn-ghost" target="_blank">Export PDF</a>
+        {% if not restricted %}{# email_pdf() refuses read-only accounts #}
         <button class="btn btn-sm btn-ghost" type="button" title="Generate post-show report and email to recipients"
                 onclick="emailPdf({{ show.id }}, 'postnotes', this)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="14" height="14" style="margin-right:4px;vertical-align:middle"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>Email
         </button>
+        {% endif %}
       </div>
     </div>
     <div class="form-section-body">
@@ -2852,9 +3656,12 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       <div class="export-card-foot">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a href="{{ url_for('export_advance', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Export → v{{ (show.advance_version or 0) + 1 }}</a>
+          {# Email: email_pdf() refuses read-only accounts (mails the list). #}
+          {% if not restricted %}
           <button class="btn btn-ghost btn-sm" title="Email to report recipients" onclick="emailPdf({{ show.id }}, 'advance', this)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="14" height="14" style="margin-right:3px;vertical-align:middle"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>Email
           </button>
+          {% endif %}
         </div>
         {% if show.advance_version > 0 %}<span class="version-badge">Current: v{{ show.advance_version }}</span>{% endif %}
       </div>
@@ -2872,9 +3679,11 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       <div class="export-card-foot">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a href="{{ url_for('export_schedule', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Export → v{{ (show.schedule_version or 0) + 1 }}</a>
+          {% if not restricted %}
           <button class="btn btn-ghost btn-sm" title="Email to report recipients" onclick="emailPdf({{ show.id }}, 'schedule', this)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="14" height="14" style="margin-right:3px;vertical-align:middle"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>Email
           </button>
+          {% endif %}
         </div>
         {% if show.schedule_version > 0 %}<span class="version-badge">Current: v{{ show.schedule_version }}</span>{% endif %}
       </div>
@@ -2893,9 +3702,11 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       <div class="export-card-foot">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a href="{{ url_for('export_postnotes', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Export → v{{ _postnotes_v + 1 }}</a>
+          {% if not restricted %}
           <button class="btn btn-ghost btn-sm" type="button" title="Email to post-show report recipients" onclick="emailPdf({{ show.id }}, 'postnotes', this)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="14" height="14" style="margin-right:3px;vertical-align:middle"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>Email
           </button>
+          {% endif %}
         </div>
         {% if _postnotes_v > 0 %}<span class="version-badge">Current: v{{ _postnotes_v }}</span>{% endif %}
       </div>
@@ -2932,7 +3743,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         </div>
         <h3 class="export-card-title">Security Sign-In Sheet</h3>
       </div>
-      <p class="export-card-desc">Personnel sign-in sheet for the security desk — names are managed on this show's <strong>Sign-In Sheet</strong> tab.</p>
+      <p class="export-card-desc">Personnel sign-in sheet for the security desk, with the production manager on duty and their phone / email — names are managed on this show's <strong>Sign-In Sheet</strong> tab.</p>
       <div class="export-card-foot">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a href="{{ url_for('security_signin_pdf', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Export PDF</a>
@@ -3001,6 +3812,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       {% endif %}
     </div>
     <div class="form-section-body">
+      {% if not restricted %}
       <div id="upload-zone" class="upload-zone"
            ondrop="handleFileDrop(event)" ondragover="handleFileDragOver(event)" ondragleave="handleFileDragLeave(event)">
         <span class="upload-zone-hint">Drop a file here to attach it to this show</span>
@@ -3011,6 +3823,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
           <span id="upload-progress-label" style="font-size:11px;color:var(--text-muted);margin-top:4px;display:block;text-align:center">0%</span>
         </div>
       </div>
+      {% endif %}
       <div id="attachments-list">
         <p class="text-dim" style="font-size:12px;margin:0">Loading...</p>
       </div>
@@ -3239,7 +4052,6 @@ window._psSettlement = {{ post_show_settlement | tojson }};
 }
 .labor-day-date { width: 150px; }
 .labor-day-actions { display: flex; gap: 6px; align-items: center; }
-.labor-day-preset { max-width: 170px; }
 .labor-day-pm-wrap { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .labor-day-pm-wrap label {
   font-size: 10px; font-weight: 700; letter-spacing: .06em;
@@ -3892,28 +4704,28 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     tr.innerHTML = `
       ${RESTRICTED ? '' : '<td style="text-align:center"><input type="checkbox" class="labor-row-check"></td>'}
       <td><select class="field-input field-input-sm labor-field" data-field="position_id" ${RESTRICTED ? 'disabled' : ''}></select></td>
-      <td><input type="text" class="field-input field-input-sm labor-field" data-field="in_time" value="${lr.in_time || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}></td>
+      <td><input type="text" class="field-input field-input-sm labor-field" data-field="in_time" value="${_esc(lr.in_time || '')}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}></td>
       <td class="labor-stack-cell">
         <div class="labor-stack-row" title="Lunch 1 start">
           <span class="labor-stack-tag">S</span>
-          <input type="text" class="field-input field-input-sm labor-field" data-field="break_start"  value="${lr.break_start  || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
+          <input type="text" class="field-input field-input-sm labor-field" data-field="break_start"  value="${_esc(lr.break_start  || '')}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
         </div>
         <div class="labor-stack-row" title="Lunch 1 end">
           <span class="labor-stack-tag">E</span>
-          <input type="text" class="field-input field-input-sm labor-field" data-field="break_end"    value="${lr.break_end    || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
+          <input type="text" class="field-input field-input-sm labor-field" data-field="break_end"    value="${_esc(lr.break_end    || '')}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
         </div>
       </td>
       <td class="labor-stack-cell">
         <div class="labor-stack-row" title="Lunch 2 start">
           <span class="labor-stack-tag">S</span>
-          <input type="text" class="field-input field-input-sm labor-field" data-field="break2_start" value="${lr.break2_start || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
+          <input type="text" class="field-input field-input-sm labor-field" data-field="break2_start" value="${_esc(lr.break2_start || '')}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
         </div>
         <div class="labor-stack-row" title="Lunch 2 end">
           <span class="labor-stack-tag">E</span>
-          <input type="text" class="field-input field-input-sm labor-field" data-field="break2_end"   value="${lr.break2_end   || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
+          <input type="text" class="field-input field-input-sm labor-field" data-field="break2_end"   value="${_esc(lr.break2_end   || '')}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}>
         </div>
       </td>
-      <td><input type="text" class="field-input field-input-sm labor-field" data-field="out_time" value="${lr.out_time || ''}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}></td>
+      <td><input type="text" class="field-input field-input-sm labor-field" data-field="out_time" value="${_esc(lr.out_time || '')}" placeholder="HH:MM" pattern="[0-2][0-9]:[0-5][0-9]" maxlength="5" ${RESTRICTED ? 'disabled' : ''}></td>
       <td><select class="field-input field-input-sm labor-field" data-field="requested_name" ${RESTRICTED ? 'disabled' : ''}></select></td>
       <td style="text-align:center" title="Set by the labor scheduler"><input type="checkbox" class="labor-is-scheduled" disabled ${lr.is_scheduled ? 'checked' : ''}></td>
       <td class="labor-scheduled-tech" title="Set by the labor scheduler"></td>
@@ -3963,6 +4775,28 @@ window._psSettlement = {{ post_show_settlement | tojson }};
 
   const _LABOR_PUT_FIELDS = ['position_id', 'in_time', 'out_time', 'break_start', 'break_end',
                              'break2_start', 'break2_end', 'requested_name'];
+  const _LABOR_TIME_FIELDS = ['in_time', 'break_start', 'break_end', 'break2_start', 'break2_end', 'out_time'];
+  /* A time cell as HH:MM ("7pm" → 19:00, "930" → 09:30, "12:5" → 12:05),
+     '' when blank, or null when it isn't a time — the server refuses free
+     text. One parser for every labor editor: app.js laborTimeHHMM(). */
+  function _laborTimeValue(raw) { return laborTimeHHMM(raw); }
+  /* Before a save: normalise the row's EDITED time cells; one that still
+     isn't a time goes back to the saved value (else it would fail every
+     later save of the row) and a toast says so. */
+  function _laborNormalizeTimes(tr) {
+    const base = tr._laborBase || {};
+    _LABOR_TIME_FIELDS.forEach(f => {
+      const el = tr.querySelector(`[data-field="${f}"]`);
+      if (!el || el.value === (base[f] ?? '')) return;
+      const v = _laborTimeValue(el.value);
+      if (v === null) {
+        showSaveToast(`✗ "${el.value.trim()}" isn't a time — use HH:MM (24-hour)`, 'error');
+        el.value = base[f] ?? '';
+      } else if (v !== el.value) {
+        el.value = v;
+      }
+    });
+  }
   /* {field: value} of a labor row's fields that differ from its baseline. */
   function _laborRowChanges(tr, overrides) {
     const base = tr._laborBase || {};
@@ -4012,24 +4846,20 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     header.className = 'labor-day-header';
     const dayInfo = (window._laborDaysMap || {})[date] || {};
     header.innerHTML = `
-      <span class="labor-day-label">${date ? _dayLabel(date).toUpperCase() : 'UNSCHEDULED'}</span>
-      <input type="date" class="field-input field-input-sm labor-day-date" value="${date || ''}" ${RESTRICTED ? 'disabled' : ''} title="Work date for this day">
+      <span class="labor-day-label">${date ? _esc(_dayLabel(date).toUpperCase()) : 'UNSCHEDULED'}</span>
+      <input type="date" class="field-input field-input-sm labor-day-date" value="${_esc(date || '')}" ${RESTRICTED ? 'disabled' : ''} title="Work date for this day">
       <span class="labor-day-pm-wrap" title="PM on duty for this day — pick one when another PM covers the show for the day. Blank = the show's main PM.">
         <label>Day PM</label>
         <select class="field-input field-input-sm labor-day-pm" ${RESTRICTED ? 'disabled' : ''}
                 onchange="onLaborDayPmChange(this)"></select>
       </span>
       <input type="text" class="field-input field-input-sm labor-day-notes"
-             value="${_esc(dayInfo.day_notes || '')}" ${RESTRICTED ? 'disabled' : ''}
+             value="${_esc(dayInfo.day_notes || '')}" ${RESTRICTED ? 'readonly' : ''}
              placeholder="Day notes — shown on the scheduler &amp; Labor Overview"
              title="Notes for this show on this day only"
              onchange="onLaborDayNotesChange(this)">
-      ${RESTRICTED ? '' : `
-        <div class="labor-day-actions">
-          ${_laborPresetSelectHtml()}
-          <button type="button" class="btn btn-xs btn-ghost" onclick="cloneLaborDay(this)" title="Copy all rows to another date">Clone to…</button>
-          <button type="button" class="btn btn-xs btn-danger-ghost" onclick="deleteLaborDay(this)" title="Delete this day and all its rows">Delete Day</button>
-        </div>
+      ${(RESTRICTED || !window.CAN_USE_SHOW_TOOLS) ? '' : `
+        <div class="labor-day-actions">${ToolsMenu.html('labor-day', {title: 'Day tools'})}</div>
       `}
     `;
     block.appendChild(header);
@@ -4166,12 +4996,22 @@ window._psSettlement = {{ post_show_settlement | tojson }};
   /* ── Per-day covering PM + day notes (show_labor_days) ─────────────────── */
   let _pmNamesList = null;
 
+  /* Re-read every day's PM / notes → true. An error reply (503 / 403 come
+     back as JSON too) keeps the map this page has → false, so a caller
+     never acts on an empty map that only means "couldn't ask". */
   async function _loadLaborDays() {
     try {
       const r = await fetch(`/shows/${SHOW_ID}/labor-days`);
       const data = await r.json();
-      window._laborDaysMap = data.days || {};
-    } catch (e) { window._laborDaysMap = window._laborDaysMap || {}; }
+      if (!r.ok || !data || typeof data.days !== 'object' || data.days === null) {
+        throw new Error(String(r.status));
+      }
+      window._laborDaysMap = data.days;
+      return true;
+    } catch (e) {
+      window._laborDaysMap = window._laborDaysMap || {};
+      return false;
+    }
   }
 
   async function _loadPMNames() {
@@ -4208,6 +5048,9 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     }
   }
 
+  /* PUT one day's PM / notes → true; false once a toast has said why (the
+     server's own message, e.g. the per-show day cap), so callers add no
+     toast of their own on failure. */
   async function _saveLaborDay(workDate, payload) {
     if (!workDate) { showSaveToast('✗ Set the day\'s date first', 'error'); return false; }
     try {
@@ -4216,29 +5059,37 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(Object.assign({ work_date: workDate }, payload)),
       });
-      if (!r.ok) return false;
-      const data = await r.json();
+      const data = await r.json().catch(() => null);
+      if (!r.ok || !data) {
+        showSaveToast('✗ ' + ((data && data.error) || 'Save failed'), 'error');
+        return false;
+      }
       window._laborDaysMap = window._laborDaysMap || {};
       if (data.day && (data.day.cover_pm || data.day.day_notes)) {
         window._laborDaysMap[workDate] = { cover_pm: data.day.cover_pm, day_notes: data.day.day_notes };
       } else {
         delete window._laborDaysMap[workDate];
       }
+      // Same value as the Production Schedule's Day PM bar (3.35.0).
+      if ('cover_pm' in payload && typeof window.schedDayPmExternal === 'function') {
+        window.schedDayPmExternal(workDate, (data.day && data.day.cover_pm) || '');
+      }
       return true;
-    } catch (e) { return false; }
+    } catch (e) { showSaveToast('✗ Network error', 'error'); return false; }
   }
 
+  /* A failed save puts the control back to what the server holds. */
   async function onLaborDayPmChange(select) {
-    const block = select.closest('.labor-day');
-    const ok = await _saveLaborDay(block.dataset.workDate, { cover_pm: select.value });
-    showSaveToast(ok ? '✓ Day PM saved' : '✗ Save failed', ok ? undefined : 'error');
+    const date = select.closest('.labor-day').dataset.workDate;
+    if (await _saveLaborDay(date, { cover_pm: select.value })) showSaveToast('✓ Day PM saved');
+    else _buildLaborDayPmSelect(select, ((window._laborDaysMap || {})[date] || {}).cover_pm || '');
   }
   window.onLaborDayPmChange = onLaborDayPmChange;
 
   async function onLaborDayNotesChange(input) {
-    const block = input.closest('.labor-day');
-    const ok = await _saveLaborDay(block.dataset.workDate, { day_notes: input.value.trim() });
-    showSaveToast(ok ? '✓ Day notes saved' : '✗ Save failed', ok ? undefined : 'error');
+    const date = input.closest('.labor-day').dataset.workDate;
+    if (await _saveLaborDay(date, { day_notes: input.value.trim() })) showSaveToast('✓ Day notes saved');
+    else input.value = ((window._laborDaysMap || {})[date] || {}).day_notes || '';
   }
   window.onLaborDayNotesChange = onLaborDayNotesChange;
 
@@ -4254,6 +5105,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
   async function _putLabor(rid, fields) {
     const tr = document.querySelector(`tr[data-rid="${rid}"]`);
     if (!tr) return;
+    _laborNormalizeTimes(tr);
     const changes = _laborRowChanges(tr, fields);
     if (!Object.keys(changes).length) return;
     const ok = await _putLaborChanges(tr, changes);
@@ -4275,30 +5127,51 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     } catch (_) { window._laborPresets = window._laborPresets || []; }
   }
 
-  /* "Apply preset…" dropdown for a day-block header ('' when no presets exist) */
-  function _laborPresetSelectHtml() {
-    const presets = window._laborPresets || [];
-    if (!presets.length) return '';
-    return `<select class="field-input field-input-sm labor-day-preset"
-                    onchange="applyLaborPreset(this)"
-                    title="Append a preset's standing positions to this day">
-      <option value="">Apply preset…</option>
-      ${presets.map(p => `<option value="${p.id}">${_esc(p.name)} (${p.row_count})</option>`).join('')}
-    </select>`;
+  /* ── Day Tools menu (3.35.0) ─────────────────────────────────────
+     Each day header's "Tools ▾" (app.js ToolsMenu): Apply preset ▸,
+     Clone to…, Sort by call time, Delete Day. Built when it opens, so the
+     preset list is whatever _loadLaborPresets() last fetched. The menu
+     lives inside the .labor-day block; every tool gets the block. */
+  function _laborBlockOf(el) {
+    if (!el) return null;
+    return el.classList && el.classList.contains('labor-day') ? el : el.closest('.labor-day');
   }
+  function _laborToolsOf(block) { return block ? block.querySelector('.labor-day-actions .tools-menu') : null; }
 
-  async function applyLaborPreset(sel) {
-    const pid = sel.value;
-    sel.value = '';
+  ToolsMenu.register('labor-day', (wrap) => {
+    const block = _laborBlockOf(wrap);
+    const presets = window._laborPresets || [];
+    return [
+      {group: 'Apply preset',
+       empty: 'No presets yet — Settings → Job Positions',
+       items: presets.map(p => ({
+         label: `${p.name} (${p.row_count})`,
+         title: 'Append this preset\'s standing positions to this day',
+         onSelect: () => applyLaborPreset(p.id, block)}))},
+      {separator: true},
+      {label: 'Clone to…', title: 'Copy all rows to another date', onSelect: () => cloneLaborDay(block)},
+      {label: 'Sort by call time', title: 'Order this day\'s requests by In time (blank times last)',
+       onSelect: () => sortLaborDayByCallTime(block)},
+      {separator: true},
+      {label: 'Delete Day', danger: true, title: 'Delete this day and all its rows',
+       onSelect: () => deleteLaborDay(block)},
+    ];
+  });
+
+  async function applyLaborPreset(presetId, blockEl) {
+    const pid = presetId;
     if (!pid) return;
-    const block = sel.closest('.labor-day');
-    const workDate = block?.dataset.workDate || '';
+    const block = _laborBlockOf(blockEl);
+    if (!block) return;
+    const workDate = block.dataset.workDate || '';
     if (!workDate) { alert('Set a date on this day before applying a preset.'); return; }
     const preset = (window._laborPresets || []).find(p => String(p.id) === String(pid));
     const label = preset ? `"${preset.name}" (${preset.row_count} request${preset.row_count === 1 ? '' : 's'})` : 'this preset';
     if (!confirm(`Add ${label} to ${workDate}? Existing rows are kept.`)) return;
+    const tools = _laborToolsOf(block);
+    ToolsMenu.setBusy(tools, 'Applying…');
     try {
-      const resp = await fetch(`/shows/${SHOW_ID}/labor-presets/${pid}/apply`, {
+      const resp = await fetch(`/shows/${SHOW_ID}/labor-presets/${encodeURIComponent(pid)}/apply`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({work_date: workDate}),
@@ -4308,6 +5181,73 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       showSaveToast(`✓ ${d.created} request${d.created === 1 ? '' : 's'} added`);
       await _refreshLaborData();
     } catch (_) { alert('Network error.'); }
+    finally { ToolsMenu.setBusy(tools, null); }
+  }
+
+  /* Sort by call time (3.35.0): order ONE day's requests by In time —
+     earliest first, an unreadable time after the readable ones, blank
+     last, ties keep their order — then save the order. Only THAT day's
+     ids are posted; the server slots them into its own show-wide order, so
+     a stale tab can't put back an old order on another day (and a 409
+     means this day changed elsewhere → reload). */
+  function _laborCallKey(tr) {
+    const raw = (tr.querySelector('[data-field="in_time"]')?.value || '').trim();
+    if (!raw) return 20000;
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(parseTimeToHHMM(raw) || ''));
+    if (!m) return 10000;
+    const h = parseInt(m[1], 10), mi = parseInt(m[2], 10);
+    return (h < 24 && mi < 60) ? h * 60 + mi : 10000;
+  }
+
+  async function sortLaborDayByCallTime(blockEl) {
+    const block = _laborBlockOf(blockEl);
+    const tbody = block?.querySelector('tbody');
+    if (!tbody) return;
+    const rows = Array.from(tbody.querySelectorAll('tr[data-rid]'));
+    const sorted = rows.map((tr, i) => ({tr, i, k: _laborCallKey(tr)}))
+                       .sort((a, b) => (a.k - b.k) || (a.i - b.i));
+    if (sorted.every((x, i) => x.i === i)) {
+      showSaveToast(rows.length > 1 ? 'Already in call-time order' : 'Nothing to sort');
+      return;
+    }
+    sorted.forEach(x => tbody.appendChild(x.tr));
+    const tools = _laborToolsOf(block);
+    ToolsMenu.setBusy(tools, 'Sorting…');
+    try {
+      const d = await _saveLaborOrder(block);
+      if (d && d.success) showSaveToast('✓ Sorted by call time');
+      else {
+        alert((d && d.error) || 'Could not save the new order.');
+        await _refreshLaborData();   // show what the server holds
+      }
+    } finally { ToolsMenu.setBusy(tools, null); }
+  }
+
+  /* POST one day block's order. Serialized, and the id list is read when
+     the request is SENT, so the last save always carries the newest order
+     (two quick sorts can't land out of order). */
+  let _laborOrderChain = Promise.resolve();
+  function _saveLaborOrder(block) {
+    const run = async () => {
+      const ids = Array.from(block.querySelectorAll('tbody tr[data-rid]'))
+        .map(tr => parseInt(tr.dataset.rid, 10)).filter(n => Number.isInteger(n) && n > 0);
+      try {
+        const resp = await fetch(`/shows/${SHOW_ID}/labor-requests/reorder`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({work_date: block.dataset.workDate || '', request_ids: ids}),
+        });
+        const d = await resp.json().catch(() => ({}));
+        if (!resp.ok && d.success === undefined) d.success = false;
+        if (!resp.ok && !d.error) d.error = `Could not save the new order (HTTP ${resp.status}).`;
+        return d;
+      } catch (_) {
+        return {success: false, error: 'Network error — the new order was not saved.'};
+      }
+    };
+    const p = _laborOrderChain.then(run, run);
+    _laborOrderChain = p.catch(() => {});
+    return p;
   }
 
   async function initLaborTab() {
@@ -4326,8 +5266,13 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       byDate[d].push(lr);
     });
     // Ensure a day block exists for every date in the load-in → load-out
-    // range, even if no labor rows have been added for it yet.
+    // range, even if no labor rows have been added for it yet — and for
+    // every day holding a Day PM / notes, so one set on a day outside the
+    // range (or left by another surface) can always be seen and cleared.
     _loadRangeDates().forEach(d => { if (!(d in byDate)) byDate[d] = []; });
+    Object.entries(window._laborDaysMap || {}).forEach(([d, info]) => {
+      if (info && (info.cover_pm || info.day_notes) && !(d in byDate)) byDate[d] = [];
+    });
     const dates = Object.keys(byDate).sort((a, b) => {
       if (!a && b) return -1;
       if (a && !b) return 1;
@@ -4373,7 +5318,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     const out = [];
     const cur = new Date(d1);
     while (cur <= d2) {
-      out.push(cur.toISOString().slice(0, 10));
+      out.push(localIsoDate(cur));   // local date — toISOString() is UTC (a day early east of UTC)
       cur.setDate(cur.getDate() + 1);
     }
     return out;
@@ -5036,7 +5981,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       just.maxLength = 500; just.placeholder = 'Justification (required)';
       just.dataset.field = 'notes';
       just.value = r.notes || '';
-      if (RESTRICTED) just.disabled = true;
+      if (RESTRICTED) just.readOnly = true;
       just.addEventListener('change', () => _savePostShowLabor(r.id, { notes: just.value }, tr));
       wrap.appendChild(crewSel); wrap.appendChild(just);
       infoTd.appendChild(wrap);
@@ -5424,12 +6369,24 @@ window._psSettlement = {{ post_show_settlement | tojson }};
 
   /* ── Day-level actions ───────────────────────────────── */
 
+  /* A real calendar date written YYYY-MM-DD (what a DATE column takes). */
+  function _laborDateOk(s) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
+    if (!m) return false;
+    const d = new Date(+m[1], +m[2] - 1, +m[3]);
+    return d.getFullYear() === +m[1] && d.getMonth() === +m[2] - 1 && d.getDate() === +m[3];
+  }
+
   async function addLaborDay() {
     const today = localTodayIso();
     const date = prompt('Work date for the new day (YYYY-MM-DD):', today);
     if (date === null) return;
     const trimmed = (date || '').trim();
     // Allow empty string → Unscheduled bucket
+    if (trimmed && !_laborDateOk(trimmed)) {
+      alert(`"${trimmed}" isn't a date — use YYYY-MM-DD.`);
+      return;
+    }
     const container = document.getElementById('labor-days-container');
     // If a block already exists for this date, scroll to it and return
     const existing = container.querySelector(`.labor-day[data-work-date="${CSS.escape(trimmed)}"]`);
@@ -5466,8 +6423,9 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     tr.querySelector('select[data-field="position_id"]')?.focus();
   }
 
-  async function cloneLaborDay(btn) {
-    const block = btn.closest('.labor-day');
+  async function cloneLaborDay(blockEl) {
+    const block = _laborBlockOf(blockEl);
+    if (!block) return;
     const fromDate = block.dataset.workDate || '';
     if (!fromDate) { alert('Set a date on this day before cloning.'); return; }
     const suggested = (() => {
@@ -5475,33 +6433,33 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         const [y,m,d] = fromDate.split('-').map(Number);
         const dt = new Date(y, m-1, d);
         dt.setDate(dt.getDate() + 1);
-        return dt.toISOString().slice(0,10);
+        return localIsoDate(dt);   // local date (toISOString() is UTC)
       } catch(e) { return ''; }
     })();
     const toDate = prompt(`Clone all rows from ${fromDate} to which date? (YYYY-MM-DD)`, suggested);
     if (toDate === null) return;
     const trimmed = (toDate || '').trim();
     if (!trimmed) { alert('A target date is required.'); return; }
+    if (!_laborDateOk(trimmed)) { alert(`"${trimmed}" isn't a date — use YYYY-MM-DD.`); return; }
     if (trimmed === fromDate) { alert('Target date must differ from source.'); return; }
 
     const rows = Array.from(block.querySelectorAll('tbody tr'));
     if (!rows.length) { alert('Nothing to clone — this day has no rows yet.'); return; }
 
-    btn.disabled = true;
-    btn.textContent = 'Cloning…';
+    const tools = _laborToolsOf(block);
+    ToolsMenu.setBusy(tools, 'Cloning…');
     try {
       for (const tr of rows) {
         const payload = {
           work_date:      trimmed,
           position_id:    tr.querySelector('[data-field="position_id"]').value || null,
-          in_time:        tr.querySelector('[data-field="in_time"]').value || '',
-          out_time:       tr.querySelector('[data-field="out_time"]').value || '',
-          break_start:    tr.querySelector('[data-field="break_start"]').value || '',
-          break_end:      tr.querySelector('[data-field="break_end"]').value || '',
-          break2_start:   tr.querySelector('[data-field="break2_start"]')?.value || '',
-          break2_end:     tr.querySelector('[data-field="break2_end"]')?.value || '',
           requested_name: tr.querySelector('[data-field="requested_name"]').value || '',
         };
+        // Copy the times billing can read; a cell that isn't a time
+        // (old free text) is cloned blank — the server refuses it.
+        _LABOR_TIME_FIELDS.forEach(f => {
+          payload[f] = _laborTimeValue(tr.querySelector(`[data-field="${f}"]`)?.value) || '';
+        });
         const resp = await fetch(`/shows/${SHOW_ID}/labor-requests`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
@@ -5518,20 +6476,66 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     } catch (e) {
       alert('Clone failed: ' + e.message);
     } finally {
-      btn.disabled = false;
-      btn.textContent = 'Clone to…';
+      // A successful clone re-renders every block; this only matters when
+      // the clone failed and the old block (and its menu) is still here.
+      ToolsMenu.setBusy(tools, null);
     }
   }
 
-  async function deleteLaborDay(btn) {
-    const block = btn.closest('.labor-day');
+  /* Delete Day: every request on the day AND its Day PM / notes
+     (show_labor_days) — left behind, a cover PM on a day with no block
+     would still feed My Shows, Search and the schedule. The block goes
+     only once every DELETE answered ok (404 = already gone); anything
+     else (503, expired session → 302 → 405) reloads the list instead. */
+  async function deleteLaborDay(blockEl) {
+    const block = _laborBlockOf(blockEl);
+    if (!block) return;
     const date = block.dataset.workDate || '';
     const rows = Array.from(block.querySelectorAll('tbody tr'));
     const label = date ? _dayLabel(date) : 'Unscheduled';
-    if (rows.length && !confirm(`Delete ${label} and all ${rows.length} labor request${rows.length===1?'':'s'} on it?`)) return;
-    for (const tr of rows) {
-      const rid = tr.dataset.rid;
-      if (rid) await fetch(`/shows/${SHOW_ID}/labor-requests/${rid}`, {method:'DELETE'});
+    // Someone may have set a Day PM since — and a day whose PM / notes
+    // can't be checked is never deleted (they'd be left behind, unseen).
+    if (date && !(await _loadLaborDays())) {
+      alert("Couldn't check this day's Day PM / notes — nothing was deleted. Try again in a moment.");
+      return;
+    }
+    const info = (date && (window._laborDaysMap || {})[date]) || {};
+    const hasInfo = !!(info.cover_pm || info.day_notes);
+    if (rows.length || hasInfo) {
+      const what = [];
+      if (rows.length) what.push(`all ${rows.length} labor request${rows.length === 1 ? '' : 's'} on it`);
+      if (hasInfo) what.push('its Day PM / notes');
+      if (!confirm(`Delete ${label} and ${what.join(' and ')}?`)) return;
+    }
+    const tools = _laborToolsOf(block);
+    ToolsMenu.setBusy(tools, 'Deleting…');
+    let failed = 0, lastStatus = '';
+    try {
+      for (const tr of rows) {
+        const rid = tr.dataset.rid;
+        if (!rid) continue;
+        const r = await fetch(`/shows/${SHOW_ID}/labor-requests/${rid}`, {method: 'DELETE'});
+        if (!r.ok && r.status !== 404) { failed++; lastStatus = r.status; }
+      }
+    } catch (e) {
+      ToolsMenu.setBusy(tools, null);
+      alert('Network error — some requests on this day may not have been deleted.');
+      await _refreshLaborData();
+      return;
+    }
+    if (failed) {
+      ToolsMenu.setBusy(tools, null);
+      alert(`${failed} request${failed === 1 ? '' : 's'} on this day could not be deleted `
+            + `(HTTP ${lastStatus}). The list will reload.`);
+      await _refreshLaborData();
+      return;
+    }
+    if (hasInfo && !(await _saveLaborDay(date, {cover_pm: '', day_notes: ''}))) {
+      ToolsMenu.setBusy(tools, null);
+      alert(`${rows.length ? 'The requests were deleted, but the' : 'The'} day's Day PM / notes `
+            + 'could not be cleared. The list will reload.');
+      await _refreshLaborData();
+      return;
     }
     block.remove();
     _updateEmptyHint();
@@ -5564,6 +6568,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     let ok = 0, fail = 0;
     for (const tr of rows) {
       if (!tr.dataset.rid) continue;
+      _laborNormalizeTimes(tr);
       const changes = _laborRowChanges(tr);
       if (!Object.keys(changes).length) continue;   // untouched rows aren't re-sent
       if (await _putLaborChanges(tr, changes)) ok++; else fail++;
@@ -5711,7 +6716,7 @@ async function emailPdf(showId, pdfType, btn) {
     if (typeof saveActive === 'function') saveActive();
     else if (typeof saveAdvance === 'function') saveAdvance();
   });
-  nav.appendChild(saveBtn);
+  if (!RESTRICTED) nav.appendChild(saveBtn);   // view only: nothing to save
 
   function setActive(activeBtn) {
     nav.querySelectorAll('.form-side-nav-link').forEach(b => {

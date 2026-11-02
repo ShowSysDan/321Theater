@@ -750,7 +750,9 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
 - **Keep `/api/session/status` side-effect-free**: it must never mark the
   session modified or set cookies — it's polled by idle tabs and must not
   keep sessions alive by itself (`/api/*` is also excluded from hover
-  prefetch; keep it that way).
+  prefetch; keep it that way). Since 3.35.0 `_refresh_session_roles` skips
+  its 5-minute refresh on that endpoint (it only ENDS a deleted/locked
+  account's session there), so the watchdog's own poll no longer slides it.
 - Syslog events: `SESSION_EXPIRED` (expired sid presented, fires once),
   `SESSION_HARVEST count=N` (hourly sweep), `SESSION_EXTEND`, and
   `GATE_SESSION_EXPIRED` in the gateway journal (HTML navigations only —
@@ -894,7 +896,7 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   (raw exception text can carry internal hosts).
 
 ## My Shows (3.7.0)
-- `/my-shows` = the Home board (`_render_show_board(mine=True)`) narrowed to
+- `/my-shows` = the Shows board (`_render_show_board(mine=True)`) narrowed to
   ACTIVE shows where the user is the `production_manager` advance value or
   a `show_labor_days.cover_pm`. Both store the contact NAME, matched
   case/space-insensitively against the contacts linked to the user
@@ -1097,7 +1099,7 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   label hidden on mobile). Keep it `pointer-events: none`.
 
 ## Archived shows page + nav badges + glass layer (3.13.0)
-- Home (`_render_show_board`) no longer renders archived cards — only
+- The Shows board (`_render_show_board`, at `/shows` since 3.35.0) no longer renders archived cards — only
   `archived_count` for the **Archived** button; `/shows/archived`
   (`archived_shows_page`, `archived_shows.html`) is the archive with its own
   client-side search/date/venue filters and Restore/Delete forms.
@@ -1258,6 +1260,202 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   add a second storage path.
 - Post-Show Notes PDF: `sound_levels` joins the section list ONLY when there
   are captures, so other post-show PDFs stay byte-identical (export reuse).
+
+## Home day timeline + Shows board (3.35.0)
+- `/` = `index` (home.html + `static/js/home_timeline.js`, the day timeline);
+  the show board is endpoint `dashboard` at **`/shows`** (name kept so every
+  "back to the board" link works); `/dashboard` only redirects. "Land
+  somewhere" redirects (post-login, forced password change, viewer bounce,
+  error page, m-brand / m-tabbar) use `url_for('index')`. Sidebar order is
+  Home · Shows · My Shows · Search, hard-coded with `aria-current`.
+- Data: `GET /api/timeline?date=&include_test=` → `_timeline_day()`
+  (read-only, `_viewer_gate` blocks viewers — don't allowlist it). Times are
+  minutes from the viewed day's midnight; `1+HH:MM` / `24:30` = next day; an
+  end before its start crosses midnight; crew out ≤ in = overnight (same rule
+  as `_calc_hours`). The previous day's still-running items come along
+  (`from_prev`), so the candidate query looks at D−1 and D. Rows group
+  EXACTLY as the Schedule tab groups them (only shows with legacy
+  no-day_date rows go through `_build_schedule_days`). PM = `_pm_contacts_many`.
+- Page: ONE `.tl-scroll` box (sticky header + sticky axis need one scroll
+  container); ONE 30 s interval, stopped while hidden / on pagehide;
+  fetches sequence-guarded + aborted; render only when `data.date` is the
+  day shown. The axis stops at 06:00 next day (`RANGE_CAP`); items past it
+  are listed in the lane header, never drawn. Item links carry
+  `.no-prefetch`. PM links use `LaborDays.telHref/mailtoHref` (no local copy).
+- The `.tl-*` class names are shared with dashboard_view.html's Reservation
+  Timeline: Home's rules on those names are scoped `:where(.tl-phead)` /
+  `:where(.tl-scroll)` in style.css and mobile.css — keep new ones scoped.
+
+## #Tags + Search (find_module.py, 3.35.0) — sandboxed, query-time, read-only
+- `find_module.py` never imports app.py: ONE `find_module.register(app, …)`
+  (deps incl. `module_enabled`). It owns no table and never writes; all
+  routes are login_required GETs (/tags, /tags/<tag>, /search, /api/tags,
+  /api/shows/<id>/tags, /api/search, /api/search/editors), NOT in
+  `_VIEWER_ALLOWED_ENDPOINTS` (`tagify` prints plain text for viewers).
+- Tag grammar is identical in `TAG_RE` (Python), `TAG_PG_PATTERN` (PG, always
+  a bound parameter) and tags.js `tagRe()` (no lookbehind — old Safari);
+  `_tag_exact_re` / `_tag_exact_pg` test for ONE known tag. Change all
+  together and fuzz both engines. '#' + letter + [A-Za-z0-9_]* + '-word'
+  groups, not after [A-Za-z0-9_&/#], lowercased, ≤ 50 chars.
+- `_sources_sql()` is THE inventory of tagged/searchable text (one UNION
+  ALL). A new free-text field = a branch there + a FOCUS kind in tags.js.
+  Never index manager-only text (piano manager_notes), derived text (piano
+  schedule rows / rental lines, advance mirrors), hidden asset lines
+  (`is_hidden`), or piano notes while that module is off.
+- Bounded work: `_snippet` scans only its window; /tags renders at most
+  `TAGS_INDEX_MAX` pills; the show strip gets ≤ 40 tags + total; chips ≤ 30
+  per box; tag pages cap at 1000 newest occurrences; only the all-tags list
+  is cached (30 s, per process).
+- Deep links `/shows/<id>?tab=&focus=<kind>:<ref>` (`occ_link` ↔ tags.js
+  `FOCUS`, own-property lookup only). show_page whitelists `?tab=` via
+  `_SHOW_TABS` — a new show tab must be added there.
+- Chip strips (`div.tag-chips`) never carry data-key / .adv-field /
+  .sched-cell / .notes-field (sync + save code would read them); ONE
+  delegated input listener + ONE 2 s sweep (skipped while hidden).
+- Search: PM via `_pm_contacts_many` + `_name_key`; "Edited by" = audit_log
+  (minus FORM_SAVE) ∪ form_history.saved_by, only for unlocked approved
+  users; LIKE input escaped; q ≤ 200, ≤ 5 tags, ≤ 500 results.
+
+## Tools menus (3.35.0) — one action-menu component
+- `window.ToolsMenu` (app.js) is THE dropdown: JS `ToolsMenu.html()` and the
+  `tools_menu()` macro in show.html render identical markup — change both.
+  Items are built when the menu OPENS by a registered provider (never
+  pre-render option lists — that's how the old selects went stale); labels
+  via textContent only. The panel is `position:fixed` inside the header DOM
+  (escapes `overflow:hidden`; no transform/filter on ancestors); z-index
+  1350. ONE set of delegated global listeners for every menu.
+  `ToolsMenu.setBusy()` for busy state.
+- Who gets menus: `show_tools_ok` / `window.CAN_USE_SHOW_TOOLS`.
+- Schedule tab menu: Import / Save day as template / History. Day menu:
+  Apply template / Copy from day / Pull show time(s) / Sort by time. Labor
+  day menu: Apply preset / Clone to… / Sort by call time / Delete Day. Every
+  item calls the original handler.
+- **Sort by call time is per day**: `POST …/labor-requests/reorder` takes
+  `{work_date, request_ids}` for ONE day; the server locks the show, 409s
+  unless the ids are exactly that day's rows, and slots them into ITS
+  order. Never post the whole show's order (a stale tab would undo other
+  days).
+- Delete Day reports failed DELETEs, keeps the block, and clears that day's
+  Day PM / notes (it re-reads /labor-days first and deletes nothing if it
+  can't). The Labor tab shows a block for every date with a Day PM / notes.
+
+## Labor times are HH:MM (3.35.0)
+- Every `labor_requests` / `labor_preset_rows` time write goes through
+  `_labor_time()` / `_labor_times()`: 'HH:MM', '' or a 400 naming the column
+  (show add/update, preset add/edit/apply, Labor Scheduler add + PUT).
+  `_normalize_perf_time()` returns unreadable text unchanged — never store
+  its output directly. Legacy free text already stored is tolerated, not
+  rewritten. Client: app.js `laborTimeHHMM()` is the ONE parser. Every
+  display escapes labor times (they reached `value="…"` raw before).
+
+## Day PM + PM contact cards (3.35.0)
+- ONE value, two pickers: the schedule's Day PM bar and the Labor tab's Day
+  PM are `show_labor_days.cover_pm` (a contact NAME), written only by
+  `PUT /shows/<id>/labor-days` (serialized per show with `FOR UPDATE`,
+  ≤ 400 days per show). Never schedule meta: `.sched-daypm-select` has no
+  `.sched-meta`, and `bindScheduleForm` routes its events away from
+  `scheduleSave`. `_schedDayPmToLabor` / `window.schedDayPmExternal` keep the
+  two tabs in step.
+- PM resolution is ONLY `_pm_contacts_many` / `_pm_contacts_for_show` /
+  `_pm_contact_for_day` (cover PM for the day, else the advance
+  `production_manager`; '' / '-' = none). Names match contacts by
+  `_name_key`; in SQL use `init_db.pg_name_key(expr)` (Python's whitespace
+  set spelled out — `[[:space:]]` misses NBSP), which `idx_contacts_name_key`
+  indexes exactly.
+- `_schedule_sync_hash` covers cover PMs, the advance PM and the matched
+  contacts' title/phone/email, so contact edits reach open editors.
+- Links: Jinja `tel_href` / `mailto_href` and app.js `LaborDays.telHref` /
+  `mailtoHref` must give identical output for any input (shared
+  `_link_text` / `_linkText` normalisation, length caps — the old regex was
+  quadratic); contact text via `LaborDays.contactInto` (textContent only).
+- Schedule PDF: the PM is resolved in `_build_schedule_pdf` before any
+  render, printed as `<tr class="day-pm-row">` in each day's thead (never
+  `data-sched-row`); nothing for a day with no PM (PM-less shows stay
+  byte-identical); layout section `day_pm`. Sign-In Sheet: security_module
+  reads the PM only via the injected `pm_contacts_for_show` dep.
+
+## Add Asset browser (3.35.0) — search-first, browsable, PM-safe
+- `#asset-search-modal`: a non-empty query = one ranked list; empty = the
+  Categories → Groups → Items → Details browser. The catalog is ONLY
+  `GET /api/asset-types` with NO params (filters hide_from_pm for everyone,
+  managers too); never `include_hidden` or the manager-only lists from the
+  show page. Without a manager's include_hidden it returns only
+  `_ASSET_PICKER_COLS` (no supplier / S3 keys / hashes).
+- Kit = `is_system || is_package` everywhere (a package is never
+  "Consumable"). `GET /api/asset-types/<id>/components` returns picker-level
+  fields only (hidden components listed by name; a hidden/retired KIT 404s
+  for non-managers). `used-in` hides retired / hide_from_pm kits from
+  non-managers.
+- Unit `<option>` text is user data: always escape it (Chromium's
+  customizable `<select>` keeps `<img>` inside an option). Every path that
+  shows no fetched availability bumps the fetch seq (`_availFetchSeq`,
+  `_apprAvailSeq`) so a late response can't rewrite the dialog.
+- ONE delegated listener set bound once (`_abBind`); only the last
+  category/group persists (`localStorage['show.assetBrowser.v1']`, try/catch).
+
+## Document viewers + background requests (3.35.0)
+- Anything base.html / app.js requests on EVERY signed-in page must be in
+  `_VIEWER_ALLOWED_ENDPOINTS` or not run for viewers. Allowed:
+  `api_session_status`, `api_session_extend`, `set_view_mode` (no show
+  data). Viewers get no notification bell and no "View site as"; app.js
+  starts the bell poll only when `#notif-bell-btn` exists.
+
+## PDF Designer preview (3.35.0)
+- The advance / schedule / post-show builders return a 6-tuple and take
+  `preview=True`: render the current content with the SAVED layout and
+  write nothing (no export_log row, no version bump, no stored-export
+  reuse). The designer preview must always pass it.
+
+## Public dashboards + read-only accounts (3.35.0)
+- `/d/<slug>` (`public_dashboard`): signed out — and for document viewers,
+  who get the same anonymous render — base.html renders `auth_content`, so
+  dashboard_view.html renders its body via `{{ self.content() }}` inside
+  `<main class="main-content public-dash">` (never `.app-layout`: that starts
+  app.js's session watchdog). The anonymous page gets only
+  `_PUBLIC_DASH_TYPE_KEYS` from asset_types (never costs / supplier /
+  storage); `ANON` renders show names and asset links as plain text;
+  `saveWidgets()` runs only with `CAN_EDIT`. Viewers reach the widget data
+  endpoints (`_PUBLIC_DASH_DATA_ENDPOINTS`) only with a `?slug=`, and
+  `_dashboard_full_access()` (signed in AND not a viewer) decides the full
+  data shape. `localIsoDate()` / `localTodayIso()` are defined in base.html's
+  head for signed-out pages too.
+- Read-only: `show_page` / `_render_show_board` compute
+  `restricted = is_restricted or is_readonly` (is_restricted_user() is always
+  False), which drives Jinja `restricted` and the JS `RESTRICTED` — every use
+  of it gates an EDIT control. Role-gated buttons use the route's own rule
+  (`can_restore`, Mark as test, Settings → Shows `can_write`). View-only text
+  fields are `readonly` (scroll / select / copy), not `disabled`; blur
+  parsers and presence handlers skip readOnly targets. Never gate on
+  `is_app_*`.
+
+## View-only manager pages (3.35.1) — match each page to its routes' rule
+- `readonly_view` (inject_version) = `_readonly_guard`'s rule: is_readonly AND
+  not admin. Exposed as Jinja `readonly_view`, `window.READONLY_VIEW`,
+  `html.readonly-view` and the `.rv-hide` utility. Display only — the server
+  stays the authority.
+- A read-only account may still carry is_scheduler / is_asset_manager /
+  is_piano_manager, which opens those pages. Each such page hides its write
+  controls in Jinja AND turns its write handlers into no-ops under
+  `window.READONLY_VIEW`, shows `<span class="rv-badge">VIEW ONLY</span>`
+  (Settings tabs: a `.rv-note` line) — the shared rules in style.css, never a
+  per-page copy. Searches / filters / exports stay live.
+- **The app has two read-only rules — keep each page on its routes' one.**
+  `_readonly_guard` (role decorators) exempts admins; raw
+  `session.get('is_readonly')` checks (Labor Scheduler row PUT + create-show,
+  `/shows/<id>/labor-notes`, `/labor-days`, `_overhead_write_check`,
+  `show_advance_editor_required`, ~40 show-data routes) refuse read-only
+  admins too. So labor_scheduler.html `sched_view_only` / no-labor
+  `nl_view_only` = `readonly_view or session.is_readonly`, and overhead's
+  `can_edit = not is_readonly`. Pay-rate routes are `@admin_required`, so
+  their controls gate on `user.role == 'admin'`. Known gap (the owner's call,
+  not decided): a read-only admin on Asset Approvals still sees edits whose
+  routes 403, and the scheduler's add/DELETE line routes still let them write.
+- Piano: the three `@login_required` write routes (update / pin-unit /
+  cancel-request) call `_piano_readonly_refusal()` first, because
+  `_is_piano_manager()` never looks at is_readonly.
+- Asset Manager: `_roLockFields()` locks fields for read-only accounts and
+  turns an EMPTY date/month input into text showing "—" — only call it on
+  DOM rebuilt on each open.
 
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.

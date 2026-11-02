@@ -57,7 +57,7 @@
     </div>
     <div class="show-card-actions" style="padding:8px 12px">
       <a href="{{ url_for('show_page', show_id=s.id, tab='advance') }}" class="btn btn-sm btn-ghost">View</a>
-      {% if not restricted %}
+      {% if can_restore %}
       <form method="post" action="{{ url_for('restore_show', show_id=s.id) }}" style="display:inline">
         <button class="btn btn-sm btn-ghost">Restore</button>
       </form>
@@ -117,7 +117,7 @@
     });
     apply();
   }));
-  // ?q= deep link (e.g. from Home's search)
+  // ?q= deep link (e.g. from the Shows board's search)
   const q = new URLSearchParams(location.search).get('q');
   if (q) { search.value = q; apply(); }
 })();

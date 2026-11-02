@@ -69,6 +69,7 @@ import security_module  # security sign-in sheets — wired up near the bottom
 import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
 import spot_module  # Spot sound-level integration — wired up near the bottom
 import file_store  # S3 <-> PostgreSQL file redundancy + migration — wired up near the bottom
+from init_db import pg_name_key  # SQL twin of _name_key (idx_contacts_name_key's text)
 
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, session, jsonify, make_response, abort, send_file,
@@ -527,8 +528,16 @@ def inject_version():
     # guard: a page served from the browser's prefetch cache compares this
     # stamp against a fresh response's Date header — same clock on both sides,
     # so client clock skew can't cause false reloads (see base.html + app.js).
+    # readonly_view: the account can read but every write is refused — the
+    # exact rule of _readonly_guard (read-only flag, admins never read-only).
+    # Pages use it (Jinja `readonly_view`, JS window.READONLY_VIEW, CSS
+    # html.readonly-view) to hide write controls; it is display only, the
+    # server checks stay the authority.
+    readonly_view = bool(has_request_context() and session.get('user_id')
+                         and session.get('is_readonly')
+                         and session.get('user_role') != 'admin')
     return {'app_version': APP_VERSION, 'page_rendered_at': int(time.time()),
-            'test_mode': TEST_MODE}
+            'test_mode': TEST_MODE, 'readonly_view': readonly_view}
 
 
 # ── Mobile view mode ──────────────────────────────────────────────────────────
@@ -889,7 +898,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.34.1'
+APP_VERSION = '3.35.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -2117,9 +2126,10 @@ def _populate_session_from_user(user, ts=None):
     # admin role so it never affects a genuine (non-preview) session.
     # 3.29.0: the saved real role is re-taken from the DB here, so a preview
     # can never carry an admin role the DB no longer grants; a demoted admin's
-    # preview simply ends.
+    # preview simply ends. So does one whose account became a document viewer:
+    # the viewer gate overrides any preview and refuses its Exit button.
     if session.get('_view_as'):
-        if user['role'] == 'admin':
+        if user['role'] == 'admin' and not session['is_document_viewer']:
             for k in ('is_readonly', 'is_content_admin', 'is_labor_scheduler',
                       'is_scheduler', 'is_asset_manager', 'is_piano_manager'):
                 session['_real_' + k] = session[k]
@@ -2194,6 +2204,13 @@ def _refresh_session_roles():
     now = datetime.utcnow().timestamp()
     if now - last_check < 300:  # 5 minutes
         return
+    # The session watchdog's status poll must stay side-effect-free: a
+    # refresh marks the session modified, which slides expires_at, so the
+    # watchdog's own poll kept a session alive (on a document viewer's page
+    # it is the only poll). There, only END a deleted/locked account's
+    # session (the endpoint then answers authenticated=false); a live one is
+    # left for the next real request to refresh.
+    status_poll = request.endpoint == 'api_session_status'
     try:
         db = get_db()
         try:
@@ -2206,12 +2223,16 @@ def _refresh_session_roles():
             ).fetchone()
             if not user:
                 session.clear()
-                return redirect(url_for('login'))
+                return None if status_poll else redirect(url_for('login'))
             # An account locked mid-session is booted on the next refresh (≤5 min).
             if user['is_locked']:
                 session.clear()
+                if status_poll:
+                    return None
                 flash('This account has been locked. Contact an administrator.', 'error')
                 return redirect(url_for('login'))
+            if status_poll:
+                return None
             # Refresh last-connection so the path stays current if a user moves
             # between the LAN and the gateway mid-session (same session cookie).
             _record_connection(db, session['user_id'])
@@ -2383,6 +2404,26 @@ _VIEWER_ALLOWED_ENDPOINTS = frozenset({
     # page; before 3.2.0 the gate 403'd this, so viewers never saw a banner.
     # get_active_messages() still filters by audience (Doc Viewers group).
     'get_messages_api', 'dismiss_message',
+    # Session-expiry watchdog (app.js _initSessionWatch, every page): viewers'
+    # sessions expire like anyone's. Both carry no show data, and the status
+    # endpoint itself writes nothing. Before this the gate 403'd them, so
+    # viewers got no warning and a 403 in the console on every page.
+    'api_session_status', 'api_session_extend',
+    # "Mobile site / Desktop site" footer link: a cookie-only UI preference
+    # that isn't even login-gated (the login page has the switch too).
+    'set_view_mode',
+    # A public dashboard link (/d/<slug>) opens for anyone; a viewer gets the
+    # same signed-out page a visitor with no account gets.
+    'public_dashboard',
+})
+
+# Widget-data endpoints behind a public dashboard. A viewer may call them only
+# with a ?slug= (checked by _dashboard_data_access_ok like an anonymous call),
+# and gets the anonymous data shape (_dashboard_full_access is False).
+_PUBLIC_DASH_DATA_ENDPOINTS = frozenset({
+    'assets_availability_bulk', 'api_dashboard_shows_calendar',
+    'api_dashboard_skills_summary', 'api_dashboard_asset_calendar',
+    'api_dashboard_reservation_timeline',
 })
 
 
@@ -2401,6 +2442,9 @@ def _viewer_gate():
     # Optional per-user grant: document viewers may also reach the Show Calendar
     # page (and its data endpoint) when their account has it enabled.
     if ep in ('viewer_calendar', 'viewer_shows_calendar') and session.get('viewer_show_calendar'):
+        return None
+    # A public dashboard's widgets (the endpoint itself checks the slug).
+    if ep in _PUBLIC_DASH_DATA_ENDPOINTS and request.args.get('slug'):
         return None
     if ep.startswith('static'):
         return None
@@ -5501,7 +5545,7 @@ def _render_login():
 
 def _login_route():
     if 'user_id' in session:
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
 
     if request.method == 'POST':
         username = request.form.get('username', '').strip()
@@ -5539,7 +5583,7 @@ def _login_route():
             # (if any) becomes orphaned; the leader-gated run_hourly_maintenance
             # job sweeps expired app_sessions rows (this per-sid path only
             # deletes a row when that same sid is presented again).
-            next_url = request.form.get('next') or url_for('dashboard')
+            next_url = request.form.get('next') or url_for('index')
             session.clear()
             try:
                 session.sid = _secrets_mod.token_urlsafe(32)
@@ -5554,7 +5598,7 @@ def _login_route():
             syslog_logger.info(
                 f"LOGIN user={username} ip={request.remote_addr} via={_cpath}")
             # Prevent open redirect — only allow relative paths
-            next_url = _safe_local_path(next_url) or url_for('dashboard')
+            next_url = _safe_local_path(next_url) or url_for('index')
             # Force password change if still using default
             try:
                 _must_change = user['must_change_password']
@@ -5631,7 +5675,9 @@ def logout():
 def api_session_status():
     """Seconds until THIS app's session dies. Deliberately read-only toward
     the session: reading flask.session never marks it modified, so this poll
-    writes no cookie and no app_sessions row. Answers JSON for logged-out
+    writes no cookie and no app_sessions row (_refresh_session_roles skips
+    its 5-minute refresh here and only ends a deleted/locked account's
+    session). Answers JSON for logged-out
     callers too (authenticated=false is the watchdog's death signal) — a
     @login_required redirect-to-HTML would break the fetch()."""
     out = {
@@ -6127,7 +6173,7 @@ def admin_view_as_reset():
 def force_change_password():
     """Force password change screen (shown after login when must_change_password is set)."""
     if not session.get('must_change_password'):
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     # user=None on purpose: the template fills base.html's auth_content
     # block (login-card layout), which base only renders when `user` is
     # falsy. Passing the real user selects the app-layout branch instead,
@@ -6151,7 +6197,7 @@ def force_change_password():
         session.pop('must_change_password', None)
         syslog_logger.info(f"FORCED_PASSWORD_CHANGE user_id={session['user_id']}")
         flash('Password changed successfully.', 'success')
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     return render_template('force_change_password.html', user=None)
 
 
@@ -6164,18 +6210,36 @@ def _enforce_password_change():
             return redirect(url_for('force_change_password'))
 
 
-# ─── Dashboard ────────────────────────────────────────────────────────────────
+# ─── Home (day timeline) + Shows board ───────────────────────────────────────
+# 3.35.0: '/' is the Home day timeline (home.html + static/js/home_timeline.js,
+# data from /api/timeline); the show board moved to '/shows' and keeps its
+# endpoint name 'dashboard', so every "back to the board" link still works.
 
 @app.route('/')
 @login_required
 def index():
-    return redirect(url_for('dashboard'))
+    """Home: everything happening on one day — every show/event's production
+    schedule and crew shifts side by side on one time axis. The page itself
+    is a shell; home_timeline.js loads the day from /api/timeline (the
+    BROWSER's today unless ?date= is given)."""
+    auto_archive_past_shows()     # the board did this on every Home view
+    day = _tl_parse_date(request.args.get('date'))
+    return render_template('home.html', user=get_current_user(),
+                           initial_date=day.isoformat() if day else '')
+
+
+@app.route('/shows')
+@login_required
+def dashboard():
+    """The show board (Home until 3.35.0)."""
+    return _render_show_board(mine=False)
 
 
 @app.route('/dashboard')
 @login_required
-def dashboard():
-    return _render_show_board(mine=False)
+def dashboard_legacy():
+    """The board's pre-3.35.0 URL — kept for bookmarks."""
+    return redirect(url_for('dashboard'))
 
 
 def _my_pm_names(db, user_id):
@@ -6222,8 +6286,9 @@ def my_shows():
 
 
 def _render_show_board(mine=False):
-    """Home dashboard; mine=True is the My Shows view — the same board
-    narrowed to the active shows I PM or cover (no archive section)."""
+    """The Shows board (/shows — Home until 3.35.0); mine=True is the My
+    Shows view — the same board narrowed to the active shows I PM or cover
+    (no archive count)."""
     auto_archive_past_shows()
     accessible = get_accessible_shows(session['user_id'])
     db = get_db()
@@ -6245,18 +6310,9 @@ def _render_show_board(mine=False):
             WHERE s.status = 'active'
             ORDER BY {_eff_date} ASC NULLS LAST
         """).fetchall()
-        # No LIMIT: the dashboard search is client-side over rendered cards, so
-        # every archived show must be present or it's unfindable. (A LIMIT here
-        # also interacted badly with PG's DESC NULLS FIRST default — undated
-        # shows crowded dated ones out of the window.)
-        archived = db.execute(f"""
-            SELECT s.*, u.display_name as creator,
-              (SELECT COUNT(*) FROM show_performances WHERE show_id=s.id) as perf_count,
-              {_eff_date} as show_date
-            FROM shows s LEFT JOIN users u ON s.created_by = u.id
-            WHERE s.status = 'archived'
-            ORDER BY {_eff_date} DESC NULLS LAST
-        """).fetchall()
+        # Archived shows live on /shows/archived; the board only counts them.
+        archived_count = db.execute(
+            "SELECT COUNT(*) AS n FROM shows WHERE status = 'archived'").fetchone()['n']
     else:
         if accessible:
             placeholders = ','.join(['%s'] * len(accessible))
@@ -6268,17 +6324,12 @@ def _render_show_board(mine=False):
                 WHERE s.status = 'active' AND s.id IN ({placeholders})
                 ORDER BY {_eff_date} ASC NULLS LAST
             """, accessible).fetchall()
-            archived = db.execute(f"""
-                SELECT s.*, u.display_name as creator,
-                  (SELECT COUNT(*) FROM show_performances WHERE show_id=s.id) as perf_count,
-                  {_eff_date} as show_date
-                FROM shows s LEFT JOIN users u ON s.created_by = u.id
-                WHERE s.status = 'archived' AND s.id IN ({placeholders})
-                ORDER BY {_eff_date} DESC NULLS LAST
-            """, accessible).fetchall()
+            archived_count = db.execute(
+                f"SELECT COUNT(*) AS n FROM shows WHERE status = 'archived' "
+                f"AND id IN ({placeholders})", accessible).fetchone()['n']
         else:
             active = []
-            archived = []
+            archived_count = 0
 
     # Attach full performance list per show (for multi-date display on card)
     def _norm_date(v):
@@ -6314,10 +6365,10 @@ def _render_show_board(mine=False):
             out.append(d)
         return out
 
-    # Archived shows live on their own page (/shows/archived, 3.12.1); Home
-    # only shows how many there are on the "Archived" button.
-    archived_count = 0 if mine else len(archived)
-    archived = []
+    # Archived shows live on their own page (/shows/archived, 3.12.1); the
+    # board only shows how many there are on the "Archived" tab.
+    if mine:
+        archived_count = 0
     active = _attach_perfs(active)
 
     # PAST badge (3.6.0): an active show whose last date has gone by stays on
@@ -6336,26 +6387,26 @@ def _render_show_board(mine=False):
         on = _show_archive_on(last, s.get('restored_on'), _grace) if s['is_past'] else None
         s['archives_on_label'] = f"{on.strftime('%a %b')} {on.day}" if on else ''
 
-    # ── "Happening Today" — shows where today falls in load-in/out, matches the
-    # show date, or matches any performance date. For each, surface the venue,
-    # production manager (from advance_data), and today's crew call times.
+    # ── "Happening Today" — shows whose schedule span (load-in → load-out ∪
+    # performance dates, _schedule_span_dates — so a show with only a load-in
+    # date counts too) or effective show date includes today. For each,
+    # surface the venue, today's PM (the covering PM when one is set for
+    # today, else the show's PM — _pm_contacts_many) and today's crew calls.
     today_iso = date.today().isoformat()
-    today_show_ids = {s['id'] for s in active
-                      if (s.get('show_date') == today_iso)
-                      or (s.get('load_in_date') and s.get('load_out_date')
-                          and s['load_in_date'] <= today_iso <= s['load_out_date'])
-                      or any((p.get('perf_date') == today_iso) for p in s.get('performances') or [])}
+
+    def _on_today(s):
+        if s.get('show_date') == today_iso:
+            return True
+        return today_iso in _schedule_span_dates(
+            s.get('load_in_date'), s.get('load_out_date'),
+            [p.get('perf_date') for p in s.get('performances') or []])
+    today_show_ids = {s['id'] for s in active if _on_today(s)}
 
     today_shows = []
     if today_show_ids:
         ids_ph = ','.join(['%s'] * len(today_show_ids))
         ids_params = list(today_show_ids)
-        pm_rows = db.execute(
-            f"SELECT show_id, field_value FROM advance_data "
-            f"WHERE field_key='production_manager' AND show_id IN ({ids_ph})",
-            ids_params,
-        ).fetchall()
-        pm_by_show = {r['show_id']: (r['field_value'] or '').strip() for r in pm_rows}
+        pm_cards = _pm_contacts_many(db, ids_params, [today_iso])
 
         # Crew call times = unique in_times from labor_requests scheduled for
         # today (work_date) or for shows whose show_date is today when
@@ -6386,10 +6437,9 @@ def _render_show_board(mine=False):
                 tags.append('Load-In')
             elif s.get('load_out_date') == today_iso:
                 tags.append('Load-Out')
-            elif (s.get('load_in_date') and s.get('load_out_date')
-                  and s['load_in_date'] < today_iso < s['load_out_date']
-                  and not tags):
-                tags.append('In Production')
+            elif not tags:
+                tags.append('In Production')    # a day inside the span
+            pm_card = (pm_cards.get(s['id']) or {}).get('days', {}).get(today_iso)
 
             today_shows.append({
                 'id': s['id'],
@@ -6398,7 +6448,8 @@ def _render_show_board(mine=False):
                 'is_test': s.get('is_test') or 0,
                 'show_mode': s.get('show_mode') or 'show',
                 'prism_status': s.get('prism_status'),
-                'pm': pm_by_show.get(s['id'], ''),
+                'pm': pm_card['name'] if pm_card else '',
+                'pm_is_cover': bool(pm_card and pm_card['is_cover']),
                 'crew_calls': sorted(calls_by_show.get(s['id'], set())),
                 'perf_times': [p.get('perf_time') for p in todays_perfs if p.get('perf_time')],
                 'tags': tags or ['Today'],
@@ -6408,7 +6459,9 @@ def _render_show_board(mine=False):
         today_shows.sort(key=lambda t: (_tag_order.get(t['tags'][0], 9), (t['name'] or '').lower()))
 
     db.close()
-    restricted = session.get('is_restricted', False)
+    # `restricted` = view only: hides New Show, which new_show() refuses for
+    # read-only accounts (is_restricted itself is always False now).
+    restricted = bool(session.get('is_restricted') or session.get('is_readonly'))
 
     # Group active shows by venue for column layout
     _venue_map = {}
@@ -6440,7 +6493,6 @@ def _render_show_board(mine=False):
 
     return render_template('dashboard.html',
                            active_shows=active,
-                           archived_shows=archived,
                            venue_groups=venue_groups,
                            today_shows=today_shows,
                            today_iso=today_iso,
@@ -6462,6 +6514,388 @@ def _long_day_label(d):
     """'Thursday, October 1' — English names on purpose (strftime %A/%B are
     locale-bound, same reason the syslog header avoids %b)."""
     return f'{_EN_DAYS[d.weekday()]}, {_EN_MONTHS[d.month - 1]} {d.day}'
+
+
+# ─── Home day timeline data (3.35.0) ─────────────────────────────────────────
+# GET /api/timeline?date=YYYY-MM-DD feeds the Home page (home.html +
+# static/js/home_timeline.js): every show/event happening on the day, side by
+# side on one time axis — its production schedule rows (grouped exactly as
+# the Schedule tab groups them) and its crew shifts — plus one lane for
+# Overhead & Project Crew. Every time is MINUTES FROM THE DAY'S MIDNIGHT:
+# next-day schedule times ('1+00:30', '24:30') and overnight shifts (out ≤
+# in) run past 1440, and the previous day's items that are still running
+# after midnight come along clipped to start at 0 (`from_prev`). `t_start` /
+# `t_end` keep the true (unclipped) times and the labels print them, with
+# the date in front when they're not on the viewed day ('11/2 01:30').
+
+_TL_DATE_MIN = date(2000, 1, 1)
+_TL_DATE_MAX = date(2100, 12, 31)
+_TL_POINT_MIN = 30          # a schedule row with no end time: 30 min…
+_TL_POINT_MAX_GAP = 180     # …or up to the next row's start when that's ≤ 3 h
+_TL_OPEN_SHIFT_MIN = 60     # a shift with an in time but no out time
+_TL_AMPM_RE = re.compile(r'^(\d{1,2})(?::?(\d{2}))?\s*([aApP])\.?\s*[mM]?\.?$')
+_TL_HEX_RE = re.compile(r'^#[0-9a-fA-F]{3,8}$')
+
+
+def _tl_parse_date(raw):
+    """A ?date= value as a date, or None (missing, malformed, out of range)."""
+    s = str(raw or '').strip()
+    if len(s) != 10:
+        return None
+    try:
+        d = date.fromisoformat(s)
+    except ValueError:
+        return None
+    return d if _TL_DATE_MIN <= d <= _TL_DATE_MAX else None
+
+
+def _tl_minutes(value):
+    """Minutes from the day's midnight for a schedule or labor time — '19:30',
+    '1930', '7:30 pm', next-day '1+00:30' / '24:30' (+1440 per day). None when
+    it isn't a time (free text such as 'TBD' or 'After show')."""
+    off, t = _sched_time_offset(value)
+    s = str(t or '').strip()
+    if not s or len(s) > 12:
+        return None
+    p = _parse_24h_time(s)
+    if p is None:
+        m = _TL_AMPM_RE.match(s)
+        if not m:
+            return None
+        h, mi = int(m.group(1)), int(m.group(2) or 0)
+        if not (1 <= h <= 12 and mi < 60):
+            return None
+        p = (h % 12 + (12 if m.group(3) in 'pP' else 0), mi)
+    return off * 1440 + p[0] * 60 + p[1]
+
+
+def _tl_label(minutes, day):
+    """'19:30' for a time on `day`; '11/2 01:30' (the schedtime filter's
+    next-day form) for one before or after it."""
+    d_off, rem = divmod(int(minutes), 1440)
+    hm = hhmm_filter(f'{rem // 60:02d}:{rem % 60:02d}')
+    if not d_off:
+        return hm
+    nd = day + timedelta(days=d_off)
+    return f'{nd.month}/{nd.day} {hm}'
+
+
+def _tl_schedule_items(rows, day, shift):
+    """One editor day's schedule rows → (timed, untimed) timeline items on
+    the viewed `day`. `shift` is 0 for the day's own rows, -1440 for the
+    previous day's, which are kept only while they run past midnight."""
+    from bisect import bisect_right
+    parsed = [(r, _tl_minutes(r.get('start_time')), _tl_minutes(r.get('end_time')))
+              for r in rows]
+    starts = sorted({s for _, s, _ in parsed if s is not None})
+    timed, untimed = [], []
+    for r, s, e in parsed:
+        base = {'id': r['id'],
+                'desc': (r.get('description') or '').strip()[:300],
+                'notes': (r.get('notes') or '').strip()[:500],
+                'piano': bool(r.get('piano_tuning_id'))}
+        if s is None:
+            if shift == 0 and (base['desc'] or base['notes']
+                               or (r.get('start_time') or '').strip()):
+                untimed.append(dict(base,
+                                    start_text=str(r.get('start_time') or '').strip()[:40],
+                                    end_text=str(r.get('end_time') or '').strip()[:40]))
+            continue
+        point = False
+        if e is not None and e < s and e + 1440 > s:
+            e += 1440          # 22:00–01:00 without '1+': runs past midnight
+        if e is None or e <= s:
+            j = bisect_right(starts, s)          # first start after this one
+            nxt = starts[j] if j < len(starts) else None
+            e = nxt if nxt is not None and nxt - s <= _TL_POINT_MAX_GAP else s + _TL_POINT_MIN
+            point = True
+        ts, te = s + shift, e + shift
+        if te <= 0:
+            continue           # the previous day's row ended by midnight
+        timed.append(dict(base, start=max(ts, 0), end=te, t_start=ts, t_end=te,
+                          start_label=_tl_label(ts, day), end_label=_tl_label(te, day),
+                          point=point, from_prev=shift != 0, sort=r.get('sort_order') or 0))
+    timed.sort(key=lambda i: (i['start'], i['end'], i['sort'], i['id']))
+    for i in timed:
+        i.pop('sort', None)
+    return timed, untimed
+
+
+def _tl_shift_item(r, day, shift):
+    """A labor line (show or overhead) → a crew bar on the viewed `day`, or
+    None when it has no usable in time / doesn't reach that day. `shift` as
+    in _tl_schedule_items. Overnight = out ≤ in (the same rule as
+    _calc_hours); lunches after midnight move with it."""
+    i = _tl_minutes(r.get('in_time'))
+    if i is None or i >= 1440:
+        return None
+    o = _tl_minutes(r.get('out_time'))
+    open_end = o is None
+    if open_end:
+        o = i + _TL_OPEN_SHIFT_MIN
+    elif o <= i:
+        o += 1440
+    breaks = []
+    for bs_key, be_key in (('break_start', 'break_end'), ('break2_start', 'break2_end')):
+        bs, be = _tl_minutes(r.get(bs_key)), _tl_minutes(r.get(be_key))
+        if bs is None or be is None:
+            continue
+        if bs < i:
+            bs += 1440
+        if be <= bs:
+            be += 1440
+        bs, be = max(bs, i), min(be, o)
+        if be > bs:
+            breaks.append({'start': bs + shift, 'end': be + shift,
+                           'label': f'{_tl_label(bs + shift, day)}–{_tl_label(be + shift, day)}'})
+    ts, te = i + shift, o + shift
+    if te <= 0:
+        return None
+    sched = r.get('scheduled_tech') or ''
+    req = (r.get('requested_name') or '').strip()
+    tech = sched or req or 'Unfilled'
+    return {'id': r['id'],
+            'position': (r.get('position_name') or '').strip() or '—',
+            'tech': tech[:120],
+            'tech_state': 'scheduled' if sched else ('requested' if req else 'unfilled'),
+            'scheduled': bool(r.get('is_scheduled')),
+            'training': bool(r.get('is_training_shift')),
+            'start': max(ts, 0), 'end': te, 't_start': ts, 't_end': te,
+            'start_label': _tl_label(ts, day),
+            'end_label': '' if open_end else _tl_label(te, day),
+            'open_end': open_end, 'breaks': breaks, 'from_prev': shift != 0}
+
+
+def _tl_untimed_shift(r):
+    """A labor line with no usable in time, for the lane's 'no time' list."""
+    sched = r.get('scheduled_tech') or ''
+    req = (r.get('requested_name') or '').strip()
+    return {'id': r['id'],
+            'position': (r.get('position_name') or '').strip() or '—',
+            'tech': (sched or req or 'Unfilled')[:120],
+            'in_text': str(r.get('in_time') or '').strip()[:40],
+            'out_text': str(r.get('out_time') or '').strip()[:40]}
+
+
+def _timeline_day(db, day, include_test=False, accessible=None):
+    """The /api/timeline payload for one day (see the section comment)."""
+    d_iso = day.isoformat()
+    prev = day - timedelta(days=1)
+    p_iso = prev.isoformat()
+    where, params = [], [d_iso, p_iso, p_iso, d_iso, p_iso, d_iso]
+    if accessible is not None:
+        where.append('s.id = ANY(%s)')
+        params.append(list(accessible) or [0])
+    # Candidates for the day AND the day before (its after-midnight items):
+    # the date envelope (load-in / show date / performances ↔ load-out) is a
+    # cheap superset of the exact span checked below; schedule rows / labor
+    # on either day bring their show in too (labor: Labor Overview's rule —
+    # an archived show's labor only while it's scheduled).
+    shows = db.execute(f"""
+        SELECT s.id, s.name, s.venue, s.show_mode, s.is_test, s.prism_status,
+               s.status, s.show_date, s.load_in_date, s.load_out_date
+        FROM shows s
+        LEFT JOIN (SELECT show_id, MIN(perf_date) AS pmin, MAX(perf_date) AS pmax
+                   FROM show_performances WHERE perf_date IS NOT NULL
+                   GROUP BY show_id) pe ON pe.show_id = s.id
+        WHERE ((LEAST(s.load_in_date, pe.pmin, s.show_date) <= %s
+                AND GREATEST(s.load_out_date, pe.pmax, s.show_date) >= %s)
+               OR EXISTS (SELECT 1 FROM schedule_rows sr WHERE sr.show_id = s.id
+                          AND sr.day_date IN (%s, %s))
+               OR EXISTS (SELECT 1 FROM labor_requests lr WHERE lr.show_id = s.id
+                          AND COALESCE(lr.work_date, s.show_date) IN (%s, %s)
+                          AND (COALESCE(s.status, 'active') != 'archived'
+                               OR lr.is_scheduled = 1)))
+          {''.join(' AND ' + w for w in where)}
+        ORDER BY s.id
+    """, params).fetchall()
+    shows = [dict(r) for r in shows]
+    ids = [s['id'] for s in shows]
+
+    perfs_by, rows_by, legacy, labor_by, dark = {}, {}, set(), {}, set()
+    if ids:
+        for p in db.execute(
+                'SELECT id, show_id, perf_date, perf_time FROM show_performances '
+                'WHERE show_id = ANY(%s) ORDER BY show_id, '
+                'CASE WHEN perf_date IS NULL THEN 1 ELSE 0 END, perf_date, perf_time, id',
+                (ids,)).fetchall():
+            pd = _as_date(p['perf_date'])
+            perfs_by.setdefault(p['show_id'], []).append(
+                {'id': p['id'], 'perf_date': pd.isoformat() if pd else None,
+                 'perf_time': p['perf_time'] or ''})
+        for r in db.execute(
+                'SELECT id, show_id, perf_id, day_date, sort_order, start_time, '
+                'end_time, description, notes, piano_tuning_id FROM schedule_rows '
+                'WHERE show_id = ANY(%s) AND (day_date IN (%s, %s) OR day_date IS NULL) '
+                'ORDER BY show_id, sort_order, id', (ids, p_iso, d_iso)).fetchall():
+            r = dict(r)
+            rows_by.setdefault(r['show_id'], []).append(r)
+            if not r['day_date']:
+                legacy.add(r['show_id'])
+        for r in db.execute(f"""
+                SELECT lr.id, lr.show_id, COALESCE(lr.work_date, s.show_date) AS work_date,
+                       jp.name AS position_name, lr.in_time, lr.out_time,
+                       lr.break_start, lr.break_end, lr.break2_start, lr.break2_end,
+                       lr.is_scheduled, COALESCE(lr.is_training_shift, 0) AS is_training_shift,
+                       cm.name AS scheduled_tech, lr.requested_name
+                FROM labor_requests lr
+                JOIN shows s ON s.id = lr.show_id
+                LEFT JOIN job_positions jp ON jp.id = lr.position_id
+                LEFT JOIN crew_members cm ON cm.id = lr.scheduled_crew_member_id
+                WHERE lr.show_id = ANY(%s)
+                  AND (COALESCE(s.status, 'active') != 'archived' OR lr.is_scheduled = 1)
+                  AND COALESCE(lr.work_date, s.show_date) IN (%s, %s)
+                ORDER BY lr.sort_order, lr.id
+                """, (ids, p_iso, d_iso)).fetchall():
+            wd = _as_date(r['work_date'])
+            if wd:
+                labor_by.setdefault((r['show_id'], wd.isoformat()), []).append(dict(r))
+        dark = {r['show_id'] for r in db.execute(
+            "SELECT show_id FROM schedule_meta WHERE show_id = ANY(%s) "
+            "AND field_key = %s AND field_value = '1'",
+            (ids, DARK_DAY_PREFIX + d_iso)).fetchall()}
+
+    out_shows, test_hidden = [], 0
+    for s in shows:
+        sid = s['id']
+        perfs = perfs_by.get(sid, [])
+        span = _schedule_span_dates(s['load_in_date'], s['load_out_date'],
+                                    [p['perf_date'] for p in perfs])
+        eff = _as_date(s['show_date']) or next(
+            (_as_date(p['perf_date']) for p in perfs if p['perf_date']), None)
+        on_day = d_iso in span or (eff == day)
+
+        # Schedule rows by editor day — legacy rows (no day_date) need the
+        # editor's own day list to land where the Schedule tab shows them.
+        rows = rows_by.get(sid, [])
+        if sid in legacy:
+            _, sdays = _build_schedule_days(db, sid, s, include_orphans=True)
+            by_day = _schedule_rows_by_editor_day(rows, sdays)
+        else:
+            by_day = {}
+            for r in rows:
+                by_day.setdefault(_as_date(r['day_date']).isoformat()
+                                  if _as_date(r['day_date']) else '', []).append(r)
+            # The editor shows a piano row only on one of the show's days.
+            real = set(span) | {k for k, rs in by_day.items()
+                                if any(not x['piano_tuning_id'] for x in rs)}
+            by_day = {k: rs for k, rs in by_day.items() if k in real}
+        sched, untimed = _tl_schedule_items(by_day.get(d_iso, []), day, 0)
+        carry, _ = _tl_schedule_items(by_day.get(p_iso, []), day, -1440)
+
+        crew, crew_untimed = [], []
+        for r in labor_by.get((sid, d_iso), []):
+            it = _tl_shift_item(r, day, 0)
+            if it:
+                crew.append(it)
+            else:
+                crew_untimed.append(_tl_untimed_shift(r))
+        crew_carry = [it for it in (_tl_shift_item(r, day, -1440)
+                                    for r in labor_by.get((sid, p_iso), [])) if it]
+
+        if not (on_day or sched or untimed or carry or crew or crew_untimed or crew_carry):
+            continue
+        if s['is_test'] and not include_test:
+            test_hidden += 1
+            continue
+
+        dated = sorted(set(span))
+        undated = sum(1 for p in perfs if not p['perf_date'])
+        day_num = dated.index(d_iso) + 1 if d_iso in dated else None
+        perf_today = []
+        for p in perfs:
+            if p['perf_date'] == d_iso:
+                m = _tl_minutes(p['perf_time'])
+                perf_today.append({'label': (hhmm_filter(p['perf_time']) or '')[:40],
+                                   'minutes': m if m is not None and m < 1440 else None})
+        items = sorted(carry + sched, key=lambda i: (i['start'], i['end'], i['id']))
+        out_shows.append({
+            'id': sid, 'name': s['name'] or '—', 'venue': (s['venue'] or '').strip(),
+            'show_mode': s['show_mode'] or 'show', 'is_test': bool(s['is_test']),
+            'prism_status': s['prism_status'] or '', 'status': s['status'] or 'active',
+            'on_day': on_day, 'dark': sid in dark,
+            'day_num': day_num, 'day_total': len(dated) + undated if day_num else None,
+            'performances': perf_today,
+            'schedule': items, 'schedule_untimed': untimed,
+            'crew': sorted(crew_carry + crew, key=lambda i: (i['start'], i['end'], i['id'])),
+            'crew_untimed': crew_untimed,
+            'pm': None,
+        })
+
+    if out_shows:
+        cards = _pm_contacts_many(db, [s['id'] for s in out_shows], [d_iso])
+        for s in out_shows:
+            c = (cards.get(s['id']) or {}).get('days', {}).get(d_iso)
+            if c:
+                s['pm'] = {'name': c['name'], 'title': c['title'], 'phone': c['phone'],
+                           'email': c['email'], 'is_cover': c['is_cover']}
+
+    # Overhead & Project Crew — one lane of its own.
+    oh_crew, oh_untimed, projects = [], [], {}
+    for r in db.execute("""
+            SELECT r.id, r.work_date, g.id AS group_id,
+                   COALESCE(p.name, g.name, 'General') AS project_name,
+                   p.color AS project_color, jp.name AS position_name,
+                   r.in_time, r.out_time, r.break_start, r.break_end,
+                   r.break2_start, r.break2_end, r.is_scheduled,
+                   COALESCE(r.is_training_shift, 0) AS is_training_shift,
+                   cm.name AS scheduled_tech, r.requested_name
+            FROM overhead_labor_requests r
+            JOIN overhead_labor_groups g ON g.id = r.group_id
+            LEFT JOIN overhead_projects p ON p.id = g.project_id
+            LEFT JOIN job_positions jp ON jp.id = r.position_id
+            LEFT JOIN crew_members cm ON cm.id = r.scheduled_crew_member_id
+            WHERE r.work_date IN (%s, %s)
+            ORDER BY r.work_date, project_name, r.sort_order, r.id
+            """, (p_iso, d_iso)).fetchall():
+        r = dict(r)
+        wd = _as_date(r['work_date'])
+        is_prev = bool(wd and wd < day)
+        color = (r['project_color'] or '').strip()
+        color = color if _TL_HEX_RE.match(color) else ''
+        it = _tl_shift_item(r, day, -1440 if is_prev else 0)
+        extra = {'project': (r['project_name'] or 'General')[:120], 'color': color}
+        if it:
+            it.update(extra)
+            oh_crew.append(it)
+        elif not is_prev:
+            oh_untimed.append(dict(_tl_untimed_shift(r), **extra))
+        else:
+            continue
+        projects.setdefault(extra['project'], color)
+    overhead = None
+    if oh_crew or oh_untimed:
+        oh_crew.sort(key=lambda i: (i['start'], i['end'], i['id']))
+        overhead = {'crew': oh_crew, 'crew_untimed': oh_untimed,
+                    'projects': [{'name': k, 'color': v} for k, v in projects.items()]}
+
+    return {'success': True, 'date': d_iso, 'label': _long_day_label(day),
+            'prev': p_iso, 'next': (day + timedelta(days=1)).isoformat(),
+            'include_test': bool(include_test), 'test_hidden': test_hidden,
+            'shows': out_shows, 'overhead': overhead}
+
+
+@app.route('/api/timeline')
+@login_required
+def api_timeline():
+    """Home timeline data for ?date=YYYY-MM-DD (default: the server's today —
+    the page always sends the browser's). include_test=1 adds test shows.
+    Read-only; document viewers never get here (_viewer_gate)."""
+    raw = request.args.get('date')
+    if raw:
+        day = _tl_parse_date(raw)
+        if not day:
+            return jsonify({'success': False, 'error': 'Invalid date.'}), 400
+    else:
+        day = date.today()
+    accessible = get_accessible_shows(session['user_id'])
+    db = get_db()
+    try:
+        data = _timeline_day(db, day, include_test=request.args.get('include_test') == '1',
+                             accessible=accessible)
+    finally:
+        db.close()
+    return jsonify(data)
 
 
 @app.route('/shows/archived')
@@ -6504,7 +6938,11 @@ def archived_shows_page():
                     key=lambda v: (v == 'Unassigned', v.lower()))
     return render_template('archived_shows.html', shows=shows, venues=venues,
                            active_count=active_count,
-                           restricted=session.get('is_restricted', False),
+                           # Restore = the roles restore_show() accepts:
+                           # admin, or staff that isn't read-only.
+                           can_restore=(session.get('user_role') == 'admin'
+                                        or (session.get('user_role') == 'staff'
+                                            and not session.get('is_readonly'))),
                            user=get_current_user())
 
 
@@ -6593,6 +7031,11 @@ def new_show():
 
 # ─── Show Page (all tabs) ─────────────────────────────────────────────────────
 
+# The show page's tab panes (show.html `tab-<name>`).
+_SHOW_TABS = frozenset(('advance', 'schedule', 'staffing', 'security', 'assets',
+                        'postnotes', 'comments', 'export'))
+
+
 @app.route('/shows/<int:show_id>')
 @login_required
 def show_page(show_id):
@@ -6600,6 +7043,8 @@ def show_page(show_id):
         abort(403)
 
     tab = request.args.get('tab', 'advance')
+    if tab not in _SHOW_TABS:
+        tab = 'advance'   # unknown ?tab= would render with no pane showing
     security_signin_enabled = module_enabled('security_signin')
     if tab == 'security' and not security_signin_enabled:
         tab = 'advance'   # module switched off — its tab/pane doesn't render
@@ -6654,6 +7099,8 @@ def show_page(show_id):
     # by either a performance or the load-in → load-out window).
     performances, schedule_days = _build_schedule_days(db, show_id, show,
                                                        include_orphans=True)
+    # Day PM bar per dated schedule day (3.35.0): who's on duty + contact.
+    sched_day_pm = _schedule_day_pm(db, show_id, schedule_days)
 
     # Export log
     exports = db.execute("""
@@ -6683,7 +7130,11 @@ def show_page(show_id):
     db.close()
 
     form_sections = get_form_fields_for_template()
-    restricted = session.get('is_restricted', False)
+    # `restricted` (Jinja) / RESTRICTED (JS) = view only: every use hides or
+    # disables an editing control whose save route refuses read-only
+    # accounts. is_restricted itself is always False now, so it must carry
+    # is_readonly or read-only users get controls that only 403.
+    restricted = bool(session.get('is_restricted') or session.get('is_readonly'))
     can_edit_advance = (
         not session.get('is_readonly')
         and not restricted
@@ -6749,6 +7200,9 @@ def show_page(show_id):
                                                      or bool(session.get('is_content_admin'))),
                            schedule_meta=schedule_meta,
                            sched_meta_fields=get_schedule_meta_fields(),
+                           sched_day_pm=sched_day_pm,
+                           # PUT /labor-days refuses readonly + restricted
+                           day_pm_can_edit=not (restricted or session.get('is_readonly')),
                            notes_data=notes_data,
                            exports=exports,
                            contacts_by_dept=contacts_by_dept,
@@ -6895,6 +7349,50 @@ def _normalize_perf_time(raw):
     if 0 <= h <= 23 and 0 <= m <= 59:
         return f'{h:02d}:{m:02d}'
     return s
+
+
+# Labor request / preset time columns, in shift order, with their UI names.
+_LABOR_TIME_LABELS = {'in_time': 'In', 'break_start': 'Lunch 1 start',
+                      'break_end': 'Lunch 1 end', 'break2_start': 'Lunch 2 start',
+                      'break2_end': 'Lunch 2 end', 'out_time': 'Out'}
+_LABOR_TIME_RE = re.compile(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]')
+
+
+def _labor_time(raw):
+    """A labor time normalised to 'HH:MM' (24-hour), '' when blank, or None
+    when it isn't a time. _normalize_perf_time hands unreadable text back
+    unchanged, so writers must refuse None: labor times feed the billing
+    engine (strptime '%H:%M') and the editors' value="…" attributes."""
+    if raw is None:
+        return ''
+    if not isinstance(raw, str):
+        return None
+    v = _normalize_perf_time(raw)
+    return v if (not v or _LABOR_TIME_RE.fullmatch(v)) else None
+
+
+def _labor_times(data, require_all=False):
+    """({col: 'HH:MM' | ''} for the labor time columns in `data` — every
+    column when require_all, a missing one as '' — , error | None)."""
+    out = {}
+    for col, label in _LABOR_TIME_LABELS.items():
+        if col not in data and not require_all:
+            continue
+        v = _labor_time(data.get(col))
+        if v is None:
+            return None, f'"{label}" is not a time — use HH:MM (24-hour).'
+        out[col] = v
+    return out, None
+
+
+def _labor_work_date(raw):
+    """A labor line's work_date: '' / None → None (Unscheduled), an ISO date
+    → 'YYYY-MM-DD'. Raises ValueError for anything else (was a PG 500)."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    if not isinstance(raw, str):
+        raise ValueError('work_date')
+    return date.fromisoformat(raw.strip()).isoformat()
 
 
 def _perf_to_json(row):
@@ -7123,11 +7621,9 @@ def _apply_schedule_ops(db, show_id, ops):
     return created
 
 
-def _schedule_sync_hash(db, show_id):
-    """ONE query: a digest of the show's schedule rows, Venue & Tech fields and
-    day structure (load range + performance dates). The 3 s poll compares it
-    before building anything (3.32.2); None when the show is gone."""
-    row = db.execute("""
+# Built once (see _schedule_sync_hash): the name keys are init_db.pg_name_key,
+# the exact text idx_contacts_name_key indexes.
+_SCHEDULE_SYNC_HASH_SQL = """
         SELECT md5(
             coalesce((SELECT string_agg(id || '|' || coalesce(day_date, '') || '|' || coalesce(perf_id::text, '')
                                         || '|' || coalesce(start_time, '') || '|' || coalesce(end_time, '')
@@ -7139,9 +7635,142 @@ def _schedule_sync_hash(db, show_id):
             || '#' || coalesce(s.load_in_date::text, '') || '/' || coalesce(s.load_out_date::text, '')
             || '#' || coalesce((SELECT string_agg(coalesce(perf_date::text, '') || ':' || id, ',' ORDER BY id)
                                 FROM show_performances WHERE show_id = s.id), '')
+            || '#' || coalesce(cv.covers, '')
+            || '#' || coalesce(pmv.v, '')
+            || '#' || coalesce((SELECT contact_dept FROM form_fields
+                                WHERE field_key = 'production_manager'), '')
+            || '#' || coalesce((SELECT string_agg(c.id || '|' || coalesce(c.name, '') || '|' || coalesce(c.title, '')
+                                                  || '|' || coalesce(c.department, '') || '|' || coalesce(c.phone, '')
+                                                  || '|' || coalesce(c.email, '') || '|' || coalesce(c.user_id::text, ''),
+                                                  E'\\n' ORDER BY c.id)
+                                FROM contacts c
+                                WHERE """ + pg_name_key('c.name') + """
+                                      = ANY(array_append(cv.keys, """ + pg_name_key('pmv.v') + """))), '')
         ) AS h
-        FROM shows s WHERE s.id = %s""", (show_id,)).fetchone()
+        FROM shows s
+        CROSS JOIN LATERAL (
+            SELECT LEAST(s.load_in_date, s.load_out_date, p.lo, r.lo) AS lo,
+                   GREATEST(s.load_in_date, s.load_out_date, p.hi, r.hi) AS hi
+            FROM (SELECT min(perf_date) AS lo, max(perf_date) AS hi
+                  FROM show_performances WHERE show_id = s.id) p,
+                 (SELECT min(t.d) AS lo, max(t.d) AS hi FROM (
+                      SELECT CASE WHEN q.v ~ '^[1-9][0-9]{3}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
+                                  THEN make_date(left(q.v, 4)::int, substr(q.v, 6, 2)::int, 1)
+                                       + (right(q.v, 2)::int - 1) END AS d
+                      FROM (SELECT left(day_date, 10) AS v FROM schedule_rows
+                            WHERE show_id = s.id AND piano_tuning_id IS NULL) q) t) r
+        ) w
+        CROSS JOIN LATERAL (
+            SELECT string_agg(work_date::text || '=' || cover_pm, E'\\n' ORDER BY work_date) AS covers,
+                   array_agg(DISTINCT """ + pg_name_key('cover_pm') + """) AS keys
+            FROM show_labor_days
+            WHERE show_id = s.id AND coalesce(cover_pm, '') <> ''
+              AND work_date BETWEEN w.lo AND w.hi
+        ) cv
+        LEFT JOIN LATERAL (SELECT field_value AS v FROM advance_data
+                           WHERE show_id = s.id AND field_key = 'production_manager') pmv ON TRUE
+        WHERE s.id = %s"""
+
+
+def _schedule_sync_hash(db, show_id):
+    """ONE query: a digest of the show's schedule rows, Venue & Tech fields and
+    day structure (load range + performance dates). The 3 s poll compares it
+    before building anything (3.32.2); None when the show is gone. 3.35.0
+    adds the Day PM inputs (show_labor_days.cover_pm + the show's PRODUCTION
+    MANAGER advance value) so a Day PM picked anywhere reaches open editors.
+    Cover rows count only inside the editor's date window `w` (load range,
+    performance dates, off-date rows' days — an index range, so cover rows on
+    other dates cost a poll nothing). schedule_rows.day_date is TEXT and a
+    legacy one can be junk ('2026-13-45'), so it is never cast: the CASE
+    builds a date from regex-checked parts of its first 10 chars (what
+    _as_date reads; a bad day-of-month just rolls over, harmless for a
+    window bound). The PM contacts those names resolve
+    to (+ the PM department that ranks duplicates) are in it too, so a
+    corrected phone / email / title reaches open editors' Day PM bars —
+    matched by pg_name_key (= _name_key, NBSP & co. included), the text
+    idx_contacts_name_key indexes, so the lookup never scans contacts."""
+    row = db.execute(_SCHEDULE_SYNC_HASH_SQL, (show_id,)).fetchone()
     return row['h'][:16] if row else None
+
+
+def _schedule_day_pm(db, show_id, days):
+    """Day PM (3.35.0) for the schedule editor: {'show_pm': card|None,
+    'days': {iso: card|None}} for every DATED editor day (off-date days
+    included; never a dateless __null_* day or the no-days fallback pane).
+    Each card is the PM on duty that day — the covering PM
+    (show_labor_days.cover_pm, is_cover True) else the show PM — from the
+    shared _pm_contacts_for_show resolver."""
+    dates = [d['date_key'] for d in days if _sched_day_date(d.get('date_key'))]
+    return _pm_contacts_for_show(db, show_id, dates)
+
+
+# Contact field caps (add_contact / edit_contact). The link filters below
+# also refuse a phone / email longer than its cap (legacy rows).
+_CONTACT_NAME_MAX = 200
+_CONTACT_TITLE_MAX = 200
+_CONTACT_PHONE_MAX = 100
+_CONTACT_EMAIL_MAX = 254
+# Contact text as both link filters (and their app.js twins) read it.
+# Python's and JS's whitespace differ only in controls (\x1c-\x1f, \x85)
+# and the BOM, so those become plain spaces first; every class below spells
+# its spaces out (_LINK_WS, never \s) — the twins then agree on any input.
+_LINK_CTRL_RE = re.compile(r'[\x00-\x1f\x7f-\x9f\ufeff]')
+_LINK_WS = r' \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000'
+# One run of a phone number: optional '+' ('+ 1 …' too) / '(', a digit,
+# then digits and separators — ASCII and Unicode dashes / minus (Word's
+# '407–555–0101'), dots / middle dot, brackets, spaces — and '/' only
+# right before a digit ('407/555-0101'). One choice per character, nothing
+# to backtrack: linear on any input (the 3.35.0 extension-stripping regex
+# was quadratic).
+_TEL_RUN_RE = re.compile(r'(?:\+ ?)?\(?[0-9](?:[0-9().\-\u00b7\u2010-\u2015\u2212\uff0d'
+                         + _LINK_WS + r']|/(?=[0-9]))*')
+# Address chars: no spaces, quotes, brackets or separators, and none of
+# ? & = % / # — they would add headers (?bcc=…&body=…) to the mailto: link.
+_MAILTO_PART = r'[^@<>"\'(),;:\\?&=%/#' + _LINK_WS + r']+'
+_MAILTO_RE = re.compile('^' + _MAILTO_PART + '@' + _MAILTO_PART + r'\.' + _MAILTO_PART + '$')
+
+
+def _link_text(value, cap):
+    """`value` as the link filters read it (controls / BOM → spaces, then
+    stripped), or None when it's over `cap` characters — code points, which
+    is what app.js LaborDays._linkText counts too."""
+    s = _LINK_CTRL_RE.sub(' ', str(value or '')).strip()
+    return s if len(s) <= cap else None
+
+
+@app.template_filter('tel_href')
+def _tel_href(phone):
+    """'tel:' link for a contact phone ('407-555-0101 x12' → tel:4075550101),
+    or '' when it doesn't hold a dialable number (then print it unlinked).
+    Dials the FIRST number only: the first run of digits + separators with
+    3+ digits, so an extension ('x12', 'ext. 3', '#5') or a second number
+    ('… / 321-…', '…, …', '… or …', 'c 407-… o 407-…') never joins it, and
+    a '/' joins only a prefix of under 7 digits ('407/555-0101'), never a
+    second number or alternate ending ('407-555-0101/0102'); more than 15
+    digits (the E.164 maximum) isn't a number. Mirrors app.js
+    LaborDays.telHref — keep the two in step."""
+    for m in _TEL_RUN_RE.finditer(_link_text(phone, _CONTACT_PHONE_MAX) or ''):
+        run = m.group(0)
+        digits = ''
+        for part in run.split('/'):
+            if len(digits) >= 7:
+                break
+            digits += re.sub(r'[^0-9]', '', part)
+        if len(digits) >= 3:
+            if len(digits) > 15:
+                return ''
+            return 'tel:' + ('+' if run.startswith('+') else '') + digits
+    return ''
+
+
+@app.template_filter('mailto_href')
+def _mailto_href(email):
+    """'mailto:' link for a plain address, or '' when it isn't one.
+    Mirrors app.js LaborDays.mailtoHref — keep the two in step."""
+    s = _link_text(email, _CONTACT_EMAIL_MAX)
+    if not s or not _MAILTO_RE.match(s):
+        return ''
+    return 'mailto:' + s
 
 
 def _schedule_live_state(db, show_id, h):
@@ -7161,7 +7790,8 @@ def _schedule_live_state(db, show_id, h):
             out.append({'id': r['id'], 'day': key, 'start_time': r['start_time'] or '',
                         'end_time': r['end_time'] or '', 'description': r['description'] or '',
                         'notes': r['notes'] or '', 'piano_id': r['piano_tuning_id']})
-    return {'hash': h, 'rows': out, 'meta': meta}
+    return {'hash': h, 'rows': out, 'meta': meta,
+            'day_pm': _schedule_day_pm(db, show_id, days)}
 
 
 @app.route('/shows/<int:show_id>/sync/schedule')
@@ -8985,11 +9615,14 @@ def _advance_attachments_fingerprint(db, show_id):
     )
 
 
-def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
+def _build_advance_pdf(show_id, exported_by_id=None, base_url=None, preview=False):
     """
     Build the advance PDF.  Works both in a request context (base_url=None reads
     from request.url_root) and in a background context (pass base_url='/').
     exported_by_id defaults to session['user_id'] when not supplied.
+    preview=True (PDF Designer) renders the current content WITHOUT versioning:
+    no export_log row, no version bump, no reuse of a stored export — returns
+    (html, current_version, show, pdf_bytes, None, False).
     """
     # Only consult the Flask session when there's a request to read it from.
     # Background callers (scheduled emails run in an APScheduler thread with an
@@ -9089,27 +9722,34 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
                                    layout=layout,
                                    export_date=export_date)
 
-    # Reuse the previous version's bytes when nothing that lands in the document
-    # has changed, so repeat clicks don't spawn redundant versions.
-    content_hash = _pdf_content_hash(
-        _render(_HASH_VERSION_SENTINEL, _HASH_DATE_SENTINEL), extra=attach_fp)
-    db = get_db()
-    cached_row, cached_bytes = _find_reusable_export(db, show_id, 'advance', content_hash)
-    if cached_row:
-        db.close()
-        syslog_logger.info(
-            f"PDF_EXPORT_REUSED show_id={show_id} type=advance v={cached_row['version']} by={exported_by_id}"
-        )
-        return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
+    if preview:
+        # PDF Designer preview: render what an export would print now, but
+        # never cut a version or reuse a stored one (a stored export would
+        # hide the layout change being previewed).
+        new_v = show['advance_version'] or 0
+        log_id = None
+    else:
+        # Reuse the previous version's bytes when nothing that lands in the
+        # document has changed, so repeat clicks don't spawn redundant versions.
+        content_hash = _pdf_content_hash(
+            _render(_HASH_VERSION_SENTINEL, _HASH_DATE_SENTINEL), extra=attach_fp)
+        db = get_db()
+        cached_row, cached_bytes = _find_reusable_export(db, show_id, 'advance', content_hash)
+        if cached_row:
+            db.close()
+            syslog_logger.info(
+                f"PDF_EXPORT_REUSED show_id={show_id} type=advance v={cached_row['version']} by={exported_by_id}"
+            )
+            return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
 
-    new_v = (show['advance_version'] or 0) + 1
-    db.execute('UPDATE shows SET advance_version=%s WHERE id=%s', (new_v, show_id))
-    log_cur = db.execute(
-        "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
-        "VALUES (%s, 'advance', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
-    log_id = log_cur.fetchone()['id']
-    db.commit()
-    db.close()
+        new_v = (show['advance_version'] or 0) + 1
+        db.execute('UPDATE shows SET advance_version=%s WHERE id=%s', (new_v, show_id))
+        log_cur = db.execute(
+            "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
+            "VALUES (%s, 'advance', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
+        log_id = log_cur.fetchone()['id']
+        db.commit()
+        db.close()
 
     html = _render(new_v, datetime.now().strftime('%B %d, %Y at %I:%M %p'))
 
@@ -9138,6 +9778,10 @@ def _build_advance_pdf(show_id, exported_by_id=None, base_url=None):
         except Exception as e:
             app.logger.error(f"PDF append failed for show {show_id}: {e}")
 
+    if preview:
+        syslog_logger.info(
+            f"PDF_DESIGNER_PREVIEW show_id={show_id} type=advance by={exported_by_id}")
+        return html, new_v, dict(show), pdf_bytes, None, False
     _stash_export_bytes(log_id, pdf_bytes)
     syslog_logger.info(
         f"PDF_EXPORT show_id={show_id} type=advance v={new_v} by={exported_by_id}"
@@ -9488,11 +10132,13 @@ def _render_attachment_wrapper_pdf(data, mime, filename, section_label,
         return None
 
 
-def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
+def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None, preview=False):
     """
     Build the schedule PDF.  Works both in a request context (base_url=None reads
     from request.url_root) and in a background context (pass base_url='/').
     exported_by_id defaults to session['user_id'] when not supplied.
+    preview=True (PDF Designer): render without versioning — no export_log row,
+    no version bump, no stored-export reuse; returns log_id None, is_new False.
     """
     # Only consult the Flask session when there's a request to read it from.
     # Background callers (scheduled emails run in an APScheduler thread with an
@@ -9609,6 +10255,17 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
             schedule_days = lit
     dark_count = run_days - len(schedule_days)
 
+    # PM on duty per printed day (3.35.0): the day's covering PM, else the
+    # show PM, with phone/email — keyed by each day's ISO date string (a
+    # performance day's perf_date is a date object). Resolved here, before
+    # any _render, so the content hash covers it. A dateless day gets the
+    # show PM; a day with no PM at all prints nothing.
+    _day_isos = [_iso_pdf(d['perf'].get('perf_date')) for d in schedule_days]
+    _pm = _pm_contacts_for_show(db, show_id, [i for i in _day_isos if i])
+    for d, iso in zip(schedule_days, _day_isos):
+        d['pm'] = _pm['days'].get(iso) if iso else _pm['show_pm']
+    show_pm_card = _pm['show_pm']
+
     # Crew call times — unique in_times from labor_requests, sorted. Training /
     # shadow shifts are excluded so they never surface on show paperwork.
     labor_in_times = db.execute(
@@ -9637,6 +10294,7 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
                                advance_data=advance_data,
                                contact_map=contact_map,
                                contact_name_map=contact_name_map,
+                               show_pm_card=show_pm_card,
                                logo_data=logo_data,
                                wifi_ssid=wifi_ssid,
                                wifi_pass=wifi_pass,
@@ -9649,23 +10307,29 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
     # Reuse the previous version's bytes when nothing in the document changed.
     # The hash is taken on the un-fitted HTML: the page-aware fit below is a
     # pure function of that content, so equal hashes still mean equal PDFs.
-    content_hash = _pdf_content_hash(_render(_HASH_VERSION_SENTINEL, _HASH_DATE_SENTINEL))
-    cached_row, cached_bytes = _find_reusable_export(db, show_id, 'schedule', content_hash)
-    if cached_row:
+    if preview:
+        # PDF Designer preview: never version, never reuse a stored export.
         db.close()
-        syslog_logger.info(
-            f"PDF_EXPORT_REUSED show_id={show_id} type=schedule v={cached_row['version']} by={exported_by_id}"
-        )
-        return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
+        new_v = show['schedule_version'] or 0
+        log_id = None
+    else:
+        content_hash = _pdf_content_hash(_render(_HASH_VERSION_SENTINEL, _HASH_DATE_SENTINEL))
+        cached_row, cached_bytes = _find_reusable_export(db, show_id, 'schedule', content_hash)
+        if cached_row:
+            db.close()
+            syslog_logger.info(
+                f"PDF_EXPORT_REUSED show_id={show_id} type=schedule v={cached_row['version']} by={exported_by_id}"
+            )
+            return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
 
-    new_v = (show['schedule_version'] or 0) + 1
-    db.execute('UPDATE shows SET schedule_version=%s WHERE id=%s', (new_v, show_id))
-    log_cur = db.execute(
-        "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
-        "VALUES (%s, 'schedule', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
-    log_id = log_cur.fetchone()['id']
-    db.commit()
-    db.close()
+        new_v = (show['schedule_version'] or 0) + 1
+        db.execute('UPDATE shows SET schedule_version=%s WHERE id=%s', (new_v, show_id))
+        log_cur = db.execute(
+            "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
+            "VALUES (%s, 'schedule', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
+        log_id = log_cur.fetchone()['id']
+        db.commit()
+        db.close()
 
     _export_date = datetime.now().strftime('%B %d, %Y at %I:%M %p')
     html = _render(new_v, _export_date)
@@ -9683,6 +10347,10 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None):
         app.logger.error(f"PDF_GENERATION_FAILED show_id={show_id} type=schedule error={e}")
         pdf_bytes = None
 
+    if preview:
+        syslog_logger.info(
+            f"PDF_DESIGNER_PREVIEW show_id={show_id} type=schedule by={exported_by_id}")
+        return html, new_v, dict(show), pdf_bytes, None, False
     _stash_export_bytes(log_id, pdf_bytes)
     syslog_logger.info(
         f"PDF_EXPORT show_id={show_id} type=schedule v={new_v} by={exported_by_id}"
@@ -10048,11 +10716,13 @@ def email_pdf(show_id, pdf_type):
     }), 202
 
 
-def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
+def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None, preview=False):
     """Build the post-show notes PDF. Versions and logs to export_log so the
     same machinery (history download, S3 archival, scheduled email) works
     identically to advance/schedule. Returns (html, version, show_dict,
-    pdf_bytes, log_id)."""
+    pdf_bytes, log_id).
+    preview=True (PDF Designer): render without versioning (no export_log row,
+    no version bump, no stored-export reuse); returns log_id None, is_new False."""
     # Only consult the Flask session when there's a request to read it from.
     # Background callers (scheduled emails run in an APScheduler thread with an
     # app context but NO request context) pass exported_by_id explicitly, or
@@ -10108,23 +10778,29 @@ def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
                                export_date=export_date)
 
     # Reuse the previous version's bytes when nothing in the document changed.
-    content_hash = _pdf_content_hash(_render(_HASH_VERSION_SENTINEL, _HASH_DATE_SENTINEL))
-    cached_row, cached_bytes = _find_reusable_export(db, show_id, 'postnotes', content_hash)
-    if cached_row:
+    if preview:
+        # PDF Designer preview: never version, never reuse a stored export.
         db.close()
-        syslog_logger.info(
-            f"PDF_EXPORT_REUSED show_id={show_id} type=postnotes v={cached_row['version']} by={exported_by_id}"
-        )
-        return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
+        new_v = show['postnotes_version'] or 0
+        log_id = None
+    else:
+        content_hash = _pdf_content_hash(_render(_HASH_VERSION_SENTINEL, _HASH_DATE_SENTINEL))
+        cached_row, cached_bytes = _find_reusable_export(db, show_id, 'postnotes', content_hash)
+        if cached_row:
+            db.close()
+            syslog_logger.info(
+                f"PDF_EXPORT_REUSED show_id={show_id} type=postnotes v={cached_row['version']} by={exported_by_id}"
+            )
+            return None, cached_row['version'], dict(show), cached_bytes, cached_row['id'], False
 
-    new_v = (show['postnotes_version'] or 0) + 1
-    db.execute('UPDATE shows SET postnotes_version=%s WHERE id=%s', (new_v, show_id))
-    log_cur = db.execute(
-        "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
-        "VALUES (%s, 'postnotes', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
-    log_id = log_cur.fetchone()['id']
-    db.commit()
-    db.close()
+        new_v = (show['postnotes_version'] or 0) + 1
+        db.execute('UPDATE shows SET postnotes_version=%s WHERE id=%s', (new_v, show_id))
+        log_cur = db.execute(
+            "INSERT INTO export_log (show_id, export_type, version, exported_by, content_hash) "
+            "VALUES (%s, 'postnotes', %s, %s, %s) RETURNING id", (show_id, new_v, exported_by_id, content_hash))
+        log_id = log_cur.fetchone()['id']
+        db.commit()
+        db.close()
 
     html = _render(new_v, datetime.now().strftime('%B %d, %Y at %I:%M %p'))
     try:
@@ -10134,6 +10810,10 @@ def _build_postnotes_pdf(show_id, exported_by_id=None, base_url=None):
         app.logger.error(f"PDF_GENERATION_FAILED show_id={show_id} type=postnotes error={e}")
         pdf_bytes = None
 
+    if preview:
+        syslog_logger.info(
+            f"PDF_DESIGNER_PREVIEW show_id={show_id} type=postnotes by={exported_by_id}")
+        return html, new_v, dict(show), pdf_bytes, None, False
     _stash_export_bytes(log_id, pdf_bytes)
     syslog_logger.info(
         f"PDF_EXPORT show_id={show_id} type=postnotes v={new_v} by={exported_by_id}"
@@ -10169,7 +10849,7 @@ def export_postnotes(show_id):
 @login_required
 def viewer_home():
     if not session.get('is_document_viewer'):
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     user_id = session['user_id']
     is_viewer, venues_allow, doc_types_allow = get_document_viewer_settings(user_id)
     accessible = viewer_accessible_shows(user_id)
@@ -10274,7 +10954,7 @@ def viewer_calendar():
     viewer_show_calendar grant. Shows only the shows their venue allow-list
     permits (same set as their /viewer documents page)."""
     if not session.get('is_document_viewer'):
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     if not session.get('viewer_show_calendar'):
         return redirect(url_for('viewer_home'))
     is_viewer, venues_allow, _ = get_document_viewer_settings(session['user_id'])
@@ -10379,6 +11059,10 @@ def manage_shows():
                            archived_count=archived_count,
                            auto_archive_days=grace,
                            auto_archive_days_max=AUTO_ARCHIVE_DAYS_MAX,
+                           # Archive / Restore: staff_or_admin_required's
+                           # _readonly_guard refuses read-only staff.
+                           can_write=(session.get('user_role') == 'admin'
+                                      or not session.get('is_readonly')),
                            user=get_current_user())
 
 
@@ -11452,9 +12136,11 @@ def settings():
     ).fetchall()] if _is_ca else []
 
     # Arts groups (touring companies / artists) — global free-text dropdown
-    # used by the arts_group_dropdown form field type.
+    # used by the arts_group_dropdown form field type. The tab's table shows
+    # each group's primary contact (it read '—' for everyone without these).
     arts_groups = [dict(r) for r in db3.execute(
-        'SELECT id, name, sort_order FROM arts_groups ORDER BY sort_order, name'
+        'SELECT id, name, sort_order, primary_contact_name, primary_contact_email, '
+        'primary_contact_phone FROM arts_groups ORDER BY sort_order, name'
     ).fetchall()] if _is_ca else []
 
     # Job positions data for settings tab — visible to content admins AND schedulers
@@ -11639,7 +12325,7 @@ def _normalize_venue_filter(raw):
 @content_admin_required
 def add_contact():
     db = get_db()
-    name = request.form.get('name','').strip()
+    name = request.form.get('name','').strip()[:_CONTACT_NAME_MAX]
     # venue_filter not exposed on the add form yet — set via edit modal.
     cur = db.execute("""
         INSERT INTO contacts (name, title, department, phone, email,
@@ -11647,10 +12333,10 @@ def add_contact():
                               postnotes_recipient, venue_filter, mode_filter)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
     """, (name,
-          request.form.get('title','').strip(),
+          request.form.get('title','').strip()[:_CONTACT_TITLE_MAX],
           request.form.get('department','').strip(),
-          request.form.get('phone','').strip(),
-          request.form.get('email','').strip(),
+          request.form.get('phone','').strip()[:_CONTACT_PHONE_MAX],
+          request.form.get('email','').strip()[:_CONTACT_EMAIL_MAX],
           1 if request.form.get('report_recipient') else 0,
           1 if request.form.get('advance_recipient') else 0,
           1 if request.form.get('production_recipient') else 0,
@@ -11676,8 +12362,12 @@ def edit_contact(cid):
     sets = ["name=%s", "title=%s", "department=%s", "phone=%s", "email=%s",
             "report_recipient=%s", "advance_recipient=%s",
             "production_recipient=%s", "postnotes_recipient=%s"]
-    params = [data.get('name',''), data.get('title',''), data.get('department',''),
-              data.get('phone',''), data.get('email',''),
+
+    def _txt(key, cap):
+        return str(data.get(key) or '').strip()[:cap]
+    params = [_txt('name', _CONTACT_NAME_MAX), _txt('title', _CONTACT_TITLE_MAX),
+              data.get('department',''),
+              _txt('phone', _CONTACT_PHONE_MAX), _txt('email', _CONTACT_EMAIL_MAX),
               1 if data.get('report_recipient') else 0,
               1 if data.get('advance_recipient') else 0,
               1 if data.get('production_recipient') else 0,
@@ -11691,10 +12381,10 @@ def edit_contact(cid):
     params.append(cid)
     db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=%s", params)
     after = _snapshot_row(db, 'contacts', cid)
-    log_audit(db, 'CONTACT_EDIT', 'contact', cid, detail=data.get('name',''),
+    log_audit(db, 'CONTACT_EDIT', 'contact', cid, detail=params[0],
               before=before, after=after)
     db.commit(); db.close()
-    syslog_logger.info(f"CONTACT_EDIT id={cid} name={data.get('name','')!r} by={session.get('username')}")
+    syslog_logger.info(f"CONTACT_EDIT id={cid} name={params[0]!r} by={session.get('username')}")
     return jsonify({'success': True})
 
 
@@ -13179,7 +13869,11 @@ def pdf_designer_preview(pdf_type):
     if not show:
         return ('show not found', 404)
 
-    # Tuple-returning builders (advance, schedule, postnotes): unpack 5-tuple.
+    # Tuple-returning builders (advance, schedule, postnotes) return a 6-tuple
+    # (html, version, show, pdf_bytes, log_id, is_new). preview=True renders
+    # the current content with the SAVED layout and writes nothing: no
+    # export_log row, no version bump, no reuse of a stored export (a stored
+    # export would hide the layout change being previewed).
     tuple_builders = {
         'advance': _build_advance_pdf,
         'postnotes': _build_postnotes_pdf,
@@ -13194,7 +13888,8 @@ def pdf_designer_preview(pdf_type):
     pdf_bytes = None
     try:
         if pdf_type in tuple_builders:
-            _html, _ver, _show, pdf_bytes, _log_id = tuple_builders[pdf_type](show_id)
+            _html, _ver, _show, pdf_bytes, _log_id, _is_new = tuple_builders[pdf_type](
+                show_id, preview=True)
         elif pdf_type in response_builders:
             sub_resp = response_builders[pdf_type](show_id)
             if hasattr(sub_resp, 'data'):
@@ -13891,9 +14586,12 @@ def delete_schedule_template(tid):
 # that inserts every row in one transaction.
 
 def _clean_preset_rows(rows):
-    """Normalize incoming preset rows: clamp quantity, normalize times."""
+    """Normalize incoming preset rows: clamp quantity, normalize times.
+    Raises ValueError (message for the user) for a time that isn't HH:MM."""
     out = []
-    for r in rows or []:
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
         try:
             pid = int(r.get('position_id')) if r.get('position_id') else None
         except (TypeError, ValueError):
@@ -13902,17 +14600,11 @@ def _clean_preset_rows(rows):
             qty = max(1, min(50, int(r.get('quantity') or 1)))
         except (TypeError, ValueError):
             qty = 1
-        out.append({
-            'position_id':  pid,
-            'quantity':     qty,
-            'in_time':      _normalize_perf_time(r.get('in_time', '')),
-            'out_time':     _normalize_perf_time(r.get('out_time', '')),
-            'break_start':  _normalize_perf_time(r.get('break_start', '')),
-            'break_end':    _normalize_perf_time(r.get('break_end', '')),
-            'break2_start': _normalize_perf_time(r.get('break2_start', '')),
-            'break2_end':   _normalize_perf_time(r.get('break2_end', '')),
-            'notes':        (r.get('notes') or '').strip(),
-        })
+        times, err = _labor_times(r, require_all=True)
+        if err:
+            raise ValueError(err)
+        out.append(dict(times, position_id=pid, quantity=qty,
+                        notes=str(r.get('notes') or '').strip()))
     return out
 
 
@@ -13970,7 +14662,10 @@ def add_labor_preset():
     name = (data.get('name') or '').strip()
     if not name:
         return jsonify({'success': False, 'error': 'Name required.'}), 400
-    rows = _clean_preset_rows(data.get('rows'))
+    try:
+        rows = _clean_preset_rows(data.get('rows'))
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
     db = get_db()
     max_o = db.execute('SELECT MAX(sort_order) FROM labor_presets').fetchone()[0] or 0
     cur = db.execute('INSERT INTO labor_presets (name, sort_order) VALUES (%s,%s) RETURNING id',
@@ -13990,7 +14685,10 @@ def edit_labor_preset(pid):
     name = (data.get('name') or '').strip()
     if not name:
         return jsonify({'success': False, 'error': 'Name required.'}), 400
-    rows = _clean_preset_rows(data.get('rows'))
+    try:
+        rows = _clean_preset_rows(data.get('rows'))
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
     db = get_db()
     if not db.execute('SELECT id FROM labor_presets WHERE id=%s', (pid,)).fetchone():
         db.close(); return jsonify({'success': False, 'error': 'Preset not found.'}), 404
@@ -14048,6 +14746,9 @@ def apply_labor_preset(show_id, pid):
     ).fetchone()[0] or 0
     created = 0
     for r in rows:
+        # A preset saved before times were validated may hold free text:
+        # it's applied blank, never copied onto the show.
+        t = {c: _labor_time(r[c]) or '' for c in _LABOR_TIME_LABELS}
         for _ in range(max(1, r['quantity'] or 1)):
             max_order += 10
             db.execute("""
@@ -14057,9 +14758,9 @@ def apply_labor_preset(show_id, pid):
                                             requested_name, notes, sort_order)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, '', %s, %s)
             """, (show_id, r['position_id'], wd,
-                  r['in_time'] or '', r['out_time'] or '',
-                  r['break_start'] or '', r['break_end'] or '',
-                  r['break2_start'] or '', r['break2_end'] or '',
+                  t['in_time'], t['out_time'],
+                  t['break_start'], t['break_end'],
+                  t['break2_start'], t['break2_end'],
                   r['notes'] or '', max_order))
             created += 1
     log_audit(db, 'LABOR_PRESET_APPLY', 'show', show_id, show_id=show_id,
@@ -16202,6 +16903,130 @@ def _get_show_labor_days(db, show_id):
     return out
 
 
+# ─── PM contact cards (3.35.0) ───────────────────────────────────────────────
+# THE resolver for "who is the production manager on this day, and how do I
+# reach them": the day's covering PM (show_labor_days.cover_pm) or else the
+# show's PRODUCTION MANAGER advance value, looked up in `contacts` for title /
+# phone / email. Both PM fields store a contact NAME (free text, not unique,
+# may outlive a rename), so the lookup is case/space-insensitive, falls back
+# to printing the stored name (`found` False), and breaks duplicate names
+# deterministically (PM department first, then a contact linked to a user,
+# then lowest id). Used by the schedule editor + PDF, the Sign-In Sheet, the
+# Home day timeline and Search — don't add a per-surface lookup.
+
+_PM_UNSET = ('', '-')          # '-' = N/A on a contact_dropdown
+
+
+def _name_key(name):
+    """Comparison form of a person/contact name (case/space-insensitive)."""
+    return ' '.join(str(name or '').split()).lower()
+
+
+def _pm_contact_dept(db):
+    """Department the PRODUCTION MANAGER field draws contacts from."""
+    r = db.execute("SELECT contact_dept FROM form_fields WHERE field_key=%s",
+                   ('production_manager',)).fetchone()
+    return (r['contact_dept'] if r and r['contact_dept'] else 'Production')
+
+
+def _pm_contact_index(db, dept=None):
+    """{name_key: contact row} over ALL contacts (a cover PM may sit outside
+    the PM department), duplicates resolved deterministically."""
+    dept = dept if dept is not None else _pm_contact_dept(db)
+    rows = db.execute('SELECT id, name, title, department, phone, email, user_id '
+                      'FROM contacts').fetchall()
+    by_key = {}
+    for c in sorted(rows, key=lambda c: ((c['department'] or '') != dept,
+                                         c['user_id'] is None, c['id'])):
+        k = _name_key(c['name'])
+        if k:
+            by_key.setdefault(k, c)
+    return by_key
+
+
+def _pm_card(name, is_cover, index):
+    """Contact card for a stored PM name, or None for unset / N/A. A matched
+    contact prints its own name (as /api/production-managers lists it), so
+    'pat   MANAGER' reads 'Pat Manager' like the phone/email beside it.
+    Name / title / phone are clipped to the contact-field caps (a legacy
+    row may predate them) — every PM surface, PDFs included, reads this."""
+    name = ' '.join(str(name or '').split())
+    if name in _PM_UNSET:
+        return None
+    c = index.get(name.lower())
+    if c:
+        name = ' '.join(str(c['name'] or '').split()) or name
+    return {'name': name[:_CONTACT_NAME_MAX],
+            'title': ((c['title'] if c else '') or '')[:_CONTACT_TITLE_MAX],
+            'phone': ((c['phone'] if c else '') or '')[:_CONTACT_PHONE_MAX],
+            'email': ((c['email'] if c else '') or ''),
+            'contact_id': c['id'] if c else None,
+            'is_cover': bool(is_cover), 'found': bool(c)}
+
+
+def _pm_contacts_many(db, show_ids, dates=None):
+    """{show_id: {'show_pm': card|None, 'days': {iso: card|None}}} in 3
+    queries for any number of shows. `days` covers `dates` (ISO strings, or
+    date objects) — each date's cover PM, else the show PM — or, with
+    dates=None, only the dates that have a cover PM. Shows with no PM data
+    still get an entry."""
+    ids = sorted({int(i) for i in (show_ids or []) if i})
+    if not ids:
+        return {}
+    pm = {r['show_id']: r['field_value'] for r in db.execute(
+        "SELECT show_id, field_value FROM advance_data "
+        "WHERE field_key='production_manager' AND show_id = ANY(%s)",
+        (ids,)).fetchall()}
+    want_all = None
+    if dates is not None:
+        want_all = []
+        for d in dates:
+            dv = _as_date(d)
+            if dv:
+                want_all.append(dv.isoformat())
+    covers = {}
+    # Only the asked-for days' rows (index lookups), however many cover rows
+    # a show holds on other dates.
+    sql = ("SELECT show_id, work_date, cover_pm FROM show_labor_days "
+           "WHERE show_id = ANY(%s) AND COALESCE(cover_pm, '') <> ''")
+    params = [ids]
+    if want_all is not None:
+        sql += " AND work_date = ANY(%s::date[])"
+        params.append(sorted(set(want_all)))
+    for r in (db.execute(sql, params).fetchall() if want_all != [] else []):
+        dv = _as_date(r['work_date'])
+        if dv:
+            covers[(r['show_id'], dv.isoformat())] = r['cover_pm']
+    index = _pm_contact_index(db)
+    out = {}
+    for sid in ids:
+        base = _pm_card(pm.get(sid), False, index)
+        want = (want_all if want_all is not None
+                else sorted(d for (s, d) in covers if s == sid))
+        days = {}
+        for iso in want:
+            cv = covers.get((sid, iso))
+            card = _pm_card(cv, True, index) if cv else None
+            days[iso] = card or base
+        out[sid] = {'show_pm': base, 'days': days}
+    return out
+
+
+def _pm_contacts_for_show(db, show_id, dates=None):
+    """_pm_contacts_many for one show."""
+    return (_pm_contacts_many(db, [show_id], dates).get(int(show_id))
+            or {'show_pm': None, 'days': {}})
+
+
+def _pm_contact_for_day(db, show_id, day):
+    """The PM card on duty for one show on one day (cover PM, else show PM)."""
+    dv = _as_date(day)
+    if not dv:
+        return _pm_contacts_for_show(db, show_id)['show_pm']
+    iso = dv.isoformat()
+    return _pm_contacts_for_show(db, show_id, [iso])['days'].get(iso)
+
+
 @app.route('/shows/<int:show_id>/labor-days', methods=['GET'])
 @login_required
 def get_show_labor_days(show_id):
@@ -16213,33 +17038,57 @@ def get_show_labor_days(show_id):
     return jsonify({'days': days})
 
 
+_LABOR_DAYS_MAX_PER_SHOW = 400
+
+
 @app.route('/shows/<int:show_id>/labor-days', methods=['PUT'])
 @login_required
 def save_show_labor_day(show_id):
     """Upsert one day's covering PM / notes. Partial update: only the keys
     present in the payload change. A day whose PM and notes are both empty is
-    deleted (no cruft rows)."""
+    deleted (no cruft rows). The show row is locked first, so two editors
+    saving the same day (the Labor tab's PM vs notes, the schedule's Day PM
+    bar) can't put back each other's stale column."""
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     if session.get('is_restricted') or session.get('is_readonly'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict) or any(
+            k in data and data[k] is not None and not isinstance(data[k], str)
+            for k in ('work_date', 'cover_pm', 'day_notes')):
+        return jsonify({'success': False, 'error': 'Invalid request.'}), 400
     try:
-        wd = date.fromisoformat(str(data.get('work_date') or '').strip()).isoformat()
+        wd = date.fromisoformat((data.get('work_date') or '').strip()).isoformat()
     except ValueError:
         return jsonify({'success': False, 'error': 'Invalid work_date.'}), 400
     db = get_db()
+    # NO KEY UPDATE: serializes the day savers without blocking FK inserts
+    # that reference the show (presence polls, labor rows).
+    if not db.execute('SELECT id FROM shows WHERE id=%s FOR NO KEY UPDATE',
+                      (show_id,)).fetchone():
+        db.close()
+        return jsonify({'success': False, 'error': 'Show not found.'}), 404
     existing = db.execute(
         'SELECT cover_pm, day_notes FROM show_labor_days '
         'WHERE show_id=%s AND work_date=%s', (show_id, wd)).fetchone()
-    cover_pm = (str(data.get('cover_pm') or '').strip() if 'cover_pm' in data
+    # Length caps (3.35.0): cover_pm is a contact name; day notes are a line.
+    cover_pm = (' '.join((data.get('cover_pm') or '').split())[:200]
+                if 'cover_pm' in data
                 else ((existing['cover_pm'] or '') if existing else ''))
-    day_notes = (str(data.get('day_notes') or '').strip() if 'day_notes' in data
+    day_notes = ((data.get('day_notes') or '').strip()[:2000] if 'day_notes' in data
                  else ((existing['day_notes'] or '') if existing else ''))
     if not cover_pm and not day_notes:
         db.execute('DELETE FROM show_labor_days WHERE show_id=%s AND work_date=%s',
                    (show_id, wd))
     else:
+        if not existing and db.execute(
+                'SELECT COUNT(*) AS n FROM show_labor_days WHERE show_id=%s',
+                (show_id,)).fetchone()['n'] >= _LABOR_DAYS_MAX_PER_SHOW:
+            db.close()
+            return jsonify({'success': False,
+                            'error': f'A show can hold a Day PM / notes on at most '
+                                     f'{_LABOR_DAYS_MAX_PER_SHOW} days.'}), 400
         db.execute("""
             INSERT INTO show_labor_days
                 (show_id, work_date, cover_pm, day_notes, updated_by, updated_at)
@@ -16264,18 +17113,32 @@ def save_show_labor_day(show_id):
 def api_production_managers():
     """Contact names eligible as a covering PM — same source the show's
     PRODUCTION MANAGER advance field draws from (contacts in the department
-    configured on the production_manager form field; 'Production' by default)."""
+    configured on the production_manager form field; 'Production' by default).
+    One entry per person: each name as the PM cards print it (whitespace
+    collapsed, the contact _pm_contact_index resolves it to), so a picked
+    value is exactly what PUT /labor-days stores and the poll sends back."""
     db = get_db()
-    dept_row = db.execute(
-        "SELECT contact_dept FROM form_fields WHERE field_key=%s",
-        ('production_manager',)).fetchone()
-    dept = (dept_row['contact_dept'] if dept_row and dept_row['contact_dept']
-            else 'Production')
-    rows = db.execute(
-        'SELECT name FROM contacts WHERE department=%s ORDER BY name',
-        (dept,)).fetchall()
-    db.close()
-    return jsonify({'names': [r['name'] for r in rows if (r['name'] or '').strip()]})
+    try:
+        dept = _pm_contact_dept(db)
+        rows = db.execute(
+            'SELECT name FROM contacts WHERE department=%s '
+            'ORDER BY name', (dept,)).fetchall()
+        index = _pm_contact_index(db, dept)
+    finally:
+        db.close()
+    pool, seen = [], set()
+    for r in rows:
+        k = _name_key(r['name'])
+        if k and k not in seen and k in index:
+            seen.add(k)
+            pool.append(index[k])
+    # `names` is what older pages read; `contacts` (3.35.0) adds the contact
+    # details so a Day PM picker can show how to reach the PM.
+    names = [' '.join(c['name'].split()) for c in pool]
+    return jsonify({'names': names,
+                    'contacts': [{'name': nm, 'title': c['title'] or '',
+                                  'phone': c['phone'] or '',
+                                  'email': c['email'] or ''} for nm, c in zip(names, pool)]})
 
 
 @app.route('/shows/<int:show_id>/labor-requests', methods=['POST'])
@@ -16285,7 +17148,16 @@ def add_labor_request(show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': 'Invalid request.'}), 400
+    times, err = _labor_times(data, require_all=True)
+    if err:
+        return jsonify({'success': False, 'error': err}), 400
+    try:
+        work_date = _labor_work_date(data.get('work_date'))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work date.'}), 400
     db = get_db()
     max_order = db.execute(
         'SELECT MAX(sort_order) FROM labor_requests WHERE show_id=%s', (show_id,)
@@ -16297,13 +17169,10 @@ def add_labor_request(show_id):
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
     """, (show_id,
           data.get('position_id') or None,
-          data.get('work_date') or None,
-          _normalize_perf_time(data.get('in_time', '')),
-          _normalize_perf_time(data.get('out_time', '')),
-          _normalize_perf_time(data.get('break_start', '')),
-          _normalize_perf_time(data.get('break_end', '')),
-          _normalize_perf_time(data.get('break2_start', '')),
-          _normalize_perf_time(data.get('break2_end', '')),
+          work_date,
+          times['in_time'], times['out_time'],
+          times['break_start'], times['break_end'],
+          times['break2_start'], times['break2_end'],
           data.get('requested_name', ''),
           (data.get('notes') or '').strip(),
           max_order + 10))
@@ -16323,21 +17192,30 @@ def update_labor_request(show_id, rid):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': 'Invalid request.'}), 400
+    # Times must read as HH:MM (or blank) — free text is refused, never stored.
+    times, err = _labor_times(data)
+    if err:
+        return jsonify({'success': False, 'error': err}), 400
+    try:
+        work_date = _labor_work_date(data.get('work_date'))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work date.'}), 400
     # Only the columns the request carries (3.32.0). Writing every column
     # blanked `notes` on every show-page save (the page never sends it — the
     # Labor Scheduler owns it) and let a stale tab put back old times/names.
-    sets, params = [], []
+    vals = dict(times)
+    if 'work_date' in data:
+        vals['work_date'] = work_date
     for col, conv in (('position_id', lambda v: v or None),
-                      ('work_date', lambda v: v or None),
-                      ('in_time', _normalize_perf_time), ('out_time', _normalize_perf_time),
-                      ('break_start', _normalize_perf_time), ('break_end', _normalize_perf_time),
-                      ('break2_start', _normalize_perf_time), ('break2_end', _normalize_perf_time),
                       ('requested_name', lambda v: v or ''),
                       ('notes', lambda v: (v or '').strip())):
         if col in data:
-            sets.append(f'{col}=%s')
-            params.append(conv(data.get(col) or ''))
+            vals[col] = conv(data.get(col) or '')
+    sets = [f'{col}=%s' for col in vals]
+    params = list(vals.values())
     if not sets:
         return jsonify({'success': True})
     db = get_db()
@@ -16370,24 +17248,74 @@ def delete_labor_request(show_id, rid):
     return jsonify({'success': True})
 
 
+_LABOR_REORDER_MAX = 2000
+
+
 @app.route('/shows/<int:show_id>/labor-requests/reorder', methods=['POST'])
 @login_required
 def reorder_labor_requests(show_id):
+    """Set ONE day's labor-request order: ``{"work_date": "YYYY-MM-DD" | "",
+    "request_ids": [id, …]}`` (Labor Requests tab → a day's Tools → Sort by
+    call time, 3.35.0). sort_order is one sequence per show, so the server
+    rebuilds it from ITS order and drops that day's rows, in the listed
+    order, into the slots they already hold — every other day keeps what
+    the server has, never what a stale tab had. The ids must be exactly the
+    day's rows ('' = Unscheduled): a row someone else added, removed or
+    re-dated → 409, and the page reloads instead of half-applying."""
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
     if session.get('is_readonly') or session.get('is_restricted'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
-    data = request.get_json(force=True) or {}
-    request_ids = data.get('request_ids', [])
+    data = request.get_json(force=True, silent=True)
+    ids = data.get('request_ids') if isinstance(data, dict) else None
+    if (not isinstance(ids, list) or len(ids) > _LABOR_REORDER_MAX
+            or not all(type(i) is int and 0 < i < 2 ** 31 for i in ids)
+            or len(set(ids)) != len(ids)):
+        return jsonify({'success': False, 'error': 'Invalid request list.'}), 400
+    stale = {'success': False, 'stale': True,
+             'error': 'The labor requests on this day changed since this page loaded '
+                      '(someone added, removed or moved one). The list will reload — '
+                      'then sort again.'}
+    if 'work_date' not in data:
+        # A page loaded before per-day sorting posts the whole show's order,
+        # which would put back a stale order on every other day.
+        return jsonify(dict(stale, error='This page is out of date — reload it, '
+                                         'then sort again.')), 409
+    try:
+        wd = _as_date(_labor_work_date(data.get('work_date')))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work date.'}), 400
     db = get_db()
-    for i, rid in enumerate(request_ids):
-        db.execute(
-            'UPDATE labor_requests SET sort_order=%s WHERE id=%s AND show_id=%s',
-            (i * 10, rid, show_id)
-        )
-    db.commit()
-    db.close()
-    return jsonify({'success': True})
+    try:
+        # Lock the show's rows (in id order, so two sorts can't deadlock).
+        rows = db.execute(
+            'SELECT id, work_date, sort_order FROM labor_requests '
+            'WHERE show_id=%s ORDER BY id FOR UPDATE', (show_id,)).fetchall()
+        day = {r['id'] for r in rows if _as_date(r['work_date']) == wd}
+        if day != set(ids):
+            return jsonify(stale), 409
+        # Server order = the list order (ORDER BY sort_order, id; NULLs last).
+        rows.sort(key=lambda r: (r['sort_order'] is None, r['sort_order'] or 0, r['id']))
+        it = iter(ids)
+        seq = [next(it) if r['id'] in day else r['id'] for r in rows]
+        old = {r['id']: r['sort_order'] for r in rows}
+        moved = [(rid, i * 10) for i, rid in enumerate(seq) if old[rid] != i * 10]
+        if moved:
+            db.execute("""
+                UPDATE labor_requests lr SET sort_order = v.ord
+                FROM unnest(%s::int[], %s::int[]) AS v(id, ord)
+                WHERE lr.id = v.id AND lr.show_id = %s
+            """, ([m[0] for m in moved], [m[1] for m in moved], show_id))
+            log_audit(db, 'LABOR_REQUEST_REORDER', 'show', show_id, show_id=show_id,
+                      detail=f'{wd.isoformat() if wd else "unscheduled"}: '
+                             f'{len(ids)} requests')
+        db.commit()
+    finally:
+        db.close()
+    syslog_logger.info(f"LABOR_REQUEST_REORDER show_id={show_id} "
+                       f"date={wd.isoformat() if wd else '-'} count={len(ids)} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'count': len(ids)})
 
 
 # ─── Labor Scheduler ─────────────────────────────────────────────────────────
@@ -18043,10 +18971,17 @@ def api_labor_scheduler_update(rid):
     """Update only the scheduling fields on a labor request."""
     if session.get('is_readonly'):
         return jsonify({'success': False, 'error': 'Read-only access.'}), 403
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': 'Invalid request.'}), 400
+    try:
+        work_date = _labor_work_date(data.get('work_date'))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work date.'}), 400
     db = get_db()
     row = db.execute(
-        'SELECT show_id, scheduled_crew_member_id FROM labor_requests WHERE id=%s', (rid,)
+        'SELECT show_id, scheduled_crew_member_id, ' + ', '.join(_LABOR_TIME_LABELS) +
+        ' FROM labor_requests WHERE id=%s', (rid,)
     ).fetchone()
     if not row:
         db.close()
@@ -18083,12 +19018,25 @@ def api_labor_scheduler_update(rid):
         updates.append('scheduled_crew_member_id=%s')
         params.append(cmid)
         detail_parts.append(f"crew_id={cmid}")
-    for field in ('in_time', 'out_time', 'break_start', 'break_end',
-                  'break2_start', 'break2_end'):
-        if field in data:
-            updates.append(f'{field}=%s')
-            params.append(_normalize_perf_time((data[field] or '').strip()))
-            detail_parts.append(f"{field}={data[field]}")
+    # Times must read as HH:MM (or blank), like every labor write path. A
+    # cell sent back exactly as stored is kept as is: the scheduler's Save
+    # All re-sends every cell, and an old free-text value must not block the
+    # row's other changes.
+    for field, label in _LABOR_TIME_LABELS.items():
+        if field not in data:
+            continue
+        raw = data[field]
+        if isinstance(raw, str) and raw.strip() and raw.strip() == (row[field] or '').strip():
+            val = row[field]
+        else:
+            val = _labor_time(raw)
+            if val is None:
+                db.close()
+                return jsonify({'success': False,
+                                'error': f'"{label}" is not a time — use HH:MM (24-hour).'}), 400
+        updates.append(f'{field}=%s')
+        params.append(val)
+        detail_parts.append(f"{field}={val}")
     if 'notes' in data:
         updates.append('notes=%s')
         params.append((data['notes'] or '').strip())
@@ -18097,10 +19045,9 @@ def api_labor_scheduler_update(rid):
         # Re-dating a line (e.g. correcting a mis-dated row, or moving a whole
         # day-block in the scheduler). Empty string clears it back to NULL, in
         # which case it falls back to the show's date in list queries.
-        wd = (data.get('work_date') or '').strip() or None
         updates.append('work_date=%s')
-        params.append(wd)
-        detail_parts.append(f"work_date={wd}")
+        params.append(work_date)
+        detail_parts.append(f"work_date={work_date}")
 
     if not updates:
         db.close()
@@ -18158,12 +19105,21 @@ def api_labor_scheduler_delete(rid):
 @scheduler_required
 def api_labor_scheduler_add():
     """Add a new labor request from the scheduler view."""
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False, 'error': 'Invalid request.'}), 400
     show_id = data.get('show_id')
     if not show_id:
         return jsonify({'success': False, 'error': 'show_id required'}), 400
     if not can_access_show(session['user_id'], show_id):
         return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    times, err = _labor_times(data, require_all=True)
+    if err:
+        return jsonify({'success': False, 'error': err}), 400
+    try:
+        work_date = _labor_work_date(data.get('work_date'))
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid work date.'}), 400
     db = get_db()
     max_order = db.execute(
         'SELECT MAX(sort_order) FROM labor_requests WHERE show_id=%s', (show_id,)
@@ -18175,13 +19131,10 @@ def api_labor_scheduler_add():
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     """, (show_id,
           data.get('position_id') or None,
-          data.get('work_date') or None,
-          _normalize_perf_time(data.get('in_time', '')),
-          _normalize_perf_time(data.get('out_time', '')),
-          _normalize_perf_time(data.get('break_start', '')),
-          _normalize_perf_time(data.get('break_end', '')),
-          _normalize_perf_time(data.get('break2_start', '')),
-          _normalize_perf_time(data.get('break2_end', '')),
+          work_date,
+          times['in_time'], times['out_time'],
+          times['break_start'], times['break_end'],
+          times['break2_start'], times['break2_end'],
           data.get('requested_name', ''), max_order + 10))
     rid = cur.fetchone()['id']
     log_audit(db, 'LABOR_REQUEST_ADD', 'labor_request', rid, show_id=show_id, detail='via scheduler')
@@ -18440,6 +19393,11 @@ def _overhead_log(action, **kw):
 @login_required
 def overhead_crew_page():
     """Render the Overhead & Project Crew running schedule."""
+    # can_edit mirrors _overhead_write_check() — the rule every overhead write
+    # route applies — which refuses ANY read-only account, admins included.
+    # So it is deliberately stricter than readonly_view (_readonly_guard's
+    # rule, which exempts admins): a read-only admin gets the view-only page
+    # here rather than editors whose every save would be refused.
     return render_template(
         'overhead_crew.html',
         user=get_current_user(),
@@ -20162,6 +21120,19 @@ def asset_category_delete(cat_id):
 
 # ─── Asset Manager — Types ────────────────────────────────────────────────────
 
+# What the PM-facing catalog (/api/asset-types without a manager's
+# include_hidden) sends per type: picker data only. A new column the show
+# page's Add Asset browser needs goes here — never supplier name/contact,
+# S3 keys (photo_s3_key), content hashes or timestamps. storage_location
+# stays: the browser's Details pane shows it as "Stored at".
+_ASSET_PICKER_COLS = (
+    'id', 'category_id', 'parent_type_id', 'name', 'manufacturer', 'model',
+    'storage_location', 'rental_cost', 'weekly_rate', 'reserve_count',
+    'is_consumable', 'is_system', 'is_package', 'track_quantity',
+    'allow_unit_selection', 'hide_from_pm', 'sort_order',
+)
+
+
 @app.route('/api/asset-types', methods=['GET'])
 @login_required
 def asset_types_api():
@@ -20180,6 +21151,10 @@ def asset_types_api():
     bogus $0.00/day duplicate of its own children — exactly what happened
     when a type created without a group later had real types parented
     under it. The asset-manager finder applies the same rule client-side.
+
+    Only a manager asking with include_hidden gets every column; everyone
+    else gets the picker-level `_ASSET_PICKER_COLS` (no supplier name /
+    contact, S3 keys or hashes — this is the PM-facing catalog).
     """
     include_hidden = request.args.get('include_hidden') == '1'
     is_manager = (
@@ -20188,6 +21163,10 @@ def asset_types_api():
         or session.get('is_asset_manager')
     )
     db = get_db()
+    if include_hidden and is_manager:
+        cols = _cols_except(db, 'asset_types', 'photo', 'at')
+    else:
+        cols = ', '.join(f'at.{c}' for c in _ASSET_PICKER_COLS)
     where = ['at.is_retired = 0']
     where.append("""NOT (
             at.parent_type_id IS NULL
@@ -20198,7 +21177,7 @@ def asset_types_api():
     if not (include_hidden and is_manager):
         where.append('COALESCE(at.hide_from_pm, 0) = 0')
     rows = db.execute(f"""
-        SELECT {_cols_except(db, 'asset_types', 'photo', 'at')}, {_ASSET_HAS_PHOTO_SQL},
+        SELECT {cols}, {_ASSET_HAS_PHOTO_SQL},
                ac.name as category_name,
                pt.name as parent_name
         FROM asset_types at
@@ -20690,13 +21669,25 @@ def asset_type_photo(type_id):
 @app.route('/settings/asset-types/<int:type_id>/used-in')
 @login_required
 def asset_type_used_in(type_id):
-    """Return system/package types that include this type as a component."""
+    """Return system/package types that include this type as a component.
+
+    Managers (the Asset Manager page) get every kit. Anyone else — the show
+    page's Add Asset browser calls this for every item — gets only kits the
+    picker shows: retired and hide_from_pm kits are left out, the same
+    visibility /api/asset-types and /api/asset-types/<id>/components apply."""
+    is_manager = (
+        session.get('user_role') == 'admin'
+        or session.get('is_content_admin')
+        or session.get('is_asset_manager')
+    )
+    visible = '' if is_manager else \
+        'AND at.is_retired = 0 AND COALESCE(at.hide_from_pm, 0) = 0'
     db = get_db()
-    rows = db.execute("""
+    rows = db.execute(f"""
         SELECT at.id, at.name, at.is_system, at.is_package
         FROM asset_type_system_members m
         JOIN asset_types at ON at.id = m.system_type_id
-        WHERE m.component_type_id = %s
+        WHERE m.component_type_id = %s {visible}
         ORDER BY at.name
     """, (type_id,)).fetchall()
     db.close()
@@ -21674,6 +22665,80 @@ def asset_type_availability(type_id):
     return jsonify(result)
 
 
+@app.route('/api/asset-types/<int:type_id>/components')
+@login_required
+def asset_type_components(type_id):
+    """What's inside a System / Package, for the show page's Add Asset
+    browser detail pane (3.35.0). Any signed-in user may call it (the picker
+    is PM-facing; /settings/asset-types/<id>/members is manager-only), so it
+    returns ONLY picker-level data: component id / name / manufacturer /
+    model / category and the per-kit quantity — never units, purchase,
+    depreciation or supplier data.
+
+    Components flagged hide_from_pm ARE listed: they rent as part of the kit
+    and the add is checked against their stock, so the PM should see what's
+    in the box (the browser lists them as plain text, not links). A kit that
+    is itself hidden from the picker or retired is 404 to non-managers, the
+    same visibility /api/asset-types applies.
+
+    With ?start=&end= (ISO dates) every component carries `available` for
+    that window (None when it can't run short) and `sets_available` is how
+    many of the kit those components cover — the arithmetic
+    _system_component_shortages() blocks an add on. A non-kit type returns
+    an empty list."""
+    is_manager = (
+        session.get('user_role') == 'admin'
+        or session.get('is_content_admin')
+        or session.get('is_asset_manager')
+    )
+
+    def _iso_arg(name):
+        v = (request.args.get(name) or '').strip()[:10]
+        try:
+            return date.fromisoformat(v).isoformat() if v else None
+        except ValueError:
+            return None
+    start, end = _iso_arg('start'), _iso_arg('end')
+    if not (start and end and start <= end):
+        start = end = None
+
+    db = get_db()
+    try:
+        kit = db.execute(
+            'SELECT id, is_system, is_package, is_retired, hide_from_pm '
+            'FROM asset_types WHERE id = %s', (type_id,)).fetchone()
+        if not kit or ((kit['is_retired'] or kit['hide_from_pm']) and not is_manager):
+            abort(404)
+        if not (kit['is_system'] or kit['is_package']):
+            return jsonify({'components': [], 'sets_available': None,
+                            'window': None})
+        rows = db.execute("""
+            SELECT at.id, at.name, at.manufacturer, at.model,
+                   ac.name AS category_name, COALESCE(m.quantity, 1) AS quantity
+            FROM asset_type_system_members m
+            JOIN asset_types at ON at.id = m.component_type_id
+            JOIN asset_categories ac ON ac.id = at.category_id
+            WHERE m.system_type_id = %s
+            ORDER BY m.sort_order, at.name
+        """, (type_id,)).fetchall()
+        comps = [dict(r) for r in rows]
+        sets = None
+        if start and comps:
+            avail = _get_asset_availability_many(
+                db, [c['id'] for c in comps], start, end)
+            for c in comps:
+                av = avail.get(c['id']) or {}
+                limited = not av.get('unlimited') and av.get('available') is not None
+                c['available'] = max(0, av['available']) if limited else None
+                if limited:
+                    can = max(0, av['available']) // max(1, c['quantity'])
+                    sets = can if sets is None else min(sets, can)
+    finally:
+        db.close()
+    return jsonify({'components': comps, 'sets_available': sets,
+                    'window': {'start': start, 'end': end} if start else None})
+
+
 @app.route('/api/assets/availability')
 def assets_availability_bulk():
     """Return availability summary for all asset types, plus by-show data.
@@ -21699,8 +22764,9 @@ def assets_availability_bulk():
                 'available':   info.get('available'),
             }
 
-    # By-show summary (for 'by_show' layout) — requires login for access control
-    if not session.get('user_id'):
+    # By-show summary (for 'by_show' layout) — requires login for access
+    # control; never for a document viewer (public-link data only).
+    if not _dashboard_full_access():
         db.close()
         return jsonify({'by_type': by_type, 'by_show': []})
 
@@ -25684,6 +26750,18 @@ def show_piano_tuning_create(show_id):
     return jsonify({'success': True, 'id': tid}), 201
 
 
+def _piano_readonly_refusal(tid):
+    """The three @login_required piano write routes (update, pin-unit,
+    cancel-request) check _is_piano_manager(), which doesn't see is_readonly:
+    a Read-only account carrying is_piano_manager must still not write.
+    Same rule as _readonly_guard (admins exempt). None = may proceed."""
+    if session.get('is_readonly') and session.get('user_role') != 'admin':
+        syslog_logger.warning(f"PIANO_TUNING_DENIED id={tid} reason=readonly "
+                              f"by={session.get('username')}")
+        return jsonify({'error': 'Read-only access'}), 403
+    return None
+
+
 @app.route('/piano-tunings/<int:tid>', methods=['PUT'])
 @login_required
 def piano_tuning_update(tid):
@@ -25692,6 +26770,9 @@ def piano_tuning_update(tid):
     fields — or cancel it — only while it is still 'requested'."""
     if not _piano_module_on():
         abort(404)
+    refusal = _piano_readonly_refusal(tid)
+    if refusal:
+        return refusal
     data = request.get_json(force=True) or {}
     db = get_db()
     cur = db.execute("SELECT t.*, COALESCE(s.name, 'House piano tuning') AS show_name "
@@ -26142,6 +27223,9 @@ def piano_tuning_pin_unit(tid):
     manager or an editor of the show."""
     if not _piano_module_on():
         abort(404)
+    refusal = _piano_readonly_refusal(tid)
+    if refusal:
+        return refusal
     db = get_db()
     t = db.execute('SELECT id, show_id, status, piano_asset_type_id, piano_asset_item_id, '
                    'tuning_date, requested_date FROM piano_tunings WHERE id=%s', (tid,)).fetchone()
@@ -26181,6 +27265,9 @@ def piano_tuning_cancel_request(tid):
     is emailed). The manager actually cancels via the normal status change."""
     if not _piano_module_on():
         abort(404)
+    refusal = _piano_readonly_refusal(tid)
+    if refusal:
+        return refusal
     db = get_db()
     t = db.execute('SELECT t.*, s.name AS show_name FROM piano_tunings t '
                    'JOIN shows s ON s.id = t.show_id WHERE t.id=%s FOR UPDATE OF t',
@@ -26636,7 +27723,7 @@ _EMAIL_RE = re.compile(r'^[^@\s<>"\'(),;:\\]+@[^@\s<>"\'(),;:\\]+\.[^@\s<>"\'(),
 
 def _register_route():
     if session.get('user_id'):
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     error = None
     if request.method == 'POST':
         username = request.form.get('username', '').strip().lower()
@@ -26863,7 +27950,7 @@ def deny_registration(reg_id):
 
 def _forgot_password_route():
     if session.get('user_id'):
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     sent = False
     error = None
     if request.method == 'POST':
@@ -26930,7 +28017,7 @@ else:
 @app.route('/reset-password/<token>', methods=['GET', 'POST'])
 def reset_password(token):
     if session.get('user_id'):
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('index'))
     db = get_db()
     rec = db.execute(
         'SELECT * FROM password_reset_tokens WHERE token=%s AND used=0', (token,)
@@ -27907,14 +28994,21 @@ def _build_shows_calendar_days(db, accessible, date_from, date_to):
     return days
 
 
+def _dashboard_full_access():
+    """Signed in AND not a document viewer: the caller gets the full widget
+    data (Assets by Show, per-user show access). A viewer — like a visitor
+    with no account — sees only what a public dashboard link shows."""
+    return bool(session.get('user_id')) and not session.get('is_document_viewer')
+
+
 def _dashboard_data_access_ok():
     """Guard for the dashboard/asset widget-data endpoints. These feed both
     the logged-in dashboards AND the anonymous public dashboard (/d/<slug>),
     so allow a request when EITHER the caller is signed in OR it carries the
     ?slug= of a genuinely public dashboard. Without this, anyone who can
     reach the server could pull crew/asset/show aggregates with no account
-    and no slug."""
-    if session.get('user_id'):
+    and no slug. A document viewer is checked by slug like a visitor."""
+    if _dashboard_full_access():
         return True
     slug = request.args.get('slug', '')
     if not slug:
@@ -27937,7 +29031,7 @@ def api_dashboard_shows_calendar():
     date_from = request.args.get('from', '')
     date_to   = request.args.get('to', '')
     db = get_db()
-    accessible = get_accessible_shows(session['user_id']) if session.get('user_id') else None
+    accessible = get_accessible_shows(session['user_id']) if _dashboard_full_access() else None
     days = _build_shows_calendar_days(db, accessible, date_from, date_to)
     db.close()
     return jsonify({'days': days})
@@ -28331,9 +29425,17 @@ def api_admin_dashboards():
     return jsonify(result)
 
 
+# Asset-type fields a signed-out /d/<slug> visitor's page carries — only what
+# the widgets draw (never costs, supplier contacts, storage, flags).
+_PUBLIC_DASH_TYPE_KEYS = ('id', 'category_id', 'category_name', 'name',
+                          'manufacturer', 'model', 'reserve_count')
+
+
 @app.route('/d/<slug>')
 def public_dashboard(slug):
-    """Public dashboard — no login required."""
+    """Public dashboard — no login required. Signed out, base.html renders the
+    page's auth_content (no sidebar, polls or beacons); signed in, the same
+    view-only dashboard sits in the user's normal chrome."""
     db = get_db()
     d = db.execute(
         'SELECT * FROM asset_dashboards WHERE public_slug=%s AND is_public=1', (slug,)
@@ -28350,13 +29452,19 @@ def public_dashboard(slug):
     """).fetchall()
     db.close()
     config = json.loads(d['config_json'] or '{}')
+    # A document viewer gets the signed-out page (no viewer chrome, and the
+    # widgets fetch the anonymous data shape — see _dashboard_full_access).
+    user = None if session.get('is_document_viewer') else get_current_user()
+    asset_types = [dict(t) for t in types]
+    if not user:
+        asset_types = [{k: t.get(k) for k in _PUBLIC_DASH_TYPE_KEYS} for t in asset_types]
     return render_template('dashboard_view.html',
                            dash=dict(d),
                            categories=[dict(c) for c in cats],
-                           asset_types=[dict(t) for t in types],
+                           asset_types=asset_types,
                            config=config,
                            public=True,
-                           user=None)
+                           user=user)
 
 
 # ─── Asset Reports ─────────────────────────────────────────────────────────────
@@ -29983,10 +31091,11 @@ prism_module.register(
 # ─── Security sign-in sheets (sandboxed) ──────────────────────────────────────
 # Per-show personnel list + the venue-themed sign-in sheet PDF that sits at
 # the security desk. All logic lives in security_module.py +
-# templates/security_signin.html + templates/pdf/security_signin_pdf.html
-# behind this one call. The whole feature toggles at Settings → System →
-# Modules (module_enabled('security_signin')); the module owns only the
-# security_signin_names table.
+# templates/pdf/security_signin_pdf.html (the editor is the show page's
+# Sign-In Sheet tab) behind this one call. The whole feature toggles at
+# Settings → Modules (module_enabled('security_signin')); the module owns only
+# the security_signin_names table and reads the PM on duty (3.35.0) only
+# through pm_contacts_for_show.
 
 security_module.register(
     app,
@@ -30002,6 +31111,32 @@ security_module.register(
     safe_content_disposition=_safe_content_disposition,
     show_span_dates=_show_span_dates,
     pdf_font_config=_wp_font_config,
+    pm_contacts_for_show=_pm_contacts_for_show,
+)
+
+
+# ─── #Tags + Search (sandboxed, 3.35.0) ───────────────────────────────────────
+# The #tag index (a query over every show text source — nothing stored), the
+# /tags + /tags/<tag> pages, the /search page and their JSON APIs, plus the
+# `tagify` Jinja filter. All logic lives in find_module.py + templates/
+# tags.html, tag.html, search.html + static/js/tags.js behind this one call.
+# Read-only: it owns no table and never writes.
+import find_module  # noqa: E402
+
+find_module.register(
+    app,
+    get_db=get_db,
+    get_current_user=get_current_user,
+    login_required=login_required,
+    can_access_show=can_access_show,
+    get_accessible_shows=get_accessible_shows,
+    my_pm_names=_my_pm_names,
+    pm_contacts_many=_pm_contacts_many,
+    name_key=_name_key,
+    as_date=_as_date,
+    ts_out=_ts_out,
+    get_distinct_venues=_get_distinct_venues,
+    module_enabled=module_enabled,
 )
 
 

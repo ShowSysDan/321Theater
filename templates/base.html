@@ -5,7 +5,7 @@
 #}
 <!DOCTYPE html>
 {% set _tpref = (user.theme if user and user.theme in ('dark', 'light', 'auto') else ('auto' if not user or not user.theme else 'dark')) %}
-<html lang="en" data-theme="{{ _tpref if _tpref != 'auto' else 'dark' }}" data-theme-pref="{{ _tpref }}"{% if is_mobile_view or test_mode %} class="{{ 'mobile-view' if is_mobile_view }}{{ ' test-mode' if test_mode }}"{% endif %}>
+<html lang="en" data-theme="{{ _tpref if _tpref != 'auto' else 'dark' }}" data-theme-pref="{{ _tpref }}"{% if is_mobile_view or test_mode or readonly_view %} class="{{ 'mobile-view' if is_mobile_view }}{{ ' test-mode' if test_mode }}{{ ' readonly-view' if readonly_view }}"{% endif %}>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
@@ -25,6 +25,20 @@
      _resolve_view_mode() in app.py. #}
   <link rel="stylesheet" href="{{ url_for('static', filename='css/mobile.css') }}">
   {% endif %}
+  <script>
+  // Today's date as YYYY-MM-DD in the BROWSER's time zone. Defined here (not
+  // app.js) because some pages' scripts run before app.js loads — and on
+  // signed-out pages too (the public dashboard /d/<slug> uses them).
+  // new Date().toISOString().slice(0,10) is the UTC date, which after
+  // ~8 pm in Orlando is already tomorrow.
+  window.localIsoDate = function (d) {
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
+           String(d.getDate()).padStart(2, '0');
+  };
+  window.localTodayIso = function () { return localIsoDate(new Date()); };
+  // Read-only account (inject_version's readonly_view = _readonly_guard's
+  // rule): pages hide their write controls when true. Display only.
+  window.READONLY_VIEW = {{ 'true' if readonly_view else 'false' }};</script>
   {% if user %}
   {# Hover preloading (Speculation Rules, Chromium): when a link is hovered the
      browser prefetches the page in the background so the click renders almost
@@ -43,16 +57,7 @@
        /static, /api      not page navigations
      Add class="no-prefetch" to any future link that must never be prefetched
      (e.g. a GET that mutates state — though those should be POSTs anyway). #}
-  <script>window.__PAGE_RENDERED_AT = {{ page_rendered_at }};
-  // Today's date as YYYY-MM-DD in the BROWSER's time zone. Defined here (not
-  // app.js) because some pages' scripts run before app.js loads.
-  // new Date().toISOString().slice(0,10) is the UTC date, which after
-  // ~8 pm in Orlando is already tomorrow.
-  window.localIsoDate = function (d) {
-    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
-           String(d.getDate()).padStart(2, '0');
-  };
-  window.localTodayIso = function () { return localIsoDate(new Date()); };</script>
+  <script>window.__PAGE_RENDERED_AT = {{ page_rendered_at }};</script>
   <script type="speculationrules">
   {% raw %}{
     "prefetch": [{
@@ -100,7 +105,12 @@
     <button type="button" class="m-icon-btn" onclick="mToggleDrawer()" aria-label="Menu">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="22" height="22"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
-    <a class="m-brand" href="{{ url_for('viewer_home') if session.get('is_document_viewer') else url_for('dashboard') }}">3·2·1→THEATER{% if test_mode %} <span class="test-instance-badge">TEST</span>{% endif %}</a>
+    <a class="m-brand" href="{{ url_for('viewer_home') if session.get('is_document_viewer') else url_for('index') }}">3·2·1→THEATER{% if test_mode %} <span class="test-instance-badge">TEST</span>{% endif %}</a>
+    {% if not session.get('is_document_viewer') %}
+    <a class="m-icon-btn" href="{{ url_for('search_page') }}" aria-label="Search"{% if request.endpoint == 'search_page' %} aria-current="page"{% endif %}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.2" y2="16.2"/></svg>
+    </a>
+    {% endif %}
     <button type="button" class="m-icon-btn" onclick="openHelp()" aria-label="Help">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="20" height="20"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
     </button>
@@ -183,13 +193,25 @@
         Log out
       </a>
       {% else %}
-      <a href="{{ url_for('dashboard') }}" class="nav-item {% if request.endpoint == 'dashboard' %}active{% endif %}"{% if request.endpoint == 'dashboard' %} aria-current="page"{% endif %}>
+      {# Home = the day timeline (3.35.0); Shows = the show board (+ its
+         Archived tab); My Shows = the board narrowed to my PM shows. #}
+      <a href="{{ url_for('index') }}" class="nav-item {% if request.endpoint == 'index' %}active{% endif %}"{% if request.endpoint == 'index' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
         Home
+      </a>
+      {% set _on_board = request.endpoint in ['dashboard', 'archived_shows_page'] %}
+      <a href="{{ url_for('dashboard') }}" class="nav-item {% if _on_board %}active{% endif %}"{% if _on_board %} aria-current="page"{% endif %}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9a3 3 0 010 6v2a2 2 0 002 2h16a2 2 0 002-2v-2a3 3 0 010-6V7a2 2 0 00-2-2H4a2 2 0 00-2 2z"/><path d="M13 5v2M13 11v2M13 17v2"/></svg>
+        Shows
       </a>
       <a href="{{ url_for('my_shows') }}" class="nav-item {% if request.endpoint == 'my_shows' %}active{% endif %}"{% if request.endpoint == 'my_shows' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M16 3l1.5 1.5L20 2"/></svg>
         My Shows
+      </a>
+      {% set _find_active = request.endpoint in ('search_page', 'tags_index', 'tag_page') %}
+      <a href="{{ url_for('search_page') }}" class="nav-item {% if _find_active %}active{% endif %}"{% if _find_active %} aria-current="page"{% endif %}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.2" y2="16.2"/></svg>
+        Search
       </a>
 
       {% if request.endpoint in ['show_page'] and show is defined %}
@@ -243,7 +265,9 @@
     </nav>
 
     <div class="sidebar-footer">
-      {% if session.get('_real_role') == 'admin' or user.role == 'admin' %}
+      {# Not for document viewers (an admin account can carry the viewer flag):
+         their gate 403s /admin/view-as, and a preview can't lift it anyway. #}
+      {% if (session.get('_real_role') == 'admin' or user.role == 'admin') and not session.get('is_document_viewer') %}
       <div>
         {% if session.get('_view_as') %}
         <button onclick="resetViewAs()" style="width:100%;font-size:10px;padding:5px 8px;background:rgba(246,173,85,.15);border:1px solid rgba(246,173,85,.4);color:#F6AD55;border-radius:4px;cursor:pointer;letter-spacing:.04em;font-weight:600">
@@ -277,10 +301,14 @@
             </div>
           </div>
         </div>
+        {% if not session.get('is_document_viewer') %}
+        {# No bell for document viewers: notifications link to pages they
+           can't open, and app.js only polls when this button exists. #}
         <button class="theme-toggle-btn notif-bell-btn" id="notif-bell-btn" onclick="toggleNotifPanel(event)" title="Notifications" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
           <span id="notif-bell-badge" class="notif-bell-badge" hidden>0</span>
         </button>
+        {% endif %}
         <button class="theme-toggle-btn" id="theme-toggle-btn" onclick="toggleTheme()" title="Theme: Dark / Light / Auto">
           {% if user.theme == 'light' %}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/></svg>
@@ -379,7 +407,7 @@
   {# ── Mobile chrome: drawer backdrop + fixed bottom tab bar ────────────── #}
   <div class="m-backdrop" onclick="mCloseDrawer()"></div>
   <nav class="m-tabbar">
-    <a href="{{ url_for('viewer_home') if session.get('is_document_viewer') else url_for('dashboard') }}" class="m-tab">
+    <a href="{{ url_for('viewer_home') if session.get('is_document_viewer') else url_for('index') }}" class="m-tab">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
       <span>Home</span>
     </a>
@@ -396,6 +424,7 @@
 {% endif %}
 
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script src="{{ url_for('static', filename='js/tags.js') }}"></script>
 {% if user %}
 <script>
 /* Browser / screen record for troubleshooting (3.33.0): once per browser
@@ -538,18 +567,35 @@ async function resetViewAs() {
 const _HELP_UL = 'padding-left:18px;margin:8px 0';
 const _HELP_PAGES = {
   home: {
-    title: 'Home — Show Board',
+    title: 'Home — Day Timeline',
     html: `
-      <p><strong>Your show board.</strong> Every active show, grouped into venue columns (stacked top-to-bottom on the mobile site).</p>
+      <p><strong>Everything happening on one day, at a glance.</strong> One column (lane) per show or event that has anything that day — its load-in/out or performance dates, production schedule rows or crew — side by side on one time axis, so you can see what overlaps.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Happening Today</strong> — appears when there's activity today, with auto tags like Load-In, Performance, Load-Out.</li>
-        <li><strong>New Show</strong> — creates a show from just a name; dates, venue and everything else are filled in on its Advance Sheet.</li>
-        <li><strong>Search</strong> — filters the active shows by name or venue. Archived shows have their own page: the <strong>Archived</strong> tab under the title (with its own search, dates and venue filter, plus Restore).</li>
-        <li>The sun button in the sidebar footer cycles the theme <strong>Dark → Light → Auto</strong>. Auto follows your device's setting.</li>
-        <li><strong>Date pickers</strong> — narrow the board by show date.</li>
-        <li><strong>Venue pills</strong> — every venue shows by default (<strong>All venues</strong> lit). Click a venue to show <em>only</em> that venue; click more to add them, click a lit one to drop it, or <strong>All venues</strong> to reset. The archived list follows the pick too.</li>
-        <li><strong>Layout / density</strong> — Columns vs Stacked, Normal vs Slim; saved to your account instantly.</li>
-        <li><strong>ARCHIVED</strong> section — view, restore, or (admins) permanently delete finished shows.</li>
+        <li><strong>Time runs top to bottom</strong> on the left axis, from 06:00 (earlier if something starts earlier) to midnight — longer when the day runs late, up to 06:00 the next morning. Scroll down for later, sideways for more lanes; the times and lane headers stay put.</li>
+        <li><strong>Lane header</strong> — show name (click it to open the show), venue, Day n of the run, badges (EVENT, TEST, DARK day, Prism status), the day's <strong>PM</strong> (the covering PM when one is set for the day) with call / email links, and performance times.</li>
+        <li><strong>Schedule</strong> blocks are the show's production schedule for the day; <strong>Crew</strong> bars are its labor lines (position · technician, in → out, lunches hatched). Items that overlap sit side by side. Dashed = not confirmed (no end time on a schedule row; a crew line not yet scheduled or unfilled). Click a block to open that schedule row, a crew bar to open the show's labor.</li>
+        <li>Anything still running after midnight from the day before shows at the top, marked <em>from the previous day</em>; times on another day carry their date (e.g. <code>11/2 01:30</code>). Schedule rows and crew lines without a usable time (TBD…) are listed under <em>N without a time</em> in the lane header.</li>
+        <li><strong>Overhead &amp; Project Crew</strong> lines for the day get a lane of their own (hidden while a venue filter is on); its blocks open the Overhead &amp; Project Crew page.</li>
+        <li>The red <strong>NOW</strong> line follows your device's clock while you look at today (it moves every 30 s); finished items fade. The page refreshes itself every minute while it's open, and a page left on today rolls over to the next day at 06:00.</li>
+        <li><strong>‹ Today ›</strong> and the date picker change the day (the link keeps <code>?date=</code>, so you can bookmark or share a day).</li>
+        <li><strong>Venue</strong> chips (shown when two or more venues have something that day) work like the Shows board's venue pills. <strong>Test shows</strong> is off by default and shows how many are hidden. <strong>− / +</strong> zooms (less or more height per hour). All three are remembered on this device.</li>
+        <li>Hover or tab to a block for its full details. A day with nothing on it says so, with a link to <strong>Shows</strong> (the full show list). On a phone the Home header scrolls away so the timeline gets the whole screen.</li>
+      </ul>
+    `
+  },
+  shows: {
+    title: 'Shows — Show Board',
+    html: `
+      <p><strong>The show board.</strong> Every active show as a card, in one column per venue (shows with no venue sit under <em>Unassigned</em>); click a card to open the show. The day timeline is <strong>Home</strong>; only the shows you PM are on <strong>My Shows</strong>.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Active / Archived</strong> tabs under the title, with counts. <strong>Archived</strong> opens the archive page (its own search, dates and venue filter, plus Restore).</li>
+        <li><strong>Happening Today</strong> — shows with something on today (any day from load-in to load-out, or a performance). Each card is tagged <em>Show Day</em>, <em>Performance</em>, <em>Load-In</em>, <em>In Production</em> (a day in between) or <em>Load-Out</em>, and lists the venue, today's PM (marked <em>cover</em> when a covering PM is set for today), performance times (▷) and crew call times (◷).</li>
+        <li><strong>New Show</strong> — creates a show from just a name; dates, venue and everything else are filled in on its Advance Sheet. Read-only accounts can't create shows.</li>
+        <li><strong>Search</strong> box — filters the cards by show name or venue as you type. When nothing matches, <strong>Search the archive →</strong> runs the same words on archived shows and <strong>Search everything →</strong> opens the full Search page (PMs, editors, #tags, text inside shows).</li>
+        <li><strong>Date pickers</strong> — keep only cards whose show date falls in the range.</li>
+        <li><strong>Venue pills</strong> — every venue shows by default (<strong>All venues</strong> lit). Click a venue to show <em>only</em> that venue; click more to add them, click a lit one to drop it, or <strong>All venues</strong> to reset.</li>
+        <li><strong>Layout</strong> — <em>Columns (scroll)</em> side by side or <em>Stacked (top→bottom)</em>, with <em>Normal</em> or <em>Slim</em> cards; saved to your account. The mobile site always stacks.</li>
+        <li>Card edges: orange = show, teal = event, slate = past; a dashed edge is a test show. Multi-performance shows list every date and time.</li>
       </ul>
       <p>A show whose last date (last performance or load-out, whichever is later) has passed stays on the board with a <strong>PAST</strong> badge — hover it to see the day it moves to the archive — and archives itself a set number of days later (3 by default; admins change it in Settings → Shows). Other card badges: <strong>EVENT</strong> (event mode), <strong>TEST</strong> (excluded from reports), and the show's Prism status tag.</p>
     `
@@ -557,36 +603,53 @@ const _HELP_PAGES = {
   new_show: {
     title: 'New Show',
     html: `
-      <p>Only the <strong>show name</strong> is needed here. Everything else — dates, times, venue, contacts — is filled in afterward on the show's Advance Sheet.</p>
+      <p>Only the <strong>show name</strong> is needed here. <strong>Create Show →</strong> opens the new show's Advance Sheet, where everything else — engagement dates, show dates &amp; times, venue, contacts — is filled in. <strong>Cancel</strong> goes back to the Shows board.</p>
+      <p>Read-only accounts can't create shows. Schedulers can also quick-create a show from the Labor Scheduler (<strong>+ Add show</strong>).</p>
     `
   },
   show_advance: {
     title: 'Show — Advance Sheet',
     html: `
-      <p>All pre-show information in one place. <strong>Edits auto-save</strong> about 1.5 s after you stop typing (Ctrl+S / Cmd+S or the Save button also work).</p>
+      <p>All pre-show information in one place. <strong>Edits auto-save</strong> about 1.5 s after you stop typing (<strong>Save</strong>, Ctrl+S / Cmd+S or 💾 <em>Save Advance</em> at the bottom of the Sections rail save at once). Other people's edits merge in live and the field flashes; a name chip with typing dots marks the field someone else is in, and the header shows who else has the show open (and <em>Last saved by</em>).</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Engagement</strong> — <strong>First Call</strong> to <strong>Final Out</strong>: the whole time in the building, from the first billed call through the end of load-out. Set it first; it drives the schedule and labor day lists and asset rental pricing (weekly rate at 7+ days).</li>
-        <li><strong>Show Dates &amp; Times</strong> — one row per performance (24-hour times); each must fall inside the engagement.</li>
-        <li>Sections and fields are configured in Settings → Form Fields; some fields appear only when another field is set a certain way (each field's "Conditional show when" — several conditions can be combined with <code>&amp;&amp;</code>).</li>
-        <li><strong>AI Extract</strong> (when enabled) — upload a rider/tech spec or pick an attachment; review the suggested values and apply the ones you want.</li>
-        <li><strong>History</strong> — browse saved versions of the form and restore one.</li>
-        <li><strong>Piano Tuning</strong> (below Backline) — <strong>+ Request Tuning</strong> sends a request to the piano tuning manager (the piano — picked from the Asset Manager's Piano category — date/time needed and notes; tunings are always on the stage). A warning shows when the picked piano isn't on the show's Assets tab yet. Edit or cancel it until the manager starts on it; after that, <strong>Request cancellation</strong> asks them to cancel it with the vendor (they're emailed and either cancel it or decline, and you're told if it stays on); once they set the tuning time it appears on the Production Schedule as a read-only 🎹 row, and its cost goes on the Final Invoice.</li>
-        <li>The presence indicator shows who else is on this show; other people's edits merge in live (updated fields flash briefly).</li>
+        <li><strong>Header buttons</strong> (on every tab):
+          <ul style="${_HELP_UL}">
+            <li><strong>History</strong> — saved versions of the Advance Sheet, Production Schedule or Post-Show Notes (it opens on the tab you're on; switch at the top): who saved, when and a summary; <strong>Changes ▾</strong> shows exactly what changed, <strong>View</strong> shows that version, <strong>Restore…</strong> previews what a restore will change before you confirm. One person's quick additions are grouped into one version; the last 100 are kept.</li>
+            <li><strong>Show Mode / Event Mode</strong> — switches the show to an event: teal accent and EVENT badge on Home and the Shows board, and contacts set to receive only show (or only event) emails follow it.</li>
+            <li><strong>Mark as test</strong> (admins and staff) — flags a test/demo show: TEST badge, left out of reports, hidden on Home and in Search unless test shows are included. <strong>Unmark test</strong> undoes it.</li>
+            <li><strong>AI Extract</strong> (when an admin has AI turned on) — upload a rider/tech spec or pick an attachment; review the suggested values and apply the ones you want.</li>
+          </ul></li>
+        <li><strong>Engagement</strong> — <strong>First Call</strong> to <strong>Final Out</strong>: the whole time in the building, from the first billed call through the end of load-out. Set it first; it drives the schedule and labor day lists and asset rental pricing (weekly rate at 7+ days). Left blank, it's filled from the earliest and latest show dates.</li>
+        <li><strong>Show Dates &amp; Times</strong> — <strong>+ Add Show Time</strong> adds one row per performance (24-hour time; a second show on the same day is its own row); <strong>Edit</strong> / <strong>×</strong> per row. Each must fall inside the engagement.</li>
+        <li><strong>Sections</strong> — set up in Settings → Form Fields. Click a section's heading to fold or open it (remembered in this browser; a section with anything filled in opens by itself). On desktop the <strong>Sections</strong> rail at the right edge jumps to any section. Notes boxes open from their <strong>▸ label</strong>.</li>
+        <li><strong>Field kinds</strong>: Yes / No (a dropdown or a NO–YES slider), checklists (tick several), contact pickers (from Settings → Contacts), <strong>Arts Group</strong> (pick one or <strong>+ Add new…</strong>), grey instruction blocks (read-only, screen only), <strong>file fields</strong> (<strong>⤴ Upload file</strong>; PDFs, images and Word files are appended to the Advance PDF) and <strong>PDF forms</strong> (<strong>Fill out form →</strong> opens the form in a popup; status <em>Not started / Draft saved / Filled</em>; <strong>Download filled PDF</strong>).</li>
+        <li>Some fields (and dropdown options) appear only when another field is set a certain way — each field's "Conditional show when" in Settings → Form Fields; several conditions can be combined with <code>&amp;&amp;</code>.</li>
+        <li><strong>Piano Tuning</strong> panel (wherever the form puts it; by default under Backline) — <strong>+ Request Tuning</strong> sends a request to the piano tuning manager: the piano (picked from the Asset Manager's Piano category, optionally the exact unit / S/N), the date and time it's needed, and notes. Sending it books the piano on the Assets tab if it isn't there. <em>⚠ not on Assets tab</em> → <strong>Add to Assets</strong>; <em>⚠ unit not pinned</em> → <strong>Pin unit</strong>. Edit or cancel it until the manager starts on it; after that, <strong>Request cancellation</strong> asks them to cancel it with the vendor (<strong>Withdraw</strong> takes the request back). Once they set the tuning time it appears on the Production Schedule as a read-only 🎹 row, and its cost goes on the Final Invoice. Managers get a <strong>Piano Tuning list →</strong> link.</li>
+        <li><strong>#tags</strong> — type <code>#</code> and a word (letters, digits, <code>_</code>, <code>-</code>; e.g. <code>#pyro</code>, <code>#load-in</code>) in a text or notes box — Advance fields, schedule rows and Venue &amp; Tech info, labor notes, Post Show notes and labor line notes, comments, Assets line notes, external rental descriptions, piano tuning notes, file descriptions. Clickable chips appear under the box, and the <strong>Tags</strong> line under the show name lists every tag in the show; a chip opens the tag's page with every show that uses it.</li>
       </ul>
+      <p>Read-only accounts get a <strong>VIEW ONLY</strong> badge: every tab can be read but its fields can't be changed (text can still be scrolled, selected and copied; a multi-select list still opens) and the editing buttons (Save, Show Mode, + Add…, ×, Restore…, Post, comment Edit, Email, + Attach File) are hidden. History, the Export buttons and PDF downloads still work.</p>
     `
   },
   show_schedule: {
     title: 'Show — Production Schedule',
     html: `
-      <p>The day-of timeline plus venue/tech info and contacts.</p>
+      <p>The day-of timeline plus venue/tech info and contacts. Edits save automatically; other people's edits merge in live, cell by cell (a cell you're typing in keeps your edit).</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Venue &amp; Tech Info</strong> — fields marked "From Advance Sheet" are read-only mirrors; edit them on the Advance tab.</li>
-        <li><strong>Day tabs</strong> — one timeline per calendar date when the show spans multiple days.</li>
-        <li>Timeline rows: Start / End / Description / Notes; drag the ⠿ handle to reorder, × to delete, <strong>+ Add Row</strong> to append.</li>
-        <li><strong>Apply template…</strong> — insert a pre-built timeline (defined in Settings → Form Fields → Day Templates).</li>
-        <li><strong>Copy from…</strong> — copy another day's rows into this day.</li>
-        <li><strong>Pull time(s)</strong> — insert a SHOW START row for each performance that date.</li>
-        <li><strong>⇅ Sort</strong> — reorder rows by start time.</li>
+        <li><strong>Venue &amp; Tech Info</strong> — WiFi, parking/security and similar fields. Fields marked "From Advance Sheet" are read-only mirrors; edit them on the Advance tab.</li>
+        <li><strong>Day tabs</strong> (<strong>DAY 1 · 10/31</strong> …) — one timeline per calendar date of the engagement and performances. A <strong>⚠ OFF-DATE</strong> tab holds rows saved on a date that's no longer one of the show's days: they're kept, never printed — copy them to a real day (Tools → Copy from day) or delete them.</li>
+        <li><strong>Day PM</strong> — the bar under each dated day's heading picks the production manager on duty that day (blank = the show's PM from the Advance Sheet) and shows their title, phone and email, tagged <em>covering</em> when it's not the show PM. It's the same setting as Day PM on the Labor Requests tab (changing one changes the other), saves as soon as you pick, updates live for everyone, and prints on the Production Schedule PDF and the Security Sign-In Sheet. Read-only users can see it but not change it.</li>
+        <li>Timeline rows: Start / End / Description / Notes. Times become 24-hour when you leave the cell (<code>4pm</code> → <code>16:00</code>) and changing a Start re-sorts the day. After midnight on the same show day, type <code>1+00:30</code> (<code>+0030</code> and <code>24:30</code> work too); it prints with the next date, e.g. <code>11/2 00:30</code>. Drag the ⠿ handle to reorder, × to delete, <strong>+ Add Row</strong> (day header and under the table) to append. 🎹 rows come from Piano Tuning and are read-only here. Emptying a schedule that had rows asks you to confirm.</li>
+        <li><strong>Tools ▾ above the day tabs</strong> — <strong>Import from another show…</strong> (copy another show's schedule onto chosen days; add to or replace what's there), <strong>Save day as template…</strong> (admins and content admins) and <strong>History</strong> (every saved version, with what changed).</li>
+        <li><strong>Tools ▾ in each day's header</strong>:
+          <ul style="${_HELP_UL}">
+            <li><strong>Apply template</strong> — pick a template to insert a pre-built timeline (replace or merge when the day already has rows). Templates are defined in Settings → Form Fields → Day Templates, or saved from a day here.</li>
+            <li><strong>Copy from day</strong> — replace this day's rows with a copy of another day's (piano tuning rows stay put).</li>
+            <li><strong>Pull show time(s)</strong> — insert a SHOW START row for each performance that date (only on days with performance times).</li>
+            <li><strong>Sort by time</strong> — reorder rows by start time (a START edit also re-sorts).</li>
+          </ul></li>
+        <li>Menus work from the keyboard too: Enter or ↓ opens, ↑/↓ move, Esc closes. Read-only accounts don't get the Tools menus (History is still in the header).</li>
+        <li><strong>Dark day — omit from print</strong> (multi-day shows) — leaves that day off the printed schedule; the other days keep their Day numbers.</li>
+        <li><strong>Show Contacts</strong> — artist / tour contact fields (Schedule Fields in Settings → Form Fields marked "Render in the Show Contacts section"), the dpc contacts (read-only, from the Advance Sheet) and the editable <strong>Security Email</strong>.</li>
       </ul>
     `
   },
@@ -595,12 +658,18 @@ const _HELP_PAGES = {
     html: `
       <p>Request crew per day. Rows save individually as you edit.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>+ Add Day</strong> — each day block has its own date, a <strong>Day PM</strong> (covering PM for that date only), day notes, and Clone to… / Delete Day.</li>
-        <li>Rows read like a shift, left to right: Position, In, Lunch 1 (start over end), Lunch 2 (start over end), Out, Requested Tech. <strong>SCHED and Scheduled Tech are read-only here</strong> — the Labor Scheduler sets them.</li>
-        <li><strong>Quick Fill</strong> — enter times once, then Apply to Selected / Apply to All.</li>
-        <li><strong>Show Labor Notes</strong> — visible to schedulers and on the Labor Overview.</li>
-        <li><strong>Per-Crew Billable Extras</strong> — pick extras (e.g. parking) and optionally fold them into the hourly rate.</li>
-        <li><strong>Estimated Labor Cost</strong> table + Labor Estimate PDF. Overtime (over 40 h per tech per Mon–Sun week) bills at 1.5×. Lunch/break windows entered on a row are unpaid, deducted from its hours, and shown in the estimate PDFs' Breaks column.</li>
+        <li><strong>+ Add Day</strong> — each day block has its own date (changing it moves every row of the day), a <strong>Day PM</strong> (covering PM for that date only, picked from the Production contacts — the same setting as the Day PM bar on the Production Schedule; it prints on the schedule PDF and the security sign-in sheet and shows on the Labor Scheduler and Labor Overview), day notes (shown on the scheduler and Labor Overview), <strong>+ Add Request</strong> under its table, and a <strong>Tools ▾</strong> menu:
+          <ul style="${_HELP_UL}">
+            <li><strong>Apply preset</strong> — append a preset's standing positions to the day (presets are set up in Settings → Job Positions; existing rows are kept).</li>
+            <li><strong>Clone to…</strong> — copy the day's rows (position, times, requested tech) to another date.</li>
+            <li><strong>Sort by call time</strong> — order the day's requests by In time, blank times last; the order is saved for everyone.</li>
+            <li><strong>Delete Day</strong> — delete the day and all its requests (asks first).</li>
+          </ul></li>
+        <li>Rows read like a shift, left to right: Position, In, Lunch 1 (start over end), Lunch 2 (start over end), Out, Requested Tech (<em>— Any technician —</em>, or a name; people qualified for the position are listed first). × deletes a row. <strong>SCHED and Scheduled Tech are read-only here</strong> — the Labor Scheduler sets them.</li>
+        <li><strong>Quick Fill</strong> — enter the times once, tick rows' checkboxes (the header box ticks a whole day), then <strong>Apply to Selected</strong>, or <strong>Apply to All</strong> for every row.</li>
+        <li><strong>Show Labor Notes</strong> — visible to schedulers and on the Labor Overview; saves when you leave the box.</li>
+        <li><strong>Per-Crew Billable Extras</strong> (only when extras are set up) — pick extras (e.g. parking) and optionally fold them into the hourly rate; the same settings as on the Post Show tab.</li>
+        <li><strong>Estimated Labor Cost</strong> — every requested line priced (<em>est.</em> until a tech is scheduled, then that tech's rate), day subtotals, the total, <strong>Labor Estimate PDF</strong> and <strong>Refresh</strong>. Overtime (over 40 h per tech per Mon–Sun week) bills at 1.5×. Lunch/break windows entered on a row are unpaid, deducted from its hours, and shown in the estimate PDFs' Breaks column.</li>
       </ul>
     `
   },
@@ -609,12 +678,16 @@ const _HELP_PAGES = {
     html: `
       <p>Gear rentals and external rentals for this show.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>+ Add Asset</strong> — search the catalog, optionally pin a specific unit, set quantity and rental dates. Availability is checked live; overbooking is blocked.</li>
+        <li><strong>+ Add Asset</strong> — opens the catalog with the <strong>search box on top</strong>: type a name, model, manufacturer or category for a ranked list (<strong>↑</strong> <strong>↓</strong> to move, <strong>Enter</strong> to add, <strong>Esc</strong> clears, <strong>Esc</strong> again closes).</li>
+        <li><strong>Browse</strong> — with the search empty, click through <strong>Categories → Groups → Items</strong> like the Asset Manager (on a phone, one list at a time with a back button). Loose items sit under <em>Individual items</em>; systems and packages under <em>Systems &amp; Packages</em>. The dialog remembers the last category and group you used.</li>
+        <li><strong>Details</strong> — picking an item shows its photo, manufacturer · model, where it's stored, the rate this show pays (its Performance Company rate when there is one), live availability for the show's rental window (load-in → load-out), its units (S/N) and what it's part of. A system or package lists what's in it and how many it can supply. <strong>Add to show…</strong> (or double-click, or <strong>Enter</strong>, or the row's <strong>+</strong>) opens the add step: optionally pin a specific unit, set quantity and rental dates. Overbooking is blocked.</li>
+        <li>Some gear is kept out of this picker by the asset manager; ask them if you can't find something.</li>
         <li><strong>Unit price is read-only here</strong> — it comes from the rate card; only the Approvals portal can override it per show.</li>
         <li><strong>Company rates</strong> — if the show's <em>Performance Company</em> (Advance Sheet) has special rates in the Asset Manager, those are used and the line shows a <strong>COMPANY RATE</strong> tag. Change the company later and a banner offers to <strong>Re-price</strong> the lines priced for the old one (hand-set approver prices are left alone).</li>
-        <li><strong>+ External Rental</strong> — description, cost, optional rental PDF.</li>
-        <li>The <strong>approval badge</strong> shows whether an asset manager has approved this list; any change resets approval.</li>
-        <li><strong>Asset Estimate PDF</strong> button and a running total in the header.</li>
+        <li><strong>On the list</strong> (anyone who can edit the show): change <strong>Qty</strong> (a line pinned to one unit stays at 1) or the <strong>rental dates</strong> in place — kept inside First Call → Final Out, re-priced for the new length and re-checked for availability; <strong>Hide</strong> keeps a line off the PDFs, invoices and the Approvals page (only admins still see it here, tagged HIDDEN; <strong>Show</strong> brings it back); <strong>✕</strong> removes it. Tags on a line: <strong>UNIT …</strong> (pinned to that S/N), <strong>COMPANY RATE</strong>, <strong>⚠ OVERBOOKED</strong>.</li>
+        <li><strong>+ External Rental</strong> — description, cost, optional rental PDF; <strong>✎</strong> edits and <strong>✕</strong> removes one, <strong>View PDF</strong> opens its file. A <em>🎹 Piano Tuning</em> line is the tuning charge — the piano tuning manager sets it, and asset approval doesn't cover it.</li>
+        <li>The <strong>approval badge</strong> shows <em>⚠ AWAITING APPROVAL</em> or <em>✓ APPROVED</em> (by whom, when); any change to the gear resets approval.</li>
+        <li><strong>Asset Estimate PDF</strong> button and a running total (gear + external rentals) in the header. Read-only accounts see the list but can't change it.</li>
       </ul>
     `
   },
@@ -623,36 +696,41 @@ const _HELP_PAGES = {
     html: `
       <p>The printed sheet that sits at the security desk on show day.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Bulk add</strong> — paste the personnel list from an email (one name per line, or comma/semicolon-separated) or upload a CSV; parsed names are added to the list below.</li>
-        <li>Rows can be edited, reordered and removed by hand; <strong>Save</strong> replaces the stored list.</li>
-        <li><strong>Export PDF</strong> — prints saved names with blank Signature / Time In columns plus walk-up rows, in this venue's paperwork colors.</li>
+        <li><strong>Bulk Add Names</strong> — paste the personnel list from an email (one name per line, or comma/semicolon-separated) and click <strong>Add Pasted Names</strong>, or <strong>Import CSV file…</strong> (a <em>Name</em> column, or <em>First</em> + <em>Last</em>). Parsed names are added to the list below — nothing is saved yet.</li>
+        <li><strong>Personnel</strong> — edit a name in place, × removes it, <strong>+ Add Row</strong> adds one, <strong>Clear All</strong> empties the list. <strong>Save</strong> stores it (up to 500 names); <em>Save *</em> and an "Unsaved changes" note mean the screen differs from what's saved. If someone else saved the list meanwhile, only your own additions and removals are applied.</li>
+        <li><strong>Export PDF</strong> — prints the <em>saved</em> names (it warns when you have unsaved edits) with blank Signature / Time In columns plus walk-up rows, in this venue's paperwork colors and logo. The Export &amp; Files tab has the same button.</li>
         <li>A <strong>multi-day</strong> show/event prints one initials column per day instead (days come from load-in → load-out and the performance dates; very long runs continue in a second table).</li>
+        <li><strong>Production contact for security</strong> (read-only) — the production manager on duty with phone and email, printed at the top of the sheet so the desk knows who to call. It's the show's PM, or a day's covering PM (set <strong>Day PM</strong> on the Production Schedule or Labor Requests tab); a multi-day sheet lists each run of days with its PM and marks a covered day's column with the cover PM's name.</li>
       </ul>
     `
   },
   show_postnotes: {
     title: 'Show — Post Show',
     html: `
-      <p>What actually happened — notes and settlement.</p>
+      <p>What actually happened — notes and settlement. Notes save automatically and other people's edits merge in live; the header's <strong>History</strong> keeps their versions.</p>
       <ul style="${_HELP_UL}">
-        <li>Crew Called / Cast / Crew counts plus four notes areas (Tour/Client, House, Equipment, Misc).</li>
+        <li>Production Manager (read-only, from the Advance Sheet), Crew Called, Cast / Crew counts plus four notes areas (Show Notes — Tour/Client, House, Equipment / Maintenance Issues, Miscellaneous).</li>
+        <li><strong>Sound Levels (Spot)</strong> (when an admin has the Spot module on) — dB levels per performance, pulled from the venue's sound sensors automatically after each show: Leq, Max, L10/L50/L90 per sensor, plus a <strong>Spot PDF</strong> filed under Export &amp; Files. <strong>Pull now</strong> / <strong>Re-pull</strong> fetches them again.</li>
+        <li><strong>Per-Crew Billable Extras</strong> (only when extras are set up) — tick the per-crew charges (e.g. parking) that apply to this show; <strong>Fold extras into the hourly rate</strong> hides those lines and spreads each charge over the worked hours instead, here and on the Final Invoice. Shared with the Labor Requests tab's estimate.</li>
         <li><strong>Settle Now</strong> — nothing is copied from the labor schedule until someone presses it (normally once the show is over), so the settlement always starts from the <em>final</em> schedule: every scheduled line arrives with its position, technician and times filled in. Until then the Final Invoice bills no labor and says so.</li>
         <li><strong>Actual Labor (Billing)</strong> — edit what actually happened: In, Lunch 1, Lunch 2, Out (left to right, like a shift); hours, rate and cost recompute, overtime is broken out. <strong>Worked by</strong> records which technician actually worked each line — tracking only, never printed on paperwork and it doesn't change the rate, but overtime (40 h per tech per week) follows it. <strong>Edits here bill the client and never change the labor schedule.</strong></li>
-        <li><strong>Re-sync from Schedule</strong> (after settling) — pulls lines scheduled since, keeping your edits; + Add Line for extra crew.</li>
+        <li><strong>Re-sync from Schedule</strong> (after settling) — pulls lines scheduled since, keeping your edits; <strong>+ Add Line</strong> for extra crew.</li>
         <li><strong>+ Add Hours</strong> — bill hours worked outside the schedule (e.g. prep work weeks out): pick the technician and position (the rate resolves automatically), enter the hours and a <strong>required justification</strong>. Added hours always bill at straight time and never count toward the 40 h overtime week.</li>
-        <li><strong>Final Invoice PDF</strong>, <strong>Export PDF</strong> (post-show report) and <strong>Email</strong> buttons in the header.</li>
-        <li>A read-only copy of the production schedule is collapsible at the bottom.</li>
+        <li><strong>Final Invoice PDF</strong>, <strong>Export PDF</strong> (post-show report) and <strong>Email</strong> (sends the post-show report to its recipients) buttons in the header.</li>
+        <li><strong>Production Schedule (Reference)</strong> — a read-only copy of the schedule, folded at the bottom; click to open.</li>
       </ul>
     `
   },
   show_comments: {
     title: 'Show — Comments',
     html: `
-      <p>Team discussion pinned to this show.</p>
+      <p>Team discussion pinned to this show, oldest first; the tab shows how many comments there are.</p>
       <ul style="${_HELP_UL}">
-        <li>Type <strong>@name</strong> for the mention autocomplete — mentioned users get a notification.</li>
-        <li>You can edit (✏) and delete (×) your own comments; deletes are soft.</li>
-        <li>Admins can restore deleted comments and view/restore a comment's edit history.</li>
+        <li>Type in the box and click <strong>Post</strong> (up to 2,000 characters). Read-only accounts can read but not post.</li>
+        <li>Type <strong>@</strong> and a name for the user autocomplete; the @name is highlighted in the comment. It doesn't send the person a notification, so let them know another way.</li>
+        <li>A <strong>#tag</strong> in a comment becomes a link to that tag's page (every show that uses it). Web addresses stay plain text.</li>
+        <li>You can edit (✏) and delete (×) your own comments; an edited comment says <em>(edited)</em>. Deletes are soft.</li>
+        <li>Admins can edit or delete anyone's comment, see deleted comments (struck through) with <strong>Restore</strong>, and open a comment's edit <strong>History</strong> to put back an earlier version.</li>
       </ul>
     `
   },
@@ -661,22 +739,25 @@ const _HELP_PAGES = {
     html: `
       <p>PDF exports, their history, and file attachments.</p>
       <ul style="${_HELP_UL}">
-        <li>Export cards: <strong>Advance Sheet</strong>, <strong>Production Schedule</strong>, <strong>Post-Show Report</strong> (each with a version number and an Email button that sends to the configured recipients), <strong>Final Invoice</strong> (warns when the show's labor hasn't been settled yet), and <strong>Pre-Show Estimate</strong> (labor + assets quote).</li>
+        <li>Export cards: <strong>Advance Sheet</strong>, <strong>Production Schedule</strong>, <strong>Post-Show Report</strong> (each <strong>Export → vN</strong> plus an <strong>Email</strong> button that sends it to the recipients set for that document in Settings → Contacts), <strong>Final Invoice</strong> (warns when the show's labor hasn't been settled yet), <strong>Security Sign-In Sheet</strong> (when that module is on: <strong>Export PDF</strong>, <strong>Edit Names</strong> opens the Sign-In Sheet tab) and <strong>Pre-Show Estimate</strong> (labor + assets quote).</li>
+        <li><strong>Versions</strong> — exporting again when nothing has changed hands back the same version; any change makes the next version number. The tab's <em>vN</em> badge shows the highest Advance / Schedule version.</li>
         <li>The Production Schedule PDF is <strong>page-aware</strong>: a day that would spill 4 or fewer rows onto the next page is tightened a step at a time so it fits on its own page, and a day that would still be split moves whole to the next page when it fits there. A row is never cut in half at a page break.</li>
-        <li><strong>Export History</strong> — the last 10 exports; Download re-fetches that exact stored PDF.</li>
-        <li><strong>Attachments</strong> — + Attach File or drag-and-drop; admins can move a file to another show.</li>
-        <li><strong>Advance Read By</strong> — read receipts for who has viewed the advance.</li>
+        <li>Each day of the Production Schedule PDF prints its <strong>PM on duty</strong> (that day's covering PM, marked "(covering)", else the show PM) with phone and email; content admins can hide or relabel that line in Settings → PDF Designer (Production Schedule → "PM on Duty (per day)").</li>
+        <li><strong>Export History</strong> — the last 10 exports (type, version, who, when); <strong>Download</strong> re-fetches that exact stored PDF.</li>
+        <li><strong>Attachments</strong> — <strong>+ Attach File</strong> or drag a file onto the drop zone (a progress bar shows the upload). Each file lists its size, uploader and date; files uploaded through an Advance file field carry <em>↳ field</em>. Anyone who can edit the show can remove a file (<strong>×</strong>) — it's archived, not destroyed, and an admin can restore it (Settings → System → Files). Admins can also move a file to another show (<strong>⇄</strong>).</li>
+        <li><strong>Advance Read By</strong> — read receipts: who has opened the advance, and at which version.</li>
       </ul>
     `
   },
   manage_shows: {
     title: 'Manage Shows',
     html: `
-      <p>Every show — active and archived — in one table.</p>
+      <p>Every show — active and archived — in one table (Settings → <strong>Shows</strong>; staff and admins). The header counts active and archived shows.</p>
       <ul style="${_HELP_UL}">
         <li><strong>Search</strong> (name / venue / year) and a <strong>status filter</strong> (All / Active / Archived).</li>
-        <li><strong>Archive</strong> hides a show from the home board — nothing is deleted; <strong>Restore</strong> brings it back.</li>
-        <li>Shows auto-archive a set number of days after their last date (last performance or load-out) — 3 by default. Until then they're marked <strong>PAST</strong> with the day they'll archive; admins set the number of days at the top of this page. A restored show gets the same number of days again, counted from the restore.</li>
+        <li>Each row: the show name (click to open it; <strong>TEST</strong> marks a test/demo show), venue, date(s), number of performances, status, and who created it.</li>
+        <li><strong>Archive</strong> takes a show off the <strong>Shows</strong> board — nothing is deleted; <strong>Restore</strong> brings it back. Archived shows are also listed under Shows → <strong>Archived</strong>.</li>
+        <li><strong>Auto-archive shows … days after their last date</strong> — shows archive themselves that many days after their last performance or load-out (3 by default; 0 = the day after). Until then they're marked <strong>PAST</strong> with the day they'll archive. Only admins can change the number. A restored show gets the same number of days again, counted from the restore.</li>
       </ul>
     `
   },
@@ -685,59 +766,99 @@ const _HELP_PAGES = {
     html: `
       <p>Fold an accidental duplicate into the real show (admin only).</p>
       <ul style="${_HELP_UL}">
-        <li>Pick the show to <strong>KEEP</strong> and the <strong>DUPLICATE</strong> to absorb — a live preview shows exactly what moves (labor, assets, performances, comments, attachments).</li>
-        <li>Blank advance fields on the keeper are filled from the duplicate; the labor scheduler is never changed.</li>
-        <li>Type <strong>MERGE</strong> to confirm. The duplicate is permanently deleted.</li>
+        <li>Pick the show to <strong>KEEP</strong> (it survives) and the <strong>DUPLICATE</strong> (absorbed, then deleted). Archived shows are listed too.</li>
+        <li>The preview shows <strong>what moves to the keeper</strong> — labor, post-show labor, assets, external rentals, performances, comments and files, counted for each show — and the <strong>advance fields</strong>: blank fields on the keeper are filled from the duplicate; where both have a value, the keeper's is kept.</li>
+        <li>Labor keeps its date, so a second day becomes its own day block. The Labor Scheduler is never changed.</li>
+        <li>Type <strong>MERGE</strong> and click <strong>Merge &amp; Delete Duplicate</strong>. The duplicate is permanently deleted and you land on the keeper.</li>
       </ul>
     `
   },
   labor_overview: {
     title: 'Labor Overview',
     html: `
-      <p><strong>Read-only</strong> week-at-a-glance of all scheduled labor — show crews and overhead/project crews together. Weeks always start Monday.</p>
+      <p><strong>Read-only</strong> look at seven days of scheduled labor — show crews and overhead/project crews together, one card per day.</p>
       <ul style="${_HELP_UL}">
-        <li>Navigate with ← Prev Week / Today / Next Week →, or jump to any date.</li>
-        <li>Each day card lists Show or Project, Role, Call, both meal windows, Wrap, Tech and PM.</li>
-        <li>Overhead rows carry an <strong>OH</strong> badge; training shifts a blue <strong>Training</strong> badge; a <strong>day</strong> badge next to a PM means a covering PM for that date only.</li>
-        <li>Group and per-day notes appear as highlighted rows above the crew lines.</li>
+        <li><strong>Opens on today</strong> and shows the next 7 days (it starts on yesterday instead while a shift from yesterday is still running past midnight). The day marked <strong>TODAY</strong> has an orange outline.</li>
+        <li><strong>← Prev Week / Next Week →</strong> step 7 days; <strong>Today</strong> goes back to the start. <strong>Jump to</strong> + <strong>Go</strong> shows the Monday–Sunday week holding the date you pick.</li>
+        <li>Each day lists Show or Project, Venue / Client, Role, Call, Meal 1 and Meal 2 start/end, Wrap, Tech Name (<em>unassigned</em> when nobody is scheduled) and PM / Contact. Days with nothing say <em>No labor scheduled</em>.</li>
+        <li>Click a show name to open its Labor Requests tab; click a project name to open Overhead &amp; Project Crew.</li>
+        <li>Overhead rows carry an <strong>OH</strong> badge; training shifts a blue <strong>Training</strong> badge; a <strong>day</strong> badge next to a PM means a covering PM (Day PM) for that date only.</li>
+        <li>The show's labor notes and that day's notes appear as highlighted rows above its crew lines.</li>
+        <li>Document viewers see this page only when their account allows it; for them the names aren't links.</li>
       </ul>
     `
   },
   labor_scheduler: {
     title: 'Labor Scheduler',
     html: `
-      <p>Assign technicians to every requested shift (schedulers, staff and admins).</p>
+      <p>Assign technicians to every requested shift (schedulers, staff and admins). Every labor line in the date range, grouped by show, then by day.</p>
       <ul style="${_HELP_UL}">
-        <li>Load a <strong>From / To</strong> range, or jump Prev / This / Next week (Mon–Sun).</li>
-        <li>Per line: <strong>SCHED ✓</strong> (counts as staffed), <strong>IN TRAINING</strong>, Position, In, Lunch, Out and the <strong>Tech</strong> picker. Rows save individually; <strong>Save All</strong> is in the header.</li>
-        <li><strong>+ Add show</strong> — quick-create a show so you can schedule before the PM builds the advance.</li>
-        <li><strong>"Add labor to existing show…"</strong> pulls in a show with no lines yet; <strong>Shows without labor</strong> lists everything still empty.</li>
-        <li>Overhead/project groups (▦) are scheduled here too, with their own date column.</li>
+        <li>Pick a <strong>From / To</strong> range and press <strong>Load</strong>, or jump <strong>← Prev Week / This Week / Next Week →</strong> (Mon–Sun).</li>
+        <li>Per line: <strong>SCHED ✓</strong> (confirmed — counts as staffed), <strong>IN TRAINING</strong> (an extra person shadowing; doesn't replace the staffed tech), Position, In, Lunch 1 and Lunch 2 (start <strong>S</strong> over end <strong>E</strong>), Out, and <strong>TECH</strong>: the PM's requested name (<strong>REQ</strong>, read-only) over the <strong>SCHED</strong> picker. The picker lists <em>Qualified</em> techs for the position first, then <em>Others</em>. <strong>×</strong> removes the line.</li>
+        <li>Every change saves on its own as you make it; <strong>Save All</strong> (header) re-saves every row on the page.</li>
+        <li>Show header: PM tag, <strong>Open show →</strong>, <strong>+ Add Day</strong> and the <strong>Show labor notes</strong> box (shared with the show page and the Labor Overview).</li>
+        <li>Day header: its date (change it to move every line in the day), <strong>Day PM</strong> (a covering PM for that date; blank = the show's PM), <strong>day notes</strong> and <strong>+ Add Line</strong>.</li>
+        <li><strong>+ Add show</strong> — quick-create a show (name, PM, date, time, venue) so you can schedule before the PM builds the advance. <strong>+ Add labor to existing show…</strong> pulls in a show in the range with no lines yet.</li>
+        <li><strong>Shows without labor</strong> (header) lists every active show that has no labor requested yet.</li>
+        <li>Overhead/project groups (<strong>OH / PROJECT</strong>) are scheduled here too, with their own date column, project notes and + Add Line.</li>
+        <li>A read-only account sees the page <strong>VIEW ONLY</strong>: the same lines, techs, PMs and notes, with no add, save or remove controls.</li>
+        <li>On a phone the grid scrolls sideways.</li>
+      </ul>
+    `
+  },
+  labor_no_labor: {
+    title: 'Shows Without Labor',
+    html: `
+      <p>Every active show that has no labor requested yet — the same list the scheduled no-labor alert email watches. The count at the top says how many need labor (or <em>All caught up</em>).</p>
+      <ul style="${_HELP_UL}">
+        <li>Each row: show, date, how far away it is (Today, Tomorrow, in N days, N days ago, No date), venue, PM, and <strong>Add labor ↗</strong>, which opens that show's Labor Requests tab in a new tab.</li>
+        <li>Upcoming and undated shows are listed by default; <strong>Include past shows</strong> / <strong>Hide past shows</strong> switches.</li>
+        <li>The venue picker shows one venue; with <em>All venues</em>, tick venues under <strong>Hide</strong> to leave them out.</li>
+        <li>A read-only account (<strong>VIEW ONLY</strong>) gets <strong>Open show ↗</strong> in place of Add labor.</li>
+        <li><strong>← Labor Scheduler</strong> goes back.</li>
       </ul>
     `
   },
   crew_tracker: {
     title: 'Skill Tracker',
     html: `
-      <p>Which technicians are qualified for which positions.</p>
+      <p>Which technicians are qualified for which positions: one row per active technician, one column per job position, grouped by position category.</p>
       <ul style="${_HELP_UL}">
-        <li>Dots: empty = not qualified, half blue = <strong>in training</strong>, filled = <strong>qualified</strong>.</li>
-        <li><strong>✎</strong> (if you can edit) — clicking a position cycles none → training → qualified; every click saves immediately. The same modal holds per-tech training notes.</li>
-        <li>Sort A–Z / Z–A / by category; filter to show-positions or training-classes only; the skill filter shows who's qualified for one position.</li>
+        <li>Dots: empty = not qualified, half blue = <strong>in training</strong>, filled = <strong>qualified</strong>. Qualified techs are listed first in the Labor Scheduler's tech picker for that position.</li>
+        <li><strong>✎</strong> next to a name (admins, schedulers and content admins) opens <em>Edit Qualifications</em>: click a position to cycle none → in training → qualified; every click saves immediately. The <strong>Training notes</strong> box at the bottom saves as you type. A read-only account (<strong>VIEW ONLY</strong>) gets <strong>View</strong> instead: the same qualifications and training notes, nothing to change.</li>
+        <li><strong>Sort A–Z / Sort Z–A / Sort by Category</strong> reorder the rows. The positions filter shows <em>All positions</em>, <em>Show positions only</em> or <em>Training / classes only</em>; the skill filter (<em>Show all skills</em>) keeps only the techs qualified for one position.</li>
         <li>Training/class columns are blue-tinted — they never appear in labor requests or the scheduler.</li>
+        <li><strong>Manage Technicians</strong> / <strong>Manage Positions</strong> open those Settings tabs. Archived technicians aren't listed here; see Settings → Technicians → <em>Archived technicians</em>.</li>
+      </ul>
+    `
+  },
+  archived_technicians: {
+    title: 'Archived Technicians',
+    html: `
+      <p>Technicians who have left. They're hidden from the technician list, the Skill Tracker and the scheduling pickers, but their skills, notes and every shift they worked are kept, and they still appear in Reports. Archive someone from Settings → Technicians.</p>
+      <ul style="${_HELP_UL}">
+        <li>Each card shows the pay level, the date they were archived, their skills (<em>· training</em> = in training), how many shows and overhead shifts they worked and over what dates, and their training notes.</li>
+        <li><strong>Search</strong> matches a name or a skill.</li>
+        <li><strong>Work history</strong> opens Reports → Labor Lines filtered to that technician, every date (shown when they worked shifts and you can see labor reports).</li>
+        <li><strong>Restore</strong> puts them back on the technician list, the Skill Tracker and the pickers.</li>
+        <li><strong>Delete</strong> appears only for someone who never worked a shift, and removes them for good.</li>
+        <li>A read-only account (<strong>VIEW ONLY</strong>) sees every card but no Restore or Delete.</li>
       </ul>
     `
   },
   overhead_crew: {
     title: 'Overhead & Project Crew',
     html: `
-      <p>Labor that isn't tied to a show — internal work and projects, billed to a project catalog.</p>
+      <p>Labor that isn't tied to a show — internal work and projects, billed to a project catalog. Days are listed closest date first; set <strong>From / To</strong> and press <strong>Load</strong> to change the range.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Projects</strong> modal — the shared catalog: client, billing code, color, contact, notes.</li>
-        <li><strong>Recurring Templates</strong> + <strong>Generate from Templates</strong> — e.g. "2× Overhead Tech, Mon–Fri 8–17" stamped across a date range.</li>
-        <li><strong>+ Add Day</strong> → sub-groups per project, each with Quick Fill, + Add Labor Line, Change Date and its own contact/notes.</li>
-        <li><strong>Project Hour Totals</strong> — collapsible summary; range totals follow the date filter, lifetime totals don't.</li>
+        <li><strong>Projects</strong> — the shared catalog: name, client / department, billing code, color, active, description, default contact and notes. <strong>Archive</strong> drops a project from the pickers; its past days keep their data.</li>
+        <li><strong>Recurring Templates</strong> — e.g. "2× Overhead Tech, Mon–Fri 8–17": project, position, quantity, times, weekdays and optional start/end dates. <strong>Run Now</strong> stamps one template across the From / To range; <strong>Generate from Templates</strong> runs every active template for that range.</li>
+        <li><strong>+ Add Day</strong> asks for a date, then a project (or a new one) for its first <strong>sub-group</strong>. A day header has <strong>+ Sub-group</strong> and <strong>Delete Day</strong>.</li>
+        <li>Each sub-group: <strong>↺ Project</strong> (relink), <strong>▾ Quick Fill</strong> (set the same times on every line), <strong>+ Add Labor Line</strong>, <strong>Change Date</strong>, <strong>×</strong> (delete), plus its own contact and notes (blank = the project's defaults).</li>
+        <li>Each line: position, In, Lunch 1 / Lunch 2 (start <strong>S</strong> over end <strong>E</strong>), Out, hours, and the requested tech (<strong>REQ</strong>). <strong>✓</strong> and the scheduled tech (<strong>SCHED</strong>) are filled in on the Labor Scheduler and are read-only here.</li>
+        <li><strong>Project Hour Totals</strong> — collapsible summary; range totals follow the From / To filter, lifetime totals cover every day ever logged.</li>
         <li>Line, group and day totals (lines / hours / cost) update live as you edit.</li>
+        <li>Read-only accounts see the page <strong>VIEW ONLY</strong>: they can look (Projects and Recurring Templates open each entry with <strong>View</strong>) but not change anything.</li>
       </ul>
     `
   },
@@ -746,22 +867,27 @@ const _HELP_PAGES = {
     html: `
       <p>Bill several shows or events on <strong>one</strong> invoice — labor, assets, and attached third-party rental PDFs.</p>
       <ul style="${_HELP_UL}">
-        <li>Tick shows in the table (search / venue / status filters — defaults to Active). Selected shows become removable chips.</li>
-        <li><strong>Generate Combined Invoice</strong> opens the PDF: shows in date order, per-show subtotals, one grand total, rental PDFs appended at the end.</li>
+        <li>Tick shows in the <strong>All Shows</strong> table. Search matches name, company, venue or year; the venue and status filters narrow it (status starts on <em>Active</em>; pick <em>Archived</em> or <em>All statuses</em> for older shows). Ticked shows appear as removable chips under <strong>Selected Shows</strong>; <strong>Clear selection</strong> empties it.</li>
+        <li><strong>NOT SETTLED</strong> marks a show whose labor hasn't been settled (Post-Show → Settle Now): the invoice bills no labor for it and says "Labor not settled yet". <strong>TEST</strong> marks a test/demo show.</li>
+        <li><strong>Generate Combined Invoice</strong> opens the PDF in a new tab: shows in date order, each with its actual labor, internal assets and external costs (piano tunings included), per-show subtotals, one grand total, and any third-party rental PDFs appended at the end.</li>
       </ul>
     `
   },
   assets_admin: {
     title: 'Asset Manager',
     html: `
-      <p>The equipment catalog: <strong>Categories → Groups → Types → Details</strong>, plus a Systems &amp; Packages tab.</p>
+      <p>The equipment catalog (admins, content admins and Asset Managers). The <strong>Assets</strong> tab is four columns: <strong>Categories → Groups → Types → Details</strong>; each column's <strong>+ Add</strong> adds one there. A second tab holds <strong>Systems &amp; Packages</strong>.</p>
       <ul style="${_HELP_UL}">
-        <li>Search types/manufacturers/models; sort by name, units, or cost.</li>
-        <li>Type details: daily/weekly rates, reserve (spare) count, supplier, photo, storage location, <strong>📅 Calendar</strong> of per-day availability, and the unit list (barcodes, add units, remove-from-service with reason, unit logs).</li>
-        <li><strong>Company Rates</strong> (Edit type) — special day/week rates per <em>Performance Company</em>, picked from the Arts Groups list (what the advance form's Performance Company field uses). A show with that company is priced at them; the type's card shows "+ N company rates".</li>
-        <li><strong>Bulk: Hide from Advance Picker</strong> — mass-toggle which types show up in the show-page asset search.</li>
-        <li><strong>⚠ Overbooked</strong> appears when demand exceeds usable units anywhere.</li>
-        <li><strong>Systems &amp; Packages</strong> — bundles of component types with per-component quantities.</li>
+        <li>Search types / manufacturers / models; the order menu sorts by name, unit count or cost.</li>
+        <li><strong>Type details</strong>: photo, rate, storage location, units and reserve (spare) count, <strong>Edit Type</strong>, <strong>📅 Calendar</strong> (per-day availability, ‹ Prev / Next › by month) and <em>Part of</em> (the systems/packages that include it). Below: the unit list — add units (count + optional barcode), search by barcode, sort.</li>
+        <li><strong>Edit Type</strong>: name, category, parent group, manufacturer, model, storage location, reserve count, supplier; options <em>Consumable</em> (billed per item), <em>Track by quantity</em>, <em>Allow unit selection</em> (a PM can pin a specific S/N), <em>System</em>, <em>Package</em>, <em>Hide from advance picker</em>; photo; daily and weekly rate; <strong>Retire This Type…</strong>.</li>
+        <li><strong>Company rates</strong> (Edit Type) — special day/week rates per <em>Performance Company</em> (from the Arts Groups list), each with optional From / Through months. A show with that company is priced at them; the type shows "+ N company rates". The header's <strong>Company Rates</strong> button lists every one (filter by company and period, search, <strong>Download CSV</strong>).</li>
+        <li><strong>Unit details</strong> (click a unit): <strong>Info</strong> — barcode/serial, condition, year purchased, purchase value, depreciation years and start date (shows remaining value), warranty, replacement cost; <strong>Retire Unit</strong>, <strong>Maintenance…</strong> (reason + notes) and <strong>Back in Service</strong>. <strong>Log</strong> — dated Note / Damage / Service / Usage entries (completed piano tunings add a Service entry).</li>
+        <li><strong>✎ Bulk: Hide from Advance Picker</strong> — tick types (or a whole category / group) to hide them from the show page's Add Asset dialog; then <strong>Save</strong>. Hidden types can still be added from Approvals. Components of a system or package are still listed by name in that dialog's details, since they rent as part of the kit.</li>
+        <li><strong>⚠ Overbooked</strong> appears when an item's busiest-day demand across all shows exceeds its usable units; it lists those items.</li>
+        <li><strong>Systems &amp; Packages</strong> — bundles of component types with per-component quantities (<strong>+ New</strong> opens the type editor with System ticked; then <strong>+ Add</strong> components).</li>
+        <li>Header: <strong>Show Retired</strong> (list retired types and units inline), <strong>Retired Archive</strong>, <strong>DB Tools</strong>, <strong>Warehouse Locations</strong> (the storage-location list), <strong>+ New Category</strong>. Types and units are never deleted, only retired.</li>
+        <li>Read-only accounts see a <strong>VIEW ONLY</strong> badge: everything can be browsed and exported (Company Rates CSV), <strong>View Details</strong> opens a type read-only, and the add / edit / retire / bulk controls are hidden.</li>
       </ul>
     `
   },
@@ -770,29 +896,32 @@ const _HELP_PAGES = {
     html: `
       <p>Approval queue for upcoming shows' asset lists, keyed on load-in date (default window: today + 6 weeks — same as the sidebar badge).</p>
       <ul style="${_HELP_UL}">
-        <li>Adjust the FROM/TO window, use the presets, or page « Prev / Next » by the window's span.</li>
-        <li>Each show card: <strong>✓ Approve / Unapprove</strong>, Open show, + Add Asset, + External Rental.</li>
-        <li>Inline edits: rental dates (bounded to the show's engagement, First Call → Final Out) and the <strong>per-show unit-price override</strong> — this is the <em>only</em> place prices can be overridden; ↻ restores the captured rate-card price.</li>
+        <li>Adjust the FROM/TO window and press <strong>Apply</strong>, use the presets (<em>Past 3 weeks</em>, <em>Today + 3 weeks</em>, <em>Today + 6 weeks</em>), or page « Prev / Next » by the window's span. <strong>Hide shows with no requests</strong> leaves out shows with no gear yet.</li>
+        <li>Each show card: status badge (Approved, ⚠ Pending, No requests, Past), the show's total, <strong>Open show ↗</strong>, <strong>+ Add Asset</strong>, <strong>+ External Rental</strong> (description, cost, optional quote PDF) and <strong>✓ Approve</strong> / <strong>Unapprove</strong>. Any change to the gear afterwards sends the show back to Pending.</li>
+        <li>Inline edits: rental dates (bounded to the show's engagement, First Call → Final Out) and the <strong>per-show unit-price override</strong> — this is the <em>only</em> place prices can be overridden; ↻ restores the captured rate-card price. <strong>×</strong> removes a line.</li>
+        <li><strong>+ Add Asset</strong> searches every item (hidden-from-picker items included), then asks for unit, quantity, unit price, dates and notes. When the add would overbook, an <strong>Availability Override</strong> warning appears and <strong>Add to Show</strong> asks you to confirm — this page is the only place gear can be overbooked on purpose.</li>
         <li>Past shows (violet) stay editable for last-second cost corrections.</li>
+        <li>Read-only accounts get a <strong>VIEW ONLY</strong> badge: the window, filters, cards, prices, dates, Open show ↗ and quote PDFs can be read, but Approve / Unapprove, + Add Asset, + External Rental, ×, ↻ and the inline date and price edits are not offered.</li>
       </ul>
     `
   },
   reports: {
     title: 'Reports',
     html: `
-      <p><strong>Reports across the whole app.</strong> The filter bar (date range on each show's date, venue, Arts Group) applies to every tab; test/demo shows are left out. <strong>More filters</strong> narrows to one show, shows that had an item or category booked (groups count their child items, systems their components), or used a job position or technician. You see the tabs your permissions allow.</p>
+      <p><strong>Reports across the whole app.</strong> The filter bar (FROM / TO on each show's date — show date, else load-in, else first performance — venue, Arts Group) applies to every tab; test/demo shows are left out. The presets (<em>This month</em>, <em>This year</em>, <em>Last 12 months</em>, <em>Next 12 months</em>, <em>All time</em>) fill the dates; <strong>Run</strong> reloads the tab. <strong>More filters</strong> narrows to one show, shows that had an item or category booked (groups count their child items, systems their components), or used a job position or technician; <strong>Clear</strong> resets them. You see the tabs your permissions allow: asset tabs for admins, content admins and Asset Managers; labor tabs for labor schedulers; Piano Tuning for piano managers.</p>
       <ul style="${_HELP_UL}">
         <li><strong>Overview</strong>: shows by venue, month and status, the money by area (assets, external costs, settled labor, piano tunings), and the list of matching shows.</li>
+        <li><strong>Advance Fields</strong>: pick one advance form field and see what every matching show answered. Narrow by <strong>Answer</strong> (each answer given, with its show count) or <strong>Answer contains</strong>, and choose shows <em>With an answer</em>, <em>All</em> or <em>Not answered</em>, then <strong>Apply</strong> — e.g. Runner = Yes at one venue for a season.</li>
         <li><strong>Arts Groups</strong>: for each company, its shows, how often it rented gear, its top items and what it spent. Click a row for every item it rented and its shows.</li>
         <li><strong>Assets</strong>: for each item type, times rented, unit-days, revenue, last use and utilization; idle gear is listed too. Click a row for the individual units.</li>
-        <li><strong>Item History</strong>: pick one item (a group counts everything under it) or one unit, and see every show that rented it.</li>
+        <li><strong>Item History</strong>: pick one item (a group counts everything under it) and optionally one unit, and see every show that rented it. An item's drill-down on the Assets tab links here too.</li>
         <li><strong>Rental Lines</strong>: every asset line, with category and type filters.</li>
         <li><strong>Labor &amp; Techs</strong>: for each technician, scheduled, settled, training and overhead shifts and hours; for each position, requested against filled.</li>
         <li><strong>Labor Lines</strong>: every shift, with its scheduled tech and, once settled, the actual times and Worked by. Example: Had item = a projector plus Position = Video Tech lists who was the video tech.</li>
         <li><strong>Break Exceptions</strong>: settled shifts whose lunch was not taken, shorter or longer than scheduled, added, or moved, broken down by tech, position and show.</li>
         <li><strong>Estimate vs Settlement</strong>: for each settled show, labor estimate against the Final Invoice labor, biggest increases first.</li>
         <li><strong>Piano Tuning</strong>: tunings and cost by vendor, month, Arts Group, requester and piano.</li>
-        <li><strong>PDF</strong> prints the current tab with its filters (the drill-down dialogs have their own PDF button). Every table has <strong>CSV</strong>. Labor money is always the settlement figure, so only settled shows count.</li>
+        <li><strong>PDF</strong> prints the current tab with its filters (the drill-down dialogs have their own PDF button). Click a column heading to sort; every table has <strong>CSV</strong>. Labor money is always the settlement figure, so only settled shows count.</li>
       </ul>
     `
   },
@@ -803,6 +932,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li>Retired item types with their full unit tables (loaded on demand via View Units).</li>
         <li>Individually retired units under still-active types, with their color-coded log entries.</li>
+        <li>Read-only accounts see the same page with a <strong>VIEW ONLY</strong> badge (nothing here writes).</li>
       </ul>
     `
   },
@@ -811,136 +941,211 @@ const _HELP_PAGES = {
     html: `
       <p>Raw, audited row access for fixing asset records the normal finder can't reach.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Integrity Scan</strong> — canned anomaly checks (orphaned types, duplicate names, broken references…), each with jump links.</li>
-        <li><strong>Browse &amp; Edit</strong> — categories, types, units, show lines, system members, locations, logs, maintenance; search by name/barcode/id.</li>
+        <li><strong>Integrity Scan</strong> — canned anomaly checks (ERROR / WARN / INFO: orphaned types, duplicate names, broken references…); <strong>details</strong> on a finding jumps to its rows, <strong>↻ Re-run</strong> scans again.</li>
+        <li><strong>Browse &amp; Edit</strong> — pick a table (categories, types, units, show lines, system members, locations, logs, maintenance); search by name/barcode or exact id; ‹ Prev / Next › page through. Type rows carry a role badge (GROUP / LEAF / STANDALONE / SYSTEM) and their reference counts.</li>
         <li>Row actions: ✎ Edit, ⇄ Merge duplicate types, ⤵ Move children, ✕ Delete (two-step force confirm).</li>
         <li>Every change is audit-logged with before/after snapshots and can be undone from the Audit Log.</li>
+        <li>Read-only accounts get a <strong>VIEW ONLY</strong> badge: the integrity scan and table browser work, but the row tools are hidden (they all write).</li>
       </ul>
     `
   },
   audit_log: {
     title: 'Audit Log',
     html: `
-      <p>Full history of user actions (admin only).</p>
+      <p>Every tracked change — who, when, what — newest first (admin only).</p>
       <ul style="${_HELP_UL}">
-        <li>Filter by user, show, action (e.g. FORM_SAVE), and date range; 50 entries per page.</li>
-        <li><strong>Show diff</strong> — side-by-side BEFORE / AFTER snapshots where recorded.</li>
-        <li><strong>↺ Undo</strong> on undoable rows reverses the action and records a new entry.</li>
+        <li>Filter by <strong>user</strong>, <strong>show</strong>, <strong>action</strong> (e.g. FORM_SAVE) and a date range, then <strong>Filter</strong>; <strong>Clear</strong> resets. 50 entries per page (← Prev / Next →).</li>
+        <li>Columns: time, user, action, the record it touched, show / detail, and the IP address it came from.</li>
+        <li><strong>▾ Show diff</strong> — side-by-side BEFORE / AFTER snapshots where recorded.</li>
+        <li><strong>↺ Undo</strong> (curved arrow) appears only on actions the app knows how to reverse safely, and is refused while other records still depend on that row. Each entry can be undone once; the undo is logged as a new entry and the original is tagged <em>undone</em>.</li>
+        <li><strong>God Mode</strong> (top right) — who is signed in and what they're looking at right now.</li>
       </ul>
     `
   },
   performance: {
     title: 'Performance',
     html: `
-      <p>Per-page response times and DB query timing — is anything getting slower as the data grows?</p>
+      <p>Per-page response times and database query timing — is anything getting slower as the data grows? (admin only)</p>
       <ul style="${_HELP_UL}">
-        <li><strong>History</strong>: pick a period (Today, 7 days to 3 years, or a custom range). Tiles show requests, avg response, avg DB time and DB share, with a daily DB-vs-app chart and a per-page table (click a slowest query to see its SQL).</li>
-        <li><strong>Day / hours</strong>: one day, hour by hour, for any hour window (hourly detail is kept 90 days).</li>
-        <li><strong>Live</strong>: every request as it happens, from every server, with filter, Hide polling, ≥ 250 ms, Pause and Clear. Capture runs only while this view is open and switches itself off 10 minutes after you leave.</li>
-        <li><strong>Reset stats…</strong>: clears the stats for a date range or everything, to start a clean measurement (audit-logged).</li>
-        <li>Slowest individual queries are kept for 90 days. Stats flush from memory about once a minute.</li>
+        <li><strong>History</strong>: pick a period (Today, 7 days to 3 years) or a custom range with <strong>Apply range</strong>. Tiles show requests, avg response, avg DB time and DB share, with a daily DB-vs-app chart, a <strong>By Page</strong> table (requests, avg / min / max, DB %, queries per request — click a page's slowest query to see its SQL) and the <strong>Slowest Individual Queries</strong> (100 ms or more, kept 90 days).</li>
+        <li><strong>Day / hours</strong>: one day, hour by hour, for any hour window (<strong>Show</strong>). Hourly detail is kept 90 days.</li>
+        <li><strong>Live</strong>: every request as it happens, from every server, with a filter box, <strong>Hide polling</strong>, <strong>≥ 250 ms only</strong>, <strong>Pause</strong>, <strong>Clear</strong> and a running average / p95. Capture runs only while a Live page is open and switches itself off 10 minutes after you leave; <strong>Stop capture</strong> ends it now. A dot on the Live tab means capture is on.</li>
+        <li><strong>Reset stats…</strong>: clears the stats for a date range (<strong>Reset these days</strong>) or <strong>everything</strong>, to start a clean measurement (audit-logged).</li>
+        <li>Stats flush from memory about once a minute, so the newest requests can take a minute to show up (Live excepted).</li>
       </ul>
     `
   },
   settings: {
     title: 'Settings',
     html: `
-      <p>Tabs you'll see depend on your role.</p>
+      <p>The tabs you see depend on your role. <strong>Everyone</strong> gets Users and My Account; <strong>staff and admins</strong> also get Contacts, Shows, Form Fields, Arts Groups and PDF Designer; <strong>schedulers</strong> (and staff / admins) get Job Positions and Technicians; the rest is <strong>admin only</strong>. A <strong>read-only</strong> account sees its tabs <strong>VIEW ONLY</strong>: every list, with labor presets, day templates and arts groups opening with <strong>View</strong>, but no add, edit or delete. Tabs that open their own page have their own help there. On phones the tab row wraps and wide tables scroll sideways. More detail: README → <em>Admin &amp; Settings Guide</em>.</p>
+      <p style="margin:10px 0 0"><strong>People &amp; directory</strong></p>
       <ul style="${_HELP_UL}">
-        <li><strong>Contacts</strong> — the shared directory; the ADVANCE / PROD / ALL checkboxes decide who receives which auto-emails (see the "Email Routing" popover).</li>
-        <li><strong>Users</strong> — roles are User / Staff / Admin / Read-only, plus per-user flags: Scheduler, Asset Manager, Document Viewer (with venue and doc-type limits). Admins can reset passwords, force a change, lock, or delete. The <strong>Last Active</strong> column shows when each account was last seen (hover for the exact time, last login, and whether they connected internally or via the gateway).</li>
-        <li><strong>Form Fields</strong> — Advance Fields, Schedule Fields, and Day Templates; drag to reorder sections and fields.</li>
-        <li><strong>Job Positions / Technicians</strong> — venues, categories, positions (incl. training-only), pay rate levels, roster, and per-crew billable items.</li>
-        <li><strong>Email</strong> — SMTP setup, the Advance / Production Schedule auto-emails, send-time, the Next Scheduled Send preview, and the send-error panel.</li>
-        <li><strong>System</strong> — messages (site-wide banners for chosen groups, plus <strong>Maintenance Notices</strong>: email a notice — optionally high priority — to Admins / Staff / Users / Doc Viewers, post it as a banner, then send a work-completed email), updates, branding &amp; paperwork (logos, per-venue colors — text printed on those colors picks a contrasting shade automatically, or set each venue's <strong>Banner text</strong> color yourself; WiFi defaults, PDF time format), server &amp; logs (app port, remote syslog), backups, files (upload limit + file manager with archived-file restore/purge), database &amp; file storage (S3), AI, cluster.</li>
-        <li>Links out to: Shows, PDF Designer, Audit Log, Performance, DB Snapshots, Dashboards, Prism Sync, Sidebar Editor, Merge Duplicates.</li>
-        <li><strong>My Account</strong> — change your password. (Theme is the sun/moon button in the sidebar.)</li>
+        <li><strong>Contacts</strong> — the directory behind contact dropdowns and emails: search, department filter, <strong>+ Add Contact</strong>, ✎ edit, × delete (a <strong>USER</strong> row mirrors a user account; change it under Users). Admins also see the <strong>ALL / ADVANCE / PROD / POST</strong> columns — which PDF emails each contact receives — and set them in ✎ along with a venue filter and a shows-only / events-only filter. The <strong>?</strong> by the title explains who gets which email.</li>
+        <li><strong>Users</strong> — admins add accounts (username, name, email, temporary password, role: User / Staff / Admin / Read-only). Per row: <strong>Edit</strong> (role plus extra permissions: Scheduler, Asset Manager, Piano Tuning Manager, Document Viewer with allowed venues, document types and optional Labor Overview / Show Calendar access; the <em>Other applications</em> flags do nothing in this app), <strong>Reset PW</strong>, <strong>Devices</strong> (the browsers and screen sizes they've used), <strong>Require PW Change</strong>, <strong>Lock</strong>, <strong>Delete</strong>. <strong>Last Active</strong> — hover for the exact time, last login and whether they came in internally or through the gateway. Everyone else sees the list only.</li>
+        <li><strong>Registrations</strong> — self-registered accounts waiting for approval (the tab shows how many): pick a role, then <strong>Approve</strong> or <strong>Deny</strong>; <strong>↻ Refresh</strong>.</li>
+        <li><strong>Arts Groups</strong> — touring companies and resident groups for arts-group fields: <strong>+ Add Group</strong>, <strong>Edit</strong> (primary contact, additional contacts, notes), ×. Names typed into an arts-group field on an advance are added here automatically.</li>
+        <li><strong>My Account</strong> — change your password (8+ characters, an uppercase letter and a punctuation mark). Theme is the sun button in the sidebar footer.</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>Shows, forms &amp; paperwork</strong></p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Shows</strong> — opens Manage Shows: archive / restore any show and the auto-archive days.</li>
+        <li><strong>Form Fields</strong>:
+          <ul style="${_HELP_UL}">
+            <li><strong>Advance Fields</strong> — <strong>+ Add Section</strong>, Edit / Delete sections and fields, drag <strong>⠿</strong> to reorder. Each field has a type (text, date, dropdown, yes/no, contact, arts group, file upload, notes, PDF form, piano tuning…), options, a width, an optional "show when" condition, change alerts, an AI hint, and can be left off the PDF. Changes apply to every show at once.</li>
+            <li><strong>Schedule Fields</strong> — the Venue &amp; Tech Info fields on the Production Schedule; link one to an advance field to mirror it read-only, or list it with the contacts.</li>
+            <li><strong>Day Templates</strong> — <strong>+ New Template</strong>, Edit, Delete: named timelines (start, end, description, notes) that a schedule day applies from its Tools menu.</li>
+            <li><strong>PDF Form Templates →</strong> — fillable PDFs for pdf_form fields (own page).</li>
+          </ul></li>
+        <li><strong>PDF Designer</strong> — section order, labels, font sizes and page breaks of the exported PDFs (own page).</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>Labor</strong></p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Job Positions</strong> — venues (read-only, taken from show data), skill <strong>categories</strong>, <strong>positions</strong> (venue, category, optional special rate, training-only), and <strong>Labor Day Presets</strong> (<strong>+ New Preset</strong>: positions × quantity with times and notes, applied to a labor day from its Tools menu).</li>
+        <li><strong>Technicians</strong> — <strong>pay rate levels</strong> (<em>In Estimate</em> decides which rates the pre-show estimate may use; only admins change rate levels), the technician list (✎ name / rate level, <strong>Archive</strong> someone who has left, × only for a mistaken entry with no shifts; <strong>Archived technicians</strong> opens their page), and <strong>per-crew billable items</strong> (e.g. parking).</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>Email</strong> (admin)</p>
+      <ul style="${_HELP_UL}">
+        <li>Sending method (SMTP relay or direct send), server details and <strong>Send Test Email</strong>; the Advance Sheet and Production Schedule <strong>auto-emails</strong> (days before the show) and the <strong>send hour</strong>; <strong>Labor — No-Request Alerts</strong>; the subject / body <strong>message content</strong> with {variables}; the <strong>Next Scheduled Send</strong> preview.</li>
+        <li><strong>Email Send Errors</strong> — failed recipients to review: ✓ Reviewed, ↻ Resend, Mark all reviewed, Clear reviewed. <strong>Email Activity</strong> — every send, with search and filters; click a row for the message, why it failed and <strong>Resend</strong>; pick how long message content is kept.</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>System</strong> (admin) — sub-tabs</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Messages</strong> — <strong>Maintenance Notices</strong> (email a notice and post a banner to chosen groups, then <strong>✓ Work Complete</strong>) and <strong>Site-Wide Messages</strong> (banners for chosen groups, optionally on the sign-in page; the Seen / Dismissed count opens who saw it; <strong>✕ All</strong> takes one down for everyone).</li>
+        <li><strong>Updates</strong> — Auto-Detect the service, <strong>Check for Updates</strong>, then apply and restart.</li>
+        <li><strong>Branding &amp; Paperwork</strong> — WiFi defaults (printed with a QR code on schedule PDFs), the 12-hour hint on PDF times, the organization logo, and <strong>Venue Branding</strong> (Edit a venue: its logo, paperwork colors and banner text color, with a preview).</li>
+        <li><strong>Server &amp; Logs</strong> — the app port; remote syslog (host, port, facility, BSD or IETF format).</li>
+        <li><strong>Backups</strong> — hourly and daily database backups: <strong>Run Backup Now</strong>, ↓ Download.</li>
+        <li><strong>Files</strong> — the upload size limit, and a file manager for every show's files (× archive, ↩ restore, ✕ delete an archived file for good).</li>
+        <li><strong>Database</strong> — connection status and Test Connection; file storage (S3 endpoints, keys, bucket); file redundancy (keep copies in S3 and / or the database, which to read first, <strong>Copy S3 → Database</strong>, <strong>Copy Database → S3</strong>, <strong>Verify Both Copies</strong>).</li>
+        <li><strong>AI</strong> — Ollama URL and model, Test Connection, the system prompt, and how many AI sessions may run at once.</li>
+        <li><strong>Cluster</strong> — this server, the other servers found and which is leader; heartbeat settings and the force-leader override.</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>Admin tools</strong></p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Audit Log</strong>, <strong>Performance</strong>, <strong>DB Snapshots</strong>, <strong>Sidebar Editor</strong> and <strong>Merge Duplicates</strong> open their own pages.</li>
+        <li><strong>God Mode</strong> — who is on a show page right now (show, tab, last seen; <strong>Refresh</strong>), and every user's last login and last connection.</li>
+        <li><strong>Dashboards</strong> — <strong>Load</strong> lists every dashboard, public ones first: owner, public link (<strong>Copy</strong>), <strong>View</strong>, and <strong>Make Private</strong> to switch a public link off.</li>
+        <li><strong>Modules</strong> — tick to switch an optional module on or off for everyone at once (Security Sign-In Sheets, Piano Tuning, Spot Sound Levels; data is kept while off), and <strong>Open settings →</strong> for Piano Tuning, Spot Sound Levels and Prism Sync.</li>
       </ul>
     `
   },
   pdf_templates: {
     title: 'PDF Form Templates',
     html: `
-      <p>Upload a PDF and drag field boxes onto it; reference it from a <strong>pdf_form</strong> advance field so users can fill it in a popup and export the stamped PDF.</p>
+      <p>Fillable forms built on your own PDFs (admins and content admins). Reference one from a <strong>pdf_form</strong> advance field: people fill it in a popup on the show and export the stamped PDF.</p>
       <ul style="${_HELP_UL}">
-        <li>Upload (name + PDF) drops you straight into the field builder.</li>
-        <li>Re-point any advance fields before deleting a template.</li>
+        <li><strong>Upload New Template</strong> — name, PDF file and an optional description; <strong>Upload PDF</strong> drops you straight into the builder.</li>
+        <li>The list shows each template's pages, placed fields and last update, with <strong>Open builder</strong>, <strong>PDF</strong> (the original file) and <strong>×</strong> delete. Re-point any advance fields that use a template before deleting it.</li>
+        <li><strong>Builder</strong>: click-and-drag on the page to place a field; click a placed field to rename it, change its type (text, multiline, date, today, checkbox, signature), link it with <strong>Pull from advance</strong> (pre-fills each show's value) or <strong>Delete field</strong>; drag a corner to resize.</li>
+        <li><strong>Default new-field type</strong> sets the type of the next field you draw; <strong>View advance field keys</strong> lists every key you can pull from. Click the title to rename the template.</li>
+        <li>Changes auto-save after a short pause; <strong>Save</strong> saves right away.</li>
       </ul>
     `
   },
   pdf_designer: {
     title: 'PDF Designer',
     html: `
-      <p>Reorder sections, hide fields, rename labels and set font sizes <strong>per PDF export type</strong> (advance, schedule, post-show, invoices). Layouts apply globally.</p>
+      <p>Changes how the exported PDFs are laid out, <strong>per PDF type</strong>, for every show (admins and content admins).</p>
       <ul style="${_HELP_UL}">
-        <li>Pick a type tab, drag sections, expand to toggle fields; the live preview on the right renders against a recent show of your choice.</li>
-        <li><strong>Save</strong> applies for everyone; <strong>Reset to defaults</strong> is per type.</li>
+        <li><strong>Type tabs</strong> — Advance, Schedule, Postnotes, Asset Invoice, Post Show Invoice. Your last tab and preview show are remembered on this device.</li>
+        <li>Each section row: drag <strong>⠿</strong> to reorder, the checkbox shows or hides it (sections tagged <em>required</em> can't be hidden), type a new <strong>label</strong> (blank = the default), pick a <strong>font size</strong> (default or 6–12 pt), and tick <strong>page-break before</strong> to start it on a new page.</li>
+        <li><strong>▸</strong> opens a section's fields: drag to reorder, untick to hide, type to rename.</li>
+        <li><strong>Save</strong> applies the layout for everyone and refreshes the preview; <strong>Reset to defaults</strong> restores the current type (asks first; audit-logged).</li>
+        <li><strong>Preview show</strong> — the PDF on the right is the <em>saved</em> layout rendered for one of the 10 most recent shows; it refreshes when you save or pick another show. A preview is never saved as an export, so it doesn't add a version to the show's Export &amp; Files.</li>
       </ul>
     `
   },
   nav_editor: {
     title: 'Sidebar Editor',
     html: `
-      <p>Controls the sidebar below Home <strong>for every user</strong>.</p>
+      <p>Arranges the sidebar <strong>for every user</strong> (admin only). <strong>Home</strong>, <strong>Shows</strong>, <strong>My Shows</strong> and <strong>Search</strong> always stay at the top (followed by the current show's tabs on a show page); everything below them is laid out here.</p>
       <ul style="${_HELP_UL}">
-        <li>Drag rows (or ↑ ↓) to reorder; add section labels; per-row Indent, Hide, and rename.</li>
-        <li><strong>Spacing</strong> — Compact / Comfortable link padding.</li>
-        <li>Hiding is cosmetic only — each item's audience is fixed in code and permissions never change here. Settings can be moved but never hidden.</li>
+        <li>Drag a row, or use <strong>↑ ↓</strong>, to reorder.</li>
+        <li>Type in a row's box to <strong>rename</strong> it (blank = the default name); <strong>Indent</strong> shows it as a sub-item of the row above; <strong>Hide</strong> takes it out of the sidebar.</li>
+        <li><strong>+ Add Section</strong> adds a section label (a group heading; ✕ removes it). A label only shows when a visible item follows it, so people who can't see any item under it never see it.</li>
+        <li><strong>Visible to</strong> on each row says who can see that item. It's fixed in code: hiding is cosmetic, never changes who can open a page, and nothing here can widen access. Settings can be moved but never hidden.</li>
+        <li><strong>Spacing</strong> — Compact or Comfortable link spacing.</li>
+        <li><strong>Save</strong> applies the layout for everyone; <strong>Reset to Default</strong> restores the built-in layout right away (asks first).</li>
       </ul>
     `
   },
   snapshots: {
     title: 'DB Snapshots',
     html: `
-      <p>Inspect hourly/daily database backups, diff them against live data, and recover pieces without a full restore.</p>
+      <p>Inspect the hourly and daily database backups kept on <strong>this server</strong>, compare them with live data, and put back rows or a whole show without a full restore (admin only).</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Tables &amp; Diff</strong> — per-table changed / removed / added rows since the snapshot; cherry-pick rows to restore.</li>
-        <li><strong>Per-Show Restore</strong> — roll one show (advance, schedule, labor, assets, comments…) back to the snapshot; deleted shows can be resurrected.</li>
-        <li>Everything is preview → confirm → one transaction, fully audit-logged. Users, sessions, sent-email history and audit logs are inspect-only by design.</li>
+        <li><strong>Snapshots on this server</strong> — hourly (last 24) and daily (last 30) backups with their age and size; <strong>Inspect</strong> opens one. Each app server keeps its own copies.</li>
+        <li><strong>Tables &amp; Diff</strong> — every table's row count in the snapshot and live; <strong>Diff</strong> lists the changed, removed and added rows. Tick rows and <strong>Preview restore of selected…</strong> to put them back.</li>
+        <li><strong>Per-Show Restore</strong> — pick a show and <strong>Preview restore…</strong> to roll it back to the snapshot (show record, advance, schedule, notes, performances, comments, attachments, labor, assets). Shows deleted since can be brought back.</li>
+        <li>Every restore is preview → <strong>Apply restore</strong>, in one transaction, audit-logged row by row. If the data changed after the preview, it refuses and asks you to preview again.</li>
+        <li>Tables marked <em>inspect-only</em> (users, sessions, sent-email history, audit log, performance stats…) can be compared but never restored.</li>
       </ul>
     `
   },
   prism: {
     title: 'Prism Sync',
     html: `
-      <p>Pulls the building schedule from Prism FM into a <strong>staging area</strong> — nothing in 321Theater changes until you import.</p>
+      <p>Pulls the building schedule from Prism FM into a <strong>staging area</strong> — nothing in 321Theater changes until you import (admin only; reached from Settings → Modules).</p>
       <ul style="${_HELP_UL}">
-        <li><strong>⟳ Sync Now</strong>, <strong>Test Connection</strong>, and <strong>Raw API Fetch</strong> (read-only debug dump).</li>
-        <li>Staged events: search, state filter (New / Imported / Ignored), <strong>Import selected</strong> (creates real shows + performances, skips duplicates), Ignore, Restore to New.</li>
-        <li>Untick a venue's <strong>Visible</strong> box to hide its events from staging (reversible).</li>
-        <li>Imported shows carry a live Hold/Confirmed tag on the home board — the only thing a sync ever changes on a real show.</li>
-        <li>The page's own <strong>"HOW THIS PAGE WORKS"</strong> panel has the full walkthrough, and Sync History keeps per-run debug logs.</li>
+        <li><strong>⟳ Sync Now</strong>, <strong>Test Connection</strong>, and <strong>Raw API Fetch</strong> (read-only debug dump of the next 7 days).</li>
+        <li><strong>Environment</strong> — live checks of the bridge scripts, Node.js, the Prism SDK, the API token and the database, plus the last successful sync and the auto-sync status.</li>
+        <li><strong>Settings</strong> — enable the module, <strong>Auto-sync daily</strong> and its hour, <strong>Auto-import new events</strong>, the API token, lookahead days, bridge timeout and which Prism statuses to pull (Hold / Confirmed / In Settlement / Settled); <strong>Save Settings</strong>.</li>
+        <li><strong>Events found in Prism</strong>: state filter (All / New / Imported / Ignored), <strong>Hide past</strong>, <strong>Show hidden venues</strong>; tick events, then <strong>Import selected → 321T</strong> (creates real shows + performances, skips duplicates), <strong>Ignore</strong> or <strong>Restore to New</strong>. <strong>{ }</strong> on a row shows its raw Prism data.</li>
+        <li><strong>Venues &amp; Stages</strong> — untick an entry's <strong>Visible</strong> box to hide its events from staging (reversible).</li>
+        <li>Imported shows carry a live Hold / Confirmed tag on their show card — the only thing a sync ever changes on a real show.</li>
+        <li>The page's own <strong>How this page works</strong> panel has the full walkthrough, and <strong>Sync History</strong> keeps per-run debug logs.</li>
+      </ul>
+    `
+  },
+  spot: {
+    title: 'Spot Sound Levels',
+    html: `
+      <p>Links Spot's dB meters to venues so each performance's sound levels — and Spot's PDF report — are pulled in after the show (admin only). This page works while the module is off; switch it on in Settings → Modules.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Test Connection</strong> checks the saved URL and key; <strong>⟳ Pull Due Now</strong> pulls every performance that's due right away (module must be on).</li>
+        <li><strong>How this works</strong> (click to expand) — how each performance's time window is worked out, when pulls happen, and where the results go.</li>
+        <li><strong>Connection &amp; Automation</strong> — Spot URL, API key (never shown; leave blank to keep the saved one, or clear it), venue timezone; switches for automatic pulls after each show, filing Spot's PDF under the show's Files, taking the end time from the production schedule and detecting the real curtain up / down; grace after the end, default show length, detection window and step, catch-up days and max attempts. <strong>Save Settings</strong>.</li>
+        <li><strong>Venue Sensors</strong> — <strong>⟳ Load sensors from Spot</strong>, tick the sensors in each venue and <strong>Save</strong> that venue. <strong>★</strong> marks the sensor used to detect curtain times.</li>
+        <li><strong>Performances</strong> — recent and upcoming performances with their window, sensors and status; <strong>Pull now</strong> / <strong>Re-pull</strong> on a row, <strong>⟳ Refresh</strong>. <strong>Recent Pulls</strong> lists the last pulls with their result.</li>
+        <li>Levels show on the show's Post Show tab and print on the Post-Show Notes PDF. Automatic pulls run only on the cluster's primary server.</li>
       </ul>
     `
   },
   dashboards: {
     title: 'Dashboards',
     html: `
-      <p>Asset-availability and skill-coverage dashboards — yours plus everyone's public ones.</p>
+      <p>Asset-availability and skill-coverage dashboards — yours first, plus everyone's public ones. Each card shows its widgets and, if public, its link; click a card to open it.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>+ New Dashboard</strong> — pick a layout (Reservation Timeline, Asset Type Calendar, Combined, By Category, By Show, Shows Calendar, Skills Overview).</li>
-        <li>Tick <strong>"publicly accessible"</strong> to get a no-login <code>/d/&lt;link&gt;</code> URL to share; admins can force a dashboard private again from Settings → Dashboards.</li>
-        <li>You can delete dashboards you own (×).</li>
+        <li><strong>+ New Dashboard</strong> — a name and a first widget (Reservation Timeline, Asset Type Calendar, Combined, By Category, By Show, Shows Calendar, Skills Overview). Add more widgets from inside the dashboard.</li>
+        <li>Tick <strong>"Make this dashboard publicly accessible"</strong> to get a no-login <code>/d/&lt;link&gt;</code> URL to share (read-only accounts can't). Anyone with the link sees the widgets view-only — signed out, without the app's menu; <em>Assets by Show</em> and links to shows are for signed-in users. <strong>PUBLIC</strong> marks those cards; admins can list them and make one private again from Settings → Dashboards.</li>
+        <li>Another person's public dashboard shows their name; only its owner can change it. You can delete dashboards you own (×).</li>
       </ul>
     `
   },
   dashboard_view: {
     title: 'Dashboard',
     html: `
-      <p>A widget board of availability views.</p>
+      <p>A board of availability widgets, stacked top to bottom. Most widgets have their own <strong>Date range</strong> (today + 90 days to start; the Shows Calendar starts on this month).</p>
       <ul style="${_HELP_UL}">
-        <li><strong>+ Add Widget</strong> (owner only) — timelines, availability calendars, per-category/per-show views, shows calendar, skill coverage.</li>
-        <li><strong>Refresh</strong> reloads every widget. If the dashboard is public, the shareable URL is shown in a banner.</li>
+        <li><strong>Reservation Timeline</strong> — one bar per reservation (show + quantity) across its rental window, grouped by category. <strong>−</strong> / <strong>+</strong> zoom, <strong>Fit</strong> fits the range, <strong>Today</strong> scrolls to today; click a bar to open the show.</li>
+        <li><strong>Asset Type Calendar</strong> — pick an item; each day shows how many are free (<em>N avail</em>, <em>N left</em> when low, <em>FULL</em>). Click a day with reservations to see the shows; ‹ › change the month.</li>
+        <li><strong>All Assets</strong>, <strong>Assets by Category</strong> — total units, in maintenance, reserved and available per item for the range. <strong>Assets by Show</strong> — each show's lines with quantity and price.</li>
+        <li><strong>Shows Calendar</strong> — a week-at-a-glance count plus a month grid of Load-In (↓), Show day (★) and Load-Out (↑) chips.</li>
+        <li><strong>Skill Coverage</strong> — for every position, how many technicians are qualified, with a list of positions nobody covers.</li>
+        <li><strong>+ Add Widget</strong> and the <strong>×</strong> on each widget are for the owner only (a dashboard keeps at least one). <strong>Refresh</strong> reloads every widget. If the dashboard is public, its shareable URL is shown in a banner; opening that <code>/d/…</code> link shows the same widgets view-only (no editing, even for the owner).</li>
       </ul>
     `
   },
   archived_shows: {
     title: 'Archived Shows',
     html: `
-      <p>Every archived show, newest first. A show archives itself a few days after its last date (Settings → Shows sets how many).</p>
+      <p>Every archived show, newest first — the <strong>Archived</strong> tab of the Shows board. A show archives itself a few days after its last date (Settings → Shows sets how many).</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Search</strong> matches show name, venue and Arts Group; the date pickers and venue pills narrow it further.</li>
-        <li><strong>Restore</strong> puts a show back on Home (its archive clock restarts). Admins can also <strong>Delete</strong> permanently.</li>
+        <li><strong>Search</strong> matches show name, venue and Arts Group (the board's "Search the archive →" link fills it in); the date pickers and venue pills narrow it further. The count under the title says how many match.</li>
+        <li><strong>View</strong> (or click the card) opens the show, marked ARCHIVED.</li>
+        <li><strong>Restore</strong> (staff and admins) puts a show back on the Shows board; its archive clock restarts from the restore. Admins can also <strong>Delete</strong> a show permanently, with everything on it (asks first).</li>
+        <li><strong>Active</strong> goes back to the board. Search (sidebar) also finds archived shows.</li>
       </ul>
     `
   },
@@ -949,26 +1154,67 @@ const _HELP_PAGES = {
     html: `
       <p><strong>The running list of piano tunings</strong> requested from show pages (Advance tab → Piano Tuning). For admins and users with the <em>Piano Tuning Manager</em> permission.</p>
       <ul style="${_HELP_UL}">
-        <li><strong>Open</strong> = Requested and Scheduled. The status buttons filter; search matches show, piano, vendor and PM.</li>
-        <li><strong>Mark scheduled</strong> — one click: it's with the vendor (the PM can no longer edit or cancel it). Setting the tuning date does the same.</li>
+        <li><strong>Open</strong> = Requested, Seen / In progress and Scheduled. The status buttons (with counts) filter; search matches show, piano, vendor and PM.</li>
+        <li><strong>Mark seen</strong> — tells the requester you're on it (bell notice) and takes it off the sidebar badge. <strong>Mark scheduled</strong> — it's with the vendor (the PM can no longer edit or cancel it). Setting the tuning date does the same. <strong>Completed</strong> (on a scheduled tuning) closes it and adds a Service entry to that piano unit's log (Asset Manager → unit → Log).</li>
         <li><strong>⚠ Cancellation requested</strong> — the PM asked to cancel (reason shown). <strong>Cancel tuning</strong> once it's off with the vendor, or <strong>Decline cancel</strong> if it can't be (the PM is emailed).</li>
         <li><strong>+ Add House Tuning</strong>: log a tuning that isn't for a show (maintenance, a rehearsal, a recording). It stays off every show's schedule and invoices; its cost counts in Reports.</li>
-        <li><strong>Unit (S/N)</strong> — pick the exact instrument, not just the model. It shows wherever the piano is named (schedule row, charge, emails, reports), so each piano's tuning history is per S/N. ⚠ <em>unit not pinned</em> means the show books the model but not that unit.</li>
+        <li><strong>Unit (S/N)</strong> — pick the exact instrument, not just the model. It shows wherever the piano is named (schedule row, charge, emails, reports), so each piano's tuning history is per S/N. ⚠ <em>unit not pinned on Assets tab</em> means the show books the model but not that unit — <strong>Pin unit</strong> names it on the show's Assets line when that can be done safely (or says why not). ⚠ <em>not on show's Assets tab</em> means the show hasn't booked the piano at all.</li>
         <li><strong>Vendors</strong> — the vendor list with each one's typical price, contact and notes. Picking a vendor in Manage fills an empty cost with its typical price. Archive a vendor to drop it from the list; past tunings keep it.</li>
-        <li><strong>Manage</strong> — vendor, tuning date + start time, cost, paperwork and notes. Setting the tuning date marks it <strong>Scheduled</strong>, puts a read-only 🎹 row on that day of the show's production schedule and emails the requester.</li>
+        <li><strong>Manage</strong> — status, vendor, piano and unit, needed-on date and tuned-by time, tuning date + start time, cost, paperwork PDF, the PM's notes and your manager notes. Setting the tuning date marks it <strong>Scheduled</strong>, puts a read-only 🎹 row on that day of the show's production schedule and emails the requester.</li>
         <li><strong>Cost</strong> appears on the show's <strong>Final Invoice</strong> and the Combined Invoice under External Assets &amp; Costs. Cancelled tunings are never billed and their schedule row is removed.</li>
         <li>The <strong>bell</strong> notifies you of new requests, PM changes and cancellation requests. Click one to open that tuning. Requesters get a notification when their tuning is scheduled, moved, completed or cancelled.</li>
+        <li><strong>VIEW ONLY</strong> (read-only account): the list, filters, search, paperwork PDFs and the Vendors list still work and <strong>View</strong> opens a tuning's details, but the status buttons, Pin unit, Save, paperwork upload/remove, vendor editing and + Add House Tuning are hidden.</li>
       </ul>
     `
   },
   my_shows: {
     title: 'My Shows',
     html: `
-      <p><strong>Just your shows.</strong> The same board as Home, narrowed to the <em>active</em> shows where you are the <strong>Production Manager</strong> on the Advance Sheet or the <strong>covering PM</strong> on any labor day.</p>
+      <p><strong>Just your shows.</strong> The same board as <strong>Shows</strong>, narrowed to the <em>active</em> shows where you are the <strong>Production Manager</strong> on the Advance Sheet or the <strong>covering PM</strong> on any labor day.</p>
       <ul style="${_HELP_UL}">
         <li>Matching uses the contact linked to your user account (kept in step with your display name) — the PM picked on the show must be that contact. If a show you run is missing, check the PM name on its Advance Sheet / labor days.</li>
-        <li>Archived shows don't appear here; use Home's search for those.</li>
-        <li>Search, date pickers, venue pills and layout work exactly as on Home.</li>
+        <li><strong>Happening Today</strong> lists just your shows that have something on today.</li>
+        <li>Archived shows don't appear here; use the Archived tab on Shows (or Search with PM = Me and All) for those. New shows are made from the Shows board.</li>
+        <li>Search, date pickers, venue pills and layout work exactly as on Shows.</li>
+      </ul>
+    `
+  },
+  search: {
+    title: 'Search',
+    html: `
+      <p><strong>Find any show — active or archived.</strong> Every filter you set narrows the results; the address bar keeps them, so you can bookmark or share a search and Back steps through your changes.</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Search box</strong> — matches the show name, venue, Arts Group and PM names (every word must match). Tick <strong>Also search inside show content</strong> to look through Advance text fields, schedule rows, notes, comments, labor / asset notes and file descriptions too; each hit shows a snippet that opens the show at that spot.</li>
+        <li><strong>PM</strong> — the show's Production Manager <em>or</em> a covering Day PM on any labor day. <strong>Me</strong> = the contact linked to your account.</li>
+        <li><strong>Edited by</strong> — shows that person changed (forms, comments, labor, assets, files…), with how many edits and when the last one was. Opening a show without changing anything doesn't count; Advance / Schedule / Post Show changes count from their version history, which keeps each show's last 100 versions.</li>
+        <li><strong>Tags</strong> — up to 5 <code>#tags</code> (suggestions as you type; Enter, space or comma adds one, × or Backspace removes it); a show must have all of them.</li>
+        <li><strong>Venue</strong>, <strong>From / To</strong> — dates match when the show's load-in → load-out span or any performance touches the range.</li>
+        <li><strong>Active / Archived / All</strong> (All by default), <strong>Include test shows</strong> (off by default), <strong>Sort</strong> (newest or oldest first, name, or last edited — the default with Edited by) and <strong>Clear all</strong>.</li>
+        <li>Each card says <em>why</em> it matched (PM, edits, tags, text snippets, "+N more matches inside"); click the card to open the show, or a snippet to open it at that spot. At most 200 shows are listed — narrow the filters if you see "Showing the first…".</li>
+        <li><strong>All tags</strong> (top right) lists every tag. On a phone the filters fold behind <strong>Filters</strong> (with how many are set), and the 🔍 in the top bar opens this page.</li>
+      </ul>
+    `
+  },
+  tags: {
+    title: 'Tags',
+    html: `
+      <p>Every <code>#tag</code> written anywhere in a show, with how many times it's used. Type <code>#</code> and a word in any show text box to make one — letters, digits, <code>_</code> and <code>-</code>; capitals don't matter (<code>#Pyro</code> = <code>#pyro</code>).</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Filter</strong> — narrows the list as you type.</li>
+        <li><strong>Most used / A–Z</strong> — sort order (remembered in this browser).</li>
+        <li>Click a tag for every show and spot that uses it; hover one for how many shows use it. Counts can take up to 30 seconds to catch up with a brand-new tag.</li>
+        <li>Not tags: a <code>#</code> after a letter or number (<code>Truck #2</code>, <code>x#1</code>), inside a web address, or followed by a number.</li>
+      </ul>
+    `
+  },
+  tag_page: {
+    title: 'Tag',
+    html: `
+      <p>Everything tagged with this <code>#tag</code>, grouped by show (newest first; archived and test shows are badged).</p>
+      <ul style="${_HELP_UL}">
+        <li>Each line names where the tag is — e.g. <em>Advance › Special Notes</em>, <em>Schedule › Mon 11/2 09:00</em>, <em>Comment by …</em>, <em>Labor › Day notes</em> — with the text around it.</li>
+        <li>Click a line to open the show right at that spot: the tab opens, the field or row scrolls into view and flashes.</li>
+        <li>The show name opens the show. <strong>Search with this tag</strong> opens Search pre-filtered, so you can add a PM, dates or more tags. <strong>← All tags</strong> goes back to the list.</li>
       </ul>
     `
   },
@@ -977,18 +1223,20 @@ const _HELP_PAGES = {
     html: `
       <p>Read-only show documents, limited to the venues and document types your account allows (shown under the title).</p>
       <ul style="${_HELP_UL}">
-        <li>Shows are grouped by venue; <strong>Open →</strong> shows that show's available PDFs.</li>
+        <li>Shows are grouped by venue, with date and time. <strong>Open →</strong> lists that show's available documents (Advance, Production Schedule, Post-show Notes); click one to open that PDF in a new tab.</li>
         <li>The search box filters across all venues at once.</li>
+        <li>The sidebar also has <strong>Show Calendar</strong> and <strong>Labor Overview</strong> when your account allows them, <strong>My Account</strong> (change your password) and <strong>Log out</strong>.</li>
       </ul>
     `
   },
   viewer_calendar: {
     title: 'Show Calendar',
     html: `
-      <p>Read-only calendar of the shows your account can see.</p>
+      <p>Read-only calendar of the shows your account can see (only when your account has the Show Calendar turned on).</p>
       <ul style="${_HELP_UL}">
-        <li>Chips per day: <strong>↓ Load-In</strong> (blue), <strong>★ Show day</strong> (green), <strong>↑ Load-Out</strong> (amber); click one to open that show's documents.</li>
-        <li>Navigate with ‹ Prev / Next › / Today or an explicit From / To range.</li>
+        <li><strong>Week at a glance</strong> counts the shows on each of seven days, starting today when today is in the range (otherwise its first week); below it, a month grid.</li>
+        <li>Chips per day: <strong>↓ Load-In</strong> (blue), <strong>★ Show day</strong> (green), <strong>↑ Load-Out</strong> (amber); click one to open that show's documents. A busy day shows three and <em>+N more</em>.</li>
+        <li>Navigate with ‹ Prev / Next › (a month at a time) / Today, or set an explicit From / To range.</li>
       </ul>
     `
   },
@@ -997,7 +1245,7 @@ const _HELP_PAGES = {
     html: `
       <p>Change your own password here. (Theme is the sun/moon button in the sidebar.)</p>
       <ul style="${_HELP_UL}">
-        <li>The button enables once the new password meets every rule in the checklist.</li>
+        <li>Enter your current password, then the new one twice. <strong>Change Password</strong> enables once the new password meets every rule in the checklist.</li>
         <li>Forgot your current password? Ask an administrator to reset it.</li>
       </ul>
     `
@@ -1008,13 +1256,15 @@ const _HELP_PAGES = {
    longest matching prefix wins — but keep specific paths (e.g. /settings/…)
    listed so they don't fall through to their parent page's entry. #}
 const _HELP_ROUTES = [
-  ['/dashboard', 'home'], ['/my-shows', 'my_shows'], ['/shows/archived', 'archived_shows'], ['/piano-tuning', 'piano_tuning'], ['/shows/new', 'new_show'],
+  ['/shows', 'shows'], ['/dashboard', 'shows'], ['/my-shows', 'my_shows'], ['/shows/archived', 'archived_shows'], ['/piano-tuning', 'piano_tuning'], ['/shows/new', 'new_show'],
   ['/settings/shows', 'manage_shows'], ['/settings/pdf-templates', 'pdf_templates'],
+  ['/settings/spot', 'spot'], ['/settings/technicians/archived', 'archived_technicians'],
   ['/settings', 'settings'],
   ['/admin/merge-shows', 'merge_shows'], ['/admin/audit', 'audit_log'],
   ['/admin/performance', 'performance'], ['/admin/navigation', 'nav_editor'],
   ['/admin/pdf-designer', 'pdf_designer'], ['/admin/snapshots', 'snapshots'],
   ['/labor-overview', 'labor_overview'], ['/labor-scheduler', 'labor_scheduler'],
+  ['/labor-scheduler/no-labor', 'labor_no_labor'],
   ['/crew', 'crew_tracker'], ['/overhead-crew', 'overhead_crew'],
   ['/combined-invoice', 'combined_invoice'],
   ['/assets/approvals', 'asset_approvals'], ['/assets/retired', 'assets_retired'],
@@ -1024,18 +1274,20 @@ const _HELP_ROUTES = [
   ['/dashboards', 'dashboards'],
   ['/viewer/calendar', 'viewer_calendar'], ['/viewer/account', 'viewer_account'],
   ['/viewer', 'viewer_home'],
+  ['/search', 'search'], ['/tags', 'tags'], ['/tags/', 'tag_page'],
 ];
 
 function _helpKeyForLocation() {
   const path = window.location.pathname;
-  if (path === '/' ) return 'home';
+  if (path === '/') return 'home';     // the day timeline (3.35.0); the board is /shows
   // Show pages get per-tab help; switchTab keeps ?tab= current in the URL.
   if (/^\/shows\/\d+/.test(path)) {
     const tab = new URLSearchParams(window.location.search).get('tab') || 'advance';
     return _HELP_PAGES['show_' + tab] ? 'show_' + tab : 'show_advance';
   }
-  // /dashboards/<id> is a dashboard view, /dashboards is the list.
-  if (/^\/dashboards\/\d+/.test(path)) return 'dashboard_view';
+  // /dashboards/<id> (and a public /d/<slug> link) is a dashboard view,
+  // /dashboards is the list.
+  if (/^\/(dashboards\/\d+|d\/)/.test(path)) return 'dashboard_view';
   let best = null, bestLen = 0;
   for (const [prefix, key] of _HELP_ROUTES) {
     if (path.startsWith(prefix) && prefix.length > bestLen) { best = key; bestLen = prefix.length; }

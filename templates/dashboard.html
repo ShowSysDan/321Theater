@@ -4,7 +4,7 @@
   MIT Licensed — see LICENSE for details.
 #}
 {% extends "base.html" %}
-{% block title %}{{ 'My Shows' if my_shows else 'Home' }} — 3·2·1→Theater{% endblock %}
+{% block title %}{{ 'My Shows' if my_shows else 'Shows' }} — 3·2·1→Theater{% endblock %}
 
 {% block content %}
 {# Frosted page header (3.15.0): pins to the top while the board scrolls under
@@ -75,7 +75,7 @@
         </div>
         <div class="today-card-row" title="Production Manager">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-          <span>{% if t.pm %}{{ t.pm }}{% else %}<em class="today-card-empty">No PM</em>{% endif %}</span>
+          <span>{% if t.pm %}{{ t.pm }}{% if t.pm_is_cover %} <span class="today-card-cover" title="Covering PM today">cover</span>{% endif %}{% else %}<em class="today-card-empty">No PM</em>{% endif %}</span>
         </div>
         {% if t.perf_times %}
         <div class="today-card-row time" title="Performance times">
@@ -125,7 +125,7 @@
             onclick="toggleVenue(this)" title="Show only {{ venue }} (click more venues to add them)">{{ venue }}</button>
     {% endfor %}
   </div>
-  <div class="dash-layout-toggles" title="Home dashboard layout (saved to your account)">
+  <div class="dash-layout-toggles" title="Show board layout (saved to your account)">
     <label class="dash-layout-label">Layout</label>
     <select id="dash-layout-select" class="field-input field-input-sm" onchange="saveHomeLayout()" aria-label="Dashboard layout">
       <option value="columns" {% if home_layout == 'columns' %}selected{% endif %}>Columns (scroll)</option>
@@ -180,7 +180,7 @@
 </div>
 </div>{# end .venue-columns-wrap #}
 
-<p id="dash-no-results" class="text-dim" style="display:none;font-size:13px;padding:24px 0">No active shows match your search.{% if not my_shows %} <a id="dash-arch-link" href="{{ url_for('archived_shows_page') }}">Search the archive →</a>{% endif %}</p>
+<p id="dash-no-results" class="text-dim" style="display:none;font-size:13px;padding:24px 0">No active shows match your search.{% if not my_shows %} <a id="dash-arch-link" href="{{ url_for('archived_shows_page') }}">Search the archive →</a>{% endif %} <a id="dash-search-link" href="/search">Search everything →</a></p>
 
 {% else %}
 <div class="empty-state">
@@ -189,43 +189,9 @@
   <p>You're not the production manager or a covering PM on any active show.<br>
     <span class="text-dim" style="font-size:13px">Shows match on the PM contact linked to your account. <a href="{{ url_for('dashboard') }}">All shows →</a></span></p>
   {% else %}
-  <p>No active shows. <a href="{{ url_for('new_show') }}">Create one →</a></p>
+  <p>No active shows.{% if not restricted %} <a href="{{ url_for('new_show') }}">Create one →</a>{% endif %}</p>
   {% endif %}
 </div>
-{% endif %}
-
-{# ── Archived ─────────────────────────────────────────────────────────────── #}
-{% if archived_shows %}
-<section class="section" id="archived-section" style="margin-top:32px">
-  <button class="section-label toggle-archived" onclick="document.getElementById('archived-list').classList.toggle('hidden')">
-    ARCHIVED (<span id="archived-count" data-total="{{ archived_shows|length }}">{{ archived_shows|length }}</span>)
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="6 9 12 15 18 9"/></svg>
-  </button>
-  <div id="archived-list" class="show-grid archived hidden" style="margin-top:12px">
-    {% for s in archived_shows %}
-    <div class="show-card archived{% if s.show_mode == 'event' %} show-card-event{% endif %}" data-search="{{ (s.name ~ ' ' ~ (s.venue or ''))|lower }}" data-date="{{ s.show_date or '' }}"
-         data-venue="{{ (s.venue or '')|trim or 'Unassigned' }}">
-      <a class="show-card-link-overlay" href="{{ url_for('show_page', show_id=s.id, tab='advance') }}"></a>
-      <div class="show-card-name">{{ s.name }}</div>
-      <div class="show-card-dates">
-        {% if s.show_date %}<div>{{ s.show_date }}</div>{% else %}<div>No date</div>{% endif %}
-        <div class="show-meta" style="margin-top:2px">{{ s.venue or '—' }}</div>
-      </div>
-      <div class="show-card-actions" style="padding:8px 12px">
-        <a href="{{ url_for('show_page', show_id=s.id, tab='advance') }}" class="btn btn-sm btn-ghost">View</a>
-        <form method="post" action="{{ url_for('restore_show', show_id=s.id) }}" style="display:inline">
-          <button class="btn btn-sm btn-ghost">Restore</button>
-        </form>
-        {% if user.role == 'admin' %}
-        <form method="post" action="{{ url_for('delete_show', show_id=s.id) }}" style="display:inline" onsubmit="return confirm('Permanently delete this show and all its data?')">
-          <button class="btn btn-sm btn-danger-ghost">Delete</button>
-        </form>
-        {% endif %}
-      </div>
-    </div>
-    {% endfor %}
-  </div>
-</section>
 {% endif %}
 
 {% endblock %}
@@ -234,7 +200,6 @@
 <script>
 // Venues picked with the pills. Empty = every venue is shown (the default).
 const _selectedVenues = new Set();
-let _archAutoExpanded = false;
 
 function _venueShown(venue) {
   return _selectedVenues.size === 0 || _selectedVenues.has(venue || '');
@@ -271,39 +236,13 @@ function filterDash(q) {
     totalVisible += colVisible;
   });
 
-  // Archived shows — the whole section hides when nothing matches, and
-  // auto-expands when something does (collapsing back once the filter clears).
-  let archivedVisible = 0;
-  const archivedList = document.getElementById('archived-list');
-  const archivedSection = document.getElementById('archived-section');
-  if (archivedList) {
-    archivedList.querySelectorAll('.show-card.archived').forEach(card => {
-      const match = _venueShown(card.dataset.venue)
-        && _cardMatchesFilter(card, term, fromDate, toDate);
-      card.style.display = match ? '' : 'none';
-      if (match) archivedVisible++;
-    });
-    // A venue pick narrows the archived list too (without auto-expanding it —
-    // only a search/date filter does that).
-    const narrowed = hasFilter || _selectedVenues.size > 0;
-    if (archivedSection) archivedSection.style.display = (narrowed && archivedVisible === 0) ? 'none' : '';
-    const archCount = document.getElementById('archived-count');
-    if (archCount) archCount.textContent = narrowed ? archivedVisible : archCount.dataset.total;
-    if (hasFilter && archivedVisible > 0) {
-      if (archivedList.classList.contains('hidden')) {
-        archivedList.classList.remove('hidden');
-        _archAutoExpanded = true;
-      }
-    } else if (!hasFilter && _archAutoExpanded) {
-      archivedList.classList.add('hidden');
-      _archAutoExpanded = false;
-    }
-  }
-
   document.getElementById('dash-no-results').style.display =
-    (totalVisible + archivedVisible === 0 && hasFilter) ? '' : 'none';
+    (totalVisible === 0 && hasFilter) ? '' : 'none';
   const archLink = document.getElementById('dash-arch-link');
   if (archLink) archLink.href = '{{ url_for('archived_shows_page') }}' + (term ? '?q=' + encodeURIComponent(term) : '');
+  // Full-text search across every show's fields (the Search page).
+  const searchLink = document.getElementById('dash-search-link');
+  if (searchLink) searchLink.href = '/search' + (term ? '?q=' + encodeURIComponent(term) : '');
 }
 
 function clearSearch() {
@@ -325,8 +264,8 @@ function toggleVenue(btn) {
     p.classList.toggle('active', on);
     p.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
-  // Re-apply search/date filters on top of the venue pick (also re-shows or
-  // hides the matching archived cards and the "no results" line).
+  // Re-apply search/date filters on top of the venue pick (also shows or
+  // hides the "no results" line).
   filterDash(document.getElementById('dash-search').value);
 }
 
