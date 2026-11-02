@@ -2883,6 +2883,7 @@ html:not(.mobile-view) .main-content:has(> #tl-root) { padding-bottom: 18px; }
   position: relative; overflow: auto; isolation: isolate;
   background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
   box-shadow: var(--hl), var(--lift); overscroll-behavior: contain;
+  overflow-anchor: none;   /* 3.38.1: lane folds must never make the browser re-anchor the scroll (flicker loop) */
 }
 .tl-scroll[hidden] { display: none; }
 :where(.tl-scroll) .tl-inner { position: relative; min-width: 100%; }
