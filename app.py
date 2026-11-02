@@ -898,7 +898,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.42.0'
+APP_VERSION = '3.43.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -10255,16 +10255,21 @@ def _build_schedule_pdf(show_id, exported_by_id=None, base_url=None, preview=Fal
             schedule_days = lit
     dark_count = run_days - len(schedule_days)
 
-    # PM on duty per printed day (3.35.0): the day's covering PM, else the
-    # show PM, with phone/email — keyed by each day's ISO date string (a
-    # performance day's perf_date is a date object). Resolved here, before
-    # any _render, so the content hash covers it. A dateless day gets the
-    # show PM; a day with no PM at all prints nothing.
+    # Covering PM per printed day (3.43.0): a day prints a PM row ONLY when
+    # that day has a covering PM who isn't the show's own PM (the show PM is
+    # already in the header block, so repeating them on every day was
+    # noise). Keyed by each day's ISO date string (a performance day's
+    # perf_date is a date object). Resolved here, before any _render, so the
+    # content hash covers it. Dateless days and days the show PM works
+    # print nothing.
     _day_isos = [_iso_pdf(d['perf'].get('perf_date')) for d in schedule_days]
     _pm = _pm_contacts_for_show(db, show_id, [i for i in _day_isos if i])
-    for d, iso in zip(schedule_days, _day_isos):
-        d['pm'] = _pm['days'].get(iso) if iso else _pm['show_pm']
     show_pm_card = _pm['show_pm']
+    _show_pm_key = _name_key(show_pm_card['name']) if show_pm_card else ''
+    for d, iso in zip(schedule_days, _day_isos):
+        card = _pm['days'].get(iso) if iso else None
+        d['pm'] = (card if card and card.get('is_cover')
+                   and _name_key(card['name']) != _show_pm_key else None)
 
     # Crew call times — unique in_times from labor_requests, sorted. Training /
     # shadow shifts are excluded so they never surface on show paperwork.

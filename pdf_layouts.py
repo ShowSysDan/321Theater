@@ -31,7 +31,7 @@ LAYOUT_CATALOG = {
     'schedule': [
         {'key': 'header',         'default_label': 'Header',          'required': True,  'fields': []},
         {'key': 'day_banner',     'default_label': 'Day Banner',      'required': False, 'fields': []},
-        {'key': 'day_pm',         'default_label': 'PM on Duty (per day)', 'required': False, 'fields': []},
+        {'key': 'day_pm',         'default_label': 'Covering PM (per day)', 'required': False, 'fields': []},
         {'key': 'info_bar',       'default_label': 'Info Bar',       'required': False, 'fields': []},
         {'key': 'wifi_box',       'default_label': 'WiFi Info',       'required': False, 'fields': []},
         {'key': 'crew_call',      'default_label': 'Crew Call Times', 'required': False, 'fields': []},

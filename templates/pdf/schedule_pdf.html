@@ -217,13 +217,13 @@
           <th colspan="4" style="font-size: {{ layout.font_size('day_banner', '10.5pt') }}">{% if day_heading %}<span class="day-name">{{ day_heading }}</span>{% else %}{{ layout.label('day_banner', 'Day') }} {{ day.day_num }}{% endif %}<span class="day-date">{% if day_heading %}{{ layout.label('day_banner', 'Day') }} {{ day.day_num }}{% endif %}{% if day.perf.perf_time %} · {{ day.perf.perf_time | dualtime }}{% endif %}</span></th>
         </tr>
         {% endif %}
-        {# PM on duty (3.35.0): cover PM else show PM, resolved per day by
+        {# Covering PM (3.43.0): only a day's cover PM who isn't the show PM, resolved per day by
            _build_schedule_pdf. Never data-sched-row — the page fit counts
            only body rows; the extra thead height is measured like the rest. #}
         {% if day.pm and layout.visible('day_pm') %}
         {% set _pmfs = layout.font_size('day_pm', '') %}
         <tr class="day-pm-row">
-          <th colspan="4"{% if _pmfs %} style="font-size: {{ _pmfs }}"{% endif %}><span class="pm-lbl">{{ layout.label('day_pm', 'PM on duty') }}</span> <span class="pm-name">{{ day.pm.name }}</span>{% if day.pm.is_cover %} <span class="pm-cover">(covering)</span>{% endif %}{% if day.pm.phone %} <span class="pm-sep">·</span> {{ day.pm.phone }}{% endif %}{% if day.pm.email %} <span class="pm-sep">·</span> {{ day.pm.email }}{% endif %}</th>
+          <th colspan="4"{% if _pmfs %} style="font-size: {{ _pmfs }}"{% endif %}><span class="pm-lbl">{{ layout.label('day_pm', 'Covering PM') }}</span> <span class="pm-name">{{ day.pm.name }}</span>{% if day.pm.phone %} <span class="pm-sep">·</span> {{ day.pm.phone }}{% endif %}{% if day.pm.email %} <span class="pm-sep">·</span> {{ day.pm.email }}{% endif %}</th>
         </tr>
         {% endif %}
         <tr class="cols-row">
