@@ -1296,6 +1296,13 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   NOW (past days stay open). Lanes/heads are `overflow: clip`, never
   `hidden` (hidden would break the items' sticky labels). Reopened lanes =
   in-memory `reopened` set keyed `date|lane`.
+  3.38.0 adds the SCROLL fold: a lane whose `lastEnd` (items' t_end AND
+  performance minutes) ≤ the minute at the top of the box
+  (`scrollTopMinute()`) becomes a `W.rail` rail (`.tl-done-scroll`, name
+  vertical); re-checked once per frame on scroll; opens itself when
+  scrolled back; its click scrolls up instead of toggling `reopened`. Time
+  fold wins over scroll fold. render() applies the fold for the restored
+  scroll position BEFORE removing `.tl-noanim`.
 - The `.tl-*` class names are shared with dashboard_view.html's Reservation
   Timeline: Home's rules on those names are scoped `:where(.tl-phead)` /
   `:where(.tl-scroll)` in style.css and mobile.css — keep new ones scoped.
