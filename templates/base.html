@@ -887,6 +887,7 @@ const _HELP_PAGES = {
         <li><strong>⚠ Overbooked</strong> appears when an item's busiest-day demand across all shows exceeds its usable units; it lists those items.</li>
         <li><strong>Systems &amp; Packages</strong> — bundles of component types with per-component quantities (<strong>+ New</strong> opens the type editor with System ticked; then <strong>+ Add</strong> components).</li>
         <li>Header: <strong>Show Retired</strong> (list retired types and units inline), <strong>Retired Archive</strong>, <strong>DB Tools</strong>, <strong>Warehouse Locations</strong> (the storage-location list), <strong>+ New Category</strong>. Types and units are never deleted, only retired.</li>
+        <li>Read-only accounts see a <strong>VIEW ONLY</strong> badge: everything can be browsed and exported (Company Rates CSV), <strong>View Details</strong> opens a type read-only, and the add / edit / retire / bulk controls are hidden.</li>
       </ul>
     `
   },
@@ -930,6 +931,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li>Retired item types with their full unit tables (loaded on demand via View Units).</li>
         <li>Individually retired units under still-active types, with their color-coded log entries.</li>
+        <li>Read-only accounts see the same page with a <strong>VIEW ONLY</strong> badge (nothing here writes).</li>
       </ul>
     `
   },
@@ -942,6 +944,7 @@ const _HELP_PAGES = {
         <li><strong>Browse &amp; Edit</strong> — pick a table (categories, types, units, show lines, system members, locations, logs, maintenance); search by name/barcode or exact id; ‹ Prev / Next › page through. Type rows carry a role badge (GROUP / LEAF / STANDALONE / SYSTEM) and their reference counts.</li>
         <li>Row actions: ✎ Edit, ⇄ Merge duplicate types, ⤵ Move children, ✕ Delete (two-step force confirm).</li>
         <li>Every change is audit-logged with before/after snapshots and can be undone from the Audit Log.</li>
+        <li>Read-only accounts get a <strong>VIEW ONLY</strong> badge: the integrity scan and table browser work, but the row tools are hidden (they all write).</li>
       </ul>
     `
   },

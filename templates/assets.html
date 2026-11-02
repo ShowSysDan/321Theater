@@ -10,7 +10,8 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">Asset Manager</h1>
-    <p class="page-sub">Manage inventory categories, item types, and individual units</p>
+    <p class="page-sub">{{ 'Browse' if readonly_view else 'Manage' }} inventory categories, item types, and individual units
+      {%- if readonly_view %}<span class="rv-badge" title="This account is read-only: everything can be viewed and exported, nothing can be changed">VIEW ONLY</span>{% endif %}</p>
   </div>
   <div class="header-actions" style="align-items:center">
     <label class="checkbox-label" style="font-size:12px;cursor:pointer" title="Show retired types and units inline">
@@ -22,7 +23,7 @@
     <button class="btn btn-ghost btn-sm" onclick="openWarehouseModal()">Warehouse Locations</button>
     <button class="btn btn-ghost btn-sm" onclick="openCompanyRatesList()" title="Every asset with special Performance Company pricing">Company Rates</button>
     <button id="overbooked-btn" class="btn btn-ghost btn-sm" onclick="openOverbookedModal()" style="display:none">⚠ Overbooked</button>
-    <button class="btn btn-primary" onclick="openCategoryModal()">+ New Category</button>
+    <button class="btn btn-primary rv-hide" onclick="openCategoryModal()">+ New Category</button>
   </div>
 </div>
 
@@ -53,7 +54,7 @@
     </div>
     <div class="modal-body" style="overflow:auto">
       <p style="color:var(--text-dim);font-size:12px;margin:0 0 10px">
-        Every asset with special Performance Company pricing. A rate applies to show lines whose rental starts inside its period. Edit opens the asset's rates.
+        Every asset with special Performance Company pricing. A rate applies to show lines whose rental starts inside its period. {{ 'View' if readonly_view else 'Edit' }} opens the asset's rates.
       </p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
         <select id="crl-company" class="field-input field-input-sm" style="width:auto;min-width:160px" onchange="renderCompanyRatesList()"></select>
@@ -112,7 +113,7 @@
     <option value="cost-desc">Highest cost</option>
     <option value="cost-asc">Lowest cost</option>
   </select>
-  <button id="bulk-edit-btn" class="btn btn-ghost btn-sm" onclick="enterBulkEdit()" title="Mass-toggle which types are hidden from the show-page advance picker. Hidden types can still be added via the approvals portal.">✎ Bulk: Hide from Advance Picker</button>
+  <button id="bulk-edit-btn" class="btn btn-ghost btn-sm rv-hide" onclick="enterBulkEdit()" title="Mass-toggle which types are hidden from the show-page advance picker. Hidden types can still be added via the approvals portal.">✎ Bulk: Hide from Advance Picker</button>
 </div>
 
 {# ── Bulk Edit Toolbar (only visible in bulk-edit mode) ── #}
@@ -131,7 +132,7 @@
   <div class="finder-col" style="width:185px;min-width:140px;flex-shrink:0">
     <div class="finder-col-hdr">
       <span>CATEGORIES</span>
-      <button class="btn btn-xs btn-ghost" style="padding:2px 7px;font-size:10px" onclick="openCategoryModal()">+ Add</button>
+      <button class="btn btn-xs btn-ghost rv-hide" style="padding:2px 7px;font-size:10px" onclick="openCategoryModal()">+ Add</button>
     </div>
     <div id="finder-cats" class="finder-col-body"></div>
   </div>
@@ -140,7 +141,7 @@
   <div class="finder-col" style="width:195px;min-width:150px;flex-shrink:0">
     <div class="finder-col-hdr">
       <span id="groups-col-label" style="flex:1">GROUPS</span>
-      <button id="add-group-btn" class="btn btn-xs btn-ghost" style="padding:2px 7px;font-size:10px;display:none" onclick="openTypeModal(null, _selectedCatId)">+ Add</button>
+      <button id="add-group-btn" class="btn btn-xs btn-ghost rv-hide" style="padding:2px 7px;font-size:10px;display:none" onclick="openTypeModal(null, _selectedCatId)">+ Add</button>
     </div>
     <div id="finder-groups" class="finder-col-body">
       <p class="finder-empty">Select a category</p>
@@ -151,7 +152,7 @@
   <div class="finder-col" style="width:280px;min-width:220px;flex-shrink:0">
     <div class="finder-col-hdr">
       <span id="types-col-label" style="flex:1">TYPES</span>
-      <button id="add-type-btn" class="btn btn-xs btn-ghost" style="padding:2px 7px;font-size:10px;display:none" onclick="openTypeModal(null, _selectedCatId)">+ Add</button>
+      <button id="add-type-btn" class="btn btn-xs btn-ghost rv-hide" style="padding:2px 7px;font-size:10px;display:none" onclick="openTypeModal(null, _selectedCatId)">+ Add</button>
     </div>
     <div id="finder-types" class="finder-col-body">
       <p class="finder-empty">Select a group</p>
@@ -178,7 +179,7 @@
     <div class="finder-col" style="width:300px;min-width:240px;flex-shrink:0">
       <div class="finder-col-hdr">
         <span style="flex:1">SYSTEMS &amp; PACKAGES</span>
-        <button class="btn btn-xs btn-ghost" style="padding:2px 7px;font-size:10px" onclick="openNewSystemModal()">+ New</button>
+        <button class="btn btn-xs btn-ghost rv-hide" style="padding:2px 7px;font-size:10px" onclick="openNewSystemModal()">+ New</button>
       </div>
       <div id="systems-list" class="finder-col-body">
         <p class="finder-empty">Loading…</p>
@@ -303,7 +304,7 @@
             <h3 class="te-title">Photo</h3>
             <div class="te-photo">
               <div id="type-photo-preview"></div>
-              <input type="file" id="type-photo" class="field-input" accept="image/*">
+              <input type="file" id="type-photo" class="field-input rv-hide" accept="image/*">
             </div>
             <div id="type-photo-progress-wrap" style="display:none;margin-top:8px">
               <div style="background:var(--bg-hover);border-radius:4px;height:6px;overflow:hidden">
@@ -336,7 +337,7 @@
           <section class="te-section" id="type-company-rates-group">
             <div class="te-title-row">
               <h3 class="te-title">Company rates</h3>
-              <button type="button" class="btn btn-sm btn-ghost" onclick="addCompanyRateRow()">+ Add company rate</button>
+              <button type="button" class="btn btn-sm btn-ghost rv-hide" onclick="addCompanyRateRow()">+ Add company rate</button>
             </div>
             <p class="te-help" style="margin-top:0">When a show's <strong>Performance Company</strong> (Advance Sheet) matches, items added to it use that company's rates — same day/week math. <strong>From / Through</strong> limit when a rate applies, by the line's rental start (blank = open-ended), so a contracted rate can go in early. A company can have several periods that don't overlap.</p>
             <div id="type-company-rates"></div>
@@ -347,10 +348,10 @@
       </div>
     </div>
     <div class="te-footer">
-      <button type="button" id="type-retire-btn" class="btn btn-ghost" style="color:#FC814A;display:none" onclick="retireTypeFromModal()">Retire This Type…</button>
+      <button type="button" id="type-retire-btn" class="btn btn-ghost rv-hide" style="color:#FC814A;display:none" onclick="retireTypeFromModal()">Retire This Type…</button>
       <div style="display:flex;gap:8px;margin-left:auto">
-        <button type="button" class="btn btn-ghost" onclick="closeTypeModal()">Cancel</button>
-        <button type="button" class="btn btn-primary" onclick="saveType()">Save</button>
+        <button type="button" class="btn btn-ghost" onclick="closeTypeModal()">{{ 'Close' if readonly_view else 'Cancel' }}</button>
+        <button type="button" class="btn btn-primary rv-hide" onclick="saveType()">Save</button>
       </div>
     </div>
   </div>
@@ -361,7 +362,7 @@
   <div class="modal-card" style="max-width:440px;max-height:90vh;display:flex;flex-direction:column">
     <div class="modal-header">Warehouse Locations<button onclick="closeWarehouseModal()" class="modal-close">×</button></div>
     <div class="modal-body" style="overflow-y:auto;flex:1">
-      <div style="display:flex;gap:8px;margin-bottom:12px">
+      <div class="rv-hide" style="display:flex;gap:8px;margin-bottom:12px">
         <input type="text" id="new-location-name" class="field-input" placeholder="New location name…" style="flex:1">
         <button class="btn btn-primary btn-sm" onclick="addLocation()">Add</button>
       </div>
@@ -469,6 +470,10 @@
 @media (max-width: 860px) {
   .te-cols { grid-template-columns: minmax(0, 1fr); }
 }
+/* View only (read-only account): the editor's options are disabled, so
+   they shouldn't look clickable. */
+html.readonly-view .te-check { cursor: default; }
+.te-nophoto { font-size: 13px; color: var(--text-dim); }
 .finder-browser {
   display: flex;
   height: calc(100vh - 210px);
@@ -570,6 +575,29 @@
 </style>
 
 <script>
+// Read-only account (base.html's window.READONLY_VIEW = inject_version's
+// readonly_view): the page is browse-only — write controls aren't rendered
+// (static ones carry .rv-hide) and every write function returns early.
+const _RO = window.READONLY_VIEW === true;
+// View only: the fields under `root` stay readable (text can be selected and
+// copied) but can't change — selects / checkboxes / file pickers disabled.
+function _roLockFields(root) {
+  if (!_RO || !root) return;
+  root.querySelectorAll('input, select, textarea').forEach(el => {
+    if (el.tagName === 'SELECT' || el.type === 'checkbox' || el.type === 'file') el.disabled = true;
+    else el.readOnly = true;
+    // An empty date / month input draws the browser's mask ("mm/dd/yyyy")
+    // and ignores placeholder, so it reads as waiting to be filled in: show
+    // it as text with the same dash. Safe — every caller's inputs are
+    // rebuilt (unit panel, rate rows) or have no date field (type modal).
+    if ((el.type === 'date' || el.type === 'month') && !el.value) {
+      el.type = 'text';
+      el.placeholder = '—';
+    }
+    // An example placeholder ("e.g. Christie") would read like data here.
+    if (el.placeholder) el.placeholder = '—';
+  });
+}
 const _categories = {{ categories | tojson }};
 const _locations  = {{ locations | tojson }};
 let _allTypes = [];
@@ -764,6 +792,7 @@ function _updateBulkEditCounter() {
 }
 
 window.enterBulkEdit = function() {
+  if (_RO) return;
   _bulkEditMode = true;
   _pendingHide.clear();
   document.getElementById('bulk-edit-toolbar').style.display = 'flex';
@@ -786,7 +815,7 @@ window.cancelBulkEdit = function() {
 };
 
 window.saveBulkEdit = async function() {
-  if (_pendingHide.size === 0) return;
+  if (_RO || _pendingHide.size === 0) return;
   const updates = [];
   _pendingHide.forEach((hide, id) => updates.push({ id, hide_from_pm: !!hide }));
   const btn = document.getElementById('bulk-edit-save-btn');
@@ -846,7 +875,7 @@ function renderSystemsList() {
   const active  = _allTypes.filter(t => (t.is_system || t.is_package) && !t.is_retired);
   const retired = _allTypes.filter(t => (t.is_system || t.is_package) &&  t.is_retired);
   if (!active.length && !retired.length) {
-    el.innerHTML = '<p class="finder-empty">No systems or packages yet.<br>Use + New to create one.</p>';
+    el.innerHTML = '<p class="finder-empty">No systems or packages yet.' + (_RO ? '' : '<br>Use + New to create one.') + '</p>';
     return;
   }
   const row = (t) => {
@@ -899,13 +928,13 @@ window.showSystemDetail = async function(typeId) {
       ${brandModel ? `<div style="font-size:12px;color:var(--text-dim);margin-top:3px">${esc(brandModel)}</div>` : ''}
       <div style="font-size:12px;color:var(--accent);margin-top:4px;font-weight:500">${rateLabel}${companyRateLabel}</div>
       <div style="margin-top:10px">
-        <button class="btn btn-sm btn-ghost" onclick="openTypeModal(${t.id});_sysDetailTypeId=${t.id}">Edit</button>
+        <button class="btn btn-sm btn-ghost" onclick="openTypeModal(${t.id});_sysDetailTypeId=${t.id}">${_RO ? 'View Details' : 'Edit'}</button>
       </div>
     </div>
     <div style="flex-shrink:0">
       <div style="padding:8px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
         <span style="font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim);flex:1">COMPONENTS</span>
-        <button class="btn btn-xs btn-primary" onclick="openAddComponentPicker(${t.id})">+ Add</button>
+        ${_RO ? '' : `<button class="btn btn-xs btn-primary" onclick="openAddComponentPicker(${t.id})">+ Add</button>`}
       </div>
     </div>
     <div id="components-list" style="overflow-y:auto;flex:1"><p class="finder-empty">Loading…</p></div>
@@ -914,6 +943,7 @@ window.showSystemDetail = async function(typeId) {
 };
 
 window.openNewSystemModal = function(asPackage) {
+  if (_RO) return;
   openTypeModal(null, null);
   setTimeout(() => {
     const sys = document.getElementById('type-is-system');
@@ -967,7 +997,7 @@ function renderFinderCats() {
   const c = document.getElementById('finder-cats');
   if (!c) return;
   if (_categories.length === 0) {
-    c.innerHTML = '<p class="finder-empty">No categories yet.<br>Click + New Category above.</p>';
+    c.innerHTML = '<p class="finder-empty">No categories yet.' + (_RO ? '' : '<br>Click + New Category above.') + '</p>';
     return;
   }
   c.innerHTML = _categories.map(cat => {
@@ -981,10 +1011,10 @@ function renderFinderCats() {
       <svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13" style="flex-shrink:0;opacity:.5"><path d="M1.5 3A1.5 1.5 0 013 1.5h3.879a1.5 1.5 0 011.06.44l.622.621A1.5 1.5 0 009.621 3H13A1.5 1.5 0 0114.5 4.5v8A1.5 1.5 0 0113 14H3a1.5 1.5 0 01-1.5-1.5V3z"/></svg>
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(cat.name)}</span>
       <span style="font-size:10px;opacity:.5;flex-shrink:0">${cnt}</span>
-      <div class="cat-actions">
+      ${_RO ? '' : `<div class="cat-actions">
         <button class="btn btn-xs btn-ghost" style="padding:1px 5px" onclick="event.stopPropagation();openCategoryModal(${cat.id},'${escJsAttr(cat.name)}')">✎</button>
         <button class="btn btn-xs btn-ghost" style="padding:1px 5px;color:#e53e3e" onclick="event.stopPropagation();deleteCategory(${cat.id})">✕</button>
-      </div>
+      </div>`}
       <span style="color:var(--text-dim);font-size:14px;flex-shrink:0">›</span>
     </div>`;
   }).join('');
@@ -1243,16 +1273,16 @@ window.selectType = async function(typeId, opts) {
     <div style="flex-shrink:0">
       <div style="padding:8px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
         <span style="font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim);flex:1">COMPONENTS</span>
-        <button class="btn btn-xs btn-primary" onclick="openAddComponentPicker(${t.id})">+ Add</button>
+        ${_RO ? '' : `<button class="btn btn-xs btn-primary" onclick="openAddComponentPicker(${t.id})">+ Add</button>`}
       </div>
     </div>
     <div id="components-list" style="overflow-y:auto;flex:1"><p class="finder-empty">Loading…</p></div>` : `
     <div style="flex-shrink:0">
       <div style="padding:8px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
         <span style="font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim);flex:1">UNITS</span>
-        <input type="number" id="add-items-count" value="1" min="1" class="field-input" style="width:46px;padding:3px 5px;font-size:11px" title="Count">
+        ${_RO ? '' : `<input type="number" id="add-items-count" value="1" min="1" class="field-input" style="width:46px;padding:3px 5px;font-size:11px" title="Count">
         <input type="text" id="add-item-barcode" class="field-input" placeholder="Barcode (opt.)" style="width:115px;padding:3px 6px;font-size:11px">
-        <button class="btn btn-xs btn-primary" onclick="addItems()">+ Add</button>
+        <button class="btn btn-xs btn-primary" onclick="addItems()">+ Add</button>`}
       </div>
       <div style="padding:5px 10px;border-bottom:1px solid var(--border);display:flex;gap:5px">
         <input type="text" id="items-search" class="field-input" placeholder="Search barcode…" style="flex:1;padding:4px 6px;font-size:11px" oninput="renderItemsList()">
@@ -1296,7 +1326,7 @@ window.selectType = async function(typeId, opts) {
       </div>
       ${stats}
       <div style="display:flex;gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
-        <button class="btn btn-sm btn-ghost" onclick="openTypeModal(${t.id})">Edit Type</button>
+        <button class="btn btn-sm btn-ghost" onclick="openTypeModal(${t.id})">${_RO ? 'View Details' : 'Edit Type'}</button>
         ${calBtn}
         ${t.supplier_name ? `<span style="font-size:11px;color:var(--text-dim)">Supplier: ${esc(t.supplier_name)}</span>` : ''}
       </div>
@@ -1354,7 +1384,7 @@ async function loadAndRenderComponents(systemTypeId) {
 
 function renderMembersHTML(members, systemTypeId) {
   if (!members.length) {
-    return '<p class="finder-empty">No components assigned yet.<br>Use + Add to assign types as components.</p>';
+    return '<p class="finder-empty">No components assigned yet.' + (_RO ? '' : '<br>Use + Add to assign types as components.') + '</p>';
   }
   return members.map(c => {
     const thumb = `<div style="width:28px;height:28px;border-radius:4px;background:var(--border);display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--text-dim);flex-shrink:0">◈</div>`;
@@ -1374,11 +1404,11 @@ function renderMembersHTML(members, systemTypeId) {
         <input type="number" min="1" step="1" value="${qty}"
                class="field-input field-input-sm" style="width:56px;text-align:center"
                onclick="event.stopPropagation()"
-               onchange="updateComponentQuantity(${c.id},${systemTypeId},this.value,this)">
+               ${_RO ? 'readonly' : `onchange="updateComponentQuantity(${c.id},${systemTypeId},this.value,this)"`}>
       </label>
-      <button class="btn btn-xs btn-ghost" style="color:#FC814A;flex-shrink:0;padding:2px 6px"
+      ${_RO ? '' : `<button class="btn btn-xs btn-ghost" style="color:#FC814A;flex-shrink:0;padding:2px 6px"
               onclick="event.stopPropagation();removeComponentFromSystem(${c.id},${systemTypeId})"
-              title="Remove from system">✕</button>
+              title="Remove from system">✕</button>`}
       <span style="color:var(--text-dim);font-size:14px;flex-shrink:0">›</span>
     </div>`;
   }).join('');
@@ -1396,7 +1426,7 @@ window.returnToSystem = async function() {
 };
 
 window.removeComponentFromSystem = async function(componentId, systemId) {
-  if (!confirm('Remove this component from the system?')) return;
+  if (_RO || !confirm('Remove this component from the system?')) return;
   const r = await fetch(`/settings/asset-types/${systemId}/members/${componentId}`, {
     method: 'DELETE',
     headers: {'X-Requested-With':'XMLHttpRequest'}
@@ -1407,6 +1437,7 @@ window.removeComponentFromSystem = async function(componentId, systemId) {
 };
 
 window.updateComponentQuantity = async function(componentId, systemId, value, inputEl) {
+  if (_RO) return;
   let qty = parseInt(value, 10);
   if (!Number.isFinite(qty) || qty < 1) qty = 1;
   const r = await fetch(`/settings/asset-types/${systemId}/members/${componentId}`, {
@@ -1425,6 +1456,7 @@ let _compPickerSystemId = null;
 let _compPickerExistingIds = new Set();
 
 window.openAddComponentPicker = async function(sysId) {
+  if (_RO) return;
   _compPickerSystemId = sysId;
   document.getElementById('comp-picker-system-id').value = sysId;
   document.getElementById('comp-picker-search').value = '';
@@ -1477,6 +1509,7 @@ window.renderCompPickerList = function() {
 };
 
 window.assignTypeAsComponent = async function(typeId, sysId) {
+  if (_RO) return;
   const r = await fetch(`/settings/asset-types/${sysId}/members`, {
     method: 'POST',
     headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
@@ -1571,7 +1604,7 @@ window.renderCompanyRatesList = function() {
   document.getElementById('crl-count').textContent = `${rows.length} of ${_crlRows.length}`;
   const body = document.getElementById('crl-body');
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="7" style="color:var(--text-dim);text-align:center;padding:18px">${_crlRows.length ? 'No rates match these filters.' : 'No assets have special company pricing yet. Add rates from an asset type\'s Edit dialog.'}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" style="color:var(--text-dim);text-align:center;padding:18px">${_crlRows.length ? 'No rates match these filters.' : 'No assets have special company pricing yet.' + (_RO ? '' : ' Add rates from an asset type\'s Edit dialog.')}</td></tr>`;
     return;
   }
   body.innerHTML = rows.map(r => `
@@ -1583,7 +1616,7 @@ window.renderCompanyRatesList = function() {
       <td style="white-space:nowrap;color:var(--text-dim)">${_crlRate(r.std_daily, r.std_weekly, r.is_consumable)}</td>
       <td style="white-space:nowrap">${esc(r.period)}</td>
       <td><span style="font-size:11px;font-weight:600;color:${_crlStatusColor[r.status]}">${_crlStatusLabel[r.status] || esc(r.status)}</span></td>
-      <td><button type="button" class="btn btn-xs btn-ghost" onclick="closeCompanyRatesList();openTypeModal(${r.asset_type_id})">Edit</button></td>
+      <td><button type="button" class="btn btn-xs btn-ghost" onclick="closeCompanyRatesList();openTypeModal(${r.asset_type_id})">${_RO ? 'View' : 'Edit'}</button></td>
     </tr>`).join('');
 };
 window.downloadCompanyRatesCsv = function() {
@@ -1719,7 +1752,7 @@ window.showAvailDayDetail = function(dateStr) {
       const resetBtn = (orig === null)
         ? '' // No original recorded — nothing to restore to
         : (isOverridden
-            ? `<button class="btn btn-xs btn-ghost" style="padding:1px 6px;font-size:10px;flex-shrink:0" title="Restore this line's price to its add-time value ($${orig.toFixed(2)}). Rate-card changes don't affect existing rentals." onclick="resetShowAssetPrice(${s.show_id}, ${s.id}, this)">↻ Restore $${orig.toFixed(2)}</button>`
+            ? (_RO ? '' : `<button class="btn btn-xs btn-ghost" style="padding:1px 6px;font-size:10px;flex-shrink:0" title="Restore this line's price to its add-time value ($${orig.toFixed(2)}). Rate-card changes don't affect existing rentals." onclick="resetShowAssetPrice(${s.show_id}, ${s.id}, this)">↻ Restore $${orig.toFixed(2)}</button>`)
             : `<span style="color:var(--text-dim);font-size:10px;flex-shrink:0;font-style:italic" title="This line is already at its original price.">— at original —</span>`);
       return `<div style="padding:4px 0;border-bottom:1px solid var(--border);font-size:12px;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
         <span style="font-weight:500;flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.show_name)}</span>
@@ -1733,6 +1766,7 @@ window.showAvailDayDetail = function(dateStr) {
 };
 
 window.resetShowAssetPrice = async function(showId, saId, btn) {
+  if (_RO) return;
   const orig = btn.textContent;
   btn.disabled = true;
   btn.textContent = '…';
@@ -1785,7 +1819,7 @@ function renderItemsList() {
   if (!container) return;
 
   if (_currentItems.length === 0) {
-    container.innerHTML = '<p style="color:var(--text-dim);font-size:12px;text-align:center;padding:20px">No units yet. Use + Add above.</p>';
+    container.innerHTML = '<p style="color:var(--text-dim);font-size:12px;text-align:center;padding:20px">No units yet.' + (_RO ? '' : ' Use + Add above.') + '</p>';
     if (countLabel) countLabel.textContent = '';
     return;
   }
@@ -1913,17 +1947,17 @@ window.selectItem = async function(itemId) {
           </div>
         </div>
         <div id="detail-depreciation-calc" style="margin-top:10px;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:12px;display:none"></div>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;gap:8px;flex-wrap:wrap">
+        ${_RO ? '' : `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;gap:8px;flex-wrap:wrap">
           <div style="display:flex;gap:6px">
             ${item.status!=='retired'?`<button class="btn btn-ghost btn-sm" style="color:#FC814A" onclick="retireItem(${item.id})">Retire Unit</button>`:''}
             ${item.status==='available'?`<button class="btn btn-ghost btn-sm" onclick="openMaintModal(${item.id})">Maintenance…</button>`:''}
             ${item.status==='maintenance'?`<button class="btn btn-ghost btn-sm" style="color:#48BB78" onclick="resolveMaintenance(${item.id})">Back in Service</button>`:''}
           </div>
           <button class="btn btn-primary btn-sm" onclick="saveItemDetail()">Save</button>
-        </div>
+        </div>`}
       </div>
       <div id="detail-panel-log" style="display:none">
-        <div style="display:flex;gap:6px;margin-bottom:10px">
+        ${_RO ? '' : `<div style="display:flex;gap:6px;margin-bottom:10px">
           <select id="log-type-sel" class="field-input" style="width:110px;padding:5px 6px">
             <option value="note">Note</option>
             <option value="damage">Damage</option>
@@ -1933,12 +1967,13 @@ window.selectItem = async function(itemId) {
           <input type="date" id="log-date-inp" class="field-input" style="width:140px;padding:5px 6px" value="${localTodayIso()}">
           <input type="text" id="log-body-inp" class="field-input" placeholder="Entry…" style="flex:1;padding:5px 6px">
           <button class="btn btn-primary btn-sm" onclick="addLogEntry()">+</button>
-        </div>
+        </div>`}
         <div id="log-entries-list"></div>
       </div>
     </div>
   `;
 
+  _roLockFields(document.getElementById('detail-panel-info'));
   updateDepreciationCalc();
 
 
@@ -1995,7 +2030,7 @@ window.switchDetailTab = function(tab) {
 
 window.saveItemDetail = async function() {
   const id = document.getElementById('detail-item-id')?.value;
-  if (!id) return;
+  if (_RO || !id) return;
   const payload = {
     barcode: document.getElementById('detail-barcode').value.trim(),
     condition: document.getElementById('detail-condition').value,
@@ -2032,7 +2067,7 @@ async function loadLogEntries(itemId) {
         <span class="log-type-badge log-type-${e.log_type}">${e.log_type}</span>
         <span style="color:var(--text-dim);font-size:10px">${e.log_date}</span>
         ${e.author_name?`<span style="color:var(--text-dim);font-size:10px">· ${esc(e.author_name)}</span>`:''}
-        <button class="btn btn-xs btn-ghost" style="color:#e53e3e;margin-left:auto;font-size:10px" onclick="deleteLogEntry(${e.id})">✕</button>
+        ${_RO ? '' : `<button class="btn btn-xs btn-ghost" style="color:#e53e3e;margin-left:auto;font-size:10px" onclick="deleteLogEntry(${e.id})">✕</button>`}
       </div>
       <div style="margin-top:3px">${esc(e.body)}</div>
     </div>
@@ -2042,6 +2077,7 @@ async function loadLogEntries(itemId) {
 }
 
 window.addLogEntry = async function() {
+  if (_RO) return;
   const itemId = document.getElementById('detail-item-id')?.value;
   const body = document.getElementById('log-body-inp')?.value.trim();
   if (!body || !itemId) return;
@@ -2059,13 +2095,14 @@ window.addLogEntry = async function() {
 };
 
 window.deleteLogEntry = async function(logId) {
-  if (!confirm('Delete this log entry?')) return;
+  if (_RO || !confirm('Delete this log entry?')) return;
   await fetch(`/settings/asset-logs/${logId}`, {method:'DELETE',headers:{'X-Requested-With':'XMLHttpRequest'}});
   const itemId = document.getElementById('detail-item-id')?.value;
   if (itemId) await loadLogEntries(parseInt(itemId));
 };
 
 window.addItems = async function() {
+  if (_RO) return;
   const count = parseInt(document.getElementById('add-items-count')?.value) || 1;
   const barcode = document.getElementById('add-item-barcode')?.value.trim() || '';
   await fetch(`/settings/asset-types/${_currentTypeId}/items`, {
@@ -2078,13 +2115,14 @@ window.addItems = async function() {
 };
 
 window.retireItem = async function(id) {
-  if (!confirm('Retire this unit? Record and history are preserved.')) return;
+  if (_RO || !confirm('Retire this unit? Record and history are preserved.')) return;
   await fetch(`/settings/asset-items/${id}`, {method:'DELETE',headers:{'X-Requested-With':'XMLHttpRequest'}});
   await loadItems();
   await selectItem(id);
 };
 
 window.openMaintModal = function(itemId) {
+  if (_RO) return;
   document.getElementById('maint-item-id').value = itemId;
   document.getElementById('maint-reason').value = '';
   document.getElementById('maint-notes').value = '';
@@ -2093,6 +2131,7 @@ window.openMaintModal = function(itemId) {
 };
 window.closeMaintModal = function() { document.getElementById('maint-modal').style.display = 'none'; };
 window.submitMaintenance = async function() {
+  if (_RO) return;
   const id = document.getElementById('maint-item-id').value;
   await fetch(`/settings/asset-items/${id}/maintenance`, {
     method:'POST', headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
@@ -2103,7 +2142,7 @@ window.submitMaintenance = async function() {
   await selectItem(parseInt(id));
 };
 window.resolveMaintenance = async function(itemId) {
-  if (!confirm('Mark this unit as back in service?')) return;
+  if (_RO || !confirm('Mark this unit as back in service?')) return;
   await fetch(`/settings/asset-items/${itemId}/maintenance/resolve`, {method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'}});
   await loadItems();
   await selectItem(itemId);
@@ -2113,6 +2152,7 @@ window.resolveMaintenance = async function(itemId) {
 <script>
 // ── Category Modal ────────────────────────────────────────────────────────────
 window.openCategoryModal = function(id, name) {
+  if (_RO) return;
   document.getElementById('cat-edit-id').value = id || '';
   document.getElementById('cat-name').value = name || '';
   document.getElementById('cat-modal-title').textContent = id ? 'Edit Category' : 'New Category';
@@ -2121,6 +2161,7 @@ window.openCategoryModal = function(id, name) {
 };
 window.closeCatModal = function() { document.getElementById('cat-modal').style.display = 'none'; };
 window.saveCat = async function() {
+  if (_RO) return;
   const id = document.getElementById('cat-edit-id').value;
   const name = document.getElementById('cat-name').value.trim();
   if (!name) { alert('Name required'); return; }
@@ -2137,7 +2178,7 @@ window.saveCat = async function() {
   renderFinderCats();
 };
 window.deleteCategory = async function(id) {
-  if (!confirm('Delete this category and all its types? This cannot be undone.')) return;
+  if (_RO || !confirm('Delete this category and all its types? This cannot be undone.')) return;
   await fetch(`/settings/asset-categories/${id}`, {method:'DELETE',headers:{'X-Requested-With':'XMLHttpRequest'}});
   const i = _categories.findIndex(c => c.id == id);
   if (i >= 0) _categories.splice(i, 1);
@@ -2160,8 +2201,9 @@ window.deleteCategory = async function(id) {
 
 // ── Type Modal ────────────────────────────────────────────────────────────────
 window.openTypeModal = async function(id, defaultCatId) {
+  if (_RO && !id) return;  // view only: opens an existing type's details, never a new one
   document.getElementById('type-edit-id').value = id || '';
-  document.getElementById('type-modal-title').textContent = id ? 'Edit Item Type' : 'New Item Type';
+  document.getElementById('type-modal-title').textContent = id ? (_RO ? 'Item Type' : 'Edit Item Type') : 'New Item Type';
   const retireBtn = document.getElementById('type-retire-btn');
   if (retireBtn) retireBtn.style.display = id ? '' : 'none';
 
@@ -2198,7 +2240,8 @@ window.openTypeModal = async function(id, defaultCatId) {
       document.getElementById('type-hide-from-pm').checked = !!t.hide_from_pm;
       document.getElementById('type-allow-unit-selection').checked = !!t.allow_unit_selection;
       document.getElementById('type-photo-preview').innerHTML = t.has_photo
-        ? `<img src="/asset-types/${t.id}/photo" style="height:60px;border-radius:4px;object-fit:cover">` : '';
+        ? `<img src="/asset-types/${t.id}/photo" style="height:60px;border-radius:4px;object-fit:cover">`
+        : (_RO ? '<span class="te-nophoto">No photo</span>' : '');  // view only: no file picker to fill the box
     }
   } else {
     document.getElementById('type-name').value = '';
@@ -2222,9 +2265,10 @@ window.openTypeModal = async function(id, defaultCatId) {
     document.getElementById('type-photo').value = '';
   }
   onConsumableChange();  // sync the cost-field label / weekly visibility
+  _roLockFields(document.getElementById('type-modal'));
   _loadCompanyRates(id);
   document.getElementById('type-modal').style.display = 'flex';
-  setTimeout(() => document.getElementById('type-name').focus(), 80);
+  if (!_RO) setTimeout(() => document.getElementById('type-name').focus(), 80);
 };
 window.closeTypeModal = function() { document.getElementById('type-modal').style.display = 'none'; };
 
@@ -2259,6 +2303,7 @@ window._syncCompanyRatesEmpty = function() {
   document.getElementById('type-company-rates-empty').style.display = n ? 'none' : '';
 };
 window.addCompanyRateRow = function(rt) {
+  if (_RO && !rt) return;  // view only: existing rates are drawn, none added
   rt = rt || {company: '', rental_cost: 0, weekly_rate: 0, start_month: '', end_month: ''};
   const host = document.getElementById('type-company-rates');
   if (!_companyOptions.length && !rt.company) {
@@ -2279,7 +2324,7 @@ window.addCompanyRateRow = function(rt) {
           <option value="">— Select —</option>
           ${opts.map(c => `<option value="${esc(c)}"${c === rt.company ? ' selected' : ''}>${esc(c)}</option>`).join('')}
         </select></label>
-      <button type="button" class="btn btn-sm btn-ghost cr-remove" title="Remove this rate" onclick="this.closest('.company-rate-row').remove();_syncCompanyRatesEmpty()">Remove</button>
+      ${_RO ? '' : `<button type="button" class="btn btn-sm btn-ghost cr-remove" title="Remove this rate" onclick="this.closest('.company-rate-row').remove();_syncCompanyRatesEmpty()">Remove</button>`}
     </div>
     <div class="cr-pair">
       <label class="cr-field"><span class="cr-daily-label">${isConsumable ? 'Per item ($)' : 'Daily rate ($/day)'}</span>
@@ -2291,6 +2336,7 @@ window.addCompanyRateRow = function(rt) {
       <label class="cr-field">Through (month)
         <input type="month" class="field-input cr-end" placeholder="YYYY-MM" value="${esc(rt.end_month || '')}" title="Last month this rate applies — blank = ongoing"></label>
     </div>`;
+  _roLockFields(row);
   host.appendChild(row);
   _syncCompanyRatesEmpty();
 };
@@ -2332,6 +2378,7 @@ window.onConsumableChange = function() {
 };
 
 window.saveType = async function() {
+  if (_RO) return;
   const id = document.getElementById('type-edit-id').value;
   const payload = {
     name: document.getElementById('type-name').value.trim(),
@@ -2403,7 +2450,7 @@ window.saveType = async function() {
 };
 
 window.retireType = async function(id) {
-  if (!confirm('Retire this item type? All active units will also be retired. The record and history are preserved.')) return;
+  if (_RO || !confirm('Retire this item type? All active units will also be retired. The record and history are preserved.')) return;
   const r = await fetch(`/settings/asset-types/${id}`, {method:'DELETE',headers:{'X-Requested-With':'XMLHttpRequest'}});
   if (!r.ok) { const d = await r.json(); alert(d.error || 'Error'); return; }
   await loadTypes();
@@ -2419,7 +2466,7 @@ window.retireType = async function(id) {
 };
 window.retireTypeFromModal = function() {
   const id = document.getElementById('type-edit-id').value;
-  if (!id) return;
+  if (_RO || !id) return;
   closeTypeModal();
   retireType(parseInt(id));
 };
@@ -2441,11 +2488,12 @@ function renderLocations() {
   c.innerHTML = _locationsArr.map(l => `
     <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
       <span style="flex:1;font-size:13px">${esc(l.name)}</span>
-      <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="deleteLocation(${l.id})">✕</button>
+      ${_RO ? '' : `<button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="deleteLocation(${l.id})">✕</button>`}
     </div>
   `).join('');
 }
 window.addLocation = async function() {
+  if (_RO) return;
   const name = document.getElementById('new-location-name').value.trim();
   if (!name) return;
   const r = await fetch('/settings/warehouse-locations', {
@@ -2461,6 +2509,7 @@ window.addLocation = async function() {
   renderLocations();
 };
 window.deleteLocation = async function(id) {
+  if (_RO) return;
   await fetch(`/settings/warehouse-locations/${id}`, {method:'DELETE',headers:{'X-Requested-With':'XMLHttpRequest'}});
   _locationsArr = _locationsArr.filter(l => l.id !== id);
   renderLocations();

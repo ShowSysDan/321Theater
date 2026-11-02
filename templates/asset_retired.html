@@ -10,7 +10,8 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">Retired Assets</h1>
-    <p class="page-sub">Full history of retired equipment — records are read-only and preserved permanently</p>
+    <p class="page-sub">Full history of retired equipment — records are read-only and preserved permanently
+      {%- if readonly_view %}<span class="rv-badge" title="This account is read-only: everything can be viewed, nothing can be changed">VIEW ONLY</span>{% endif %}</p>
   </div>
   <div class="header-actions">
     <a href="/assets" class="btn btn-ghost btn-sm">← Asset Manager</a>
