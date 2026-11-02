@@ -463,3 +463,14 @@ html.mobile-view #tab-assets > .form-section-header > .ml-auto {
 html.mobile-view .page-header > div { flex-wrap: wrap; }
 html.mobile-view .tracker-toolbar { flex-wrap: wrap; row-gap: 8px; }
 html.mobile-view .tracker-toolbar select { max-width: 100%; }
+
+/* ── Asset Approvals line inputs on phones ────────────────────────────────
+   At the phone's 16px input font the desktop widths cut the values off
+   ('10/31/202…', '1500.0…') — and for a view-only account those fields are
+   pure display. The line tables scroll sideways inside .appr-table-wrap, so
+   wider fields cost no page overflow. The date inputs carry an inline width
+   (hence !important); 140px also leaves room for the editable date's picker
+   icon, 116px fits a unit price up to '99999.99' (the number input keeps
+   room for its spinner, so 110px still cut '12500.00'). */
+html.mobile-view .appr-date-input { width: 140px !important; }
+html.mobile-view .appr-price-input { width: 116px; }
