@@ -2930,6 +2930,9 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 .tl-lh-cols { display: flex; gap: 6px; margin: auto -4px 0; padding: 6px 4px 4px;   /* bottom of the (equal-height) header */
   font: 600 9.5px var(--font-mono); letter-spacing: .1em; text-transform: uppercase; color: var(--text-muted); }
 .tl-lh-cols span { flex: 0 0 auto; }
+.tl-lh-colswrap { margin-top: auto; display: flex; flex-direction: column; }
+.tl-lh-colswrap .tl-lh-cols { margin-top: 0; }
+.tl-lh-colnone { font-size: 11px; font-style: italic; color: var(--text-muted); }
 
 /* Body: hour lines behind, axis sticky left, lanes, NOW line on top. */
 .tl-bodyrow { position: relative; display: flex; }
@@ -2951,6 +2954,12 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 .tl-lane.tl-lane-dark .tl-col { opacity: .45; }
 .tl-col { position: relative; flex: 0 0 auto; }
 .tl-col-crew { border-left: 1px dashed var(--border); padding-left: 0; }
+/* 3.36.0: a lane with nothing timed in the current view — one narrow
+   column at the right-hand end, quieter than the busy lanes. */
+.tl-lanehead.tl-lane-empty { opacity: .78; }
+.tl-lanehead.tl-lane-empty:hover { opacity: 1; }
+.tl-lanehead.tl-lane-empty .tl-lh-name { font-size: 13px; }
+:where(.tl-scroll) .tl-lane.tl-lane-empty { background: color-mix(in srgb, var(--text-dim) 4%, transparent); }
 .tl-col-none { position: absolute; top: 8px; left: 0; right: 0; text-align: center; font-size: 10.5px; color: var(--text-muted); font-style: italic; }
 .tl-perf { position: absolute; left: 0; right: 0; height: 0; border-top: 1px dashed var(--tl-accent); opacity: .7; pointer-events: none; z-index: 0; }
 .tl-perf::before { content: ""; position: absolute; left: 0; top: -5px; border: 5px solid transparent; border-left: 7px solid var(--tl-accent); }

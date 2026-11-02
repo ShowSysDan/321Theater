@@ -33,18 +33,25 @@
   const dateInput = $('tl-date'), testCb = $('tl-include-test'), testCount = $('tl-test-count');
   const prevBtn = $('tl-prev'), nextBtn = $('tl-next'), todayBtn = $('tl-today');
   const zoomOutBtn = $('tl-zoom-out'), zoomInBtn = $('tl-zoom-in');
+  const showSeg = $('tl-show');
 
   const IS_MOBILE = document.documentElement.classList.contains('mobile-view');
   const ZOOMS = [36, 48, 60, 72, 96, 128];             // px per hour
   const AXIS_W = IS_MOBILE ? 46 : 60;
   // Sub-column widths: a base, then grown to fit side-by-side (overlapping) items.
+  // 3.36.0: schedule columns are as narrow as crew columns (long text wraps,
+  // narrow + tall blocks run their label down the bar), and a lane with
+  // nothing timed in the current view is one narrow column (`empty`), parked
+  // at the right-hand end.
   const W = IS_MOBILE
-    ? { sched: 96, schedCol: 84, schedEmpty: 40, crew: 58, crewCol: 32, crewEmpty: 30, pad: 4, max: 420 }
-    : { sched: 190, schedCol: 128, schedEmpty: 70, crew: 112, crewCol: 40, crewEmpty: 44, pad: 6, max: 1100 };
+    ? { sched: 80, schedCol: 56, crew: 58, crewCol: 32, pad: 4, max: 360, empty: 96, minLane: 104 }
+    : { sched: 112, schedCol: 84, crew: 112, crewCol: 40, pad: 6, max: 640, empty: 150, minLane: 136 };
   const RANGE_START = 6 * 60, RANGE_END = 24 * 60, RANGE_CAP = 30 * 60;
   const MIN_ITEM_PX = 18;
   const TICK_MS = 30000, REFRESH_MS = 60000;
-  const LS_ZOOM = 'home_tl_zoom', LS_VENUES = 'home_tl_venues', LS_TEST = 'home_tl_test';
+  const LS_ZOOM = 'home_tl_zoom', LS_VENUES = 'home_tl_venues', LS_TEST = 'home_tl_test', LS_SHOW = 'home_tl_show';
+  // What the lanes draw: everything, the production schedule only, or crew only.
+  const SHOW_MODES = ['all', 'sched', 'crew'];
   const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
 
   // ── small helpers ─────────────────────────────────────────────────────
@@ -80,6 +87,8 @@
   // picks another day.
   let followToday = !ISO_RE.test(initial) || initial === localTodayIso();
   let includeTest = lsGet(LS_TEST) === '1';
+  let showMode = lsGet(LS_SHOW);
+  if (SHOW_MODES.indexOf(showMode) < 0) showMode = 'all';
   let zoomIdx = parseInt(lsGet(LS_ZOOM), 10);
   if (!(zoomIdx >= 0 && zoomIdx < ZOOMS.length)) zoomIdx = IS_MOBILE ? 2 : 3;
   const selVenues = new Set();
@@ -171,6 +180,11 @@
     testCb.checked = includeTest;
     zoomOutBtn.disabled = zoomIdx <= 0;
     zoomInBtn.disabled = zoomIdx >= ZOOMS.length - 1;
+    if (showSeg) showSeg.querySelectorAll('button[data-show]').forEach(b => {
+      const on = b.dataset.show === showMode;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
   }
 
   // ── layout ────────────────────────────────────────────────────────────
@@ -205,11 +219,20 @@
   function onAxis(list) { return (list || []).filter(i => i.start < RANGE_CAP); }
   function offAxis(list) { return (list || []).filter(i => i.start >= RANGE_CAP); }
 
+  // The Show filter decides which sub-columns exist: 'sched' drops crew (and
+  // the Overhead lane, which has no schedule), 'crew' drops the schedule.
+  // A lane left with nothing timed is `empty`: one narrow column, sorted to
+  // the right-hand end (its header still names the show, PM and any
+  // untimed rows, so nothing disappears).
   function visibleLanes() {
     const shows = (data && data.shows) || [];
+    const wantSched = showMode !== 'crew', wantCrew = showMode !== 'sched';
     const lanes = shows.filter(s => selVenues.size === 0 || selVenues.has(venueKey(s)))
-      .map(s => ({ kind: 'show', show: s, sched: onAxis(s.schedule), crew: onAxis(s.crew) }));
+      .map(s => ({ kind: 'show', show: s,
+        sched: wantSched ? onAxis(s.schedule) : [], crew: wantCrew ? onAxis(s.crew) : [] }));
+    lanes.forEach(l => { l.empty = !l.sched.length && !l.crew.length; });
     lanes.sort((a, b) => {
+      if (a.empty !== b.empty) return a.empty ? 1 : -1;
       const sa = a.show, sb = b.show;
       if (sa.is_test !== sb.is_test) return sa.is_test ? 1 : -1;
       const va = venueKey(sa).toLowerCase(), vb = venueKey(sb).toLowerCase();
@@ -221,8 +244,12 @@
       const fa = firstStart(a), fb = firstStart(b);
       return fa - fb || sa.name.localeCompare(sb.name);
     });
-    if (data && data.overhead && selVenues.size === 0) {
-      lanes.push({ kind: 'oh', oh: data.overhead, sched: [], crew: onAxis(data.overhead.crew) });
+    if (data && data.overhead && selVenues.size === 0 && wantCrew) {
+      const oh = { kind: 'oh', oh: data.overhead, sched: [], crew: onAxis(data.overhead.crew) };
+      oh.empty = !oh.crew.length;
+      // After the busy show lanes, ahead of the empty ones (or last, if empty itself).
+      const at = oh.empty ? lanes.length : lanes.findIndex(l => l.empty);
+      lanes.splice(at < 0 ? lanes.length : at, 0, oh);
     }
     return lanes;
   }
@@ -323,26 +350,34 @@
         it._ve = Math.max(Math.min(it.end, range.end), it._vs + minMin);
       }));
       const sc = pack(l.sched), cc = pack(l.crew);
-      l.sw = l.kind === 'oh' ? 0 : (l.sched.length ? Math.max(W.sched, sc * W.schedCol) : W.schedEmpty);
-      l.cw = l.crew.length ? Math.max(W.crew, cc * W.crewCol) : W.crewEmpty;
-      if (l.kind === 'oh') l.cw = Math.max(l.cw, W.sched);
-      l.w = l.sw + l.cw + W.pad * (l.sw ? 3 : 2);
+      if (l.empty) { l.sw = 0; l.cw = 0; return; }
+      // Only the sub-columns with something in them (the header says "no crew"
+      // / "no schedule" for the missing one).
+      l.sw = l.sched.length ? Math.max(W.sched, sc * W.schedCol) : 0;
+      l.cw = l.crew.length ? Math.max(W.crew, cc * W.crewCol) : 0;
+      // A one-column lane still needs room for its header (show name, PM).
+      const short = W.minLane - (l.sw + l.cw + W.pad * ((l.sw ? 1 : 0) + (l.cw ? 1 : 0) + 1));
+      if (short > 0) { if (l.sw) l.sw += short; else l.cw += short; }
     });
-    // Few lanes: widen them to fill the box (capped), keeping the split.
+    const laneW = l => l.empty ? W.empty : l.sw + l.cw + W.pad * ((l.sw ? 1 : 0) + (l.cw ? 1 : 0) + 1);
+    lanes.forEach(l => { l.w = laneW(l); });
+    // Few lanes: widen the busy ones to fill the box (capped), keeping the
+    // split. Empty lanes stay narrow.
     const avail = scroller.clientWidth - AXIS_W - 2;
     const total = lanes.reduce((a, l) => a + l.w, 0);
-    if (avail > total) {
-      const extra = (avail - total) / lanes.length;
-      lanes.forEach(l => {
+    const busy = lanes.filter(l => !l.empty);
+    if (avail > total && busy.length) {
+      const extra = (avail - total) / busy.length;
+      busy.forEach(l => {
         const grow = Math.max(0, Math.min(extra, W.max - l.w));
         if (grow <= 0) return;
-        const inner = l.sw + l.cw;
-        l.sw += l.sw ? grow * l.sw / inner : 0;
-        l.cw += l.sw ? grow * l.cw / inner : grow;
+        const inner = l.sw + l.cw, sw0 = l.sw;
+        l.sw += sw0 ? grow * sw0 / inner : 0;
+        l.cw += l.cw ? grow * l.cw / inner : 0;
         l.w += grow;
       });
     }
-    lanes.forEach(l => { l.sw = Math.floor(l.sw); l.cw = Math.floor(l.cw); l.w = l.sw + l.cw + W.pad * (l.sw ? 3 : 2); });
+    lanes.forEach(l => { l.sw = Math.floor(l.sw); l.cw = Math.floor(l.cw); l.w = laneW(l); });
 
     itemInfo.clear();
     const inner = el('div', 'tl-inner');
@@ -424,7 +459,7 @@
   }
 
   function laneHead(l) {
-    const h = el('div', 'tl-lanehead');
+    const h = el('div', 'tl-lanehead' + (l.empty ? ' tl-lane-empty' : ''));
     h.style.width = l.w + 'px';
     if (l.kind === 'oh') {
       h.classList.add('tl-lane-oh');
@@ -440,7 +475,7 @@
       });
       h.appendChild(pj);
       untimedList(h, [], l.oh.crew_untimed || [], null);
-      h.appendChild(colLabels(l));
+      if (!l.empty) h.appendChild(colLabels(l));
       return h;
     }
     const s = l.show;
@@ -486,9 +521,10 @@
       pf.appendChild(el('span', 'mono', perfs.map(p => p.label).join(', ')));
       h.appendChild(pf);
     }
-    untimedList(h, s.schedule_untimed || [], s.crew_untimed || [], s);
-    laterList(h, offAxis(s.schedule), s);
-    h.appendChild(colLabels(l));
+    untimedList(h, showMode === 'crew' ? [] : (s.schedule_untimed || []),
+      showMode === 'sched' ? [] : (s.crew_untimed || []), s);
+    if (showMode !== 'crew') laterList(h, offAxis(s.schedule), s);
+    if (!l.empty) h.appendChild(colLabels(l));
     return h;
   }
 
@@ -560,35 +596,55 @@
     h.appendChild(d);
   }
 
+  // A sub-column this lane has nothing for is left out, not drawn empty —
+  // the header says so on its own line, just above the column labels.
   function colLabels(l) {
+    const missing = (!l.sw && l.kind === 'show' && showMode !== 'crew') ? 'No schedule'
+      : (!l.cw && showMode !== 'sched') ? 'No crew' : '';
+    if (missing) {
+      const wrap = el('div', 'tl-lh-colswrap');
+      wrap.appendChild(el('div', 'tl-lh-colnone', missing));
+      wrap.appendChild(colLabelRow(l));
+      return wrap;
+    }
+    return colLabelRow(l);
+  }
+  function colLabelRow(l) {
     const row = el('div', 'tl-lh-cols');
     if (l.sw) {
       const a = el('span', null, 'Schedule');
       a.style.width = l.sw + 'px';
       row.appendChild(a);
     }
-    const b = el('span', null, 'Crew');
-    b.style.width = l.cw + 'px';
-    row.appendChild(b);
+    if (l.cw) {
+      const b = el('span', null, 'Crew');
+      b.style.width = l.cw + 'px';
+      row.appendChild(b);
+    }
     return row;
   }
 
   function laneBody(l, idx, ppm, range) {
-    const lane = el('div', 'tl-lane');
+    const lane = el('div', 'tl-lane' + (l.empty ? ' tl-lane-empty' : ''));
     lane.style.width = l.w + 'px';
     if (l.kind === 'oh') lane.classList.add('tl-lane-oh');
     else laneVariant(lane, l.show);
+    if (l.empty) {
+      lane.appendChild(el('span', 'tl-col-none',
+        showMode === 'sched' ? 'no schedule' : showMode === 'crew' ? 'no crew' : 'nothing timed'));
+    }
     if (l.sw) {
       const col = el('div', 'tl-col tl-col-sched');
       col.style.width = l.sw + 'px';
       l.sched.forEach(it => col.appendChild(schedItem(l.show, it, ppm, range, l.sw)));
       lane.appendChild(col);
     }
-    const ccol = el('div', 'tl-col tl-col-crew');
-    ccol.style.width = l.cw + 'px';
-    l.crew.forEach(it => ccol.appendChild(crewItem(l, it, ppm, range, l.cw)));
-    if (!l.crew.length) ccol.appendChild(el('span', 'tl-col-none', 'no crew'));
-    lane.appendChild(ccol);
+    if (l.cw) {
+      const ccol = el('div', 'tl-col tl-col-crew');
+      ccol.style.width = l.cw + 'px';
+      l.crew.forEach(it => ccol.appendChild(crewItem(l, it, ppm, range, l.cw)));
+      lane.appendChild(ccol);
+    }
     if (l.kind === 'show') {
       (l.show.performances || []).forEach(p => {
         if (p.minutes == null || p.minutes < range.start || p.minutes > range.end) return;
@@ -870,6 +926,14 @@
     lsSet(LS_ZOOM, String(zoomIdx));
     if (data) render(); else syncControls();
   }
+  if (showSeg) showSeg.addEventListener('click', e => {
+    const b = e.target.closest('button[data-show]');
+    if (!b || SHOW_MODES.indexOf(b.dataset.show) < 0 || b.dataset.show === showMode) return;
+    showMode = b.dataset.show;
+    lsSet(LS_SHOW, showMode);
+    // Same rule as the venue chips: mid day-change only the control changes.
+    if (dayShown()) { pendingScroll = null; render(); } else syncControls();
+  });
   zoomOutBtn.addEventListener('click', () => zoom(-1));
   zoomInBtn.addEventListener('click', () => zoom(1));
 

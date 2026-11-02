@@ -1282,6 +1282,13 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   day shown. The axis stops at 06:00 next day (`RANGE_CAP`); items past it
   are listed in the lane header, never drawn. Item links carry
   `.no-prefetch`. PM links use `LaborDays.telHref/mailtoHref` (no local copy).
+- Width (3.36.0): a lane draws only the sub-columns it has items for (the
+  header says "No crew" / "No schedule"); a lane with nothing timed in the
+  current view is `empty` (one `W.empty` column, sorted after everything,
+  Overhead included). The Show filter (`#tl-show`, All / Schedule / Crew,
+  localStorage `home_tl_show`) decides which items exist BEFORE
+  `computeRange` and the empty test; Schedule hides the Overhead lane.
+  Width constants live in `W` (`minLane` keeps one-column headers readable).
 - The `.tl-*` class names are shared with dashboard_view.html's Reservation
   Timeline: Home's rules on those names are scoped `:where(.tl-phead)` /
   `:where(.tl-scroll)` in style.css and mobile.css — keep new ones scoped.
