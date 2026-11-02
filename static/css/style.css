@@ -3008,8 +3008,7 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 .tl-wrap-body { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
   gap: 6px; padding: 18px 0 0; border: 0; margin: 0; background: transparent; color: var(--text-dim); cursor: pointer;
   opacity: 0; pointer-events: none; transition: opacity .35s ease; }
-.tl-lane.tl-done .tl-wrap-body { opacity: 1; pointer-events: auto; transition-delay: .3s;
-  background: repeating-linear-gradient(135deg, transparent 0 10px, color-mix(in srgb, var(--past) 7%, transparent) 10px 11px); }
+.tl-lane.tl-done .tl-wrap-body { opacity: 1; pointer-events: auto; transition-delay: .3s; }
 .tl-lane.tl-done .tl-wrap-body:hover { color: var(--ink); background-color: color-mix(in srgb, var(--past) 6%, transparent); }
 .tl-wrap-inner { position: sticky; top: calc(var(--tl-head-h, 0px) + 14px); display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .tl-wrap-check { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; font-size: 13px; font-weight: 700;
@@ -3018,14 +3017,14 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 .tl-wrap-time { font: 600 11px var(--font-mono); color: var(--text-muted); }
 /* Scrolled-past lanes are a thin rail: the header shows only the name,
    running down the rail; the pill + other header lines step aside. */
-:where(.tl-scroll) .tl-lanehead.tl-done-scroll { padding: 9px 0 0; align-items: center; }
-:where(.tl-scroll) .tl-lanehead.tl-done-scroll > :not(.tl-lh-top):not(.tl-lh-name) { display: none; }
-:where(.tl-scroll) .tl-lanehead.tl-done-scroll .tl-lh-name { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap;
+/* 3.41.0: every folded lane (scrolled past OR wrapped) is the thin rail. */
+:where(.tl-scroll) .tl-lanehead.tl-done { padding: 9px 0 0; align-items: center; }
+:where(.tl-scroll) .tl-lanehead.tl-done > :not(.tl-lh-top):not(.tl-lh-name) { display: none; }
+:where(.tl-scroll) .tl-lanehead.tl-done .tl-lh-name { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap;
   max-height: calc(var(--tl-head-h, 160px) - 16px); overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; }
-.tl-lane.tl-done-scroll .tl-wrap-text, .tl-lane.tl-done-scroll .tl-wrap-time { display: none; }
-.tl-lane.tl-done-scroll .tl-wrap-check { width: 22px; height: 22px; font-size: 12px; }
+.tl-lane.tl-done .tl-wrap-text, .tl-lane.tl-done .tl-wrap-time { display: none; }
+.tl-lane.tl-done .tl-wrap-check { width: 22px; height: 22px; font-size: 12px; }
 .tl-lane.tl-done-scroll .tl-wrap-check { background: var(--tl-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--tl-accent) 25%, transparent); }
-.tl-lane.tl-done-scroll .tl-wrap-body { background: repeating-linear-gradient(135deg, transparent 0 10px, color-mix(in srgb, var(--tl-accent) 7%, transparent) 10px 11px); }
 :where(.tl-scroll) .tl-lanehead.tl-done-scroll { background: color-mix(in srgb, var(--tl-accent) 6%, transparent); }
 .tl-lanehead.tl-done-scroll .tl-wrap-toggle { background: color-mix(in srgb, var(--tl-accent) 16%, transparent); border-color: color-mix(in srgb, var(--tl-accent) 45%, transparent); }
 .tl-lane.tl-done .tl-wrap-check { animation: tl-pop .5s cubic-bezier(.3, 1.5, .5, 1) .3s both; }

@@ -1290,7 +1290,7 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   `computeRange` and the empty test; Schedule hides the Overhead lane.
   Width constants live in `W` (`minLane` keeps one-column headers readable).
 - Wrapped lanes (3.37.0): `applyWrapped(nowOnView())` (from `updateNow`)
-  folds a non-empty lane whose last drawn `t_end` ≤ NOW to `W.done` —
+  folds a non-empty lane whose last drawn `t_end` ≤ NOW to the rail (`W.rail`, 3.41.0) —
   widths animate via CSS transitions on .tl-inner / .tl-lanehead / .tl-lane
   (`.tl-noanim` suppresses them on a full render). Never fold without a real
   NOW (past days stay open). Lanes/heads are `overflow: clip`, never
@@ -1321,6 +1321,9 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   translateX(old−new), then transition to 0; the lane whose fold changed
   gets `.tl-flipping` (lifted). Never on a `.tl-noanim` render or with
   reduced motion.
+  3.41.0: the slim "Wrapped" column (W.done) is gone — EVERY fold is the
+  `W.rail` rail (`.tl-done` carries the rail layout; `.tl-done-scroll` only
+  recolours the badge ↑). No hatching on folded lanes.
 - The `.tl-*` class names are shared with dashboard_view.html's Reservation
   Timeline: Home's rules on those names are scoped `:where(.tl-phead)` /
   `:where(.tl-scroll)` in style.css and mobile.css — keep new ones scoped.

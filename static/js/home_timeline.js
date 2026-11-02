@@ -44,8 +44,8 @@
   // nothing timed in the current view is one narrow column (`empty`), parked
   // at the right-hand end.
   const W = IS_MOBILE
-    ? { sched: 80, schedCol: 56, crew: 58, crewCol: 32, pad: 4, max: 360, empty: 96, minLane: 104, done: 96, rail: 30 }
-    : { sched: 112, schedCol: 84, crew: 112, crewCol: 40, pad: 6, max: 640, empty: 150, minLane: 136, done: 132, rail: 38 };
+    ? { sched: 80, schedCol: 56, crew: 58, crewCol: 32, pad: 4, max: 360, empty: 96, minLane: 104, rail: 30 }
+    : { sched: 112, schedCol: 84, crew: 112, crewCol: 40, pad: 6, max: 640, empty: 150, minLane: 136, rail: 38 };
   const RANGE_START = 6 * 60, RANGE_END = 24 * 60, RANGE_CAP = 30 * 60;
   const MIN_ITEM_PX = 18;
   const TICK_MS = 30000, REFRESH_MS = 60000;
@@ -838,7 +838,7 @@
   // yesterday's after-midnight hours) — a past day's lanes stay open, or the
   // whole grid would fold. Widths animate (CSS transition on width); the
   // items fade out under the slim column.
-  // Two reasons a lane folds to the slim column (`W.done`):
+  // Two reasons a lane folds to the thin rail (`W.rail`, sent to the far right):
   //  - 'time':   NOW is past its last block (only against a real NOW, so a
   //              past day isn't folded wholesale) — "✓ Wrapped hh:mm";
   //              a click reopens it (`reopened`) until reload.
@@ -886,8 +886,8 @@
       // are above the view needn't keep its 'Wrapped' column either.
       const reason = scrollFold ? 'scroll' : (timeFold ? 'time' : '');
       const fold = !!reason;
-      // Scrolled past: a thin rail (name runs down it); wrapped: the slim column.
-      const w = reason === 'scroll' ? W.rail : (fold ? W.done : l.w);
+      // Folded either way = the thin rail (name runs down it), at the far right.
+      const w = fold ? W.rail : l.w;
       total += w;
       if (finished === l.finished && reason === l.reason) return;
       if (flipFrom && fold !== !!l.done) l._moved = true;   // lifted while it slides
