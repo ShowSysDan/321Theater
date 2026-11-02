@@ -1303,6 +1303,13 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   scrolled back; its click scrolls up instead of toggling `reopened`. Time
   fold wins over scroll fold. render() applies the fold for the restored
   scroll position BEFORE removing `.tl-noanim`.
+  NO-FLICKER RULES (3.38.1): a fold must never change the grid's vertical
+  geometry, or the browser re-anchors the scroll and the fold flips back in
+  a loop. So: the header row gets `min-height` = its all-open height at
+  render; `.tl-scroll` has `overflow-anchor: none`; scroll folds have
+  hysteresis (`FOLD_SLACK`); and if the open grid overflowed sideways,
+  `.tl-inner` stays wider than the box so the horizontal scrollbar can't
+  vanish. Keep all four.
 - The `.tl-*` class names are shared with dashboard_view.html's Reservation
   Timeline: Home's rules on those names are scoped `:where(.tl-phead)` /
   `:where(.tl-scroll)` in style.css and mobile.css — keep new ones scoped.

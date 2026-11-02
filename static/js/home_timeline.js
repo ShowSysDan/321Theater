@@ -107,7 +107,10 @@
   // its last end), it slides shut to a slim "Wrapped" column. `laneRecs` =
   // the current render's lanes with their nodes; `reopened` = lanes the user
   // opened again ('<date>|<key>', this page only).
-  let laneRecs = [], innerEl = null;
+  let laneRecs = [], innerEl = null, l0Overflow = false;
+  // Scroll fold hysteresis (minutes): fold once scrolled this far past a
+  // lane's last block; open again as soon as that block is back in view.
+  const FOLD_SLACK = 20;
   const reopened = new Set();
 
   // ── data ──────────────────────────────────────────────────────────────
@@ -445,6 +448,14 @@
     setHead(head);
     inner.classList.add('tl-noanim');      // first paint: no slide
     syncHeadHeight();
+    // Freeze the header row at its all-open height: a folded lane hides its
+    // header lines, and a shorter header would move the grid under the
+    // scroll position — the browser re-anchors, the fold flips back, and the
+    // grid flickers open/closed while scrolling.
+    head.style.minHeight = head.offsetHeight + 'px';
+    // Same for the sideways scrollbar: if the open grid needs one, keep it
+    // while lanes fold (it appearing/vanishing changes the box's height).
+    l0Overflow = AXIS_W + lanes.reduce((a, l) => a + l.w, 0) > scroller.clientWidth;
     fitHeight();
     updateNow();
 
@@ -840,7 +851,7 @@
       const has = !l.empty && l.lastEnd > -Infinity;
       const finished = has && nm != null && l.lastEnd <= nm;
       const timeFold = finished && !reopened.has(curDate + '|' + l.key);
-      const scrollFold = has && l.lastEnd <= topMin;
+      const scrollFold = has && (l.reason === 'scroll' ? l.lastEnd <= topMin : l.lastEnd <= topMin - FOLD_SLACK);
       const reason = timeFold ? 'time' : (scrollFold ? 'scroll' : '');
       const fold = !!reason;
       // Scrolled past: a thin rail (name runs down it); wrapped: the slim column.
@@ -884,7 +895,11 @@
           : 'Wrapped at ' + end + ' — click to open the lane again';
       }
     });
-    if (changed) innerEl.style.width = (AXIS_W + total) + 'px';
+    if (changed) {
+      let iw = AXIS_W + total;
+      if (l0Overflow) iw = Math.max(iw, scroller.clientWidth + 1);
+      innerEl.style.width = iw + 'px';
+    }
   }
 
   scroller.addEventListener('click', e => {
