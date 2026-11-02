@@ -26750,6 +26750,18 @@ def show_piano_tuning_create(show_id):
     return jsonify({'success': True, 'id': tid}), 201
 
 
+def _piano_readonly_refusal(tid):
+    """The three @login_required piano write routes (update, pin-unit,
+    cancel-request) check _is_piano_manager(), which doesn't see is_readonly:
+    a Read-only account carrying is_piano_manager must still not write.
+    Same rule as _readonly_guard (admins exempt). None = may proceed."""
+    if session.get('is_readonly') and session.get('user_role') != 'admin':
+        syslog_logger.warning(f"PIANO_TUNING_DENIED id={tid} reason=readonly "
+                              f"by={session.get('username')}")
+        return jsonify({'error': 'Read-only access'}), 403
+    return None
+
+
 @app.route('/piano-tunings/<int:tid>', methods=['PUT'])
 @login_required
 def piano_tuning_update(tid):
@@ -26758,6 +26770,9 @@ def piano_tuning_update(tid):
     fields — or cancel it — only while it is still 'requested'."""
     if not _piano_module_on():
         abort(404)
+    refusal = _piano_readonly_refusal(tid)
+    if refusal:
+        return refusal
     data = request.get_json(force=True) or {}
     db = get_db()
     cur = db.execute("SELECT t.*, COALESCE(s.name, 'House piano tuning') AS show_name "
@@ -27208,6 +27223,9 @@ def piano_tuning_pin_unit(tid):
     manager or an editor of the show."""
     if not _piano_module_on():
         abort(404)
+    refusal = _piano_readonly_refusal(tid)
+    if refusal:
+        return refusal
     db = get_db()
     t = db.execute('SELECT id, show_id, status, piano_asset_type_id, piano_asset_item_id, '
                    'tuning_date, requested_date FROM piano_tunings WHERE id=%s', (tid,)).fetchone()
@@ -27247,6 +27265,9 @@ def piano_tuning_cancel_request(tid):
     is emailed). The manager actually cancels via the normal status change."""
     if not _piano_module_on():
         abort(404)
+    refusal = _piano_readonly_refusal(tid)
+    if refusal:
+        return refusal
     db = get_db()
     t = db.execute('SELECT t.*, s.name AS show_name FROM piano_tunings t '
                    'JOIN shows s ON s.id = t.show_id WHERE t.id=%s FOR UPDATE OF t',

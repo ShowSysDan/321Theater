@@ -9,13 +9,15 @@
 {% block content %}
 <div class="page-header">
   <div>
-    <h1 class="page-title">Piano Tuning</h1>
-    <p class="page-sub">Every tuning requested from a show page. Schedule it with a vendor, set the tuning time (it goes onto the show's production schedule) and the cost (it shows on the show's Assets tab and invoices). <strong>Add House Tuning</strong> logs a tuning that isn't for a show: maintenance, a rehearsal, a recording. A <strong>Completed</strong> tuning is added to the piano unit's service record (Assets → unit → Log).</p>
+    <h1 class="page-title">Piano Tuning{% if readonly_view %}<span class="rv-badge" title="Your account is read-only: you can see every tuning, vendor and paperwork PDF, but not change them">VIEW ONLY</span>{% endif %}</h1>
+    <p class="page-sub">Every tuning requested from a show page. Schedule it with a vendor, set the tuning time (it goes onto the show's production schedule) and the cost (it shows on the show's Assets tab and invoices). {% if readonly_view %}A <strong>🏠 House</strong> tuning isn't for a show: maintenance, a rehearsal, a recording.{% else %}<strong>Add House Tuning</strong> logs a tuning that isn't for a show: maintenance, a rehearsal, a recording.{% endif %} A <strong>Completed</strong> tuning is added to the piano unit's service record (Assets → unit → Log).</p>
   </div>
   <div class="header-actions">
     {% if user and user.role == 'admin' %}<a href="{{ url_for('settings') }}#modules" class="btn btn-ghost btn-sm">← Modules</a>{% endif %}
     <button type="button" class="btn btn-ghost btn-sm" onclick="pvOpen()">Vendors</button>
-    <button type="button" class="btn btn-primary btn-sm" onclick="ptOpenHouse()">+ Add House Tuning</button>
+    {# Read-only account (readonly_view): every write control on this page is
+       hidden (.rv-hide) or read-only, and the JS write paths stand down (RO). #}
+    <button type="button" class="btn btn-primary btn-sm rv-hide" onclick="ptOpenHouse()">+ Add House Tuning</button>
   </div>
 </div>
 
@@ -110,7 +112,7 @@
         <div class="field-group" id="pt-paper-group">
           <label class="field-label">PAPERWORK (PDF)</label>
           <div id="pt-paper-current" style="font-size:12px;margin-bottom:4px"></div>
-          <input type="file" id="pt-paper" accept="application/pdf,.pdf" class="field-input" onchange="ptUploadPaper()">
+          <input type="file" id="pt-paper" accept="application/pdf,.pdf" class="field-input rv-hide" onchange="ptUploadPaper()"{% if readonly_view %} disabled{% endif %}>
         </div>
         <div class="field-group" style="grid-column:span 2">
           <label class="field-label">NOTES<span class="pt-show-only"> (request notes from the PM)</span></label>
@@ -126,7 +128,7 @@
     <div class="modal-footer">
       <a id="pt-show-link" class="btn btn-ghost" href="#" style="margin-right:auto">Open show →</a>
       <button type="button" class="btn btn-ghost" onclick="ptClose()">Close</button>
-      <button type="button" class="btn btn-primary" id="pt-save" onclick="ptSave()">Save</button>
+      <button type="button" class="btn btn-primary rv-hide" id="pt-save" onclick="ptSave()">Save</button>
     </div>
   </div>
 </div>
@@ -145,7 +147,7 @@
           <tbody id="pv-body"></tbody>
         </table>
       </div>
-      <div class="pv-form">
+      <div class="pv-form rv-hide">
         <input type="hidden" id="pv-id">
         <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px;margin-top:14px">
           <div class="field-group"><label class="field-label" id="pv-form-title">ADD VENDOR — NAME *</label>
@@ -183,7 +185,17 @@
 (function() {
   const H = {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'};
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  // Read-only account (base.html's READONLY_VIEW = _readonly_guard's rule):
+  // the list, Manage dialog (as "View") and Vendors still open, but no row
+  // action, Save, upload or vendor edit is offered and every write function
+  // below returns before its request.
+  const RO = !!window.READONLY_VIEW;
   let _status = 'open', _rows = [], _seq = 0, _pianos = [], _vendors = [];
+  if (RO) {
+    // The dialog's fields stay readable/copyable: text read-only, pickers off.
+    document.querySelectorAll('#pt-modal input:not([type=hidden]), #pt-modal select, #pt-modal textarea')
+      .forEach(el => { if (el.tagName === 'SELECT' || el.type === 'file') el.disabled = true; else el.readOnly = true; });
+  }
 
   async function load() {
     const seq = ++_seq;
@@ -227,19 +239,20 @@
         <td>${t.show_id ? `<a href="/shows/${t.show_id}?tab=advance">${esc(t.show_name)}</a>
           <div class="sub">${esc(t.show_venue || '')}${t.production_manager ? ' · PM ' + esc(t.production_manager) : ''}</div>`
           : `<span class="piano-house-tag" title="Not tied to a show">🏠 House</span> ${esc(t.purpose || 'Maintenance')}`}</td>
-        <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? '<div class="piano-warn" style="margin-left:0" title="The show hasn\'t added this piano on its Assets tab.">⚠ not on show\'s Assets tab</div>' : ''}${t.piano_on_show === 'other_unit' && t.status !== 'cancelled' ? '<div class="piano-warn" style="margin-left:0" title="The show books this model, but not this specific unit.">⚠ unit not pinned on Assets tab <button type="button" class="btn btn-xs btn-ghost" onclick="ptPinUnit(' + t.id + ')" title="Make the show\'s Assets line for this model name this unit (S/N)">Pin unit</button></div>' : ''}</td>
+        <td>${esc(t.piano) || '—'}${t.piano_on_show === false && t.status !== 'cancelled' ? '<div class="piano-warn" style="margin-left:0" title="The show hasn\'t added this piano on its Assets tab.">⚠ not on show\'s Assets tab</div>' : ''}${t.piano_on_show === 'other_unit' && t.status !== 'cancelled' ? '<div class="piano-warn" style="margin-left:0" title="The show books this model, but not this specific unit.">⚠ unit not pinned on Assets tab' + (RO ? '' : ' <button type="button" class="btn btn-xs btn-ghost" onclick="ptPinUnit(' + t.id + ')" title="Make the show\'s Assets line for this model name this unit (S/N)">Pin unit</button>') + '</div>' : ''}</td>
         <td style="white-space:nowrap">${esc(t.requested_date || '')} ${esc(t.requested_time || '')}</td>
         <td style="white-space:nowrap">${t.tuning_date ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}` : '—'}</td>
         <td>${esc(t.vendor) || '—'}</td>
         <td class="num">${t.cost === null || t.cost === undefined ? '—' : '$' + Number(t.cost).toFixed(2)}${t.paperwork_filename ? `<div class="sub"><a href="/shows/${t.show_id}/external-rentals/${t.er_id}/pdf" target="_blank" title="${esc(t.paperwork_filename)}">📄 PDF</a></div>` : ''}</td>
         <td class="sub">${esc(t.requested_by_name || '')}</td>
         <td><div style="display:flex;flex-direction:column;gap:4px;align-items:stretch">
+          ${RO ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptOpen(${t.id})">View</button>` : `
           ${t.cancel_pending ? `<button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="ptCancelTuning(${t.id})">Cancel tuning</button>
             <button type="button" class="btn btn-xs btn-ghost" onclick="ptDeclineCancel(${t.id})" title="It can't be cancelled — the requester is emailed">Decline cancel</button>` : ''}
           ${t.status === 'requested' ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptQuick(${t.id},'seen')" title="Let the requester know you've seen it and are working on it">Mark seen</button>` : ''}
           ${t.status === 'requested' || t.status === 'seen' ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptQuick(${t.id},'scheduled')" title="Sent to the vendor">Mark scheduled</button>` : ''}
           ${t.status === 'scheduled' ? `<button type="button" class="btn btn-xs btn-ghost" onclick="ptQuick(${t.id},'completed')">Completed</button>` : ''}
-          <button type="button" class="btn btn-xs btn-primary" onclick="ptOpen(${t.id})">Manage</button>
+          <button type="button" class="btn btn-xs btn-primary" onclick="ptOpen(${t.id})">Manage</button>`}
         </div></td>
       </tr>`).join('');
   }
@@ -262,7 +275,7 @@
     const t = _rows.find(x => x.id === id);
     if (!t) return;
     document.getElementById('pt-id').value = t.id;
-    document.getElementById('pt-title').textContent = `Piano Tuning #${t.id}`;
+    document.getElementById('pt-title').textContent = `Piano Tuning #${t.id}${RO ? ' — view only' : ''}`;
     document.getElementById('pt-show').textContent =
       `${t.show_name}${t.show_venue ? ' · ' + t.show_venue : ''}${t.requested_by_name ? ' · requested by ' + t.requested_by_name : ''}`;
     _ptHouseMode(!t.show_id, t);
@@ -326,7 +339,8 @@
     const saved = _pianos.length && pick.value && pick.value === pick.dataset.orig && usel.value === (usel.dataset.orig || '');
     const msg = !saved ? ''
       : pick.dataset.onShow === '0' ? "⚠ This piano isn't on the show's Assets tab — ask the PM to add it so it's reserved."
-      : pick.dataset.onShow === 'unit' ? "⚠ The show books this model, but this unit (S/N) isn't pinned on its Assets tab — pin it so the right instrument is reserved."
+      : pick.dataset.onShow === 'unit' ? (RO ? "⚠ The show books this model, but this unit (S/N) isn't pinned on its Assets tab."
+                                            : "⚠ The show books this model, but this unit (S/N) isn't pinned on its Assets tab — pin it so the right instrument is reserved.")
       : '';
     warn.style.display = msg ? '' : 'none';
     warn.textContent = msg;
@@ -335,7 +349,7 @@
     const host = document.getElementById('pt-paper-current');
     host.innerHTML = t.paperwork_filename
       ? `<a href="/shows/${t.show_id}/external-rentals/${t.er_id}/pdf" target="_blank">📄 ${esc(t.paperwork_filename)}</a>
-         <button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="ptRemovePaper()">Remove</button>`
+         ${RO ? '' : '<button type="button" class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="ptRemovePaper()">Remove</button>'}`
       : '<span class="text-dim">None attached</span>';
   }
   // A completed tuning's entry in the unit's service record (3.19.0).
@@ -345,12 +359,14 @@
     el.className = 'pt-svc' + (missing ? ' pt-svc-missing' : '');
     el.textContent = !t || t.status !== 'completed' ? ''
       : t.service_log_unit ? `🔧 Logged in the service record of ${t.service_log_unit} (Assets → unit → Log).`
-      : missing ? "⚠ Not in a service record — pick the unit (S/N) that was tuned and Save to log it."
+      : missing ? (RO ? "⚠ Not in a service record — no unit (S/N) is set for this tuning."
+                      : "⚠ Not in a service record — pick the unit (S/N) that was tuned and Save to log it.")
       : '';
     el.style.display = el.textContent ? '' : 'none';
   }
   // Paperwork saves immediately (its own endpoint), separate from Save.
   window.ptUploadPaper = async function() {
+    if (RO) return;
     const id = document.getElementById('pt-id').value;
     const inp = document.getElementById('pt-paper');
     if (!inp.files[0]) return;
@@ -365,7 +381,7 @@
     load();
   };
   window.ptRemovePaper = async function() {
-    if (!confirm('Remove the paperwork from this tuning?')) return;
+    if (RO || !confirm('Remove the paperwork from this tuning?')) return;
     const id = document.getElementById('pt-id').value;
     const r = await fetch(`/piano-tunings/${id}/paperwork`, {method: 'DELETE', headers: H});
     if (!r.ok) { alert('Could not remove the paperwork.'); return; }
@@ -382,6 +398,7 @@
   window.ptClose = function() { document.getElementById('pt-modal').style.display = 'none'; };
 
   async function put(id, payload) {
+    if (RO) return false;
     const r = await fetch(`/piano-tunings/${id}`, {method: 'PUT', headers: H, body: JSON.stringify(payload)});
     const d = await r.json().catch(() => ({}));
     if (!r.ok) { alert(d.error || 'Could not save.'); return false; }
@@ -404,6 +421,7 @@
       `House tuning — not tied to a show${t.requested_by_name ? ' · added by ' + t.requested_by_name : ''}`;
   }
   window.ptOpenHouse = function() {
+    if (RO) return;
     document.getElementById('pt-id').value = '';
     document.getElementById('pt-title').textContent = 'Add House Tuning';
     document.getElementById('pt-show').textContent = 'Not tied to a show — maintenance, a rehearsal, a recording… It stays off every show\'s schedule and invoices; its cost counts in Reports → Piano Tuning.';
@@ -430,6 +448,7 @@
     document.getElementById('pt-modal').style.display = 'flex';
   };
   window.ptSave = async function() {
+    if (RO) return;
     const id = document.getElementById('pt-id').value;
     const house = document.getElementById('pt-purpose-row').style.display !== 'none';
     const payload = {};
@@ -483,11 +502,11 @@
         <td class="num">${v.typical_price === null ? '—' : '$' + Number(v.typical_price).toFixed(2)}</td>
         <td class="sub">${esc(v.contact)}</td>
         <td class="sub">${esc(v.notes)}</td>
-        <td style="white-space:nowrap">
+        <td style="white-space:nowrap">${RO ? '' : `
           <button type="button" class="btn btn-xs btn-ghost" onclick="pvEdit(${v.id})">Edit</button>
-          <button type="button" class="btn btn-xs btn-ghost" onclick="pvArchive(${v.id}, ${v.is_active ? 0 : 1})">${v.is_active ? 'Archive' : 'Restore'}</button>
+          <button type="button" class="btn btn-xs btn-ghost" onclick="pvArchive(${v.id}, ${v.is_active ? 0 : 1})">${v.is_active ? 'Archive' : 'Restore'}</button>`}
         </td>
-      </tr>`).join('') : '<tr><td colspan="5" class="text-dim">No vendors yet — add one below.</td></tr>';
+      </tr>`).join('') : `<tr><td colspan="5" class="text-dim">${RO ? 'No vendors yet.' : 'No vendors yet — add one below.'}</td></tr>`;
   }
   window.pvOpen = function() { pvEdit(null); document.getElementById('pv-modal').style.display = 'flex'; pvLoad(); };
   window.pvClose = function() { document.getElementById('pv-modal').style.display = 'none'; load(); };
@@ -503,6 +522,7 @@
     document.getElementById('pv-cancel-edit').style.display = v ? '' : 'none';
   };
   window.pvSave = async function() {
+    if (RO) return;
     const id = document.getElementById('pv-id').value;
     const payload = {name: document.getElementById('pv-name').value.trim(),
                      typical_price: document.getElementById('pv-price').value,
@@ -521,18 +541,20 @@
     } finally { btn.disabled = false; }
   };
   window.pvArchive = async function(id, active) {
+    if (RO) return;
     const r = await fetch(`/api/piano-vendors/${id}`, {method: 'PUT', headers: H, body: JSON.stringify({is_active: active})});
     if (!r.ok) { alert('Could not update the vendor.'); return; }
     pvLoad();
   };
 
   window.ptCancelTuning = async function(id) {
+    if (RO) return;
     const t = _rows.find(x => x.id === id);
     if (!confirm('Cancel this tuning? Its schedule row, charge' + (t && t.paperwork_filename ? ' and paperwork' : '') + ' are removed from the show.')) return;
     if (await put(id, {status: 'cancelled'})) load();
   };
   window.ptDeclineCancel = async function(id) {
-    if (!confirm("Decline the cancellation request? The tuning stays on and the requester is emailed.")) return;
+    if (RO || !confirm("Decline the cancellation request? The tuning stays on and the requester is emailed.")) return;
     const r = await fetch(`/piano-tunings/${id}/cancel-request`, {method: 'DELETE', headers: H});
     if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || 'Could not decline.'); return; }
     load();
@@ -540,6 +562,7 @@
 
   // Make the show's reservation name this tuning's unit (3.34.0).
   window.ptPinUnit = async function(id) {
+    if (RO) return;
     const r = await fetch(`/piano-tunings/${id}/pin-unit`, {method: 'POST', headers: H, body: '{}'});
     const d = await r.json().catch(() => ({}));
     if (!r.ok) { alert(d.error || 'Could not pin the unit.'); return; }
