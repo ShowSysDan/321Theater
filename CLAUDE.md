@@ -1289,6 +1289,20 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   localStorage `home_tl_show`) decides which items exist BEFORE
   `computeRange` and the empty test; Schedule hides the Overhead lane.
   Width constants live in `W` (`minLane` keeps one-column headers readable).
+- Wrapped lanes (3.37.0): `applyWrapped(nowOnView())` (from `updateNow`)
+  folds a non-empty lane whose last drawn `t_end` ≤ NOW to `W.done` —
+  widths animate via CSS transitions on .tl-inner / .tl-lanehead / .tl-lane
+  (`.tl-noanim` suppresses them on a full render). Never fold without a real
+  NOW (past days stay open). Lanes/heads are `overflow: clip`, never
+  `hidden` (hidden would break the items' sticky labels). Reopened lanes =
+  in-memory `reopened` set keyed `date|lane`.
+  3.38.0 adds the SCROLL fold: a lane whose `lastEnd` (items' t_end AND
+  performance minutes) ≤ the minute at the top of the box
+  (`scrollTopMinute()`) becomes a `W.rail` rail (`.tl-done-scroll`, name
+  vertical); re-checked once per frame on scroll; opens itself when
+  scrolled back; its click scrolls up instead of toggling `reopened`. Time
+  fold wins over scroll fold. render() applies the fold for the restored
+  scroll position BEFORE removing `.tl-noanim`.
 - The `.tl-*` class names are shared with dashboard_view.html's Reservation
   Timeline: Home's rules on those names are scoped `:where(.tl-phead)` /
   `:where(.tl-scroll)` in style.css and mobile.css — keep new ones scoped.
