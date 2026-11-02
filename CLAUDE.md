@@ -1314,6 +1314,13 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   are compact: `.tl-lh-meta` (badges + venue), `.tl-lh-pm` (PM + contacts +
   `.tl-lh-perf`), each one nowrap line with ellipsis + `title`; the missing
   column note lives in the label row. Default zoom index 1 (48 px/h).
+  3.40.0: folded lanes go to the far right via flex `order` on the lane's
+  head + body (busy 0, empty 1, folded 2; DOM order = original sort, so a
+  lane returns to its place). An order change is a FLIP in applyWrapped:
+  measure lefts, `.tl-nowidth` (widths jump so the measure is final), set
+  translateX(old−new), then transition to 0; the lane whose fold changed
+  gets `.tl-flipping` (lifted). Never on a `.tl-noanim` render or with
+  reduced motion.
 - The `.tl-*` class names are shared with dashboard_view.html's Reservation
   Timeline: Home's rules on those names are scoped `:where(.tl-phead)` /
   `:where(.tl-scroll)` in style.css and mobile.css — keep new ones scoped.

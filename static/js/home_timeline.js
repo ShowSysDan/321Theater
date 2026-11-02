@@ -855,6 +855,28 @@
     if (!innerEl || !dayShown()) return;
     const topMin = scrollTopMinute();
     let changed = false, total = 0;
+    // 3.40.0: folded lanes move to the far right (flex `order`: busy 0,
+    // empty 1, folded 2 — stable within each group). An order change slides
+    // the lanes to their new places (FLIP: measure, re-lay out instantly,
+    // then animate the translateX back to 0).
+    const animate = !innerEl.classList.contains('tl-noanim') && !REDUCED_MOTION();
+    const laneOrder = (l, fold) => (fold ? 2 : (l.empty ? 1 : 0));
+    let flipFrom = null;
+    if (animate) {
+      const moves = laneRecs.some(l => {
+        if (!l.headEl || l.empty) return false;
+        const has = l.lastEnd > -Infinity;
+        const fin = has && nm != null && l.lastEnd <= nm;
+        const sf = has && (l.reason === 'scroll' ? l.lastEnd <= topMin : l.lastEnd <= topMin - FOLD_SLACK);
+        const fold = sf || (fin && !reopened.has(curDate + '|' + l.key));
+        return laneOrder(l, fold) !== laneOrder(l, !!l.done);
+      });
+      if (moves) {
+        flipFrom = new Map();
+        laneRecs.forEach(l => { if (l.headEl) flipFrom.set(l, l.headEl.getBoundingClientRect().left); });
+        innerEl.classList.add('tl-nowidth');   // final widths at once, so the measure is true
+      }
+    }
     laneRecs.forEach(l => {
       const has = !l.empty && l.lastEnd > -Infinity;
       const finished = has && nm != null && l.lastEnd <= nm;
@@ -868,6 +890,7 @@
       const w = reason === 'scroll' ? W.rail : (fold ? W.done : l.w);
       total += w;
       if (finished === l.finished && reason === l.reason) return;
+      if (flipFrom && fold !== !!l.done) l._moved = true;   // lifted while it slides
       l.finished = finished;
       l.reason = reason;
       l.done = fold;
@@ -875,6 +898,7 @@
       [l.headEl, l.bodyEl].forEach(n => {
         if (!n) return;
         n.style.width = w + 'px';
+        n.style.order = String(laneOrder(l, fold));
         n.classList.toggle('tl-done', fold);
         n.classList.toggle('tl-done-scroll', reason === 'scroll');
         n.classList.toggle('tl-finished', finished);
@@ -911,6 +935,37 @@
       if (l0Overflow) iw = Math.max(iw, scroller.clientWidth + 1);
       innerEl.style.width = iw + 'px';
     }
+    if (flipFrom) {
+      laneRecs.forEach(l => {
+        if (!l.headEl || !flipFrom.has(l)) return;
+        const dx = flipFrom.get(l) - l.headEl.getBoundingClientRect().left;
+        if (Math.abs(dx) < 1) return;
+        [l.headEl, l.bodyEl].forEach(n => {
+          n.style.transition = 'none';
+          n.style.transform = 'translateX(' + dx + 'px)';
+          if (l._moved) n.classList.add('tl-flipping');
+        });
+      });
+      laneRecs.forEach(l => { l._moved = false; });
+      void innerEl.offsetWidth;
+      innerEl.classList.remove('tl-nowidth');
+      laneRecs.forEach(l => {
+        [l.headEl, l.bodyEl].forEach(n => {
+          if (!n || !n.style.transform) return;
+          n.style.transition = 'transform .5s cubic-bezier(.22, .8, .24, 1)';
+          n.style.transform = '';
+          n.addEventListener('transitionend', function done(e) {
+            if (e.target !== n || e.propertyName !== 'transform') return;
+            n.removeEventListener('transitionend', done);
+            n.style.transition = '';
+            n.classList.remove('tl-flipping');
+          });
+        });
+      });
+    }
+  }
+  function REDUCED_MOTION() {
+    try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (_) { return false; }
   }
 
   scroller.addEventListener('click', e => {

@@ -2985,6 +2985,8 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 :where(.tl-scroll) .tl-inner, :where(.tl-scroll) .tl-lanehead, :where(.tl-scroll) .tl-lane {
   transition: width .55s cubic-bezier(.22, .8, .24, 1); }
 :where(.tl-scroll) .tl-noanim, :where(.tl-scroll) .tl-noanim * { transition: none !important; }
+.tl-inner.tl-nowidth, .tl-inner.tl-nowidth .tl-lanehead, .tl-inner.tl-nowidth .tl-lane { transition: none !important; }   /* 3.40.0: lane reorder (FLIP) measures final widths */
+:where(.tl-scroll) .tl-flipping { z-index: 4; background-color: var(--bg-card); box-shadow: 0 0 0 1px var(--border), 0 8px 22px rgba(0, 0, 0, .35); }   /* a lane sliding to its new place rides above the rest */
 /* clip (not hidden): hidden would make each lane the scroll container for the items' sticky labels */
 :where(.tl-scroll) .tl-lanehead, :where(.tl-scroll) .tl-lane { overflow: clip; }
 :where(.tl-scroll) .tl-lane .tl-col, :where(.tl-scroll) .tl-lane .tl-perf, :where(.tl-scroll) .tl-lanehead .tl-lh-cols {
