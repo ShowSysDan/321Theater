@@ -1145,21 +1145,11 @@ function _syncScheduleMirrors() {
     return (el && el.value || '').trim();
   };
   const liDate = readVal('load_in_date');
-  const liTime = readVal('load_in_time');
   const loDate = readVal('load_out_date');
-  const loTime = readVal('load_out_time');
   const liEl = document.querySelector('.sched-adv-mirror[data-mirror-type="load_in"]');
   const loEl = document.querySelector('.sched-adv-mirror[data-mirror-type="load_out"]');
-  if (liEl) {
-    liEl.textContent = (liDate || liTime)
-      ? `${liDate}${liDate && liTime ? ' · ' : ''}${liTime}`
-      : '—';
-  }
-  if (loEl) {
-    loEl.textContent = (loDate || loTime)
-      ? `${loDate}${loDate && loTime ? ' · ' : ''}${loTime}`
-      : '—';
-  }
+  if (liEl) liEl.textContent = liDate || '—';
+  if (loEl) loEl.textContent = loDate || '—';
 }
 
 /* Values other people saved to a field while it was focused here: apply
@@ -1230,17 +1220,6 @@ function bindAdvanceForm() {
     });
   }
 
-  // Normalize load-in/out time fields to 24-hour HH:MM on blur
-  ['load_in_time', 'load_out_time'].forEach(key => {
-    const el = form.querySelector(`[data-key="${key}"]`);
-    if (el) el.addEventListener('blur', () => {
-      const parsed = parseTimeToHHMM(el.value);
-      if (parsed !== el.value) {
-        el.value = parsed;
-        scheduleSave();
-      }
-    });
-  });
 
   // On first fillout, default the load-out date to the load-in date. Only
   // fires when load-out is still blank, so it never overrides a date the
@@ -1414,15 +1393,11 @@ function bindAdvanceForm() {
 
 function collectAdvanceData() {
   const data = {};
-  const _timeKeys = new Set(['load_in_time', 'load_out_time']);
   document.querySelectorAll('#advance-form .adv-field').forEach(el => {
     const key = el.dataset.key;
     if (!key) return;
     if (el.type === 'checkbox') {
       data[key] = el.checked ? 'true' : 'false';
-    } else if (_timeKeys.has(key) && el.value) {
-      data[key] = parseTimeToHHMM(el.value);
-      el.value = data[key];
     } else {
       data[key] = el.value;
     }

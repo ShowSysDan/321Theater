@@ -392,36 +392,24 @@
       <span class="section-icon">◈</span> ENGAGEMENT
     </div>
     <div class="form-section-body">
-      <div class="form-row cols-4">
+      {# Dates only (3.45.0): the First Call / Final Out times were display-only
+         and are gone; shows.load_in_time / load_out_time stay in the DB, unused. #}
+      <div class="form-row cols-2">
         <div class="field-group">
-          <label class="field-label">FIRST CALL DATE</label>
+          <label class="field-label">FIRST CALL</label>
           <input type="date" class="field-input adv-field" data-key="load_in_date"
                  id="load-in-date" value="{{ show.load_in_date or '' }}"
                  {% if restricted %}disabled{% endif %}>
         </div>
         <div class="field-group">
-          <label class="field-label">FIRST CALL TIME</label>
-          <input type="text" class="field-input adv-field" data-key="load_in_time"
-                 id="load-in-time" value="{{ show.load_in_time or '' }}"
-                 placeholder="08:00" maxlength="5"
-                 {% if restricted %}disabled{% endif %}>
-        </div>
-        <div class="field-group">
-          <label class="field-label">FINAL OUT DATE</label>
+          <label class="field-label">FINAL OUT</label>
           <input type="date" class="field-input adv-field" data-key="load_out_date"
                  id="load-out-date" value="{{ show.load_out_date or '' }}"
                  {% if restricted %}disabled{% endif %}>
         </div>
-        <div class="field-group">
-          <label class="field-label">FINAL OUT TIME</label>
-          <input type="text" class="field-input adv-field" data-key="load_out_time"
-                 id="load-out-time" value="{{ show.load_out_time or '' }}"
-                 placeholder="23:00" maxlength="5"
-                 {% if restricted %}disabled{% endif %}>
-        </div>
       </div>
       <p class="field-note" style="margin:6px 0 0;font-size:11px;color:var(--text-muted)">
-        First billed call through end of load-out (24-hour times). Set this first — show dates must fall inside it; it also sets schedule days and rental pricing.
+        First billed call through end of load-out. Set this first — show dates must fall inside it; it also sets schedule days and rental pricing.
       </p>
       <div id="load-range-warning" class="load-range-warning" style="display:none"></div>
     </div>
@@ -896,14 +884,14 @@ window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
         <div class="field-group">
           <label class="field-label">FIRST CALL</label>
           <div class="field-input sched-adv-mirror" data-mirror-type="load_in" style="background:var(--bg-hover);color:var(--text-muted);cursor:default">
-            {% if show.load_in_date or show.load_in_time %}{{ show.load_in_date or '' }}{% if show.load_in_date and show.load_in_time %} · {% endif %}{{ show.load_in_time or '' }}{% else %}—{% endif %}
+            {{ show.load_in_date or '—' }}
           </div>
           <p class="field-hint" style="font-size:10px;color:var(--text-muted);margin-top:3px">From Advance Sheet</p>
         </div>
         <div class="field-group">
           <label class="field-label">FINAL OUT</label>
           <div class="field-input sched-adv-mirror" data-mirror-type="load_out" style="background:var(--bg-hover);color:var(--text-muted);cursor:default">
-            {% if show.load_out_date or show.load_out_time %}{{ show.load_out_date or '' }}{% if show.load_out_date and show.load_out_time %} · {% endif %}{{ show.load_out_time or '' }}{% else %}—{% endif %}
+            {{ show.load_out_date or '—' }}
           </div>
           <p class="field-hint" style="font-size:10px;color:var(--text-muted);margin-top:3px">From Advance Sheet</p>
         </div>

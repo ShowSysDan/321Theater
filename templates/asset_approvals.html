@@ -238,8 +238,8 @@
   <div class="appr-show-head" onclick="toggleShow(this)">
     <span class="appr-show-name">{{ s.name }}</span>
     <span class="appr-show-meta">
-      {% if s.load_in_date %}First Call {{ s.load_in_date }}{% if s.load_in_time %} · {{ s.load_in_time }}{% endif %}{% endif %}
-      {% if s.load_out_date %}&nbsp;→&nbsp;Final Out {{ s.load_out_date }}{% if s.load_out_time %} · {{ s.load_out_time }}{% endif %}{% endif %}
+      {% if s.load_in_date %}First Call {{ s.load_in_date }}{% endif %}
+      {% if s.load_out_date %}&nbsp;→&nbsp;Final Out {{ s.load_out_date }}{% endif %}
       {% if not s.load_in_date and s.show_date %}Show {{ s.show_date }}{% endif %}
       {% if s.venue %}&nbsp;·&nbsp;{{ s.venue }}{% endif %}
     </span>
