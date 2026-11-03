@@ -898,7 +898,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.44.2'
+APP_VERSION = '3.45.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -4692,9 +4692,9 @@ def _advance_show_sets(data):
     for k in ('load_in_date', 'load_out_date'):
         if k in data:
             sets.append((k, _txt(k) or None))
-    for k in ('load_in_time', 'load_out_time'):
-        if k in data:
-            sets.append((k, _txt(k)))
+    # load_in_time / load_out_time are no longer written (3.45.0: the
+    # engagement is dates only); a stale tab or an old version's restore that
+    # still carries them leaves the columns as they are.
     return sets
 
 
@@ -11276,9 +11276,7 @@ _SHOW_MERGE_MOVE_LABELS = {
 _ADVANCE_SCALAR_FIELDS = [
     ('performance_company', 'Performance Company'),
     ('load_in_date',  'First Call Date'),
-    ('load_in_time',  'First Call Time'),
     ('load_out_date', 'Final Out Date'),
-    ('load_out_time', 'Final Out Time'),
 ]
 
 
