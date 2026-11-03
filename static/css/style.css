@@ -3039,10 +3039,15 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 .tl-lanehead.tl-lane-empty .tl-lh-name { font-size: 13px; }
 :where(.tl-scroll) .tl-lane.tl-lane-empty { background: color-mix(in srgb, var(--text-dim) 4%, transparent); }
 .tl-col-none { position: absolute; top: 8px; left: 0; right: 0; text-align: center; font-size: 10.5px; color: var(--text-muted); font-style: italic; }
-.tl-perf { position: absolute; left: 0; right: 0; height: 0; border-top: 1px dashed color-mix(in srgb, var(--tl-accent) 70%, transparent); pointer-events: none; }   /* no z-index / opacity (either makes a stacking context): the line sits behind items, its label (z 2) above them */
-.tl-perf::before { content: ""; position: absolute; left: 0; top: -5px; border: 5px solid transparent; border-left: 7px solid var(--tl-accent); }
-.tl-perf-label { position: absolute; z-index: 2; left: 9px; top: -7px; padding: 0 4px; border-radius: 3px; background: var(--bg-card);
-  font: 700 9px/13px var(--font-mono); letter-spacing: .06em; color: var(--tl-accent); white-space: nowrap; }
+/* Show / event time (3.44.1): drawn ABOVE the items (z 2; a hovered item,
+   z 3, still rises over it) — behind them the line vanished under crew
+   bars and the label floated over their text. The label is a solid pill in
+   the lane colour with a card-coloured halo, readable over any bar. */
+.tl-perf { position: absolute; left: 0; right: 0; height: 0; z-index: 2; border-top: 2px dashed var(--tl-accent); pointer-events: none; }
+.tl-perf::before { content: ""; position: absolute; left: 0; top: -6px; border: 5px solid transparent; border-left: 7px solid var(--tl-accent); }
+.tl-perf-label { position: absolute; left: 9px; top: -8px; padding: 0 5px; border-radius: 4px; background: var(--tl-accent);
+  box-shadow: 0 0 0 2px var(--bg-card), 0 2px 6px rgba(0,0,0,.35);
+  font: 700 9.5px/14px var(--font-mono); letter-spacing: .06em; color: #111; white-space: nowrap; }
 .tl-key-perf { width: 14px; height: 0; border: 0; border-radius: 0; border-top: 2px dashed var(--accent); }
 
 /* Items: schedule blocks + crew bars. */
@@ -3155,6 +3160,9 @@ html[data-theme="light"] .tl-item.tl-sched .tl-item-time { color: color-mix(in s
 .tl-item.tl-sched.tl-showtime:hover, .tl-item.tl-sched.tl-showtime:focus-visible {
   background: color-mix(in srgb, var(--tl-accent) 32%, var(--bg-card));
 }
+/* Its text starts below the show-time pill that sits on its top edge. */
+.tl-item.tl-showtime:not(.tl-short) { padding-top: 12px; }
+.tl-item.tl-showtime:not(.tl-short) .tl-item-label { top: calc(var(--tl-head-h, 0px) + 12px); }
 .tl-item.tl-showtime .tl-item-desc::before { content: "\25B6\FE0E  "; font-size: .78em; color: var(--tl-accent); }
 .tl-item.tl-showtime.tl-piano .tl-item-desc::before { content: "\1F3B9  "; font-size: 1em; }
 
