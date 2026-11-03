@@ -2882,7 +2882,6 @@ a.pmc-phone:hover, a.pmc-email:hover { text-decoration: underline; }
 .tl-venues { flex: 1 1 260px; min-width: 0; }
 .tl-venues[hidden] { display: none; }
 .tl-pill-count { font-family: var(--font-mono); font-weight: 600; opacity: .7; }
-.tl-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-dim); cursor: pointer; white-space: nowrap; }
 :where(.tl-phead) .tl-zoom { display: inline-flex; gap: 4px; }
 :where(.tl-phead) .tl-zoom .btn { min-width: 32px; font: 600 15px/1 var(--font-mono); padding: 5px 8px; }
 .tl-legend { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11.5px; color: var(--text-dim); }
@@ -2936,10 +2935,6 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 .tl-lh-perf .mono { color: var(--ink); font-size: 12px; }
 .tl-cover, .today-card-cover { display: inline-block; font: 700 9px/1.5 var(--font-main); letter-spacing: .08em; text-transform: uppercase;
   padding: 0 5px; border-radius: 3px; background: rgba(232,130,47,.16); color: var(--orange-text); vertical-align: middle; }
-.tl-contact { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 6px;
-  border: 1px solid var(--border-light); color: var(--text-dim); }
-.tl-contact:hover { color: var(--orange-text); border-color: var(--line-strong); text-decoration: none; }
-.tl-contact svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .tl-lh-projects { display: flex; flex-wrap: wrap; gap: 4px; }
 .tl-proj { --tl-proj: var(--text-dim); display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-dim); }
 .tl-proj::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: var(--tl-proj); }
@@ -2965,8 +2960,6 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 .tl-lh-meta .tl-lh-venue { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
 :where(.tl-scroll) .tl-lh-pm { flex-wrap: nowrap; gap: 4px; font-size: 11.5px; line-height: 20px; white-space: nowrap; overflow: hidden; }
 :where(.tl-scroll) .tl-lh-pmname { min-width: 0; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
-:where(.tl-scroll) .tl-lh-pm .tl-contact { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 5px; }
-:where(.tl-scroll) .tl-lh-pm .tl-contact svg { width: 11px; height: 11px; }
 :where(.tl-scroll) .tl-lh-perf { display: inline-flex; flex: 0 0 auto; flex-wrap: nowrap; gap: 4px; margin-left: 4px; font-size: 11.5px; }
 :where(.tl-scroll) .tl-lh-perf .mono { font-size: 11.5px; }
 :where(.tl-scroll) .tl-lh-label { font-size: 9px; }
@@ -3160,6 +3153,14 @@ html[data-theme="light"] .tl-item.tl-sched .tl-item-time { color: color-mix(in s
 .tl-item.tl-sched.tl-showtime:hover, .tl-item.tl-sched.tl-showtime:focus-visible {
   background: color-mix(in srgb, var(--tl-accent) 32%, var(--bg-card));
 }
+/* A block a show-time line crosses (3.44.2, JS dodgeMarkers): its label
+   lives in .tl-seg, the part of the block above or below the line, so the
+   line and pill never sit on the text (sticky stays inside that part). */
+.tl-item.tl-dodged { padding: 0; }
+.tl-seg { position: absolute; left: 0; right: 0; display: block; box-sizing: border-box; padding: 3px 6px;
+  overflow: hidden; overflow-x: visible; overflow-y: clip; }   /* clip only at the line; the bar's own edge clips sideways (narrow phone bars) */
+.tl-item.tl-vert .tl-seg { padding: 5px 3px; }
+.tl-item.tl-vert .tl-seg .tl-item-label { max-height: calc(100% - 2px); }
 /* Its text starts below the show-time pill that sits on its top edge. */
 .tl-item.tl-showtime:not(.tl-short) { padding-top: 12px; }
 .tl-item.tl-showtime:not(.tl-short) .tl-item-label { top: calc(var(--tl-head-h, 0px) + 12px); }
