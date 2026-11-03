@@ -1288,7 +1288,8 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   fetches sequence-guarded + aborted; render only when `data.date` is the
   day shown. The axis stops at 06:00 next day (`RANGE_CAP`); items past it
   are listed in the lane header, never drawn. Item links carry
-  `.no-prefetch`. PM links use `LaborDays.telHref/mailtoHref` (no local copy).
+  `.no-prefetch`. No PM call / email buttons in lane headers (removed 3.44.2,
+  the user's call); phone + email live in the PM name's tooltip.
 - Width (3.36.0): a lane draws only the sub-columns it has items for (the
   header says "No crew" / "No schedule"); a lane with nothing timed in the
   current view is `empty` (one `W.empty` column, sorted after everything,

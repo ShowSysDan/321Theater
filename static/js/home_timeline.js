@@ -30,7 +30,7 @@
   const $ = (id) => document.getElementById(id);
   const ctxEl = $('tl-context'), statusEl = $('tl-status'), emptyEl = $('tl-empty');
   const emptyText = $('tl-empty-text'), venuesEl = $('tl-venues'), tip = $('tl-tip');
-  const dateInput = $('tl-date'), testCb = $('tl-include-test'), testCount = $('tl-test-count');
+  const dateInput = $('tl-date');
   const prevBtn = $('tl-prev'), nextBtn = $('tl-next'), todayBtn = $('tl-today');
   const zoomOutBtn = $('tl-zoom-out'), zoomInBtn = $('tl-zoom-in');
   const showSeg = $('tl-show');
@@ -49,7 +49,7 @@
   const RANGE_START = 6 * 60, RANGE_END = 24 * 60, RANGE_CAP = 30 * 60;
   const MIN_ITEM_PX = 18;
   const TICK_MS = 30000, REFRESH_MS = 60000;
-  const LS_ZOOM = 'home_tl_zoom', LS_VENUES = 'home_tl_venues', LS_TEST = 'home_tl_test', LS_SHOW = 'home_tl_show';
+  const LS_ZOOM = 'home_tl_zoom', LS_VENUES = 'home_tl_venues', LS_SHOW = 'home_tl_show';
   // What the lanes draw: everything, the production schedule only, or crew only.
   const SHOW_MODES = ['all', 'sched', 'crew'];
   const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -73,11 +73,6 @@
     return String(Math.floor(r / 60)).padStart(2, '0') + ':' + String(r % 60).padStart(2, '0');
   }
   function venueKey(s) { return s.venue || 'Unassigned'; }
-  // PM contact links use the ONE shared rule (app.js LaborDays.telHref /
-  // mailtoHref = the Jinja tel_href / mailto_href filters), so a number with
-  // an extension dials the same here as on the show page. '' = no link.
-  function telHref(p) { return window.LaborDays && LaborDays.telHref ? LaborDays.telHref(p) : ''; }
-  function mailHref(e) { return window.LaborDays && LaborDays.mailtoHref ? LaborDays.mailtoHref(e) : ''; }
 
   // ── state ─────────────────────────────────────────────────────────────
   const initial = root.dataset.initialDate || '';
@@ -86,7 +81,9 @@
   // day by itself (a wall display left on Home overnight), until the user
   // picks another day.
   let followToday = !ISO_RE.test(initial) || initial === localTodayIso();
-  let includeTest = lsGet(LS_TEST) === '1';
+  // Test / demo shows are never on Home (3.44.2: the Test shows checkbox is
+  // gone, the user's call; Search can still include them).
+  const includeTest = false;
   let showMode = lsGet(LS_SHOW);
   if (SHOW_MODES.indexOf(showMode) < 0) showMode = 'all';
   let zoomIdx = parseInt(lsGet(LS_ZOOM), 10);
@@ -153,7 +150,7 @@
       if (!dayShown()) {
         data = null;
         hideTip();
-        testCount.textContent = '';   // nor its '(N hidden)' count or venue chips
+        // nor its venue chips
         renderVenueChips();
         showEmpty('This day could not be loaded. It will try again in a minute.');
         renderContext();
@@ -184,7 +181,6 @@
   function syncControls() {
     if (document.activeElement !== dateInput) dateInput.value = curDate;
     todayBtn.disabled = curDate === localTodayIso();
-    testCb.checked = includeTest;
     zoomOutBtn.disabled = zoomIdx <= 0;
     zoomInBtn.disabled = zoomIdx >= ZOOMS.length - 1;
     if (showSeg) showSeg.querySelectorAll('button[data-show]').forEach(b => {
@@ -322,13 +318,11 @@
     renderVenueChips();
     renderContext();
     const n = (data.shows || []).length;
-    testCount.textContent = (!includeTest && data.test_hidden) ? ' (' + data.test_hidden + ' hidden)' : '';
 
     const lanes = visibleLanes();
     if (!lanes.length) {
       let msg = 'Nothing on the schedule for ' + data.label + '.';
       if (n && selVenues.size) msg = 'Nothing at the selected venue' + (selVenues.size === 1 ? '' : 's') + ' on ' + data.label + '.';
-      if (data.test_hidden && !includeTest) msg += ' (' + data.test_hidden + ' test show' + (data.test_hidden === 1 ? '' : 's') + ' hidden.)';
       showEmpty(msg);
       return;
     }
@@ -448,6 +442,7 @@
     inner.appendChild(body);
     scroller.textContent = '';
     scroller.appendChild(inner);
+    placeDodges(inner);
     setHead(head);
     inner.classList.add('tl-noanim');      // first paint: no slide
     syncHeadHeight();
@@ -553,9 +548,8 @@
       nm.title = [s.pm.name, s.pm.title, s.pm.phone, s.pm.email].filter(Boolean).join(' · ');
       pm.appendChild(nm);
       if (s.pm.is_cover) pm.appendChild(badge('tl-cover', 'cover', 'Covering PM for this day'));
-      const tel = telHref(s.pm.phone), mail = mailHref(s.pm.email);
-      if (tel) pm.appendChild(contactLink(tel, 'Call ' + s.pm.name + ' (' + s.pm.phone + ')', 'phone'));
-      if (mail) pm.appendChild(contactLink(mail, 'Email ' + s.pm.name + ' (' + s.pm.email + ')', 'mail'));
+      // No call / email buttons (3.44.2, the user's call): the PM's phone
+      // and email are in the name's tooltip.
     } else {
       pm.appendChild(glyph('person', 'PM'));
       pm.appendChild(el('em', 'tl-lh-none', 'No PM'));
@@ -600,24 +594,6 @@
     return svg;
   }
 
-  const ICONS = {
-    phone: 'M22 16.9v3a2 2 0 01-2.2 2 19.8 19.8 0 01-8.6-3.1 19.5 19.5 0 01-6-6A19.8 19.8 0 012.1 4.2 2 2 0 014.1 2h3a2 2 0 012 1.7c.1.9.4 1.8.7 2.7a2 2 0 01-.5 2.1L8 9.8a16 16 0 006 6l1.3-1.3a2 2 0 012.1-.4c.9.3 1.8.6 2.7.7a2 2 0 011.7 2z',
-    mail: 'M4 4h16a2 2 0 012 2v12a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2zM22 6l-10 7L2 6',
-  };
-  function contactLink(href, label, icon) {
-    const a = el('a', 'tl-contact');
-    a.href = href;
-    a.title = label;
-    a.setAttribute('aria-label', label);
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('viewBox', '0 0 24 24');
-    svg.setAttribute('aria-hidden', 'true');
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    path.setAttribute('d', ICONS[icon]);
-    svg.appendChild(path);
-    a.appendChild(svg);
-    return a;
-  }
 
   function untimedList(h, sched, crew, s) {
     if (!sched.length && !crew.length) return;
@@ -739,6 +715,8 @@
     const h = Math.max(MIN_ITEM_PX, Math.round((it._ve - it._vs) * ppm) - 1);
     node.style.top = top + 'px';
     node.style.height = h + 'px';
+    node._tlTop = top;
+    node._tlH = h;
     const n = it._ncol || 1;
     node.style.left = 'calc(' + (100 * it._col / n) + '% + 1px)';
     node.style.width = 'calc(' + (100 / n) + '% - 2px)';
@@ -747,6 +725,51 @@
     // Narrow + tall: the label runs down the bar (vertical text).
     else if (colW / n < vertAt && h >= 72) node.classList.add('tl-vert');
     if (it.t_start < it.start || it.start < range.start || it.end > range.end) node.classList.add('tl-clipped');
+  }
+
+  // A show / event time line (and its pill) drawn ACROSS a block (3.44.2)
+  // would sit on the block's text. Cut the block into the parts above and
+  // below the line and put the label in ONE of them: the top part when the
+  // label fits there, else the taller part. The part is its own box, so the
+  // sticky label can't slide across the line while scrolling either. A line
+  // exactly at the block's start is the show row's own (it pads instead).
+  // dodgeMarkers() only records the parts; placeDodges() measures the real
+  // label once the grid is in the page and picks the part.
+  const MARK_BAND = 11;          // px kept clear each side of the line (the pill is ~16 px tall)
+  function dodgeMarkers(node, it, ppm, range, show) {
+    if (!show || node.classList.contains('tl-short') || node._tlH == null) return;
+    const h = node._tlH, top = node._tlTop;
+    const ys = (show.performances || [])
+      .filter(p => p.minutes != null && p.minutes > it._vs && p.minutes < it._ve
+        && p.minutes >= range.start && p.minutes <= range.end)
+      .map(p => Math.round((p.minutes - range.start) * ppm) - top)
+      .sort((a, b) => a - b);
+    if (!ys.length) return;
+    const segs = [];
+    let from = 0;
+    ys.forEach(y => { segs.push([from, y - MARK_BAND]); from = y + MARK_BAND; });
+    segs.push([from, h]);
+    const usable = segs.filter(g => g[1] - g[0] > 0);
+    if (usable.length) node._tlSegs = usable;
+  }
+  function placeDodges(root) {
+    root.querySelectorAll('.tl-item').forEach(node => {
+      const segs = node._tlSegs;
+      const lab = node.querySelector(':scope > .tl-item-label');
+      if (!segs || !lab) return;
+      const vert = node.classList.contains('tl-vert');
+      // Full label length (vertical labels are capped by max-height, so
+      // scrollHeight) + the part's padding.
+      const need = lab.scrollHeight + (vert ? 10 : 6);
+      let pick = segs.find(g => g[1] - g[0] >= need);
+      if (!pick) pick = segs.reduce((a, b) => (b[1] - b[0] > a[1] - a[0] ? b : a));
+      const seg = el('span', 'tl-seg');
+      seg.style.top = pick[0] + 'px';
+      seg.style.height = (pick[1] - pick[0]) + 'px';
+      seg.appendChild(lab);
+      node.appendChild(seg);
+      node.classList.add('tl-dodged');
+    });
   }
 
   // The label rides in one wrapper that sticks under the lane headers, so a
@@ -773,6 +796,7 @@
     const times = it.point ? it.start_label : it.start_label + '–' + it.end_label;
     a.appendChild(label([['tl-item-time', times], ['tl-item-desc', it.desc || it.notes || '(no description)']]));
     place(a, it, ppm, range, colW, 64);
+    dodgeMarkers(a, it, ppm, range, s);
     a.setAttribute('aria-label', s.name + ': ' + times + ' ' + (it.desc || ''));
     itemInfo.set(k, { kind: 'sched', show: s, it: it });
     return a;
@@ -804,6 +828,7 @@
     const times = it.start_label + (it.open_end ? ' →' : '–' + it.end_label);
     a.appendChild(label([['tl-item-time', times],
       ['tl-item-desc', oh ? it.project + ' · ' + it.position : it.position], ['tl-item-sub', it.tech]]));
+    if (!oh) dodgeMarkers(a, it, ppm, range, l.show);
     a.setAttribute('aria-label', (oh ? it.project : l.show.name) + ': ' + it.position + ', ' + it.tech + ', ' + times);
     itemInfo.set(k, { kind: oh ? 'oh' : 'crew', show: oh ? null : l.show, it: it });
     return a;
@@ -1156,12 +1181,6 @@
   nextBtn.addEventListener('click', () => go(isoAdd(curDate, 1)));
   todayBtn.addEventListener('click', () => go(localTodayIso(), { follow: true }));
   dateInput.addEventListener('change', () => { if (ISO_RE.test(dateInput.value)) go(dateInput.value); });
-  testCb.addEventListener('change', () => {
-    includeTest = testCb.checked;
-    lsSet(LS_TEST, includeTest ? '1' : '0');
-    dataSig = '';
-    load();
-  });
   function zoom(d) {
     const z = Math.max(0, Math.min(ZOOMS.length - 1, zoomIdx + d));
     if (z === zoomIdx) return;
