@@ -35,10 +35,8 @@
 <div class="form-section" style="border-left:3px solid var(--accent)">
   <div class="form-section-body">
     <p class="text-dim" style="font-size:12px;margin:0">
-      <strong>Sandboxed module.</strong> Syncing only reads from Prism and writes to its own
-      staging tables — nothing in 321Theater changes until you select staged events below and
-      click <em>Import selected</em>. Imports create normal shows (with performances) that you
-      can edit or archive like any other.
+      <strong>Sandboxed module.</strong> Syncing only stages events; nothing changes until you
+      <em>Import selected</em>, which creates normal shows.
     </p>
   </div>
 </div>
@@ -276,12 +274,8 @@
   <div class="form-section-body no-pad" id="venue-panel" style="display:none">
     <div style="padding:10px 14px 0">
       <p class="text-dim" style="font-size:12px;margin:0">
-        Everything Prism reports as a venue or stage, plus anything seen on staged events.
-        Unchecking <em>Visible</em> hides that venue's events from the list below, moves its
-        not-yet-imported NEW events to Ignored, and makes future syncs stage its events
-        pre-ignored — so things like "Holidays" disappear in one click. Imported events are
-        never touched, and hiding is always reversible (tick "Show hidden venues", select,
-        Restore).
+        Every venue and stage Prism reports. Unchecking <em>Visible</em> hides and ignores that
+        venue's events (e.g. "Holidays"); imported events are untouched, and it's reversible.
       </p>
     </div>
     <table class="data-table">

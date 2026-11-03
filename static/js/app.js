@@ -672,7 +672,12 @@ document.addEventListener('keydown', (e) => {
      wrapper's data-tools name: ToolsMenu.register(name, wrap => items).
      An item is {label, onSelect(wrap), danger, disabled, title}, a
      {separator: true}, a {group: 'Heading', items: [...], empty: 'text'}
-     section, or a {note: 'text'} line. So a list is never stale.
+     section, a {note: 'text'} line, or a {submenu: [...], label, empty}
+     item that opens a second list beside the menu (3.44.0 — e.g. the
+     Schedule day menu's Templates ▸). So a list is never stale.
+   - Submenus: hover, click, Enter or → opens one (← / Esc goes back). It
+     flies out to the right (else left) of the menu; with no room on either
+     side (a phone) it covers the menu with a "‹ Back" row instead.
    - The panel stays INSIDE the wrapper (handlers can still use
      closest('.labor-day') etc.) but is position:fixed, placed from the
      trigger's rect, so overflow:hidden cards don't clip it.
@@ -682,7 +687,7 @@ document.addEventListener('keydown', (e) => {
      activation, another menu opening, or its trigger scrolling away. */
 window.ToolsMenu = (function () {
   const providers = {};
-  let open = null;            // {wrap, btn, panel, defs}
+  let open = null;            // {wrap, btn, panel, defs, sub: {item, panel, defs} | null}
 
   function register(name, fn) { providers[name] = fn; }
 
@@ -700,15 +705,19 @@ window.ToolsMenu = (function () {
       `<div class="tools-menu-panel" role="menu" aria-label="${_esc(title)}" hidden></div></div>`;
   }
 
-  function _items() {
-    return open ? Array.from(open.panel.querySelectorAll('.tools-menu-item:not([aria-disabled="true"])')) : [];
+  // The items of the list the keyboard is in: the open submenu while focus
+  // is inside it, else the main menu.
+  function _items(inSub) {
+    if (!open) return [];
+    const p = (inSub && open.sub) ? open.sub.panel : open.panel;
+    return Array.from(p.querySelectorAll('.tools-menu-item:not([aria-disabled="true"])'));
   }
 
   // Focus an item without scrolling the page; keep it visible inside a
   // panel that scrolls (a long template list).
   function _focusItem(el) {
     el.focus({preventScroll: true});
-    const p = open && open.panel;
+    const p = el.closest('.tools-menu-panel');
     if (!p || p.scrollHeight <= p.clientHeight) return;
     const top = el.offsetTop, bottom = top + el.offsetHeight;
     if (top < p.scrollTop) p.scrollTop = top;
@@ -718,6 +727,7 @@ window.ToolsMenu = (function () {
   function close(focusTrigger) {
     if (!open) return;
     const {btn, panel} = open;
+    closeSub(false);
     open = null;
     panel.hidden = true;
     panel.textContent = '';          // rebuilt on the next open; drops the item closures
@@ -731,10 +741,12 @@ window.ToolsMenu = (function () {
     const addItem = (parent, d, sub) => {
       const b = document.createElement('button');
       b.type = 'button';
-      b.className = 'tools-menu-item' + (sub ? ' tools-menu-sub' : '') + (d.danger ? ' is-danger' : '');
+      b.className = 'tools-menu-item' + (sub ? ' tools-menu-sub' : '') + (d.danger ? ' is-danger' : '')
+        + (d.submenu ? ' has-sub' : '') + (d.back ? ' tools-menu-back' : '');
       b.setAttribute('role', 'menuitem');
       b.tabIndex = -1;
       b.textContent = d.label;
+      if (d.submenu) { b.setAttribute('aria-haspopup', 'menu'); b.setAttribute('aria-expanded', 'false'); }
       if (d.title) b.title = d.title;
       if (d.disabled) b.setAttribute('aria-disabled', 'true');
       b.dataset.i = String(flat.length);
@@ -761,6 +773,7 @@ window.ToolsMenu = (function () {
         return;
       }
       if (d.group && !(d.items || []).length && !d.empty) return;   // nothing to list
+      if (d.submenu && !d.submenu.length && !d.empty) return;
       lastWasSep = false;
       if (d.group) {
         const g = document.createElement('div');
@@ -786,6 +799,83 @@ window.ToolsMenu = (function () {
     if (last && last.classList.contains('tools-menu-sep')) last.remove();
     if (!flat.length && !panel.firstChild) addNote(panel, 'Nothing to do here yet.');
     return flat;
+  }
+
+  // ── Submenus (3.44.0) ──
+  function closeSub(focusItem) {
+    if (!open || !open.sub) return;
+    const {item, panel} = open.sub;
+    open.sub = null;
+    panel.remove();
+    item.setAttribute('aria-expanded', 'false');
+    item.classList.remove('is-open');
+    if (focusItem && item.isConnected) _focusItem(item);
+  }
+
+  function openSub(item, focusFirst) {
+    if (!open) return;
+    const def = open.defs[parseInt(item.dataset.i, 10)];
+    if (!def || !def.submenu) return;
+    if (open.sub && open.sub.item === item) {
+      if (focusFirst) { const it = _items(true); if (it.length) _focusItem(it[0]); }
+      return;
+    }
+    closeSub(false);
+    const panel = document.createElement('div');
+    panel.className = 'tools-menu-panel tools-menu-subpanel';
+    panel.setAttribute('role', 'menu');
+    panel.setAttribute('aria-label', def.label);
+    const vw = document.documentElement.clientWidth || window.innerWidth;
+    const vh = window.innerHeight;
+    const m = 8;
+    const pr = open.panel.getBoundingClientRect();
+    const ir = item.getBoundingClientRect();
+    // Width first (off-screen), so we know which side it fits on.
+    panel.style.visibility = 'hidden';
+    open.wrap.appendChild(panel);
+    let defs = def.submenu.slice();
+    let w = 0, side = null;
+    const measure = () => {
+      panel.textContent = '';
+      const f = _build(panel, defs);
+      if (!def.submenu.length && def.empty) {
+        panel.textContent = '';
+        const n = document.createElement('div');
+        n.className = 'tools-menu-note';
+        n.textContent = def.empty;
+        panel.appendChild(n);
+      }
+      return f;
+    };
+    let flat = measure();
+    w = panel.offsetWidth;
+    if (vw - pr.right - m >= w - 4) side = 'right';
+    else if (pr.left - m >= w - 4) side = 'left';
+    else {
+      // No room beside the menu (phone): cover it, with a way back.
+      defs = [{label: '\u2039 ' + def.label, back: true, onSelect: null}, {separator: true}].concat(defs);
+      flat = measure();
+      panel.classList.add('is-cover');
+    }
+    panel.style.maxWidth = side ? '' : `${Math.round(pr.width)}px`;
+    if (!side) panel.style.minWidth = `${Math.round(pr.width)}px`;
+    const natural = panel.scrollHeight + 2;
+    let top = side ? ir.top - 6 : pr.top;
+    const maxH = vh - 2 * m;
+    if (natural > maxH) { panel.style.maxHeight = `${maxH}px`; top = m; }
+    else top = Math.max(m, Math.min(top, vh - m - natural));
+    const left = side === 'right' ? pr.right - 2 : side === 'left' ? pr.left - panel.offsetWidth + 2 : pr.left;
+    panel.style.top = `${Math.round(top)}px`;
+    panel.style.left = `${Math.round(Math.max(m, left))}px`;
+    panel.style.visibility = '';
+    open.sub = {item, panel, defs: flat};
+    item.setAttribute('aria-expanded', 'true');
+    item.classList.add('is-open');
+    if (focusFirst || !side) {
+      const it = _items(true).filter(b => !b.classList.contains('tools-menu-back'));
+      const all = _items(true);
+      if (it.length) _focusItem(it[0]); else if (all.length) _focusItem(all[0]);
+    }
   }
 
   function place() {
@@ -843,7 +933,14 @@ window.ToolsMenu = (function () {
 
   function activate(item) {
     if (!open || item.getAttribute('aria-disabled') === 'true') return;
-    const def = open.defs[parseInt(item.dataset.i, 10)];
+    const inSub = !!(open.sub && open.sub.panel.contains(item));
+    const def = (inSub ? open.sub.defs : open.defs)[parseInt(item.dataset.i, 10)];
+    if (inSub && def && def.back) { closeSub(true); return; }
+    if (!inSub && def && def.submenu) {
+      if (open.sub && open.sub.item === item) closeSub(true);
+      else openSub(item, true);
+      return;
+    }
     const wrap = open.wrap;
     close(true);                     // close first: a prompt()/confirm() must not sit under it
     if (def && typeof def.onSelect === 'function') {
@@ -885,7 +982,24 @@ window.ToolsMenu = (function () {
       return;
     }
     const item = t.closest('.tools-menu-item');
-    if (item && open && open.panel.contains(item)) { e.preventDefault(); activate(item); }
+    if (item && open && (open.panel.contains(item) || (open.sub && open.sub.panel.contains(item)))) {
+      e.preventDefault();
+      activate(item);
+    }
+  });
+  // Mouse hover opens a submenu (and moving onto another item of the main
+  // menu closes it), like a desktop menu bar. Touch/pen use click.
+  document.addEventListener('pointerover', (e) => {
+    if (!open || e.pointerType !== 'mouse') return;
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    const item = t.closest('.tools-menu-item');
+    if (!item || !open.panel.contains(item)) return;
+    if (item.classList.contains('has-sub')) {
+      if (item.getAttribute('aria-disabled') !== 'true') openSub(item, false);
+    } else if (open.sub && !open.sub.panel.classList.contains('is-cover')) {
+      closeSub(false);
+    }
   });
   // Outside press closes (pointerdown: iOS doesn't send click for taps on
   // non-interactive elements, and a stopPropagation()'d click elsewhere
@@ -911,11 +1025,19 @@ window.ToolsMenu = (function () {
     if (!open) return;
     if (e.key === 'Escape') {
       if (open.wrap.contains(t)) { e.preventDefault(); e.stopPropagation(); }
+      if (open.sub && open.sub.panel.contains(t)) { closeSub(true); return; }
       close(open.wrap.contains(t));
       return;
     }
-    if (!open.panel.contains(t) && t !== open.btn) return;
-    const items = _items();
+    const inSub = !!(open.sub && open.sub.panel.contains(t));
+    if (!open.panel.contains(t) && t !== open.btn && !inSub) return;
+    if (inSub && e.key === 'ArrowLeft') { e.preventDefault(); closeSub(true); return; }
+    if (!inSub && e.key === 'ArrowRight' && t.classList.contains('has-sub')) {
+      e.preventDefault();
+      openSub(t, true);
+      return;
+    }
+    const items = _items(inSub);
     const idx = items.indexOf(document.activeElement);
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
@@ -931,10 +1053,12 @@ window.ToolsMenu = (function () {
       close(false);
     }
   }, true);
-  window.addEventListener('resize', place);
+  window.addEventListener('resize', () => { closeSub(false); place(); });
   window.addEventListener('scroll', (e) => {
     // Scrolling inside the menu itself (a long list) must not re-place it.
-    if (open && e.target instanceof Node && open.panel.contains(e.target)) return;
+    if (open && e.target instanceof Node && (open.panel.contains(e.target)
+        || (open.sub && open.sub.panel.contains(e.target)))) return;
+    closeSub(false);
     place();
   }, true);
 
@@ -1689,10 +1813,12 @@ ToolsMenu.register('sched-day', (wrap) => {
   if (!Array.isArray(times)) times = [];
   const defs = [];
   const templates = window.SCHED_TEMPLATES || [];
+  // Templates ▸ (3.44.0): one entry; the list is its submenu.
   if (templates.length) {
-    defs.push({group: 'Apply template', items: templates.map(t => ({
-      label: t.name || 'Untitled', title: 'Apply this template to this day',
-      onSelect: () => applySchedTemplate(t.id, key)}))});
+    defs.push({label: 'Templates', title: 'Apply a saved template to this day',
+               submenu: templates.map(t => ({
+                 label: t.name || 'Untitled', title: 'Apply this template to this day',
+                 onSelect: () => applySchedTemplate(t.id, key)}))});
   }
   // The OTHER days, as the day tabs list them right now (the tab strip only
   // shows when the show has more than one day — same rule as the old select).
@@ -2240,9 +2366,8 @@ function openSaveSchedTemplate() {
       ${dayPick}
       <label class="field-label">Template name</label>
       <input type="text" class="field-input" data-name maxlength="120" placeholder="e.g. Orchestra concert — single day">
-      <p class="text-dim" style="margin:0;font-size:12px">Saves the day's rows (times, descriptions, notes) as a
-        schedule template anyone can apply from a day's Tools → Apply template. Piano tuning rows are left out.
-        Using an existing template's name replaces that template.</p>`,
+      <p class="text-dim" style="margin:0;font-size:12px">Saves this day's rows for anyone to apply from Tools → Templates.
+        An existing name is replaced.</p>`,
     `<button type="button" class="btn btn-ghost" data-close>Cancel</button>
      <button type="button" class="btn btn-primary" data-go>Save template</button>`, 480);
   const nameEl = ov.querySelector('[data-name]');
@@ -6514,4 +6639,232 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
     if (!document.hidden) maybeResync();
   });
   window.addEventListener('focus', maybeResync);
+})();
+
+/* ── Sidebar search box (3.44.0) ─────────────────────────────────────
+   base.html #nav-search. Typing (≥ 2 chars, 220 ms debounce) asks
+   /api/search for the 8 best matches (show name / venue / Arts Group /
+   PM — the cheap metadata search, never the content scan) and lists them
+   in a popover under the box. '#word' searches that tag instead. ↑/↓ move,
+   Enter opens the highlighted show (nothing highlighted → the Search page
+   with the words filled in), Esc closes. "/" anywhere focuses the box.
+   The popover lives on <body> (the mobile drawer's transform would make a
+   fixed child relative to the drawer). Fetches are sequence-guarded and
+   aborted, so a slow answer never overwrites a newer one. */
+(function _initNavSearch() {
+  const input = document.getElementById('nav-search-q');
+  const form = document.getElementById('nav-search');
+  if (!input || !form) return;
+  const LIMIT = 8;
+  const pop = document.createElement('div');
+  pop.className = 'nav-sr';
+  pop.id = 'nav-search-results';
+  pop.setAttribute('role', 'listbox');
+  pop.setAttribute('aria-label', 'Search results');
+  pop.hidden = true;
+  document.body.appendChild(pop);
+  let timer = null, seq = 0, ctrl = null, active = -1, lastQ = '';
+
+  const isTag = q => /^#[A-Za-z]/.test(q);
+  function searchUrl(q) {
+    const p = new URLSearchParams();
+    if (isTag(q)) q.split(/\s+/).filter(Boolean).forEach(t => p.append('tag', t));
+    else p.set('q', q);
+    return '/search?' + p.toString();
+  }
+  function links() { return Array.from(pop.querySelectorAll('a[role="option"]')); }
+  function setActive(i) {
+    const ls = links();
+    ls.forEach((a, j) => a.classList.toggle('is-active', j === i));
+    active = (i >= 0 && i < ls.length) ? i : -1;
+    if (active >= 0) {
+      input.setAttribute('aria-activedescendant', ls[active].id);
+      ls[active].scrollIntoView({block: 'nearest'});
+    } else input.removeAttribute('aria-activedescendant');
+  }
+  function place() {
+    if (pop.hidden) return;
+    const r = form.querySelector('.nav-search-box').getBoundingClientRect();
+    const vw = document.documentElement.clientWidth || window.innerWidth;
+    const w = Math.min(360, vw - 16);
+    pop.style.top = Math.round(r.bottom + 6) + 'px';
+    pop.style.left = Math.round(Math.max(8, Math.min(r.left, vw - w - 8))) + 'px';
+  }
+  function show() { pop.hidden = false; input.setAttribute('aria-expanded', 'true'); place(); }
+  function hide() {
+    pop.hidden = true;
+    input.setAttribute('aria-expanded', 'false');
+    setActive(-1);
+  }
+  function note(text, err) {
+    pop.textContent = '';
+    const n = document.createElement('div');
+    n.className = 'nav-sr-note' + (err ? ' is-error' : '');
+    n.textContent = text;
+    pop.appendChild(n);
+  }
+  function allLink(q, total) {
+    const a = document.createElement('a');
+    a.className = 'nav-sr-all';
+    a.href = searchUrl(q);
+    a.id = 'nav-sr-all';
+    a.setAttribute('role', 'option');
+    const l = document.createElement('span');
+    l.textContent = total > LIMIT ? `All ${total} results →` : 'Open in Search →';
+    const r = document.createElement('span');
+    r.textContent = 'filters, content, #tags';
+    a.append(l, r);
+    return a;
+  }
+  // The name with every typed word highlighted (textContent only).
+  function nameInto(el, name, terms) {
+    const lower = name.toLowerCase();
+    const marks = [];
+    terms.forEach(t => {
+      let i = 0;
+      while (t && (i = lower.indexOf(t, i)) >= 0) { marks.push([i, i + t.length]); i += t.length; }
+    });
+    marks.sort((a, b) => a[0] - b[0]);
+    let pos = 0;
+    marks.forEach(([s, e]) => {
+      if (s < pos) return;
+      if (s > pos) el.appendChild(document.createTextNode(name.slice(pos, s)));
+      const m = document.createElement('mark');
+      m.textContent = name.slice(s, e);
+      el.appendChild(m);
+      pos = e;
+    });
+    if (pos < name.length) el.appendChild(document.createTextNode(name.slice(pos)));
+  }
+  function render(q, data) {
+    pop.textContent = '';
+    const res = data.results || [];
+    const terms = isTag(q) ? [] : q.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!res.length) {
+      note(isTag(q) ? `No shows tagged ${q}.` : `No shows match “${q}”.`);
+    } else {
+      const h = document.createElement('div');
+      h.className = 'nav-sr-head';
+      h.setAttribute('role', 'presentation');
+      h.textContent = data.total > res.length ? `Top ${res.length} of ${data.total}` : `${res.length} show${res.length === 1 ? '' : 's'}`;
+      pop.appendChild(h);
+      res.forEach((r, i) => {
+        const a = document.createElement('a');
+        a.className = 'nav-sr-item' + (r.is_event ? ' is-event' : '') + (r.status === 'archived' ? ' is-archived' : '');
+        a.href = r.url;
+        a.id = 'nav-sr-' + i;
+        a.setAttribute('role', 'option');
+        const main = document.createElement('span');
+        main.className = 'nav-sr-main';
+        const nm = document.createElement('span');
+        nm.className = 'nav-sr-name';
+        nameInto(nm, r.name || '(untitled)', terms);
+        nm.title = r.name || '';
+        const meta = document.createElement('span');
+        meta.className = 'nav-sr-meta';
+        if (r.dates_label) {
+          const d = document.createElement('span');
+          d.className = 'mono';
+          d.textContent = r.dates_label;
+          meta.appendChild(d);
+        }
+        const rest = [r.venue, r.pm ? 'PM ' + r.pm : ''].filter(Boolean).join(' · ');
+        if (rest) meta.appendChild(document.createTextNode((r.dates_label ? ' · ' : '') + rest));
+        main.append(nm, meta);
+        const why = (r.matched || []).find(m => m.type === 'meta');
+        if (why) {
+          const w = document.createElement('span');
+          w.className = 'nav-sr-why';
+          w.textContent = why.text;
+          main.appendChild(w);
+        }
+        a.appendChild(main);
+        const tags = document.createElement('span');
+        tags.className = 'nav-sr-tags';
+        const tag = (t, c) => { const s = document.createElement('span'); s.className = 'nav-sr-tag' + (c ? ' ' + c : ''); s.textContent = t; tags.appendChild(s); };
+        if (r.is_event) tag('Event', 't-event');
+        if (r.status === 'archived') tag('Archived');
+        if (r.is_test) tag('Test');
+        if (tags.childNodes.length) a.appendChild(tags);
+        pop.appendChild(a);
+      });
+    }
+    pop.appendChild(allLink(q, data.total || 0));
+    setActive(-1);
+    show();
+  }
+  async function run(q) {
+    const my = ++seq;
+    if (ctrl) ctrl.abort();
+    ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    const p = new URLSearchParams({limit: String(LIMIT), status: 'all'});
+    if (isTag(q)) q.split(/\s+/).filter(Boolean).forEach(t => p.append('tag', t));
+    else p.set('q', q);
+    try {
+      const r = await fetch('/api/search?' + p.toString(), {
+        headers: {'X-Requested-With': 'XMLHttpRequest'}, credentials: 'same-origin',
+        signal: ctrl ? ctrl.signal : undefined});
+      const data = await r.json().catch(() => null);
+      if (my !== seq || input.value.trim() !== q) return;
+      if (!r.ok || !data || data.success === false) { note((data && data.error) || 'Search failed — try again.', true); show(); return; }
+      render(q, data);
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+      if (my === seq) { note('Search failed — try again.', true); show(); }
+    }
+  }
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    const q = input.value.trim().replace(/\s+/g, ' ');
+    if (q.length < 2) { seq++; if (ctrl) ctrl.abort(); lastQ = ''; hide(); return; }
+    if (q === lastQ && !pop.hidden) return;
+    timer = setTimeout(() => { lastQ = q; run(q); }, 220);
+  });
+  input.addEventListener('focus', () => {
+    if (input.value.trim().length >= 2 && pop.childNodes.length) show();
+  });
+  input.addEventListener('keydown', (e) => {
+    const ls = links();
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (pop.hidden) { if (ls.length) show(); else return; }
+      e.preventDefault();
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      setActive(active < 0 ? (step > 0 ? 0 : ls.length - 1) : (active + step + ls.length) % ls.length);
+    } else if (e.key === 'Escape') {
+      if (!pop.hidden) { e.preventDefault(); hide(); }
+      else if (input.value) { e.preventDefault(); input.value = ''; lastQ = ''; }
+      else input.blur();
+    } else if (e.key === 'Enter' && active >= 0 && !pop.hidden && ls[active]) {
+      e.preventDefault();
+      window.location.href = ls[active].href;
+    }
+  });
+  form.addEventListener('submit', (e) => {
+    const q = input.value.trim().replace(/\s+/g, ' ');
+    e.preventDefault();
+    window.location.href = q ? searchUrl(q) : '/search';
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (pop.hidden) return;
+    const t = e.target;
+    if (t instanceof Node && (pop.contains(t) || form.contains(t))) return;
+    hide();
+  }, true);
+  pop.addEventListener('pointermove', (e) => {
+    const a = e.target instanceof Element ? e.target.closest('a[role="option"]') : null;
+    if (a) setActive(links().indexOf(a));
+  });
+  window.addEventListener('resize', place);
+  window.addEventListener('scroll', (e) => { if (!(e.target instanceof Node && pop.contains(e.target))) place(); }, true);
+  // "/" focuses the box (not while typing somewhere, nor when it's hidden —
+  // the icon rail, or the closed phone drawer).
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+    const t = e.target;
+    if (t instanceof Element && (t.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]'))) return;
+    if (!input.offsetParent || document.documentElement.classList.contains('mobile-view')) return;
+    e.preventDefault();
+    input.focus();
+    input.select();
+  });
 })();

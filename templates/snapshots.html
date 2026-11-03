@@ -14,7 +14,7 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">DB Snapshots</h1>
-    <p class="page-sub">Inspect an hourly or daily backup, see what changed since, and recover pieces without a full restore.</p>
+    <p class="page-sub">Inspect a backup, see what changed, and recover pieces of it.</p>
   </div>
   <a href="{{ url_for('settings') }}" class="btn btn-secondary">← Settings</a>
 </div>
@@ -109,9 +109,7 @@
       {# Per-show restore #}
       <div id="view-shows" style="display:none">
         <p class="text-dim" style="font-size:.85rem;margin-bottom:.75rem">
-          Roll one show back to how it looked in this snapshot — its show record, advance fields, schedule,
-          notes, performances, comments, attachments, labor and assets. Shows deleted from live can be resurrected.
-          Sent-email history and audit logs are never rewound.
+          Roll one show (all its data) back to this snapshot, or bring back a deleted show.
         </p>
         <div id="shows-loading" class="text-dim">Reading shows…</div>
         <div id="shows-picker" style="display:none;max-width:640px">

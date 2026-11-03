@@ -119,7 +119,7 @@
 {# ── Bulk Edit Toolbar (only visible in bulk-edit mode) ── #}
 <div id="bulk-edit-toolbar" style="display:none;margin-bottom:12px;padding:8px 12px;background:rgba(245,127,32,.10);border:1px solid rgba(245,127,32,.4);border-radius:4px;align-items:center;gap:10px;flex-wrap:wrap">
   <strong style="font-size:12px;color:var(--accent)">BULK EDIT · HIDE FROM ADVANCE PICKER</strong>
-  <span style="font-size:11px;color:var(--text-dim)">Checked types are removed from the show-page asset picker, so only the approvals portal can add them. Check a category / group to cascade. <span style="font-style:italic">Indeterminate (—)</span> means at least one child differs.</span>
+  <span style="font-size:11px;color:var(--text-dim)">Checked types can only be added from Approvals. A category / group cascades; <span style="font-style:italic">—</span> = mixed.</span>
   <span id="bulk-edit-counter" style="margin-left:auto;font-size:11px;color:var(--text-dim)">0 pending</span>
   <button class="btn btn-sm btn-ghost" onclick="cancelBulkEdit()">Cancel</button>
   <button id="bulk-edit-save-btn" class="btn btn-sm btn-primary" onclick="saveBulkEdit()" disabled>Save</button>
@@ -328,7 +328,7 @@
                 <input type="number" id="type-weekly-cost" class="field-input" value="0" min="0" step="0.01">
               </div>
             </div>
-            <p class="te-help" id="type-weekly-help">Whole weeks bill at the weekly rate; leftover days bill daily but never more than one week. Leave the daily rate at 0 to bill purely by the week (rounded up).</p>
+            <p class="te-help" id="type-weekly-help">Whole weeks bill weekly, leftover days daily (capped at a week). Daily rate 0 = weekly only.</p>
           </section>
 
           {# Performance Company special rates (3.8.0) — a show whose advance
@@ -339,10 +339,10 @@
               <h3 class="te-title">Company rates</h3>
               <button type="button" class="btn btn-sm btn-ghost rv-hide" onclick="addCompanyRateRow()">+ Add company rate</button>
             </div>
-            <p class="te-help" style="margin-top:0">When a show's <strong>Performance Company</strong> (Advance Sheet) matches, items added to it use that company's rates — same day/week math. <strong>From / Through</strong> limit when a rate applies, by the line's rental start (blank = open-ended), so a contracted rate can go in early. A company can have several periods that don't overlap.</p>
+            <p class="te-help" style="margin-top:0">Used when a show's <strong>Performance Company</strong> matches. <strong>From / Through</strong> (by rental start, blank = open) set when a rate applies; periods can't overlap.</p>
             <div id="type-company-rates"></div>
             <div id="type-company-rates-empty" class="te-empty">No special rates — shows use the standard pricing.</div>
-            <p class="te-help">Items already on a show keep their price until someone presses <em>Re-price</em> on the show's Assets tab.</p>
+            <p class="te-help">Existing show lines keep their price until <em>Re-price</em> on the show's Assets tab.</p>
           </section>
         </div>
       </div>

@@ -23,15 +23,12 @@
 
 <div style="background:rgba(245,127,32,.08);border:1px solid rgba(245,127,32,.35);border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:12px;line-height:1.5">
   <strong style="color:var(--accent)">How the tree works:</strong>
-  Categories → Groups → Types. A “group” is just an <code>asset_types</code> row with no parent; anything
-  with <code>parent_type_id</code> set appears under it. A parentless row that gains children silently becomes a
-  group (and disappears from the finder search); a parentless row with no children shows as an empty group.
-  Edits and deletes here are <strong>audited with before/after snapshots</strong> — admins can undo them from the Audit Log.
+  Categories → Groups → Types. A group is a parentless <code>asset_types</code> row; rows with
+  <code>parent_type_id</code> sit under it. Every edit is <strong>audited</strong> and can be undone from the Audit Log.
 </div>
 {% if readonly_view %}
 <div style="background:rgba(74,85,104,.14);border:1px solid rgba(74,85,104,.5);border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:12px;line-height:1.5">
-  <strong>View only.</strong> This account is read-only, so the row tools (Edit, Merge, Move children, Delete, Unlink) are hidden —
-  every one of them writes. You can still run the integrity scan, open its findings and browse / search every table.
+  <strong>View only.</strong> Row tools are hidden; you can still run the integrity scan and browse every table.
 </div>
 {% endif %}
 
@@ -112,8 +109,7 @@
     <div class="modal-body">
       <div id="dbt-merge-src" style="font-size:13px"></div>
       <p style="font-size:12px;color:var(--text-dim);margin:0">
-        Units, show lines (locked prices kept), system links and memberships are repointed at the
-        target, then the source row is deleted. Use this to fold an accidental duplicate into the real type.
+        Moves everything onto the target type, then deletes the source row.
       </p>
       <label style="font-size:12px">Merge into
         <select id="dbt-merge-target" class="field-input" style="width:100%;margin-top:4px"></select>

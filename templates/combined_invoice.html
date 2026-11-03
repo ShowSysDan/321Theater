@@ -10,7 +10,7 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">Combined Invoice</h1>
-    <p class="page-sub">Bill several shows/events on one invoice — labor, gear &amp; assets, plus attached 3rd-party rentals</p>
+    <p class="page-sub">Bill several shows/events on one invoice</p>
   </div>
   <button id="generate-btn" class="btn btn-primary" onclick="generatePdf()" disabled>
     Generate Combined Invoice
@@ -24,10 +24,8 @@
   </div>
   <div class="form-section-body" style="gap:10px">
     <p class="text-dim" style="font-size:12px;margin:0">
-      Pick every show/event that belongs on this invoice — e.g. a mainstage performance in one venue
-      plus an after-party in another. The PDF shows each show's actual labor, internal assets &amp; gear,
-      and external costs with per-show totals and one combined grand total; any 3rd-party rental PDFs
-      are attached at the end. Shows appear on the invoice in date order.
+      Pick the shows/events for this invoice. The PDF lists each show's costs with per-show totals
+      and a grand total, with rental PDFs attached.
     </p>
     <div id="sel-chips" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center"></div>
     <p id="sel-unsettled" style="display:none;margin:0;font-size:12px;color:#f59e0b"></p>

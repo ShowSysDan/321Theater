@@ -10,7 +10,7 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">Piano Tuning{% if readonly_view %}<span class="rv-badge" title="Your account is read-only: you can see every tuning, vendor and paperwork PDF, but not change them">VIEW ONLY</span>{% endif %}</h1>
-    <p class="page-sub">Every tuning requested from a show page. Schedule it with a vendor, set the tuning time (it goes onto the show's production schedule) and the cost (it shows on the show's Assets tab and invoices). {% if readonly_view %}A <strong>🏠 House</strong> tuning isn't for a show: maintenance, a rehearsal, a recording.{% else %}<strong>Add House Tuning</strong> logs a tuning that isn't for a show: maintenance, a rehearsal, a recording.{% endif %} A <strong>Completed</strong> tuning is added to the piano unit's service record (Assets → unit → Log).</p>
+    <p class="page-sub">Tunings requested from shows, plus {% if readonly_view %}<strong>🏠 House</strong>{% else %}house{% endif %} tunings. Times go on the show's schedule, costs on its invoices; completed tunings log to the piano's service record.</p>
   </div>
   <div class="header-actions">
     {% if user and user.role == 'admin' %}<a href="{{ url_for('settings') }}#modules" class="btn btn-ghost btn-sm">← Modules</a>{% endif %}
@@ -123,7 +123,7 @@
           <textarea id="pt-mgr-notes" class="field-input field-textarea" rows="2" maxlength="4000" placeholder="Vendor confirmation, PO number…"></textarea>
         </div>
       </div>
-      <p class="text-dim pt-show-only" style="font-size:11px;margin:8px 0 0;line-height:1.45"><strong>Scheduled</strong> = sent to the vendor. Setting the tuning date also marks it Scheduled; the requester is emailed when it's scheduled and when the time changes. The cost and paperwork appear right away as an external rental on the show's Assets tab (and its Asset Estimate / Final Invoice, with the PDF attached). Cancelling removes the schedule row, the charge and the paperwork.</p>
+      <p class="text-dim pt-show-only" style="font-size:11px;margin:8px 0 0;line-height:1.45"><strong>Scheduled</strong> = sent to the vendor (a tuning date sets it); the requester is emailed. Cost and paperwork go on the show's Assets tab and invoices. Cancelling removes the schedule row, charge and paperwork.</p>
     </div>
     <div class="modal-footer">
       <a id="pt-show-link" class="btn btn-ghost" href="#" style="margin-right:auto">Open show →</a>
