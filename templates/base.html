@@ -193,6 +193,27 @@
         Log out
       </a>
       {% else %}
+      {# Search box (3.44.0) — first thing in the nav. Typing lists quick
+         matches (app.js _initNavSearch → /api/search, show name / venue /
+         Arts Group / PM; '#tag' searches a tag); Enter or "All results"
+         opens the Search page with the words filled in. "Advanced search"
+         = the Search page with every filter. On the icon rail the box is
+         replaced by a plain Search tile. #}
+      {% set _find_active = request.endpoint in ('search_page', 'tags_index', 'tag_page') %}
+      <form class="nav-search" id="nav-search" action="{{ url_for('search_page') }}" method="get" role="search" autocomplete="off">
+        <div class="nav-search-box">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.2" y2="16.2"/></svg>
+          <input type="search" name="q" id="nav-search-q" maxlength="200" placeholder="Search shows…"
+                 aria-label="Search shows" role="combobox" aria-autocomplete="list" aria-expanded="false"
+                 aria-controls="nav-search-results" enterkeyhint="search" spellcheck="false">
+          <kbd class="nav-search-kbd" aria-hidden="true" title="Press / to search">/</kbd>
+        </div>
+        <a class="nav-search-adv{% if _find_active %} active{% endif %}" href="{{ url_for('search_page') }}"{% if _find_active %} aria-current="page"{% endif %}>Advanced search</a>
+      </form>
+      <a href="{{ url_for('search_page') }}" class="nav-item nav-search-rail {% if _find_active %}active{% endif %}" title="Search"{% if _find_active %} aria-current="page"{% endif %}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.2" y2="16.2"/></svg>
+        Search
+      </a>
       {# Home = the day timeline (3.35.0); Shows = the show board (+ its
          Archived tab); My Shows = the board narrowed to my PM shows. #}
       <a href="{{ url_for('index') }}" class="nav-item {% if request.endpoint == 'index' %}active{% endif %}"{% if request.endpoint == 'index' %} aria-current="page"{% endif %}>
@@ -207,11 +228,6 @@
       <a href="{{ url_for('my_shows') }}" class="nav-item {% if request.endpoint == 'my_shows' %}active{% endif %}"{% if request.endpoint == 'my_shows' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M16 3l1.5 1.5L20 2"/></svg>
         My Shows
-      </a>
-      {% set _find_active = request.endpoint in ('search_page', 'tags_index', 'tag_page') %}
-      <a href="{{ url_for('search_page') }}" class="nav-item {% if _find_active %}active{% endif %}"{% if _find_active %} aria-current="page"{% endif %}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.2" y2="16.2"/></svg>
-        Search
       </a>
 
       {% if request.endpoint in ['show_page'] and show is defined %}
@@ -572,8 +588,8 @@ const _HELP_PAGES = {
       <p><strong>Everything happening on one day, at a glance.</strong> One column (lane) per show or event that has anything that day — its load-in/out or performance dates, production schedule rows or crew — side by side on one time axis, so you can see what overlaps.</p>
       <ul style="${_HELP_UL}">
         <li><strong>Time runs top to bottom</strong> on the left axis, from 06:00 (earlier if something starts earlier) to midnight — longer when the day runs late, up to 06:00 the next morning. Scroll down for later, sideways for more lanes; the times and lane headers stay put.</li>
-        <li><strong>Lane header</strong> — show name (click it to open the show), venue, Day n of the run, badges (EVENT, TEST, DARK day, Prism status), the day's <strong>PM</strong> (the covering PM when one is set for the day) with call / email links, and performance times.</li>
-        <li><strong>Schedule</strong> blocks are the show's production schedule for the day; <strong>Crew</strong> bars are its labor lines (position · technician, in → out, lunches hatched). Items that overlap sit side by side. Dashed = not confirmed (no end time on a schedule row; a crew line not yet scheduled or unfilled). Click a block to open that schedule row, a crew bar to open the show's labor.</li>
+        <li><strong>Lane header</strong> — show name (click it to open the show), venue, Day n of the run, badges (EVENT, TEST, DARK day, Prism status), the day's <strong>PM</strong> (the covering PM when one is set for the day) with call / email links, and ▶ performance times. Orange lanes are shows, teal lanes events.</li>
+        <li><strong>Schedule</strong> blocks are the show's production schedule for the day, in the lane's colour; the row that starts at a performance / event time is filled in (▶). <strong>Crew</strong> bars are its labor lines (position · technician, in → out, lunches hatched). Items that overlap sit side by side. Dashed = not confirmed (no end time on a schedule row; a crew line not yet scheduled or unfilled). Click a block to open that schedule row, a crew bar to open the show's labor.</li>
         <li>Anything still running after midnight from the day before shows at the top, marked <em>from the previous day</em>; times on another day carry their date (e.g. <code>11/2 01:30</code>). Schedule rows and crew lines without a usable time (TBD…) are listed under <em>N without a time</em> in the lane header.</li>
         <li><strong>Overhead &amp; Project Crew</strong> lines for the day get a lane of their own (hidden while a venue filter is on); its blocks open the Overhead &amp; Project Crew page.</li>
         <li>The red <strong>NOW</strong> line follows your device's clock while you look at today (it moves every 30 s); finished items fade. The page refreshes itself every minute while it's open, and a page left on today rolls over to the next day at 06:00.</li>
@@ -642,7 +658,7 @@ const _HELP_PAGES = {
         <li><strong>Tools ▾ above the day tabs</strong> — <strong>Import from another show…</strong> (copy another show's schedule onto chosen days; add to or replace what's there), <strong>Save day as template…</strong> (admins and content admins) and <strong>History</strong> (every saved version, with what changed).</li>
         <li><strong>Tools ▾ in each day's header</strong>:
           <ul style="${_HELP_UL}">
-            <li><strong>Apply template</strong> — pick a template to insert a pre-built timeline (replace or merge when the day already has rows). Templates are defined in Settings → Form Fields → Day Templates, or saved from a day here.</li>
+            <li><strong>Templates ▸</strong> — hover or click for the list, then pick a template to insert a pre-built timeline (replace or merge when the day already has rows). Templates are defined in Settings → Form Fields → Day Templates, or saved from a day here.</li>
             <li><strong>Copy from day</strong> — replace this day's rows with a copy of another day's (piano tuning rows stay put).</li>
             <li><strong>Pull show time(s)</strong> — insert a SHOW START row for each performance that date (only on days with performance times).</li>
             <li><strong>Sort by time</strong> — reorder rows by start time (a START edit also re-sorts).</li>
@@ -1059,7 +1075,7 @@ const _HELP_PAGES = {
   nav_editor: {
     title: 'Sidebar Editor',
     html: `
-      <p>Arranges the sidebar <strong>for every user</strong> (admin only). <strong>Home</strong>, <strong>Shows</strong>, <strong>My Shows</strong> and <strong>Search</strong> always stay at the top (followed by the current show's tabs on a show page); everything below them is laid out here.</p>
+      <p>Arranges the sidebar <strong>for every user</strong> (admin only). The search box, <strong>Home</strong>, <strong>Shows</strong> and <strong>My Shows</strong> always stay at the top (followed by the current show's tabs on a show page); everything below them is laid out here.</p>
       <ul style="${_HELP_UL}">
         <li>Drag a row, or use <strong>↑ ↓</strong>, to reorder.</li>
         <li>Type in a row's box to <strong>rename</strong> it (blank = the default name); <strong>Indent</strong> shows it as a sub-item of the row above; <strong>Hide</strong> takes it out of the sidebar.</li>
@@ -1182,7 +1198,7 @@ const _HELP_PAGES = {
   search: {
     title: 'Search',
     html: `
-      <p><strong>Find any show — active or archived.</strong> Every filter you set narrows the results; the address bar keeps them, so you can bookmark or share a search and Back steps through your changes.</p>
+      <p><strong>Find any show — active or archived.</strong> For a quick lookup, type in the <strong>search box at the top of the sidebar</strong> (or press <kbd>/</kbd>): the best matches drop down as you type (<code>#tag</code> searches a tag), Enter opens the highlighted show or this page. <strong>Advanced search</strong> under the box opens this page. Every filter you set narrows the results; the address bar keeps them, so you can bookmark or share a search and Back steps through your changes.</p>
       <ul style="${_HELP_UL}">
         <li><strong>Search box</strong> — matches the show name, venue, Arts Group and PM names (every word must match). Tick <strong>Also search inside show content</strong> to look through Advance text fields, schedule rows, notes, comments, labor / asset notes and file descriptions too; each hit shows a snippet that opens the show at that spot.</li>
         <li><strong>PM</strong> — the show's Production Manager <em>or</em> a covering Day PM on any labor day. <strong>Me</strong> = the contact linked to your account.</li>

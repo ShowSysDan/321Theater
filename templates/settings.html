@@ -507,8 +507,7 @@
     </div>
     <div class="form-section-body">
       <p class="text-dim" style="font-size:12px;margin-bottom:12px">
-        Touring companies, artists, or arts organizations. New entries can also be created on the fly by typing into any
-        <strong>arts group</strong> field on an advance form — they'll appear here automatically.
+        Touring companies, artists and arts organizations. Names typed into an advance form are added automatically.
       </p>
       <table class="data-table" id="arts-groups-table">
         <thead><tr>
@@ -683,8 +682,7 @@
     <div class="form-section-header"><span class="section-icon">◈</span> SERVER SETTINGS</div>
     <div class="form-section-body">
       <p class="text-dim" style="font-size:12px;margin-bottom:16px">
-        Application port stored in the database. Restart the service after changing.
-        <br>For the systemd service, re-run <code>sudo ./install.sh</code> to apply the new port.
+        Restart the service after changing (systemd: re-run <code>sudo ./install.sh</code>).
       </p>
       <form onsubmit="event.preventDefault(); saveServerSettings(this)" style="max-width:300px">
         <div class="field-group">
@@ -705,10 +703,7 @@
     <div class="form-section-header"><span class="section-icon">◈</span> SYSLOG SETTINGS</div>
     <div class="form-section-body">
       <p class="text-dim" style="font-size:12px;margin-bottom:4px">
-        Send audit events (logins, saves, exports, user changes) to a remote syslog server via UDP.
-        Requires the syslog server to accept UDP on the configured port.
-        Each line carries the app name 321Theater and this server's hostname.
-        Changes reach every server within a minute.
+        Send audit events to a remote syslog server over UDP. Changes reach every server within a minute.
       </p>
       <form onsubmit="event.preventDefault(); saveSyslogSettings(this)" style="max-width:440px">
         <div class="field-group">
@@ -794,9 +789,7 @@
     <div class="form-section-header"><span class="section-icon">◈</span> PAPERWORK TIME FORMAT</div>
     <div class="form-section-body">
       <p class="text-dim" style="font-size:12px;margin-bottom:12px">
-        When enabled, times on printed paperwork (advance, schedule, post-show notes, and labor/invoice PDFs)
-        show a smaller 12-hour hint after the 24-hour time — e.g. <strong>17:15 <span style="font-size:11px;font-weight:normal">(5:15 PM)</span></strong>.
-        The app itself always works in 24-hour time; this only changes PDF output.
+        PDF times add a 12-hour hint — e.g. <strong>17:15 <span style="font-size:11px;font-weight:normal">(5:15 PM)</span></strong>. PDFs only.
       </p>
       <form onsubmit="event.preventDefault(); savePaperworkTime(this)" style="max-width:420px">
         <div class="field-group">
@@ -841,8 +834,7 @@
     </div>
     <div class="form-section-body">
       <p class="text-dim" style="font-size:12px;margin-bottom:6px">
-        The logo and colors printed on the PDFs for shows at each venue. Venues are listed from existing
-        shows; anything left unset uses the defaults. Click <strong>Edit</strong> to change a venue.
+        PDF logo and colors per venue; unset venues use the defaults.
       </p>
       <div id="venue-branding-list">
         <p class="text-dim" style="font-size:12px">Loading…</p>
@@ -864,10 +856,7 @@
     </div>
     <div class="form-section-body" style="gap:20px">
       <p class="text-dim" style="font-size:12px">
-        Automatic backups run hourly (keeping last 24) and daily at midnight (keeping last 30).
-        The PostgreSQL database is dumped as compressed
-        <code style="font-family:var(--font-mono);font-size:11px">.sql.gz</code> files.
-        Click <strong>↓ Download</strong> next to any backup to save it to your local machine.
+        Hourly (last 24 kept) and daily (last 30 kept) <code style="font-family:var(--font-mono);font-size:11px">.sql.gz</code> dumps of the database.
       </p>
 
       <div>
@@ -948,7 +937,7 @@
         <tbody><tr><td colspan="8" class="text-dim" style="padding:16px;font-size:12px">Loading...</td></tr></tbody>
       </table>
       <p class="text-dim" style="padding:10px 14px;font-size:11px;margin:0">
-        Backups run on <strong>every</strong> instance for redundancy. Only scheduled PDF emails are restricted to the leader, so recipients receive each email exactly once.
+        Backups run on <strong>every</strong> instance; scheduled emails only on the leader.
       </p>
     </div>
   </div>
@@ -1028,10 +1017,7 @@
     <div class="form-section-header"><span class="section-icon">◈</span> FEATURE MODULES</div>
     <div class="form-section-body">
       <p class="text-dim" style="font-size:12px;margin:0 0 14px">
-        Optional feature modules can be switched on or off here. Changes apply immediately —
-        no restart needed. A disabled module hides its UI everywhere and its pages return
-        "not found"; its saved data is kept and comes back when re-enabled.
-        <strong>Open settings →</strong> takes you to a module's own page.
+        Switch optional features on or off (applies immediately). A disabled module is hidden; its data is kept.
       </p>
       <div id="modules-list">
         <p class="text-dim" style="font-size:12px;margin:0">Loading...</p>
@@ -1048,7 +1034,7 @@
   <div class="form-section" style="margin-bottom:16px">
     <div class="form-section-header"><span class="section-icon">◈</span> DATABASE STATUS</div>
     <div class="form-section-body" style="max-width:600px">
-      <p class="field-hint" style="margin-bottom:16px">The app runs on PostgreSQL only. Connection settings come from the server's <code>.env</code> file (<code>PG_*</code> keys; the old <code>db_config.ini</code> is still read for anything missing there); schema migrations apply automatically on startup.</p>
+      <p class="field-hint" style="margin-bottom:16px">PostgreSQL connection settings come from the server's <code>.env</code> file (<code>PG_*</code> keys).</p>
       <div class="field-hint" style="background:var(--bg-2,#23272e);border:1px solid var(--border,#333);border-radius:6px;padding:12px 14px;line-height:1.8;overflow-wrap:anywhere">
         <strong>Backend:</strong> <code>PostgreSQL</code><br>
         <strong>Host:</strong> <code>{{ db_settings.pg_host }}:{{ db_settings.pg_port }}/{{ db_settings.pg_dbname }}</code><br>
@@ -1079,11 +1065,8 @@
     <div class="form-section-header"><span class="section-icon">◈</span> FILE STORAGE (SEAWEEDFS / S3)</div>
     <div class="form-section-body" style="max-width:640px">
       <p class="field-hint" style="margin-bottom:12px">
-        Where show file uploads, PDF exports and asset photos are stored. Config can come from
-        the server's <code>.env</code> (<code>S3_*</code> keys, falling back to the old
-        <code>db_config.ini [seaweedfs]</code>; the historical default) or from the
-        values saved here — which support <strong>multiple S3 gateway endpoints</strong> tried in
-        order with automatic failover (for redundant SeaweedFS gateways fronting one cluster).
+        Where uploads, PDF exports and asset photos are stored: the server's <code>.env</code>
+        (<code>S3_*</code> keys) or the values saved here, which allow <strong>multiple endpoints</strong> with failover.
       </p>
       <div id="s3-settings-body"><p class="text-dim" style="font-size:12px">Loading…</p></div>
     </div>
@@ -1093,11 +1076,8 @@
     <div class="form-section-header"><span class="section-icon">◈</span> FILE REDUNDANCY (S3 ⇄ DATABASE)</div>
     <div class="form-section-body" style="max-width:820px">
       <p class="field-hint" style="margin-bottom:12px">
-        Every stored file (show attachments, exported PDF versions, asset photos, external rental
-        PDFs, PDF form templates) can live in S3, in the PostgreSQL database, or in <strong>both</strong>.
-        Copies keep their show association, file type and a SHA-256 of their contents. The migration
-        tool only ever <strong>copies</strong> — it never deletes the source — and re-runs skip files
-        already copied. Every step is written to the app syslog (<code>FILE_MIGRATE_*</code>).
+        Files can live in S3, the database, or <strong>both</strong>. The migration tool only
+        <strong>copies</strong> (never deletes the source) and skips files already copied.
       </p>
       <div id="file-redundancy-body"><p class="text-dim" style="font-size:12px">Loading…</p></div>
     </div>
@@ -1111,7 +1091,7 @@
   <div class="form-section">
     <div class="form-section-header"><span class="section-icon">◈</span> AI EXTRACTION (OLLAMA)</div>
     <div class="form-section-body" style="max-width:600px">
-      <p class="field-hint" style="margin-bottom:16px">Enable AI-powered document extraction using a locally-hosted Ollama model. Once enabled, users can upload a PDF on any show and the AI will suggest values for fields that have an AI Hint configured.</p>
+      <p class="field-hint" style="margin-bottom:16px">A local Ollama model suggests values from an uploaded PDF for fields with an AI Hint.</p>
       <div class="field-group">
         <label class="checkbox-label">
           <input type="checkbox" id="ollama-enabled" {% if ai_settings.ollama_enabled == '1' %}checked{% endif %}
@@ -1142,7 +1122,7 @@
 
       <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
       <h3 class="sub-section-label">SYSTEM PROMPT</h3>
-      <p class="field-hint">Instructions sent to the AI before every extraction. Leave blank to use the default. The field list and document text are always appended automatically — don't include them here.</p>
+      <p class="field-hint">Sent before every extraction; blank = default. The field list and document are appended automatically.</p>
       <div class="field-group">
         <label class="field-label">CUSTOM SYSTEM PROMPT</label>
         <textarea id="ai-system-prompt" class="field-input field-textarea" rows="5"
@@ -1217,11 +1197,8 @@
     </div>
     <div class="form-section-body" style="padding-bottom:12px">
       <p class="text-dim text-sm" style="margin:0">
-        Email a maintenance notice to the groups you pick (optionally flagged
-        <strong>high priority</strong>) and post it as a banner for the same groups.
-        When the work is done, <strong>Work Complete</strong> takes the banner down and
-        emails a work-completed notice. Recipients are always BCC'd; failed
-        deliveries show under Email → Email Send Errors.
+        Email a notice to the groups you pick and post it as a banner for them.
+        <strong>Work Complete</strong> removes the banner and emails a completion notice.
       </p>
     </div>
     <div class="form-section-body no-pad">
@@ -1255,7 +1232,7 @@
   <div class="form-section">
     <div class="form-section-header"><span class="section-icon">◈</span> IN-APP UPDATES</div>
     <div class="form-section-body" style="max-width:720px">
-      <p class="field-hint">Pull the latest version from git and automatically restart the service. Changed files are archived before pull so you can roll back manually.</p>
+      <p class="field-hint">Pull the latest version from git and restart. Changed files are archived first for manual rollback.</p>
 
       <div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:16px">
         <div class="field-group" style="margin:0;flex:1">
@@ -1439,7 +1416,7 @@
       {% endif %}
     </div>
     <div class="form-section-body" style="gap:10px">
-      <p class="text-dim" style="font-size:12px">Standing position calls (e.g. the crew every show night always needs) you can apply to any labor day on a show with one click. Quantity expands to that many request lines.</p>
+      <p class="text-dim" style="font-size:12px">Standing crew calls you can apply to any labor day in one click.</p>
       <div id="labor-preset-list"><p class="text-dim" style="font-size:12px">Loading…</p></div>
     </div>
   </div>
@@ -1556,9 +1533,8 @@
         </tbody>
       </table>
       <p class="text-dim" style="font-size:11px;margin:10px 14px 0">
-        <strong>In Estimate:</strong> the pre-show labor estimate bills each unscheduled position at the
-        <em>highest</em> rate among the levels checked here (unless the position has its own special rate).
-        Uncheck test or placeholder levels so they never inflate an estimate.
+        <strong>In Estimate:</strong> unscheduled positions are estimated at the <em>highest</em> checked
+        rate (unless the position has its own rate).
       </p>
     </div>
   </div>
@@ -1588,9 +1564,7 @@
     <div class="form-section-body no-pad">
       <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;margin:10px 16px">
         <p class="text-dim text-sm" style="margin:0;flex:1;min-width:220px">
-          {% if readonly_view %}A technician who has left is <strong>archived</strong>{% else %}<strong>Archive</strong> a technician who has left{% endif %}: they leave this list, the Skill Tracker and the
-          scheduling pickers, but stay on every past show and in Reports, and their skills are kept on the
-          archived page.
+          {% if readonly_view %}A technician who has left is <strong>archived</strong>{% else %}<strong>Archive</strong> a technician who has left{% endif %}: hidden from scheduling, kept on past shows and in Reports.
         </p>
         <a href="{{ url_for('archived_technicians_page') }}" class="btn btn-ghost btn-sm" style="flex-shrink:0">Archived technicians ({{ archived_crew_count }})</a>
       </div>
@@ -1632,7 +1606,7 @@
     <div class="form-section-body" style="border-bottom:1px solid var(--border)">
       {% if not readonly_view %}<h3 class="sub-section-label">ADD BILLABLE ITEM</h3>{% endif %}
       <p class="text-dim text-sm" style="margin:0 0 8px 0">
-        Defines the per-crew charges available to shows (e.g. parking). Each show opts in from its <strong>Post-Show</strong> tab; a selected item bills its cost multiplied by the number of crew with actual hours entered.
+        Per-crew charges (e.g. parking), opted into per show on its <strong>Post-Show</strong> tab.
       </p>
       {% if not readonly_view %}
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -1823,8 +1797,7 @@
     <div class="form-section-header"><span class="section-icon">◈</span> PRODUCTION SCHEDULE — AUTO EMAIL</div>
     <div class="form-section-body">
       <p class="text-dim text-sm" style="margin-bottom:12px">
-        Send the Production Schedule PDF automatically at up to two intervals before the show.
-        Either send can be disabled independently.
+        Auto-send the Production Schedule PDF up to twice before the show.
       </p>
       <h3 class="sub-section-label" style="margin-bottom:8px">FIRST SEND</h3>
       <div class="form-row cols-3">
@@ -1864,11 +1837,8 @@
     <div class="form-section-header"><span class="section-icon">◈</span> LABOR — NO-REQUEST ALERTS</div>
     <div class="form-section-body">
       <p class="text-dim text-sm" style="margin-bottom:12px">
-        Warn schedulers (users with the Scheduler permission) about active shows that are
-        approaching their date with <strong>no labor requested yet</strong>, so they can follow up.
-        Each show alerts once per window: a single digest email lists all the due shows (the breakdown),
-        and each show also gets its own in-app notification.
-        Alerts go out at the shared send hour below. A show that has any labor requested is skipped.
+        Email and notify schedulers about upcoming shows with <strong>no labor requested yet</strong>,
+        once per window, at the send hour below.
       </p>
       <div class="form-row cols-3">
         <div class="field-group">
@@ -1902,10 +1872,8 @@
     <div class="form-section-header"><span class="section-icon">◈</span> MESSAGE CONTENT</div>
     <div class="form-section-body">
       <p class="text-dim text-sm" style="margin-bottom:12px">
-        Customize the subject line and body for every PDF email — both the automated
-        sends above and manual “Email PDF” sends. Leave a field blank to use the
-        built-in default. Use the variables below (e.g. <code>{show_name}</code>) and
-        they’ll be filled in per show when the email goes out.
+        Subject and body for every PDF email, automated or manual; blank = default.
+        Variables like <code>{show_name}</code> are filled in per show.
       </p>
 
       <div class="field-group">
@@ -1974,7 +1942,7 @@
     </div>
     <div class="form-section-body">
       <div id="pdf-email-preview" class="text-dim text-sm">Loading…</div>
-      <p class="field-hint" style="margin-top:10px">Based on saved settings, active shows, and what's already been sent. Save the schedule above to refresh this preview.</p>
+      <p class="field-hint" style="margin-top:10px">Based on saved settings and what's already been sent.</p>
     </div>
   </div>
 
@@ -1999,9 +1967,7 @@
     </div>
     <div class="form-section-body no-pad">
       <p class="text-dim text-sm" style="padding:10px 14px 0">
-        One row per recipient that failed to deliver. Use this to spot
-        bounces, invalid addresses, or transient SMTP issues. Rows persist
-        until you mark them reviewed and clear them.
+        Failed deliveries, one row per recipient, kept until reviewed and cleared.
       </p>
       <table class="data-table" id="email-errors-table">
         <thead>
@@ -2035,9 +2001,7 @@
     </div>
     <div class="form-section-body no-pad">
       <p class="text-dim text-sm" style="padding:10px 14px 0">
-        One row per recipient of every email the app sends — this history is kept for good.
-        Search by address or subject, click a row to see the message, why a send failed,
-        and to resend it. The message itself (for preview and resend) is kept for
+        Every email sent, one row per recipient (kept for good). Click a row to view or resend. Message bodies are kept for
         <select id="email-log-retention" class="field-input field-input-sm" style="width:auto;display:inline-block"
                 onchange="saveEmailRetention(this.value)" title="After this, the content is deleted; the log row stays">
           <option value="60">60 days</option>
@@ -2376,11 +2340,10 @@
           <label class="field-label">OPTIONS (one per line)</label>
           <textarea name="options_text" class="field-input field-textarea" rows="5" placeholder="-&#10;Concert&#10;Pit | venue=Walt Disney Theater&#10;Stage | venue=Steinmetz Hall,Pugh Theater"></textarea>
           <p class="field-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px">
-            Append <code style="background:var(--bg-hover);padding:1px 4px;border-radius:3px">| field_key=value</code> to limit when an option is visible.
-            Comma-separate to match any of several values: <code style="background:var(--bg-hover);padding:1px 4px;border-radius:3px">| venue=Steinmetz Hall,Pugh Theater</code>.
-            Use <code style="background:var(--bg-hover);padding:1px 4px;border-radius:3px">!=</code> to invert: <code style="background:var(--bg-hover);padding:1px 4px;border-radius:3px">| venue!=Walt Disney Theater</code> shows the option for every venue <em>except</em> WDT.
-            Combine conditions with <code style="background:var(--bg-hover);padding:1px 4px;border-radius:3px">&amp;&amp;</code> (all must match): <code style="background:var(--bg-hover);padding:1px 4px;border-radius:3px">| runner_needed=Yes &amp;&amp; venue!=Walt Disney Theater</code>.
-            Same syntax works in the field-level "Conditional show when" box. Options without a condition are always visible.
+            Append a condition to show an option only sometimes:
+            <code style="background:var(--bg-hover);padding:1px 4px;border-radius:3px">| venue=Steinmetz Hall,Pugh Theater</code>,
+            <code style="background:var(--bg-hover);padding:1px 4px;border-radius:3px">| venue!=Walt Disney Theater</code>,
+            <code style="background:var(--bg-hover);padding:1px 4px;border-radius:3px">| runner_needed=Yes &amp;&amp; venue!=Walt Disney Theater</code>.
           </p>
         </div>
         <div class="field-group" style="margin-top:4px">
@@ -2395,8 +2358,7 @@
             Auto-check visible options when 2 or fewer are shown
           </label>
           <p class="field-hint" style="font-size:11px;color:var(--text-muted);margin-top:2px">
-            Useful with conditional options — once a trigger narrows the list to 1 or 2 choices,
-            they'll be pre-checked. (Multi-select only. Won't override choices the user has already toggled.)
+            Multi-select only: pre-checks the choices when conditions narrow the list to 1 or 2.
           </p>
         </div>
       </div>
@@ -2415,8 +2377,7 @@
           <textarea name="notes_content" class="field-input field-textarea" rows="5"
                     placeholder="e.g. Reach out to box office at least 2 weeks before the show — https://example.com/checklist"></textarea>
           <p class="field-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px">
-            Renders as a read-only instructional block on the advance form. URLs are auto-linked.
-            This field type is <strong>screen only</strong> — it never prints on the advance PDF.
+            A read-only instruction block (links auto-linked). <strong>Screen only</strong> — never printed.
           </p>
         </div>
       </div>
@@ -2427,8 +2388,7 @@
             <option value="">— Select a template —</option>
           </select>
           <p class="field-hint" style="font-size:11px;color:var(--text-muted);margin-top:4px">
-            On the advance, this field renders as a button — clicking opens a popup with the PDF
-            and positioned inputs for each placed field. Manage templates in
+            Opens a fillable PDF popup on the advance. Manage templates in
             <a href="{{ url_for('pdf_templates_list') }}" style="color:var(--accent)">Settings → PDF Form Templates</a>.
           </p>
         </div>
@@ -2436,9 +2396,7 @@
       <div class="field-group field-alert-group">
         <label class="field-label">CHANGE ALERTS <span class="text-dim" style="font-size:10px">(optional)</span></label>
         <p class="field-hint" style="font-size:11px;color:var(--text-muted);margin:0 0 6px">
-          When this field's value changes on a show, email the selected departments + people
-          and drop a notification in their in-app bell. Alerts are debounced (10-min job,
-          5-min quiet window) so rapid retypes and toggles don't fire duplicates.
+          When this field changes on a show, email and notify the selected departments + people.
         </p>
         <div style="display:flex;gap:12px;flex-wrap:wrap">
           <div style="flex:1;min-width:200px">
@@ -2585,7 +2543,7 @@
           <option value="{{ c.id }}">{{ c.name }}</option>
           {% endfor %}
         </select>
-        <p class="field-hint" style="margin-top:4px">Rented assets in this category will be listed under this section on the advance PDF (e.g. link a VIDEO section to the Video category and any rented projectors will appear there).</p>
+        <p class="field-hint" style="margin-top:4px">Rented assets in this category print under this section on the advance PDF.</p>
       </div>
     </div>
     <div class="modal-footer">
@@ -2660,7 +2618,7 @@
   <div class="modal-card" style="max-width:860px;max-height:88vh;display:flex;flex-direction:column">
     <div class="modal-header"><span id="user-devices-title">Devices</span> <button onclick="closeUserDevices()" class="modal-close">×</button></div>
     <div class="modal-body" style="overflow:auto;flex:1">
-      <p class="text-dim" style="font-size:12px;margin:0 0 10px">Each row is one browser on one screen size, recorded when the person opens the app (at most once every 6 hours per browser; kept 180 days). Hover a row for the full user-agent string.</p>
+      <p class="text-dim" style="font-size:12px;margin:0 0 10px">Browsers and screen sizes this person has used (kept 180 days). Hover for the full user agent.</p>
       <div id="user-devices-body"><p class="text-dim">Loading…</p></div>
     </div>
     <div class="modal-footer"><button type="button" class="btn btn-ghost" onclick="closeUserDevices()">Close</button></div>
@@ -6474,8 +6432,7 @@ function escHtml(s) {
         <label class="checkbox-label" id="msg-m-login-wrap"><input type="checkbox" id="msg-m-login"> Also show on the sign-in page</label>
       </div>
       <div id="msg-m-login-hint" class="text-dim text-sm" style="margin-top:-8px">
-        Shown on the login screen before anyone signs in (and as a normal banner after).
-        Only messages shown to <strong>All users</strong> can appear there.
+        Also shown on the sign-in page. <strong>All users</strong> messages only.
       </div>
     </div>
     <div class="modal-footer">
@@ -6547,8 +6504,7 @@ function escHtml(s) {
         <div id="maint-m-estimate" class="text-dim text-sm" style="margin-top:4px"></div>
       </div>
       <div id="maint-m-done-note" class="text-dim text-sm" style="display:none">
-        This notice is marked complete, so its banner and email options are closed.
-        Use <strong>↻ Resend</strong> in the list to send the work-completed email again.
+        This notice is complete. Use <strong>↻ Resend</strong> in the list to resend the completion email.
       </div>
       <div id="maint-m-delivery" style="display:flex;flex-direction:column;gap:10px">
         <label class="field-label" style="margin:0">DELIVERY</label>

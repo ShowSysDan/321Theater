@@ -1267,7 +1267,14 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   "back to the board" link works); `/dashboard` only redirects. "Land
   somewhere" redirects (post-login, forced password change, viewer bounce,
   error page, m-brand / m-tabbar) use `url_for('index')`. Sidebar order is
-  Home · Shows · My Shows · Search, hard-coded with `aria-current`.
+  search box · Home · Shows · My Shows, hard-coded with `aria-current`
+  (3.44.0: the Search link became the `.nav-search` box + "Advanced
+  search" link; `.nav-search-rail` is the plain tile on the icon rail).
+- Sidebar search (3.44.0, app.js `_initNavSearch`): quick matches from
+  `/api/search` (`q` or `tag`, limit 8, status all — metadata only, never
+  `content=1`, which is the expensive scan); results popover on `<body>`
+  (the mobile drawer's transform); textContent only; fetches aborted +
+  seq-guarded. Enter with nothing highlighted → `/search?q=` (or `tag=`).
 - Data: `GET /api/timeline?date=&include_test=` → `_timeline_day()`
   (read-only, `_viewer_gate` blocks viewers — don't allowlist it). Times are
   minutes from the viewed day's midnight; `1+HH:MM` / `24:30` = next day; an
@@ -1314,6 +1321,10 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   `.tl-lh-pm` (PM + contacts + `.tl-lh-perf`), each one nowrap line with
   ellipsis + `title`; the missing-column note lives in the label row.
   Default zoom index 1 (48 px/h).
+- Look (3.44.0): lane headers tint with the lane colour and use the Shows
+  board's venue / person / ▶ glyphs; schedule blocks are lane-tinted, the
+  row starting exactly at a performance minute gets `.tl-showtime` (filled);
+  crew bars stay neutral. Flat `color-mix` tints only — no gradients.
 - The `.tl-*` class names are shared with dashboard_view.html's Reservation
   Timeline: Home's rules on those names are scoped `:where(.tl-phead)` /
   `:where(.tl-scroll)` in style.css and mobile.css — keep new ones scoped.
@@ -1359,7 +1370,10 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   `ToolsMenu.setBusy()` for busy state.
 - Who gets menus: `show_tools_ok` / `window.CAN_USE_SHOW_TOOLS`.
 - Schedule tab menu: Import / Save day as template / History. Day menu:
-  Apply template / Copy from day / Pull show time(s) / Sort by time. Labor
+  Templates ▸ (a `{submenu: [...]}` item, 3.44.0) / Copy from day / Pull
+  show time(s) / Sort by time. Submenus fly out right (else left) of the
+  panel; with no room either side (phones) they cover it with a "‹ Back"
+  row. Hover (mouse only), click, Enter or → opens; ← / Esc goes back. Labor
   day menu: Apply preset / Clone to… / Sort by call time / Delete Day. Every
   item calls the original handler.
 - **Sort by call time is per day**: `POST …/labor-requests/reorder` takes

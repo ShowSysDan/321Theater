@@ -318,7 +318,7 @@
       <button onclick="closeAiExtract()" class="modal-close">×</button>
     </div>
     <div class="modal-body">
-      <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px">Upload a PDF or text document and the AI will suggest values for form fields that have AI hints configured.</p>
+      <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px">Upload a PDF or text document; the AI suggests values for fields with AI hints.</p>
       <div id="ai-upload-section">
         <div class="field-group">
           <label class="field-label">UPLOAD DOCUMENT</label>
@@ -421,7 +421,7 @@
         </div>
       </div>
       <p class="field-note" style="margin:6px 0 0;font-size:11px;color:var(--text-muted)">
-        The whole time in the building — first billed call through the end of load-out. Set this first; show dates &amp; times below must fall inside it. Times use 24-hour format (e.g. 08:00, 23:00). Drives the schedule and labor day lists and asset rental pricing — weekly rate applies when the engagement is 7+ days.
+        First billed call through end of load-out (24-hour times). Set this first — show dates must fall inside it; it also sets schedule days and rental pricing.
       </p>
       <div id="load-range-warning" class="load-range-warning" style="display:none"></div>
     </div>
@@ -482,7 +482,7 @@
           </div>
         </div>
         <p class="field-note" style="margin:0 0 8px;font-size:11px;color:var(--text-muted)">
-          24-hour format (e.g. 14:00, 19:30). For multiple performances on the same date, add a separate row for each time.
+          24-hour times. One row per performance.
         </p>
         <div class="action-btns">
           <button type="button" class="btn btn-primary btn-sm" onclick="savePerf()">Save</button>
@@ -571,7 +571,7 @@
           <textarea id="piano-notes" class="field-input field-textarea" rows="3" maxlength="4000" placeholder="Pitch (A440?), access, quiet time needed, rehearsal schedule…"></textarea>
         </div>
       </div>
-      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">The piano is booked on this show's Assets (asset approval applies to the piano itself; the tuning charge doesn't need it). The piano tuning manager is emailed. Once they set the tuning time it's added to this show's production schedule. You can change or cancel the request until they schedule it with the vendor.</p>
+      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">The piano is booked on this show's Assets and the piano tuning manager is emailed. You can change or cancel until they schedule it.</p>
     </div>
     <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
       <button type="button" class="btn btn-ghost" onclick="closePianoModal()">Close</button>
@@ -982,7 +982,7 @@ window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
         {% endif %}
         {% if not restricted %}
         {# Day actions — the SAME markup as app.js _buildPaneHeader: a Tools
-           menu (Apply template / Copy from day / Pull show time(s) / Sort by
+           menu (Templates ▸ / Copy from day / Pull show time(s) / Sort by
            time — built when it opens, ToolsMenu 'sched-day') + "+ Add Row". #}
         <div class="sched-day-actions">
           {% if show_tools_ok %}{{ tools_menu('sched-day', 'Day tools', d.perfs | selectattr('perf_time') | map(attribute='perf_time') | map('hhmm') | list) }}{% endif %}
@@ -992,9 +992,8 @@ window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
       </div>
       {% if d.orphan %}
       <div class="sched-orphan-note">
-        <strong>{{ d.perf_date }} is outside this show's dates</strong> (load-in → load-out and performances).
-        These rows were saved on that day and are kept here so nothing is lost — copy them to a real day
-        (that day's Tools → Copy from day) or delete them. They don't print on the schedule PDF.
+        <strong>{{ d.perf_date }} is outside this show's dates.</strong> These rows don't print — copy them to
+        a real day (Tools → Copy from day) or delete them.
       </div>
       {% endif %}
       {% if d.date_key in sched_day_pm.days %}{{ sched_day_pm_bar(d.date_key, sched_day_pm.days[d.date_key], sched_day_pm.show_pm, day_pm_can_edit) }}{% endif %}
@@ -1229,7 +1228,7 @@ window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
         <span>
           <strong>Fold extras into the hourly rate</strong>
           <span class="text-dim" style="display:block;font-size:11px;margin-top:2px">
-            Hides the additional-charge lines and spreads each charge across worked hours instead — on the estimate here and the Final Invoice PDF.
+            Spreads extra charges across worked hours instead of listing them.
           </span>
         </span>
       </label>
@@ -1298,11 +1297,8 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     </div>
     <div class="form-section-body">
       <p class="text-dim" style="font-size:12px;margin:0">
-        The sign-in sheet that sits at the security desk on show day: each saved name prints with blank
-        Signature / Time In columns, plus extra walk-up rows. A multi-day show/event prints one
-        <strong>initials column per day</strong> instead (days come from load-in → load-out and the
-        performance dates). The <strong>production manager on duty</strong> — name, phone and email —
-        prints at the top so the desk knows who to call. The PDF uses this venue's paperwork colors and logo.
+        The security desk's sign-in sheet: each name with Signature / Time In columns (one
+        <strong>initials column per day</strong> for multi-day shows), plus the <strong>PM on duty</strong>.
       </p>
     </div>
   </div>
@@ -1312,8 +1308,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     <div class="form-section-header"><span class="section-icon">◈</span> PRODUCTION CONTACT FOR SECURITY</div>
     <div class="form-section-body">
       <p class="text-dim" style="font-size:12px;margin:0">
-        Prints on the sign-in sheet. It's the show's <strong>Production Manager</strong> (Advance Sheet), or
-        a day's covering PM — set <strong>Day PM</strong> on the Production Schedule or Labor Requests tab.
+        The show's <strong>Production Manager</strong>, or a day's <strong>Day PM</strong> (set on the Schedule or Labor tab).
       </p>
       <div id="sec-pm-rows" class="sec-pm-rows"><span class="text-dim">Loading…</span></div>
     </div>
@@ -1324,9 +1319,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     <div class="form-section-header"><span class="section-icon">◈</span> BULK ADD NAMES</div>
     <div class="form-section-body">
       <p class="text-dim" style="font-size:12px;margin:0 0 10px">
-        Paste the personnel list straight from the email — one name per line, or a single
-        comma/semicolon-separated line. Parsed names are <strong>added</strong> to the list below
-        (nothing is saved until you click Save).
+        Paste names one per line or comma-separated; they're <strong>added</strong> below (Save to keep).
       </p>
       <textarea id="sec-bulk-paste" class="field-input" rows="5"
                 placeholder="Jane Doe&#10;John Smith&#10;…&#10;&#10;or:  Jane Doe, John Smith, Alex Roe"
@@ -1339,9 +1332,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         <span id="sec-bulk-msg" class="text-dim" style="font-size:12px"></span>
       </div>
       <p class="text-dim" style="font-size:11px;margin:8px 0 0">
-        CSV: a <code>Name</code> column (or <code>First</code> + <code>Last</code> columns) is used when
-        the file has a header row; otherwise two-column rows are joined "First Last" and anything else
-        takes the first cell. Review the list before saving.
+        CSV: uses a <code>Name</code> or <code>First</code> + <code>Last</code> column. Review before saving.
       </p>
     </div>
   </div>
@@ -3475,7 +3466,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         <span>
           <strong>Fold extras into the hourly rate</strong>
           <span class="text-dim" style="display:block;font-size:11px;margin-top:2px">
-            Hides the additional-charge lines and spreads each charge across the crew member's worked hours instead — on this page and the Final Invoice PDF.
+            Spreads extra charges across each crew member's worked hours instead of listing them.
           </span>
         </span>
       </label>
@@ -3509,9 +3500,8 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       <div id="ps-settle-banner" class="ps-settle-banner"{% if post_show_settlement %} style="display:none"{% endif %}>
         <div>
           <strong>Labor hasn't been settled yet.</strong>
-          When the show is over, press <strong>Settle Now</strong> to pull in the final labor schedule — who worked
-          each position and their times — as the starting point for billing. Nothing is copied from the schedule
-          before then, so later schedule changes are never missed. Until it's settled, the Final Invoice bills no labor.
+          After the show, press <strong>Settle Now</strong> to pull in the final labor schedule for billing.
+          Until then, the Final Invoice bills no labor.
         </div>
         {% if not restricted %}
         <button type="button" class="btn btn-sm btn-primary" onclick="settleNow(this)">Settle Now</button>
@@ -3519,7 +3509,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       </div>
       <p id="ps-settled-info" class="text-dim" style="padding:10px 14px 0;font-size:11px;margin:0{% if not post_show_settlement %};display:none{% endif %}">✓ Settled</p>
       <p class="text-dim" style="padding:10px 14px 0;font-size:11px;margin:0">
-        Settle Now pulls the scheduled labor in with its people and times filled in — then adjust what actually happened, including who worked each line (<strong>Worked by</strong> — tracking only, never printed on paperwork). Edits here bill the client and never change the schedule. Use <strong>+ Add Line</strong> for extra crew, or <strong>+ Add Hours</strong> to bill hours worked outside the schedule (prep work etc. — straight time, never overtime, justification required).
+        Adjust to what actually happened; edits bill the client and never change the schedule. <strong>Worked by</strong> is tracking only. <strong>+ Add Hours</strong> bills off-schedule work at straight time.
       </p>
       {% if not restricted %}
       <div id="ps-addhours-form" style="display:none;margin:10px 14px 0;padding:10px 12px;border:1px dashed var(--border);border-radius:6px">
@@ -3569,7 +3559,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       </div>
       <p class="text-dim" id="ps-labor-empty" style="padding:16px;text-align:center;display:none">
         {% if restricted %}No actual labor recorded.{% else %}
-        <span class="ps-empty-unsettled"{% if post_show_settlement %} style="display:none"{% endif %}>No labor lines yet. Press <strong>Settle Now</strong> once the show is over to pull in the scheduled labor, or use <strong>+ Add Line</strong> / <strong>+ Add Hours</strong>.</span>
+        <span class="ps-empty-unsettled"{% if post_show_settlement %} style="display:none"{% endif %}>No labor lines yet. Press <strong>Settle Now</strong> after the show, or use <strong>+ Add Line</strong> / <strong>+ Add Hours</strong>.</span>
         <span class="ps-empty-settled"{% if not post_show_settlement %} style="display:none"{% endif %}>No labor lines. Use <strong>+ Add Line</strong> for extra crew, or <strong>Re-sync from Schedule</strong> to pull newly-scheduled lines.</span>
         {% endif %}
       </p>
@@ -3743,7 +3733,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         </div>
         <h3 class="export-card-title">Security Sign-In Sheet</h3>
       </div>
-      <p class="export-card-desc">Personnel sign-in sheet for the security desk, with the production manager on duty and their phone / email — names are managed on this show's <strong>Sign-In Sheet</strong> tab.</p>
+      <p class="export-card-desc">Security desk sign-in sheet with the PM on duty. Names are on the <strong>Sign-In Sheet</strong> tab.</p>
       <div class="export-card-foot">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a href="{{ url_for('security_signin_pdf', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Export PDF</a>
@@ -3761,7 +3751,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
         </div>
         <h3 class="export-card-title">Pre-Show Estimate PDF</h3>
       </div>
-      <p class="export-card-desc">Combined labor &amp; asset estimate/quote for the client — before anything is scheduled. Uses position special rates or the highest standard tech rate.</p>
+      <p class="export-card-desc">Labor &amp; asset quote for the client, before anything is scheduled.</p>
       <div class="export-card-foot">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <a href="{{ url_for('show_pre_show_estimate', show_id=show.id) }}" class="btn btn-primary btn-sm" target="_blank">Generate Pre-Show Estimate</a>

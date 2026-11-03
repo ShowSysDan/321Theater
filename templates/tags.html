@@ -11,7 +11,7 @@
   <div>
     <a href="{{ url_for('search_page') }}" class="back-link">← Search</a>
     <h1 class="page-title">Tags</h1>
-    <p class="page-sub">Every <span class="mono">#tag</span> written in a show — Advance fields, schedule rows, notes, comments, labor and asset notes. Type <span class="mono">#</span> and a word anywhere to add one.</p>
+    <p class="page-sub">Every <span class="mono">#tag</span> used in shows. Type <span class="mono">#</span> and a word anywhere to add one.</p>
   </div>
 </div>
 
@@ -40,7 +40,7 @@
 <p id="tags-none" class="text-dim" style="display:none;font-size:13px;padding:16px 0">No tags match.</p>
 {% else %}
 <div class="empty-state">
-  <p>No tags yet.<br><span class="text-dim" style="font-size:13px">Write <span class="mono">#something</span> in any show text box — an Advance note, a schedule row, a comment — and it shows up here.</span></p>
+  <p>No tags yet.<br><span class="text-dim" style="font-size:13px">Write <span class="mono">#something</span> in any show text box to add one.</span></p>
 </div>
 {% endif %}
 {% endblock %}

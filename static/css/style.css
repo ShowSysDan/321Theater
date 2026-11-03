@@ -2823,6 +2823,14 @@ a.find-why-text:hover { border-color: rgba(232,130,47,.45); }
 }
 .tools-menu-note { padding: 4px 10px 6px 20px; font-size: 12px; color: var(--text-muted); }
 .tools-menu-sep { height: 1px; margin: 5px 4px; background: var(--border); }
+/* Submenus (3.44.0): "Templates ▸" — the list flies out beside the menu
+   (.tools-menu-subpanel, placed by JS); .is-cover = no room beside it
+   (phones), so it covers the menu and starts with a "‹ Back" row. */
+.tools-menu-item.has-sub { display: flex; align-items: center; gap: 10px; }
+.tools-menu-item.has-sub::after { content: "\25B8"; margin-left: auto; font-size: .9em; color: var(--text-muted); }
+.tools-menu-item.has-sub.is-open { background: var(--bg-hover); }
+.tools-menu-subpanel { z-index: 1351; }
+.tools-menu-item.tools-menu-back { color: var(--text-dim); font-weight: 600; }
 /* Production Schedule day header: Tools + "+ Add Row" pinned right */
 .sched-day-actions { display: flex; gap: 6px; align-items: center; margin-left: auto; flex-wrap: wrap; }
 
@@ -3100,6 +3108,71 @@ html[data-theme="light"] .tl-badge-dark { background: #2b2f36; }
 .tl-tip-hint { margin-top: 6px; font-size: 11px; color: var(--text-muted); }
 @media (prefers-reduced-motion: reduce) { .tl-item { transition: none; } }
 
+/* ── Timeline refresh (3.44.0): the site's card language on the grid ───────
+   Lane headers read like the Shows board's Happening Today cards (venue /
+   person / play glyphs, a flat lane-colour tint under the coloured top
+   edge); schedule blocks are tinted with their lane's colour instead of
+   flat grey; the row that starts at a show time is filled in that colour;
+   crew bars are the quieter neutral. Flat tints only (color-mix) — the
+   guide's one-texture rule still holds. Phone rules: mobile.css. */
+.tl-lanehead { background: color-mix(in srgb, var(--tl-accent) 6%, var(--bg-card)); }
+.tl-lanehead:hover { background: color-mix(in srgb, var(--tl-accent) 11%, var(--bg-card)); }
+.tl-lanehead.tl-lane-oh { background: var(--bg-card); }
+.tl-lanehead.tl-lane-empty { background: var(--bg-card); }
+.tl-glyph { flex: 0 0 auto; width: 12px; height: 12px; fill: none; stroke: var(--text-muted); stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round; }
+.tl-glyph-play { fill: var(--tl-accent); stroke: var(--tl-accent); width: 10px; height: 10px; }
+.tl-lh-perf .tl-glyph-play + .mono { color: var(--ink); font-weight: 600; }
+:where(.tl-scroll) .tl-lh-pm .tl-lh-none { font-size: 11.5px; }
+:where(.tl-scroll) .tl-lh-cols { color: var(--text-muted); }
+
+/* Axis: bold hour, quiet minutes. */
+.tl-hour .tl-hour-h { color: var(--ink); font-weight: 600; }
+.tl-hour .tl-hour-m { color: var(--text-muted); }
+.tl-hour-next .tl-hour-h { color: var(--text-dim); }
+.tl-hour-midnight .tl-hour-h, .tl-hour-midnight .tl-hour-m { color: var(--ink); font-weight: 700; }
+
+/* Schedule blocks: the lane's colour, card-like. */
+.tl-item.tl-sched {
+  background: color-mix(in srgb, var(--tl-accent) 9%, var(--bg-card));
+  border-color: color-mix(in srgb, var(--tl-accent) 26%, var(--border));
+  border-left-color: var(--tl-accent);
+  border-radius: 7px; box-shadow: var(--hl);
+}
+.tl-item.tl-sched .tl-item-time { color: color-mix(in srgb, var(--tl-accent) 70%, var(--text)); }
+html[data-theme="light"] .tl-item.tl-sched .tl-item-time { color: color-mix(in srgb, var(--tl-accent) 55%, #000); }
+.tl-item.tl-sched:hover, .tl-item.tl-sched:focus-visible {
+  background: color-mix(in srgb, var(--tl-accent) 15%, var(--bg-card));
+  border-color: color-mix(in srgb, var(--tl-accent) 55%, var(--border)); border-left-color: var(--tl-accent);
+  box-shadow: var(--hl), var(--lift-hover);
+}
+.tl-item.tl-sched.tl-point { background: color-mix(in srgb, var(--tl-accent) 4%, transparent); }
+/* The show itself: filled with the lane colour. */
+.tl-item.tl-sched.tl-showtime {
+  background: color-mix(in srgb, var(--tl-accent) 24%, var(--bg-card));
+  border-color: color-mix(in srgb, var(--tl-accent) 60%, transparent); border-left-width: 4px;
+}
+.tl-item.tl-sched.tl-showtime:hover, .tl-item.tl-sched.tl-showtime:focus-visible {
+  background: color-mix(in srgb, var(--tl-accent) 32%, var(--bg-card));
+}
+.tl-item.tl-showtime .tl-item-desc::before { content: "\25B6\FE0E  "; font-size: .78em; color: var(--tl-accent); }
+.tl-item.tl-showtime.tl-piano .tl-item-desc::before { content: "\1F3B9  "; font-size: 1em; }
+
+/* Crew bars: neutral, rounded to match. */
+.tl-item.tl-crew { border-radius: 7px; box-shadow: var(--hl); }
+.tl-item.tl-crew:hover, .tl-item.tl-crew:focus-visible { box-shadow: var(--hl), var(--lift-hover); }
+
+/* Lanes: the schedule column carries a whisper of the lane colour. */
+:where(.tl-scroll) .tl-lane .tl-col-sched { background: color-mix(in srgb, var(--tl-accent) 2.5%, transparent); }
+
+/* NOW: a dot where the line meets the axis. */
+.tl-now::before { content: ""; position: absolute; left: calc(var(--tl-axis-w, 0px) - 5px); top: -5px; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--brand-red); box-shadow: 0 0 0 2px var(--bg-card); }
+
+/* Legend keys follow the new looks. */
+.tl-key-sched { background: color-mix(in srgb, var(--accent) 14%, var(--bg-card)); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); border-left: 3px solid var(--accent); }
+.tl-key-show { background: color-mix(in srgb, var(--accent) 34%, var(--bg-card)); border-color: color-mix(in srgb, var(--accent) 60%, transparent); border-left: 3px solid var(--accent); }
+
 /* ── Narrow desktop (≤900px) header bleed (3.35.1) ─────────────────────────
    The header bar bleeds sideways by the column's side padding (see "Frosted
    page header" above: margin 0 -48px, padding 24px 48px). At ≤900px the
@@ -3131,3 +3204,84 @@ html.readonly-view .rv-hide { display: none !important; }
 }
 .rv-note { font-size: 12px; color: var(--text-dim); margin: 0 0 14px; }
 .rv-note .rv-badge { margin: 0 8px 0 0; }
+
+/* ── Sidebar search box (3.44.0) ───────────────────────────────────────────
+   templates/base.html .nav-search + app.js _initNavSearch. Sits on the brand
+   blue, so it uses the sidebar's own white-alpha tokens (never content
+   colours). The quick-results popover (.nav-sr) is appended to <body> —
+   position:fixed inside the sidebar would be relative to the mobile
+   drawer's transform — so it uses the content tokens like any menu. On the
+   icon rail the form hides and .nav-search-rail (a plain tile) shows. */
+.nav-search { margin: 2px 0 12px; }
+.nav-search-box {
+  position: relative; display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 8px 0 11px;
+  border-radius: 10px; background: rgba(0,0,0,.2); border: 1px solid rgba(255,255,255,.16);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.18); transition: background .15s, border-color .15s, box-shadow .15s;
+}
+.nav-search-box:hover { background: rgba(0,0,0,.26); border-color: rgba(255,255,255,.24); }
+.nav-search-box:focus-within { background: rgba(0,0,0,.3); border-color: rgba(255,255,255,.55);
+  box-shadow: 0 0 0 3px rgba(240,138,60,.35); }
+.nav-search-box > svg { width: 16px; height: 16px; flex: 0 0 auto; color: rgba(255,255,255,.7); }
+.nav-search-box input {
+  flex: 1 1 auto; min-width: 0; height: 100%; padding: 0; border: 0; outline: 0; background: transparent;
+  color: #fff; font: 500 14px var(--font-main); -webkit-appearance: none; appearance: none;
+}
+.nav-search-box input::placeholder { color: rgba(255,255,255,.6); opacity: 1; }
+.nav-search-box input::-webkit-search-cancel-button { filter: invert(1); opacity: .6; cursor: pointer; }
+.nav-search-kbd {
+  flex: 0 0 auto; min-width: 20px; height: 20px; padding: 0 5px; box-sizing: border-box; display: grid; place-items: center;
+  border-radius: 5px; border: 1px solid rgba(255,255,255,.22); color: rgba(255,255,255,.65);
+  font: 600 11px/1 var(--font-mono);
+}
+.nav-search-box:focus-within .nav-search-kbd, .nav-search-box:has(input:not(:placeholder-shown)) .nav-search-kbd { display: none; }
+.nav-search-adv {
+  display: inline-flex; align-items: center; gap: 4px; margin: 6px 0 0 11px; font-size: 12px; font-weight: 500;
+  color: rgba(255,255,255,.72) !important; text-decoration: none !important;
+}
+.nav-search-adv::after { content: "\2192"; transition: transform .15s; }
+.nav-search-adv:hover { color: #fff !important; }
+.nav-search-adv:hover::after { transform: translateX(2px); }
+.nav-search-adv.active { color: #fff !important; font-weight: 600; }
+.nav-search-adv:focus-visible { outline: 2px solid #fff; outline-offset: 2px; border-radius: 3px; }
+.nav-search-rail { display: none !important; }
+html.sidebar-collapsed .nav-search, html.force-rail .nav-search { display: none; }
+html.sidebar-collapsed .nav-search-rail, html.force-rail .nav-search-rail { display: flex !important; }
+html.mobile-view .nav-search-rail { display: none !important; }
+html.mobile-view .nav-search { display: block; }
+
+.nav-sr {
+  position: fixed; z-index: 1360; width: 360px; max-width: calc(100vw - 16px); max-height: min(70vh, 520px);
+  overflow-y: auto; overscroll-behavior: contain; padding: 6px; border-radius: 10px;
+  background: var(--bg-card); color: var(--text); border: 1px solid var(--border-light);
+  box-shadow: var(--hl), 0 14px 36px rgba(0,0,0,.45), 0 2px 6px rgba(0,0,0,.25);
+  font-family: var(--font-main); font-size: 13px; line-height: 1.35;
+}
+.nav-sr[hidden] { display: none; }
+.nav-sr-head { padding: 6px 10px 4px; font: 600 10.5px var(--font-mono); letter-spacing: .1em; text-transform: uppercase; color: var(--text-muted); }
+.nav-sr-item {
+  display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; border-radius: 7px;
+  color: var(--text) !important; text-decoration: none !important; border-left: 3px solid transparent;
+}
+.nav-sr-item:hover, .nav-sr-item.is-active { background: var(--bg-hover); border-left-color: var(--accent); }
+.nav-sr-item.is-event:hover, .nav-sr-item.is-event.is-active { border-left-color: var(--event); }
+.nav-sr-item.is-archived:hover, .nav-sr-item.is-archived.is-active { border-left-color: var(--past); }
+.nav-sr-main { min-width: 0; flex: 1 1 auto; }
+.nav-sr-name { display: block; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-sr-name mark { background: color-mix(in srgb, var(--accent) 28%, transparent); color: inherit; border-radius: 2px; padding: 0 1px; }
+.nav-sr-meta { display: block; font-size: 11.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-sr-meta .mono { font-family: var(--font-mono); font-size: 11px; }
+.nav-sr-why { display: block; font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-sr-tags { display: flex; gap: 4px; flex: 0 0 auto; padding-top: 2px; }
+.nav-sr-tag { font: 700 9px/1.6 var(--font-mono); letter-spacing: .06em; padding: 0 5px; border-radius: 3px;
+  background: color-mix(in srgb, var(--text-dim) 18%, transparent); color: var(--text-dim); text-transform: uppercase; }
+.nav-sr-tag.t-event { background: color-mix(in srgb, var(--event) 18%, transparent); color: var(--event); }
+.nav-sr-note { padding: 12px 10px; color: var(--text-dim); font-size: 12.5px; }
+.nav-sr-note.is-error { color: var(--red); }
+.nav-sr-all {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 4px; padding: 9px 10px;
+  border-top: 1px solid var(--border); border-radius: 0 0 7px 7px; font-weight: 600; font-size: 12.5px;
+  color: var(--orange-text, var(--accent)) !important; text-decoration: none !important;
+}
+.nav-sr-all:hover, .nav-sr-all.is-active { background: var(--bg-hover); }
+.nav-sr-all span:last-child { font-size: 11px; font-weight: 500; color: var(--text-muted); }
+@media (prefers-reduced-motion: reduce) { .nav-search-box, .nav-search-adv::after { transition: none; } }

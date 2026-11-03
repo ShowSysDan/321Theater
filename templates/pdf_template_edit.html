@@ -14,9 +14,7 @@
         oninput="markDirty()"
         onblur="renamePdfTemplate(this.textContent.trim())">{{ template.name }}</h1>
     <p class="page-sub" style="margin-top:4px">
-      Click-and-drag on the page to place a field. Click a placed field to rename, change
-      type, or delete it. Coordinates are stored in PDF points so they stamp cleanly on
-      export.
+      Drag on the page to place a field; click a field to edit or delete it.
     </p>
   </div>
   <div class="pdf-tpl-toolbar">
@@ -43,15 +41,14 @@
       </select>
     </div>
     <p class="field-hint" style="font-size:10px;color:var(--text-dim);margin-top:14px">
-      Tip: click an existing field on the page to edit it. Drag a corner to resize. Click outside to deselect.
-      Changes auto-save after a short pause.
+      Drag a corner to resize. Changes auto-save.
     </p>
     <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
       <button type="button" class="btn btn-sm btn-ghost" onclick="openAdvanceKeyList()" style="width:100%;font-size:11px">
         View advance field keys
       </button>
       <p class="field-hint" style="font-size:10px;color:var(--text-dim);margin-top:6px">
-        Use the <strong>Pull from advance</strong> picker on a field to pre-fill it with the value of an advance form field on each show.
+        <strong>Pull from advance</strong> pre-fills a field from the show's advance.
       </p>
     </div>
   </div>

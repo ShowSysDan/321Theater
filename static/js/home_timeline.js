@@ -424,7 +424,11 @@
       line.style.top = y + 'px';
       body.appendChild(line);
       if (m % 60 === 0 && m < range.end) {
-        const lab = el('div', 'tl-hour' + (m >= 1440 ? ' tl-hour-next' : ''), hhmm(m));
+        // Hour in full weight, ":00" quieter (3.44.0) — same text as before.
+        const lab = el('div', 'tl-hour' + (m >= 1440 ? ' tl-hour-next' : ''));
+        const hm = hhmm(m);
+        lab.appendChild(el('span', 'tl-hour-h', hm.slice(0, 2)));
+        lab.appendChild(el('span', 'tl-hour-m', hm.slice(2)));
         lab.style.top = y + 'px';
         if (m === 1440) {
           lab.classList.add('tl-hour-midnight');
@@ -538,12 +542,13 @@
     if (s.dark) badges.appendChild(badge('tl-badge tl-badge-dark', 'DARK', 'Marked dark on the Schedule tab — left off the schedule PDF'));
     if (s.status === 'archived') badges.appendChild(badge('past-badge', 'ARCHIVED', 'This show is archived'));
     if (badges.childNodes.length) meta.appendChild(badges);
+    meta.appendChild(glyph('venue', 'Venue'));
     meta.appendChild(el('span', 'tl-lh-venue', s.venue || 'No venue'));
     meta.title = s.venue || 'No venue';
     h.appendChild(meta);
     const pm = el('div', 'tl-lh-pm');
     if (s.pm) {
-      pm.appendChild(el('span', 'tl-lh-label', 'PM'));
+      pm.appendChild(glyph('person', 'PM'));
       const nm = el('span', 'tl-lh-pmname', s.pm.name);
       nm.title = [s.pm.name, s.pm.title, s.pm.phone, s.pm.email].filter(Boolean).join(' · ');
       pm.appendChild(nm);
@@ -552,15 +557,15 @@
       if (tel) pm.appendChild(contactLink(tel, 'Call ' + s.pm.name + ' (' + s.pm.phone + ')', 'phone'));
       if (mail) pm.appendChild(contactLink(mail, 'Email ' + s.pm.name + ' (' + s.pm.email + ')', 'mail'));
     } else {
-      pm.appendChild(el('span', 'tl-lh-label', 'PM'));
-      pm.appendChild(el('em', 'tl-lh-none', 'none set'));
+      pm.appendChild(glyph('person', 'PM'));
+      pm.appendChild(el('em', 'tl-lh-none', 'No PM'));
     }
     const perfs = (s.performances || []).filter(p => p.label);
     if (perfs.length) {
       const pf = el('span', 'tl-lh-perf');
       const what = s.show_mode === 'event' ? 'Event' : 'Perf';
       pf.title = what + ' ' + perfs.map(p => p.label).join(', ');
-      pf.appendChild(el('span', 'tl-lh-label', what));
+      pf.appendChild(glyph('play', what));
       pf.appendChild(el('span', 'mono', perfs.map(p => p.label).join(', ')));
       pm.appendChild(pf);
     }
@@ -576,6 +581,23 @@
     if (s.show_mode === 'event') node.classList.add('tl-lane-event');
     if (s.is_test) node.classList.add('tl-lane-test');
     if (s.dark) node.classList.add('tl-lane-dark');
+  }
+
+  // Lane-header glyphs (3.44.0): the same venue / person / play icons the
+  // Shows board's Happening Today cards use, so a lane reads like a card.
+  const GLYPHS = {
+    venue: '<path d="M3 21h18M3 7h18M5 7v14M19 7v14M9 11h2M13 11h2M9 15h2M13 15h2"/>',
+    person: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+    play: '<polygon points="6 4 19 12 6 20 6 4"/>',
+  };
+  function glyph(name, label) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('class', 'tl-glyph tl-glyph-' + name);
+    svg.innerHTML = GLYPHS[name];            // constant markup only
+    if (label) { svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', label); }
+    else svg.setAttribute('aria-hidden', 'true');
+    return svg;
   }
 
   const ICONS = {
@@ -743,6 +765,11 @@
     if (it.point) a.classList.add('tl-point');
     if (it.from_prev) a.classList.add('tl-prev');
     if (it.piano) a.classList.add('tl-piano');
+    // The row that starts at a performance / event time is "the show":
+    // drawn in the lane's colour, with the play glyph (3.44.0).
+    if (!it.from_prev && (s.performances || []).some(p => p.minutes != null && p.minutes === it.start)) {
+      a.classList.add('tl-showtime');
+    }
     const times = it.point ? it.start_label : it.start_label + '–' + it.end_label;
     a.appendChild(label([['tl-item-time', times], ['tl-item-desc', it.desc || it.notes || '(no description)']]));
     place(a, it, ppm, range, colW, 64);
