@@ -214,11 +214,12 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.2" y2="16.2"/></svg>
         Search
       </a>
-      {# Home = the day timeline (3.35.0); Shows = the show board (+ its
+      {# Timeline = the day timeline at / (3.35.0; labelled "Home" until
+         3.46.0); Shows = the show board (+ its
          Archived tab); My Shows = the board narrowed to my PM shows. #}
       <a href="{{ url_for('index') }}" class="nav-item {% if request.endpoint == 'index' %}active{% endif %}"{% if request.endpoint == 'index' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-        Home
+        Timeline
       </a>
       {% set _on_board = request.endpoint in ['dashboard', 'archived_shows_page'] %}
       <a href="{{ url_for('dashboard') }}" class="nav-item {% if _on_board %}active{% endif %}"{% if _on_board %} aria-current="page"{% endif %}>
@@ -262,7 +263,7 @@
       </a>
       {% endif %}
 
-      {# Everything below Home is data-driven: catalog in nav_layout.py,
+      {# Everything below Timeline is data-driven: catalog in nav_layout.py,
          admin-saved order/sections in app_settings ('nav_layout' — see
          Settings → Sidebar Editor). Audience filtering happens server-side
          in get_nav_context(); icons come from the code catalog (safe). #}
@@ -425,7 +426,7 @@
   <nav class="m-tabbar">
     <a href="{{ url_for('viewer_home') if session.get('is_document_viewer') else url_for('index') }}" class="m-tab">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-      <span>Home</span>
+      <span>{{ 'Home' if session.get('is_document_viewer') else 'Timeline' }}</span>
     </a>
     <button type="button" class="m-tab" onclick="mToggleDrawer()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
@@ -583,7 +584,7 @@ async function resetViewAs() {
 const _HELP_UL = 'padding-left:18px;margin:8px 0';
 const _HELP_PAGES = {
   home: {
-    title: 'Home — Day Timeline',
+    title: 'Timeline — Day Timeline',
     html: `
       <p><strong>Everything happening on one day, at a glance.</strong> One column (lane) per show or event that has anything that day — its load-in/out or performance dates, production schedule rows or crew — side by side on one time axis, so you can see what overlaps.</p>
       <ul style="${_HELP_UL}">
@@ -595,14 +596,14 @@ const _HELP_PAGES = {
         <li>The red <strong>NOW</strong> line follows your device's clock while you look at today (it moves every 30 s); finished items fade. The page refreshes itself every minute while it's open, and a page left on today rolls over to the next day at 06:00.</li>
         <li><strong>‹ Today ›</strong> and the date picker change the day (the link keeps <code>?date=</code>, so you can bookmark or share a day).</li>
         <li><strong>Venue</strong> chips (shown when two or more venues have something that day) work like the Shows board's venue pills. Test / demo shows are left off. <strong>− / +</strong> zooms (less or more height per hour). Both are remembered on this device.</li>
-        <li>Hover or tab to a block for its full details. A day with nothing on it says so, with a link to <strong>Shows</strong> (the full show list). On a phone the Home header scrolls away so the timeline gets the whole screen.</li>
+        <li>Hover or tab to a block for its full details. A day with nothing on it says so, with a link to <strong>Shows</strong> (the full show list). On a phone the Timeline header scrolls away so the timeline gets the whole screen.</li>
       </ul>
     `
   },
   shows: {
     title: 'Shows — Show Board',
     html: `
-      <p><strong>The show board.</strong> Every active show as a card, in one column per venue (shows with no venue sit under <em>Unassigned</em>); click a card to open the show. The day timeline is <strong>Home</strong>; only the shows you PM are on <strong>My Shows</strong>.</p>
+      <p><strong>The show board.</strong> Every active show as a card, in one column per venue (shows with no venue sit under <em>Unassigned</em>); click a card to open the show. The day timeline is <strong>Timeline</strong>; only the shows you PM are on <strong>My Shows</strong>.</p>
       <ul style="${_HELP_UL}">
         <li><strong>Active / Archived</strong> tabs under the title, with counts. <strong>Archived</strong> opens the archive page (its own search, dates and venue filter, plus Restore).</li>
         <li><strong>Happening Today</strong> — shows with something on today (any day from load-in to load-out, or a performance). Each card is tagged <em>Show Day</em>, <em>Performance</em>, <em>Load-In</em>, <em>In Production</em> (a day in between) or <em>Load-Out</em>, and lists the venue, today's PM (marked <em>cover</em> when a covering PM is set for today), performance times (▷) and crew call times (◷).</li>
@@ -631,8 +632,8 @@ const _HELP_PAGES = {
         <li><strong>Header buttons</strong> (on every tab):
           <ul style="${_HELP_UL}">
             <li><strong>History</strong> — saved versions of the Advance Sheet, Production Schedule or Post-Show Notes (it opens on the tab you're on; switch at the top): who saved, when and a summary; <strong>Changes ▾</strong> shows exactly what changed, <strong>View</strong> shows that version, <strong>Restore…</strong> previews what a restore will change before you confirm. One person's quick additions are grouped into one version; the last 100 are kept.</li>
-            <li><strong>Show Mode / Event Mode</strong> — switches the show to an event: teal accent and EVENT badge on Home and the Shows board, and contacts set to receive only show (or only event) emails follow it.</li>
-            <li><strong>Mark as test</strong> (admins and staff) — flags a test/demo show: TEST badge, left out of reports, hidden on Home and in Search unless test shows are included. <strong>Unmark test</strong> undoes it.</li>
+            <li><strong>Show Mode / Event Mode</strong> — switches the show to an event: teal accent and EVENT badge on the Timeline and the Shows board, and contacts set to receive only show (or only event) emails follow it.</li>
+            <li><strong>Mark as test</strong> (admins and staff) — flags a test/demo show: TEST badge, left out of reports, hidden on the Timeline and in Search unless test shows are included. <strong>Unmark test</strong> undoes it.</li>
             <li><strong>AI Extract</strong> (when an admin has AI turned on) — upload a rider/tech spec or pick an attachment; review the suggested values and apply the ones you want.</li>
           </ul></li>
         <li><strong>Engagement</strong> — <strong>First Call</strong> to <strong>Final Out</strong> dates: the whole time in the building, from the first billed call through the end of load-out. Set it first; it drives the schedule and labor day lists and asset rental pricing (weekly rate at 7+ days). Left blank, it's filled from the earliest and latest show dates.</li>
@@ -1075,7 +1076,7 @@ const _HELP_PAGES = {
   nav_editor: {
     title: 'Sidebar Editor',
     html: `
-      <p>Arranges the sidebar <strong>for every user</strong> (admin only). The search box, <strong>Home</strong>, <strong>Shows</strong> and <strong>My Shows</strong> always stay at the top (followed by the current show's tabs on a show page); everything below them is laid out here.</p>
+      <p>Arranges the sidebar <strong>for every user</strong> (admin only). The search box, <strong>Timeline</strong>, <strong>Shows</strong> and <strong>My Shows</strong> always stay at the top (followed by the current show's tabs on a show page); everything below them is laid out here.</p>
       <ul style="${_HELP_UL}">
         <li>Drag a row, or use <strong>↑ ↓</strong>, to reorder.</li>
         <li>Type in a row's box to <strong>rename</strong> it (blank = the default name); <strong>Indent</strong> shows it as a sub-item of the row above; <strong>Hide</strong> takes it out of the sidebar.</li>
