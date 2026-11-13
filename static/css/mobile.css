@@ -483,3 +483,28 @@ html.mobile-view .tracker-toolbar select { max-width: 100%; }
    room for its spinner, so 110px still cut '12500.00'). */
 html.mobile-view .appr-date-input { width: 140px !important; }
 html.mobile-view .appr-price-input { width: 116px; }
+
+/* ── Inbox (3.47.0): no floating button on phones — the "Inbox" tab of the
+   bottom bar opens the panel as a full-screen sheet above the chrome. ───── */
+html.mobile-view .m-tab-ico { position: relative; display: inline-flex; }
+html.mobile-view .m-tab-ico .inbox-badge { top: -5px; right: -10px; }
+html.mobile-view.inbox-open #m-inbox-tab { color: var(--accent); }
+html.mobile-view .inbox-panel {
+  top: 0; left: 0; right: 0; bottom: 0; width: auto; max-width: none; height: auto;
+  border: 0; border-radius: 0; z-index: 1250;
+  padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);
+}
+html.mobile-view.inbox-open { overflow: hidden; }
+html.mobile-view .inbox-head { padding: 10px 8px 10px 12px; }
+html.mobile-view .inbox-icon-btn { width: 40px; height: 40px; }
+html.mobile-view .inbox-tabs button { padding: 12px 8px; font-size: 14px; }
+html.mobile-view .inbox-toolbar input,
+html.mobile-view .inbox-composer-row textarea,
+html.mobile-view .inbox-form .field-input,
+html.mobile-view .inbox-time-input { font-size: 16px; }   /* no iOS zoom on focus */
+html.mobile-view .inbox-toolbar input { height: 38px; }
+html.mobile-view .inbox-thread { padding: 13px 12px; }
+html.mobile-view .inbox-bubble { font-size: 15px; }
+html.mobile-view .inbox-link-btn { font-size: 13px; padding: 4px 0; }
+html.mobile-view .inbox-msg-foot .inbox-link-btn { font-size: 12px; }
+html.mobile-view .inbox-time-input { height: 38px; }

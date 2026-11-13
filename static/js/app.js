@@ -4485,6 +4485,13 @@ async function _loadNotifPanel() {
 
 function toggleNotifPanel(ev) {
   if (ev) ev.stopPropagation();
+  // 3.47.0: the list lives in the inbox panel (chat.js) — the bell opens
+  // its Notifications tab.
+  if (window.Inbox) {
+    if (typeof mCloseDrawer === 'function') mCloseDrawer();
+    window.Inbox.toggle('notifications');
+    return;
+  }
   const panel = document.getElementById('notif-panel');
   if (!panel) return;
   _notifPanelOpen = !_notifPanelOpen;
@@ -4497,6 +4504,7 @@ async function markNotifRead(nid) {
     await fetch(`/api/notifications/${nid}/read`, {method: 'POST', credentials: 'same-origin'});
   } catch (e) {}
   refreshNotifBadge();
+  if (window.Inbox) window.Inbox.refresh();
 }
 
 async function markAllNotifRead() {
@@ -4505,6 +4513,7 @@ async function markAllNotifRead() {
   } catch (e) {}
   _loadNotifPanel();
   refreshNotifBadge();
+  if (window.Inbox) window.Inbox.refresh();
 }
 
 // Close the panel when clicking outside of it (but allow clicks inside the
@@ -4524,6 +4533,9 @@ document.addEventListener('click', (e) => {
 // sign-in pages).
 function _startNotifPolling() {
   if (!document.getElementById('notif-bell-btn')) return;
+  // With the inbox on the page (3.47.0) chat.js's one status poll paints
+  // this badge too — don't run a second poll beside it.
+  if (document.getElementById('inbox-panel')) return;
   refreshNotifBadge();
   _notifPollTimer = setInterval(refreshNotifBadge, _NOTIF_POLL_MS);
 }
@@ -4956,6 +4968,7 @@ function renderComments(comments) {
         <div class="comment-bubble" style="${isDeleted ? 'opacity:.6' : ''}">
           <div class="comment-header">
             <strong>${_esc(c.author)}</strong>
+            ${c.via_message !== undefined ? `<span class="comment-via-msg" title="Sent as a message that is also posted to this show's comments">✉ message${c.via_message ? ' to ' + _esc(c.via_message) : ''}</span>` : ''}
             <span class="comment-time">${dt}${editedIndicator}</span>
             <span style="margin-left:auto;display:flex;gap:4px;align-items:center">${actions.join('')}</span>
           </div>

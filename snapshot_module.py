@@ -86,7 +86,16 @@ RESTORE_BLOCKED = {
     'cluster_instances', 'perf_page_stats', 'perf_slow_queries',
     'perf_hourly_stats', 'perf_request_log',
     'file_migration_runs',
+    # Private conversations (chat_module, 3.47.0)
+    'chat_threads', 'chat_participants', 'chat_messages',
 }
+
+# Tables this tool never SHOWS, let alone restores (3.47.0): the private
+# conversations of chat_module. An admin browsing a backup must not be able
+# to read other people's messages or see who writes to whom — they are left
+# out of the table list and the diff view refuses them. (They are also in
+# RESTORE_BLOCKED, so no restore path can touch them.)
+PRIVATE_TABLES = {'chat_threads', 'chat_participants', 'chat_messages'}
 
 # Churny operational tables — sorted to the bottom of the tables list so the
 # content tables people actually care about stay on top.
@@ -894,6 +903,8 @@ def _tables_view():
         ok, reason = _restore_allowed(db, snap)
         tables = []
         for (schema, table) in keys:
+            if table in PRIVATE_TABLES:
+                continue
             meta = scan.get((schema, table))
             in_live = (schema, table) in live_set
             tables.append({
@@ -926,6 +937,8 @@ def _diff_view():
     table = request.args.get('table') or ''
     if not _SAFE_IDENT_RE.match(schema) or not _SAFE_IDENT_RE.match(table):
         return _json_error('Invalid table.')
+    if table in PRIVATE_TABLES:
+        return _json_error('This table holds private conversations and cannot be inspected.', 403)
     try:
         meta = snap.scan().get((schema, table))
     except SnapshotReadError as e:

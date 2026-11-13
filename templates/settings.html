@@ -2107,6 +2107,20 @@
       </div>
     </div>
   </div>
+  {# Inbox emails (3.47.0) — this person's own switches (user_notify_prefs). #}
+  <div class="form-section">
+    <div class="form-section-header"><span class="section-icon">◈</span> EMAIL NOTIFICATIONS</div>
+    <div class="form-section-body">
+      <div style="max-width:560px">
+        <p class="text-dim" style="font-size:12px;line-height:1.5;margin:0 0 12px">Everything below always shows in your <strong>inbox</strong> (the envelope button). These switches decide what is <em>also</em> emailed to <strong id="np-email">your address</strong> when you haven't seen it in the app.</p>
+        <label class="np-row"><input type="checkbox" id="np-messages"> <span><strong>New messages</strong><span class="text-dim np-sub">A message someone sent you that is still unread after <span id="np-delay">10</span> minutes. One email covers everything unread.</span></span></label>
+        <label class="np-row"><input type="checkbox" id="np-mentions"> <span><strong>@mentions</strong><span class="text-dim np-sub">Someone typed @your name in a show's comments and you haven't opened the notification.</span></span></label>
+        <label class="np-row"><input type="checkbox" id="np-reminders"> <span><strong>Reminders</strong><span class="text-dim np-sub">A reminder you set on a message or a note to self has come due.</span></span></label>
+        <div id="np-msg" class="field-msg" style="display:none"></div>
+        <button class="btn btn-primary" type="button" onclick="saveNotifyPrefs()">Save</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 {# ── MODALS ────────────────────────────────────────────────────────────────── #}
@@ -3163,6 +3177,32 @@ async function changePassword() {
     if (_acctPwRulesUpdate) _acctPwRulesUpdate();
   }
 }
+
+/* Inbox email switches (My Account) */
+async function loadNotifyPrefs() {
+  try {
+    const d = await (await fetch('/account/notify-prefs', {headers: {'X-Requested-With': 'XMLHttpRequest'}})).json();
+    if (!d.success) return;
+    document.getElementById('np-messages').checked = !!d.prefs.email_messages;
+    document.getElementById('np-mentions').checked = !!d.prefs.email_mentions;
+    document.getElementById('np-reminders').checked = !!d.prefs.email_reminders;
+    document.getElementById('np-delay').textContent = d.delay_minutes;
+    document.getElementById('np-email').textContent = d.email || 'your address (none on your account yet — ask an admin to add one)';
+  } catch (e) {}
+}
+async function saveNotifyPrefs() {
+  const msg = document.getElementById('np-msg');
+  try {
+    const resp = await fetch('/account/notify-prefs', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
+      body: JSON.stringify({email_messages: document.getElementById('np-messages').checked,
+                            email_mentions: document.getElementById('np-mentions').checked,
+                            email_reminders: document.getElementById('np-reminders').checked})});
+    const d = await resp.json();
+    showMsg(msg, d.success ? 'Saved.' : (d.error || 'Could not save.'), d.success ? 'success' : 'error');
+  } catch (e) { showMsg(msg, 'Could not save.', 'error'); }
+}
+document.addEventListener('DOMContentLoaded', loadNotifyPrefs);
 
 /* ── Arts Groups ────────────────────────────────────────────────── */
 

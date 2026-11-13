@@ -68,6 +68,7 @@ import prism_module  # sandboxed Prism FM integration — wired up near the bott
 import security_module  # security sign-in sheets — wired up near the bottom
 import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
 import spot_module  # Spot sound-level integration — wired up near the bottom
+import chat_module  # Messages / inbox — wired up near the bottom
 import file_store  # S3 <-> PostgreSQL file redundancy + migration — wired up near the bottom
 from init_db import pg_name_key  # SQL twin of _name_key (idx_contacts_name_key's text)
 
@@ -898,7 +899,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.46.0'
+APP_VERSION = '3.47.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1138,10 +1139,22 @@ APP_MODULES = [
         'name': 'Piano Tuning',
         'description': 'PMs request piano tunings from the show page (Advance '
                        'tab); the piano tuning manager works the running list, '
-                       'schedules them onto the production schedule and adds '
-                       'the cost to the show settlement.',
+                       'schedules them onto the production schedule and records '
+                       'the cost on the show (billed on its invoices only when '
+                       'the manager chooses to).',
         'default': '1',
         'settings_endpoint': 'piano_tuning_page',
+    },
+    {
+        'key': 'messages',
+        'name': 'Messages',
+        'description': 'Private conversations between users from the floating '
+                       'inbox button: tag a show, optionally post the '
+                       'conversation to that show\'s comments, notes to self '
+                       'and reminders. Off = the inbox shows notifications only; '
+                       'conversations are kept.',
+        'default': '1',
+        'settings_endpoint': None,
     },
     {
         'key': 'spot',
@@ -4250,6 +4263,9 @@ def start_scheduler():
         # quiet long enough.
         scheduler.add_job(run_field_change_alerts, 'interval', minutes=10,
                           id='field_change_alerts')
+        # Inbox emails (3.47.0): unread messages, due reminders, @mentions —
+        # leader-gated inside the job; each item is mailed at most once.
+        scheduler.add_job(run_inbox_emails, 'interval', minutes=5, id='inbox_emails')
         # Prism auto-sync (sandboxed module): leader-gated inside the job;
         # fires hourly but only acts during the configured hour, only when
         # both prism_enabled and prism_auto_sync_enabled are '1', and skips
@@ -4988,6 +5004,215 @@ def notify_users(db, user_ids, title, body='', link_url=None, kind='system',
                 'VALUES (%s,%s,%s,%s,%s,%s,%s)', rows)
     except Exception as e:
         app.logger.warning(f'notify_users failed ({kind}): {e}')
+
+
+_MENTION_SCAN_MAX = 4000      # comment bodies are ≤ 2000 chars
+
+
+def _notify_comment_mentions(db, show_id, body, actor_id, actor_name=None, old_body=None):
+    """@mentions in a show comment → an inbox notification for each person
+    named (3.47.0). The comment box inserts '@Display Name', so a mention is
+    '@' + a user's display name or username (any case) not followed by a
+    word character; longer names are matched first and consumed, so
+    '@Dan Lupo' never also notifies a user called 'Dan'. With `old_body`
+    (an edit) only people newly mentioned are told. Never the actor, never
+    locked / pending / document-viewer accounts. Caller commits; never
+    raises. Returns the user ids notified."""
+    try:
+        text = (body or '')[:_MENTION_SCAN_MAX]
+        if '@' not in text:
+            return []
+        users = db.execute(
+            """SELECT id, username, display_name FROM users
+                WHERE COALESCE(is_locked, 0) = 0 AND COALESCE(pending_approval, 0) = 0
+                  AND COALESCE(is_document_viewer, 0) = 0""").fetchall()
+        names = []
+        for u in users:
+            for n in {(u['display_name'] or '').strip(), (u['username'] or '').strip()}:
+                if n:
+                    names.append((n.lower(), u['id']))
+        names.sort(key=lambda x: -len(x[0]))
+
+        def _found(src):
+            low, hit = src.lower(), set()
+            for n, uid in names:
+                start = 0
+                while True:
+                    i = low.find('@' + n, start)
+                    if i < 0:
+                        break
+                    end = i + 1 + len(n)
+                    nxt = low[end:end + 1]
+                    if not (nxt.isalnum() or nxt == '_'):
+                        hit.add(uid)
+                        low = low[:i] + ' ' * (end - i) + low[end:]   # consumed
+                    start = end
+            return hit
+
+        who = _found(text) - {actor_id}
+        if old_body:
+            who -= _found((old_body or '')[:_MENTION_SCAN_MAX])
+        if not who:
+            return []
+        show = db.execute('SELECT name FROM shows WHERE id=%s', (show_id,)).fetchone()
+        if actor_name is None:
+            a = db.execute("SELECT COALESCE(NULLIF(TRIM(display_name), ''), username) AS n "
+                           'FROM users WHERE id=%s', (actor_id,)).fetchone()
+            actor_name = a['n'] if a else 'Someone'
+        excerpt = ' '.join(text.split())
+        notify_users(db, who,
+                     f"{actor_name} mentioned you — {show['name'] if show else 'a show'}",
+                     excerpt[:240] + ('…' if len(excerpt) > 240 else ''),
+                     link_url=f'/shows/{show_id}?tab=comments', kind='mention', show_id=show_id)
+        return sorted(who)
+    except Exception as e:
+        app.logger.warning(f'_notify_comment_mentions failed (show {show_id}): {e}')
+        return []
+
+
+# ── Inbox emails (3.47.0) ────────────────────────────────────────────────────
+# Per-user switches (My Account → Email notifications), stored in
+# user_notify_prefs; a missing row = all on.
+_NOTIFY_PREF_KEYS = ('email_messages', 'email_mentions', 'email_reminders')
+_INBOX_EMAIL_DELAY_MIN = 10     # a message must sit unread this long first
+_INBOX_MENTION_DELAY_MIN = 3
+
+
+def _notify_prefs(db, user_ids):
+    """{user_id: {email_messages, email_mentions, email_reminders}} (bools)."""
+    out = {int(u): {k: True for k in _NOTIFY_PREF_KEYS} for u in user_ids}
+    if out:
+        for r in db.execute('SELECT * FROM user_notify_prefs WHERE user_id = ANY(%s)',
+                            (list(out),)).fetchall():
+            out[r['user_id']] = {k: bool(r[k]) if r[k] is not None else True
+                                 for k in _NOTIFY_PREF_KEYS}
+    return out
+
+
+@app.route('/account/notify-prefs', methods=['GET', 'POST'])
+@login_required
+def account_notify_prefs():
+    """The signed-in user's inbox email switches."""
+    uid = session['user_id']
+    db = get_db()
+    try:
+        if request.method == 'POST':
+            if session.get('is_document_viewer'):
+                return jsonify({'success': False, 'error': 'Not available.'}), 403
+            data = request.get_json(silent=True) or {}
+            vals = [1 if data.get(k) else 0 for k in _NOTIFY_PREF_KEYS]
+            db.execute(
+                """INSERT INTO user_notify_prefs (user_id, email_messages, email_mentions, email_reminders)
+                   VALUES (%s, %s, %s, %s)
+                   ON CONFLICT (user_id) DO UPDATE SET
+                     email_messages = EXCLUDED.email_messages,
+                     email_mentions = EXCLUDED.email_mentions,
+                     email_reminders = EXCLUDED.email_reminders,
+                     updated_at = CURRENT_TIMESTAMP""", [uid] + vals)
+            db.commit()
+            syslog_logger.info(f"NOTIFY_PREFS user_id={uid} messages={vals[0]} mentions={vals[1]} "
+                               f"reminders={vals[2]} by={session.get('username')}")
+        prefs = _notify_prefs(db, [uid])[uid]
+        me = db.execute('SELECT email FROM users WHERE id=%s', (uid,)).fetchone()
+    finally:
+        db.close()
+    return jsonify({'success': True, 'prefs': prefs,
+                    'email': ((me['email'] if me else '') or '').strip(),
+                    'delay_minutes': _INBOX_EMAIL_DELAY_MIN})
+
+
+def run_inbox_emails():
+    """Every 5 minutes (leader-gated): one email per person for what is
+    waiting in their inbox and they haven't seen — messages left unread for
+    _INBOX_EMAIL_DELAY_MIN minutes, reminders that came due, and @mentions
+    still unread after a few minutes — each mailed at most once, honouring
+    the person's switches (user_notify_prefs). Stamps are committed BEFORE
+    sending: a failed send is logged (Email log), never retried in a loop."""
+    if not am_i_leader():
+        return
+    try:
+        db = get_db()
+    except db_adapter.DatabaseUnavailable as e:
+        syslog_logger.error(f'INBOX_EMAIL_SKIPPED reason=database_unavailable detail={e}')
+        return
+    try:
+        items = (chat_module.pending_email_items(db, _INBOX_EMAIL_DELAY_MIN)
+                 if module_enabled('messages') else {})
+        mentions = db.execute(
+            """UPDATE notifications SET emailed_at = CURRENT_TIMESTAMP
+                WHERE kind = 'mention' AND read_at IS NULL AND emailed_at IS NULL
+                  AND created_at <= NOW() - %s * INTERVAL '1 minute'
+            RETURNING user_id, title, body, link_url""", (_INBOX_MENTION_DELAY_MIN,)).fetchall()
+        for m in mentions:
+            items.setdefault(m['user_id'], {'messages': [], 'reminders': []}) \
+                 .setdefault('mentions', []).append(dict(m))
+        people = {}
+        if items:
+            prefs = _notify_prefs(db, list(items))
+            for u in db.execute(
+                    """SELECT id, email, COALESCE(NULLIF(TRIM(display_name), ''), username) AS name
+                         FROM users WHERE id = ANY(%s) AND COALESCE(is_locked, 0) = 0
+                          AND COALESCE(pending_approval, 0) = 0
+                          AND COALESCE(is_document_viewer, 0) = 0""", (list(items),)).fetchall():
+                addr = (u['email'] or '').strip()
+                if _EMAIL_ADDR_RE.match(addr):
+                    people[u['id']] = (addr, u['name'], prefs[u['id']])
+        db.commit()            # the stamps — before any SMTP round-trip
+    except Exception as e:
+        app.logger.error(f'run_inbox_emails failed: {e}')
+        db.close()
+        return
+    db.close()
+    base = (get_app_setting('public_base_url', '') or '').rstrip('/')
+    sent = 0
+    for uid, it in items.items():
+        if uid not in people:
+            continue
+        addr, name, pref = people[uid]
+        msgs = it.get('messages') if pref['email_messages'] else []
+        rems = it.get('reminders') if pref['email_reminders'] else []
+        ments = it.get('mentions') if pref['email_mentions'] else []
+        if not (msgs or rems or ments):
+            continue
+        blocks, bits = [], []
+
+        def _line(text, n=280):
+            text = ' '.join((text or '').split())
+            return text[:n] + ('…' if len(text) > n else '')
+        if msgs:
+            by_thread = {}
+            for m in msgs:
+                by_thread.setdefault(m['thread_id'], []).append(m)
+            for tid, ms in by_thread.items():
+                senders = ', '.join(sorted({m['author_name'] or 'Someone' for m in ms
+                                            if m['kind'] != 'system'})) or 'Conversation'
+                head = senders + (f" — about {ms[0]['show_name']}" if ms[0]['show_name'] else '')
+                blocks.append({'heading': head, 'items': [_line(m['body']) for m in ms[-8:]]})
+            bits.append(f"{len(msgs)} unread message{'' if len(msgs) == 1 else 's'}")
+        if rems:
+            blocks.append({'heading': 'Reminders due',
+                           'items': [_line(r['body']) + (f" ({r['show_name']})" if r['show_name'] else '')
+                                     for r in rems]})
+            bits.append(f"{len(rems)} reminder{'' if len(rems) == 1 else 's'} due")
+        if ments:
+            blocks.append({'heading': 'Mentions in show comments',
+                           'items': [f"{m['title']}: {_line(m['body'], 200)}" for m in ments]})
+            bits.append(f"{len(ments)} mention{'' if len(ments) == 1 else 's'}")
+        title = ' · '.join(bits)
+        title = title[:1].upper() + title[1:]
+        text, html = _mail(
+            title, eyebrow='Inbox',
+            intro=f'Hi {name}, this is waiting for you in 3·2·1→Theater.',
+            blocks=blocks,
+            button=('Open your inbox', (base + '/shows?inbox=open') if base else ''),
+            note='You get this because something sat unread in your inbox. Change what is '
+                 'emailed under Settings → My Account → Email notifications.')
+        ok, _msg = _send_email(f'3·2·1→THEATER: {title}', [addr], text, html,
+                               error_context={'purpose': 'inbox_digest', 'sensitive': True,
+                                              'triggered_by': 'inbox_job'})
+        sent += 1 if ok else 0
+    if sent:
+        syslog_logger.info(f'INBOX_EMAIL sent={sent}')
 
 
 def _role_user_ids(db, flag, exclude_user_id=None):
@@ -8531,7 +8756,13 @@ def get_comments(show_id):
         SELECT sc.id, sc.body, sc.created_at::timestamptz AS created_at,
                sc.edited_at::timestamptz AS edited_at, sc.deleted_at::timestamptz AS deleted_at,
                u.display_name, u.username, u.id as uid, sc.author_name,
-               du.display_name as deleted_by_name, du.username as deleted_by_username
+               du.display_name as deleted_by_name, du.username as deleted_by_username,
+               sc.chat_thread_id,
+               (SELECT string_agg(COALESCE(NULLIF(TRIM(pu.display_name), ''), pu.username), ', '
+                                  ORDER BY LOWER(COALESCE(NULLIF(TRIM(pu.display_name), ''), pu.username)))
+                  FROM chat_participants cp JOIN users pu ON pu.id = cp.user_id
+                 WHERE cp.thread_id = sc.chat_thread_id
+                   AND cp.user_id IS DISTINCT FROM sc.user_id) AS chat_to
         FROM show_comments sc
         LEFT JOIN users u ON sc.user_id = u.id
         LEFT JOIN users du ON sc.deleted_by = du.id
@@ -8554,6 +8785,10 @@ def get_comments(show_id):
             'initials':    ''.join(w[0].upper() for w in author.split()[:2]),
             'is_own':      r['uid'] is not None and r['uid'] == session['user_id'],
         }
+        if r['chat_thread_id']:
+            # Posted from a Messages conversation set to "also post to the
+            # show's comments" (3.47.0): say who it was written to.
+            entry['via_message'] = r['chat_to'] or ''
         if is_admin and r['deleted_at']:
             entry['deleted_by'] = r['deleted_by_name'] or r['deleted_by_username'] or 'Unknown'
         result.append(entry)
@@ -8583,6 +8818,7 @@ def post_comment(show_id):
     cid = cur.fetchone()['id']
     log_audit(db, 'COMMENT_POST', 'comment', cid, show_id=show_id,
               after={'body': body})
+    _notify_comment_mentions(db, show_id, body, session['user_id'])
     db.commit()
     row = db.execute("""
         SELECT sc.id, sc.body, sc.created_at,
@@ -8670,6 +8906,8 @@ def edit_comment(show_id, cid):
     )
     log_audit(db, 'COMMENT_EDIT', 'comment', cid, show_id=show_id,
               before={'body': old_body}, after={'body': new_body})
+    # Only people the edit newly mentions are notified.
+    _notify_comment_mentions(db, show_id, new_body, session['user_id'], old_body=old_body)
     db.commit()
     db.close()
     syslog_logger.info(f"COMMENT_EDIT show_id={show_id} comment_id={cid} by={session.get('username')}")
@@ -11259,7 +11497,7 @@ _SHOW_PURGE_TABLES = ['advance_data', 'schedule_rows', 'schedule_meta',
 _SHOW_MERGE_MOVE_TABLES = ['labor_requests', 'post_show_labor', 'show_assets',
     'show_external_rentals', 'show_performances', 'show_comments',
     'show_attachments', 'security_signin_names', 'piano_tunings',
-    'spot_captures']
+    'spot_captures', 'chat_threads']
 
 # Friendly labels for the merge preview's "what will move" summary.
 _SHOW_MERGE_MOVE_LABELS = {
@@ -11269,6 +11507,7 @@ _SHOW_MERGE_MOVE_LABELS = {
     'show_attachments': 'Files', 'security_signin_names': 'Security sign-in names',
     'piano_tunings': 'Piano tunings',
     'spot_captures': 'Spot sound levels',
+    'chat_threads': 'Message conversations',
 }
 
 # Advance fields stored as scalar columns on the shows row (vs the advance_data
@@ -15870,6 +16109,7 @@ _EMAIL_PURPOSE_LABELS = {
     'password_reset': 'Password reset', 'email_confirm': 'Email confirmation',
     'gateway_otp': 'Sign-in code', 'test': 'Email test',
     'maintenance_notice': 'Maintenance notice', 'maintenance_complete': 'Maintenance complete',
+    'inbox_digest': 'Inbox (messages / mentions / reminders)',
 }
 
 
@@ -23270,8 +23510,9 @@ def show_assets_list(show_id):
 
     # External rentals
     ext_rows = db.execute(f"""
-        SELECT {_cols_except(db, 'show_external_rentals', ('pdf_data', 's3_key'))}
-        FROM show_external_rentals WHERE show_id=%s ORDER BY sort_order, id
+        SELECT {_cols_except(db, 'show_external_rentals', ('pdf_data', 's3_key'), alias='er')},
+               CASE WHEN {_ER_BILLED_SQL} THEN 1 ELSE 0 END AS on_invoice
+        FROM show_external_rentals er WHERE er.show_id=%s ORDER BY er.sort_order, er.id
     """, (show_id,)).fetchall()
 
     # Approval state
@@ -25404,12 +25645,24 @@ def _merge_pdfs(base_pdf_bytes, extra_pdfs, extras_watermark=None):
         return base_pdf_bytes
 
 
+# External-rental lines that are BILLED (3.47.0). A piano tuning's line
+# (piano_tuning_id) stays on the show — Assets tab, Reports — as a show
+# expense, but is settled separately: it reaches the Asset Estimate / Final /
+# Combined Invoice (line, total and appended paperwork) only when the piano
+# manager ticked "Bill on the show's invoices" (piano_tunings.bill_on_invoice,
+# default 0). Every billing query filters with this; alias the table `er`.
+_ER_BILLED_SQL = ("(er.piano_tuning_id IS NULL OR EXISTS (SELECT 1 FROM piano_tunings pt "
+                  "WHERE pt.id = er.piano_tuning_id AND pt.bill_on_invoice = 1))")
+
+
 def _fetch_external_rental_pdfs(db, show_id):
-    """Return list of PDF byte-strings for all external rentals that have attached PDFs."""
+    """PDF byte-strings of the paperwork attached to the show's BILLED
+    external rentals (see _ER_BILLED_SQL) — appended to the invoices."""
     rows = db.execute(
-        f"SELECT id, s3_key, pdf_filename, {file_store.in_db_col('rentals')} "
-        "FROM show_external_rentals WHERE show_id=%s AND COALESCE(pdf_filename, '') <> '' "
-        'ORDER BY sort_order',
+        f"SELECT er.id, er.s3_key, er.pdf_filename, {file_store.in_db_col('rentals')} "
+        "FROM show_external_rentals er WHERE er.show_id=%s "
+        f"AND COALESCE(er.pdf_filename, '') <> '' AND {_ER_BILLED_SQL} "
+        'ORDER BY er.sort_order',
         (show_id,)
     ).fetchall()
     result = []
@@ -25436,8 +25689,8 @@ def _fetch_external_rental_pdfs(db, show_id):
 def _fetch_show_assets_and_externals(db, show_id):
     """Assets + external rentals for a show's invoices, with subtotals.
     Shared by the asset invoice and the final (post-show) invoice so the
-    two stay in lock-step. Piano tunings arrive as their linked external
-    rental lines (3.9.1)."""
+    two stay in lock-step. A piano tuning's linked external-rental line is
+    included only when its manager chose to bill it (_ER_BILLED_SQL, 3.47.0)."""
     assets = db.execute("""
         SELECT sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end, sa.notes,
                sa.asset_item_id, ai.barcode AS unit_barcode,
@@ -25450,11 +25703,11 @@ def _fetch_show_assets_and_externals(db, show_id):
         WHERE sa.show_id = %s AND sa.is_hidden = 0
         ORDER BY ac.sort_order, at.name
     """, (show_id,)).fetchall()
-    external_rentals = db.execute("""
-        SELECT description, cost, pdf_filename
-        FROM show_external_rentals
-        WHERE show_id = %s
-        ORDER BY sort_order
+    external_rentals = db.execute(f"""
+        SELECT er.description, er.cost, er.pdf_filename
+        FROM show_external_rentals er
+        WHERE er.show_id = %s AND {_ER_BILLED_SQL}
+        ORDER BY er.sort_order
     """, (show_id,)).fetchall()
     assets_list = [dict(a) for a in assets]
     ext_list    = [dict(e) for e in external_rentals]
@@ -25943,7 +26196,7 @@ _PIANO_REQUEST_FIELDS = ('piano_asset_type_id', 'piano_asset_item_id', 'piano',
 # Fields only the piano manager edits.
 # Only a start time (3.10.2): tuning_end is no longer set or shown.
 _PIANO_MANAGER_FIELDS = ('piano_vendor_id', 'tuning_date', 'tuning_start',
-                         'cost', 'manager_notes', 'purpose')
+                         'cost', 'bill_on_invoice', 'manager_notes', 'purpose')
 # House tunings (3.18.0): no show — maintenance, rehearsal, recording… The
 # piano manager's own: no schedule row, no show charge, no PM cancel flow.
 PIANO_HOUSE_PURPOSES = ('Maintenance', 'Rehearsal', 'Recording', 'Event', 'Seasonal', 'Other')
@@ -26387,8 +26640,10 @@ def _piano_er_description(t):
 def _sync_piano_external_rental(db, tid, s3_deletes):
     """Keep tuning `tid`'s linked show_external_rentals line (3.9.1): it
     exists while the tuning isn't cancelled and has a cost or paperwork, so
-    the charge shows on the Assets tab, the Asset Estimate and the Final /
-    Combined Invoice like any external rental (paperwork PDF appended).
+    the cost shows on the Assets tab and in Reports as a show expense. It is
+    billed on the Asset Estimate / Final / Combined Invoice (paperwork PDF
+    appended) only when the tuning's bill_on_invoice is set (_ER_BILLED_SQL,
+    3.47.0 — tunings are normally settled separately).
     Cancelling removes the line and its paperwork. Caller commits, THEN
     deletes the S3 keys this appended to `s3_deletes` (_piano_s3_cleanup), so
     a rollback never leaves the DB pointing at a deleted object. Returns the
@@ -26600,6 +26855,8 @@ def _piano_clean(data, fields):
                               }.get(k, 'Pick the vendor from the list.')
         elif k in ('requested_time', 'tuning_start'):
             out[k] = _normalize_perf_time(str(v or ''))[:20]
+        elif k == 'bill_on_invoice':
+            out[k] = 1 if v in (1, True, '1', 'true', 'on') else 0
         elif k == 'cost':
             s = str(v if v is not None else '').strip().replace('$', '').replace(',', '')
             if not s:
@@ -27378,8 +27635,9 @@ _PIANO_ER_COLS = ("(SELECT er.id FROM show_external_rentals er WHERE er.piano_tu
 @piano_manager_required
 def piano_tuning_paperwork_upload(tid):
     """Attach the vendor paperwork (PDF) to a tuning. It lives on the
-    tuning's external-rental line, so it shows on the show's Assets tab and
-    is appended to the Asset Estimate / Final / Combined Invoice PDFs."""
+    tuning's external-rental line, so it shows on the show's Assets tab; it
+    is appended to the Asset Estimate / Final / Combined Invoice PDFs only
+    when the tuning is billed on the invoices (bill_on_invoice)."""
     if not _piano_module_on():
         abort(404)
     f = request.files.get('pdf')
@@ -29712,7 +29970,8 @@ def reports_page():
                            asset_categories=asset_categories, asset_types=asset_types,
                            positions=positions, techs=techs, shows=shows, adv_sections=adv_sections,
                            can_assets=_can_report_assets(), can_labor=_can_report_labor(),
-                           can_piano=_can_report_piano(), user=get_current_user())
+                           can_piano=_can_report_piano(), can_sound=module_enabled('spot'),
+                           user=get_current_user())
 
 
 @app.route('/api/reports/overview')
@@ -29880,7 +30139,13 @@ def report_asset_types():
     if denied:
         return denied
     d_from, d_to, _v, _c = _report_filters()
+    # 3.47.0: `types` (ids; a group counts its child items) with types_mode
+    # 'only' (default) or 'exclude' narrows the list to the picked items.
+    pick, exclude = _report_id_list('types'), request.args.get('types_mode') == 'exclude'
     db = get_db()
+    if pick:
+        pick = set(pick) | {r['id'] for r in db.execute(
+            'SELECT id FROM asset_types WHERE parent_type_id = ANY(%s)', (list(pick),)).fetchall()}
     shows = _report_shows(db)
     types = {r['id']: {
         'type_id': r['id'], 'type': r['name'], 'category': r['category_name'],
@@ -29894,7 +30159,7 @@ def report_asset_types():
             FROM asset_types at JOIN asset_categories ac ON ac.id = at.category_id
             WHERE at.is_retired = 0
               AND NOT EXISTS (SELECT 1 FROM asset_types ch WHERE ch.parent_type_id = at.id)
-        """).fetchall()}
+        """).fetchall() if not pick or ((r['id'] in pick) != exclude)}
     for r in _report_asset_lines(db, list(shows)):
         t = types.get(r['asset_type_id'])
         if not t:
@@ -29921,7 +30186,11 @@ def report_asset_types():
                             if span and t['units_owned'] else None)
         out.append(t)
     out.sort(key=lambda t: (-t['lines'], -t['revenue'], t['type'].lower()))
-    return jsonify({'types': out, 'range_days': span})
+    return jsonify({'types': out, 'range_days': span,
+                    'totals': {'items': len(out), 'lines': sum(t['lines'] for t in out),
+                               'units': sum(t['units'] for t in out),
+                               'unit_days': sum(t['unit_days'] for t in out),
+                               'revenue': round(sum(t['revenue'] for t in out), 2)}})
 
 
 @app.route('/api/reports/asset-units')
@@ -29981,33 +30250,61 @@ def report_asset_units():
     return jsonify({'units': list(items.values()), 'pooled': pooled})
 
 
+def _report_id_list(*names, cap=300):
+    """Positive ints from comma-separated query params (first `cap`, no
+    duplicates) — e.g. ?type_ids=3,9 or the older single ?type_id=3."""
+    out = []
+    for n in names:
+        for part in (request.args.get(n) or '').split(','):
+            part = part.strip()
+            if part.isdigit() and 0 < int(part) < 2 ** 31 and int(part) not in out:
+                out.append(int(part))
+    return out[:cap]
+
+
 @app.route('/api/reports/item-shows')
 @reports_required
 def report_item_shows():
-    """Item History (3.18.0): every show that rented one item — a type (a
-    group counts its child items), optionally one specific unit. Direct
-    lines, plus (whole type only) lines that booked a system/package
-    containing it. Honours the shared date / venue / Arts Group / drill
-    filters via _report_shows()."""
+    """Item History (3.18.0; several items / units since 3.47.0): every show
+    that rented the picked items — `type_ids` (a group counts its child
+    items), optionally narrowed to `unit_ids` (specific units of those items,
+    e.g. four projectors). Direct lines, plus (no unit picked) lines that
+    booked a system/package containing an item. `by_unit` is the usage /
+    income / days-rented summary per unit, idle units included; `by_item`
+    the same per item. Honours the shared date / venue / Arts Group / drill
+    filters via _report_shows(). The single `type_id` / `unit_id` of older
+    links still work."""
     denied = _report_need(_can_report_assets)
     if denied:
         return denied
-    tid = request.args.get('type_id', type=int)
-    uid = request.args.get('unit_id', type=int)
-    if not tid:
+    tids = _report_id_list('type_ids', 'type_id')
+    uids = _report_id_list('unit_ids', 'unit_id')
+    if not tids:
         return jsonify({'error': 'Pick an item.'}), 400
+    d_from, d_to, _v, _c = _report_filters()
     db = get_db()
-    t = db.execute('SELECT id, name FROM asset_types WHERE id=%s', (tid,)).fetchone()
-    if not t:
+    picked = db.execute('SELECT id, name FROM asset_types WHERE id = ANY(%s) ORDER BY name',
+                        (tids,)).fetchall()
+    if not picked:
         db.close()
         return jsonify({'error': 'Item not found.'}), 404
-    type_ids = [tid] + [r['id'] for r in db.execute(
-        'SELECT id FROM asset_types WHERE parent_type_id = %s', (tid,)).fetchall()]
+    tids = [r['id'] for r in picked]
+    type_ids = sorted(set(tids) | {r['id'] for r in db.execute(
+        'SELECT id FROM asset_types WHERE parent_type_id = ANY(%s)', (tids,)).fetchall()})
+    # Every unit of the picked items — the choices of the Units picker and
+    # the rows of the per-unit summary. A picked unit must be one of them.
+    units = {r['id']: dict(r) for r in db.execute("""
+        SELECT ai.id, ai.barcode, ai.status, ai.asset_type_id, at.name AS type_name
+        FROM asset_items ai JOIN asset_types at ON at.id = ai.asset_type_id
+        WHERE ai.asset_type_id = ANY(%s)
+        ORDER BY at.name, ai.sort_order, ai.barcode, ai.id""", (type_ids,)).fetchall()}
+    uids = [u for u in uids if u in units]
     shows = _report_shows(db)
     ids = list(shows) or [0]
-    unit_sql, unit_args = ('AND sa.asset_item_id = %s', [uid]) if uid else ('', [])
+    unit_sql, unit_args = ('AND sa.asset_item_id = ANY(%s)', [uids]) if uids else ('', [])
     rows = [dict(r) for r in db.execute(f"""
-        SELECT sa.show_id, sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end,
+        SELECT sa.show_id, sa.asset_type_id, sa.quantity, sa.locked_price,
+               sa.rental_start, sa.rental_end,
                sa.asset_item_id, ai.barcode AS unit_barcode, at.name AS type_name,
                NULL::text AS via_system
         FROM show_assets sa
@@ -30015,10 +30312,11 @@ def report_item_shows():
         LEFT JOIN asset_items ai ON ai.id = sa.asset_item_id
         WHERE sa.show_id = ANY(%s) AND sa.asset_type_id = ANY(%s) AND sa.is_hidden = 0 {unit_sql}
     """, [ids, type_ids] + unit_args).fetchall()]
-    if not uid:
+    if not uids:
         # Inside a booked system/package: priced on the system line, so no $ here.
         rows += [dict(r) for r in db.execute("""
-            SELECT sa.show_id, sa.quantity * COALESCE(m.quantity, 1) AS quantity,
+            SELECT sa.show_id, m.component_type_id AS asset_type_id,
+                   sa.quantity * COALESCE(m.quantity, 1) AS quantity,
                    NULL::double precision AS locked_price, sa.rental_start, sa.rental_end,
                    NULL::integer AS asset_item_id, NULL::text AS unit_barcode,
                    ct.name AS type_name, sys.name AS via_system
@@ -30028,11 +30326,35 @@ def report_item_shows():
             JOIN asset_types ct ON ct.id = m.component_type_id
             WHERE sa.show_id = ANY(%s) AND m.component_type_id = ANY(%s) AND sa.is_hidden = 0
         """, (ids, type_ids)).fetchall()]
-    unit_label = None
-    if uid:
-        u = db.execute('SELECT id, barcode FROM asset_items WHERE id=%s', (uid,)).fetchone()
-        unit_label = ((u['barcode'] or '').strip() or f'#{uid}') if u else f'#{uid}'
+    type_names = {r['id']: r['name'] for r in db.execute(
+        'SELECT id, name FROM asset_types WHERE id = ANY(%s)', (type_ids,)).fetchall()}
     db.close()
+
+    def _ulabel(u):
+        return (u['barcode'] or '').strip() or f"#{u['id']}"
+
+    span = (d_to - d_from).days + 1 if d_from and d_to and d_to >= d_from else None
+
+    def _bucket(**kw):
+        return dict(kw, lines=0, shows=set(), units=0, unit_days=0, revenue=0.0,
+                    last_date=None, last_show='')
+
+    def _add(bk, x):
+        bk['lines'] += 1
+        bk['shows'].add(x['show_id'])
+        bk['units'] += x['quantity']
+        bk['unit_days'] += x['quantity'] * x['days']
+        bk['revenue'] += x['total'] or 0
+        if x['date'] and (not bk['last_date'] or x['date'] > bk['last_date']):
+            bk['last_date'], bk['last_show'] = x['date'], x['show']
+
+    # Per-unit rows exist up front so a unit that never went out still lists
+    # (idle gear is half the point); a retired unit only when it was used.
+    unit_bk = {uid: _bucket(unit_id=uid, type_id=u['asset_type_id'], item=u['type_name'],
+                            unit=_ulabel(u), status=u['status'] or '')
+               for uid, u in units.items() if (uid in uids if uids else True)}
+    pool_bk, item_bk = {}, {tid: _bucket(type_id=tid, item=type_names.get(tid, f'#{tid}'))
+                            for tid in type_ids}
     out = []
     for r in rows:
         sh = shows.get(r['show_id'])
@@ -30040,7 +30362,7 @@ def report_item_shows():
             continue
         qty = int(r['quantity'] or 1)
         price = float(r['locked_price']) if r['locked_price'] is not None else None
-        out.append({
+        x = {
             'show_id': sh['id'], 'show': sh['name'], 'date': sh['date'], 'venue': sh['venue'],
             'company': sh['company'], 'status': sh['status'] or 'active',
             'item': r['type_name'],
@@ -30051,8 +30373,41 @@ def report_item_shows():
             'rental_end': _as_date(r['rental_end']).isoformat() if r['rental_end'] else '',
             'days': _rental_days(r['rental_start'], r['rental_end']),
             'quantity': qty, 'price': price,
-            'total': round(price * qty, 2) if price is not None else None})
+            'total': round(price * qty, 2) if price is not None else None}
+        out.append(x)
+        tid = r['asset_type_id']
+        if tid in item_bk:
+            _add(item_bk[tid], x)
+        if r['asset_item_id'] and r['asset_item_id'] in unit_bk:
+            _add(unit_bk[r['asset_item_id']], x)
+        elif not r['asset_item_id']:
+            _add(pool_bk.setdefault(tid, _bucket(
+                unit_id=None, type_id=tid, item=type_names.get(tid, f'#{tid}'),
+                unit='(no unit picked)', status='')), x)
     out.sort(key=lambda x: (x['date'] or '', x['show']), reverse=True)
+
+    def _done(bk, per_units=1):
+        bk['shows'] = len(bk['shows'])
+        bk['revenue'] = round(bk['revenue'], 2)
+        # Share of the date range the unit was out (needs both dates).
+        bk['utilization'] = (round(100.0 * bk['unit_days'] / (per_units * span), 1)
+                             if span and per_units else None)
+        return bk
+
+    by_unit = [_done(b) for b in unit_bk.values()
+               if b['lines'] or b['status'] != 'retired']
+    by_unit += [_done(b, 0) for b in pool_bk.values()]
+    by_unit.sort(key=lambda b: (b['item'].lower(), b['unit_id'] is None, b['unit'].lower()))
+    owned = {}
+    for u in units.values():
+        if u['status'] != 'retired':
+            owned[u['asset_type_id']] = owned.get(u['asset_type_id'], 0) + 1
+    by_item = []
+    for tid, b in item_bk.items():
+        b['units_owned'] = owned.get(tid, 0)
+        if b['lines'] or tid in tids or b['units_owned']:
+            by_item.append(_done(b, b['units_owned']))
+    by_item.sort(key=lambda b: b['item'].lower())
     companies = {}
     for x in out:
         k = x['company'] or '(No company)'
@@ -30061,7 +30416,21 @@ def report_item_shows():
         c['revenue'] += x['total'] or 0
     by_company = sorted(({**c, 'shows': len(c['shows']), 'revenue': round(c['revenue'], 2)}
                          for c in companies.values()), key=lambda c: (-c['shows'], c['company']))
-    return jsonify({'item': t['name'], 'unit': unit_label, 'lines': out, 'by_company': by_company,
+    item_label = (picked[0]['name'] if len(picked) == 1
+                  else f"{len(picked)} items ({', '.join(r['name'] for r in picked[:4])}"
+                       f"{', …' if len(picked) > 4 else ''})")
+    unit_label = None
+    if uids:
+        labels = [_ulabel(units[u]) for u in uids]
+        unit_label = (labels[0] if len(labels) == 1
+                      else f"{len(labels)} units ({', '.join(labels[:6])}{', …' if len(labels) > 6 else ''})")
+    return jsonify({'item': item_label, 'unit': unit_label,
+                    'type_ids': tids, 'unit_ids': uids, 'range_days': span,
+                    'unit_choices': [{'id': u['id'], 'label': _ulabel(u), 'item': u['type_name'],
+                                      'type_id': u['asset_type_id'], 'status': u['status'] or ''}
+                                     for u in units.values()],
+                    'lines': out, 'by_unit': by_unit, 'by_item': by_item,
+                    'by_company': by_company,
                     'totals': {'shows': len({x['show_id'] for x in out}), 'lines': len(out),
                                'units': sum(x['quantity'] for x in out),
                                'unit_days': sum(x['quantity'] * x['days'] for x in out),
@@ -30389,6 +30758,180 @@ def report_advance_field():
         'values': sorted(({'value': k, 'shows': n} for k, n in counts.items()),
                          key=lambda x: (-x['shows'], x['value'].lower())),
         'rows': rows})
+
+
+_RPT_SOUND_GROUPS = (('sensor', 'Sensor'), ('venue', 'Venue'), ('company', 'Arts Group'),
+                     ('show', 'Show'), ('month', 'Month'), ('weekday', 'Day of week'),
+                     ('hour', 'Start hour'))
+
+
+def _db_energy_avg(levels):
+    """Average of decibel levels on the energy scale (dB is logarithmic, so
+    a plain mean under-reads the loud ones): 10·log10(mean(10^(L/10)))."""
+    vals = [float(v) for v in levels if v is not None]
+    if not vals:
+        return None
+    return round(10.0 * math.log10(sum(10.0 ** (v / 10.0) for v in vals) / len(vals)), 1)
+
+
+@app.route('/api/reports/sound')
+@reports_required
+def report_sound():
+    """Sound Levels (3.47.0): the dB readings Spot captured per performance
+    (spot_module), reported and correlated with show data. One row per
+    performance × sensor for the shows _report_shows() selects — so every
+    shared filter and drill (venue, Arts Group, had item / category booked,
+    job position, technician) narrows it. `monitors` = only these sensors;
+    `limit` = a dB level to flag (Leq at or over it); `group` = what the
+    summary table compares: sensor / venue / company / show / month /
+    weekday / hour, or `field:<advance field key>` to compare by the answers
+    to one advance field. Any Reports user; 404 while the module is off."""
+    if not module_enabled('spot'):
+        abort(404)
+    want = set(_report_id_list('monitors'))
+    try:
+        limit = float(request.args.get('limit')) if (request.args.get('limit') or '').strip() else None
+    except ValueError:
+        limit = None
+    if limit is not None and not (0 < limit < 200):
+        limit = None
+    group = (request.args.get('group') or 'sensor').strip()
+    db = get_db()
+    try:
+        shows = _report_shows(db)
+        caps = spot_module.captures_for_report(db, list(shows))
+        field = None
+        answers = {}
+        if group.startswith('field:'):
+            key = group[6:]
+            field = next((r for r in _report_adv_fields(db) if r['field_key'] == key), None)
+            if not field:
+                group = 'sensor'
+            else:
+                for r in db.execute(
+                        'SELECT show_id, field_value FROM advance_data '
+                        'WHERE field_key = %s AND show_id = ANY(%s)',
+                        (key, list(shows) or [0])).fetchall():
+                    answers[r['show_id']] = _report_adv_values(
+                        field['field_type'], field['allow_multi'], r['field_value'])
+        elif group not in dict(_RPT_SOUND_GROUPS):
+            group = 'sensor'
+    finally:
+        db.close()
+
+    def _f(v):
+        try:
+            return round(float(v), 1) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    sensors, rows = {}, []
+    for c in caps:
+        sh = shows.get(c['show_id'])
+        if not sh:
+            continue
+        for m in c['monitors']:
+            st = m.get('stats') or {}
+            if not (st.get('count') or 0):
+                continue
+            mid = m.get('id')
+            name = (m.get('name') or f'Sensor {mid}').strip()
+            unit = (m.get('unit') or 'dB').strip()
+            sensors.setdefault(mid, {'id': mid, 'name': name, 'unit': unit,
+                                     'location': (m.get('location') or '').strip()})
+            if want and mid not in want:
+                continue
+            leq = _f(st.get('leq') if st.get('leq') is not None else st.get('avg'))
+            peak = _f(st.get('max'))
+            max_at = ''
+            if st.get('max_at'):
+                try:
+                    max_at = datetime.fromisoformat(str(st['max_at'])).strftime('%H:%M')
+                except ValueError:
+                    max_at = ''
+            try:
+                d = date.fromisoformat(c['date'])
+            except (TypeError, ValueError):
+                d = None
+            rows.append({
+                'show_id': sh['id'], 'show': sh['name'], 'date': c['date'], 'time': c['time'],
+                'venue': sh['venue'], 'company': sh['company'], 'perf_key': c['perf_key'],
+                'sensor_id': mid, 'sensor': name, 'location': (m.get('location') or '').strip(),
+                'unit': unit, 'minutes': c['minutes'], 'detected': c['detected'],
+                'leq': leq, 'avg': _f(st.get('avg')), 'max': peak, 'max_at': max_at,
+                'min': _f(st.get('min')), 'l10': _f(st.get('l10')), 'l50': _f(st.get('l50')),
+                'l90': _f(st.get('l90')), 'readings': int(st.get('count') or 0),
+                'events': int(st.get('events') or 0),
+                'over': bool(limit is not None and leq is not None and leq >= limit),
+                'peak_over': bool(limit is not None and peak is not None and peak >= limit),
+                '_month': d.strftime('%Y-%m') if d else '(no date)',
+                '_weekday': d.strftime('%A') if d else '(no date)',
+                '_wd': d.weekday() if d else 9,
+                '_hour': (c['time'][:2] + ':00') if c['time'] else '(no time)'})
+    rows.sort(key=lambda r: (r['date'] or '', r['time'] or '', r['show'], r['sensor']), reverse=True)
+
+    def _keys(r):
+        if field:
+            return answers.get(r['show_id']) or ['(not answered)']
+        return [{'sensor': r['sensor'], 'venue': r['venue'] or '(No venue)',
+                 'company': r['company'] or '(No company)', 'show': r['show'],
+                 'month': r['_month'], 'weekday': r['_weekday'], 'hour': r['_hour']}[group]]
+
+    # Levels in different units (dBA / dBC) are never averaged together.
+    groups = {}
+    for r in rows:
+        for k in _keys(r):
+            g = groups.setdefault((k, r['unit']), {
+                'group': k, 'unit': r['unit'], 'perfs': set(), 'shows': set(), 'leqs': [],
+                'peaks': [], 'over': 0, 'peak_over': 0, 'minutes': 0, '_wd': r['_wd']})
+            g['perfs'].add(r['perf_key']); g['shows'].add(r['show_id'])
+            if r['leq'] is not None:
+                g['leqs'].append(r['leq'])
+            if r['max'] is not None:
+                g['peaks'].append(r['max'])
+            g['over'] += 1 if r['over'] else 0
+            g['peak_over'] += 1 if r['peak_over'] else 0
+    by_group = []
+    for g in groups.values():
+        by_group.append({
+            'group': g['group'], 'unit': g['unit'], 'performances': len(g['perfs']),
+            'shows': len(g['shows']), 'readings': len(g['leqs']),
+            'avg_leq': _db_energy_avg(g['leqs']),
+            'low_leq': min(g['leqs']) if g['leqs'] else None,
+            'high_leq': max(g['leqs']) if g['leqs'] else None,
+            'avg_peak': round(sum(g['peaks']) / len(g['peaks']), 1) if g['peaks'] else None,
+            'high_peak': max(g['peaks']) if g['peaks'] else None,
+            'over': g['over'], 'peak_over': g['peak_over'], '_wd': g['_wd']})
+    if group == 'weekday':
+        by_group.sort(key=lambda g: (g['_wd'], g['unit']))
+    elif group in ('month', 'hour'):
+        by_group.sort(key=lambda g: (g['group'], g['unit']))
+    else:
+        by_group.sort(key=lambda g: (-(g['avg_leq'] or 0), g['group']))
+    for g in by_group:
+        g.pop('_wd', None)
+    for r in rows:
+        for k in ('_month', '_weekday', '_wd', '_hour', 'perf_key'):
+            r.pop(k, None)
+    units = sorted({r['unit'] for r in rows})
+    leqs = [r['leq'] for r in rows if r['leq'] is not None]
+    loudest = max(rows, key=lambda r: r['max'] if r['max'] is not None else -1) if rows else None
+    group_label = (field['label'] if field else dict(_RPT_SOUND_GROUPS)[group])
+    return jsonify({
+        'rows': rows, 'by_group': by_group, 'group': group, 'group_label': group_label,
+        'limit': limit, 'units': units,
+        'sensors': sorted(sensors.values(), key=lambda m: (m['name'].lower(), m['id'] or 0)),
+        'totals': {
+            'performances': len({(r['show_id'], r['date'], r['time']) for r in rows}),
+            'shows': len({r['show_id'] for r in rows}), 'readings': len(rows),
+            # One figure only when every row shares a unit.
+            'avg_leq': _db_energy_avg(leqs) if len(units) == 1 else None,
+            'high_leq': max(leqs) if leqs and len(units) == 1 else None,
+            'high_peak': loudest['max'] if loudest and len(units) == 1 else None,
+            'high_peak_show': loudest['show'] if loudest and len(units) == 1 else None,
+            'unit': units[0] if len(units) == 1 else None,
+            'over': sum(1 for r in rows if r['over']) if limit is not None else None,
+            'peak_over': sum(1 for r in rows if r['peak_over']) if limit is not None else None}})
 
 
 def _report_line_filter():
@@ -30761,9 +31304,39 @@ _RPT_PDF = {
                                                 ('via', 'Via system', 't'),
                                                 ('rental_start', 'From', 't'), ('rental_end', 'To', 't'),
                                                 ('quantity', 'Qty', 'i'), ('total', 'Line total', 'm')]),
+        ('Usage by unit', 'by_unit', [('item', 'Item', 't'), ('unit', 'Unit', 't'),
+                                      ('status', 'Status', 't'), ('lines', 'Times rented', 'i'),
+                                      ('shows', 'Shows', 'i'), ('unit_days', 'Days rented', 'i'),
+                                      ('utilization', 'Utilization', 'p'),
+                                      ('revenue', 'Income', 'm'),
+                                      ('last_date', 'Last out', 't'), ('last_show', 'Last show', 't')]),
+        ('Usage by item', 'by_item', [('item', 'Item', 't'), ('units_owned', 'Units owned', 'i'),
+                                      ('lines', 'Times rented', 'i'), ('shows', 'Shows', 'i'),
+                                      ('units', 'Units out', 'i'), ('unit_days', 'Unit-days', 'i'),
+                                      ('utilization', 'Utilization', 'p'),
+                                      ('revenue', 'Income', 'm'), ('last_date', 'Last out', 't')]),
         ('By Arts Group', 'by_company', [('company', 'Arts Group', 't'), ('shows', 'Shows', 'i'),
                                          ('lines', 'Lines', 'i'), ('units', 'Units', 'i'),
                                          ('revenue', 'Revenue', 'm')])]),
+    'sound': ('Sound levels', 'report_sound', [
+        ('Performances', 'totals.performances', 'i'), ('Shows', 'totals.shows', 'i'),
+        ('Average Leq', 'totals.avg_leq', 'h'), ('Loudest Leq', 'totals.high_leq', 'h'),
+        ('Highest peak', 'totals.high_peak', 'h'),
+        ('Leq at / over limit', 'totals.over', 'i'), ('Peak at / over limit', 'totals.peak_over', 'i')], [
+        ('Compared', 'by_group', [('group', 'Group', 't'), ('unit', 'Unit', 't'),
+                                  ('performances', 'Performances', 'i'), ('shows', 'Shows', 'i'),
+                                  ('avg_leq', 'Avg Leq', 'h'), ('low_leq', 'Quietest Leq', 'h'),
+                                  ('high_leq', 'Loudest Leq', 'h'), ('avg_peak', 'Avg peak', 'h'),
+                                  ('high_peak', 'Highest peak', 'h'),
+                                  ('over', 'Leq ≥ limit', 'i'), ('peak_over', 'Peak ≥ limit', 'i')]),
+        ('Every performance', 'rows', [('date', 'Date', 't'), ('time', 'Start', 't'),
+                                       ('show', 'Show', 't'), ('venue', 'Venue', 't'),
+                                       ('company', 'Arts Group', 't'), ('sensor', 'Sensor', 't'),
+                                       ('unit', 'Unit', 't'), ('minutes', 'Minutes', 'i'),
+                                       ('leq', 'Leq', 'h'), ('max', 'Peak', 'h'),
+                                       ('max_at', 'Peak at', 't'), ('l10', 'L10', 'h'),
+                                       ('l50', 'L50', 'h'), ('l90', 'L90', 'h'),
+                                       ('over', 'Leq ≥ limit', 'b')])]),
     'rentals': ('Rental lines', 'asset_reports_data', [
         ('Revenue', 'total_revenue', 'm'), ('Line items', 'count', 'i')], [
         ('Rental lines', 'rows', [('show_name', 'Show', 't'), ('show_date', 'Date', 't'),
@@ -30876,6 +31449,12 @@ def _rpt_filter_summary(db):
         if v:
             r = db.execute(f'SELECT name FROM {table} WHERE id=%s', (v,)).fetchone()
             out.append(f"{label}: {r['name'] if r else '#' + str(v)}")
+    if a.get('report') == 'assets' and _report_id_list('types'):
+        ids = _report_id_list('types')
+        names = [r['name'] for r in db.execute(
+            'SELECT name FROM asset_types WHERE id = ANY(%s) ORDER BY name', (ids,)).fetchall()]
+        out.append(('All items except: ' if a.get('types_mode') == 'exclude' else 'Only items: ')
+                   + ', '.join(names[:12]) + (f' … (+{len(names) - 12})' if len(names) > 12 else ''))
     if a.get('report') == 'advance':
         if a.get('answer'):
             out.append(f"Answer: {a.get('answer')[:120]}")
@@ -30885,6 +31464,14 @@ def _rpt_filter_summary(db):
                    .get(a.get('include'), 'Shows with an answer'))
     if a.get('min_diff'):
         out.append(f"Break difference ≥ {a.get('min_diff')[:4]} min")
+    if a.get('report') == 'sound':
+        if a.get('limit'):
+            out.append(f"Limit flagged: {a.get('limit')[:6]} dB")
+        g = a.get('group') or 'sensor'
+        out.append('Compared by: ' + (dict(_RPT_SOUND_GROUPS).get(g) or
+                                      ('advance field ' + g[6:60] if g.startswith('field:') else 'Sensor')))
+        if a.get('monitors'):
+            out.append(f"Sensors: {len(_report_id_list('monitors'))} picked")
     return out or ['All shows (no filters)']
 
 
@@ -31125,6 +31712,18 @@ security_module.register(
 # tags.html, tag.html, search.html + static/js/tags.js behind this one call.
 # Read-only: it owns no table and never writes.
 import find_module  # noqa: E402
+
+chat_module.register(
+    app,
+    get_db=get_db,
+    login_required=login_required,
+    ts_out=_ts_out,
+    log_audit=log_audit,
+    syslog_logger=syslog_logger,
+    module_enabled=module_enabled,
+    can_access_show=can_access_show,
+    notify_mentions=_notify_comment_mentions,
+)
 
 find_module.register(
     app,

@@ -578,6 +578,7 @@ CREATE TABLE IF NOT EXISTS piano_tunings (
     tuning_start   TEXT DEFAULT '',
     tuning_end     TEXT DEFAULT '',
     cost           DOUBLE PRECISION DEFAULT NULL,
+    bill_on_invoice INTEGER DEFAULT 0,
     manager_notes  TEXT DEFAULT '',
     requested_by   INTEGER,
     created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -785,7 +786,8 @@ CREATE TABLE IF NOT EXISTS notifications (
     show_id INTEGER REFERENCES shows(id) ON DELETE SET NULL,
     field_key TEXT DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    read_at TIMESTAMP DEFAULT NULL
+    read_at TIMESTAMP DEFAULT NULL,
+    emailed_at TIMESTAMP DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_show ON notifications(show_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
@@ -853,9 +855,65 @@ CREATE TABLE IF NOT EXISTS show_comments (
     deleted_at TIMESTAMP,
     deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     edited_at  TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    chat_thread_id INTEGER DEFAULT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_show_comments_show ON show_comments(show_id);
+
+-- Messages (3.47.0, chat_module.py): private conversations between users.
+-- A thread = a set of people (member_key = their sorted ids) + an optional
+-- tagged show. post_to_comments 1 = every message sent in it is ALSO
+-- inserted into that show's comments (show_comments.chat_thread_id).
+CREATE TABLE IF NOT EXISTS chat_threads (
+    id               SERIAL PRIMARY KEY,
+    show_id          INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+    member_key       TEXT NOT NULL DEFAULT '',
+    post_to_comments INTEGER DEFAULT 0,
+    created_by       INTEGER,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_message_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_message_id  INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_chat_threads_key ON chat_threads(member_key, show_id);
+CREATE INDEX IF NOT EXISTS idx_chat_threads_show ON chat_threads(show_id);
+
+CREATE TABLE IF NOT EXISTS chat_participants (
+    thread_id    INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    last_read_id INTEGER DEFAULT 0,
+    emailed_up_to_id INTEGER DEFAULT 0,
+    PRIMARY KEY (thread_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_participants_user ON chat_participants(user_id);
+
+-- Per-user email preferences for the inbox (3.47.0): a missing row = every
+-- switch at its default (1). 321Theater's own table — never the shared users
+-- table, whose columns other apps read.
+CREATE TABLE IF NOT EXISTS user_notify_prefs (
+    user_id         INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    email_messages  INTEGER DEFAULT 1,
+    email_mentions  INTEGER DEFAULT 1,
+    email_reminders INTEGER DEFAULT 1,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- remind_at is an absolute instant (TIMESTAMPTZ, compared with NOW()), the
+-- author's private reminder on their own message. created_at is the DB clock.
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id             SERIAL PRIMARY KEY,
+    thread_id      INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+    user_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    author_name    TEXT DEFAULT '',
+    kind           TEXT NOT NULL DEFAULT 'message',
+    body           TEXT NOT NULL,
+    comment_id     INTEGER DEFAULT NULL,
+    remind_at      TIMESTAMPTZ DEFAULT NULL,
+    remind_done_at TIMESTAMP DEFAULT NULL,
+    remind_emailed_at TIMESTAMP DEFAULT NULL,
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(thread_id, id);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_remind ON chat_messages(user_id, remind_at);
 
 CREATE TABLE IF NOT EXISTS show_attachments (
     id          SERIAL PRIMARY KEY,
@@ -2174,6 +2232,10 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         # 3.25.0: a comment outlives its author's account (FK swap below).
         f"ALTER TABLE \"{app_schema}\".show_comments ADD COLUMN IF NOT EXISTS author_name TEXT DEFAULT ''",
         f'ALTER TABLE "{app_schema}".show_comments ALTER COLUMN user_id DROP NOT NULL',
+        # 3.47.0: inbox emails — a mention notification is emailed once.
+        f'ALTER TABLE "{app_schema}".notifications ADD COLUMN IF NOT EXISTS emailed_at TIMESTAMP DEFAULT NULL',
+        # 3.47.0: a comment posted from a Messages conversation (chat_module).
+        f'ALTER TABLE "{app_schema}".show_comments ADD COLUMN IF NOT EXISTS chat_thread_id INTEGER DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".contacts ADD COLUMN IF NOT EXISTS report_recipient INTEGER DEFAULT 0',
         f"ALTER TABLE \"{app_schema}\".asset_items ADD COLUMN IF NOT EXISTS condition TEXT DEFAULT 'good'",
         f'ALTER TABLE "{app_schema}".asset_items ADD COLUMN IF NOT EXISTS year_purchased INTEGER DEFAULT NULL',
@@ -2239,6 +2301,9 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         # A tuning's charge + paperwork = a linked external rental — 3.9.1
         f'ALTER TABLE "{app_schema}".show_external_rentals ADD COLUMN IF NOT EXISTS piano_tuning_id INTEGER DEFAULT NULL',
         f'CREATE INDEX IF NOT EXISTS idx_show_external_rentals_piano ON "{app_schema}".show_external_rentals(piano_tuning_id)',
+        # 3.47.0: a tuning's cost stays on the show (Assets tab, reports) but
+        # is billed on the invoices only when the manager ticks it. Default 0.
+        f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS bill_on_invoice INTEGER DEFAULT 0',
         # Piano tuning vendor list — 3.10.2
         f'ALTER TABLE "{app_schema}".piano_tunings ADD COLUMN IF NOT EXISTS piano_vendor_id INTEGER DEFAULT NULL',
         # 3.18.0: house tunings (maintenance etc.) have no show.

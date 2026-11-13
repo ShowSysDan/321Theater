@@ -2024,7 +2024,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td data-tag-focus="rental:${er.id}">${er.piano_tuning_id ? esc(er.description) : renderTaggedText(er.description)}</td>
-          <td>$${Number(er.cost).toFixed(2)}</td>
+          <td>$${Number(er.cost).toFixed(2)}${er.on_invoice === 0 ? ` <span class="er-off-invoice" title="A show expense kept here and in Reports. It is not billed on the Asset Estimate, Final Invoice or Combined Invoice — the piano tuning manager can switch that on for this tuning.">not on invoice</span>` : ''}</td>
           <td>${er.pdf_filename ? `<a href="/shows/${SHOW_ID}/external-rentals/${er.id}/pdf" target="_blank" style="font-size:11px">View PDF</a>` : '—'}</td>
           ${IS_ADMIN ? `<td style="white-space:nowrap">${er.piano_tuning_id
             ? `<span class="piano-er-tag" title="From Piano Tuning — the piano tuning manager sets its cost and paperwork; not part of asset approval">🎹 Piano Tuning</span>`
@@ -2040,10 +2040,14 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
 
     // Total cost
     const assetTotal = assets.reduce((s,a) => s + a.locked_price * a.quantity, 0);
-    const erTotal = extRentals.reduce((s,er) => s + Number(er.cost), 0);
+    // The header total is what the invoices bill: a piano tuning's line that
+    // isn't billed (on_invoice 0) is listed below but left out of it.
+    const erTotal = extRentals.reduce((s,er) => s + (er.on_invoice === 0 ? 0 : Number(er.cost)), 0);
+    const erOff = extRentals.reduce((s,er) => s + (er.on_invoice === 0 ? Number(er.cost) : 0), 0);
     const grandTotal = assetTotal + erTotal;
     document.getElementById('assets-total-cost').textContent =
-      grandTotal > 0 ? `Total: $${grandTotal.toFixed(2)}` : '';
+      (grandTotal > 0 ? `Total: $${grandTotal.toFixed(2)}` : '')
+      + (erOff > 0 ? `${grandTotal > 0 ? ' · ' : ''}$${erOff.toFixed(2)} not on invoice` : '');
   }
 
   function esc(s) {

@@ -1054,6 +1054,61 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   manager cancels through the normal status change. Refusals syslog
   `PIANO_TUNING_DENIED reason=…`; every write route syslogs.
 
+## Inbox: Messages, reminders, mentions (chat_module.py, 3.47.0) — SANDBOXED
+- `chat_module.py` never imports app.py: ONE `chat_module.register(app, …)`.
+  Module key `messages` (default ON). It owns `chat_threads` /
+  `chat_participants` / `chat_messages` and writes to ONE main-app table:
+  `show_comments` (`chat_thread_id` marks the origin), only for a thread
+  whose `post_to_comments` is on. UI = base.html `#inbox-panel` +
+  `static/js/chat.js` (floating `#inbox-fab` on desktop, `#m-inbox-tab` in
+  the phone tab bar; the old bell panel is gone — `#notif-panel-list` lives
+  in the inbox and `toggleNotifPanel()` opens its Notifications tab).
+- A thread = sorted participant ids (`member_key`) + optional `show_id`; the
+  same people + show reuse it (find-or-create under
+  `pg_advisory_xact_lock`). Own-only thread = "Notes to self". New threads
+  tag ACTIVE shows only. No add/remove-participant route exists — don't add
+  one without thinking about who then reads the history.
+- **PRIVATE: keep every rule.** Every route goes through `_member()`
+  (chat_participants); no admin bypass. Never index chat text in
+  find_module's `_sources_sql`, never put a body in audit before/after or
+  syslog, never add the tables to snapshot inspection
+  (`snapshot_module.PRIVATE_TABLES`: not listed, diff 403, also
+  RESTORE_BLOCKED). Emails quoting messages are `sensitive: True`.
+- **Post to comments is never implicit.** Thread-level switch
+  (`…/comments-mode`, any participant, needs a show + a non-read-only
+  account) that writes a `kind='system'` line into the thread. Every send
+  carries the sender's on-screen belief (`post_to_comments`); a mismatch (or
+  a missing flag) is a 409 `comments_mode_changed` and NOTHING is sent.
+  Composing "private" into a thread that already posts → 409
+  `thread_is_public`; chat.js opens it with the text as a draft. Keep the
+  banner, the orange composer and the "Send + post to comments" label —
+  they are the user's requirement that nobody is caught off guard. Read-only
+  accounts can't send in a posting thread (the show-comment rule).
+- Reminders: `chat_messages.remind_at` is TIMESTAMPTZ (the browser sends
+  UTC ISO), compared with `NOW()`; private to the author (`_msg_out` only
+  returns it for `mine`); due ones count in the badge until Done. No job
+  computes "due" — the status poll does.
+- Polling: ONE `/api/chat/status` poll (30 s, visible tabs) paints every
+  badge incl. the sidebar bell (app.js skips its own bell poll when
+  `#inbox-panel` exists); the open thread polls 5 s; all GETs are
+  side-effect free — reading is `POST …/read`. chat.js builds everything
+  with textContent.
+- **@mentions**: `_notify_comment_mentions()` (post + edit of a comment, and
+  public chat messages via the injected dep) → `notify_users(kind='mention')`.
+  Longest names first and consumed, so `@Dan Lupo` never also hits `Dan`.
+- **Email**: `user_notify_prefs` (app schema, missing row = all on; My
+  Account → Email notifications, `/account/notify-prefs`). `run_inbox_emails`
+  (5 min, leader-gated, skips on DatabaseUnavailable): messages unread for
+  `_INBOX_EMAIL_DELAY_MIN`, due reminders (`chat_module.pending_email_items`,
+  which stamps `emailed_up_to_id` / `remind_emailed_at`), unread mentions
+  (`notifications.emailed_at`). Stamps commit BEFORE sending — at most once,
+  never a retry loop. Always through `_send_email` (TEST_MODE chokepoint).
+- `_ER_BILLED_SQL` (piano, 3.47.0): a piano tuning's external-rental line is
+  billed (invoice line, totals, appended paperwork) only when
+  `piano_tunings.bill_on_invoice = 1` (default 0, manager-only field). Every
+  BILLING query filters with it; the Assets tab and Reports do not (the cost
+  stays a visible show expense). Don't add a billing read that skips it.
+
 ## Reports (3.12.0)
 - `/reports` (`reports_page`, `templates/reports.html`) is its own nav
   section (nav key `reports`, audience `reports` = `_can_view_reports()`).
@@ -1082,6 +1137,21 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   Settle Now) with the actual `break*`; Estimate vs Settlement calls both
   billing engines (`_calc_labor_cost_for_show` vs
   `_calc_post_show_labor_cost`) — never re-derive either.
+- **Several items / units (3.47.0):** `item-shows` takes `type_ids` /
+  `unit_ids` (comma lists via `_report_id_list`; the old single `type_id` /
+  `unit_id` still work) and returns `by_unit` (idle units included, pool
+  bookings on a "(no unit picked)" row), `by_item`, `unit_choices`.
+  `asset-types` takes `types` + `types_mode=exclude`. reports.html's
+  `rptMulti()` is THE multi-select picker (textContent only; applies on
+  close).
+- **Sound Levels (3.47.0)** `/api/reports/sound` (any Reports user; 404
+  while module `spot` is off; `sound` in `_RPT_PDF`): rows come ONLY from
+  `spot_module.captures_for_report()` (read-only). `group` = sensor / venue /
+  company / show / month / weekday / hour / `field:<advance key>`; Leq
+  averages are ENERGY averages (`_db_energy_avg`) and units are never mixed
+  (the group key includes the unit) — keep both.
+- Every `table()` with > 8 rows gets a "Find in table" box (`rptFind`); the
+  CSV exports the rows shown.
 - **Advance Fields (3.20.0)** `/api/reports/advance-field?field=&answer=&q=&include=`
   (any Reports user, `advance` in `_RPT_PDF`): one form field's value per
   `_report_shows()` show. `_report_adv_values()` is the one decoder of

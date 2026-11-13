@@ -10,7 +10,7 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">Reports</h1>
-    <p class="page-sub">Shows, advance answers, gear, labor and piano tunings. One filter for every tab; test shows excluded.</p>
+    <p class="page-sub">Shows, advance answers, gear, labor, piano tunings and sound levels. One filter for every tab; test shows excluded.</p>
   </div>
 </div>
 
@@ -116,30 +116,81 @@
   <button type="button" class="rpt-tab" data-tab="breaks">Break Exceptions</button>
   <button type="button" class="rpt-tab" data-tab="variance">Estimate vs Settlement</button>{% endif %}
   {% if can_piano %}<button type="button" class="rpt-tab" data-tab="piano">Piano Tuning</button>{% endif %}
+  {% if can_sound %}<button type="button" class="rpt-tab" data-tab="sound">Sound Levels</button>{% endif %}
 </div>
 
 <div id="rpt-body">
   <div class="rpt-loading text-dim">Loading…</div>
 </div>
 
-{# Item History (3.18.0): pick one item (a group counts its child items),
-   optionally one unit — every show that rented it. #}
+{# Item History (3.18.0; multi-select 3.47.0): pick one or several items (a
+   group counts its child items), optionally just some of their units —
+   usage / income / days rented per unit, and every show that rented them.
+   The pickers are built by rptMulti() after each render. #}
 <template id="rpt-items-filters">
   <div class="rpt-subfilters">
     <div class="field-group" style="min-width:260px">
-      <label class="field-label">ITEM</label>
-      <select id="ri-type" class="field-input" onchange="rptItemTypeChanged()">
-        <option value="">— Pick an item —</option>
-        {% for cat in asset_categories %}
-        <optgroup label="{{ cat.name }}">
-          {% for t in asset_types if t.category_id == cat.id %}<option value="{{ t.id }}">{{ t.name }}</option>{% endfor %}
+      <label class="field-label">ITEMS</label>
+      <div class="rpt-multi" id="ri-types"></div>
+    </div>
+    <div class="field-group" style="min-width:220px">
+      <label class="field-label">UNITS (OPTIONAL)</label>
+      <div class="rpt-multi" id="ri-units"></div>
+    </div>
+    <div class="field-group" style="min-width:0">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="rptItemClear()">Clear</button>
+    </div>
+  </div>
+</template>
+
+{# Assets tab (3.47.0): report on just some items, or leave some out. #}
+<template id="rpt-assets-filters">
+  <div class="rpt-subfilters">
+    <div class="field-group" style="min-width:150px">
+      <label class="field-label">ITEMS</label>
+      <select id="ras-mode" class="field-input" onchange="rptAssetMode(this.value)">
+        <option value="only">Show only…</option>
+        <option value="exclude">Leave out…</option>
+      </select>
+    </div>
+    <div class="field-group" style="min-width:260px">
+      <label class="field-label">&nbsp;</label>
+      <div class="rpt-multi" id="ras-types"></div>
+    </div>
+    <div class="field-group" style="min-width:0">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="rptAssetClear()">Clear</button>
+    </div>
+  </div>
+</template>
+
+{# Sound Levels (3.47.0): the dB readings Spot captured per performance,
+   compared by venue / Arts Group / sensor / month / an advance answer. #}
+<template id="rpt-sound-filters">
+  <div class="rpt-subfilters">
+    <div class="field-group" style="min-width:220px">
+      <label class="field-label">COMPARE BY</label>
+      <select id="rs-group" class="field-input" onchange="rptSoundApply()">
+        <option value="sensor">Sensor</option>
+        <option value="venue">Venue</option>
+        <option value="company">Arts Group</option>
+        <option value="show">Show</option>
+        <option value="month">Month</option>
+        <option value="weekday">Day of week</option>
+        <option value="hour">Start hour</option>
+        {% for sec_label, sec_fields in adv_sections %}
+        <optgroup label="Advance: {{ sec_label }}">
+          {% for f in sec_fields %}<option value="field:{{ f.key }}">{{ f.label }}</option>{% endfor %}
         </optgroup>
         {% endfor %}
       </select>
     </div>
-    <div class="field-group" style="min-width:200px">
-      <label class="field-label">UNIT (OPTIONAL)</label>
-      <select id="ri-unit" class="field-input" onchange="rptLoad()"><option value="">All units</option></select>
+    <div class="field-group" style="min-width:220px">
+      <label class="field-label">SENSORS</label>
+      <div class="rpt-multi" id="rs-sensors"></div>
+    </div>
+    <div class="field-group" style="min-width:120px;max-width:150px">
+      <label class="field-label">FLAG AT (dB)</label>
+      <input type="number" id="rs-limit" class="field-input" min="1" max="199" step="0.5" placeholder="e.g. 95" onchange="rptSoundApply()">
     </div>
   </div>
 </template>
@@ -242,6 +293,29 @@
 .rpt-subfilters { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
 .rpt-subfilters .field-group { margin: 0; min-width: 160px; }
 .rpt-idle td { opacity: .6; }
+.rpt-find { margin-left: auto; width: 170px; max-width: 40vw; height: 26px; padding: 2px 8px; font-size: 12px; font-weight: 400; }
+.rpt-over td { background: color-mix(in srgb, #e5484d 9%, transparent); }
+/* Multi-select picker (items / units), 3.47.0 */
+.rpt-multi { position: relative; }
+.rpt-multi-btn { width: 100%; text-align: left; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+.rpt-multi-btn .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rpt-multi-btn .n { background: var(--accent); color: #fff; border-radius: 8px; font-size: 10px; line-height: 16px; min-width: 16px; padding: 0 5px; text-align: center; }
+.rpt-multi-btn:disabled { opacity: .55; cursor: default; }
+.rpt-multi-panel { position: absolute; z-index: 60; top: calc(100% + 4px); left: 0; width: max(100%, 300px); max-width: min(420px, 92vw);
+  background: var(--bg-card, var(--bg)); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 8px 28px rgba(0,0,0,.35);
+  display: flex; flex-direction: column; max-height: min(420px, 60vh); }
+.rpt-multi-panel[hidden] { display: none; }
+.rpt-multi-top { display: flex; gap: 6px; padding: 8px; border-bottom: 1px solid var(--border); align-items: center; flex-wrap: wrap; }
+.rpt-multi-top input { flex: 1 1 140px; min-width: 0; }
+.rpt-multi-list { overflow-y: auto; padding: 4px 0; flex: 1 1 auto; }
+.rpt-multi-group { font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); padding: 8px 10px 3px; display: flex; gap: 8px; align-items: center; }
+.rpt-multi-group button { background: none; border: 0; color: var(--orange-text, var(--accent)); font-size: 10px; cursor: pointer; padding: 0; text-transform: none; letter-spacing: 0; }
+.rpt-multi-opt { display: flex; gap: 8px; align-items: center; padding: 5px 10px; font-size: 12.5px; cursor: pointer; }
+.rpt-multi-opt:hover { background: var(--bg-hover); }
+.rpt-multi-opt .sub { font-size: 11px; color: var(--text-dim); margin-left: auto; white-space: nowrap; }
+.rpt-multi-foot { display: flex; gap: 8px; padding: 8px; border-top: 1px solid var(--border); align-items: center; }
+.rpt-multi-foot .cnt { font-size: 11px; color: var(--text-dim); margin-right: auto; }
+.rpt-multi-empty { padding: 14px 10px; font-size: 12px; color: var(--text-dim); text-align: center; }
 .rpt-more[hidden] { display: none; }
 .rpt-more { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); }
 .rpt-more-count:empty { display: none; }
@@ -316,23 +390,165 @@
     const el = document.getElementById('rf-tech'), v = _q0.get('tech');
     if (el && v && el.querySelector(`option[value="${CSS.escape(v)}"]`)) { el.value = v; moreCount(); }
   })();
-  const _item = {type: _q0.get('item') || '', unit: _q0.get('unit') || ''};
+  // (3.47.0) several items and several units: ?item=3,9&unit=41,42 — a
+  // single id (older links) reads the same way.
+  const _idList = v => String(v || '').split(',').map(x => x.trim()).filter(x => /^\d+$/.test(x));
+  const _item = {types: _idList(_q0.get('item')), units: _idList(_q0.get('unit'))};
   function _itemUrl() {
     try {
       const u = new URL(location.href);
-      ['item', 'unit'].forEach(k => { const v = _item[k === 'item' ? 'type' : 'unit']; if (v) u.searchParams.set(k, v); else u.searchParams.delete(k); });
+      [['item', _item.types], ['unit', _item.units]].forEach(([k, v]) => {
+        if (v.length) u.searchParams.set(k, v.join(',')); else u.searchParams.delete(k);
+      });
       history.replaceState(null, '', u);
     } catch (e) {}
   }
-  window.rptItemTypeChanged = function() {
-    _item.type = _val('ri-type'); _item.unit = '';
-    rptLoad();
-  };
+  const _itemParams = () => ({type_ids: _item.types.join(','), unit_ids: _item.units.join(',')});
+  window.rptItemClear = function() { _item.types = []; _item.units = []; rptLoad(); };
   window.rptOpenItem = function(typeId, unitId) {
-    _item.type = String(typeId || ''); _item.unit = String(unitId || '');
+    _item.types = _idList(typeId); _item.units = _idList(unitId);
     rptCloseModal();
     setTab('items');
   };
+  // Assets tab: report on only some items, or leave some out.
+  const _assetSel = {ids: _idList(_q0.get('types')), mode: _q0.get('types_mode') === 'exclude' ? 'exclude' : 'only'};
+  const _assetParams = () => _assetSel.ids.length
+    ? {types: _assetSel.ids.join(','), types_mode: _assetSel.mode === 'exclude' ? 'exclude' : ''} : {};
+  function _assetUrl() {
+    try {
+      const u = new URL(location.href);
+      if (_assetSel.ids.length) u.searchParams.set('types', _assetSel.ids.join(',')); else u.searchParams.delete('types');
+      if (_assetSel.ids.length && _assetSel.mode === 'exclude') u.searchParams.set('types_mode', 'exclude'); else u.searchParams.delete('types_mode');
+      history.replaceState(null, '', u);
+    } catch (e) {}
+  }
+  window.rptAssetMode = function(m) { _assetSel.mode = m === 'exclude' ? 'exclude' : 'only'; if (_assetSel.ids.length) rptLoad(); };
+  window.rptAssetClear = function() { _assetSel.ids = []; _assetSel.mode = 'only'; rptLoad(); };
+
+  // Sound Levels selection — kept across reloads of the tab and in the URL.
+  const _sound = {group: _q0.get('group') || 'sensor', monitors: _idList(_q0.get('monitors')),
+                  limit: _q0.get('limit') || ''};
+  const _soundParams = () => ({group: _sound.group === 'sensor' ? '' : _sound.group,
+                               monitors: _sound.monitors.join(','), limit: _sound.limit});
+  function _soundUrl() {
+    try {
+      const u = new URL(location.href);
+      Object.entries(_soundParams()).forEach(([k, v]) => { if (v) u.searchParams.set(k, v); else u.searchParams.delete(k); });
+      history.replaceState(null, '', u);
+    } catch (e) {}
+  }
+  window.rptSoundApply = function() {
+    _sound.group = _val('rs-group') || 'sensor';
+    _sound.limit = _val('rs-limit');
+    rptLoad();
+  };
+
+  // ── multi-select picker: a button + a panel of searchable checkboxes ──
+  // groups = [{label, options: [{id, label, sub?}]}]. The choice is applied
+  // (onApply(ids)) when the panel closes — Apply, Esc or a click outside —
+  // so ticking ten boxes reloads the report once.
+  const ITEM_GROUPS = (function() {
+    const cats = {{ asset_categories | tojson }}, types = {{ asset_types | tojson }};
+    const out = cats.map(c => ({label: c.name, options: types.filter(t => t.category_id === c.id)
+      .map(t => ({id: String(t.id), label: t.name}))})).filter(g => g.options.length);
+    const rest = types.filter(t => !cats.some(c => c.id === t.category_id));
+    if (rest.length) out.push({label: 'Other', options: rest.map(t => ({id: String(t.id), label: t.name}))});
+    return out;
+  })();
+  let _multiOpen = null;      // {host, close}
+  function rptMulti(hostId, o) {
+    const host = document.getElementById(hostId);
+    if (!host) return;
+    const all = o.groups.flatMap(g => g.options);
+    let sel = new Set((o.selected || []).map(String).filter(id => all.some(x => x.id === id)));
+    const label = () => {
+      if (!sel.size) return o.empty || 'Any';
+      const names = all.filter(x => sel.has(x.id)).map(x => x.label);
+      return names.length <= 2 ? names.join(', ') : `${names[0]}, ${names[1]} +${names.length - 2}`;
+    };
+    host.innerHTML = `<button type="button" class="field-input rpt-multi-btn" aria-haspopup="listbox" aria-expanded="false"${o.disabled ? ' disabled' : ''}>
+        <span class="lbl"></span><span class="n" hidden></span><span aria-hidden="true">▾</span></button>
+      <div class="rpt-multi-panel" hidden>
+        <div class="rpt-multi-top"><input type="search" class="field-input" placeholder="Search…" aria-label="Search">
+          <button type="button" class="btn btn-xs btn-ghost" data-act="all">All shown</button>
+          <button type="button" class="btn btn-xs btn-ghost" data-act="none">None</button></div>
+        <div class="rpt-multi-list" role="listbox" aria-multiselectable="true"></div>
+        <div class="rpt-multi-foot"><span class="cnt"></span>
+          <button type="button" class="btn btn-sm btn-primary" data-act="apply">Apply</button></div>
+      </div>`;
+    const btn = host.querySelector('.rpt-multi-btn'), panel = host.querySelector('.rpt-multi-panel');
+    const list = host.querySelector('.rpt-multi-list'), q = host.querySelector('input[type=search]');
+    const paint = () => {
+      btn.querySelector('.lbl').textContent = label();
+      btn.title = all.filter(x => sel.has(x.id)).map(x => x.label).join(', ');
+      const n = btn.querySelector('.n'); n.hidden = sel.size < 3; n.textContent = sel.size;
+      host.querySelector('.cnt').textContent = sel.size ? `${sel.size} picked` : (o.empty || 'Any');
+    };
+    const draw = () => {
+      const needle = q.value.trim().toLowerCase();
+      list.textContent = '';
+      let shown = 0;
+      o.groups.forEach((g, gi) => {
+        const opts = g.options.filter(x => !needle || x.label.toLowerCase().includes(needle)
+          || g.label.toLowerCase().includes(needle) || (x.sub || '').toLowerCase().includes(needle));
+        if (!opts.length) return;
+        const h = document.createElement('div');
+        h.className = 'rpt-multi-group';
+        h.append(g.label);
+        if (opts.length > 1) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          const every = opts.every(x => sel.has(x.id));
+          b.textContent = every ? 'clear' : 'all';
+          b.addEventListener('click', () => { opts.forEach(x => every ? sel.delete(x.id) : sel.add(x.id)); draw(); paint(); });
+          h.appendChild(b);
+        }
+        list.appendChild(h);
+        opts.forEach(x => {
+          const l = document.createElement('label');
+          l.className = 'rpt-multi-opt';
+          const c = document.createElement('input');
+          c.type = 'checkbox'; c.checked = sel.has(x.id); c.dataset.id = x.id;
+          c.addEventListener('change', () => { c.checked ? sel.add(x.id) : sel.delete(x.id); paint(); });
+          const t = document.createElement('span'); t.textContent = x.label;
+          l.append(c, t);
+          if (x.sub) { const sb = document.createElement('span'); sb.className = 'sub'; sb.textContent = x.sub; l.appendChild(sb); }
+          list.appendChild(l);
+          shown++;
+        });
+      });
+      if (!shown) { const e = document.createElement('div'); e.className = 'rpt-multi-empty'; e.textContent = all.length ? 'Nothing matches.' : (o.none || 'Nothing to pick.'); list.appendChild(e); }
+    };
+    const before = () => Array.from(sel).sort().join(',');
+    let opened = '';
+    const close = (apply) => {
+      if (panel.hidden) return;
+      panel.hidden = true; btn.setAttribute('aria-expanded', 'false');
+      if (_multiOpen && _multiOpen.host === host) _multiOpen = null;
+      if (apply !== false && before() !== opened) o.onApply(Array.from(sel));
+    };
+    btn.addEventListener('click', () => {
+      if (!panel.hidden) { close(); return; }
+      if (_multiOpen) _multiOpen.close();
+      opened = before(); q.value = ''; draw();
+      panel.hidden = false; btn.setAttribute('aria-expanded', 'true');
+      _multiOpen = {host, close};
+      setTimeout(() => q.focus());
+    });
+    q.addEventListener('input', draw);
+    panel.addEventListener('click', e => {
+      const act = (e.target.closest('[data-act]') || {}).dataset;
+      if (!act) return;
+      if (act.act === 'apply') close();
+      else if (act.act === 'all') { list.querySelectorAll('input[type=checkbox]').forEach(c => sel.add(c.dataset.id)); draw(); paint(); }
+      else if (act.act === 'none') { list.querySelectorAll('input[type=checkbox]').forEach(c => sel.delete(c.dataset.id)); draw(); paint(); }
+    });
+    panel.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); close(); btn.focus(); } });
+    paint();
+  }
+  document.addEventListener('mousedown', e => {
+    if (_multiOpen && !_multiOpen.host.contains(e.target)) _multiOpen.close();
+  });
   // Advance Fields selection — kept across reloads of the tab and in the URL.
   const _adv = {field: _q0.get('field') || '', answer: _q0.get('answer') || '',
                 q: _q0.get('q') || '', include: _q0.get('include') || 'answered'};
@@ -356,7 +572,8 @@
     rptLoad();
   };
   const PDF_KEY = {advance: 'advance', items: 'items', overview: 'overview', groups: 'groups', assets: 'assets', rentals: 'rentals',
-                   labor: 'labor', lines: 'lines', breaks: 'breaks', variance: 'variance', piano: 'piano'};
+                   labor: 'labor', lines: 'lines', breaks: 'breaks', variance: 'variance', piano: 'piano',
+                   sound: 'sound'};
   function openPdf(report, extra) {
     window.open('/reports/pdf?' + params(Object.assign({report}, extra || {})), '_blank', 'noopener');
   }
@@ -371,9 +588,11 @@
       Object.assign(extra, _advParams());
     }
     if (_tab === 'items') {
-      if (!_item.type) { alert('Pick an item first.'); return; }
-      extra.type_id = _item.type; extra.unit_id = _item.unit;
+      if (!_item.types.length) { alert('Pick an item first.'); return; }
+      Object.assign(extra, _itemParams());
     }
+    if (_tab === 'assets') Object.assign(extra, _assetParams());
+    if (_tab === 'sound') Object.assign(extra, _soundParams());
     openPdf(PDF_KEY[_tab], extra);
   };
   function preset(kind) {
@@ -409,19 +628,40 @@
   // col = {key, label, num?, fmt?(v,row) -> html, csv?(row) -> text, sub?(row) -> html}
   function table(id, title, cols, rows, opts = {}) {
     _tables[id] = {cols, rows, sortKey: opts.sortKey || null, asc: false, onRow: opts.onRow || null,
-                   rowClass: opts.rowClass || null, title};
+                   rowClass: opts.rowClass || null, title, q: ''};
+    // A "find in table" box on any table long enough to need one (3.47.0):
+    // narrows the rows shown — and the CSV — to those containing the text.
     return `<div class="form-section rpt-section">
       <div class="form-section-header"><span class="section-icon">◈</span> ${esc(title)}
-        <span class="text-dim" style="font-weight:400;font-size:11px">${rows.length} row${rows.length === 1 ? '' : 's'}</span>
-        <button type="button" class="btn btn-xs btn-ghost" style="margin-left:auto" onclick="rptCsv('${id}')">CSV</button></div>
+        <span class="text-dim" style="font-weight:400;font-size:11px" id="${id}-count">${rows.length} row${rows.length === 1 ? '' : 's'}</span>
+        ${rows.length > 8 ? `<input type="search" class="field-input rpt-find" placeholder="Find in table…" aria-label="Find in ${esc(title)}" oninput="rptFind('${id}', this.value)">` : '<span style="margin-left:auto"></span>'}
+        <button type="button" class="btn btn-xs btn-ghost" onclick="rptCsv('${id}')">CSV</button></div>
       <div class="form-section-body no-pad rpt-scroll"><table class="data-table rpt-table" id="${id}"></table></div>
       ${opts.note ? `<p class="rpt-note" style="padding:0 16px 12px">${opts.note}</p>` : ''}
     </div>`;
   }
+  // Rows of a table that contain its "find" text (every column, as shown).
+  function shownRows(t) {
+    const q = (t.q || '').trim().toLowerCase();
+    if (!q) return t.rows.slice();
+    const words = q.split(/\s+/);
+    return t.rows.filter(r => {
+      const hay = t.cols.map(c => (c.csv ? c.csv(r) : r[c.key]) + ' ' + (c.sub ? String(c.sub(r)).replace(/<[^>]*>/g, '') : '')).join(' ').toLowerCase();
+      return words.every(w => hay.includes(w));
+    });
+  }
+  window.rptFind = function(id, v) {
+    const t = _tables[id];
+    if (!t) return;
+    t.q = v;
+    drawTable(id);
+    const n = shownRows(t).length, c = document.getElementById(id + '-count');
+    if (c) c.textContent = (t.q.trim() ? `${n} of ${t.rows.length}` : t.rows.length) + ` row${t.rows.length === 1 ? '' : 's'}`;
+  };
   function drawTable(id) {
     const t = _tables[id], el = document.getElementById(id);
     if (!t || !el) return;
-    let rows = t.rows.slice();
+    let rows = shownRows(t);
     if (t.sortKey) {
       const col = t.cols.find(c => c.key === t.sortKey);
       rows.sort((a, b) => {
@@ -434,7 +674,7 @@
     el.innerHTML = `<thead><tr>${t.cols.map(c => `<th data-k="${c.key}" class="${c.num ? 'num' : ''}${t.sortKey === c.key ? ' sorted' + (t.asc ? ' asc' : '') : ''}">${esc(c.label)}</th>`).join('')}</tr></thead>
       <tbody>${rows.length ? rows.map((r, i) => `<tr data-i="${t.rows.indexOf(r)}" class="${t.onRow ? 'clickable ' : ''}${t.rowClass ? t.rowClass(r) : ''}">${t.cols.map(c =>
         `<td class="${c.num ? 'num' : ''}">${c.fmt ? c.fmt(r[c.key], r) : esc(r[c.key] == null ? '—' : r[c.key])}${c.sub ? `<div class="sub">${c.sub(r)}</div>` : ''}</td>`).join('')}</tr>`).join('')
-        : `<tr><td colspan="${t.cols.length}" class="text-dim">Nothing for these filters.</td></tr>`}</tbody>`;
+        : `<tr><td colspan="${t.cols.length}" class="text-dim">${t.q && t.q.trim() ? 'No row contains that text.' : 'Nothing for these filters.'}</td></tr>`}</tbody>`;
     el.querySelectorAll('th').forEach(th => th.addEventListener('click', () => {
       t.asc = t.sortKey === th.dataset.k ? !t.asc : false;
       t.sortKey = th.dataset.k;
@@ -450,7 +690,7 @@
     const t = _tables[id];
     if (!t) return;
     const strip = h => String(h == null ? '' : h).replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
-    const lines = [t.cols.map(c => c.label)].concat(t.rows.map(r => t.cols.map(c =>
+    const lines = [t.cols.map(c => c.label)].concat(shownRows(t).map(r => t.cols.map(c =>
       c.csv ? c.csv(r) : (c.num ? (r[c.key] == null ? '' : r[c.key]) : strip(r[c.key])))));
     // Cells starting with = + - @ are prefixed so a spreadsheet never runs them as formulas.
     const cell = v => { let s = String(v == null ? '' : v); if (/^[=+\-@]/.test(s) && isNaN(Number(s))) s = "'" + s; return `"${s.replace(/"/g, '""')}"`; };
@@ -535,7 +775,14 @@
         note: 'Click a row for every item that group rented and their shows. "Unit-days" = units × rental days. Labor counts only settled shows (Final Invoice figure).'});
     },
     async assets() {
-      const d = await get('/api/reports/asset-types?' + params());
+      const head = document.getElementById('rpt-assets-filters').innerHTML;
+      _assetUrl();
+      const d = await get('/api/reports/asset-types?' + params(_assetParams()));
+      setTimeout(() => {
+        const m = document.getElementById('ras-mode'); if (m) m.value = _assetSel.mode;
+        rptMulti('ras-types', {groups: ITEM_GROUPS, selected: _assetSel.ids, empty: 'All items',
+          onApply: ids => { _assetSel.ids = ids; rptLoad(); }});
+      });
       const cols = [
         {key: 'type', label: 'Item', sub: r => esc(r.category) + (r.is_system ? ' · system/package' : '')},
         {key: 'lines', label: 'Times rented', num: true},
@@ -549,14 +796,15 @@
         {key: 'last_used', label: 'Last used'},
       ];
       const used = d.types.filter(t => t.lines);
-      return cards([
+      return head + cards([
         [num(used.length), 'Item types rented'],
         [num(d.types.length - used.length), 'Never rented in range'],
         [num(used.reduce((a, t) => a + t.lines, 0)), 'Rental lines'],
+        [num(used.reduce((a, t) => a + t.unit_days, 0)), 'Days rented (unit-days)'],
         [money(used.reduce((a, t) => a + t.revenue, 0)), 'Revenue'],
       ]) + table('t-types', 'Asset usage by item', cols, d.types, {sortKey: 'lines', onRow: assetUnits,
         rowClass: r => r.lines ? '' : 'rpt-idle',
-        note: 'Click an item for its individual units. ' + (d.range_days ? `Utilization = unit-days booked ÷ (units owned × ${d.range_days} days in range).` : 'Pick a From and To date to see utilization.') + ' Dimmed rows were never rented in the range.'});
+        note: (_assetSel.ids.length ? (_assetSel.mode === 'exclude' ? 'Leaving out the items picked above. ' : 'Only the items picked above. ') : '') + 'Click an item for its individual units. ' + (d.range_days ? `Utilization = unit-days booked ÷ (units owned × ${d.range_days} days in range).` : 'Pick a From and To date to see utilization.') + ' Dimmed rows were never rented in the range.'});
     },
     async advance() {
       const head = document.getElementById('rpt-advance-filters').innerHTML;
@@ -610,46 +858,123 @@
     },
     async items() {
       const head = document.getElementById('rpt-items-filters').innerHTML;
-      if (!_item.unit && _val('ri-unit')) _item.unit = _val('ri-unit');
-      setTimeout(() => {
-        const t = document.getElementById('ri-type'); if (t) t.value = _item.type;
-      });
       _itemUrl();
-      if (!_item.type) return head + '<div class="rpt-loading text-dim">Pick an item to see every show that rented it — a hazer, a piano, any item. Pick a group to include all the items under it; add a unit to follow one specific instrument / barcode.</div>';
-      const [d, u] = await Promise.all([
-        get('/api/reports/item-shows?' + params({type_id: _item.type, unit_id: _item.unit})),
-        get('/api/reports/asset-units?' + params({type_id: _item.type})).catch(() => ({units: []})),
-      ]);
-      setTimeout(() => {
-        const t = document.getElementById('ri-type'); if (t) t.value = _item.type;
-        const us = document.getElementById('ri-unit');
-        if (us) {
-          us.innerHTML = '<option value="">All units</option>' + (u.units || []).map(x =>
-            `<option value="${x.id}">${esc(x.barcode || ('#' + x.id))}${x.status && x.status !== 'available' ? ' — ' + esc(x.status) : ''}</option>`).join('');
-          us.value = _item.unit;
-          us.onchange = () => { _item.unit = us.value; rptLoad(); };
-        }
+      const mount = (d) => setTimeout(() => {
+        rptMulti('ri-types', {groups: ITEM_GROUPS, selected: _item.types, empty: '— Pick items —',
+          onApply: ids => { _item.types = ids; _item.units = []; rptLoad(); }});
+        const byItem = {};
+        ((d && d.unit_choices) || []).forEach(u => (byItem[u.item] = byItem[u.item] || []).push(
+          {id: String(u.id), label: u.label, sub: u.status && u.status !== 'available' ? u.status : ''}));
+        rptMulti('ri-units', {groups: Object.keys(byItem).map(k => ({label: k, options: byItem[k]})),
+          selected: _item.units, empty: 'All units', disabled: !_item.types.length,
+          none: 'These items have no individual units.',
+          onApply: ids => { _item.units = ids; rptLoad(); }});
       });
+      if (!_item.types.length) {
+        mount(null);
+        return head + '<div class="rpt-loading text-dim">Pick one or more items to see their usage, income and days rented, and every show that rented them — a hazer, a piano, four projectors. Pick a group to include all the items under it; then pick just some units to compare specific barcodes.</div>';
+      }
+      const d = await get('/api/reports/item-shows?' + params(_itemParams()));
+      // The server drops ids it doesn't know — keep the URL in step.
+      _item.types = (d.type_ids || []).map(String); _item.units = (d.unit_ids || []).map(String);
+      _itemUrl();
+      mount(d);
       const t = d.totals;
+      const usage = [
+        {key: 'lines', label: 'Times rented', num: true}, {key: 'shows', label: 'Shows', num: true},
+      ];
+      const tail = [
+        {key: 'utilization', label: 'Utilization', num: true, fmt: v => v == null ? '—' : `${v}%`},
+        {key: 'revenue', label: 'Income', num: true, fmt: money},
+        {key: 'last_date', label: 'Last out', sub: r => esc(r.last_show || '')},
+      ];
+      const multi = d.by_item.length > 1;
+      const what = `${d.item}${d.unit ? ' · ' + (_item.units.length === 1 ? 'unit ' : '') + d.unit : ''}`;
       return head + cards([
         [num(t.shows), 'Shows'], [num(t.lines), 'Rental lines'], [num(t.units), 'Units out'],
-        [num(t.unit_days), 'Unit-days'], [money(t.revenue), 'Revenue'], [esc(t.last || '—'), 'Last show'],
-      ]) + table('t-items', `Every show that rented ${d.item}${d.unit ? ' · unit ' + d.unit : ''}`, [
+        [num(t.unit_days), 'Days rented (unit-days)'], [money(t.revenue), 'Income'], [esc(t.last || '—'), 'Last show'],
+      ]) + (d.by_unit.length ? table('t-items-unit', 'Usage by unit', [
+        {key: 'item', label: 'Item'},
+        {key: 'unit', label: 'Unit', sub: r => r.status && r.status !== 'available' ? esc(r.status) : ''},
+        ...usage, {key: 'unit_days', label: 'Days rented', num: true}, ...tail,
+      ], d.by_unit, {sortKey: 'unit_days', rowClass: r => r.lines ? '' : 'rpt-idle',
+        onRow: r => { if (r.unit_id) { _item.units = [String(r.unit_id)]; rptLoad(); } },
+        note: 'One row per unit' + (_item.units.length ? ' you picked' : ' of these items') + '. A booking counts for a unit only when that unit was picked on the show' + (_item.units.length ? '.' : '; bookings from the general pool are on the “(no unit picked)” row.') + ' Days rented = rental days of each booking. ' + (d.range_days ? `Utilization = days rented ÷ ${d.range_days} days in range.` : 'Pick a From and To date to see utilization.') + ' Dimmed units never went out in the range. Click a unit to see only it.'}) : '')
+        + (multi ? table('t-items-item', 'Usage by item', [
+          {key: 'item', label: 'Item'}, {key: 'units_owned', label: 'Units owned', num: true},
+          ...usage, {key: 'units', label: 'Units out', num: true},
+          {key: 'unit_days', label: 'Unit-days', num: true}, ...tail,
+        ], d.by_item, {sortKey: 'unit_days', rowClass: r => r.lines ? '' : 'rpt-idle',
+          note: d.range_days ? `Utilization = unit-days ÷ (units owned × ${d.range_days} days in range).` : ''}) : '')
+        + table('t-items', `Every show that rented ${what}`, [
         {key: 'date', label: 'Show date'},
         {key: 'show', label: 'Show', fmt: (v, r) => showLink(v, r.show_id), sub: r => esc(r.venue || '')},
         {key: 'company', label: 'Arts Group'},
         {key: 'item', label: 'Item', sub: r => r.via ? 'in ' + esc(r.via) : ''},
         {key: 'unit', label: 'Unit'},
         {key: 'rental_start', label: 'From'}, {key: 'rental_end', label: 'To'},
+        {key: 'days', label: 'Days', num: true},
         {key: 'quantity', label: 'Qty', num: true},
         {key: 'total', label: 'Line total', num: true, fmt: v => v == null ? '<span class="sub">in system</span>' : money(v), csv: r => r.total == null ? '' : r.total},
       ], d.lines, {sortKey: 'date',
-        note: 'Direct rental lines' + (d.unit ? ' with this unit picked' : ', plus lines that booked a system/package containing it (priced on the system line)') + '. The date, venue, Arts Group and More filters above still apply.'})
+        note: 'Direct rental lines' + (d.unit ? ' with ' + (_item.units.length === 1 ? 'this unit' : 'one of these units') + ' picked' : ', plus lines that booked a system/package containing an item (priced on the system line)') + '. The date, venue, Arts Group and More filters above still apply.'})
         + table('t-items-co', 'By Arts Group', [
           {key: 'company', label: 'Arts Group'}, {key: 'shows', label: 'Shows', num: true},
           {key: 'lines', label: 'Lines', num: true}, {key: 'units', label: 'Units', num: true},
           {key: 'revenue', label: 'Revenue', num: true, fmt: money},
         ], d.by_company, {sortKey: 'shows'});
+    },
+    async sound() {
+      const head = document.getElementById('rpt-sound-filters').innerHTML;
+      _soundUrl();
+      const d = await get('/api/reports/sound?' + params(_soundParams()));
+      _sound.group = d.group;
+      setTimeout(() => {
+        const g = document.getElementById('rs-group'); if (g) g.value = _sound.group;
+        const l = document.getElementById('rs-limit'); if (l) l.value = _sound.limit;
+        rptMulti('rs-sensors', {groups: [{label: 'Sensors', options: (d.sensors || []).map(m => (
+          {id: String(m.id), label: m.name, sub: [m.location, m.unit].filter(Boolean).join(' · ')}))}],
+          selected: _sound.monitors, empty: 'All sensors', none: 'No sensor has readings for these filters.',
+          onApply: ids => { _sound.monitors = ids; rptLoad(); }});
+      });
+      const t = d.totals, db = v => v == null ? '—' : Number(v).toFixed(1);
+      const lim = d.limit != null;
+      const u = t.unit ? ' ' + esc(t.unit) : '';
+      if (!d.rows.length) {
+        return head + '<div class="rpt-loading text-dim">No captured sound levels for these filters. Levels are pulled from Spot after each performance at a venue with linked sensors (Settings → Modules → Spot Sound Levels).</div>';
+      }
+      const overCell = (v, r, flag) => db(v) + (lim && r[flag] ? ' <span class="rpt-pill rpt-pill-bad">over</span>' : '');
+      return head + cards([
+        [num(t.performances), 'Performances measured'], [num(t.shows), 'Shows'],
+        t.avg_leq != null ? [db(t.avg_leq) + u, 'Average level (Leq)'] : null,
+        t.high_leq != null ? [db(t.high_leq) + u, 'Loudest performance (Leq)'] : null,
+        t.high_peak != null ? [db(t.high_peak) + u, 'Highest peak' + (t.high_peak_show ? ' — ' + t.high_peak_show : '')] : null,
+        lim ? [num(t.over), `Readings with Leq ≥ ${d.limit}`] : null,
+        lim ? [num(t.peak_over), `Readings with a peak ≥ ${d.limit}`] : null,
+      ]) + table('t-sound-group', `Compared by ${d.group_label}`, [
+        {key: 'group', label: d.group_label}, {key: 'unit', label: 'Unit'},
+        {key: 'performances', label: 'Performances', num: true}, {key: 'shows', label: 'Shows', num: true},
+        {key: 'avg_leq', label: 'Avg Leq', num: true, fmt: db},
+        {key: 'low_leq', label: 'Quietest Leq', num: true, fmt: db},
+        {key: 'high_leq', label: 'Loudest Leq', num: true, fmt: db},
+        {key: 'avg_peak', label: 'Avg peak', num: true, fmt: db},
+        {key: 'high_peak', label: 'Highest peak', num: true, fmt: db},
+        ...(lim ? [{key: 'over', label: `Leq ≥ ${d.limit}`, num: true}, {key: 'peak_over', label: `Peak ≥ ${d.limit}`, num: true}] : []),
+      ], d.by_group, {
+        note: 'Leq = the equivalent continuous level over the measured performance — the fair “how loud was it” figure. Averages of Leq are taken on the energy scale (decibels are logarithmic), and levels in different units (dBA / dBC) are never mixed. To see what goes with louder shows, change Compare by — including any advance-sheet answer — or narrow the shows with the filters above: More filters → Had item booked (e.g. the subs), Job position or Technician (who mixed) all apply here.'})
+        + table('t-sound', 'Every performance', [
+          {key: 'date', label: 'Date', sub: r => esc(r.time || '')},
+          {key: 'show', label: 'Show', fmt: (v, r) => showLink(v, r.show_id), sub: r => esc(r.venue || '')},
+          {key: 'company', label: 'Arts Group'},
+          {key: 'sensor', label: 'Sensor', sub: r => esc([r.location, r.unit].filter(Boolean).join(' · '))},
+          {key: 'minutes', label: 'Minutes', num: true},
+          {key: 'leq', label: 'Leq', num: true, fmt: (v, r) => overCell(v, r, 'over')},
+          {key: 'max', label: 'Peak', num: true, fmt: (v, r) => overCell(v, r, 'peak_over'), sub: r => r.max_at ? 'at ' + esc(r.max_at) : ''},
+          {key: 'l10', label: 'L10', num: true, fmt: db},
+          {key: 'l50', label: 'L50', num: true, fmt: db},
+          {key: 'l90', label: 'L90', num: true, fmt: db},
+        ], d.rows, {sortKey: 'date', rowClass: r => r.over ? 'rpt-over' : '',
+          note: 'One row per performance and sensor. Minutes = the window Spot measured' + (d.rows.some(r => r.detected) ? ' (curtain times detected where Spot could)' : '') + '. L10 / L50 / L90 = the level exceeded 10 / 50 / 90 % of the time (L10 ≈ the loud passages, L90 ≈ the background).' + (lim ? ` Rows tinted red had a Leq at or over ${d.limit}.` : ' Enter a level under Flag at to mark performances at or over it.')});
     },
     async rentals() {
       const extra = {asset_category_id: (document.getElementById('rr-category') || {}).value || '',

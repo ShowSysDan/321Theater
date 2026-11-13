@@ -321,7 +321,7 @@
         {% if not session.get('is_document_viewer') %}
         {# No bell for document viewers: notifications link to pages they
            can't open, and app.js only polls when this button exists. #}
-        <button class="theme-toggle-btn notif-bell-btn" id="notif-bell-btn" onclick="toggleNotifPanel(event)" title="Notifications" type="button">
+        <button class="theme-toggle-btn notif-bell-btn" id="notif-bell-btn" onclick="toggleNotifPanel(event)" title="Notifications (opens the inbox)" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
           <span id="notif-bell-badge" class="notif-bell-badge" hidden>0</span>
         </button>
@@ -380,17 +380,129 @@
     </div>
   </div>
 
-  {# ── Notification Panel (pops out of the sidebar bell) ────────────────── #}
-  <div id="notif-panel" class="notif-panel" hidden>
-    <div class="notif-panel-head">
-      <span>Notifications</span>
-      <button type="button" class="notif-panel-mark-all" onclick="markAllNotifRead()">Mark all read</button>
-      <button type="button" class="notif-panel-close" onclick="toggleNotifPanel()" aria-label="Close">×</button>
+  {# ── Inbox (3.47.0): Messages (chat_module.py) + the notification list
+        that used to pop out of the sidebar bell. Desktop: the floating
+        envelope button, bottom right. Mobile: the "Inbox" tab of the bottom
+        tab bar; the panel is a full-screen sheet. All behaviour is
+        static/js/chat.js. Not for document viewers (the gate 403s the
+        polls). The bell in the sidebar footer opens the Notifications tab. #}
+  {% if not session.get('is_document_viewer') %}
+  {% set _chat_on = chat_enabled() %}
+  {% if not is_mobile_view %}
+  <button type="button" id="inbox-fab" class="inbox-fab" aria-label="Messages and notifications" aria-expanded="false" aria-controls="inbox-panel" title="Messages and notifications">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="22" height="22" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><polyline points="3 7 12 13 21 7"/></svg>
+    <span id="inbox-fab-badge" class="inbox-badge" hidden>0</span>
+  </button>
+  {% endif %}
+  <section id="inbox-panel" class="inbox-panel" role="dialog" aria-label="Inbox" hidden
+           data-chat="{{ '1' if _chat_on else '0' }}" data-uid="{{ user.id }}"
+           data-can-comment="{{ '0' if (session.get('is_readonly') or session.get('is_restricted')) else '1' }}"
+           {% if request.endpoint == 'show_page' and show is defined and show.status == 'active' %}data-show-id="{{ show.id }}" data-show-name="{{ show.name }}"{% endif %}>
+    <header class="inbox-head">
+      <button type="button" id="inbox-back" class="inbox-icon-btn" aria-label="Back" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <div id="inbox-title" class="inbox-title">Inbox</div>
+      <button type="button" id="inbox-new" class="btn btn-xs btn-primary"{% if not _chat_on %} hidden{% endif %}>+ New</button>
+      <button type="button" id="inbox-close" class="inbox-icon-btn" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+      </button>
+    </header>
+    <div id="inbox-flash" class="inbox-flash" role="status" hidden></div>
+    <nav id="inbox-tabs" class="inbox-tabs" role="tablist"{% if not _chat_on %} hidden{% endif %}>
+      <button type="button" role="tab" data-view="threads">Messages <span id="inbox-tab-msg-badge" class="inbox-badge inline" hidden>0</span></button>
+      <button type="button" role="tab" data-view="notifications">Notifications <span id="inbox-tab-notif-badge" class="inbox-badge inline" hidden>0</span></button>
+    </nav>
+
+    {# Conversations #}
+    <div id="inbox-view-threads" class="inbox-view" hidden>
+      <div class="inbox-toolbar">
+        <input type="search" id="inbox-search" class="field-input" placeholder="Search people, shows, messages…" aria-label="Search conversations">
+        <button type="button" id="inbox-group-btn" class="btn btn-xs btn-ghost" aria-pressed="false" title="Group conversations under the show they are about">By show</button>
+      </div>
+      <div id="inbox-thread-list" class="inbox-list"><div class="inbox-empty">Loading…</div></div>
     </div>
-    <div id="notif-panel-list" class="notif-panel-list">
-      <div class="notif-empty">No notifications yet.</div>
+
+    {# Notifications (the list app.js fills — same ids as the old bell panel) #}
+    <div id="inbox-view-notifications" class="inbox-view" hidden>
+      <div class="inbox-toolbar">
+        <span class="text-dim" style="font-size:11px;flex:1">Approvals, piano tunings, advance changes…</span>
+        <button type="button" class="btn btn-xs btn-ghost" onclick="markAllNotifRead()">Mark all read</button>
+      </div>
+      <div id="notif-panel-list" class="inbox-list notif-panel-list">
+        <div class="notif-empty">No notifications yet.</div>
+      </div>
     </div>
-  </div>
+
+    {# One conversation #}
+    <div id="inbox-view-thread" class="inbox-view" hidden>
+      <div id="inbox-thread-meta" class="inbox-thread-meta" hidden></div>
+      <div id="inbox-public-banner" class="inbox-public-banner" role="note" hidden>
+        <strong>Posting to show comments</strong>
+        <span id="inbox-public-text"></span>
+        <button type="button" id="inbox-public-off" class="inbox-link-btn">Stop posting to comments</button>
+      </div>
+      <div id="inbox-msgs" class="inbox-msgs" aria-live="polite"></div>
+      <div id="inbox-due" class="inbox-due" hidden></div>
+      <div id="inbox-composer" class="inbox-composer">
+        <div id="inbox-composer-note" class="inbox-composer-note" hidden></div>
+        <div id="inbox-composer-extra">
+          <div id="inbox-remind-set" class="inbox-remind-set" hidden>
+            <span id="inbox-remind-set-text"></span>
+            <button type="button" id="inbox-remind-clear" class="inbox-link-btn">Remove</button>
+          </div>
+        </div>
+        <div class="inbox-composer-row">
+          <textarea id="inbox-input" class="field-input" rows="1" maxlength="2000" placeholder="Message…" aria-label="Message"></textarea>
+          <button type="button" id="inbox-remind-btn" class="inbox-icon-btn" title="Remind me about this message later" aria-label="Remind me later">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="18" height="18" aria-hidden="true"><circle cx="12" cy="13" r="8"/><polyline points="12 9 12 13 15 15"/><line x1="5" y1="3" x2="2" y2="6"/><line x1="19" y1="3" x2="22" y2="6"/></svg>
+          </button>
+          <button type="button" id="inbox-send" class="btn btn-sm btn-primary">Send</button>
+        </div>
+      </div>
+    </div>
+
+    {# New message #}
+    <div id="inbox-view-compose" class="inbox-view" hidden>
+      <div class="inbox-form">
+        <label class="field-label" for="inbox-c-to">TO</label>
+        <div class="inbox-pick">
+          <div id="inbox-c-to-chips" class="inbox-chips"></div>
+          <input type="text" id="inbox-c-to" class="field-input" autocomplete="off" placeholder="Name">
+          <div id="inbox-c-to-sug" class="inbox-sug" hidden></div>
+        </div>
+        <div id="inbox-c-self" class="inbox-hint">No one picked: this is a <strong>note to self</strong> — only you see it. Add a reminder below to have it come back to you.</div>
+
+        <label class="field-label" for="inbox-c-show">ABOUT A SHOW OR EVENT <span class="text-dim" style="font-weight:400">(optional)</span></label>
+        <div class="inbox-pick">
+          <div id="inbox-c-show-chip" class="inbox-chips"></div>
+          <input type="text" id="inbox-c-show" class="field-input" autocomplete="off" placeholder="Search active shows and events…">
+          <div id="inbox-c-show-sug" class="inbox-sug" hidden></div>
+        </div>
+
+        <label id="inbox-c-pub-row" class="inbox-pub-row disabled">
+          <input type="checkbox" id="inbox-c-pub" disabled>
+          <span><strong>Also post to the show's comments</strong>
+            <span class="inbox-hint" style="display:block;margin:0">Leaves the question — and the replies — on the show for everyone working on it. <span id="inbox-c-pub-hint"></span></span></span>
+        </label>
+        <div id="inbox-c-pub-warn" class="inbox-public-banner" role="note" hidden></div>
+
+        <label class="field-label" for="inbox-c-body">MESSAGE</label>
+        <textarea id="inbox-c-body" class="field-input field-textarea" rows="4" maxlength="2000"></textarea>
+
+        <div id="inbox-c-remind-row" class="inbox-remind-row">
+          <span id="inbox-c-remind-text"></span>
+          <button type="button" id="inbox-c-remind-btn" class="inbox-link-btn">⏰ Remind me…</button>
+          <button type="button" id="inbox-c-remind-clear" class="inbox-link-btn" hidden>Remove</button>
+        </div>
+      </div>
+      <div class="inbox-form-foot">
+        <button type="button" id="inbox-c-cancel" class="btn btn-sm btn-ghost">Cancel</button>
+        <button type="button" id="inbox-c-send" class="btn btn-sm btn-primary">Send</button>
+      </div>
+    </div>
+  </section>
+  {% endif %}
 
   <!-- Main -->
   <main class="main-content">
@@ -428,6 +540,13 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
       <span>{{ 'Home' if session.get('is_document_viewer') else 'Timeline' }}</span>
     </a>
+    {% if not session.get('is_document_viewer') %}
+    {# Inbox (3.47.0): the phone's stand-in for the desktop floating button. #}
+    <button type="button" class="m-tab" id="m-inbox-tab" aria-controls="inbox-panel">
+      <span class="m-tab-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><polyline points="3 7 12 13 21 7"/></svg><span id="m-inbox-badge" class="inbox-badge" hidden>0</span></span>
+      <span>Inbox</span>
+    </button>
+    {% endif %}
     <button type="button" class="m-tab" onclick="mToggleDrawer()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       <span>Menu</span>
@@ -442,6 +561,7 @@
 
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 <script src="{{ url_for('static', filename='js/tags.js') }}"></script>
+{% if user and not session.get('is_document_viewer') %}<script src="{{ url_for('static', filename='js/chat.js') }}"></script>{% endif %}
 {% if user %}
 <script>
 /* Browser / screen record for troubleshooting (3.33.0): once per browser
@@ -641,7 +761,7 @@ const _HELP_PAGES = {
         <li><strong>Sections</strong> — set up in Settings → Form Fields. Click a section's heading to fold or open it (remembered in this browser; a section with anything filled in opens by itself). On desktop the <strong>Sections</strong> rail at the right edge jumps to any section. Notes boxes open from their <strong>▸ label</strong>.</li>
         <li><strong>Field kinds</strong>: Yes / No (a dropdown or a NO–YES slider), checklists (tick several), contact pickers (from Settings → Contacts), <strong>Arts Group</strong> (pick one or <strong>+ Add new…</strong>), grey instruction blocks (read-only, screen only), <strong>file fields</strong> (<strong>⤴ Upload file</strong>; PDFs, images and Word files are appended to the Advance PDF) and <strong>PDF forms</strong> (<strong>Fill out form →</strong> opens the form in a popup; status <em>Not started / Draft saved / Filled</em>; <strong>Download filled PDF</strong>).</li>
         <li>Some fields (and dropdown options) appear only when another field is set a certain way — each field's "Conditional show when" in Settings → Form Fields; several conditions can be combined with <code>&amp;&amp;</code>.</li>
-        <li><strong>Piano Tuning</strong> panel (wherever the form puts it; by default under Backline) — <strong>+ Request Tuning</strong> sends a request to the piano tuning manager: the piano (picked from the Asset Manager's Piano category, optionally the exact unit / S/N), the date and time it's needed, and notes. Sending it books the piano on the Assets tab if it isn't there. <em>⚠ not on Assets tab</em> → <strong>Add to Assets</strong>; <em>⚠ unit not pinned</em> → <strong>Pin unit</strong>. Edit or cancel it until the manager starts on it; after that, <strong>Request cancellation</strong> asks them to cancel it with the vendor (<strong>Withdraw</strong> takes the request back). Once they set the tuning time it appears on the Production Schedule as a read-only 🎹 row, and its cost goes on the Final Invoice. Managers get a <strong>Piano Tuning list →</strong> link.</li>
+        <li><strong>Piano Tuning</strong> panel (wherever the form puts it; by default under Backline) — <strong>+ Request Tuning</strong> sends a request to the piano tuning manager: the piano (picked from the Asset Manager's Piano category, optionally the exact unit / S/N), the date and time it's needed, and notes. Sending it books the piano on the Assets tab if it isn't there. <em>⚠ not on Assets tab</em> → <strong>Add to Assets</strong>; <em>⚠ unit not pinned</em> → <strong>Pin unit</strong>. Edit or cancel it until the manager starts on it; after that, <strong>Request cancellation</strong> asks them to cancel it with the vendor (<strong>Withdraw</strong> takes the request back). Once they set the tuning time it appears on the Production Schedule as a read-only 🎹 row. Its cost shows on the Assets tab as a show expense; it is billed on the invoices only when the piano tuning manager ticks <strong>Bill on the show's invoices</strong>. Managers get a <strong>Piano Tuning list →</strong> link.</li>
         <li><strong>#tags</strong> — type <code>#</code> and a word (letters, digits, <code>_</code>, <code>-</code>; e.g. <code>#pyro</code>, <code>#load-in</code>) in a text or notes box — Advance fields, schedule rows and Venue &amp; Tech info, labor notes, Post Show notes and labor line notes, comments, Assets line notes, external rental descriptions, piano tuning notes, file descriptions. Clickable chips appear under the box, and the <strong>Tags</strong> line under the show name lists every tag in the show; a chip opens the tag's page with every show that uses it.</li>
       </ul>
       <p>Read-only accounts get a <strong>VIEW ONLY</strong> badge: every tab can be read but its fields can't be changed (text can still be scrolled, selected and copied; a multi-select list still opens) and the editing buttons (Save, Show Mode, + Add…, ×, Restore…, Post, comment Edit, Email, + Attach File) are hidden. History, the Export buttons and PDF downloads still work.</p>
@@ -744,7 +864,7 @@ const _HELP_PAGES = {
       <p>Team discussion pinned to this show, oldest first; the tab shows how many comments there are.</p>
       <ul style="${_HELP_UL}">
         <li>Type in the box and click <strong>Post</strong> (up to 2,000 characters). Read-only accounts can read but not post.</li>
-        <li>Type <strong>@</strong> and a name for the user autocomplete; the @name is highlighted in the comment. It doesn't send the person a notification, so let them know another way.</li>
+        <li>Type <strong>@</strong> and a name for the user autocomplete; the @name is highlighted in the comment, and that person gets a notification in their inbox (and an email if it stays unread, unless they switched that off under My Account).</li>
         <li>A <strong>#tag</strong> in a comment becomes a link to that tag's page (every show that uses it). Web addresses stay plain text.</li>
         <li>You can edit (✏) and delete (×) your own comments; an edited comment says <em>(edited)</em>. Deletes are soft.</li>
         <li>Admins can edit or delete anyone's comment, see deleted comments (struck through) with <strong>Restore</strong>, and open a comment's edit <strong>History</strong> to put back an earlier version.</li>
@@ -886,7 +1006,7 @@ const _HELP_PAGES = {
       <ul style="${_HELP_UL}">
         <li>Tick shows in the <strong>All Shows</strong> table. Search matches name, company, venue or year; the venue and status filters narrow it (status starts on <em>Active</em>; pick <em>Archived</em> or <em>All statuses</em> for older shows). Ticked shows appear as removable chips under <strong>Selected Shows</strong>; <strong>Clear selection</strong> empties it.</li>
         <li><strong>NOT SETTLED</strong> marks a show whose labor hasn't been settled (Post-Show → Settle Now): the invoice bills no labor for it and says "Labor not settled yet". <strong>TEST</strong> marks a test/demo show.</li>
-        <li><strong>Generate Combined Invoice</strong> opens the PDF in a new tab: shows in date order, each with its actual labor, internal assets and external costs (piano tunings included), per-show subtotals, one grand total, and any third-party rental PDFs appended at the end.</li>
+        <li><strong>Generate Combined Invoice</strong> opens the PDF in a new tab: shows in date order, each with its actual labor, internal assets and external costs (a piano tuning only when its manager ticked Bill on the show's invoices), per-show subtotals, one grand total, and any third-party rental PDFs appended at the end.</li>
       </ul>
     `
   },
@@ -1178,7 +1298,7 @@ const _HELP_PAGES = {
         <li><strong>Unit (S/N)</strong> — pick the exact instrument, not just the model. It shows wherever the piano is named (schedule row, charge, emails, reports), so each piano's tuning history is per S/N. ⚠ <em>unit not pinned on Assets tab</em> means the show books the model but not that unit — <strong>Pin unit</strong> names it on the show's Assets line when that can be done safely (or says why not). ⚠ <em>not on show's Assets tab</em> means the show hasn't booked the piano at all.</li>
         <li><strong>Vendors</strong> — the vendor list with each one's typical price, contact and notes. Picking a vendor in Manage fills an empty cost with its typical price. Archive a vendor to drop it from the list; past tunings keep it.</li>
         <li><strong>Manage</strong> — status, vendor, piano and unit, needed-on date and tuned-by time, tuning date + start time, cost, paperwork PDF, the PM's notes and your manager notes. Setting the tuning date marks it <strong>Scheduled</strong>, puts a read-only 🎹 row on that day of the show's production schedule and emails the requester.</li>
-        <li><strong>Cost</strong> appears on the show's <strong>Final Invoice</strong> and the Combined Invoice under External Assets &amp; Costs. Cancelled tunings are never billed and their schedule row is removed.</li>
+        <li><strong>Cost</strong> and paperwork stay on the show — the <strong>Assets tab</strong> (tagged <em>not on invoice</em>) and <strong>Reports</strong> — as a show expense. Tunings are settled separately, so they are left off the Asset Estimate, Final Invoice and Combined Invoice unless you tick <strong>Bill on the show's invoices</strong> on that tuning. Cancelled tunings are never billed and their schedule row is removed.</li>
         <li>The <strong>bell</strong> notifies you of new requests, PM changes and cancellation requests. Click one to open that tuning. Requesters get a notification when their tuning is scheduled, moved, completed or cancelled.</li>
         <li><strong>VIEW ONLY</strong> (read-only account): the list, filters, search, paperwork PDFs and the Vendors list still work and <strong>View</strong> opens a tuning's details, but the status buttons, Pin unit, Save, paperwork upload/remove, vendor editing and + Add House Tuning are hidden.</li>
       </ul>
