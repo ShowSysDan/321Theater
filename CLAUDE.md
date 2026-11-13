@@ -1152,6 +1152,33 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   (the group key includes the unit) — keep both.
 - Every `table()` with > 8 rows gets a "Find in table" box (`rptFind`); the
   CSV exports the rows shown.
+- **Saved reports (3.48.0):** `saved_reports` (app schema, per user, ≤ 100)
+  holds `view_json` = {tab, preset, params, show_text}, always passed
+  through `_saved_report_clean_view` (tab whitelist `_SAVED_RPT_TABS`, param
+  whitelist `_SAVED_RPT_PARAMS`, short strings) on the way in AND out. A
+  view is filter DATA only — nothing ever stores or replays report results.
+  A new tab filter = add its param to `_SAVED_RPT_PARAMS`, to reports.html
+  `tabExtras()` (the ONE builder of a tab's extra params, shared with the
+  PDF) and to `applyView()`. A named date preset is stored as the preset
+  and resolved when opened (`_saved_report_preset_dates` mirrors
+  reports.html `preset()` — keep the two in step). `applyView()` must SAY
+  which saved filter no longer exists (a select set to a missing option
+  silently widens the report). Tab filters whose controls are rebuilt each
+  load (rentals, breaks) are restored through the one-shot `_pending`.
+  - **Send** copies the row into each recipient's list (`sent_by`,
+    `sent_by_name`) + `create_notification(kind='report_shared')` with a
+    link built server-side from the int id. Recipients =
+    `_SAVED_RPT_RECIPIENT_SQL` (can open Reports; 321Theater flags only).
+  - **Dashboard widget** `{type:'saved_report', saved_report_id}`
+    (dashboard_view.html `loadSavedReportWidget`): `…/saved/<id>/widget`
+    (owner, or a signed-in non-viewer when the owner put it on a PUBLIC
+    dashboard; one 404 for "gone" and "not yours") returns today's query;
+    `/api/reports/render` → `_rpt_assemble(key, row_cap)` — shared with
+    `/reports/pdf` — calls the tab's own view function, so the gates run
+    for whoever is LOOKING. Never add either endpoint to
+    `_PUBLIC_DASH_DATA_ENDPOINTS` / `_VIEWER_ALLOWED_ENDPOINTS`, and never
+    compute a widget with the owner's permissions: report data is not
+    public. The widget makes no request at all when `ANON`.
 - **Advance Fields (3.20.0)** `/api/reports/advance-field?field=&answer=&q=&include=`
   (any Reports user, `advance` in `_RPT_PDF`): one form field's value per
   `_report_shows()` show. `_report_adv_values()` is the one decoder of

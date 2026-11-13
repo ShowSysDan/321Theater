@@ -886,6 +886,24 @@ CREATE TABLE IF NOT EXISTS chat_participants (
 );
 CREATE INDEX IF NOT EXISTS idx_chat_participants_user ON chat_participants(user_id);
 
+-- Saved reports (3.48.0): a Reports tab + its filters, kept under a name by
+-- one user. view_json = {tab, preset, params, show_text} (app.py
+-- _saved_report_clean_view). A report SENT to someone is a separate row in
+-- their list (sent_by / sent_by_name say who from), so later edits or a
+-- delete by the sender never change it.
+CREATE TABLE IF NOT EXISTS saved_reports (
+    id           SERIAL PRIMARY KEY,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    tab          TEXT NOT NULL,
+    view_json    TEXT NOT NULL DEFAULT '{}',
+    sent_by      INTEGER DEFAULT NULL,
+    sent_by_name TEXT DEFAULT '',
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_saved_reports_user ON saved_reports(user_id);
+
 -- Per-user email preferences for the inbox (3.47.0): a missing row = every
 -- switch at its default (1). 321Theater's own table — never the shared users
 -- table, whose columns other apps read.

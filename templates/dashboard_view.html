@@ -298,6 +298,23 @@
 }
 .widget-remove-btn:hover { opacity: 1; color: var(--red); }
 
+/* ── Saved report widget (3.48.0) ────────────────────────────────── */
+.srw-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-right: 38px; }
+.srw-title { text-transform: none; letter-spacing: 0; font-size: 13.5px; overflow-wrap: anywhere; }
+.srw-sub { font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.srw-open { margin-left: auto; text-transform: none; letter-spacing: 0; }
+.srw-filters { font-size: 11.5px; margin: 0 0 10px; line-height: 1.45; }
+.srw-note { margin: 0; padding: 14px 0; text-align: center; font-size: 12.5px; }
+.srw-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-bottom: 12px; }
+.srw-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 12px; }
+.srw-card .v { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.srw-card .l { font-size: 10.5px; color: var(--text-dim); margin-top: 2px; }
+.srw-cap { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); margin: 10px 0 4px; }
+.srw-scroll { overflow-x: auto; }
+.srw-table { width: 100%; font-size: 12px; }
+.srw-table td.num, .srw-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.srw-table td { white-space: nowrap; }
+
 /* ── Date range row per widget ───────────────────────────────────── */
 .widget-date-row {
   display: flex;
@@ -386,6 +403,7 @@ const WIDGET_LABELS = {
   skills:         'Skill Coverage',
   asset_calendar: 'Asset Availability Calendar',
   reservation_timeline: 'Reservation Timeline',
+  saved_report:   'Saved Report',
 };
 
 /* ── Safe fetch: throws if not JSON ─────────────────────────────── */
@@ -414,7 +432,8 @@ function buildWidgetEl(idx, wtype) {
     section.appendChild(btn);
   }
 
-  const needsDates = !['skills', 'asset_calendar'].includes(wtype);
+  // A saved report carries its own date range (its filters) — no date row.
+  const needsDates = !['skills', 'asset_calendar', 'saved_report'].includes(wtype);
   if (needsDates) {
     const now = new Date();
     let fromDefault, toDefault;
@@ -570,7 +589,8 @@ function buildWidgetEl(idx, wtype) {
 
 /* ── Load all widgets ────────────────────────────────────────────── */
 function reloadAll() {
-  WIDGETS.forEach((w, i) => loadWidget(i));
+  // The live list — WIDGETS is only what the page loaded with.
+  _currentWidgets.forEach((w, i) => loadWidget(i));
 }
 
 async function loadWidget(idx) {
@@ -589,11 +609,97 @@ async function loadWidget(idx) {
     else if (wtype === 'skills')        await loadSkillsWidget(idx, section, loadEl, contentEl);
     else if (wtype === 'asset_calendar') await loadAssetCalendarWidget(idx, section, loadEl, contentEl);
     else if (wtype === 'reservation_timeline') await loadTimelineWidget(idx, section, loadEl, contentEl);
+    else if (wtype === 'saved_report')  await loadSavedReportWidget(idx, section, loadEl, contentEl);
     else                                await loadAvailWidget(idx, section, loadEl, contentEl);
   } catch(e) {
     loadEl.innerHTML = `<span style="color:var(--red)">Error: ${escHtml(e.message)}</span>`;
     loadEl.style.display = 'block';
   }
+}
+
+/* ── Saved report widget (3.48.0) ───────────────────────────────────
+   Pinned from Reports → Saved reports → "Add to dashboard". Config:
+   {type:'saved_report', saved_report_id}. It asks for the report's name +
+   today's query string, then for the report itself (/api/reports/render) —
+   both under the session of whoever is LOOKING, so the report gates apply to
+   them, not to the dashboard's owner. A signed-out visitor / document viewer
+   on a public dashboard never calls either: reports are not public. Every
+   value is written with textContent. */
+async function loadSavedReportWidget(idx, section, loadEl, contentEl) {
+  const w = _currentWidgets[idx] || {};
+  const box = document.createElement('div');
+  box.className = 'form-section srw';
+  const head = document.createElement('div');
+  head.className = 'form-section-header srw-head';
+  const icon = document.createElement('span'); icon.className = 'section-icon'; icon.textContent = '◈';
+  const title = document.createElement('span'); title.className = 'srw-title'; title.textContent = 'Saved report';
+  head.append(icon, title);
+  const body = document.createElement('div');
+  body.className = 'form-section-body';
+  box.append(head, body);
+  const note = text => { const p = document.createElement('p'); p.className = 'text-dim srw-note'; p.textContent = text; body.appendChild(p); };
+  const show = () => { contentEl.textContent = ''; contentEl.appendChild(box); loadEl.style.display = 'none'; contentEl.style.display = 'block'; };
+  if (ANON) { note('A saved report — sign in to see it.'); show(); return; }
+  const id = parseInt(w.saved_report_id, 10);
+  if (!id) { note('This widget has no report. Add one from Reports → Saved reports → Add to dashboard.'); show(); return; }
+  const H = {headers: {'X-Requested-With': 'XMLHttpRequest'}};
+  const getJson = async url => {
+    const r = await fetch(url, H);
+    const ct = r.headers.get('content-type') || '';
+    const d = ct.includes('application/json') ? await r.json() : {};
+    if (!r.ok) throw new Error(d.error || (r.status === 403 ? 'You do not have access to this report.' : `Could not load (${r.status}).`));
+    return d;
+  };
+  let meta;
+  try { meta = await getJson(`/api/reports/saved/${id}/widget`); }
+  catch (e) { note(e.message); show(); return; }
+  title.textContent = meta.name;
+  if (!meta.mine && meta.owner) {
+    const by = document.createElement('span'); by.className = 'text-dim srw-sub'; by.textContent = `${meta.owner}'s report`;
+    head.appendChild(by);
+  }
+  if (meta.open_url) {
+    const a = document.createElement('a'); a.className = 'btn btn-xs btn-ghost srw-open'; a.href = meta.open_url; a.textContent = 'Open in Reports →';
+    head.appendChild(a);
+  }
+  let d;
+  try { d = await getJson('/api/reports/render?rows=8&' + meta.query); }
+  catch (e) { note(e.message); show(); return; }
+  const filt = document.createElement('p');
+  filt.className = 'text-dim srw-filters';
+  filt.textContent = `${d.title} — ${(d.filters || []).join(' · ')}`;
+  body.appendChild(filt);
+  if ((d.cards || []).length) {
+    const cards = document.createElement('div');
+    cards.className = 'srw-cards';
+    d.cards.forEach(([label, value]) => {
+      const c = document.createElement('div'); c.className = 'srw-card';
+      const v = document.createElement('div'); v.className = 'v'; v.textContent = value;
+      const l = document.createElement('div'); l.className = 'l'; l.textContent = label;
+      c.append(v, l); cards.appendChild(c);
+    });
+    body.appendChild(cards);
+  }
+  (d.tables || []).filter(t => t.total).slice(0, 2).forEach(t => {
+    const cap = document.createElement('div');
+    cap.className = 'srw-cap';
+    cap.textContent = t.title + (t.total > t.rows.length ? ` — first ${t.rows.length} of ${t.total}` : ` — ${t.total} row${t.total === 1 ? '' : 's'}`);
+    body.appendChild(cap);
+    const wrap = document.createElement('div'); wrap.className = 'srw-scroll';
+    const tbl = document.createElement('table'); tbl.className = 'data-table srw-table';
+    const thr = document.createElement('tr');
+    t.cols.forEach(([label, isNum]) => { const th = document.createElement('th'); th.textContent = label; if (isNum) th.className = 'num'; thr.appendChild(th); });
+    const thead = document.createElement('thead'); thead.appendChild(thr);
+    const tb = document.createElement('tbody');
+    t.rows.forEach(r => {
+      const tr = document.createElement('tr');
+      r.forEach((v, i) => { const td = document.createElement('td'); td.textContent = v; if (t.cols[i] && t.cols[i][1]) td.className = 'num'; tr.appendChild(td); });
+      tb.appendChild(tr);
+    });
+    tbl.append(thead, tb); wrap.appendChild(tbl); body.appendChild(wrap);
+  });
+  if (!(d.tables || []).some(t => t.total) && !(d.cards || []).length) note('Nothing for these filters.');
+  show();
 }
 
 function getWidgetDates(section) {

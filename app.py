@@ -54,6 +54,8 @@ import fcntl
 import tempfile
 import html as _html_mod
 from datetime import datetime, date, timedelta
+from urllib.parse import urlencode
+from werkzeug.exceptions import HTTPException
 from functools import wraps
 from io import BytesIO
 
@@ -899,7 +901,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.47.0'
+APP_VERSION = '3.48.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -31475,17 +31477,16 @@ def _rpt_filter_summary(db):
     return out or ['All shows (no filters)']
 
 
-@app.route('/reports/pdf')
-@reports_required
-def report_pdf():
-    key = request.args.get('report', '')
-    spec = _RPT_PDF.get(key)
-    if not spec:
-        abort(404)
-    title, view, card_spec, table_spec = spec
+def _rpt_assemble(key, row_cap):
+    """Run report `key` (an _RPT_PDF entry) with the CURRENT request's query
+    string and shape it for display: (None, {title, cards, tables, filters})
+    or (the view's own refusal response, None). The tab's JSON view function
+    is called as-is, so its gate applies to whoever is asking. Shared by the
+    PDF and by /api/reports/render (dashboard widgets)."""
+    title, view, card_spec, table_spec = _RPT_PDF[key]
     resp = app.view_functions[view]()
     if isinstance(resp, tuple) or getattr(resp, 'status_code', 200) != 200:
-        return resp            # the view's own 403 / 400
+        return resp, None      # the view's own 403 / 400
     data = resp.get_json() or {}
     if key == 'group_detail':
         title = f"Arts Group — {(request.args.get('group_name') or request.args.get('group') or '(No company)')[:120]}"
@@ -31503,13 +31504,26 @@ def report_pdf():
         tables.append({'title': t_title, 'total': len(rows),
                        'cols': [(label, f in 'imhp') for _k, label, f in cols],
                        'rows': [[_rpt_fmt(r.get(k), f) for k, _l, f in cols]
-                                for r in rows[:_RPT_PDF_ROW_CAP]]})
+                                for r in rows[:row_cap]]})
     db = get_db()
     try:
         filters = _rpt_filter_summary(db)
-        logo = get_app_setting('logo_data', '')
     finally:
         db.close()
+    return None, {'title': title, 'cards': cards, 'tables': tables, 'filters': filters}
+
+
+@app.route('/reports/pdf')
+@reports_required
+def report_pdf():
+    key = request.args.get('report', '')
+    if key not in _RPT_PDF:
+        abort(404)
+    refusal, r = _rpt_assemble(key, _RPT_PDF_ROW_CAP)
+    if refusal is not None:
+        return refusal
+    title, cards, tables, filters = r['title'], r['cards'], r['tables'], r['filters']
+    logo = get_app_setting('logo_data', '')
     me = get_current_user()
     html = render_template('pdf/report_pdf.html', title=title, cards=cards, tables=tables,
                            filters=filters, row_cap=_RPT_PDF_ROW_CAP, logo=logo,
@@ -31524,6 +31538,424 @@ def report_pdf():
     resp.headers['Content-Disposition'] = (
         f'inline; filename="report_{key}_{date.today().isoformat()}.pdf"')
     return resp
+
+
+@app.route('/api/reports/render')
+@reports_required
+def report_render():
+    """A report as display-ready JSON — summary cards + the first rows of each
+    table, formatted like the PDF (3.48.0). For the saved-report dashboard
+    widget. Same query string as the tab's own endpoint plus `report` (an
+    _RPT_PDF key) and `rows` (per table, default 8, max 50). The tab's view
+    function runs unchanged, so its permission gate decides — a refusal comes
+    back as JSON."""
+    key = request.args.get('report', '')
+    if key not in _RPT_PDF:
+        return jsonify({'error': 'Unknown report.'}), 404
+    try:
+        cap = max(1, min(50, int(request.args.get('rows') or 8)))
+    except ValueError:
+        cap = 8
+    try:
+        refusal, r = _rpt_assemble(key, cap)
+    except HTTPException as e:          # a role decorator's abort(403) / module-off 404
+        return jsonify({'error': 'You do not have access to this report.'
+                        if e.code == 403 else 'This report is not available.'}), e.code or 500
+    if refusal is not None:
+        if getattr(refusal, 'status_code', 200) in (301, 302, 303):
+            return jsonify({'error': 'You do not have access to this report.'}), 403
+        return refusal
+    return jsonify(r)
+
+
+# ── Saved reports (3.48.0) ───────────────────────────────────────────────────
+# A user keeps a Reports tab + its filters under a name (saved_reports), can
+# send a copy to other users and pin it to one of their own dashboards.
+# A view is DATA about which filters to apply — opening it runs the normal
+# report endpoints under the OPENER's own permissions, never the saver's.
+_SAVED_RPT_TABS = ('overview', 'advance', 'groups', 'assets', 'items', 'rentals', 'labor',
+                   'lines', 'breaks', 'variance', 'piano', 'sound')     # each is an _RPT_PDF key
+_SAVED_RPT_PRESETS = ('month', 'year', '12m', 'next12', 'all')
+# Every query parameter a report tab reads. Anything else is dropped.
+_SAVED_RPT_PARAMS = ('from', 'to', 'venue', 'company', 'show', 'has_type', 'has_category',
+                     'position', 'tech', 'type_ids', 'unit_ids', 'types', 'types_mode',
+                     'field', 'answer', 'q', 'include', 'asset_category_id', 'asset_type_id',
+                     'min_diff', 'group', 'monitors', 'limit')
+_SAVED_RPT_MAX_PER_USER = 100
+_SAVED_RPT_NAME_MAX = 80
+_SAVED_RPT_VALUE_MAX = 600
+_SAVED_RPT_SEND_MAX = 25
+
+
+def _saved_report_clean_view(raw):
+    """(view, error): the stored shape {tab, preset, params, show_text} from
+    client JSON — known tab, known preset or none, whitelisted params as
+    short strings. With a preset the from/to are dropped (the preset is
+    resolved when the report is opened, so "This year" stays this year)."""
+    if not isinstance(raw, dict):
+        return None, 'Unreadable report view.'
+    tab = str(raw.get('tab') or '')
+    if tab not in _SAVED_RPT_TABS:
+        return None, 'Unknown report tab.'
+    preset = raw.get('preset') or None
+    if preset is not None and preset not in _SAVED_RPT_PRESETS:
+        return None, 'Unknown date range.'
+    src = raw.get('params') if isinstance(raw.get('params'), dict) else {}
+    params = {}
+    for k in _SAVED_RPT_PARAMS:
+        v = src.get(k)
+        if v is None or isinstance(v, (dict, list)):
+            continue
+        v = str(v).strip()
+        if v:
+            params[k] = v[:_SAVED_RPT_VALUE_MAX]
+    if preset:
+        params.pop('from', None)
+        params.pop('to', None)
+    else:
+        for k in ('from', 'to'):
+            if k in params:
+                try:
+                    params[k] = date.fromisoformat(params[k][:10]).isoformat()
+                except ValueError:
+                    params.pop(k)
+    return {'tab': tab, 'preset': preset, 'params': params,
+            'show_text': str(raw.get('show_text') or '')[:300]}, None
+
+
+def _saved_report_view(row):
+    """A stored row's view, re-validated on the way out (a hand-edited or
+    older row can never hand the page something unexpected)."""
+    try:
+        raw = json.loads(row['view_json'] or '{}')
+    except ValueError:
+        raw = {}
+    raw = dict(raw if isinstance(raw, dict) else {}, tab=row['tab'])
+    view, _err = _saved_report_clean_view(raw)
+    return view or {'tab': 'overview', 'preset': 'year', 'params': {}, 'show_text': ''}
+
+
+def _saved_report_preset_dates(preset, today=None):
+    """(from, to) ISO strings for a date preset — the same ranges as the
+    Reports page's preset buttons (reports.html preset())."""
+    t = today or date.today()
+
+    def _shift_year(d, n):
+        try:
+            return d.replace(year=d.year + n)
+        except ValueError:          # Feb 29
+            return d.replace(year=d.year + n, day=28)
+    if preset == 'month':
+        nxt = (t.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return t.replace(day=1).isoformat(), (nxt - timedelta(days=1)).isoformat()
+    if preset == 'year':
+        return f'{t.year}-01-01', f'{t.year}-12-31'
+    if preset == '12m':
+        return _shift_year(t, -1).isoformat(), t.isoformat()
+    if preset == 'next12':
+        return t.isoformat(), _shift_year(t, 1).isoformat()
+    return '', ''
+
+
+def _saved_report_query(view):
+    """The query-string dict a saved view means TODAY (preset resolved)."""
+    q = dict(view['params'])
+    if view['preset']:
+        d_from, d_to = _saved_report_preset_dates(view['preset'])
+        if d_from:
+            q['from'] = d_from
+        if d_to:
+            q['to'] = d_to
+    return q
+
+
+def _saved_report_out(row):
+    return {'id': row['id'], 'name': row['name'], 'tab': row['tab'],
+            'view': _saved_report_view(row),
+            'sent_by_name': (row['sent_by_name'] or '') if row['sent_by'] else '',
+            'created_at': _ts_out(row['created_at']), 'updated_at': _ts_out(row['updated_at'])}
+
+
+_SAVED_RPT_COLS = ('id, user_id, name, tab, view_json, sent_by, sent_by_name, '
+                   'created_at::timestamptz AS created_at, updated_at::timestamptz AS updated_at')
+# Accounts a report can be sent to: unlocked, approved, not a document
+# viewer, and holding a role / 321Theater flag that opens the Reports page.
+_SAVED_RPT_RECIPIENT_SQL = (
+    "COALESCE(u.is_locked, 0) = 0 AND COALESCE(u.pending_approval, 0) = 0 "
+    "AND COALESCE(u.is_document_viewer, 0) = 0 "
+    "AND (u.role IN ('admin', 'staff') OR COALESCE(u.is_scheduler, 0) = 1 "
+    "OR COALESCE(u.is_asset_manager, 0) = 1 OR COALESCE(u.is_piano_manager, 0) = 1)")
+
+
+def _saved_report_name(v):
+    name = ' '.join(str(v or '').split())[:_SAVED_RPT_NAME_MAX]
+    return name or None
+
+
+@app.route('/api/reports/saved')
+@reports_required
+def saved_reports_list():
+    """My saved reports (newest first) + my dashboards (for "Add to
+    dashboard")."""
+    uid = session['user_id']
+    db = get_db()
+    try:
+        rows = db.execute(f'SELECT {_SAVED_RPT_COLS} FROM saved_reports WHERE user_id = %s '
+                          'ORDER BY LOWER(name), id', (uid,)).fetchall()
+        dashes = db.execute('SELECT id, name FROM asset_dashboards WHERE user_id = %s '
+                            'ORDER BY LOWER(name), id', (uid,)).fetchall()
+    finally:
+        db.close()
+    return jsonify({'reports': [_saved_report_out(r) for r in rows],
+                    'dashboards': [{'id': d['id'], 'name': d['name']} for d in dashes],
+                    'max': _SAVED_RPT_MAX_PER_USER})
+
+
+@app.route('/api/reports/saved', methods=['POST'])
+@reports_required
+def saved_reports_create():
+    uid = session['user_id']
+    data = request.get_json(silent=True) or {}
+    name = _saved_report_name(data.get('name'))
+    if not name:
+        return jsonify({'error': 'Give the report a name.'}), 400
+    view, err = _saved_report_clean_view(data.get('view'))
+    if err:
+        return jsonify({'error': err}), 400
+    db = get_db()
+    try:
+        n = db.execute('SELECT COUNT(*) AS n FROM saved_reports WHERE user_id = %s',
+                       (uid,)).fetchone()['n']
+        if n >= _SAVED_RPT_MAX_PER_USER:
+            return jsonify({'error': f'You have {_SAVED_RPT_MAX_PER_USER} saved reports — '
+                                     'delete one first.'}), 409
+        rid = db.execute(
+            'INSERT INTO saved_reports (user_id, name, tab, view_json) VALUES (%s, %s, %s, %s) '
+            'RETURNING id', (uid, name, view['tab'], json.dumps(view))).fetchone()['id']
+        db.commit()
+        row = db.execute(f'SELECT {_SAVED_RPT_COLS} FROM saved_reports WHERE id = %s',
+                         (rid,)).fetchone()
+    finally:
+        db.close()
+    syslog_logger.info(f"REPORT_SAVED id={rid} tab={view['tab']} by={session.get('username')}")
+    return jsonify({'success': True, 'report': _saved_report_out(row)})
+
+
+@app.route('/api/reports/saved/<int:rid>', methods=['PUT', 'DELETE'])
+@reports_required
+def saved_reports_edit(rid):
+    """Rename / replace the view of one of MY saved reports, or delete it."""
+    uid = session['user_id']
+    db = get_db()
+    try:
+        row = db.execute(f'SELECT {_SAVED_RPT_COLS} FROM saved_reports '
+                         'WHERE id = %s AND user_id = %s FOR UPDATE', (rid, uid)).fetchone()
+        if not row:
+            return jsonify({'error': 'Saved report not found.'}), 404
+        if request.method == 'DELETE':
+            db.execute('DELETE FROM saved_reports WHERE id = %s', (rid,))
+            db.commit()
+            syslog_logger.info(f"REPORT_SAVED_DELETE id={rid} by={session.get('username')}")
+            return jsonify({'success': True})
+        data = request.get_json(silent=True) or {}
+        sets, args = [], []
+        if 'name' in data:
+            name = _saved_report_name(data.get('name'))
+            if not name:
+                return jsonify({'error': 'Give the report a name.'}), 400
+            sets.append('name = %s'); args.append(name)
+        if 'view' in data:
+            view, err = _saved_report_clean_view(data.get('view'))
+            if err:
+                return jsonify({'error': err}), 400
+            sets += ['tab = %s', 'view_json = %s']; args += [view['tab'], json.dumps(view)]
+        if sets:
+            db.execute(f"UPDATE saved_reports SET {', '.join(sets)}, updated_at = CURRENT_TIMESTAMP "
+                       'WHERE id = %s', args + [rid])
+            db.commit()
+        row = db.execute(f'SELECT {_SAVED_RPT_COLS} FROM saved_reports WHERE id = %s',
+                         (rid,)).fetchone()
+    finally:
+        db.close()
+    syslog_logger.info(f"REPORT_SAVED_EDIT id={rid} by={session.get('username')}")
+    return jsonify({'success': True, 'report': _saved_report_out(row)})
+
+
+@app.route('/api/reports/saved/people')
+@reports_required
+def saved_reports_people():
+    """Who a saved report can be sent to (accounts that can open Reports)."""
+    db = get_db()
+    try:
+        rows = db.execute(
+            f"""SELECT u.id, COALESCE(NULLIF(TRIM(u.display_name), ''), u.username) AS name, u.role
+                  FROM users u WHERE {_SAVED_RPT_RECIPIENT_SQL} AND u.id <> %s
+                 ORDER BY LOWER(COALESCE(NULLIF(TRIM(u.display_name), ''), u.username)), u.id""",
+            (session['user_id'],)).fetchall()
+    finally:
+        db.close()
+    return jsonify({'people': [{'id': r['id'], 'name': r['name'], 'role': r['role'] or ''}
+                               for r in rows]})
+
+
+@app.route('/api/reports/saved/<int:rid>/send', methods=['POST'])
+@reports_required
+def saved_reports_send(rid):
+    """Send one of MY saved reports to other users: each gets their OWN copy
+    in their Saved reports (so my later edits or delete don't change theirs)
+    and an inbox notification that opens it. Only the filters travel — the
+    recipient sees whatever their own permissions allow."""
+    uid = session['user_id']
+    data = request.get_json(silent=True) or {}
+    try:
+        to = sorted({int(x) for x in (data.get('user_ids') or [])} - {uid})
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Unreadable recipients.'}), 400
+    if not to:
+        return jsonify({'error': 'Pick who to send it to.'}), 400
+    if len(to) > _SAVED_RPT_SEND_MAX:
+        return jsonify({'error': f'Send to at most {_SAVED_RPT_SEND_MAX} people at a time.'}), 400
+    db = get_db()
+    try:
+        row = db.execute(f'SELECT {_SAVED_RPT_COLS} FROM saved_reports '
+                         'WHERE id = %s AND user_id = %s', (rid, uid)).fetchone()
+        if not row:
+            return jsonify({'error': 'Saved report not found.'}), 404
+        ok = [r['id'] for r in db.execute(
+            f'SELECT u.id FROM users u WHERE u.id = ANY(%s) AND {_SAVED_RPT_RECIPIENT_SQL}',
+            (to,)).fetchall()]
+        if len(ok) != len(to):
+            return jsonify({'error': 'One of those people can no longer open Reports.'}), 409
+        me = db.execute("SELECT COALESCE(NULLIF(TRIM(display_name), ''), username) AS n "
+                        'FROM users WHERE id = %s', (uid,)).fetchone()
+        my_name = (me['n'] if me else '') or 'Someone'
+        view = _saved_report_view(row)
+        skipped, sent = [], 0
+        for rcpt in ok:
+            n = db.execute('SELECT COUNT(*) AS n FROM saved_reports WHERE user_id = %s',
+                           (rcpt,)).fetchone()['n']
+            if n >= _SAVED_RPT_MAX_PER_USER:
+                skipped.append(rcpt)
+                continue
+            new_id = db.execute(
+                'INSERT INTO saved_reports (user_id, name, tab, view_json, sent_by, sent_by_name) '
+                'VALUES (%s, %s, %s, %s, %s, %s) RETURNING id',
+                (rcpt, row['name'], view['tab'], json.dumps(view), uid, my_name)).fetchone()['id']
+            # The link is built here from an int id — never from client text.
+            create_notification(db, rcpt, f'{my_name} sent you a report',
+                                row['name'], link_url=f'/reports?saved={int(new_id)}',
+                                kind='report_shared')
+            sent += 1
+        db.commit()
+        names = []
+        if skipped:
+            names = [r['n'] for r in db.execute(
+                "SELECT COALESCE(NULLIF(TRIM(display_name), ''), username) AS n FROM users "
+                'WHERE id = ANY(%s)', (skipped,)).fetchall()]
+    finally:
+        db.close()
+    syslog_logger.info(f"REPORT_SAVED_SEND id={rid} recipients={sent} skipped={len(skipped)} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'sent': sent, 'skipped': names})
+
+
+@app.route('/api/reports/saved/<int:rid>/dashboard', methods=['POST'])
+@reports_required
+def saved_reports_to_dashboard(rid):
+    """Pin one of MY saved reports to one of MY dashboards as a widget —
+    {dashboard_id} or {new_name} for a new private dashboard. Appends to the
+    dashboard's widget list (never replaces it)."""
+    uid = session['user_id']
+    data = request.get_json(silent=True) or {}
+    db = get_db()
+    try:
+        if not db.execute('SELECT 1 FROM saved_reports WHERE id = %s AND user_id = %s',
+                          (rid, uid)).fetchone():
+            return jsonify({'error': 'Saved report not found.'}), 404
+        widget = {'type': 'saved_report', 'saved_report_id': rid}
+        if data.get('dashboard_id') in (None, ''):
+            name = ' '.join(str(data.get('new_name') or '').split())[:80] or 'My Reports'
+            did = db.execute(
+                "INSERT INTO asset_dashboards (user_id, name, is_public, public_slug, layout, config_json) "
+                "VALUES (%s, %s, 0, NULL, 'saved_report', %s) RETURNING id",
+                (uid, name, json.dumps({'widgets': [widget]}))).fetchone()['id']
+            already = False
+        else:
+            try:
+                did = int(data.get('dashboard_id'))
+            except (TypeError, ValueError):
+                return jsonify({'error': 'Pick a dashboard.'}), 400
+            d = db.execute('SELECT id, layout, config_json FROM asset_dashboards '
+                           'WHERE id = %s AND user_id = %s FOR UPDATE', (did, uid)).fetchone()
+            if not d:
+                return jsonify({'error': 'Dashboard not found.'}), 404
+            try:
+                cfg = json.loads(d['config_json'] or '{}')
+            except ValueError:
+                cfg = {}
+            cfg = cfg if isinstance(cfg, dict) else {}
+            widgets = cfg.get('widgets')
+            if not isinstance(widgets, list) or not widgets:
+                widgets = [{'type': d['layout'] or 'combined'}]    # a pre-widget dashboard
+            already = any(isinstance(w, dict) and w.get('type') == 'saved_report'
+                          and w.get('saved_report_id') == rid for w in widgets)
+            if not already:
+                if len(widgets) >= 40:
+                    return jsonify({'error': 'That dashboard is full.'}), 409
+                widgets.append(widget)
+                cfg['widgets'] = widgets
+                db.execute('UPDATE asset_dashboards SET config_json = %s, '
+                           'updated_at = CURRENT_TIMESTAMP WHERE id = %s', (json.dumps(cfg), did))
+        db.commit()
+    finally:
+        db.close()
+    syslog_logger.info(f"REPORT_SAVED_DASHBOARD id={rid} dashboard={did} by={session.get('username')}")
+    return jsonify({'success': True, 'dashboard_id': did, 'already': already,
+                    'url': url_for('dashboard_view', dash_id=did)})
+
+
+@app.route('/api/reports/saved/<int:rid>/widget')
+@login_required
+def saved_reports_widget(rid):
+    """What a saved-report dashboard widget needs to draw itself: the name
+    and today's query string — the widget then calls /api/reports/render,
+    whose gates run for the PERSON LOOKING, never the dashboard's owner.
+    Readable by the report's owner, and by another signed-in user only when
+    the owner put it on a PUBLIC dashboard. Never anonymous, never a
+    document viewer (not in the public-dashboard endpoint list on purpose)."""
+    uid = session['user_id']
+    db = get_db()
+    try:
+        row = db.execute(
+            f"""SELECT {_SAVED_RPT_COLS},
+                       (SELECT COALESCE(NULLIF(TRIM(u.display_name), ''), u.username)
+                          FROM users u WHERE u.id = saved_reports.user_id) AS owner_name
+                  FROM saved_reports WHERE id = %s""", (rid,)).fetchone()
+        mine = bool(row) and row['user_id'] == uid
+        shared = False
+        if row and not mine:
+            for d in db.execute('SELECT config_json FROM asset_dashboards '
+                                'WHERE user_id = %s AND is_public = 1', (row['user_id'],)).fetchall():
+                try:
+                    ws = (json.loads(d['config_json'] or '{}') or {}).get('widgets') or []
+                except (ValueError, AttributeError):
+                    ws = []
+                if any(isinstance(w, dict) and w.get('type') == 'saved_report'
+                       and w.get('saved_report_id') == rid for w in ws):
+                    shared = True
+                    break
+    finally:
+        db.close()
+    if not row or not (mine or shared):
+        # One answer for "deleted" and "not yours": ids can't be probed.
+        return jsonify({'error': 'This saved report is no longer available.'}), 404
+    view = _saved_report_view(row)
+    q = _saved_report_query(view)
+    q['report'] = view['tab']
+    return jsonify({'name': row['name'], 'tab': view['tab'], 'mine': mine,
+                    'owner': row['owner_name'] or '',
+                    'query': urlencode(q),
+                    'open_url': f'/reports?saved={int(rid)}' if mine else ''})
 
 
 @app.route('/reports/assets')

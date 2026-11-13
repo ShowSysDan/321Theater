@@ -37,7 +37,7 @@
           {{ wlist|length }} widget{{ 's' if wlist|length != 1 else '' }}:
           {{ wlist | map(attribute='type') | join(', ') }}
         {% else %}
-          Layout: {{ d.layout }}
+          Layout: {{ 'saved reports' if d.layout == 'saved_report' else d.layout }}
         {% endif %}
       </div>
       {% if d.is_public and d.public_slug %}

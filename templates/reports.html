@@ -51,8 +51,19 @@
         </div>
         <button type="button" class="btn btn-primary btn-sm" onclick="rptRun()">Run</button>
         <button type="button" class="btn btn-ghost btn-sm" onclick="rptPdf()" title="This tab as a PDF, with the current filters">PDF</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="rptSavedOpen()" title="Save this tab and its filters, re-open a saved report, send one to someone or pin it to a dashboard">Saved reports <span id="rs-count" class="rpt-more-count"></span></button>
       </div>
     </div>
+    {# Saved reports (3.48.0): which saved report is on screen, if any. #}
+    <div class="rpt-saved-bar" id="rs-bar" hidden>
+      <span class="rpt-saved-label">Saved report</span>
+      <strong id="rs-bar-name"></strong>
+      <span id="rs-bar-from" class="text-dim"></span>
+      <span id="rs-bar-changed" class="rpt-pill rpt-pill-warn" hidden>filters changed</span>
+      <button type="button" class="btn btn-xs btn-ghost" id="rs-bar-update" onclick="rptSavedUpdateActive()" hidden title="Save the filters on screen into this saved report">Update</button>
+      <button type="button" class="btn btn-xs btn-ghost" onclick="rptSavedClose()" title="Stop tracking this saved report (the filters stay as they are)">×</button>
+    </div>
+    <div class="rpt-saved-bar rpt-saved-warn" id="rs-warn" hidden></div>
     {# Drill-down filters (3.14.0) — each narrows the shows every tab reports on. #}
     <div class="rpt-filter-row rpt-more" id="rf-more" hidden>
       <div class="field-group" style="min-width:240px">
@@ -252,6 +263,28 @@
 </template>
 
 {# Drill-down dialog (Arts Group detail / asset units) #}
+{# Saved reports (3.48.0) — built by rptSaved* in the script below. #}
+<div id="rs-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)rptSavedCloseModal()">
+  <div class="modal-card" style="width:680px" role="dialog" aria-labelledby="rs-modal-title">
+    <div class="modal-header">
+      <span id="rs-modal-title">Saved reports</span>
+      <button type="button" class="modal-close" onclick="rptSavedCloseModal()" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="rs-save">
+        <label class="field-label" for="rs-name">SAVE WHAT IS ON SCREEN</label>
+        <div class="rs-save-row">
+          <input type="text" id="rs-name" class="field-input" maxlength="80" placeholder="Name — e.g. Projectors this year">
+          <button type="button" class="btn btn-primary btn-sm" onclick="rptSavedSave()">Save</button>
+        </div>
+        <p class="rpt-note" id="rs-what"></p>
+      </div>
+      <div id="rs-msg" class="rs-msg" role="status" hidden></div>
+      <div id="rs-list" class="rs-list"><div class="rpt-loading text-dim">Loading…</div></div>
+    </div>
+  </div>
+</div>
+
 <div id="rpt-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)rptCloseModal()">
   <div class="modal-card" style="max-width:960px;width:94vw;max-height:90vh;overflow-y:auto">
     <div class="modal-header">
@@ -293,6 +326,31 @@
 .rpt-subfilters { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
 .rpt-subfilters .field-group { margin: 0; min-width: 160px; }
 .rpt-idle td { opacity: .6; }
+/* Saved reports (3.48.0) */
+.rpt-saved-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border); font-size: 12.5px; }
+.rpt-saved-bar[hidden] { display: none; }
+.rpt-saved-bar [hidden], #rs-modal [hidden] { display: none !important; }   /* .btn / .rpt-pill set a display */
+.rpt-saved-label { font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--text-dim); }
+.rpt-saved-warn { color: var(--text); background: color-mix(in srgb, #e5a50a 12%, transparent); border: 1px solid color-mix(in srgb, #e5a50a 40%, var(--border)); border-radius: 6px; padding: 8px 10px; }
+.rs-save-row { display: flex; gap: 8px; }
+.rs-save-row input { flex: 1; min-width: 0; }
+.rs-msg { margin: 10px 0 0; padding: 7px 10px; border-radius: 6px; font-size: 12px; background: var(--bg-hover); }
+.rs-msg[hidden] { display: none; }
+.rs-msg.err { background: color-mix(in srgb, #e5484d 14%, transparent); }
+.rs-list { margin-top: 14px; border-top: 1px solid var(--border); }
+.rs-item { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.rs-item-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.rs-item-name { background: none; border: 0; padding: 0; font: 600 13.5px var(--font-main); color: var(--orange-text, var(--accent)); cursor: pointer; text-align: left; overflow-wrap: anywhere; }
+.rs-item-name:hover { text-decoration: underline; }
+.rs-item-meta { font-size: 11.5px; color: var(--text-dim); }
+.rs-item-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.rs-panel { margin-top: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); display: flex; flex-direction: column; gap: 8px; }
+.rs-people { max-height: 190px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+.rs-person { display: flex; gap: 8px; align-items: center; padding: 5px 9px; font-size: 12.5px; cursor: pointer; }
+.rs-person:hover { background: var(--bg-hover); }
+.rs-person .sub { margin-left: auto; font-size: 11px; color: var(--text-dim); }
+.rs-panel-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.rs-panel-row select, .rs-panel-row input[type=text] { flex: 1 1 180px; min-width: 0; }
 .rpt-find { margin-left: auto; width: 170px; max-width: 40vw; height: 26px; padding: 2px 8px; font-size: 12px; font-weight: 400; }
 .rpt-over td { background: color-mix(in srgb, #e5484d 9%, transparent); }
 /* Multi-select picker (items / units), 3.47.0 */
@@ -577,25 +635,34 @@
   function openPdf(report, extra) {
     window.open('/reports/pdf?' + params(Object.assign({report}, extra || {})), '_blank', 'noopener');
   }
-  window.rptPdf = function() {
+  // The current tab's own filters as query params — the PDF and a saved
+  // report both use exactly this.
+  function tabExtras() {
     const extra = {};
     if (_tab === 'rentals') {
       extra.asset_category_id = _val('rr-category'); extra.asset_type_id = _val('rr-type');
     }
     if (_tab === 'breaks') extra.min_diff = _val('rb-min');
-    if (_tab === 'advance') {
-      if (!_adv.field) { alert('Pick an advance field first.'); return; }
-      Object.assign(extra, _advParams());
-    }
-    if (_tab === 'items') {
-      if (!_item.types.length) { alert('Pick an item first.'); return; }
-      Object.assign(extra, _itemParams());
-    }
+    if (_tab === 'advance') Object.assign(extra, _advParams());
+    if (_tab === 'items') Object.assign(extra, _itemParams());
     if (_tab === 'assets') Object.assign(extra, _assetParams());
     if (_tab === 'sound') Object.assign(extra, _soundParams());
-    openPdf(PDF_KEY[_tab], extra);
+    return extra;
+  }
+  window.rptPdf = function() {
+    if (_tab === 'advance' && !_adv.field) { alert('Pick an advance field first.'); return; }
+    if (_tab === 'items' && !_item.types.length) { alert('Pick an item first.'); return; }
+    openPdf(PDF_KEY[_tab], tabExtras());
   };
+  // The date range as a NAMED preset (so a saved "This year" is still this
+  // year next January) — cleared the moment a date is edited by hand.
+  let _preset = null;
+  // Tab filters with no state object of their own (their controls are
+  // rebuilt by each load): a saved view parks them here for the next load.
+  const _pending = {rentals: null, breaks: null};
+  ['rf-from', 'rf-to'].forEach(id => document.getElementById(id).addEventListener('input', () => { _preset = null; rptSavedDirty(); }));
   function preset(kind) {
+    _preset = kind;
     const now = new Date();
     let from = '', to = '';
     if (kind === 'month') { from = localIsoDate(new Date(now.getFullYear(), now.getMonth(), 1)); to = localIsoDate(new Date(now.getFullYear(), now.getMonth() + 1, 0)); }
@@ -706,6 +773,7 @@
 
   // ── loaders per tab ──
   window.rptLoad = async function() {
+    rptSavedDirty();
     const seq = ++_seq;
     const body = document.getElementById('rpt-body');
     Object.keys(_tables).forEach(k => delete _tables[k]);
@@ -719,6 +787,8 @@
     } catch (e) {
       if (seq === _seq) body.innerHTML = `<div class="rpt-loading" style="color:#e53e3e">Couldn't load this report: ${esc(e.message)}</div>`;
     }
+    // After the tab's own controls are restored (they do that in a timeout).
+    if (seq === _seq) setTimeout(rptSavedLoaded, 60);
   };
 
   const LOADERS = {
@@ -977,8 +1047,9 @@
           note: 'One row per performance and sensor. Minutes = the window Spot measured' + (d.rows.some(r => r.detected) ? ' (curtain times detected where Spot could)' : '') + '. L10 / L50 / L90 = the level exceeded 10 / 50 / 90 % of the time (L10 ≈ the loud passages, L90 ≈ the background).' + (lim ? ` Rows tinted red had a Leq at or over ${d.limit}.` : ' Enter a level under Flag at to mark performances at or over it.')});
     },
     async rentals() {
-      const extra = {asset_category_id: (document.getElementById('rr-category') || {}).value || '',
+      const extra = _pending.rentals || {asset_category_id: (document.getElementById('rr-category') || {}).value || '',
                      asset_type_id: (document.getElementById('rr-type') || {}).value || ''};
+      _pending.rentals = null;
       const keep = {cat: extra.asset_category_id, type: extra.asset_type_id};
       const d = await get('/api/reports/assets?' + params(extra));
       const rows = d.rows || [];
@@ -1063,7 +1134,8 @@
           + 'One row per requested shift; settled shows add the settlement line\'s actual times and <em>Worked by</em> (bold when someone other than the scheduled tech worked it). Settlement-only lines (added hours, lines added at settlement) are listed too. Training shifts never bill.'});
     },
     async breaks() {
-      const min = _val('rb-min') || '5';
+      const min = (_pending.breaks && _pending.breaks.min_diff) || _val('rb-min') || '5';
+      _pending.breaks = null;
       const d = await get('/api/reports/breaks?' + params({min_diff: min}));
       const kc = {'Not taken': 'bad', Shorter: 'warn', Longer: 'warn', Added: 'dim', Moved: 'dim'};
       const k = d.kinds || {};
@@ -1209,7 +1281,307 @@
   // Default range: this calendar year (past and upcoming shows); a
   // technician's work-history link (?tech=) opens on all time.
   preset(_q0.get('tech') ? 'all' : 'year');
-  setTab(_tab);
+
+  // ══ Saved reports (3.48.0) ════════════════════════════════════════════════
+  // A saved report = this page's tab + filters under a name (server:
+  // saved_reports). Opening one only sets the filters and runs the tab's
+  // normal endpoints, so what shows is what the person looking may see.
+  const RS = {list: [], dashboards: [], people: null, active: null, loaded: false};
+  const TAB_LABEL = {};
+  document.querySelectorAll('.rpt-tab').forEach(b => { TAB_LABEL[b.dataset.tab] = b.textContent.trim(); });
+  const ALL_TAB_LABEL = {overview: 'Overview', advance: 'Advance Fields', groups: 'Arts Groups', assets: 'Assets',
+    items: 'Item History', rentals: 'Rental Lines', labor: 'Labor & Techs', lines: 'Labor Lines',
+    breaks: 'Break Exceptions', variance: 'Estimate vs Settlement', piano: 'Piano Tuning', sound: 'Sound Levels'};
+  const PRESET_LABEL = {month: 'This month', year: 'This year', '12m': 'Last 12 months', next12: 'Next 12 months', all: 'All time'};
+  const J = {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'};
+  async function send(url, method, body) {
+    const r = await fetch(url, {method, headers: J, body: body === undefined ? undefined : JSON.stringify(body)});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  }
+  function mk(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  // What is on screen, as the shape the server stores.
+  function currentView() {
+    const p = {};
+    new URLSearchParams(params(tabExtras())).forEach((v, k) => { p[k] = v; });
+    if (_preset) { delete p.from; delete p.to; }
+    return {tab: _tab, preset: _preset, params: p, show_text: p.show ? _val('rf-show') : ''};
+  }
+  const viewKey = v => JSON.stringify([v.tab, v.preset || '', Object.keys(v.params).sort().map(k => [k, v.params[k]])]);
+  function describe(v) {
+    const p = v.params || {}, bits = [ALL_TAB_LABEL[v.tab] || v.tab];
+    bits.push(v.preset ? PRESET_LABEL[v.preset] : ((p.from || p.to) ? `${p.from || 'any'} – ${p.to || 'any'}` : 'All time'));
+    if (p.venue) bits.push(p.venue);
+    if (p.company) bits.push(p.company);
+    const n = Object.keys(p).filter(k => !['from', 'to', 'venue', 'company'].includes(k)).length;
+    if (n) bits.push(`${n} more filter${n === 1 ? '' : 's'}`);
+    return bits.join(' · ');
+  }
+  // Put a saved view on screen. Returns the list of things that could not
+  // be applied (a filter value that no longer exists must be SAID — setting
+  // a select to a missing option silently widens the report).
+  function applyView(v) {
+    const lost = [], p = v.params || {};
+    if (!TABS.includes(v.tab)) {
+      return {ok: false, lost: [`You don't have access to the ${ALL_TAB_LABEL[v.tab] || v.tab} report.`]};
+    }
+    if (v.preset) preset(v.preset);
+    else { _preset = null; document.getElementById('rf-from').value = p.from || ''; document.getElementById('rf-to').value = p.to || ''; }
+    const pick = (id, val, what) => {
+      const el = document.getElementById(id);
+      if (!el) { if (val) lost.push(`${what} (you don't have that filter)`); return; }
+      el.value = val || '';
+      if (val && el.value !== String(val)) { el.value = ''; lost.push(`${what} “${val}” no longer exists`); }
+    };
+    pick('rf-venue', p.venue, 'Venue');
+    pick('rf-company', p.company, 'Arts Group');
+    pick('rf-has-type', p.has_type, 'Had item booked');
+    pick('rf-has-category', p.has_category, 'Had category booked');
+    pick('rf-position', p.position, 'Job position');
+    pick('rf-tech', p.tech, 'Technician');
+    // The show box reads the id off the end of its text ("… #123").
+    document.getElementById('rf-show').value = p.show ? ((v.show_text && new RegExp('#' + p.show + '\\s*$').test(v.show_text)) ? v.show_text : `#${p.show}`) : '';
+    moreCount();
+    if (Object.values(drill()).some(Boolean)) document.getElementById('rf-more').hidden = false;
+    // Tab state: only the saved tab's own filters are touched.
+    if (v.tab === 'items') { _item.types = _idList(p.type_ids); _item.units = _idList(p.unit_ids); }
+    if (v.tab === 'assets') { _assetSel.ids = _idList(p.types); _assetSel.mode = p.types_mode === 'exclude' ? 'exclude' : 'only'; }
+    if (v.tab === 'advance') { _adv.field = p.field || ''; _adv.answer = p.answer || ''; _adv.q = p.q || ''; _adv.include = p.include || 'answered'; }
+    if (v.tab === 'sound') { _sound.group = p.group || 'sensor'; _sound.monitors = _idList(p.monitors); _sound.limit = p.limit || ''; }
+    if (v.tab === 'rentals') _pending.rentals = {asset_category_id: p.asset_category_id || '', asset_type_id: p.asset_type_id || ''};
+    if (v.tab === 'breaks') _pending.breaks = {min_diff: p.min_diff || ''};
+    return {ok: true, lost};
+  }
+  function paintBar() {
+    const bar = document.getElementById('rs-bar'), a = RS.active;
+    bar.hidden = !a;
+    const n = document.getElementById('rs-count');
+    n.textContent = RS.list.length ? RS.list.length : '';
+    if (!a) return;
+    document.getElementById('rs-bar-name').textContent = a.name;
+    document.getElementById('rs-bar-from').textContent = a.sent_by_name ? `from ${a.sent_by_name}` : '';
+    const changed = RS.activeKey && viewKey(currentView()) !== RS.activeKey;
+    document.getElementById('rs-bar-changed').hidden = !changed;
+    document.getElementById('rs-bar-update').hidden = !changed;
+  }
+  // Called after anything that can change the filters (every load does).
+  window.rptSavedDirty = function() { if (RS.active && !RS.markPending) setTimeout(paintBar, 0); };
+  // A load finished. Right after a saved report is opened this is the
+  // moment its "unchanged" fingerprint is taken — the server may have
+  // normalised ids, and the tab's controls are back in place by now.
+  window.rptSavedLoaded = function() {
+    if (RS.active && RS.markPending) { RS.markPending = false; RS.activeKey = viewKey(currentView()); }
+    if (RS.active) paintBar();
+  };
+  function warn(lines) {
+    const w = document.getElementById('rs-warn');
+    w.hidden = !lines.length;
+    w.textContent = lines.length ? 'This saved report could not be applied in full: ' + lines.join('; ') + '. It is showing more than was saved.' : '';
+  }
+  function openSaved(r) {
+    const res = applyView(r.view);
+    if (!res.ok) { warn([]); RS.active = null; paintBar(); msg(res.lost[0], true); return false; }
+    RS.active = r;
+    warn(res.lost);
+    try { const u = new URL(location.href); u.searchParams.set('saved', r.id); history.replaceState(null, '', u); } catch (e) {}
+    RS.activeKey = null;
+    RS.markPending = true;         // rptSavedLoaded() takes the fingerprint
+    setTab(r.view.tab);
+    paintBar();
+    return true;
+  }
+  window.rptSavedClose = function() {
+    RS.active = null; RS.activeKey = null; warn([]);
+    try { const u = new URL(location.href); u.searchParams.delete('saved'); history.replaceState(null, '', u); } catch (e) {}
+    paintBar();
+  };
+  async function loadSaved() {
+    const d = await get('/api/reports/saved');
+    RS.list = d.reports || []; RS.dashboards = d.dashboards || []; RS.loaded = true;
+    if (RS.active) RS.active = RS.list.find(x => x.id === RS.active.id) || null;
+    paintBar();
+  }
+  function msg(text, isErr) {
+    const m = document.getElementById('rs-msg');
+    m.textContent = text || ''; m.hidden = !text; m.classList.toggle('err', !!isErr);
+    if (text && document.getElementById('rs-modal').style.display === 'none') alert(text);
+  }
+  window.rptSavedOpen = async function() {
+    document.getElementById('rs-modal').style.display = 'flex';
+    document.getElementById('rs-what').textContent = 'Saves: ' + describe(currentView()) + '. A named range such as “This year” stays relative; typed dates stay fixed.';
+    msg('');
+    drawSaved();
+    try { await loadSaved(); drawSaved(); } catch (e) { msg(e.message, true); }
+    const nm = document.getElementById('rs-name'); if (!nm.value) nm.focus();
+  };
+  window.rptSavedCloseModal = function() { document.getElementById('rs-modal').style.display = 'none'; };
+  window.rptSavedSave = async function() {
+    const nm = document.getElementById('rs-name'), name = nm.value.trim();
+    if (!name) { msg('Give the report a name.', true); nm.focus(); return; }
+    if (_tab === 'advance' && !_adv.field) { msg('Pick an advance field first.', true); return; }
+    if (_tab === 'items' && !_item.types.length) { msg('Pick an item first.', true); return; }
+    const same = RS.list.find(x => x.name.toLowerCase() === name.toLowerCase());
+    if (same && !confirm(`You already have a saved report called “${same.name}”. Replace its filters with what is on screen?`)) return;
+    try {
+      const d = same ? await send(`/api/reports/saved/${same.id}`, 'PUT', {view: currentView()})
+                     : await send('/api/reports/saved', 'POST', {name, view: currentView()});
+      nm.value = '';
+      await loadSaved();
+      RS.active = RS.list.find(x => x.id === d.report.id) || null;
+      RS.activeKey = viewKey(currentView());
+      try { const u = new URL(location.href); u.searchParams.set('saved', d.report.id); history.replaceState(null, '', u); } catch (e) {}
+      paintBar(); drawSaved();
+      msg(same ? `Updated “${d.report.name}”.` : `Saved “${d.report.name}”.`);
+    } catch (e) { msg(e.message, true); }
+  };
+  window.rptSavedUpdateActive = async function() {
+    if (!RS.active) return;
+    try {
+      await send(`/api/reports/saved/${RS.active.id}`, 'PUT', {view: currentView()});
+      await loadSaved();
+      RS.activeKey = viewKey(currentView());
+      paintBar();
+    } catch (e) { alert(e.message); }
+  };
+  let _rsOpenPanel = null;       // {id, kind}
+  function drawSaved() {
+    const host = document.getElementById('rs-list');
+    host.textContent = '';
+    if (!RS.loaded) { host.appendChild(mk('div', 'rpt-loading text-dim', 'Loading…')); return; }
+    if (!RS.list.length) { host.appendChild(mk('div', 'rpt-loading text-dim', 'Nothing saved yet. Set the tab and filters you want, name it above and press Save.')); return; }
+    RS.list.forEach(r => {
+      const item = mk('div', 'rs-item');
+      const head = mk('div', 'rs-item-head');
+      const name = mk('button', 'rs-item-name', r.name);
+      name.type = 'button';
+      name.title = 'Open this report';
+      name.addEventListener('click', () => { if (openSaved(r)) rptSavedCloseModal(); });
+      head.appendChild(name);
+      head.appendChild(mk('span', 'rs-item-meta', describe(r.view) + (r.sent_by_name ? ` · from ${r.sent_by_name}` : '')));
+      item.appendChild(head);
+      const acts = mk('div', 'rs-item-actions');
+      const btn = (label, fn, title) => { const b = mk('button', 'btn btn-xs btn-ghost', label); b.type = 'button'; if (title) b.title = title; b.addEventListener('click', fn); acts.appendChild(b); return b; };
+      btn('Open', () => { if (openSaved(r)) rptSavedCloseModal(); });
+      btn('Rename', async () => {
+        const n = prompt('New name', r.name);
+        if (n == null || !n.trim() || n.trim() === r.name) return;
+        try { await send(`/api/reports/saved/${r.id}`, 'PUT', {name: n.trim()}); await loadSaved(); drawSaved(); } catch (e) { msg(e.message, true); }
+      });
+      btn('Send to…', () => togglePanel(r, 'send'), 'Give someone their own copy of this report');
+      btn('Add to dashboard…', () => togglePanel(r, 'dash'), 'Show this report as a widget on one of your dashboards');
+      const del = btn('Delete', async () => {
+        if (!confirm(`Delete the saved report “${r.name}”? Copies you sent to other people stay with them; a dashboard widget showing it will say it is gone.`)) return;
+        try {
+          await send(`/api/reports/saved/${r.id}`, 'DELETE');
+          if (RS.active && RS.active.id === r.id) rptSavedClose();
+          await loadSaved(); drawSaved();
+        } catch (e) { msg(e.message, true); }
+      });
+      del.style.color = '#e5484d';
+      item.appendChild(acts);
+      if (_rsOpenPanel && _rsOpenPanel.id === r.id) item.appendChild(_rsOpenPanel.kind === 'send' ? sendPanel(r) : dashPanel(r));
+      host.appendChild(item);
+    });
+  }
+  function togglePanel(r, kind) {
+    _rsOpenPanel = (_rsOpenPanel && _rsOpenPanel.id === r.id && _rsOpenPanel.kind === kind) ? null : {id: r.id, kind};
+    drawSaved();
+  }
+  function sendPanel(r) {
+    const box = mk('div', 'rs-panel');
+    box.appendChild(mk('div', 'rpt-note', 'Each person gets their own copy in their Saved reports and a notification in their inbox. Only the tab and filters are sent — they see what their own access allows. Changes you make later are not sent along.'));
+    const find = mk('input', 'field-input');
+    find.type = 'search'; find.placeholder = 'Search people…'; find.setAttribute('aria-label', 'Search people');
+    box.appendChild(find);
+    const list = mk('div', 'rs-people');
+    box.appendChild(list);
+    const picked = new Set();
+    const draw = () => {
+      list.textContent = '';
+      if (!RS.people) { list.appendChild(mk('div', 'rpt-loading text-dim', 'Loading…')); return; }
+      const q = find.value.trim().toLowerCase();
+      const rows = RS.people.filter(p => !q || p.name.toLowerCase().includes(q));
+      if (!rows.length) { list.appendChild(mk('div', 'rpt-loading text-dim', RS.people.length ? 'No one by that name.' : 'No one else can open Reports.')); return; }
+      rows.forEach(p => {
+        const l = mk('label', 'rs-person');
+        const c = mk('input'); c.type = 'checkbox'; c.checked = picked.has(p.id);
+        c.addEventListener('change', () => { c.checked ? picked.add(p.id) : picked.delete(p.id); go.disabled = !picked.size; });
+        l.append(c, mk('span', null, p.name), mk('span', 'sub', p.role));
+        list.appendChild(l);
+      });
+    };
+    find.addEventListener('input', draw);
+    const row = mk('div', 'rs-panel-row');
+    const go = mk('button', 'btn btn-sm btn-primary', 'Send');
+    go.type = 'button'; go.disabled = true;
+    go.addEventListener('click', async () => {
+      go.disabled = true;
+      try {
+        const d = await send(`/api/reports/saved/${r.id}/send`, 'POST', {user_ids: Array.from(picked)});
+        _rsOpenPanel = null; drawSaved();
+        msg(`Sent “${r.name}” to ${d.sent} ${d.sent === 1 ? 'person' : 'people'}.` + (d.skipped && d.skipped.length ? ` Not sent to ${d.skipped.join(', ')} — their saved-report list is full.` : ''));
+      } catch (e) { go.disabled = false; msg(e.message, true); }
+    });
+    row.appendChild(go);
+    box.appendChild(row);
+    if (!RS.people) get('/api/reports/saved/people').then(d => { RS.people = d.people || []; draw(); }).catch(e => { list.textContent = e.message; });
+    draw();
+    return box;
+  }
+  function dashPanel(r) {
+    const box = mk('div', 'rs-panel');
+    box.appendChild(mk('div', 'rpt-note', 'Adds a widget to one of your dashboards showing this report’s summary and first rows, run fresh each time the dashboard opens. On a dashboard you made public, other signed-in people see it with their own access; visitors who are not signed in never do.'));
+    const row = mk('div', 'rs-panel-row');
+    const sel = mk('select', 'field-input');
+    RS.dashboards.forEach(d => { const o = mk('option', null, d.name); o.value = d.id; sel.appendChild(o); });
+    const nw = mk('option', null, '+ New dashboard…'); nw.value = ''; sel.appendChild(nw);
+    const nm = mk('input', 'field-input'); nm.type = 'text'; nm.maxLength = 80; nm.placeholder = 'New dashboard name'; nm.value = 'My Reports';
+    const sync = () => { nm.hidden = sel.value !== ''; };
+    sel.addEventListener('change', sync);
+    const go = mk('button', 'btn btn-sm btn-primary', 'Add');
+    go.type = 'button';
+    go.addEventListener('click', async () => {
+      go.disabled = true;
+      try {
+        const d = await send(`/api/reports/saved/${r.id}/dashboard`, 'POST', sel.value === '' ? {new_name: nm.value} : {dashboard_id: sel.value});
+        _rsOpenPanel = null;
+        await loadSaved(); drawSaved();
+        const m = document.getElementById('rs-msg');
+        m.textContent = d.already ? 'That dashboard already shows this report. ' : 'Added to the dashboard. ';
+        const a = mk('a', null, 'Open the dashboard →'); a.href = d.url;
+        m.appendChild(a); m.hidden = false; m.classList.remove('err');
+      } catch (e) { go.disabled = false; msg(e.message, true); }
+    });
+    row.append(sel, nm, go);
+    box.appendChild(row);
+    sync();
+    return box;
+  }
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && document.getElementById('rs-modal').style.display !== 'none') rptSavedCloseModal();
+  });
+  ['rf-venue', 'rf-company'].forEach(id => document.getElementById(id).addEventListener('change', rptSavedDirty));
+
+  // ?saved=<id> (a notification link, a dashboard widget, a bookmark) opens
+  // that saved report; otherwise the default range and tab.
+  (async function() {
+    const want = parseInt(_q0.get('saved') || '', 10);
+    try { await loadSaved(); } catch (e) {}
+    const r = want ? RS.list.find(x => x.id === want) : null;
+    if (r && openSaved(r)) return;
+    if (want && !r) {
+      const w = document.getElementById('rs-warn');
+      w.hidden = false; w.textContent = 'That saved report is not in your list — it may have been deleted.';
+      try { const u = new URL(location.href); u.searchParams.delete('saved'); history.replaceState(null, '', u); } catch (e) {}
+    }
+    setTab(_tab);
+  })();
 })();
 </script>
 {% endblock %}

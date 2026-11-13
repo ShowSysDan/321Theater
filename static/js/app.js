@@ -4444,6 +4444,7 @@ async function refreshNotifBadge() {
 const _NOTIF_KIND_LABELS = {
   asset_approval: 'Asset approval', piano_tuning: 'Piano tuning',
   field_alert: 'Advance change', no_labor_alert: 'Labor', mention: 'Mention', system: 'System',
+  report_shared: 'Report',
 };
 
 async function _loadNotifPanel() {
