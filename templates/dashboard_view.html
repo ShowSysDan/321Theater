@@ -646,13 +646,19 @@ async function loadSavedReportWidget(idx, section, loadEl, contentEl) {
   const getJson = async url => {
     const r = await fetch(url, H);
     const ct = r.headers.get('content-type') || '';
-    const d = ct.includes('application/json') ? await r.json() : {};
+    if (!ct.includes('application/json')) {
+      // A signed-out session answers with the sign-in PAGE (200, HTML).
+      throw new Error(r.ok ? 'Could not load — you may need to sign in again.'
+        : (r.status === 403 ? 'You do not have access to this report.' : `Could not load (${r.status}).`));
+    }
+    const d = await r.json();
     if (!r.ok) throw new Error(d.error || (r.status === 403 ? 'You do not have access to this report.' : `Could not load (${r.status}).`));
     return d;
   };
   let meta;
   try { meta = await getJson(`/api/reports/saved/${id}/widget`); }
   catch (e) { note(e.message); show(); return; }
+  if (!meta.query) { note('Could not load this report.'); show(); return; }
   title.textContent = meta.name;
   if (!meta.mine && meta.owner) {
     const by = document.createElement('span'); by.className = 'text-dim srw-sub'; by.textContent = `${meta.owner}'s report`;
@@ -1467,6 +1473,8 @@ function drawTimeline(idx) {
 
 /* ── Add / Remove widgets ────────────────────────────────────────── */
 let _currentWidgets = WIDGETS.slice();
+const _savedIds = ws => ws.filter(w => w && w.type === 'saved_report' && Number.isInteger(w.saved_report_id)).map(w => w.saved_report_id);
+let _knownSaved = _savedIds(WIDGETS);
 const _dayDataStore = {}; /* key: "{idx}_{date}" → day object from API */
 
 function openAddWidget() {
@@ -1512,8 +1520,12 @@ async function saveWidgets() {
       layout:    _currentWidgets[0]?.type || 'combined',
       is_public: {{ 'true' if dash.is_public else 'false' }},
       config:    { widgets: _currentWidgets },
+      // The saved-report widgets this page knows of: the server keeps one
+      // that was pinned from the Reports page after this page loaded.
+      base_saved: _knownSaved,
     }),
   });
+  _knownSaved = _savedIds(_currentWidgets);
 }
 
 function renderWidgets() {

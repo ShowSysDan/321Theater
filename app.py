@@ -29613,7 +29613,7 @@ def dashboard_view(dash_id):
 @login_required
 def dashboard_edit(dash_id):
     db = get_db()
-    d = db.execute('SELECT * FROM asset_dashboards WHERE id=%s', (dash_id,)).fetchone()
+    d = db.execute('SELECT * FROM asset_dashboards WHERE id=%s FOR UPDATE', (dash_id,)).fetchone()
     if not d or d['user_id'] != session['user_id']:
         db.close()
         abort(403)
@@ -29624,6 +29624,27 @@ def dashboard_edit(dash_id):
     slug = d['public_slug']
     if data.get('is_public') and not slug:
         slug = secrets.token_urlsafe(12)
+    # Saved-report widgets are also added from the Reports page (3.48.0),
+    # while this dashboard may be open in a tab that then saves the widget
+    # list it loaded. `base_saved` = the saved-report ids that page knew of:
+    # a stored saved-report widget it never knew about is kept, one it knew
+    # and left out was removed on purpose.
+    config = data.get('config', {})
+    if isinstance(config, dict) and isinstance(config.get('widgets'), list):
+        try:
+            stored = (json.loads(d['config_json'] or '{}') or {}).get('widgets') or []
+        except (ValueError, AttributeError):
+            stored = []
+        known = {w.get('saved_report_id') for w in config['widgets']
+                 if isinstance(w, dict) and w.get('type') == 'saved_report'}
+        base = data.get('base_saved')
+        known |= {x for x in base if isinstance(x, int)} if isinstance(base, list) else set()
+        for w in stored if isinstance(stored, list) else []:
+            if (isinstance(w, dict) and w.get('type') == 'saved_report'
+                    and isinstance(w.get('saved_report_id'), int)
+                    and w['saved_report_id'] not in known and len(config['widgets']) < 40):
+                config['widgets'].append(w)
+                known.add(w['saved_report_id'])
     db.execute("""
         UPDATE asset_dashboards SET name=%s, is_public=%s, public_slug=%s,
                layout=%s, config_json=%s, updated_at=CURRENT_TIMESTAMP
@@ -29633,7 +29654,7 @@ def dashboard_edit(dash_id):
         1 if data.get('is_public') else 0,
         slug if data.get('is_public') else None,
         data.get('layout', 'combined'),
-        json.dumps(data.get('config', {})),
+        json.dumps(config),
         dash_id,
     ))
     db.commit()
@@ -31585,6 +31606,7 @@ _SAVED_RPT_MAX_PER_USER = 100
 _SAVED_RPT_NAME_MAX = 80
 _SAVED_RPT_VALUE_MAX = 600
 _SAVED_RPT_SEND_MAX = 25
+_SAVED_RPT_FROM_ONE_MAX = 25     # copies one sender may leave in one person's list
 
 
 def _saved_report_clean_view(raw):
@@ -31609,6 +31631,27 @@ def _saved_report_clean_view(raw):
         v = str(v).strip()
         if v:
             params[k] = v[:_SAVED_RPT_VALUE_MAX]
+    # Single-id filters are ids, nothing else (the page puts them into
+    # selectors and the show box).
+    for k in ('show', 'has_type', 'has_category', 'position', 'tech',
+              'asset_category_id', 'asset_type_id'):
+        if k in params and not re.fullmatch(r'\d{1,10}', params[k]):
+            params.pop(k)
+    # Id lists keep WHOLE ids (cutting the text at a length would change an
+    # id) — the same first-300 rule the report endpoints apply.
+    for k in ('type_ids', 'unit_ids', 'types', 'monitors'):
+        if k in src and not isinstance(src[k], (dict, list)) and src[k] is not None:
+            ids = []
+            for part in str(src[k]).split(',')[:5000]:
+                part = part.strip()
+                if part.isdigit() and 0 < int(part) < 2 ** 31 and int(part) not in ids:
+                    ids.append(int(part))
+                    if len(ids) >= 300:
+                        break
+            if ids:
+                params[k] = ','.join(str(i) for i in ids)
+            else:
+                params.pop(k, None)
     if preset:
         params.pop('from', None)
         params.pop('to', None)
@@ -31620,7 +31663,7 @@ def _saved_report_clean_view(raw):
                 except ValueError:
                     params.pop(k)
     return {'tab': tab, 'preset': preset, 'params': params,
-            'show_text': str(raw.get('show_text') or '')[:300]}, None
+            'show_text': str(raw.get('show_text') or '')[:300] if 'show' in params else ''}, None
 
 
 def _saved_report_view(row):
@@ -31643,8 +31686,8 @@ def _saved_report_preset_dates(preset, today=None):
     def _shift_year(d, n):
         try:
             return d.replace(year=d.year + n)
-        except ValueError:          # Feb 29
-            return d.replace(year=d.year + n, day=28)
+        except ValueError:          # Feb 29 → Mar 1, as the page's JS Date does
+            return date(d.year + n, 3, 1)
     if preset == 'month':
         nxt = (t.replace(day=28) + timedelta(days=4)).replace(day=1)
         return t.replace(day=1).isoformat(), (nxt - timedelta(days=1)).isoformat()
@@ -31680,11 +31723,15 @@ _SAVED_RPT_COLS = ('id, user_id, name, tab, view_json, sent_by, sent_by_name, '
                    'created_at::timestamptz AS created_at, updated_at::timestamptz AS updated_at')
 # Accounts a report can be sent to: unlocked, approved, not a document
 # viewer, and holding a role / 321Theater flag that opens the Reports page.
-_SAVED_RPT_RECIPIENT_SQL = (
-    "COALESCE(u.is_locked, 0) = 0 AND COALESCE(u.pending_approval, 0) = 0 "
-    "AND COALESCE(u.is_document_viewer, 0) = 0 "
-    "AND (u.role IN ('admin', 'staff') OR COALESCE(u.is_scheduler, 0) = 1 "
-    "OR COALESCE(u.is_asset_manager, 0) = 1 OR COALESCE(u.is_piano_manager, 0) = 1)")
+def _saved_report_recipient_sql():
+    # Mirrors _can_view_reports(): the piano flag opens Reports only while
+    # the Piano Tuning module is on.
+    piano = (" OR COALESCE(u.is_piano_manager, 0) = 1"
+             if module_enabled('piano_tuning') else '')
+    return ("COALESCE(u.is_locked, 0) = 0 AND COALESCE(u.pending_approval, 0) = 0 "
+            "AND COALESCE(u.is_document_viewer, 0) = 0 "
+            "AND (u.role IN ('admin', 'staff') OR COALESCE(u.is_scheduler, 0) = 1 "
+            f"OR COALESCE(u.is_asset_manager, 0) = 1{piano})")
 
 
 def _saved_report_name(v):
@@ -31724,8 +31771,10 @@ def saved_reports_create():
         return jsonify({'error': err}), 400
     db = get_db()
     try:
-        n = db.execute('SELECT COUNT(*) AS n FROM saved_reports WHERE user_id = %s',
-                       (uid,)).fetchone()['n']
+        # Only reports I saved myself count — copies other people sent me
+        # have their own limit, so nobody can use up my room.
+        n = db.execute('SELECT COUNT(*) AS n FROM saved_reports WHERE user_id = %s '
+                       'AND sent_by IS NULL', (uid,)).fetchone()['n']
         if n >= _SAVED_RPT_MAX_PER_USER:
             return jsonify({'error': f'You have {_SAVED_RPT_MAX_PER_USER} saved reports — '
                                      'delete one first.'}), 409
@@ -31789,7 +31838,7 @@ def saved_reports_people():
     try:
         rows = db.execute(
             f"""SELECT u.id, COALESCE(NULLIF(TRIM(u.display_name), ''), u.username) AS name, u.role
-                  FROM users u WHERE {_SAVED_RPT_RECIPIENT_SQL} AND u.id <> %s
+                  FROM users u WHERE {_saved_report_recipient_sql()} AND u.id <> %s
                  ORDER BY LOWER(COALESCE(NULLIF(TRIM(u.display_name), ''), u.username)), u.id""",
             (session['user_id'],)).fetchall()
     finally:
@@ -31822,7 +31871,7 @@ def saved_reports_send(rid):
         if not row:
             return jsonify({'error': 'Saved report not found.'}), 404
         ok = [r['id'] for r in db.execute(
-            f'SELECT u.id FROM users u WHERE u.id = ANY(%s) AND {_SAVED_RPT_RECIPIENT_SQL}',
+            f'SELECT u.id FROM users u WHERE u.id = ANY(%s) AND {_saved_report_recipient_sql()}',
             (to,)).fetchall()]
         if len(ok) != len(to):
             return jsonify({'error': 'One of those people can no longer open Reports.'}), 409
@@ -31831,20 +31880,32 @@ def saved_reports_send(rid):
         my_name = (me['n'] if me else '') or 'Someone'
         view = _saved_report_view(row)
         skipped, sent = [], 0
+        view_text = json.dumps(view)
         for rcpt in ok:
-            n = db.execute('SELECT COUNT(*) AS n FROM saved_reports WHERE user_id = %s',
-                           (rcpt,)).fetchone()['n']
-            if n >= _SAVED_RPT_MAX_PER_USER:
-                skipped.append(rcpt)
-                continue
-            new_id = db.execute(
-                'INSERT INTO saved_reports (user_id, name, tab, view_json, sent_by, sent_by_name) '
-                'VALUES (%s, %s, %s, %s, %s, %s) RETURNING id',
-                (rcpt, row['name'], view['tab'], json.dumps(view), uid, my_name)).fetchone()['id']
+            # Sending the same report again doesn't stack a second copy.
+            dup = db.execute(
+                'SELECT id FROM saved_reports WHERE user_id = %s AND sent_by = %s '
+                'AND name = %s AND view_json = %s ORDER BY id LIMIT 1',
+                (rcpt, uid, row['name'], view_text)).fetchone()
+            if dup:
+                new_id = dup['id']
+            else:
+                got = db.execute(
+                    'SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE sent_by = %s) AS mine '
+                    'FROM saved_reports WHERE user_id = %s AND sent_by IS NOT NULL',
+                    (uid, rcpt)).fetchone()
+                if got['n'] >= _SAVED_RPT_MAX_PER_USER or got['mine'] >= _SAVED_RPT_FROM_ONE_MAX:
+                    skipped.append(rcpt)
+                    continue
+                new_id = db.execute(
+                    'INSERT INTO saved_reports (user_id, name, tab, view_json, sent_by, sent_by_name) '
+                    'VALUES (%s, %s, %s, %s, %s, %s) RETURNING id',
+                    (rcpt, row['name'], view['tab'], view_text, uid, my_name)).fetchone()['id']
             # The link is built here from an int id — never from client text.
-            create_notification(db, rcpt, f'{my_name} sent you a report',
-                                row['name'], link_url=f'/reports?saved={int(new_id)}',
-                                kind='report_shared')
+            # One unread item per sender: a second send refreshes it.
+            notify_users(db, [rcpt], f'{my_name} sent you a report', row['name'],
+                         link_url=f'/reports?saved={int(new_id)}', kind='report_shared',
+                         coalesce_key=f'report_from:{uid}')
             sent += 1
         db.commit()
         names = []

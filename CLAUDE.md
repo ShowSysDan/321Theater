@@ -1163,12 +1163,19 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   and resolved when opened (`_saved_report_preset_dates` mirrors
   reports.html `preset()` — keep the two in step). `applyView()` must SAY
   which saved filter no longer exists (a select set to a missing option
-  silently widens the report). Tab filters whose controls are rebuilt each
-  load (rentals, breaks) are restored through the one-shot `_pending`.
+  silently widens the report). Single-id params must be digits and id
+  lists keep WHOLE ids (never cut text at a length); the page never builds
+  a RegExp or a selector from a stored value. Rental Lines / Break
+  Exceptions keep their filters in `_rent` / `_brk`: their controls sit
+  inside `#rpt-body`, which `rptLoad` wipes BEFORE the loader runs, so a
+  loader must never read its own controls.
   - **Send** copies the row into each recipient's list (`sent_by`,
     `sent_by_name`) + `create_notification(kind='report_shared')` with a
     link built server-side from the int id. Recipients =
-    `_SAVED_RPT_RECIPIENT_SQL` (can open Reports; 321Theater flags only).
+    `_saved_report_recipient_sql()` (mirrors `_can_view_reports()`;
+    321Theater flags only). An identical re-send reuses the copy, the
+    notification coalesces per sender, and received copies have their own
+    limits — they never use up the recipient's own 100.
   - **Dashboard widget** `{type:'saved_report', saved_report_id}`
     (dashboard_view.html `loadSavedReportWidget`): `…/saved/<id>/widget`
     (owner, or a signed-in non-viewer when the owner put it on a PUBLIC
@@ -1179,6 +1186,9 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
     `_PUBLIC_DASH_DATA_ENDPOINTS` / `_VIEWER_ALLOWED_ENDPOINTS`, and never
     compute a widget with the owner's permissions: report data is not
     public. The widget makes no request at all when `ANON`.
+    `dashboard_edit` keeps a stored saved-report widget the saving page
+    never knew of (`base_saved`), so a dashboard tab opened before the pin
+    can't wipe it.
 - **Advance Fields (3.20.0)** `/api/reports/advance-field?field=&answer=&q=&include=`
   (any Reports user, `advance` in `_RPT_PDF`): one form field's value per
   `_report_shows()` show. `_report_adv_values()` is the one decoder of
