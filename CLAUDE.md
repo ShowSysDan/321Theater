@@ -1084,6 +1084,17 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   banner, the orange composer and the "Send + post to comments" label —
   they are the user's requirement that nobody is caught off guard. Read-only
   accounts can't send in a posting thread (the show-comment rule).
+- **A draft is sent only in the mode it was written under (3.48.1).**
+  chat.js `_draftPub` records the mode when typing starts; `send()` refuses
+  ONCE with a notice when the mode differs at Send (the poll may have
+  redrawn the banner a moment before Enter) — the server 409 covers only
+  the case where the poll hasn't arrived. Keep both. Drafts belong to a
+  LOADED thread (`!S.thread.loading`); the poll never rebuilds a row that
+  holds an open time picker (`S.redrawPending`, `drawDue` signature).
+- "Public" always means `post_to_comments` AND a `show_id` (a deleted show
+  leaves `show_id` NULL with the flag still set). `is_self` comes from
+  `member_key == str(uid)`, never from "no one else is left" (a deleted
+  account's conversation is not a note to self).
 - Reminders: `chat_messages.remind_at` is TIMESTAMPTZ (the browser sends
   UTC ISO), compared with `NOW()`; private to the author (`_msg_out` only
   returns it for `mine`); due ones count in the badge until Done. No job
@@ -1095,14 +1106,22 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   with textContent.
 - **@mentions**: `_notify_comment_mentions()` (post + edit of a comment, and
   public chat messages via the injected dep) → `notify_users(kind='mention')`.
-  Longest names first and consumed, so `@Dan Lupo` never also hits `Dan`.
+  `_mention_user_ids()`: longest names first and consumed (locked / pending /
+  viewer names consume too, they just aren't notified), and a mention needs
+  a non-word character on BOTH sides (`x@steve.com` is not one). The
+  notification carries `field_key='comment:<id>'`;
+  `_mention_notifications_sync()` withdraws / corrects unseen ones when the
+  comment is deleted / edited.
 - **Email**: `user_notify_prefs` (app schema, missing row = all on; My
   Account → Email notifications, `/account/notify-prefs`). `run_inbox_emails`
   (5 min, leader-gated, skips on DatabaseUnavailable): messages unread for
   `_INBOX_EMAIL_DELAY_MIN`, due reminders (`chat_module.pending_email_items`,
   which stamps `emailed_up_to_id` / `remind_emailed_at`), unread mentions
   (`notifications.emailed_at`). Stamps commit BEFORE sending — at most once,
-  never a retry loop. Always through `_send_email` (TEST_MODE chokepoint).
+  never a retry loop. Every claim is ATOMIC (`FOR UPDATE … SKIP LOCKED` on
+  chat_participants, `UPDATE … RETURNING` for reminders and mentions):
+  `am_i_leader()` is true in every worker when the leader is forced or the
+  heartbeat is off, so the job must be safe to run several times at once. Always through `_send_email` (TEST_MODE chokepoint).
 - `_ER_BILLED_SQL` (piano, 3.47.0): a piano tuning's external-rental line is
   billed (invoice line, totals, appended paperwork) only when
   `piano_tunings.bill_on_invoice = 1` (default 0, manager-only field). Every

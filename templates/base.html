@@ -864,6 +864,7 @@ const _HELP_PAGES = {
       <p>Team discussion pinned to this show, oldest first; the tab shows how many comments there are.</p>
       <ul style="${_HELP_UL}">
         <li>Type in the box and click <strong>Post</strong> (up to 2,000 characters). Read-only accounts can read but not post.</li>
+        <li>A comment tagged <strong>✉ message to …</strong> was sent as a message in the inbox, in a conversation set to also post to this show's comments. Replies in that conversation appear here too; a comment typed here is not sent back into the conversation.</li>
         <li>Type <strong>@</strong> and a name for the user autocomplete; the @name is highlighted in the comment, and that person gets a notification in their inbox (and an email if it stays unread, unless they switched that off under My Account).</li>
         <li>A <strong>#tag</strong> in a comment becomes a link to that tag's page (every show that uses it). Web addresses stay plain text.</li>
         <li>You can edit (✏) and delete (×) your own comments; an edited comment says <em>(edited)</em>. Deletes are soft.</li>
@@ -1051,14 +1052,22 @@ const _HELP_PAGES = {
         <li><strong>Advance Fields</strong>: pick one advance form field and see what every matching show answered. Narrow by <strong>Answer</strong> (each answer given, with its show count) or <strong>Answer contains</strong>, and choose shows <em>With an answer</em>, <em>All</em> or <em>Not answered</em>, then <strong>Apply</strong> — e.g. Runner = Yes at one venue for a season.</li>
         <li><strong>Arts Groups</strong>: for each company, its shows, how often it rented gear, its top items and what it spent. Click a row for every item it rented and its shows.</li>
         <li><strong>Assets</strong>: for each item type, times rented, unit-days, revenue, last use and utilization; idle gear is listed too. Click a row for the individual units.</li>
-        <li><strong>Item History</strong>: pick one item (a group counts everything under it) and optionally one unit, and see every show that rented it. An item's drill-down on the Assets tab links here too.</li>
-        <li><strong>Rental Lines</strong>: every asset line, with category and type filters.</li>
+        <li><strong>Assets</strong> also has an <strong>Items</strong> picker: <em>Show only…</em> the items you tick, or <em>Leave out…</em> the ones you tick.</li>
+        <li><strong>Item History</strong>: tick one or several items (a group counts everything under it), then optionally just some of their units — for example three of your four projectors. <strong>Usage by unit</strong> gives each unit's times rented, shows, days rented, utilization (pick a From and To date), income and last show; units that never went out are listed dimmed, and bookings made without picking a unit are on a <em>(no unit picked)</em> row. <strong>Usage by item</strong> compares the items when you picked more than one. Below: every show that rented them. Click a unit row to see only that unit. An item's drill-down on the Assets tab links here too.</li>
+        <li><strong>Rental Lines</strong>: every asset line. Pick a category and/or item type and press <strong>Apply</strong>.</li>
+        <li><strong>Sound Levels</strong> (when the Spot module is on): every performance the venue's sound sensors measured — Leq (the overall level), peak and when, L10 / L50 / L90, minutes measured. <strong>Flag at</strong> marks performances at or over a level you type. <strong>Compare by</strong> groups them by sensor, venue, Arts Group, show, month, day of week, start hour, or the answers to any advance-sheet field. To see what goes with louder shows, also narrow the shows with <em>More filters</em> — Had item booked, Job position, Technician. Averages are worked on the energy scale and dBA / dBC are never mixed.</li>
         <li><strong>Labor &amp; Techs</strong>: for each technician, scheduled, settled, training and overhead shifts and hours; for each position, requested against filled.</li>
         <li><strong>Labor Lines</strong>: every shift, with its scheduled tech and, once settled, the actual times and Worked by. Example: Had item = a projector plus Position = Video Tech lists who was the video tech.</li>
         <li><strong>Break Exceptions</strong>: settled shifts whose lunch was not taken, shorter or longer than scheduled, added, or moved, broken down by tech, position and show.</li>
         <li><strong>Estimate vs Settlement</strong>: for each settled show, labor estimate against the Final Invoice labor, biggest increases first.</li>
         <li><strong>Piano Tuning</strong>: tunings and cost by vendor, month, Arts Group, requester and piano.</li>
-        <li><strong>PDF</strong> prints the current tab with its filters (the drill-down dialogs have their own PDF button). Click a column heading to sort; every table has <strong>CSV</strong>. Labor money is always the settlement figure, so only settled shows count.</li>
+        <li><strong>PDF</strong> prints the current tab with its filters (the drill-down dialogs have their own PDF button). Click a column heading to sort; every table has <strong>CSV</strong>, and tables longer than 8 rows have a <strong>Find in table</strong> box (the CSV then exports only the rows shown). Labor money is always the settlement figure, so only settled shows count.</li>
+        <li><strong>Saved reports</strong> keeps the tab and all its filters under a name. Set up the report, press <strong>Saved reports</strong>, type a name and <strong>Save</strong>. Click a saved report to bring it back; the bar under the filters shows which one is open, says <em>filters changed</em> once you alter something, and <strong>Update</strong> saves the change. A range chosen with a preset button stays relative (<em>This year</em> is still this year next January); typed dates stay as typed. If a saved filter no longer exists, the page tells you which.
+          <ul style="${_HELP_UL}">
+            <li><strong>Send to…</strong> gives each person you tick their own copy and a notification that opens it. Only the tab and filters are sent — they see what their own access allows, and your later changes don't reach their copy.</li>
+            <li><strong>Add to dashboard…</strong> shows the report as a widget on one of your dashboards (or a new one): summary figures and first rows, run fresh each time the dashboard opens.</li>
+            <li><strong>Rename</strong> and <strong>Delete</strong> affect only your copy. You can keep 100; reports other people send you don't count.</li>
+          </ul></li>
       </ul>
     `
   },
@@ -1122,7 +1131,7 @@ const _HELP_PAGES = {
         <li><strong>Users</strong> — admins add accounts (username, name, email, temporary password, role: User / Staff / Admin / Read-only). Per row: <strong>Edit</strong> (role plus extra permissions: Scheduler, Asset Manager, Piano Tuning Manager, Document Viewer with allowed venues, document types and optional Labor Overview / Show Calendar access; the <em>Other applications</em> flags do nothing in this app), <strong>Reset PW</strong>, <strong>Devices</strong> (the browsers and screen sizes they've used), <strong>Require PW Change</strong>, <strong>Lock</strong>, <strong>Delete</strong>. <strong>Last Active</strong> — hover for the exact time, last login and whether they came in internally or through the gateway. Everyone else sees the list only.</li>
         <li><strong>Registrations</strong> — self-registered accounts waiting for approval (the tab shows how many): pick a role, then <strong>Approve</strong> or <strong>Deny</strong>; <strong>↻ Refresh</strong>.</li>
         <li><strong>Arts Groups</strong> — touring companies and resident groups for arts-group fields: <strong>+ Add Group</strong>, <strong>Edit</strong> (primary contact, additional contacts, notes), ×. Names typed into an arts-group field on an advance are added here automatically.</li>
-        <li><strong>My Account</strong> — change your password (8+ characters, an uppercase letter and a punctuation mark). Theme is the sun button in the sidebar footer.</li>
+        <li><strong>My Account</strong> — change your password (8+ characters, an uppercase letter and a punctuation mark), and <strong>Email notifications</strong>: three switches for what is also emailed to you when you haven't seen it in the app — new messages (still unread after 10 minutes), @mentions in show comments, and reminders that came due. Everything always shows in your inbox whatever the switches say. Theme is the sun button in the sidebar footer.</li>
       </ul>
       <p style="margin:10px 0 0"><strong>Shows, forms &amp; paperwork</strong></p>
       <ul style="${_HELP_UL}">
@@ -1163,7 +1172,7 @@ const _HELP_PAGES = {
         <li><strong>Audit Log</strong>, <strong>Performance</strong>, <strong>DB Snapshots</strong>, <strong>Sidebar Editor</strong> and <strong>Merge Duplicates</strong> open their own pages.</li>
         <li><strong>God Mode</strong> — who is on a show page right now (show, tab, last seen; <strong>Refresh</strong>), and every user's last login and last connection.</li>
         <li><strong>Dashboards</strong> — <strong>Load</strong> lists every dashboard, public ones first: owner, public link (<strong>Copy</strong>), <strong>View</strong>, and <strong>Make Private</strong> to switch a public link off.</li>
-        <li><strong>Modules</strong> — tick to switch an optional module on or off for everyone at once (Security Sign-In Sheets, Piano Tuning, Spot Sound Levels; data is kept while off), and <strong>Open settings →</strong> for Piano Tuning, Spot Sound Levels and Prism Sync.</li>
+        <li><strong>Modules</strong> — tick to switch an optional module on or off for everyone at once (Security Sign-In Sheets, Piano Tuning, Messages, Spot Sound Levels; data is kept while off — with Messages off the inbox shows notifications only), and <strong>Open settings →</strong> for Piano Tuning, Spot Sound Levels and Prism Sync.</li>
       </ul>
     `
   },
@@ -1433,6 +1442,19 @@ function _helpKeyForLocation() {
   return best;
 }
 
+// The inbox (envelope button / Inbox tab) is on every page, so its help is
+// added under whichever page's help is open.
+const _HELP_INBOX = `
+  <hr style="border:0;border-top:1px solid var(--border);margin:16px 0 12px">
+  <p><strong>Inbox</strong> — the envelope button at the bottom right (on a phone: <strong>Inbox</strong> in the bottom bar). The sidebar bell opens it too.</p>
+  <ul style="${_HELP_UL}">
+    <li><strong>Messages</strong> are private conversations. <strong>+ New</strong>: type a name and pick the person (add more for a group), optionally pick an active show or event the message is about, write, <strong>Send</strong>. Writing to the same people about the same show continues the same conversation. <strong>By show</strong> groups the list under each show.</li>
+    <li><strong>Also post to the show's comments</strong> (needs a show): every message sent in that conversation from then on — by anyone in it — is also added to that show's Comments tab, where everyone working on the show can read it. You can't miss it: an orange notice, an orange message box and a button that reads <strong>Send + post to comments</strong>, for everyone in the conversation. Turning it on or off asks first and leaves a line in the conversation. Earlier messages stay private.</li>
+    <li><strong>Notes to self</strong>: leave <em>To</em> empty. Only you see it.</li>
+    <li><strong>Remind me</strong> (the clock, or under any message of yours): pick a time. When it comes due it counts in the badge and sits above the message box until you press <strong>Done</strong> or <strong>Later…</strong>. Only you see your reminders.</li>
+    <li><strong>Notifications</strong>: approvals, piano tunings, advance changes, @mentions and reports sent to you. Click one to open it.</li>
+    <li>What is also <strong>emailed</strong> to you is under Settings → My Account → Email notifications. Messages can't be edited or deleted after sending.</li>
+  </ul>`;
 function openHelp() {
   const modal = document.getElementById('help-modal');
   let page = _HELP_PAGES[_helpKeyForLocation()];
@@ -1444,7 +1466,8 @@ function openHelp() {
     };
   }
   document.getElementById('help-modal-title').textContent = page.title;
-  document.getElementById('help-modal-body').innerHTML = page.html;
+  document.getElementById('help-modal-body').innerHTML = page.html
+    + (document.getElementById('inbox-panel') ? _HELP_INBOX : '');
   modal.style.display = 'flex';
 }
 function closeHelp() {

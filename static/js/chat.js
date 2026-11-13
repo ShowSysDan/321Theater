@@ -176,8 +176,9 @@
   // ── thread list ──────────────────────────────────────────────────────────
   function threadTitle(t) {
     if (t.is_self) return 'Notes to self';
+    // No one else left: the other person's account was deleted.
     return t.members.filter(function (m) { return m.id !== ME; })
-      .map(function (m) { return m.name; }).join(', ') || 'Conversation';
+      .map(function (m) { return m.name; }).join(', ') || 'Former user';
   }
   async function loadThreads() {
     if (!CHAT) return;
@@ -276,10 +277,14 @@
 
   // ── one conversation ─────────────────────────────────────────────────────
   function lastId() { return S.msgs.length ? S.msgs[S.msgs.length - 1].id : 0; }
-  async function openThread(tid, keepDraft) {
+  async function openThread(tid, keepDraft, keepReminder) {
     var seq = ++S.threadSeq;
-    if (S.thread && !keepDraft) S.drafts[S.thread.id] = $('inbox-input').value;
+    // Only a LOADED conversation owns the text in the box (a placeholder
+    // that never finished loading still shows the previous one's).
+    if (S.thread && !S.thread.loading && !keepDraft) S.drafts[S.thread.id] = $('inbox-input').value;
     S.thread = {id: tid, members: [], show: null, post_to_comments: false, loading: true};
+    $('inbox-input').value = S.drafts[tid] || '';
+    _draftPub = null;
     S.msgs = []; S.due = []; S.more = false;
     if (!S.open) open('thread'); else show('thread');
     $('inbox-title').textContent = 'Loading…';
@@ -292,7 +297,9 @@
       S.thread = d.thread; S.msgs = d.messages || []; S.more = !!d.more; S.due = d.due || [];
       drawThread(true);
       $('inbox-input').value = S.drafts[tid] || '';
-      setReminder(null);
+      _draftPub = null;
+      noteDraftMode();               // a restored draft counts as written under the mode now shown
+      if (!keepReminder) setReminder(null);
       autoGrow();
       toBottom();
       markRead();
@@ -318,8 +325,12 @@
       S.msgs.forEach(function (m) { have[m.id] = 1; });
       var fresh = (d.messages || []).filter(function (m) { return !have[m.id]; });
       S.msgs = S.msgs.concat(fresh);
-      if (fresh.length || was !== d.thread.post_to_comments) drawThread(stick);
-      else drawDue();
+      if (fresh.length || was !== d.thread.post_to_comments) {
+        // A time picker open under a message would be wiped by the redraw:
+        // repaint only what must change now, redraw when the picker closes.
+        if ($('inbox-msgs').querySelector('.inbox-timepick')) { S.redrawPending = true; paintPublic(); paintComposer(); }
+        else drawThread(stick);
+      } else drawDue();
       if (fresh.length) markRead();
     } catch (e) {
       if (e.status === 404 && S.thread && S.thread.id === tid) { S.thread = null; show('threads'); }
@@ -344,6 +355,17 @@
   }
   function publicNow() { return !!(S.thread && S.thread.post_to_comments && S.thread.show); }
 
+  // The "this posts to show comments" banner — always current, even while
+  // the message list itself is waiting for a time picker to close.
+  function paintPublic() {
+    var t = S.thread, ban = $('inbox-public-banner');
+    ban.hidden = !publicNow();
+    if (publicNow()) {
+      $('inbox-public-text').textContent = 'Every message sent here — yours and '
+        + (t.is_self ? 'any' : 'theirs') + ' — is also posted to the comments of “' + t.show.name
+        + '”. Anyone with access to the show can read it.';
+    }
+  }
   function drawThread(stick) {
     var t = S.thread;
     if (!t) return;
@@ -365,13 +387,8 @@
         meta.appendChild(on);
       }
     } else meta.hidden = true;
-    var ban = $('inbox-public-banner');
-    ban.hidden = !publicNow();
-    if (publicNow()) {
-      $('inbox-public-text').textContent = 'Every message sent here — yours and '
-        + (t.is_self ? 'any' : 'theirs') + ' — is also posted to the comments of “' + t.show.name
-        + '”. Anyone with access to the show can read it.';
-    }
+    paintPublic();
+    S.redrawPending = false;
     var box = $('inbox-msgs');
     var prevTop = box.scrollTop;
     clear(box);
@@ -455,11 +472,16 @@
   // even when their message is far up the conversation.
   function drawDue() {
     var host = $('inbox-due');
-    clear(host);
     var due = S.due.slice();
     S.msgs.forEach(function (m) {
       if (m.mine && m.remind_due && !due.some(function (x) { return x.id === m.id; })) due.push(m);
     });
+    // Leave the rows alone while a time is being picked in one of them, and
+    // when nothing changed (keeps keyboard focus on Done / Later… between polls).
+    var sig = (S.thread ? S.thread.id : 0) + ':' + due.map(function (m) { return m.id; }).join(',');
+    if (host.querySelector('.inbox-timepick') || host.dataset.sig === sig) return;
+    host.dataset.sig = sig;
+    clear(host);
     host.hidden = !due.length;
     due.forEach(function (m) {
       var row = el('div', 'inbox-due-row');
@@ -508,6 +530,15 @@
   }
 
   // ── composer (open conversation) ─────────────────────────────────────────
+  // The mode (posts to comments or not) the text in the box was WRITTEN
+  // under. If the conversation's mode changes while someone is typing, the
+  // poll redraws the banner — but a quick Enter must not publish what was
+  // typed as private (or the reverse): send() stops once and says so.
+  var _draftPub = null;
+  function noteDraftMode() {
+    if (!$('inbox-input').value.trim()) _draftPub = null;
+    else if (_draftPub === null) _draftPub = publicNow();
+  }
   var _remindIso = null;
   function setReminder(iso) {
     _remindIso = iso || null;
@@ -544,11 +575,19 @@
     var ta = $('inbox-input'), body = ta.value.trim();
     if (!body) return;
     var tid = t.id;
+    if (_draftPub !== null && _draftPub !== publicNow()) {
+      _draftPub = publicNow();
+      flash(publicNow()
+        ? 'Not sent — this conversation now posts to the show’s comments. Check the banner, then send again.'
+        : 'Not sent — this conversation no longer posts to the show’s comments, so your message would stay private. Send again if that is what you want.');
+      return;
+    }
     S.sending = true; paintComposer();
     try {
       await api('/api/chat/threads/' + tid + '/messages',
         {body: body, post_to_comments: publicNow(), remind_at: _remindIso});
-      if (S.thread && S.thread.id === tid) { ta.value = ''; S.drafts[tid] = ''; setReminder(null); autoGrow(); }
+      S.drafts[tid] = '';            // sent — whatever is on screen by now
+      if (S.thread && S.thread.id === tid) { ta.value = ''; _draftPub = null; setReminder(null); autoGrow(); }
       S.sending = false;
       await pollThread();
       toBottom();
@@ -560,6 +599,7 @@
         // and let the writer decide — nothing was sent.
         await pollThread();
         if (S.thread && S.thread.id === tid) { S.thread.post_to_comments = !!e.data.post_to_comments; drawThread(true); }
+        _draftPub = publicNow();     // the writer has now been told: the retry goes through
       }
       flash(e.message);
     }
@@ -586,13 +626,15 @@
      cb(isoUtc) once a time is chosen. One picker at a time. */
   function pickTime(host, cb) {
     var old = panel.querySelector('.inbox-timepick');
-    if (old) { var same = old.parentNode === host; old.remove(); if (same) return; }
+    var flush = function () { if (S.redrawPending && S.view === 'thread' && S.thread && !S.thread.loading) drawThread(nearBottom()); };
+    if (old) { var same = old.parentNode === host; old.remove(); if (same) { flush(); drawDue(); return; } }
     if (!host) return;
     var row = el('div', 'inbox-timepick');
     var done = function (d) {
       if (!d || isNaN(d)) return;
       if (d.getTime() < Date.now() - 60000) { flash('Pick a time in the future.'); return; }
       row.remove();
+      flush();
       cb(d.toISOString());
     };
     quickTimes().forEach(function (q) {
@@ -778,9 +820,11 @@
         // That conversation already posts to comments: nothing was sent.
         // Open it with the text in its composer so the banner is seen first.
         S.drafts[e.data.thread_id] = body;
+        var keepRemind = c.remind;
         S.sending = false;
         $('inbox-c-send').disabled = false;
-        await openThread(e.data.thread_id, true);
+        await openThread(e.data.thread_id, true, true);
+        if (S.thread && S.thread.id === e.data.thread_id) setReminder(keepRemind);
         flash('Not sent yet — this conversation posts to the show’s comments. Check the banner, then press Send.');
         return;
       }
@@ -810,8 +854,13 @@
   });
   $('inbox-close').addEventListener('click', close);
   $('inbox-back').addEventListener('click', function () {
-    if (S.view === 'thread' && S.thread) S.drafts[S.thread.id] = $('inbox-input').value;
-    S.thread = S.view === 'thread' ? null : S.thread;
+    if (S.view === 'thread') {
+      if (S.thread && !S.thread.loading) S.drafts[S.thread.id] = $('inbox-input').value;
+      S.threadSeq++;                 // a fetch still in flight is for a view we left
+      S.thread = null;
+      $('inbox-input').value = '';
+      _draftPub = null;
+    }
     show(CHAT ? 'threads' : 'notifications');
   });
   $('inbox-new').addEventListener('click', function () { compose(); });
@@ -826,7 +875,7 @@
   });
   $('inbox-public-off').addEventListener('click', function () { setCommentsMode(false); });
   $('inbox-send').addEventListener('click', send);
-  $('inbox-input').addEventListener('input', autoGrow);
+  $('inbox-input').addEventListener('input', function () { autoGrow(); noteDraftMode(); });
   $('inbox-input').addEventListener('keydown', function (e) {
     // Enter sends on a keyboard; on a phone Enter is a new line.
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !MOBILE) { e.preventDefault(); send(); }

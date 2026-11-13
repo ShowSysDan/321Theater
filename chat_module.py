@@ -84,43 +84,51 @@ def pending_email_items(db, delay_minutes):
     - reminders: the user's own reminders that have come due.
     Preferences / addresses are the caller's business. Caller commits."""
     out = {}
-    rows = db.execute(
-        f"""SELECT p.user_id, m.thread_id, m.id, m.author_name, m.body, m.kind,
-                   m.created_at::timestamptz AS created_at,
-                   t.show_id, s.name AS show_name, t.post_to_comments
-              FROM chat_participants p
-              JOIN chat_threads t ON t.id = p.thread_id
-              JOIN chat_messages m ON m.thread_id = p.thread_id
-                   AND m.id > GREATEST(p.last_read_id, COALESCE(p.emailed_up_to_id, 0))
-                   AND m.user_id IS DISTINCT FROM p.user_id
-              LEFT JOIN shows s ON s.id = t.show_id
-             WHERE EXISTS (SELECT 1 FROM chat_messages o
-                            WHERE o.thread_id = p.thread_id
-                              AND o.id > GREATEST(p.last_read_id, COALESCE(p.emailed_up_to_id, 0))
-                              AND o.user_id IS DISTINCT FROM p.user_id
-                              AND o.created_at <= NOW() - %s * INTERVAL '1 minute')
-             ORDER BY p.user_id, m.thread_id, m.id LIMIT 2000""", (delay_minutes,)).fetchall()
-    marks = {}
-    for r in rows:
-        out.setdefault(r['user_id'], {'messages': [], 'reminders': []})['messages'].append(dict(r))
-        marks[(r['thread_id'], r['user_id'])] = r['id']
-    for (tid, uid), mid in marks.items():
+    # Claims are ATOMIC: am_i_leader() is true in every worker when the
+    # leader is forced or the heartbeat is off, so several can run this at
+    # once. Participant rows are locked (SKIP LOCKED: a second runner passes
+    # over what the first holds) and reminders are stamped by the one
+    # statement that returns them — nothing is mailed twice.
+    claim = db.execute(
+        """SELECT p.thread_id, p.user_id,
+                  GREATEST(p.last_read_id, COALESCE(p.emailed_up_to_id, 0)) AS seen
+             FROM chat_participants p
+            WHERE EXISTS (SELECT 1 FROM chat_messages o
+                           WHERE o.thread_id = p.thread_id
+                             AND o.id > GREATEST(p.last_read_id, COALESCE(p.emailed_up_to_id, 0))
+                             AND o.user_id IS DISTINCT FROM p.user_id
+                             AND o.created_at <= NOW() - %s * INTERVAL '1 minute')
+            ORDER BY p.thread_id, p.user_id LIMIT 500
+              FOR UPDATE OF p SKIP LOCKED""", (delay_minutes,)).fetchall()
+    for c in claim:
+        rows = db.execute(
+            """SELECT m.thread_id, m.id, m.author_name, m.body, m.kind,
+                      m.created_at::timestamptz AS created_at,
+                      t.show_id, s.name AS show_name, t.post_to_comments
+                 FROM chat_messages m
+                 JOIN chat_threads t ON t.id = m.thread_id
+                 LEFT JOIN shows s ON s.id = t.show_id
+                WHERE m.thread_id = %s AND m.id > %s AND m.user_id IS DISTINCT FROM %s
+                ORDER BY m.id LIMIT 200""", (c['thread_id'], c['seen'], c['user_id'])).fetchall()
+        if not rows:
+            continue
+        out.setdefault(c['user_id'], {'messages': [], 'reminders': []})['messages'] += [
+            dict(r, user_id=c['user_id']) for r in rows]
         db.execute('UPDATE chat_participants SET emailed_up_to_id = %s '
-                   'WHERE thread_id = %s AND user_id = %s', (mid, tid, uid))
+                   'WHERE thread_id = %s AND user_id = %s',
+                   (rows[-1]['id'], c['thread_id'], c['user_id']))
     due = db.execute(
-        """SELECT m.id, m.user_id, m.thread_id, m.body, m.remind_at, s.name AS show_name
-             FROM chat_messages m
-             JOIN chat_threads t ON t.id = m.thread_id
+        """WITH c AS (UPDATE chat_messages SET remind_emailed_at = CURRENT_TIMESTAMP
+                       WHERE remind_at IS NOT NULL AND remind_at <= NOW()
+                         AND remind_done_at IS NULL AND remind_emailed_at IS NULL
+                         AND user_id IS NOT NULL
+                   RETURNING id, user_id, thread_id, body, remind_at)
+           SELECT c.id, c.user_id, c.thread_id, c.body, c.remind_at, s.name AS show_name
+             FROM c JOIN chat_threads t ON t.id = c.thread_id
              LEFT JOIN shows s ON s.id = t.show_id
-            WHERE m.remind_at IS NOT NULL AND m.remind_at <= NOW()
-              AND m.remind_done_at IS NULL AND m.remind_emailed_at IS NULL
-              AND m.user_id IS NOT NULL
-            ORDER BY m.remind_at LIMIT 500""").fetchall()
+            ORDER BY c.remind_at""").fetchall()
     for r in due:
         out.setdefault(r['user_id'], {'messages': [], 'reminders': []})['reminders'].append(dict(r))
-    if due:
-        db.execute('UPDATE chat_messages SET remind_emailed_at = CURRENT_TIMESTAMP '
-                   'WHERE id = ANY(%s)', ([r['id'] for r in due],))
     return out
 
 
@@ -211,7 +219,9 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
     def _thread_out(db, t, uid):
         mem = _members(db, [t['id']])[t['id']]
         return {'id': t['id'], 'members': mem,
-                'is_self': not any(m['id'] != uid for m in mem),
+                # From the thread's own key: a conversation whose other
+                # person's account was deleted is NOT a note to self.
+                'is_self': (t['member_key'] or '') == str(uid),
                 'show': ({'id': t['show_id'], 'name': t['show_name'],
                           'status': t['show_status'] or 'active'} if t['show_id'] else None),
                 'post_to_comments': bool(t['post_to_comments']) and bool(t['show_id']),
@@ -230,7 +240,7 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
             log_audit(db, 'COMMENT_POST', 'comment', comment_id, show_id=t['show_id'],
                       after={'body': body}, detail=f"via=message thread={t['id']}")
             if notify_mentions:      # an @name in a public message works like in a comment
-                notify_mentions(db, t['show_id'], body, uid, name)
+                notify_mentions(db, t['show_id'], body, uid, name, comment_id=comment_id)
         mid = db.execute(
             'INSERT INTO chat_messages (thread_id, user_id, author_name, kind, body, comment_id, remind_at) '
             'VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id',
@@ -357,7 +367,7 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
         db = get_db()
         try:
             rows = db.execute(
-                """SELECT t.id, t.show_id, t.post_to_comments, t.last_message_id,
+                """SELECT t.id, t.show_id, t.post_to_comments, t.last_message_id, t.member_key,
                           t.last_message_at::timestamptz AS last_at,
                           s.name AS show_name, s.status AS show_status,
                           COALESCE(s.show_date, s.load_in_date) AS show_date,
@@ -388,7 +398,7 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
             body = (r['last_body'] or '')
             out.append({
                 'id': r['id'], 'members': mem,
-                'is_self': not any(m['id'] != uid for m in mem),
+                'is_self': (r['member_key'] or '') == str(uid),
                 'show': ({'id': r['show_id'], 'name': r['show_name'],
                           'status': r['show_status'] or 'active',
                           'date': r['show_date'].isoformat() if r['show_date'] else ''}
@@ -454,8 +464,12 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
                     WHERE t.member_key = %s AND t.show_id IS NOT DISTINCT FROM %s
                       AND EXISTS (SELECT 1 FROM chat_participants p
                                    WHERE p.thread_id = t.id AND p.user_id = %s)
-                    ORDER BY t.id DESC LIMIT 1 FOR UPDATE OF t""",
-                (key, show_id, uid)).fetchone()
+                    ORDER BY (COALESCE(t.post_to_comments, 0) = %s) DESC, t.id
+                    LIMIT 1 FOR UPDATE OF t""",
+                (key, show_id, uid, 1 if want_public else 0)).fetchone()
+            # A show merge / delete can leave two threads with the same
+            # people + show (nothing here is unique on purpose): prefer the
+            # one already in the mode the writer asked for, else the oldest.
             name = _my_name(db, uid)
             created = False
             if t is None:
@@ -472,7 +486,7 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
                          FROM chat_threads t LEFT JOIN shows s ON s.id = t.show_id
                         WHERE t.id = %s""", (tid,)).fetchone()
                 created = True
-            elif bool(t['post_to_comments']) and not want_public:
+            elif bool(t['post_to_comments']) and t['show_id'] and not want_public:
                 # The writer believes this is private; the thread publishes.
                 db.rollback()
                 return _err('Your conversation with these people about this show already posts '

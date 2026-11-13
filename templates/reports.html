@@ -979,7 +979,7 @@
           {key: 'item', label: 'Item'}, {key: 'units_owned', label: 'Units owned', num: true},
           ...usage, {key: 'units', label: 'Units out', num: true},
           {key: 'unit_days', label: 'Unit-days', num: true}, ...tail,
-        ], d.by_item, {sortKey: 'unit_days', rowClass: r => r.lines ? '' : 'rpt-idle',
+        ].map(c => c.key === 'units_owned' && _item.units.length ? {...c, label: 'Units picked'} : c), d.by_item, {sortKey: 'unit_days', rowClass: r => r.lines ? '' : 'rpt-idle',
           note: d.range_days ? `Utilization = unit-days ÷ (units owned × ${d.range_days} days in range).` : ''}) : '')
         + table('t-items', `Every show that rented ${what}`, [
         {key: 'date', label: 'Show date'},
@@ -1004,6 +1004,9 @@
       _soundUrl();
       const d = await get('/api/reports/sound?' + params(_soundParams()));
       _sound.group = d.group;
+      // The server drops a picked sensor with no readings in this show set.
+      _sound.monitors = (d.monitors || []).map(String);
+      _soundUrl();
       setTimeout(() => {
         const g = document.getElementById('rs-group'); if (g) g.value = _sound.group;
         const l = document.getElementById('rs-limit'); if (l) l.value = _sound.limit;

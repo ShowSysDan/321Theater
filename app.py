@@ -901,7 +901,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.48.0'
+APP_VERSION = '3.48.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -5011,49 +5011,59 @@ def notify_users(db, user_ids, title, body='', link_url=None, kind='system',
 _MENTION_SCAN_MAX = 4000      # comment bodies are ≤ 2000 chars
 
 
-def _notify_comment_mentions(db, show_id, body, actor_id, actor_name=None, old_body=None):
+def _mention_user_ids(db, text):
+    """User ids @mentioned in `text`. A mention is '@' + a display name or
+    username (any case), NOT preceded by a word character (so the 'steve' in
+    booking@steve.com is not one) and not followed by one. Longest names are
+    matched first and their span consumed, so '@Dan Lupo' never also matches
+    a user called 'Dan' — and that holds for accounts that can't be notified
+    too (locked / pending / document viewer): their names still consume the
+    span, they just aren't returned."""
+    text = (text or '')[:_MENTION_SCAN_MAX]
+    if '@' not in text:
+        return set()
+    names = []
+    for u in db.execute(
+            """SELECT id, username, display_name,
+                      (COALESCE(is_locked, 0) = 0 AND COALESCE(pending_approval, 0) = 0
+                       AND COALESCE(is_document_viewer, 0) = 0) AS ok
+                 FROM users""").fetchall():
+        for n in {(u['display_name'] or '').strip(), (u['username'] or '').strip()}:
+            if n:
+                names.append((n.lower(), u['id'], bool(u['ok'])))
+    names.sort(key=lambda x: -len(x[0]))
+    low, hit = text.lower(), set()
+    for n, uid, ok in names:
+        start = 0
+        while True:
+            i = low.find('@' + n, start)
+            if i < 0:
+                break
+            end = i + 1 + len(n)
+            prev, nxt = low[i - 1:i] if i else '', low[end:end + 1]
+            if not (prev.isalnum() or prev == '_' or nxt.isalnum() or nxt == '_'):
+                if ok:
+                    hit.add(uid)
+                low = low[:i] + ' ' * (end - i) + low[end:]       # consumed
+            start = end
+    return hit
+
+
+def _notify_comment_mentions(db, show_id, body, actor_id, actor_name=None, old_body=None,
+                             comment_id=None):
     """@mentions in a show comment → an inbox notification for each person
-    named (3.47.0). The comment box inserts '@Display Name', so a mention is
-    '@' + a user's display name or username (any case) not followed by a
-    word character; longer names are matched first and consumed, so
-    '@Dan Lupo' never also notifies a user called 'Dan'. With `old_body`
-    (an edit) only people newly mentioned are told. Never the actor, never
-    locked / pending / document-viewer accounts. Caller commits; never
-    raises. Returns the user ids notified."""
+    named (3.47.0; matching rules: _mention_user_ids). With `old_body` (an
+    edit) only people newly mentioned are told. Never the actor. With
+    `comment_id` the notification is tied to that comment (field_key
+    'comment:<id>'), so deleting or editing the comment can withdraw or
+    correct a notification nobody has read or been emailed yet
+    (_mention_notifications_sync). Caller commits; never raises. Returns the
+    user ids notified."""
     try:
         text = (body or '')[:_MENTION_SCAN_MAX]
-        if '@' not in text:
-            return []
-        users = db.execute(
-            """SELECT id, username, display_name FROM users
-                WHERE COALESCE(is_locked, 0) = 0 AND COALESCE(pending_approval, 0) = 0
-                  AND COALESCE(is_document_viewer, 0) = 0""").fetchall()
-        names = []
-        for u in users:
-            for n in {(u['display_name'] or '').strip(), (u['username'] or '').strip()}:
-                if n:
-                    names.append((n.lower(), u['id']))
-        names.sort(key=lambda x: -len(x[0]))
-
-        def _found(src):
-            low, hit = src.lower(), set()
-            for n, uid in names:
-                start = 0
-                while True:
-                    i = low.find('@' + n, start)
-                    if i < 0:
-                        break
-                    end = i + 1 + len(n)
-                    nxt = low[end:end + 1]
-                    if not (nxt.isalnum() or nxt == '_'):
-                        hit.add(uid)
-                        low = low[:i] + ' ' * (end - i) + low[end:]   # consumed
-                    start = end
-            return hit
-
-        who = _found(text) - {actor_id}
+        who = _mention_user_ids(db, text) - {actor_id}
         if old_body:
-            who -= _found((old_body or '')[:_MENTION_SCAN_MAX])
+            who -= _mention_user_ids(db, old_body)
         if not who:
             return []
         show = db.execute('SELECT name FROM shows WHERE id=%s', (show_id,)).fetchone()
@@ -5061,15 +5071,41 @@ def _notify_comment_mentions(db, show_id, body, actor_id, actor_name=None, old_b
             a = db.execute("SELECT COALESCE(NULLIF(TRIM(display_name), ''), username) AS n "
                            'FROM users WHERE id=%s', (actor_id,)).fetchone()
             actor_name = a['n'] if a else 'Someone'
-        excerpt = ' '.join(text.split())
         notify_users(db, who,
                      f"{actor_name} mentioned you — {show['name'] if show else 'a show'}",
-                     excerpt[:240] + ('…' if len(excerpt) > 240 else ''),
-                     link_url=f'/shows/{show_id}?tab=comments', kind='mention', show_id=show_id)
+                     _mention_excerpt(text),
+                     link_url=f'/shows/{show_id}?tab=comments', kind='mention', show_id=show_id,
+                     coalesce_key=f'comment:{int(comment_id)}' if comment_id else None)
         return sorted(who)
     except Exception as e:
         app.logger.warning(f'_notify_comment_mentions failed (show {show_id}): {e}')
         return []
+
+
+def _mention_excerpt(text):
+    excerpt = ' '.join((text or '').split())
+    return excerpt[:240] + ('…' if len(excerpt) > 240 else '')
+
+
+def _mention_notifications_sync(db, show_id, comment_id, new_body=None):
+    """A comment was deleted (new_body None) or edited: its mention
+    notifications that nobody has read or been emailed yet are withdrawn —
+    or, after an edit, kept only for people still mentioned, with the new
+    text. Read / already-emailed ones are history and stay. Never raises."""
+    try:
+        key = f'comment:{int(comment_id)}'
+        cond = ("kind = 'mention' AND show_id = %s AND field_key = %s "
+                'AND read_at IS NULL AND emailed_at IS NULL')
+        if new_body is None:
+            db.execute(f'DELETE FROM notifications WHERE {cond}', (show_id, key))
+            return
+        still = sorted(_mention_user_ids(db, new_body))
+        db.execute(f'DELETE FROM notifications WHERE {cond} AND NOT (user_id = ANY(%s))',
+                   (show_id, key, still))
+        db.execute(f'UPDATE notifications SET body = %s WHERE {cond}',
+                   (_mention_excerpt(new_body), show_id, key))
+    except Exception as e:
+        app.logger.warning(f'_mention_notifications_sync failed (comment {comment_id}): {e}')
 
 
 # ── Inbox emails (3.47.0) ────────────────────────────────────────────────────
@@ -8820,7 +8856,7 @@ def post_comment(show_id):
     cid = cur.fetchone()['id']
     log_audit(db, 'COMMENT_POST', 'comment', cid, show_id=show_id,
               after={'body': body})
-    _notify_comment_mentions(db, show_id, body, session['user_id'])
+    _notify_comment_mentions(db, show_id, body, session['user_id'], comment_id=cid)
     db.commit()
     row = db.execute("""
         SELECT sc.id, sc.body, sc.created_at,
@@ -8866,6 +8902,8 @@ def delete_comment(show_id, cid):
         'UPDATE show_comments SET deleted_at=CURRENT_TIMESTAMP, deleted_by=%s WHERE id=%s',
         (session['user_id'], cid)
     )
+    # A withdrawn comment must not be emailed to the people it mentioned.
+    _mention_notifications_sync(db, show_id, cid)
     db.commit()
     db.close()
     syslog_logger.info(f"COMMENT_DELETE show_id={show_id} comment_id={cid} by={session.get('username')}")
@@ -8908,8 +8946,11 @@ def edit_comment(show_id, cid):
     )
     log_audit(db, 'COMMENT_EDIT', 'comment', cid, show_id=show_id,
               before={'body': old_body}, after={'body': new_body})
-    # Only people the edit newly mentions are notified.
-    _notify_comment_mentions(db, show_id, new_body, session['user_id'], old_body=old_body)
+    # Unseen notifications follow the edit (dropped for people no longer
+    # mentioned, new text for the rest); only newly mentioned people are told.
+    _mention_notifications_sync(db, show_id, cid, new_body)
+    _notify_comment_mentions(db, show_id, new_body, session['user_id'], old_body=old_body,
+                             comment_id=cid)
     db.commit()
     db.close()
     syslog_logger.info(f"COMMENT_EDIT show_id={show_id} comment_id={cid} by={session.get('username')}")
@@ -30280,7 +30321,7 @@ def _report_id_list(*names, cap=300):
     for n in names:
         for part in (request.args.get(n) or '').split(','):
             part = part.strip()
-            if part.isdigit() and 0 < int(part) < 2 ** 31 and int(part) not in out:
+            if re.fullmatch(r'[0-9]{1,10}', part) and 0 < int(part) < 2 ** 31 and int(part) not in out:
                 out.append(int(part))
     return out[:cap]
 
@@ -30312,8 +30353,10 @@ def report_item_shows():
         db.close()
         return jsonify({'error': 'Item not found.'}), 404
     tids = [r['id'] for r in picked]
-    type_ids = sorted(set(tids) | {r['id'] for r in db.execute(
-        'SELECT id FROM asset_types WHERE parent_type_id = ANY(%s)', (tids,)).fetchall()})
+    kids = db.execute('SELECT id, parent_type_id FROM asset_types WHERE parent_type_id = ANY(%s)',
+                      (tids,)).fetchall()
+    type_ids = sorted(set(tids) | {r['id'] for r in kids})
+    headings = {r['parent_type_id'] for r in kids}     # picked groups: headings over their items
     # Every unit of the picked items — the choices of the Units picker and
     # the rows of the per-unit summary. A picked unit must be one of them.
     units = {r['id']: dict(r) for r in db.execute("""
@@ -30423,12 +30466,12 @@ def report_item_shows():
     by_unit.sort(key=lambda b: (b['item'].lower(), b['unit_id'] is None, b['unit'].lower()))
     owned = {}
     for u in units.values():
-        if u['status'] != 'retired':
+        if u['status'] != 'retired' and (not uids or u['id'] in uids):
             owned[u['asset_type_id']] = owned.get(u['asset_type_id'], 0) + 1
     by_item = []
     for tid, b in item_bk.items():
         b['units_owned'] = owned.get(tid, 0)
-        if b['lines'] or tid in tids or b['units_owned']:
+        if b['lines'] or b['units_owned'] or (tid in tids and tid not in headings):
             by_item.append(_done(b, b['units_owned']))
     by_item.sort(key=lambda b: b['item'].lower())
     companies = {}
@@ -30848,7 +30891,13 @@ def report_sound():
         except (TypeError, ValueError):
             return None
 
+    # Sensors that have readings in this show set. A picked sensor outside
+    # it (the date range or venue changed, a saved report's old sensor) is
+    # dropped — the page then shows the same choice it is filtered by.
     sensors, rows = {}, []
+    live = {m.get('id') for c in caps if c['show_id'] in shows for m in c['monitors']
+            if (m.get('stats') or {}).get('count')}
+    want_live = want & live
     for c in caps:
         sh = shows.get(c['show_id'])
         if not sh:
@@ -30862,7 +30911,7 @@ def report_sound():
             unit = (m.get('unit') or 'dB').strip()
             sensors.setdefault(mid, {'id': mid, 'name': name, 'unit': unit,
                                      'location': (m.get('location') or '').strip()})
-            if want and mid not in want:
+            if want_live and mid not in want_live:
                 continue
             leq = _f(st.get('leq') if st.get('leq') is not None else st.get('avg'))
             peak = _f(st.get('max'))
@@ -30942,7 +30991,7 @@ def report_sound():
     group_label = (field['label'] if field else dict(_RPT_SOUND_GROUPS)[group])
     return jsonify({
         'rows': rows, 'by_group': by_group, 'group': group, 'group_label': group_label,
-        'limit': limit, 'units': units,
+        'limit': limit, 'units': units, 'monitors': sorted(want_live),
         'sensors': sorted(sensors.values(), key=lambda m: (m['name'].lower(), m['id'] or 0)),
         'totals': {
             'performances': len({(r['show_id'], r['date'], r['time']) for r in rows}),
@@ -31635,7 +31684,7 @@ def _saved_report_clean_view(raw):
     # selectors and the show box).
     for k in ('show', 'has_type', 'has_category', 'position', 'tech',
               'asset_category_id', 'asset_type_id'):
-        if k in params and not re.fullmatch(r'\d{1,10}', params[k]):
+        if k in params and not re.fullmatch(r'[0-9]{1,10}', params[k]):
             params.pop(k)
     # Id lists keep WHOLE ids (cutting the text at a length would change an
     # id) — the same first-300 rule the report endpoints apply.
@@ -31644,7 +31693,7 @@ def _saved_report_clean_view(raw):
             ids = []
             for part in str(src[k]).split(',')[:5000]:
                 part = part.strip()
-                if part.isdigit() and 0 < int(part) < 2 ** 31 and int(part) not in ids:
+                if re.fullmatch(r'[0-9]{1,10}', part) and 0 < int(part) < 2 ** 31 and int(part) not in ids:
                     ids.append(int(part))
                     if len(ids) >= 300:
                         break
