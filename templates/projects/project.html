@@ -1,0 +1,76 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{# One project. The route already answered 404 unless the caller is a member
+   (no admin bypass). This template is only the SHELL — header, tab strip and
+   one empty pane per tab; everything about the project is fetched by
+   /projects/assets/projects.js (window.PM, the contract documented at the top
+   of that file) and drawn with textContent. Nothing of the project is in the
+   HTML, the page title or the URL beyond its numeric id.
+
+   Asset order is part of the contract (spec §8):
+     css  projects.css, projects_gantt.css, projects_docs.css
+     js   projects.js (defines window.PM), projects_gantt.js (registers the
+          Timeline tab), projects_docs.js (registers Budget / Files / Notes)
+   A file that is not deployed yet simply 404s: core never depends on the
+   other two, and a tab nobody registered shows "Not available yet". #}
+{% block title %}Project — 3·2·1→Theater{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/projects/assets/projects.css?v={{ asset_v }}">
+<link rel="stylesheet" href="/projects/assets/projects_gantt.css?v={{ asset_v }}">
+<link rel="stylesheet" href="/projects/assets/projects_docs.css?v={{ asset_v }}">
+{% endblock %}
+
+{% block content %}
+<header class="phead pm-head" id="pm-head">
+  <div class="phead-row">
+    <div class="phead-title">
+      <span class="phead-tile" id="pm-tile" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M13 9h5M13 13h3"/><path d="M5.5 9h1M5.5 13h1"/></svg>
+      </span>
+      <div style="min-width:0">
+        <a class="pm-back" href="/projects">← Projects</a>
+        <h1 class="page-title"><span id="pm-name">Loading…</span><span class="pm-head-tags" id="pm-head-tags"></span></h1>
+        <div class="pm-head-meta" id="pm-head-meta"></div>
+      </div>
+    </div>
+    <div class="pm-head-actions" id="pm-head-actions" hidden>
+      <div class="pm-search" role="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.2" y2="16.2"/></svg>
+        <input type="search" id="pm-search-q" class="field-input" maxlength="200" placeholder="Search this project…"
+               aria-label="Search this project" role="combobox" aria-autocomplete="list" aria-expanded="false"
+               aria-controls="pm-search-results" autocomplete="off" spellcheck="false" enterkeyhint="search">
+      </div>
+      {# A generated document: never hover-prefetched (.no-prefetch; the
+         path also ends in .pdf, which both exclusion lists already cover). #}
+      <a id="pm-summary-pdf" class="btn btn-ghost btn-sm no-prefetch" href="/projects/{{ pid }}/summary.pdf" target="_blank" rel="noopener">Summary PDF</a>
+      <span id="pm-head-menu"></span>
+    </div>
+  </div>
+  <div id="pm-head-banner"></div>
+  <div class="pm-tabs" role="tablist" aria-label="Project sections" id="pm-tabs">
+    {% for key, label in [('overview', 'Overview'), ('tasks', 'Tasks'), ('timeline', 'Timeline'), ('budget', 'Budget'),
+                          ('files', 'Files'), ('notes', 'Notes'), ('contacts', 'Contacts'),
+                          ('discussion', 'Discussion'), ('settings', 'Settings')] %}
+    <button type="button" class="pm-tab" role="tab" id="pm-tab-{{ key }}" data-tab="{{ key }}"
+            aria-controls="pm-pane-{{ key }}" aria-selected="false" tabindex="-1"{% if key in ('budget', 'settings') %} hidden{% endif %}>{{ label }}</button>
+    {% endfor %}
+  </div>
+</header>
+
+<div id="pm-root" class="pm-root" data-page="project" data-pid="{{ pid }}">
+  <div id="pm-boot"><p class="pm-loading" role="status">Loading…</p></div>
+  {% for key in ['overview', 'tasks', 'timeline', 'budget', 'files', 'notes', 'contacts', 'discussion', 'settings'] %}
+  <section class="pm-pane" id="pm-pane-{{ key }}" role="tabpanel" aria-labelledby="pm-tab-{{ key }}" tabindex="-1" hidden></section>
+  {% endfor %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/projects/assets/projects.js?v={{ asset_v }}"></script>
+<script src="/projects/assets/projects_gantt.js?v={{ asset_v }}"></script>
+<script src="/projects/assets/projects_docs.js?v={{ asset_v }}"></script>
+{% endblock %}

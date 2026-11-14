@@ -1,0 +1,281 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{# Projects — the ADMIN page (/settings/projects): the module switch and who
+   may use the module. Reachable by any admin, with the module OFF and
+   without module access (so an admin can switch it on and grant themself) —
+   which is why this page is SELF-CONTAINED: its CSS and JS are inline. The
+   module's own assets (/projects/assets/…) are served only to people with
+   access and would 404 here.
+
+   An admin manages WHO may use Projects, never what is in one: nothing on
+   this page (or in the API behind it) shows a project's name or content.
+   Projects that no longer have any member are listed by number only, and
+   the single thing that can be done with them is delete. #}
+{% block title %}Projects — Settings — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Projects</h1>
+    <p class="page-sub">
+      Private projects with tasks, a timeline, budgets, files and notes. Only people ticked below see anything of it.
+      <span id="pma-pill" class="pma-pill" hidden></span>
+    </p>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <a href="{{ url_for('settings') }}#modules" class="btn btn-ghost">← Modules</a>
+    <button type="button" class="btn btn-primary" id="pma-toggle" disabled>…</button>
+  </div>
+</div>
+
+<div id="pma-error" class="form-section" style="border-left:3px solid var(--red)" hidden>
+  <div class="form-section-body">
+    <p style="font-size:13px;margin:0"><span id="pma-error-text"></span> <button type="button" class="btn btn-sm btn-ghost" id="pma-retry">Retry</button></p>
+  </div>
+</div>
+
+<div id="pma-off-note" class="form-section" style="border-left:3px solid var(--red)" hidden>
+  <div class="form-section-body">
+    <p style="font-size:12.5px;margin:0">
+      The module is <strong>off</strong>: nobody sees Projects, whatever is ticked below. Existing projects are kept.
+    </p>
+  </div>
+</div>
+
+<div class="form-section">
+  <div class="form-section-header">
+    <span>Who can use Projects <span class="pma-count" id="pma-count"></span></span>
+  </div>
+  <div class="form-section-body">
+    <p class="pma-note">
+      A ticked person sees the Projects link and can create projects and be added to other people's. Access does not
+      open anyone's project: a project is visible only to the people its owner added — administrators included.
+      Unticking keeps their place on projects (tick again to restore it) and clears their project notifications.
+    </p>
+    <input type="search" id="pma-filter" class="field-input" placeholder="Filter by name, username or role…" aria-label="Filter people" autocomplete="off" style="max-width:360px">
+    <div id="pma-users" class="pma-users" role="group" aria-label="People with access"><p class="pma-note">Loading…</p></div>
+  </div>
+</div>
+
+<div class="form-section">
+  <div class="form-section-header"><span>Server support</span></div>
+  <div class="form-section-body" id="pma-status"><p class="pma-note">Loading…</p></div>
+</div>
+
+<div class="form-section" id="pma-orphans-card" hidden>
+  <div class="form-section-header"><span>Projects with no members</span></div>
+  <div class="form-section-body">
+    <p class="pma-note">
+      Every member of these projects has had their account deleted, so nobody can open them. They are listed by number
+      only. Deleting one removes it and its files for good.
+    </p>
+    <div id="pma-orphans"></div>
+  </div>
+</div>
+
+<style>
+.pma-pill { font-size: 10px; padding: 2px 7px; border-radius: 3px; letter-spacing: .06em; margin-left: 6px; white-space: nowrap; }
+.pma-pill.on  { background: rgba(34,197,94,.12); color: var(--green); }
+.pma-pill.off { background: rgba(239,68,68,.12); color: var(--red); }
+.pma-note { font-size: 12.5px; color: var(--text-dim); margin: 0; line-height: 1.5; }
+.pma-count { font: 600 11px var(--font-mono); color: var(--text-muted); margin-left: 6px; text-transform: none; letter-spacing: 0; }
+.pma-users { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 2px 16px; }
+.pma-user { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: var(--radius); cursor: pointer; min-width: 0; }
+.pma-user:hover { background: var(--bg-hover); }
+.pma-user input { width: 17px; height: 17px; accent-color: var(--accent); flex-shrink: 0; }
+.pma-user .n { font-size: 13.5px; color: var(--ink); overflow-wrap: anywhere; }
+.pma-user .s { font-size: 11.5px; color: var(--text-muted); overflow-wrap: anywhere; }
+.pma-user.is-busy { opacity: .6; }
+.pma-line { display: flex; align-items: baseline; gap: 10px; font-size: 13.5px; flex-wrap: wrap; }
+.pma-line .yes { color: var(--green); font-weight: 600; white-space: nowrap; }
+.pma-line .no  { color: var(--text-muted); font-weight: 600; white-space: nowrap; }
+.pma-orphan { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13.5px; }
+.pma-orphan:last-child { border-bottom: 0; }
+.pma-orphan span { flex: 1 1 auto; font-family: var(--font-mono); }
+html.mobile-view .pma-users { grid-template-columns: minmax(0, 1fr); }
+html.mobile-view .pma-user { padding: 10px 8px; }
+html.mobile-view #pma-filter { max-width: none !important; }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+/* Admin page for the Projects module. Self-contained on purpose (see the
+   template comment). Everything is built with textContent; the API answers
+   ids, names of USER ACCOUNTS and booleans — never anything of a project. */
+(function () {
+  'use strict';
+  var API = '/api/projects/admin';
+  var $ = function (id) { return document.getElementById(id); };
+  var data = null;          // last GET …/access
+  var busy = false;
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function toast(msg, isError) {
+    if (typeof showSaveToast === 'function') showSaveToast(msg, isError ? 'error' : undefined);
+  }
+  // fetch → JSON. A non-JSON answer means the session ended (login page) or
+  // the admin role was taken away (the gate's plain 404).
+  function call(method, path, body) {
+    var opt = {method: method, credentials: 'same-origin', cache: 'no-store', headers: {'Accept': 'application/json'}};
+    if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+    return fetch(API + path, opt).then(function (r) {
+      var ct = r.headers.get('Content-Type') || '';
+      if (ct.indexOf('application/json') < 0) throw new Error('Your session ended — reload the page.');
+      return r.json().then(function (j) {
+        if (!r.ok) throw new Error((j && j.error) || 'Something went wrong.');
+        return j;
+      });
+    }, function () { throw new Error("Can't reach the server."); });
+  }
+
+  function renderSwitch() {
+    var on = !!data.enabled;
+    var pill = $('pma-pill');
+    pill.hidden = false;
+    pill.className = 'pma-pill ' + (on ? 'on' : 'off');
+    pill.textContent = on ? 'MODULE ON' : 'MODULE OFF';
+    var b = $('pma-toggle');
+    b.disabled = false;
+    b.textContent = on ? 'Turn module off' : 'Turn module on';
+    b.className = 'btn ' + (on ? 'btn-ghost' : 'btn-primary');
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    $('pma-off-note').hidden = on;
+  }
+
+  function renderUsers() {
+    var box = $('pma-users');
+    var q = $('pma-filter').value.trim().toLowerCase();
+    var users = data.users || [];
+    var shown = users.filter(function (u) {
+      return !q || (u.name + ' ' + u.username + ' ' + u.role).toLowerCase().indexOf(q) >= 0;
+    });
+    var keep = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.uid : null;
+    box.textContent = '';
+    $('pma-count').textContent = users.filter(function (u) { return u.has_access; }).length + ' of ' + users.length;
+    if (!shown.length) {
+      box.appendChild(el('p', 'pma-note', users.length ? 'Nobody matches that filter.' : 'No accounts can be given access yet.'));
+      return;
+    }
+    shown.forEach(function (u) {
+      var row = el('label', 'pma-user');
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!u.has_access;
+      cb.dataset.uid = String(u.id);
+      cb.addEventListener('change', function () { setAccess(u, cb, row); });
+      var txt = el('span');
+      txt.appendChild(el('span', 'n', u.name));
+      txt.appendChild(document.createElement('br'));
+      txt.appendChild(el('span', 's', u.username + ' · ' + u.role));
+      row.appendChild(cb);
+      row.appendChild(txt);
+      box.appendChild(row);
+    });
+    if (keep) {
+      var again = box.querySelector('input[data-uid="' + String(parseInt(keep, 10)) + '"]');
+      if (again) again.focus({preventScroll: true});
+    }
+  }
+
+  function setAccess(u, cb, row) {
+    var grant = cb.checked;
+    cb.disabled = true;
+    row.classList.add('is-busy');
+    call('POST', '/access', {user_id: u.id, grant: grant}).then(function (j) {
+      u.has_access = !!j.has_access;
+      toast(grant ? '✓ Access given' : '✓ Access removed');
+    }, function (e) {
+      toast(e.message, true);
+    }).then(function () {
+      cb.disabled = false;
+      row.classList.remove('is-busy');
+      cb.checked = !!u.has_access;
+      $('pma-count').textContent = data.users.filter(function (x) { return x.has_access; }).length + ' of ' + data.users.length;
+    });
+  }
+
+  function statusLine(ok, label, yes, no) {
+    var p = el('p', 'pma-line');
+    p.style.margin = '0';
+    p.appendChild(el('span', ok ? 'yes' : 'no', ok ? '✓ Available' : '— Not available'));
+    p.appendChild(el('span', null, label + ' — ' + (ok ? yes : no)));
+    return p;
+  }
+  function renderStatus() {
+    var box = $('pma-status');
+    box.textContent = '';
+    box.appendChild(statusLine(!!data.msg_support, 'Reading Outlook .msg emails',
+      'uploaded .msg files are opened and searched like .eml ones.',
+      'the optional extract-msg package is not installed on this server; .msg files can still be stored and downloaded.'));
+    box.appendChild(statusLine(!!data.office_preview, 'Previewing Office documents',
+      'Word / Excel / PowerPoint files are shown as PDF.',
+      'LibreOffice (soffice) is not installed on this server; Office files can still be stored and downloaded.'));
+  }
+
+  function renderOrphans() {
+    var list = data.orphans || [];
+    $('pma-orphans-card').hidden = !list.length;
+    var box = $('pma-orphans');
+    box.textContent = '';
+    list.forEach(function (o) {
+      var row = el('div', 'pma-orphan');
+      row.appendChild(el('span', null, 'Project #' + o.id));
+      var b = el('button', 'btn btn-sm btn-danger-ghost', 'Delete');
+      b.type = 'button';
+      b.addEventListener('click', function () {
+        // The server wants the literal word, typed by a person.
+        var typed = window.prompt('Delete project #' + o.id + ' and its files for good?\nNobody can open it any more. Type DELETE to confirm.');
+        if (typed === null) return;
+        if (typed.trim() !== 'DELETE') { toast('Not deleted — type DELETE to confirm.', true); return; }
+        b.disabled = true;
+        call('POST', '/orphans/' + encodeURIComponent(o.id) + '/delete', {confirm: 'DELETE'}).then(function () {
+          toast('✓ Deleted');
+          load();
+        }, function (e) { b.disabled = false; toast(e.message, true); });
+      });
+      row.appendChild(b);
+      box.appendChild(row);
+    });
+  }
+
+  function load() {
+    $('pma-error').hidden = true;
+    return call('GET', '/access').then(function (j) {
+      data = j;
+      renderSwitch(); renderUsers(); renderStatus(); renderOrphans();
+    }, function (e) {
+      $('pma-error-text').textContent = e.message;
+      $('pma-error').hidden = false;
+    });
+  }
+
+  $('pma-toggle').addEventListener('click', function () {
+    if (!data || busy) return;
+    var want = !data.enabled;
+    if (!want && !window.confirm('Turn Projects off for everyone? Nothing is deleted — turning it back on restores it.')) return;
+    busy = true;
+    $('pma-toggle').disabled = true;
+    call('POST', '/module', {enabled: want}).then(function (j) {
+      data.enabled = !!j.enabled;
+      toast(data.enabled ? '✓ Projects is on' : '✓ Projects is off');
+    }, function (e) { toast(e.message, true); }).then(function () {
+      busy = false;
+      renderSwitch();
+    });
+  });
+  $('pma-filter').addEventListener('input', function () { if (data) renderUsers(); });
+  $('pma-retry').addEventListener('click', load);
+  load();
+})();
+</script>
+{% endblock %}

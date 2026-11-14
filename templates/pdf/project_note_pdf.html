@@ -1,0 +1,83 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+
+  One project note as a PDF (3.49.0) — projects_docs_module.pm_note_pdf.
+  `body` is the ONLY markup on this page that came from a person: it is the
+  note's HTML passed through project_docs.sanitize_note_html AGAIN by the
+  route, immediately before rendering (allow-list of tags; a[href] limited
+  to http / https / mailto; no styles, images or scripts can survive), and
+  handed over as Markup. Everything else is autoescaped text — never add
+  |safe to another value. No @font-face, no external resource (the renderer
+  refuses to fetch anything but the inline data: logo).
+#}
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page {
+    size: Letter;
+    margin: 16mm 16mm 18mm 16mm;
+    @bottom-left   { content: element(footerLeft); font-family: Arial, Helvetica, sans-serif; font-size: 6.5pt; color: #888; }
+    @bottom-right  { content: "Page " counter(page) " of " counter(pages); font-family: Arial, Helvetica, sans-serif; font-size: 6.5pt; color: #888; white-space: nowrap; }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 10.5px; color: #1a1a1a; margin: 0; line-height: 1.45; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2.5px solid #1a4a7a; padding-bottom: 10px; margin-bottom: 14px; }
+  .doc-type { font-size: 8px; font-weight: bold; color: #B8840A; letter-spacing: 0.12em; text-transform: uppercase; }
+  .org-name { font-size: 15px; font-weight: 900; color: #1a4a7a; margin-top: 2px; }
+  .doc-title { text-align: right; max-width: 55%; }
+  .doc-title .project { font-size: 11px; font-weight: 700; color: #1a4a7a; overflow-wrap: anywhere; }
+  .doc-title .meta { font-size: 8.5px; color: #555; margin-top: 2px; }
+  h1.note-title { font-size: 19px; font-weight: 900; color: #1a4a7a; margin: 0 0 3px 0; overflow-wrap: anywhere; }
+  .byline { font-size: 8.5px; color: #666; margin-bottom: 12px; }
+  .footer-left { position: running(footerLeft); font-size: 6.5pt; color: #888; }
+
+  /* The note itself: only the sanitizer's allow-list can appear in here. */
+  .note { overflow-wrap: anywhere; }
+  .note p { margin: 0 0 7px 0; }
+  .note h2 { font-size: 15px; color: #1a4a7a; margin: 14px 0 5px 0; break-after: avoid; }
+  .note h3 { font-size: 12.5px; color: #1a4a7a; margin: 12px 0 4px 0; break-after: avoid; }
+  .note h4 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: #555; margin: 10px 0 3px 0; break-after: avoid; }
+  .note ul, .note ol { margin: 0 0 7px 0; padding-left: 20px; }
+  .note li { margin-bottom: 2px; }
+  .note blockquote { margin: 0 0 7px 0; padding: 4px 12px; border-left: 3px solid #B8840A; background: #f7f7f7; color: #444; }
+  .note code { font-family: "DejaVu Sans Mono", "Courier New", monospace; font-size: 9px; background: #f1f3f5; padding: 0 2px; border-radius: 2px; }
+  .note pre { font-family: "DejaVu Sans Mono", "Courier New", monospace; font-size: 9px; background: #f1f3f5; border: 1px solid #dde3ea; border-radius: 3px; padding: 6px 8px; margin: 0 0 7px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .note pre code { background: none; padding: 0; }
+  .note hr { border: none; border-top: 1px solid #ccc; margin: 10px 0; }
+  .note a { color: #1a4a7a; text-decoration: underline; }
+  .note table { width: 100%; border-collapse: collapse; table-layout: fixed; margin: 0 0 9px 0; }
+  .note thead { display: table-header-group; }
+  .note tr { break-inside: avoid; }
+  .note th { font-size: 9px; font-weight: 700; text-align: left; background: #eef2f7; color: #1a4a7a; padding: 4px 6px; border: 1px solid #c8d3df; }
+  .note td { padding: 4px 6px; border: 1px solid #dde3ea; vertical-align: top; }
+  .empty { color: #888; font-style: italic; }
+</style>
+</head>
+<body>
+  <div class="footer-left">3·2·1→Theater · Project note · {{ generated }}</div>
+  <div class="header">
+    <div>
+      {% if logo %}<img src="{{ logo }}" alt="Logo" style="max-height:52px;max-width:180px;object-fit:contain">{% endif %}
+      <div class="doc-type">Project note</div>
+      <div class="org-name">Dr. Phillips Center for the Performing Arts</div>
+    </div>
+    <div class="doc-title">
+      <div class="project">{{ project }}</div>
+      <div class="meta">Generated {{ generated }}{% if generated_by %} by {{ generated_by }}{% endif %}</div>
+    </div>
+  </div>
+
+  <h1 class="note-title">{{ title }}</h1>
+  <div class="byline">{% if updated %}Last edited {{ updated }}{% if updated_by %} by {{ updated_by }}{% endif %}{% endif %}</div>
+
+  {% if body %}
+  <div class="note">{{ body }}</div>
+  {% else %}
+  <div class="empty">This note is empty.</div>
+  {% endif %}
+</body>
+</html>

@@ -459,6 +459,10 @@ def money(v, field='Amount'):
             v = float(v.strip().replace(',', ''))
         except ValueError:
             raise Refuse(400, f'{field} is not a valid amount.')
+    # A JSON integer of 300+ digits is a valid Python int but overflows a
+    # float: compare as an int first so it is a 400, never an OverflowError.
+    if isinstance(v, int) and abs(v) > 10 ** 12:
+        raise Refuse(400, f'{field} is not a valid amount.')
     if not isinstance(v, (int, float)) or not math.isfinite(v) or abs(v) > 1e12:
         raise Refuse(400, f'{field} is not a valid amount.')
     return round(float(v), 2)

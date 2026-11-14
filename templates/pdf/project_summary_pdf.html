@@ -1,0 +1,258 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+
+  Executive summary of one project (3.49.0) — projects_docs_module._summary().
+  Built on report_pdf.html's skeleton and its neutral palette (a project is
+  not tied to a venue, so there is no venue theming). Rules:
+    - every value is pre-formatted text; autoescape keeps it inert — never
+      add |safe here;
+    - bar widths are integers 0–100 clamped by the server (_pct);
+    - a section with nothing in it is omitted, and the Budget section exists
+      only when `s.budget` was built (the person generating it can see the
+      budget);
+    - no @font-face and no external resource (the renderer refuses to fetch
+      anything but the inline data: logo).
+#}
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page {
+    size: Letter;
+    margin: 14mm 13mm 16mm 13mm;
+    @bottom-left   { content: element(footerLeft); font-family: Arial, Helvetica, sans-serif; font-size: 6.5pt; color: #888; }
+    @bottom-right  { content: "Page " counter(page) " of " counter(pages); font-family: Arial, Helvetica, sans-serif; font-size: 6.5pt; color: #888; white-space: nowrap; }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 9.5px; color: #1a1a1a; margin: 0; line-height: 1.35; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2.5px solid #1a4a7a; padding-bottom: 10px; margin-bottom: 12px; }
+  .doc-type { font-size: 8px; font-weight: bold; color: #B8840A; letter-spacing: 0.12em; text-transform: uppercase; }
+  .org-name { font-size: 15px; font-weight: 900; color: #1a4a7a; margin-top: 2px; }
+  .doc-title { text-align: right; max-width: 55%; }
+  .doc-title h1 { font-size: 17px; font-weight: 900; color: #1a4a7a; margin: 0 0 3px 0; overflow-wrap: anywhere; }
+  .doc-title .meta { font-size: 8.5px; color: #555; }
+  .facts { background: #f5f5f5; border-left: 3px solid #B8840A; padding: 7px 12px; margin-bottom: 4px; font-size: 9px; color: #444; }
+  .facts span { display: inline-block; margin-right: 18px; }
+  .facts b { color: #1a1a1a; }
+  .pill { display: inline-block; border: 1px solid #1a4a7a; color: #1a4a7a; border-radius: 8px; padding: 0 7px; font-size: 8px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+  .section-title { font-size: 8.5px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #1a4a7a; border-bottom: 1px solid #1a4a7a; padding-bottom: 3px; margin: 15px 0 5px 0; break-after: avoid; }
+  .section-title .n { color: #888; font-weight: 400; letter-spacing: 0; text-transform: none; }
+  .prose { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; }
+  .cards { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 8px 0; }
+  .card { border: 1px solid #dde3ea; border-radius: 4px; padding: 6px 10px; min-width: 104px; }
+  .card .v { font-size: 14px; font-weight: 700; color: #1a4a7a; }
+  .card .l { font-size: 7.5px; color: #666; text-transform: uppercase; letter-spacing: .06em; margin-top: 1px; }
+  .card.warn .v { color: #a33a1c; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; }
+  th { font-size: 7.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: #666; padding: 4px 5px; border-bottom: 1px solid #ccc; text-align: left; }
+  td { padding: 3.5px 5px; border-bottom: 1px solid #eee; vertical-align: top; overflow-wrap: anywhere; }
+  tbody tr:nth-child(even) td { background: #fafbfc; }
+  tr.total td { font-weight: 700; border-top: 1.5px solid #1a4a7a; border-bottom: none; background: #fff; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .muted { color: #777; }
+  .flag { color: #a33a1c; font-weight: 700; white-space: nowrap; }
+  .ok { color: #2c6e3f; font-weight: 700; white-space: nowrap; }
+  .more { font-size: 8px; color: #8a5a00; margin-top: 3px; }
+  /* Bars: a grey track with a filled span. Widths come from the server as
+     whole percents already clamped to 0–100. */
+  .bar { height: 7px; background: #e6eaef; border-radius: 3px; overflow: hidden; }
+  .bar span { display: block; height: 7px; background: #1a4a7a; border-radius: 3px; }
+  .bar.gold span { background: #B8840A; }
+  .bar.over span { background: #a33a1c; }
+  .bar.big, .bar.big span { height: 10px; border-radius: 5px; }
+  .statbar td { border-bottom: none; padding: 2.5px 5px; vertical-align: middle; }
+  .statbar tbody tr:nth-child(even) td { background: none; }
+  .two { display: flex; gap: 18px; align-items: flex-start; }
+  .two > div { flex: 1 1 0; min-width: 0; }
+  .footer-left { position: running(footerLeft); font-size: 6.5pt; color: #888; }
+</style>
+</head>
+<body>
+  <div class="footer-left">3·2·1→Theater · Project summary · {{ generated }}</div>
+  <div class="header">
+    <div>
+      {% if logo %}<img src="{{ logo }}" alt="Logo" style="max-height:52px;max-width:180px;object-fit:contain">{% endif %}
+      <div class="doc-type">Project summary</div>
+      <div class="org-name">Dr. Phillips Center for the Performing Arts</div>
+    </div>
+    <div class="doc-title">
+      <h1>{{ s.name }}</h1>
+      <div class="meta">Generated {{ generated }}{% if generated_by %} by {{ generated_by }}{% endif %}</div>
+    </div>
+  </div>
+
+  <div class="facts">
+    <span><span class="pill">{{ s.status }}</span></span>
+    {% if s.dates %}<span><b>Dates</b> {{ s.dates }}</span>{% endif %}
+    <span><b>Owner</b> {{ s.owner or 'No owner' }}</span>
+    <span><b>Tasks</b> {{ s.progress.done }} of {{ s.progress.total }} done</span>
+  </div>
+
+  {% if s.summary_text %}
+  <div class="section-title">Summary</div>
+  <div class="prose">{{ s.summary_text }}</div>
+  {% endif %}
+
+  {% if s.risks_text %}
+  <div class="section-title">Risks / issues</div>
+  <div class="prose">{{ s.risks_text }}</div>
+  {% endif %}
+
+  <div class="section-title">Progress</div>
+  {% if s.progress.total %}
+  <div class="cards">
+    <div class="card"><div class="v">{{ s.progress.pct }}%</div><div class="l">Complete</div></div>
+    <div class="card"><div class="v">{{ s.progress.done }} / {{ s.progress.total }}</div><div class="l">Tasks done</div></div>
+    <div class="card{{ ' warn' if s.progress.overdue }}"><div class="v">{{ s.progress.overdue }}</div><div class="l">Overdue</div></div>
+    <div class="card{{ ' warn' if s.progress.conflicts }}"><div class="v">{{ s.progress.conflicts }}</div><div class="l">Schedule conflicts</div></div>
+  </div>
+  <div class="bar big"><span style="width: {{ s.progress.pct }}%"></span></div>
+  <table class="statbar" style="margin-top: 7px">
+    <colgroup><col style="width: 16%"><col style="width: 9%"><col style="width: 75%"></colgroup>
+    <tbody>
+      {% for st in s.progress.statuses %}
+      <tr>
+        <td>{{ st.label }}</td>
+        <td class="num">{{ st.count }}</td>
+        <td><div class="bar{{ ' over' if st.key == 'blocked' }}{{ ' gold' if st.key == 'doing' }}"><span style="width: {{ st.pct }}%"></span></div></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="muted">No tasks yet.</div>
+  {% endif %}
+
+  {% if s.milestones %}
+  <div class="section-title">Milestones <span class="n">· {{ s.milestones|length + s.milestones_more }}</span></div>
+  <table>
+    <colgroup><col style="width: 17%"><col style="width: 53%"><col style="width: 16%"><col style="width: 14%"></colgroup>
+    <thead><tr><th>Date</th><th>Milestone</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+      {% for m in s.milestones %}
+      <tr>
+        <td>{{ m.date }}</td><td>{{ m.title }}</td><td>{{ m.status }}</td>
+        <td>{% if m.late %}<span class="flag">Late</span>{% elif m.done %}<span class="ok">Done</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if s.milestones_more %}<div class="more">and {{ s.milestones_more }} more</div>{% endif %}
+  {% endif %}
+
+  {% if s.overdue %}
+  <div class="section-title">Overdue <span class="n">· {{ s.overdue|length + s.overdue_more }}</span></div>
+  <table>
+    <colgroup><col style="width: 50%"><col style="width: 22%"><col style="width: 15%"><col style="width: 13%"></colgroup>
+    <thead><tr><th>Task</th><th>Assigned to</th><th>Due</th><th class="num">Days late</th></tr></thead>
+    <tbody>
+      {% for t in s.overdue %}
+      <tr><td>{{ t.title }}</td><td>{{ t.assignee or 'Unassigned' }}</td><td>{{ t.due }}</td><td class="num flag">{{ t.days }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if s.overdue_more %}<div class="more">and {{ s.overdue_more }} more</div>{% endif %}
+  {% endif %}
+
+  {% if s.coming %}
+  <div class="section-title">Next 30 days <span class="n">· {{ s.coming|length + s.coming_more }}</span></div>
+  <table>
+    <colgroup><col style="width: 60%"><col style="width: 25%"><col style="width: 15%"></colgroup>
+    <thead><tr><th>Task</th><th>Assigned to</th><th>Due</th></tr></thead>
+    <tbody>
+      {% for t in s.coming %}
+      <tr><td>{{ t.title }}</td><td>{{ t.assignee or 'Unassigned' }}</td><td>{{ t.due }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if s.coming_more %}<div class="more">and {{ s.coming_more }} more</div>{% endif %}
+  {% endif %}
+
+  {% if s.shows %}
+  <div class="section-title">Linked shows <span class="n">· {{ s.shows|length }}</span></div>
+  <table>
+    <colgroup><col style="width: 42%"><col style="width: 30%"><col style="width: 28%"></colgroup>
+    <thead><tr><th>Show</th><th>Dates</th><th>Venue</th></tr></thead>
+    <tbody>
+      {% for sh in s.shows %}
+      <tr><td>{{ sh.name }}{% if sh.kind == 'Event' %} <span class="muted">(event)</span>{% endif %}</td><td>{{ sh.dates }}{% if sh.past %} <span class="muted">· past</span>{% endif %}</td><td>{{ sh.venue }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if s.budget %}
+  <div class="section-title">Budget{% if s.budget.lines %} <span class="n">· {{ s.budget.lines }} line{{ '' if s.budget.lines == 1 else 's' }}{% if s.budget.over_lines %}, {{ s.budget.over_lines }} over estimate{% endif %}</span>{% endif %}</div>
+  {% if s.budget.total %}
+  <div class="cards">
+    <div class="card"><div class="v">{{ s.budget.total.estimate }}</div><div class="l">Estimate</div></div>
+    <div class="card"><div class="v">{{ s.budget.total.committed }}</div><div class="l">Committed</div></div>
+    <div class="card{{ ' warn' if s.budget.total.over }}"><div class="v">{{ s.budget.total.actual }}</div><div class="l">Actual</div></div>
+    <div class="card{{ ' warn' if s.budget.total.over }}"><div class="v">{{ s.budget.total.variance }}</div><div class="l">Variance</div></div>
+  </div>
+  <table>
+    <colgroup><col style="width: 25%"><col style="width: 14%"><col style="width: 14%"><col style="width: 14%"><col style="width: 15%"><col style="width: 18%"></colgroup>
+    <thead><tr><th>Category</th><th class="num">Estimate</th><th class="num">Committed</th><th class="num">Actual</th><th class="num">Variance</th><th>Spent of estimate</th></tr></thead>
+    <tbody>
+      {% for b in s.budget.categories %}
+      <tr>
+        <td>{{ b.name }}</td><td class="num">{{ b.estimate }}</td><td class="num">{{ b.committed }}</td><td class="num">{{ b.actual }}</td>
+        <td class="num{{ ' flag' if b.over }}">{{ b.variance }}</td>
+        <td style="vertical-align: middle"><div class="bar{{ ' over' if b.over }}"><span style="width: {{ b.actual_pct }}%"></span></div></td>
+      </tr>
+      {% endfor %}
+      <tr class="total">
+        <td>{{ s.budget.total.name }}</td><td class="num">{{ s.budget.total.estimate }}</td><td class="num">{{ s.budget.total.committed }}</td><td class="num">{{ s.budget.total.actual }}</td>
+        <td class="num{{ ' flag' if s.budget.total.over }}">{{ s.budget.total.variance }}</td>
+        <td style="vertical-align: middle"><div class="bar{{ ' over' if s.budget.total.over }}"><span style="width: {{ s.budget.total.actual_pct }}%"></span></div></td>
+      </tr>
+    </tbody>
+  </table>
+  {% endif %}
+  {% if s.budget.figures %}
+  <div class="section-title" style="border-bottom-color: #ccc; color: #555; margin-top: 11px">Costs on the linked shows</div>
+  <table>
+    <thead><tr><th style="width: 30%">Show</th>{% for label in s.budget.figures.cols %}<th class="num">{{ label }}</th>{% endfor %}</tr></thead>
+    <tbody>
+      {% for r in s.budget.figures.rows %}
+      <tr><td>{{ r.name }}</td>{% for cell in r.cells %}<td class="num">{{ cell }}</td>{% endfor %}</tr>
+      {% endfor %}
+      <tr class="total"><td>Total</td>{% for cell in s.budget.figures.totals %}<td class="num">{{ cell }}</td>{% endfor %}</tr>
+    </tbody>
+  </table>
+  <div class="more" style="color: #777">From each show's own paperwork; not part of the project budget above. Labor actual appears once a show is settled.</div>
+  {% endif %}
+  {% endif %}
+
+  {% if s.team or s.contacts %}
+  <div class="two">
+    {% if s.team %}
+    <div>
+      <div class="section-title">Team <span class="n">· {{ s.team|length }}</span></div>
+      <table>
+        <colgroup><col style="width: 68%"><col style="width: 32%"></colgroup>
+        <thead><tr><th>Name</th><th>Role</th></tr></thead>
+        <tbody>{% for m in s.team %}<tr><td>{{ m.name }}</td><td>{{ m.role }}</td></tr>{% endfor %}</tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% if s.contacts %}
+    <div style="flex-grow: 1.6">
+      <div class="section-title">Key contacts <span class="n">· {{ s.contacts|length + s.contacts_more }}</span></div>
+      <table>
+        <colgroup><col style="width: 36%"><col style="width: 34%"><col style="width: 30%"></colgroup>
+        <thead><tr><th>Name</th><th>Company</th><th>Role</th></tr></thead>
+        <tbody>{% for k in s.contacts %}<tr><td>{{ k.name }}</td><td>{{ k.company }}</td><td>{{ k.role }}</td></tr>{% endfor %}</tbody>
+      </table>
+      {% if s.contacts_more %}<div class="more">and {{ s.contacts_more }} more</div>{% endif %}
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+</body>
+</html>
