@@ -27,10 +27,11 @@ The two rules everything below protects
   any log line: `core.syslog()` writes verbs + integer ids only and the
   catch-all in `wrap` logs the exception TYPE, never its text (psycopg2
   messages can quote row values). The project's own history is pm_activity.
-  There is NO `log_audit` call in this module — the Audit Log page is
-  read by every admin, and a row there (even ids only) would tell an admin
-  without access that the feature exists. The admin routes (grant / revoke /
-  orphan delete / the module switch) leave their trail in syslog instead.
+  The ONE `log_audit` call in this module is the master switch's
+  SETTINGS_CHANGE row — the same row Settings → Modules writes, where every
+  admin sees the switch (the owner's call). Who was granted access and which
+  project was deleted never go to the Audit Log (every admin reads it):
+  grant / revoke / orphan delete leave their trail in syslog (ids only).
 
 Calling convention (BE-docs uses the same, via `core`)
     @app.route('/api/projects/<int:pid>/tasks', methods=['POST'], endpoint='pm_task_create')
@@ -2619,8 +2620,9 @@ def _routes_search(app):
 def _routes_admin(app):
     """The admin page's API. Works with the module off. An admin here manages
     WHO may use the module — never what is in a project: nothing below reads
-    a project's name or content (orphans are listed by id). No audit_log
-    rows (see the module docstring): syslog carries who did what."""
+    a project's name or content (orphans are listed by id). Only the master
+    switch writes an audit row (see the module docstring); grants and orphan
+    deletes are in syslog."""
 
     @app.route('/api/projects/admin/access', methods=['GET'], endpoint='pm_admin_access')
     @wrap_admin
@@ -2678,15 +2680,16 @@ def _routes_admin(app):
     @app.route('/api/projects/admin/module', methods=['POST'], endpoint='pm_admin_module')
     @wrap_admin
     def pm_admin_module(db, uid):
-        """The module switch (it is not listed in Settings → Modules for
-        admins without access, so it lives here). Same row and syslog line
-        as POST /settings/modules; no audit row (see the module docstring)."""
+        """The module switch — the same one Settings → Modules shows every
+        admin (kept here too so the access page is complete). Same row,
+        audit entry and syslog line as POST /settings/modules."""
         v = _body().get('enabled')
         if not isinstance(v, bool):
             raise Refuse(400, 'Bad request.')
         enabled = '1' if v else '0'
         db.execute('INSERT INTO app_settings (key, value) VALUES (%s, %s) '
                    'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', (_SETTING, enabled))
+        _d['log_audit'](db, 'SETTINGS_CHANGE', 'setting', None, detail=f'{_SETTING}={enabled}')
         db.commit()
         try:
             _d['syslog_logger'].info(f'MODULE_TOGGLE key={MODULE_KEY} enabled={enabled} by={_username()}')

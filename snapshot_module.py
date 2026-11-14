@@ -120,8 +120,6 @@ RESTORE_BLOCKED |= UNLISTED_TABLES
 #   notifications / kind 'project' — that module's bell rows carry a task
 #       title and a project name for ONE recipient; an admin reading a backup
 #       must not see them.
-#   app_settings / module_projects_enabled — the module's own on/off switch
-#       (the key alone names it).
 # The filter sits in the FOUR functions every path reads rows or counts
 # through — _scan_pg_dump and _read_pg_dump_table for the snapshot side,
 # _live_count and _read_live_table for the live side — so the table list, the
@@ -130,7 +128,6 @@ RESTORE_BLOCKED |= UNLISTED_TABLES
 # picked, updated or deleted from here. Never read a table's rows any other way.
 ROW_FILTERS = {
     'notifications': ('kind', frozenset({'project'})),
-    'app_settings': ('key', frozenset({'module_projects_enabled'})),
 }
 
 # Churny operational tables — sorted to the bottom of the tables list so the

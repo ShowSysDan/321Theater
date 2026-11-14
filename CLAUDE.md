@@ -1145,7 +1145,9 @@ in full. Module key `projects`, default OFF.
   app.py: ONE `projects_module.register(app, **deps)`. Tables are `pm_*`
   ("project" already means Overhead & Project Crew).
 - **HIDDEN — the owner's requirement: nobody without access can tell it
-  exists.** Keep every rule:
+  exists** — except that every ADMIN sees its master switch in Settings →
+  Modules (the owner's call, 3.49.0). What is in it and who uses it stays
+  hidden from admins without access too. Keep every rule:
   - Access = module ON **and** a `pm_access` row (`has_access()`; granted by
     an admin at `/settings/projects`, which also holds the on/off switch).
     The role does not matter: an admin without a row has no access.
@@ -1171,17 +1173,18 @@ in full. Module key `projects`, default OFF.
     `/my-shows` adds the tasks / projects block (`templates/projects/_my_work.html`
     via `projects_module.my_work()`); without it the page is byte-identical
     to before ("My Shows").
-  - `APP_MODULES` entry is `'unlisted': True`: Settings → Modules lists it
-    only for an admin who has access. `_NOTIFY_PREF_GATED` (`email_tasks`)
+  - The `APP_MODULES` entry is listed (its "Open settings →" is the access
+    page); the `'unlisted'` mechanism (`_modules_see_unlisted`) remains but
+    nothing uses it. `_NOTIFY_PREF_GATED` (`email_tasks`)
     is neither returned to nor accepted from a user without access, and the
     notify-prefs POST is partial (an absent key keeps its stored value).
   - Admin screens must not name it either (review, 3.49.0):
-    NO `log_audit` anywhere in the module, and Settings → Modules writes no
-    audit row for an `'unlisted'` entry (every admin reads the Audit Log —
-    syslog is the trail). `snapshot_module.UNLISTED_TABLES` (every `pm_*`
-    table; the tool behaves as if they did not exist — a NEW pm table must
-    be added) and `ROW_FILTERS` (notifications `kind='project'`, the
-    `module_projects_enabled` setting) sit in the four row readers. The
+    the only Audit Log row is the master switch's SETTINGS_CHANGE (same as
+    any module); grants / revokes / orphan deletes are syslog only (every
+    admin reads the Audit Log). `snapshot_module.UNLISTED_TABLES` (every
+    `pm_*` table; the tool behaves as if they did not exist — a NEW pm table
+    must be added) and `ROW_FILTERS` (notifications `kind='project'`) sit in
+    the four row readers. The
     perf collector records nothing for endpoints starting `pm_`
     (`_PERF_LIVE_SKIP_PREFIX` — every module endpoint name must start
     `pm_`) and never keeps SQL text naming a ` pm_` table

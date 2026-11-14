@@ -1170,19 +1170,19 @@ APP_MODULES = [
         'settings_endpoint': 'spot_settings_page',
     },
     {
-        # 'unlisted': Settings → Modules shows this entry only to an admin
-        # who personally has access to it (_modules_see_unlisted); everyone
-        # else's module list does not contain it at all. Its switch and its
-        # per-user access list live on its own settings page.
+        # The master switch is listed for every admin (the owner's call,
+        # 3.49.0). WHO may use it is still per person, on its settings page
+        # (/settings/projects): with the switch on, nobody without a grant
+        # sees anything of it. (The 'unlisted' flag below this list's
+        # readers still supports hiding an entry; nothing uses it now.)
         'key': 'projects',
         'name': 'Projects',
-        'description': 'Private projects for the people given access: tasks, '
-                       'a timeline, budgets, files, notes and linked shows. '
-                       'Switched on, and access granted per person, on its '
-                       'settings page.',
+        'description': 'Private project workspaces — tasks, a timeline, '
+                       'budgets, files, notes and linked shows. Only the people '
+                       'given access on its settings page can see or use it; '
+                       'a project is seen only by the people on it.',
         'default': '0',
         'settings_endpoint': 'pm_settings',
-        'unlisted': True,
     },
 ]
 
@@ -15914,9 +15914,9 @@ def modules_save():
                    (f"module_{m['key']}_enabled", enabled))
         changed.append((m['key'], enabled))
         if not m.get('unlisted'):
-            # An unlisted module leaves no Audit Log row: every admin reads
-            # that page, and the setting's name alone would give it away.
-            # Its MODULE_TOGGLE syslog line below is the trail.
+            # An unlisted module (none today) leaves no Audit Log row: every
+            # admin reads that page, and the setting's name alone would give
+            # it away. Its MODULE_TOGGLE syslog line below is the trail.
             log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
                       detail=f"module_{m['key']}_enabled={enabled}")
     db.commit(); db.close()
@@ -32498,7 +32498,7 @@ chat_module.register(
 # creates is an ordinary show (same inserts, same audit row as New Show), and
 # every figure it shows comes from the report helpers / the two labor engines,
 # gated for whoever is LOOKING. The rest of this file's wiring for it is small
-# and marked where it sits: APP_MODULES ('unlisted'), _modules_see_unlisted,
+# and marked where it sits: APP_MODULES (listed; access is per person),
 # the show-merge hook, _run_pm_hourly, the perf Live skip, email_tasks in the
 # notify prefs + run_inbox_emails, and my_shows.
 
