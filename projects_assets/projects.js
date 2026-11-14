@@ -380,7 +380,14 @@
         const i = dialogs.indexOf(d);
         if (i >= 0) dialogs.splice(i, 1);
         if (typeof opts.onClose === 'function') { try { opts.onClose(); } catch (e) { /* closing must finish */ } }
-        if (back && back.isConnected && typeof back.focus === 'function') back.focus({preventScroll: true});
+        // The opener may have been redrawn while the dialog was open (a save
+        // re-renders the list it sits in): its twin carries the same data-fk.
+        let to = back;
+        if (to && !to.isConnected && to.dataset && to.dataset.fk) {
+          const fk = to.dataset.fk;
+          to = Array.from(document.querySelectorAll('[data-fk]')).find(n => n.dataset.fk === fk && visible(n)) || null;
+        }
+        if (to && to.isConnected && typeof to.focus === 'function') to.focus({preventScroll: true});
       },
       ask() {
         if (d.dirty() && !window.confirm('You have unsaved changes in this dialog. Discard them?')) return;
@@ -421,6 +428,13 @@
     }
   });
   function closeAllDialogs() { dialogs.slice().reverse().forEach(d => d.close()); }
+  // The ONE leave-the-page guard of this file: an open dialog holding
+  // unsaved input (d.dirty() — app.js marks the overlay on input / change),
+  // or whatever a page registers in `unsaved` (the Overview's autosave boxes).
+  const unsaved = [];
+  window.addEventListener('beforeunload', e => {
+    if (dialogs.some(d => d.dirty()) || unsaved.some(fn => fn())) { e.preventDefault(); e.returnValue = ''; }
+  });
 
   PM.confirm = function (message, okLabel) {
     return new Promise(resolve => {
@@ -490,7 +504,8 @@
     opts = opts || {};
     const title = opts.title || 'Tools';
     const btn = h('button', {type: 'button', class: 'btn btn-sm btn-ghost tools-menu-btn', title, 'aria-label': title,
-                             'aria-haspopup': 'menu', 'aria-expanded': 'false'},
+                             'aria-haspopup': 'menu', 'aria-expanded': 'false',
+                             data: {fk: 'menu:' + provider + ':' + ((opts.data && opts.data.id) || '')}},
                   h('span', {class: 'tools-menu-label', text: opts.label || 'Tools'}),
                   h('span', {class: 'tools-menu-busy', hidden: true}),
                   opts.caret === false ? null : h('span', {class: 'tools-menu-caret', 'aria-hidden': 'true', text: '▾'}));
@@ -502,19 +517,25 @@
 
   // Re-render `box` with `fn` but keep keyboard focus on the "same" control
   // (matched by data-fk) — a poll must not throw a keyboard user to <body>.
-  function keepFocus(box, fn) {
+  // `fallback()` names where focus goes when that control is gone (the row
+  // left the list).
+  function keepFocus(box, fn, fallback) {
     const a = document.activeElement;
     const key = (a && box.contains(a) && a.dataset) ? a.dataset.fk : null;
     fn();
     if (key) {
-      const again = Array.from(box.querySelectorAll('[data-fk]')).find(n => n.dataset.fk === key);
+      const again = Array.from(box.querySelectorAll('[data-fk]')).find(n => n.dataset.fk === key) ||
+                    (fallback ? fallback() : null);
       if (again) again.focus({preventScroll: true});
     }
   }
-  // True while the user is in a form control inside `box` (rule (a)).
+  // True while the user is in a form control inside `box` (rule (a)). A
+  // <select> whose choice was just sent (data-sent) is no longer being
+  // edited: it may be redrawn, and keepFocus puts the focus on its twin.
   function editingIn(box) {
     const a = document.activeElement;
-    return !!(a && box.contains(a) && /^(SELECT|INPUT|TEXTAREA)$/.test(a.tagName) && a.type !== 'checkbox');
+    return !!(a && box.contains(a) && /^(SELECT|INPUT|TEXTAREA)$/.test(a.tagName) && a.type !== 'checkbox' &&
+              !a.dataset.sent);
   }
 
   /* ── Colour swatches (new project, Settings) ───────────────────────────── */
@@ -634,14 +655,17 @@
         h('div', {class: 'field-group'}, h('span', {class: 'field-label', text: 'Colour'}), col.el),
         h('p', {class: 'pm-note', text: 'Only you can see a new project until you add people to it in its Settings.'}));
       const save = h('button', {type: 'button', class: 'btn btn-primary', text: 'Create project'});
+      let saving = false;              // Enter twice must not create two
       const go = () => {
+        if (saving) return;
         if (!name.value.trim()) { PM.toast('Give the project a name.', true); name.focus(); return; }
+        saving = true;
         busy(save, req('POST', '/api/projects', {
           name: name.value, description: desc.value, start_date: start.value || null,
           end_date: end.value || null, color: col.get()})).then(j => {
             d.clean();
-            window.location.href = '/projects/' + j.id;
-          }, say);
+            window.location.href = '/projects/' + j.id;      // `saving` stays set until the page is gone
+          }, e => { saving = false; say(e); });
       };
       save.addEventListener('click', go);
       name.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
@@ -754,7 +778,12 @@
       }
       reindex();
       if (rev != null) {
-        if (rev === knownRev || rev === knownRev + 1) { knownRev = rev; s.project.rev = rev; }
+        if (resp.unchanged === true) {
+          // My save changed nothing, so this is the project's CURRENT rev, not
+          // one I made: never adopt it. If it moved, the move is someone else's.
+          if (rev !== knownRev) PM.reload().catch(() => {});
+        }
+        else if (rev === knownRev || rev === knownRev + 1) { knownRev = rev; s.project.rev = rev; }
         else PM.reload().catch(() => {});                   // someone else wrote in between: take it all
       }
       afterState();
@@ -769,14 +798,20 @@
       });
     }
 
+    let todayTried = null;           // the server date the last "new day" reload was made for
     async function pollOnce() {
       if (gone || document.hidden || !started) return;
       const my = ++pollSeq;
       try {
         const j = await req('GET', base() + '/rev');
         if (my !== pollSeq || gone) return;
+        // A page left open past midnight: the server's date moved on (overdue
+        // flags, "due in the next 7 days", the Timeline's today line). Asked
+        // for once per date, so a bundle that disagrees can never loop.
+        const newDay = typeof j.today === 'string' && !!PM.state && j.today !== PM.state.today && j.today !== todayTried;
+        if (newDay) todayTried = j.today;
         // `>`: a poll that raced our own write answers an older rev.
-        if (typeof j.rev === 'number' && knownRev != null && j.rev > knownRev) await PM.reload();
+        if (newDay || (typeof j.rev === 'number' && knownRev != null && j.rev > knownRev)) await PM.reload();
       } catch (e) {
         if (isGone(e)) handleGone();
         // anything else (offline, a 503): keep the page; the next tick retries
@@ -873,10 +908,20 @@
         u.search = name === 'overview' ? '' : '?tab=' + name;
         window.history.replaceState(null, '', u.pathname + u.search + u.hash);
       } catch (e) { /* history unavailable: the tab still switches */ }
+      showTabButton(name);
       enterTab(name, lastParams);
       if (prev !== name) PM.emit('tab', name);
     };
     const tabBar = $('pm-tabs');
+    // Phones: the strip scrolls sideways — bring the active tab into it (a
+    // deep link may open the last one). Only the strip moves, never the page.
+    function showTabButton(name) {
+      const b = $('pm-tab-' + name);
+      if (!b || b.hidden || tabBar.scrollWidth <= tabBar.clientWidth) return;
+      const br = tabBar.getBoundingClientRect(), r = b.getBoundingClientRect(), pad = 16;
+      if (r.left < br.left + pad) tabBar.scrollLeft -= br.left + pad - r.left;
+      else if (r.right > br.right - pad) tabBar.scrollLeft += r.right - (br.right - pad);
+    }
     tabBar.addEventListener('click', e => {
       const b = e.target.closest('.pm-tab');
       if (b) PM.setTab(b.dataset.tab);
@@ -961,6 +1006,7 @@
       tabCount('notes', s.counts && s.counts.notes);
       tabCount('contacts', s.contacts.length);
       pinHeader();
+      if (PM.activeTab) showTabButton(PM.activeTab);
     }
     // Phones: let the title block scroll away and keep only the tab strip
     // pinned (projects.css reads --pm-pin).
@@ -1349,11 +1395,19 @@
                                   'aria-label': 'Write a comment', 'aria-autocomplete': 'list', 'aria-expanded': 'false'});
         const post = h('button', {type: 'button', class: 'btn btn-primary btn-sm', text: 'Post'});
         const key = attachMentions(ta);
+        let sending = false;           // Enter twice must not post twice
         const send = () => {
-          if (!PM.can.comment) return;
+          if (sending) return;
+          if (!PM.can.comment) {
+            // The right went away (role, archive, "Viewers can comment") while a draft was here.
+            PM.toast('You can no longer comment on this project — copy your text if you need it.', true);
+            return;
+          }
           const text = ta.value.trim();
           if (!text) { ta.focus(); return; }
+          sending = true;
           busy(post, PM.api('POST', '/comments', taskId ? {task_id: taskId, body: text} : {body: text})).then(resp => {
+            sending = false;
             ta.value = '';
             if (resp.comment) comments.push(resp.comment);
             bump(1);
@@ -1362,7 +1416,7 @@
             draw();
             const last = list.lastElementChild;
             if (last) last.scrollIntoView({block: 'nearest'});
-          }, say);
+          }, e => { sending = false; say(e); });
         };
         post.addEventListener('click', send);
         const phone = document.documentElement.classList.contains('mobile-view');
@@ -1938,8 +1992,9 @@
       }
       const vals = () => { const o = {}; Object.keys(f).forEach(k => { o[k] = f[k].value.trim(); }); return o; };
       const save = h('button', {type: 'button', class: 'btn btn-primary', text: isNew ? 'Add contact' : 'Save'});
+      let saving = false;              // Enter twice must not add two
       const go = () => {
-        if (!editable) return;
+        if (!editable || saving) return;
         const v = vals();
         if (!v.name) { PM.toast('Give the contact a name.', true); f.name.focus(); return; }
         let call;
@@ -1952,7 +2007,9 @@
           if (!Object.keys(ch).length) { d.close(); return; }
           call = PM.api('PUT', '/contacts/' + contact.id, ch);
         }
-        busy(save, call).then(resp => { d.close(); PM.applyWrite(resp); PM.toast(isNew ? '✓ Contact added' : '✓ Saved'); }, say);
+        saving = true;
+        busy(save, call).then(resp => { d.close(); PM.applyWrite(resp); PM.toast(isNew ? '✓ Contact added' : '✓ Saved'); },
+                              e => { saving = false; say(e); });
       };
       save.addEventListener('click', go);
       Object.keys(f).forEach(k => { if (k !== 'notes') f[k].addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); go(); } }); });
@@ -1991,7 +2048,7 @@
     let activityStale = false, activityTimer = null;
     PM.registerTab('overview', (function () {
       let pane = null, c = null;       // c = the card bodies that get redrawn
-      const notes = {};                // summary_text / risks_text → {ta, status, dirty, timer, sent}
+      const notes = {};                // summary_text / risks_text → {ta, base, dirty, saving, conflict, …}
 
       function card(titleText, bodyEl, actions) {
         return h('div', {class: 'form-section'},
@@ -2017,51 +2074,142 @@
       }
 
       // Summary / Risks: autosaved text. The <textarea> is created once and
-      // NEVER rebuilt; a poll only writes into it while it is neither
-      // focused nor holding unsaved text (rule (a)).
+      // NEVER rebuilt. Each box keeps a BASELINE (n.base) = the last text the
+      // server is known to hold:
+      //   · nothing unsaved here → a newer server text is shown at once,
+      //     focused or not (a parked old text would be saved over a
+      //     colleague's by the next keystroke);
+      //   · unsaved text here AND the server text moved away from the
+      //     baseline → nothing is autosaved over it; the person chooses
+      //     (Load theirs / Keep mine).
       function noteBox(key, label, hint) {
-        const n = notes[key] = {dirty: false, timer: null, ta: null, view: null,
-                                status: h('span', {class: 'pm-autosave', role: 'status'})};
+        const n = notes[key] = {base: '', dirty: false, saving: false, conflict: false, timer: null, ta: null, view: null,
+                                status: h('span', {class: 'pm-autosave', role: 'status'}),
+                                notice: h('div', {class: 'pm-banner pm-note-conflict', role: 'status', hidden: true})};
         n.ta = h('textarea', {class: 'field-input field-textarea', rows: 5, maxLength: 10000, placeholder: hint, 'aria-label': label});
         n.view = h('p', {class: 'pm-desc'});
-        const save = () => {
+        const later = ms => { clearTimeout(n.timer); n.timer = setTimeout(save, ms); };
+        function save() {
           clearTimeout(n.timer);
-          if (!n.dirty || !PM.can.edit) return;
+          if (!n.dirty || n.saving || n.conflict || gone || !PM.can.edit) return;
           const sent = n.ta.value;
+          n.saving = true;
           n.status.textContent = 'Saving…';
           const body = {};
           body[key] = sent;
           PM.api('PUT', '', body).then(resp => {
+            n.saving = false;
+            // What the server now holds (it trims the text) is the baseline.
+            n.base = (resp.project && typeof resp.project[key] === 'string') ? resp.project[key] : sent;
             n.dirty = n.ta.value !== sent;          // typed more while it was saving
             n.status.textContent = n.dirty ? 'Unsaved changes' : 'Saved';
             PM.applyWrite(resp);
-            if (n.dirty) n.timer = setTimeout(save, 1500);
-          }, e => { n.status.textContent = 'Not saved — ' + e.message; });
+            if (n.dirty && !n.conflict) later(1500);
+          }, e => {
+            n.saving = false;
+            n.status.textContent = 'Not saved — ' + e.message;
+            syncNotes();                            // a server text that arrived while this was in flight
+            // Try again by itself while the text is still unsaved. A refusal
+            // (view only, removed, bad text) would only be refused again.
+            if (n.dirty && !n.conflict && [400, 403, 404, 413].indexOf(e.status) < 0) later(5000);
+          });
+        }
+        // Show the server's text (the caret stays where it was) and make it the baseline.
+        n.adopt = val => {
+          if (n.ta.value !== val) {
+            const a = n.ta.selectionStart, b = n.ta.selectionEnd, focused = document.activeElement === n.ta;
+            n.ta.value = val;
+            if (focused) { try { n.ta.setSelectionRange(Math.min(a, val.length), Math.min(b, val.length)); } catch (e) { /* no caret to keep */ } }
+          }
+          clearTimeout(n.timer);
+          if (n.dirty || n.conflict) n.status.textContent = '';
+          n.base = val; n.dirty = false; n.conflict = false; n.notice.hidden = true;
+        };
+        n.ask = () => {
+          if (n.conflict) return;                   // already asking: the buttons read the newest text when pressed
+          n.conflict = true;
+          clearTimeout(n.timer);
+          n.status.textContent = 'Not saved';
+          const who = summaryEditor();
+          clear(n.notice).append(
+            h('span', null, h('strong', {text: (who || 'Someone') + ' changed this while you were typing'}),
+              h('span', {class: 'pm-note', style: 'display:block', text: 'Your text is not saved. Load theirs replaces it with the saved text; Keep mine saves yours over it.'})),
+            h('button', {type: 'button', class: 'btn btn-sm btn-ghost', text: 'Load theirs', onclick: () => {
+              n.adopt(PM.state.project[key] || '');
+              n.ta.focus();
+            }}),
+            h('button', {type: 'button', class: 'btn btn-sm btn-ghost', text: 'Keep mine', onclick: () => {
+              n.base = PM.state.project[key] || '';   // seen and chosen against: the new baseline
+              n.conflict = false; n.notice.hidden = true; n.dirty = true;
+              n.ta.focus();
+              save();
+            }}));
+          n.notice.hidden = false;
         };
         n.ta.addEventListener('input', () => {
           n.dirty = true;
+          if (n.conflict) return;                   // nothing saves until the person has chosen
           n.status.textContent = 'Unsaved changes';
-          clearTimeout(n.timer);
-          n.timer = setTimeout(save, 1500);
+          later(1500);
         });
-        n.ta.addEventListener('blur', () => { if (n.dirty) save(); else sync(); });
+        n.ta.addEventListener('blur', () => {
+          if (n.dirty) save();
+          else if (!n.conflict && n.ta.value !== n.base) n.ta.value = n.base;     // the trimmed text the server kept
+        });
         n.save = save;
-        return card(label, h('div', {class: 'form-section-body'}, n.ta, n.view), n.status);
+        return card(label, h('div', {class: 'form-section-body'}, n.ta, n.notice, n.view), n.status);
+      }
+      // Who edited the summary / risks just now, when the history can say:
+      // it holds one line per person per 10 minutes. Two candidates → nobody.
+      function summaryEditor() {
+        const names = [];
+        (PM.state.activity || []).forEach(a => {
+          if (a.verb !== 'summary' || a.actor === PM.me.name || names.indexOf(a.actor) >= 0) return;
+          const at = typeof parseServerTime === 'function' ? parseServerTime(a.at) : null;
+          if (at && Date.now() - at.getTime() < 11 * 60000) names.push(a.actor);
+        });
+        return names.length === 1 ? names[0] : '';
       }
       function syncNotes() {
         Object.keys(notes).forEach(key => {
           const n = notes[key], val = PM.state.project[key] || '';
           n.ta.hidden = !PM.can.edit;
           n.view.hidden = PM.can.edit;
-          if (PM.can.edit) {
-            if (!n.dirty && document.activeElement !== n.ta && n.ta.value !== val) n.ta.value = val;
-          } else {
+          if (!PM.can.edit) {
+            n.notice.hidden = true;
             clear(n.view);
             if (val) n.view.appendChild(PM.richText(val));
             else n.view.appendChild(h('span', {class: 'pm-note', text: 'Nothing written yet.'}));
+            return;
           }
+          if (n.saving) return;                     // my own answer sets the baseline
+          if (val === n.base) {
+            // The server is (back) at the text I started from: mine can be saved as usual.
+            if (n.conflict) { n.conflict = false; n.notice.hidden = true; if (n.dirty) n.save(); }
+            return;
+          }
+          if (!n.dirty || n.ta.value === val) n.adopt(val);
+          else n.ask();
         });
       }
+      // Leaving the page with text the debounce has not sent yet: one last
+      // request that survives the unload (only the integer id is in the URL).
+      // A box waiting for "Load theirs / Keep mine" is never sent.
+      window.addEventListener('pagehide', () => {
+        if (gone || !PM.state || !PM.can.edit) return;
+        const body = {};
+        Object.keys(notes).forEach(key => {
+          const n = notes[key];
+          if (n.dirty && !n.conflict) { clearTimeout(n.timer); body[key] = n.ta.value; }
+        });
+        if (!Object.keys(body).length) return;
+        try {
+          fetch('/api/projects/' + PM.pid, {method: 'PUT', keepalive: true, credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
+            body: JSON.stringify(body)}).catch(() => {});
+        } catch (e) { /* refused by the browser: nothing more can be done here */ }
+      });
+      unsaved.push(() => !gone && PM.can.edit && Object.keys(notes).some(key => notes[key].dirty));
 
       function mount(el) {
         pane = el;
@@ -2252,7 +2400,13 @@
           if (!t || !PM.can.edit || qb.disabled) return;
           const bodyJson = {title: t};
           if (f.status) bodyJson.status = f.status;
-          busy(qb, PM.api('POST', '/tasks', bodyJson)).then(resp => { qi.value = ''; PM.applyWrite(resp); qi.focus(); }, say);
+          busy(qb, PM.api('POST', '/tasks', bodyJson)).then(resp => {
+            qi.value = '';
+            PM.applyWrite(resp);
+            qi.focus();
+            const made = PM.taskById(resp.id);
+            if (made && !matches(made)) PM.toast('Task added — hidden by the current filter');
+          }, say);
         };
         qi.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addQuick(); } });
         qb.addEventListener('click', addQuick);
@@ -2277,7 +2431,7 @@
         const s = e.target.closest('select.pm-status');
         if (!s) return;
         const id = +s.dataset.id, t = PM.taskById(id);
-        s.blur();                       // let the redraw that follows go ahead
+        s.dataset.sent = '1';           // chosen: the redraw that follows may go ahead (focus moves to its twin)
         if (!t || !canSetStatus(t)) { draw(); return; }
         PM.saveTask(id, {status: s.value}).catch(() => {});
       }
@@ -2388,6 +2542,9 @@
         if (!pane || PM.activeTab !== 'tasks') return;
         // Rules (a) and (c): not under an open status menu, not mid-drag.
         if ((drag && drag.on) || (editingIn(body) && document.activeElement.tagName === 'SELECT')) { pending = true; return; }
+        // …and not under an open ⋯ menu of a row / card (a rebuild destroys it).
+        const openMenu = body.querySelector('.tools-menu-btn[aria-expanded="true"]');
+        if (openMenu) { pending = true; afterMenu(openMenu); return; }
         pending = false;
         const all = PM.state.tasks;
         tg.mine.lastChild.textContent = String(all.filter(t => t.assignee_id === PM.me.id && t.status !== 'done').length);
@@ -2406,7 +2563,21 @@
         segBoard.setAttribute('aria-pressed', view === 'board' ? 'true' : 'false');
         selSort.hidden = view !== 'list';
         newBtn.hidden = toolsWrap.hidden = quick.hidden = !PM.can.edit;
-        keepFocus(body, view === 'list' ? drawList : drawBoard);
+        // A focused row that left the list (filtered out, deleted elsewhere):
+        // the first control of the list, not <body>.
+        keepFocus(body, view === 'list' ? drawList : drawBoard, () => body.querySelector('button[data-fk], select[data-fk]:not(:disabled)'));
+      }
+      // The redraw that waited for a ⋯ menu: run it when that menu closes.
+      let menuWatch = null;
+      function afterMenu(btn) {
+        if (menuWatch) return;
+        menuWatch = new MutationObserver(() => {
+          if (btn.getAttribute('aria-expanded') === 'true') return;
+          menuWatch.disconnect();
+          menuWatch = null;
+          setTimeout(() => { if (pending) draw(); }, 0);      // after the picked item has run
+        });
+        menuWatch.observe(btn, {attributes: true, attributeFilter: ['aria-expanded']});
       }
 
       /* reorder helpers (POST …/tasks/reorder takes ONE group / column: a
@@ -2503,7 +2674,8 @@
         if (e.target.closest('.tools-menu, a, select')) return;
         if (!grip && e.pointerType !== 'mouse') return;
         drag = {id: t.id, card: cardEl, x0: e.clientX, y0: e.clientY, pointer: e.pointerId, on: false,
-                ghost: null, line: h('div', {class: 'pm-dropline'}), col: null, before: null, dx: 0, dy: 0};
+                ghost: null, line: h('div', {class: 'pm-dropline'}), col: null, before: null, dx: 0, dy: 0,
+                x: e.clientX, y: e.clientY, edge: false, tick: null};
         document.addEventListener('pointermove', onMove, {passive: false});
         document.addEventListener('pointerup', onUp);
         document.addEventListener('pointercancel', onCancel);
@@ -2525,23 +2697,43 @@
           drag.ghost = g;
           drag.card.classList.add('is-dragging');
           drag.on = true;
+          drag.tick = setInterval(() => { if (drag && drag.on && drag.edge) follow(); }, 50);
           document.documentElement.classList.add('pm-drag-on');
           if (window.ToolsMenu) window.ToolsMenu.close(false);
           if (window.getSelection) { try { window.getSelection().removeAllRanges(); } catch (e2) { /* nothing selected */ } }
         }
         e.preventDefault();
-        drag.ghost.style.left = (e.clientX - drag.dx) + 'px';
-        drag.ghost.style.top = (e.clientY - drag.dy) + 'px';
+        drag.x = e.clientX; drag.y = e.clientY;
+        follow();
+      }
+      // Where the card would land for the pointer's last position — and the
+      // edge scrolling. Runs on every move and, while the pointer rests at an
+      // edge, on a timer (a finger held still sends no moves).
+      function follow() {
+        const x = drag.x, y = drag.y;
+        drag.ghost.style.left = (x - drag.dx) + 'px';
+        drag.ghost.style.top = (y - drag.dy) + 'px';
         const board = body.querySelector('.pm-board');
         if (!board) return;
+        board.classList.add('is-dragging');             // phones: no scroll-snap while a card is carried
         const br = board.getBoundingClientRect();
-        if (e.clientX > br.right - 36) board.scrollLeft += 16;          // swipe the columns along on a phone
-        else if (e.clientX < br.left + 36) board.scrollLeft -= 16;
+        drag.edge = true;
+        if (x > br.right - 36) board.scrollLeft += 16;          // swipe the columns along on a phone
+        else if (x < br.left + 36) board.scrollLeft -= 16;
         // …and the page, so a card can travel up or down a long column.
-        if (e.clientY > window.innerHeight - 90) window.scrollBy(0, 16);
-        else if (e.clientY < 130) window.scrollBy(0, -16);
-        const under = document.elementFromPoint(e.clientX, e.clientY);
-        const col = (under && under.closest) ? under.closest('.pm-col') : null;
+        else if (y > window.innerHeight - 90) window.scrollBy(0, 16);
+        else if (y < 130) window.scrollBy(0, -16);
+        else drag.edge = false;
+        const under = document.elementFromPoint(x, y);
+        let col = (under && under.closest) ? under.closest('.pm-col') : null;
+        if ((!col || !body.contains(col)) && y >= br.top && y <= br.bottom) {
+          // Inside the board but on no column's box (the lane under a short
+          // column): the column is the one the pointer's X is in.
+          col = Array.from(board.querySelectorAll('.pm-col')).find(cn => {
+            const r = cn.getBoundingClientRect();
+            return x >= r.left && x <= r.right;
+          }) || null;
+        }
         body.querySelectorAll('.pm-col').forEach(cn => cn.classList.toggle('is-over', cn === col));
         if (!col || !body.contains(col)) { drag.col = null; drag.line.remove(); return; }
         const colBody = col.querySelector('.pm-col-body');
@@ -2549,7 +2741,7 @@
         Array.from(colBody.querySelectorAll('.pm-tcard')).some(cn => {
           if (cn === drag.card) return false;
           const r = cn.getBoundingClientRect();
-          if (e.clientY < r.top + r.height / 2) { before = cn; return true; }
+          if (y < r.top + r.height / 2) { before = cn; return true; }
           return false;
         });
         drag.col = col.dataset.status;
@@ -2565,8 +2757,10 @@
         document.removeEventListener('keydown', onKey, true);
         if (!dg || !dg.on) return;                 // it was a plain click
         noClickUntil = performance.now() + 350;
+        clearInterval(dg.tick);
         if (dg.ghost) dg.ghost.remove();
         dg.line.remove();
+        body.querySelectorAll('.pm-board.is-dragging').forEach(bn => bn.classList.remove('is-dragging'));
         dg.card.classList.remove('is-dragging');
         document.documentElement.classList.remove('pm-drag-on');
         body.querySelectorAll('.pm-col.is-over').forEach(cn => cn.classList.remove('is-over'));
@@ -2759,7 +2953,13 @@
       }
       function saveSharing(body) {
         if (!PM.can.manage || PM.me.archived) { sync(); return; }
-        PM.api('PUT', '', body).then(resp => { PM.toast('✓ Saved'); return PM.reload(); }).catch(e => { say(e); sync(); });
+        PM.api('PUT', '', body).then(resp => { PM.toast('✓ Saved'); return PM.reload(); }).catch(e => {
+          say(e);
+          // Not saved: show what IS saved (sync() leaves a focused menu alone).
+          vis.value = PM.state.project.budget_visibility;
+          vcc.checked = !!PM.state.project.viewers_can_comment;
+          sync();
+        });
       }
       function loadPeople() {
         const my = ++peopleSeq;
@@ -2783,7 +2983,8 @@
             } else {
               const sel = select([{value: 'editor', label: 'Editor — can change things'}, {value: 'viewer', label: 'Viewer — can look'}], m.role,
                                  {'aria-label': 'Role of ' + m.name, disabled: locked, data: {fk: 'role' + m.id}});
-              sel.addEventListener('change', () => { sel.blur(); memberWrite(PM.api('PUT', '/members/' + m.id, {role: sel.value}), '✓ Role changed'); });
+              // data-sent: this menu is done with — the redraw may replace it (focus goes to its twin).
+              sel.addEventListener('change', () => { sel.dataset.sent = '1'; memberWrite(PM.api('PUT', '/members/' + m.id, {role: sel.value}), '✓ Role changed'); });
               row.appendChild(sel);
               row.appendChild(h('button', {type: 'button', class: 'btn btn-sm btn-ghost', text: 'Make owner', disabled: locked || !m.active, data: {fk: 'own' + m.id},
                 title: m.active ? 'Hand the project over to ' + m.name : 'They no longer have access',
@@ -2799,6 +3000,9 @@
       }
       function drawAdd() {
         if (editingIn(addBox)) return;
+        keepFocus(addBox, fillAdd);
+      }
+      function fillAdd() {
         clear(addBox);
         if (PM.me.archived) { addBox.hidden = true; return; }
         addBox.hidden = false;
@@ -2809,7 +3013,7 @@
         }
         const who = select([{value: '', label: 'Add someone…'}].concat(people.map(p => ({value: p.id, label: p.name}))), '', {'aria-label': 'Person to add'});
         const role = select([{value: 'editor', label: 'as Editor'}, {value: 'viewer', label: 'as Viewer'}], 'editor', {class: 'field-input pm-role-sel', 'aria-label': 'Their role'});
-        const btn = h('button', {type: 'button', class: 'btn btn-primary btn-sm', text: 'Add'});
+        const btn = h('button', {type: 'button', class: 'btn btn-primary btn-sm', text: 'Add', data: {fk: 'addm'}});
         btn.addEventListener('click', () => {
           if (!who.value) { who.focus(); return; }
           who.blur(); role.blur();

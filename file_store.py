@@ -13,7 +13,7 @@ which has BOTH an inline BYTEA column and an S3 key column:
   asset_photos   asset_types             photo         photo_s3_key
   rentals        show_external_rentals   pdf_data      s3_key
   pdf_templates  pdf_templates           pdf_data      s3_key
-  project_files  pm_file_versions        file_data     s3_key
+  module_files   pm_file_versions        file_data     s3_key
 
 The row itself carries the show association (show_id), the file type
 (mime_type / photo_mime / always-PDF) and name, and — new in 3.1.0 — a
@@ -124,7 +124,7 @@ KINDS = OrderedDict([
     # error list), which every admin can read; the S3 key is ids only for the
     # same reason. Not in the admin File Manager. Archived versions are gzip
     # in the database like archived attachments (compressible).
-    ('project_files', {
+    ('module_files', {
         'label': 'Module files',
         'table': 'pm_file_versions', 'blob': 'file_data', 'key': 's3_key',
         'compressible': True,
@@ -133,7 +133,7 @@ KINDS = OrderedDict([
                  "COALESCE(NULLIF(mime_type,''),'application/octet-stream') AS mime, "
                  "COALESCE(is_compressed,0) AS is_compressed, "
                  "(deleted_at IS NOT NULL) AS archived"),
-        's3_key_for': lambda r: (f"project-files/{r['project_id']}/{r['file_id']}/"
+        's3_key_for': lambda r: (f"mf/{r['project_id']}/{r['file_id']}/"
                                  f"v{r['version']}-{r['id']}"),
     }),
 ])

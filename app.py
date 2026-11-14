@@ -1335,10 +1335,15 @@ _PERF_LIVE_FLUSH = 2.0
 _PERF_LIVE_BUFFER_MAX = 500
 _PERF_LIVE_TTL = 600             # seconds a Live-view renewal keeps capture on
 _PERF_LIVE_SKIP = frozenset(('static', 'performance_live_feed', 'performance_live_control'))
-# Endpoints with this prefix belong to a module whose pages are private to
-# the people given access: their requests (path + username, one row each)
-# never go into the Live request log, which every admin can watch.
+# Endpoints with this prefix belong to a module that is private to the
+# people given access, and every admin can open the Performance pages. So
+# their requests are not recorded at all — not in the Live request log
+# (path + username), not in the per-page stats (endpoint name, slowest
+# path), not in the slow-query list — and a statement that names one of the
+# module's tables never has its SQL text kept, whichever page ran it
+# (_PERF_PRIVATE_SQL; its time still counts).
 _PERF_LIVE_SKIP_PREFIX = 'pm_'
+_PERF_PRIVATE_SQL = ' pm_'
 _perf_live = {'until': 0.0, 'checked': 0.0, 'flushed': time.time()}
 _perf_live_buf = []
 _PERF_WORKER = f"{socket.gethostname()}:{os.getpid()}"
@@ -1354,8 +1359,8 @@ def _perf_record_query(sql, duration_s):
     g._perf_db_count = getattr(g, '_perf_db_count', 0) + 1
     if ms > getattr(g, '_perf_db_max_ms', 0.0):
         g._perf_db_max_ms = ms
-        g._perf_db_max_sql = sql[:_PERF_SQL_SNIPPET_LEN]
-    if ms >= _perf_conf['slow_ms']:
+        g._perf_db_max_sql = '' if _PERF_PRIVATE_SQL in sql else sql[:_PERF_SQL_SNIPPET_LEN]
+    if ms >= _perf_conf['slow_ms'] and _PERF_PRIVATE_SQL not in sql:
         slow = getattr(g, '_perf_slow', None)
         if slow is None:
             slow = g._perf_slow = []
@@ -1559,6 +1564,8 @@ def _perf_finish_request(exc=None):
                     _perf_live_buf.clear()
         if live_rows:
             _perf_live_flush(live_rows)
+        if endpoint.startswith(_PERF_LIVE_SKIP_PREFIX):
+            return              # private module: no stats row (see above)
 
         flush_pages = flush_slow = None
         with _perf_lock:
@@ -10334,10 +10341,43 @@ def _convert_attachment_to_pdf(data, mime, filename, section_label,
     return None
 
 
+# LibreOffice profile for conversions of UPLOADED documents. A document can
+# reference things outside itself — an image at http://10.x.x.x/… or at
+# file:///etc/… — and a stock LibreOffice fetches them while converting: a
+# request made from inside the network (SSRF) and, for a file the service
+# can read, its picture embedded in the PDF handed back to the uploader.
+# So every conversion runs with this profile:
+#   - BlockUntrustedRefererLinks: links from a document that is not in a
+#     trusted location are not loaded (the temp dir is not one);
+#   - macros off (level 3 + DisableMacrosExecution), no link updates in
+#     Writer / Calc;
+#   - a manual proxy pointing at a closed local port, so anything that still
+#     tried the network gets nowhere.
+# Verified (3.49.0) with an .odt holding an http:// and a file:// image:
+# neither is fetched. Keep it for every soffice call that touches an upload.
+_LO_HARDENED_XCU = '''<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="BlockUntrustedRefererLinks" oor:op="fuse"><value>true</value></prop></item>
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="MacroSecurityLevel" oor:op="fuse"><value>3</value></prop></item>
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="DisableMacrosExecution" oor:op="fuse"><value>true</value></prop></item>
+<item oor:path="/org.openoffice.Office.Writer/Content/Update"><prop oor:name="Link" oor:op="fuse"><value>0</value></prop></item>
+<item oor:path="/org.openoffice.Office.Calc/Content/Update"><prop oor:name="Link" oor:op="fuse"><value>1</value></prop></item>
+<item oor:path="/org.openoffice.Inet/Settings"><prop oor:name="ooInetProxyType" oor:op="fuse"><value>1</value></prop></item>
+<item oor:path="/org.openoffice.Inet/Settings"><prop oor:name="ooInetHTTPProxyName" oor:op="fuse"><value>127.0.0.1</value></prop></item>
+<item oor:path="/org.openoffice.Inet/Settings"><prop oor:name="ooInetHTTPProxyPort" oor:op="fuse"><value>9</value></prop></item>
+<item oor:path="/org.openoffice.Inet/Settings"><prop oor:name="ooInetHTTPSProxyName" oor:op="fuse"><value>127.0.0.1</value></prop></item>
+<item oor:path="/org.openoffice.Inet/Settings"><prop oor:name="ooInetHTTPSProxyPort" oor:op="fuse"><value>9</value></prop></item>
+<item oor:path="/org.openoffice.Inet/Settings"><prop oor:name="ooInetNoProxy" oor:op="fuse"><value></value></prop></item>
+</oor:items>
+'''
+
+
 def _libreoffice_convert_to_pdf(data, filename):
     """Convert an Office / OpenDocument file to PDF via LibreOffice headless.
     Each call uses an isolated user-installation dir so concurrent requests
-    don't collide on the shared profile lock. Returns PDF bytes or None."""
+    don't collide on the shared profile lock, pre-seeded with
+    _LO_HARDENED_XCU so the document cannot make LibreOffice fetch anything
+    outside itself. Returns PDF bytes or None."""
     try:
         import subprocess, tempfile, os
         from werkzeug.utils import secure_filename as _sf
@@ -10350,7 +10390,10 @@ def _libreoffice_convert_to_pdf(data, filename):
             with open(src_path, 'wb') as f:
                 f.write(data)
             profile_dir = os.path.join(workdir, 'profile')
-            os.makedirs(profile_dir, exist_ok=True)
+            os.makedirs(os.path.join(profile_dir, 'user'), exist_ok=True)
+            with open(os.path.join(profile_dir, 'user', 'registrymodifications.xcu'),
+                      'w', encoding='utf-8') as f:
+                f.write(_LO_HARDENED_XCU)
             result = subprocess.run(
                 [
                     'soffice',
@@ -11680,6 +11723,9 @@ _ADVANCE_SCALAR_FIELDS = [
 def _purge_show(db, show_id):
     """Delete a show plus the child rows not handled by ON DELETE CASCADE.
     Caller commits. Used by both delete_show and merge_shows."""
+    # The optional module's own bookkeeping for its links to this show (its
+    # tables cascade by FK). First, before any row of the show is touched.
+    projects_module.on_show_delete(db, show_id)
     for tbl in _SHOW_PURGE_TABLES:
         db.execute(f'DELETE FROM {tbl} WHERE show_id=%s', (show_id,))
     db.execute('DELETE FROM shows WHERE id=%s', (show_id,))
@@ -13018,6 +13064,8 @@ def delete_user(uid):
                          user_id = NULL
                     FROM users u
                    WHERE u.id = %s AND show_comments.user_id = u.id""", (uid,))
+    # The optional module's bell rows for this person (no FK on notifications).
+    projects_module.on_user_delete(db, uid)
     db.execute('DELETE FROM users WHERE id=%s', (uid,))
     db.commit(); db.close()
     syslog_logger.info(f"USER_DELETE user_id={uid} by={session.get('username')}")
@@ -15865,8 +15913,12 @@ def modules_save():
         db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                    (f"module_{m['key']}_enabled", enabled))
         changed.append((m['key'], enabled))
-        log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
-                  detail=f"module_{m['key']}_enabled={enabled}")
+        if not m.get('unlisted'):
+            # An unlisted module leaves no Audit Log row: every admin reads
+            # that page, and the setting's name alone would give it away.
+            # Its MODULE_TOGGLE syslog line below is the trail.
+            log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
+                      detail=f"module_{m['key']}_enabled={enabled}")
     db.commit(); db.close()
     for key, enabled in changed:
         syslog_logger.info(
@@ -27955,6 +28007,27 @@ def _detect_service_name():
             pass
     return None
 
+def _update_private(line):
+    """True for an updater line (a commit subject, a changed path, a line of
+    `git pull` output) that names the optional per-user-access module — its
+    files are projects_*.py / project_docs.py / projects_assets/ /
+    templates/projects/ / templates/pdf/project_*. Every admin can open
+    Settings → System → Check for updates, and that module must stay
+    invisible to admins who were not given it (CLAUDE.md "Projects module").
+    "Overhead & Project Crew" is an ordinary feature and stays visible."""
+    low = (line or '').lower()
+    return 'project' in low and 'project crew' not in low and 'overhead' not in low
+
+
+def _update_public(lines):
+    """`lines` without the module's, plus one neutral line counting them."""
+    shown = [l for l in lines if not _update_private(l)]
+    hidden = len(lines) - len(shown)
+    if hidden:
+        shown.append(f'(+{hidden} more)')
+    return shown
+
+
 def _run_update(service_name):
     """Background thread: git pull + archive + restart + rollback on failure."""
     import glob as _glob
@@ -27981,7 +28054,7 @@ def _run_update(service_name):
             _update_state['phase'] = 'done'
             return
 
-        _update_log(f'Files to update: {", ".join(changed)}')
+        _update_log(f'Files to update: {", ".join(_update_public(changed))}')
 
         # Archive changed files
         _update_state['phase'] = 'archiving'
@@ -28005,7 +28078,8 @@ def _run_update(service_name):
                            cwd=os.path.dirname(os.path.abspath(__file__)))
         if r.returncode != 0:
             raise RuntimeError(f'git pull failed: {r.stderr.strip() or r.stdout.strip()}')
-        _update_log(r.stdout.strip() or 'Pull successful.')
+        _update_log('\n'.join(_update_public(r.stdout.strip().split('\n'))) if r.stdout.strip()
+                    else 'Pull successful.')
 
         # Run DB migration
         _update_log('Running database migrations…')
@@ -28072,7 +28146,8 @@ def update_check():
                             capture_output=True, text=True, timeout=10,
                             cwd=os.path.dirname(os.path.abspath(__file__)))
         files = [f.strip() for f in r3.stdout.split('\n') if f.strip()]
-        return jsonify({'available': bool(commits), 'commits': commits, 'files': files})
+        return jsonify({'available': bool(commits), 'commits': _update_public(commits),
+                        'files': _update_public(files)})
     except Exception as e:
         return jsonify({'available': False, 'error': str(e)})
 

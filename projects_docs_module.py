@@ -29,7 +29,7 @@ The rules this file protects (they are the point of the feature)
   the sibling's readers hide those two — and its detail never holds an
   amount. Activity about a budget-only file uses `budget_source` too.
 - FILES follow CLAUDE.md "File redundancy": the bytes live on
-  pm_file_versions (file_store kind `project_files`), every read goes through
+  pm_file_versions (file_store kind `module_files`), every read goes through
   `file_store.read_bytes`, `content_sha256` is the hash of the UNCOMPRESSED
   bytes, deleting is ARCHIVE (gzip the database copy, keep the S3 object) and
   only the owner's purge of an already archived file destroys bytes — S3
@@ -64,6 +64,7 @@ from flask import jsonify, make_response, render_template, request
 from markupsafe import Markup
 from werkzeug.utils import secure_filename
 
+import app_config
 import project_docs
 
 core = None             # the namespace projects_module.register() built (set by register)
@@ -72,6 +73,7 @@ _NOT_FOUND = 'Not found.'
 _TOO_LONG = 'This note is too long.'
 _NO_PREVIEW = 'No preview available.'
 _NO_SUCH_FILE = 'That file is not on this project.'
+_NOTE_PDF_MAX_TAGS = 24_000      # see pm_note_pdf (≈ 12,000 elements, a few seconds)
 
 _MONEY = (('estimate', 'Estimate'), ('committed', 'Committed'), ('actual', 'Actual'))
 # (column, cap key in core.caps, label, single line)
@@ -426,7 +428,7 @@ def _routes_budget(app):
         why = core.clean_text(body.get('note'), core.caps['comment'], 'Reason')
         f = {k: v for k, v in _line_fields(db, pid, body, cur).items() if _line_changed(cur, k, v)}
         if not f:                   # an identical save changes (and logs) nothing
-            return jsonify({'success': True, 'rev': c.project['rev'],
+            return jsonify({'success': True, 'unchanged': True, 'rev': c.project['rev'],
                             'line': _budget(db, pid, lid)['lines'][0]})
         sets = ', '.join(f'{k} = %s' for k in f)        # keys from the fixed lists above
         db.execute(f'UPDATE pm_budget_lines SET {sets}, updated_at = CURRENT_TIMESTAMP '
@@ -587,7 +589,7 @@ def _vcols(db, alias='v'):
     database copy is the one served)."""
     return (core.d['cols_except'](db, 'pm_file_versions',
                                   ('file_data', 'extracted_text', 'email_json'), alias)
-            + ', ' + core.d['file_store'].in_db_col('project_files', alias))
+            + ', ' + core.d['file_store'].in_db_col('module_files', alias))
 
 
 def _file(db, c, fid, state='live', lock=False, code=404):
@@ -634,7 +636,7 @@ def _read(db, v):
     db.rollback()
     fs = core.d['file_store']
     try:
-        return fs.read_bytes('project_files', v)
+        return fs.read_bytes('module_files', v)
     except fs.FileMissing:
         raise _refuse(404, _NOT_FOUND)
     except fs.FileUnavailable:
@@ -694,8 +696,8 @@ def _files_out(db, c, archived=False, fid=None):
 
 def _s3_key(pid, fid, version, vid):
     """Ids only — the same key file_store's migration tool derives
-    (KINDS['project_files']['s3_key_for'])."""
-    return f'project-files/{int(pid)}/{int(fid)}/v{int(version)}-{int(vid)}'
+    (KINDS['module_files']['s3_key_for'])."""
+    return f'mf/{int(pid)}/{int(fid)}/v{int(version)}-{int(vid)}'
 
 
 def _to_s3(db, pid, fid, vid, version, data, mime):
@@ -919,12 +921,18 @@ def _extract_one(pid, fid, vid):
         return False
     text, info, status = '', None, 'error'
     try:
-        data = core.d['file_store'].read_bytes('project_files', v)
-        # project_docs never raises and never logs: '' / None mean "nothing".
-        if v['kind'] == 'email':
-            info = project_docs.parse_email(data, v['filename'])
-        text = project_docs.extract_text(data, v['filename'], v['mime_type'] or '')
-        status = 'done' if (text or info) else 'none'
+        data = core.d['file_store'].read_bytes('module_files', v)
+        # In a child process with CPU / memory / time limits (a crafted PDF
+        # or office file must not pin or kill this worker), and without the
+        # app's secrets in its environment. Never raises, never logs; a
+        # child that was stopped by a limit answers ok=False → 'error', which
+        # the drawer shows as "could not be read" with Try again.
+        text, info, ok = project_docs.extract_isolated(
+            data, v['filename'], v['mime_type'] or '', want_email=v['kind'] == 'email',
+            env=app_config.child_env())
+        status = ('done' if (text or info) else 'none') if ok else 'error'
+        if not ok:
+            core.syslog('PM_EXTRACT_FAILED', pid, file_id=fid, version_id=vid)
         del data
     except Exception as e:
         core.log_failure('extract_read', e, version_id=vid)
@@ -1104,7 +1112,7 @@ def _routes_files(app):
         if 'budget_only' in new and not c.can_budget:
             raise _refuse(403, 'Only people who can see the budget can change that.')
         if not new:
-            return jsonify({'success': True, 'rev': c.project['rev'],
+            return jsonify({'success': True, 'unchanged': True, 'rev': c.project['rev'],
                             'file': _files_out(db, c, fid=fid)[0]})
         if new.get('budget_only') == 1:
             _make_budget_only(db, pid, fid)
@@ -1242,7 +1250,10 @@ def _routes_files(app):
         if queued:
             _enqueue(pid, fid, vid)         # a no-op when this process is already on it
             core.syslog('PM_FILE_REEXTRACT', pid, file_id=fid, version_id=vid)
-        return jsonify({'success': True, 'rev': rev, 'queued': queued, 'extract_status': status})
+        out = {'success': True, 'rev': rev, 'queued': queued, 'extract_status': status}
+        if rev == c.project['rev']:
+            out['unchanged'] = True         # no rev was written: see PM.applyWrite
+        return jsonify(out)
 
     @app.route('/api/projects/<int:pid>/files/<int:fid>/v/<int:vid>/attachments/<int:n>/save',
                methods=['POST'], endpoint='pm_file_attachment_save')
@@ -1605,7 +1616,7 @@ def _routes_notes(app):
         except ValueError:
             raise _refuse(413, _TOO_LONG)
         if title == n['title'] and html == (n['body_html'] or ''):
-            return jsonify({'success': True, 'rev': c.project['rev'], 'note': _note_full(n)})
+            return jsonify({'success': True, 'unchanged': True, 'rev': c.project['rev'], 'note': _note_full(n)})
         _keep_version(db, n, uid, force=True)
         if not _write_note(db, c, n, title, html):
             db.rollback()
@@ -1623,11 +1634,18 @@ def _routes_notes(app):
         c = core.ctx(db, pid)
         n = _note(db, pid, nid)
         db.rollback()
+        body = _safe_html(n['body_html'])
+        # WeasyPrint's time grows faster than linearly with the number of
+        # elements: a note within the size limit made of ~50,000 tiny ones
+        # (<br>, empty cells) held a worker thread for over a minute. Word
+        # export has no such cost, so it is the way out for those.
+        if body.count('<') > _NOTE_PDF_MAX_TAGS:
+            raise _refuse(413, 'This note has too many lines and cells to print as a PDF — use Word instead.')
         html = render_template(
             'pdf/project_note_pdf.html', title=n['title'], project=c.project['name'],
             # Sanitized AGAIN here: this is the one place the stored HTML is
             # rendered as markup on the server.
-            body=Markup(_safe_html(n['body_html'])),
+            body=Markup(body),
             updated_by=n['updated_name'] or '', updated=_fmt_stamp(n['updated_at']),
             generated=_fmt_stamp(datetime.now()), generated_by=c.name, logo=_logo())
         pdf = _render_pdf(html)

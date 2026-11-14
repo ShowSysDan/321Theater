@@ -49,8 +49,11 @@ import datetime
 import html as _html
 import importlib
 import io
+import json
 import logging
+import os
 import re
+import sys
 import threading
 import time
 import warnings
@@ -59,7 +62,7 @@ import zlib
 from html.parser import HTMLParser
 
 __all__ = [
-    'extract_text', 'parse_email', 'email_attachment', 'has_msg_support',
+    'extract_text', 'extract_isolated', 'parse_email', 'email_attachment', 'has_msg_support',
     'sniff', 'sanitize_note_html', 'html_to_text', 'html_to_docx',
     'NOTE_HTML_MAX',
 ]
@@ -2385,5 +2388,75 @@ def _selftest():
     print('OK' + (' (skipped: %s)' % ', '.join(skipped) if skipped else ''))
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# extract_isolated — the same readers, in a child process with hard limits
+# ═════════════════════════════════════════════════════════════════════════════
+# The readers above bound their OUTPUT (characters, pages, rows, a time budget
+# checked between pages), but a hostile file can still make ONE page or ONE
+# part expensive: a 2 KB PDF whose form XObjects call each other expands to
+# millions of drawing operations inside a single extract_text() call, and a
+# small .docx can inflate to hundreds of MB inside python-docx. In-process
+# that is a worker thread pinned for minutes or the whole gunicorn worker
+# killed for memory. So uploads are read in a CHILD process that the kernel
+# stops at a CPU and an address-space limit, and that the parent kills at a
+# wall-clock limit. A file that trips a limit simply has no text.
+_ISOLATED_CPU_S = 60              # RLIMIT_CPU (seconds of CPU)
+_ISOLATED_WALL_S = 120            # the parent's kill timer
+_ISOLATED_MEM = 1536 * 1024 ** 2  # RLIMIT_AS (bytes of address space)
+_ISOLATED_OUT_MAX = 8_000_000     # bytes of JSON the parent will read back
+
+
+def extract_isolated(data, filename, mime='', want_email=False, env=None):
+    """extract_text() — and parse_email() when `want_email` — run in a child
+    process under CPU / memory / time limits. Returns (text, info, ok):
+    ok is False when the child could not be run, was stopped by a limit or
+    answered nonsense (text '' and info None then). Never raises, never logs.
+    `env` is the child's environment (the caller passes one without the
+    app's secrets). The file name travels on stdin, never in argv (a process
+    list is readable by other users of the machine)."""
+    try:
+        import subprocess
+        head = json.dumps({'filename': str(filename or ''), 'mime': str(mime or ''),
+                           'email': bool(want_email)}).encode('utf-8')
+        payload = len(head).to_bytes(4, 'big') + head + bytes(data or b'')
+        r = subprocess.run([sys.executable, os.path.abspath(__file__), '--extract'],
+                           input=payload, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=_ISOLATED_WALL_S, env=env)
+        if r.returncode != 0 or not r.stdout or len(r.stdout) > _ISOLATED_OUT_MAX:
+            return '', None, False
+        out = json.loads(r.stdout.decode('utf-8'))
+        text, info = out.get('text'), out.get('info')
+        if not isinstance(text, str) or not (info is None or isinstance(info, dict)):
+            return '', None, False
+        return text, info, True
+    except Exception:
+        return '', None, False
+
+
+def _extract_child():
+    """`python project_docs.py --extract`: the child side of
+    extract_isolated(). Limits itself first, then reads one job from stdin
+    and writes one JSON object to stdout."""
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_CPU, (_ISOLATED_CPU_S, _ISOLATED_CPU_S + 5))
+        resource.setrlimit(resource.RLIMIT_AS, (_ISOLATED_MEM, _ISOLATED_MEM))
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except Exception:
+        pass                        # no `resource` (not Linux): the wall clock still applies
+    raw = sys.stdin.buffer.read()
+    n = int.from_bytes(raw[:4], 'big')
+    head = json.loads(raw[4:4 + n].decode('utf-8'))
+    data = raw[4 + n:]
+    del raw
+    info = parse_email(data, head.get('filename') or '') if head.get('email') else None
+    text = extract_text(data, head.get('filename') or '', head.get('mime') or '')
+    sys.stdout.write(json.dumps({'text': text, 'info': info}, ensure_ascii=True))
+    sys.stdout.flush()
+
+
 if __name__ == '__main__':
-    _selftest()
+    if sys.argv[1:2] == ['--extract']:
+        _extract_child()
+    else:
+        _selftest()

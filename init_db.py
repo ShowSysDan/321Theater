@@ -2102,7 +2102,7 @@ CREATE TABLE IF NOT EXISTS pm_files (
 );
 CREATE INDEX IF NOT EXISTS idx_pm_files_project ON pm_files(project_id);
 
--- The file_store kind 'project_files' (file_data / s3_key / content_sha256
+-- The file_store kind 'module_files' (file_data / s3_key / content_sha256
 -- of the UNCOMPRESSED bytes). Real versions: version >= 1 and preview_of
 -- NULL. A cached PDF preview of an office document is a row with preview_of
 -- = the source version id and version = -(source version number), at most

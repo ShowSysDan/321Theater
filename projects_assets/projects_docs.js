@@ -147,7 +147,7 @@
     if (counts) return PM.reload().catch(() => {});
     if (resp && typeof resp.rev === 'number') {
       ownWrite = true;
-      try { PM.applyWrite({rev: resp.rev}); } finally { ownWrite = false; }
+      try { PM.applyWrite({rev: resp.rev, unchanged: resp.unchanged}); } finally { ownWrite = false; }
     }
     return Promise.resolve();
   }

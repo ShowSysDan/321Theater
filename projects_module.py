@@ -27,8 +27,10 @@ The two rules everything below protects
   any log line: `core.syslog()` writes verbs + integer ids only and the
   catch-all in `wrap` logs the exception TYPE, never its text (psycopg2
   messages can quote row values). The project's own history is pm_activity.
-  `log_audit` is used only by the admin routes (grant / revoke / orphan
-  delete / the module switch), with ids only.
+  There is NO `log_audit` call in this module — the Audit Log page is
+  read by every admin, and a row there (even ids only) would tell an admin
+  without access that the feature exists. The admin routes (grant / revoke /
+  orphan delete / the module switch) leave their trail in syslog instead.
 
 Calling convention (BE-docs uses the same, via `core`)
     @app.route('/api/projects/<int:pid>/tasks', methods=['POST'], endpoint='pm_task_create')
@@ -109,6 +111,7 @@ CAPS = types.MappingProxyType({
 })
 
 _INT_MAX = 2147483647            # PostgreSQL INTEGER: a bigger id can't exist
+_DATE_MAX = date(2200, 12, 31)   # the last date parse_date accepts
 _COLOR_RE = re.compile(r'^#[0-9a-fA-F]{6}$')
 _DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _ENTITY_RE = re.compile(r'^[a-z_]{1,30}$')
@@ -120,12 +123,17 @@ _NAME_SQL = "COALESCE(NULLIF(TRIM(u.display_name), ''), u.username)"
 
 
 def _access_sql(expr):
-    """SQL for "this user id has module access right now": a pm_access row
-    and not a document viewer (viewers are confined to /viewer; has_access()
-    is False for them whatever the table says). The module switch itself is
-    checked separately — it is the same for everyone."""
+    """SQL for "this user id can use the module right now": a pm_access row
+    on an account that can sign in and get here — not a document viewer
+    (viewers are confined to /viewer; has_access() is False for them whatever
+    the table says), not locked, not awaiting approval. Locking is how a
+    person is offboarded, and they keep their pm_access and pm_members rows:
+    without this a locked account could be handed ownership and would be sent
+    the alerts for its tasks instead of the owner. The module switch itself
+    is checked separately — it is the same for everyone."""
     return (f"(EXISTS (SELECT 1 FROM pm_access a_ WHERE a_.user_id = {expr}) AND NOT EXISTS "
-            f"(SELECT 1 FROM users v_ WHERE v_.id = {expr} AND COALESCE(v_.is_document_viewer, 0) = 1))")
+            f"(SELECT 1 FROM users v_ WHERE v_.id = {expr} AND (COALESCE(v_.is_document_viewer, 0) = 1 "
+            f"OR COALESCE(v_.is_locked, 0) = 1 OR COALESCE(v_.pending_approval, 0) = 1)))")
 
 
 # Someone an admin may grant access to / an owner may add: an approved,
@@ -152,6 +160,7 @@ _PROJECT_COLS = ('p.*, p.created_at::timestamptz AS created_tz, '
                  'p.updated_at::timestamptz AS updated_tz')
 
 _core = None        # the shared namespace (set by register)
+_enabled_failed = False     # projects_enabled() already logged a failure
 _d = {}             # the deps dict register() was given (also core.d)
 
 
@@ -578,8 +587,21 @@ def notify(db, pid, user_ids, code, link, key, actor_id=None, subject=''):
         f"""SELECT m.user_id, p.name FROM pm_members m
               JOIN pm_projects p ON p.id = m.project_id
              WHERE m.project_id = %s AND m.user_id = ANY(%s::int[])
-               AND {_access_sql('m.user_id')}""", (pid, want)).fetchall()
+               AND {_access_sql('m.user_id')}
+             ORDER BY m.user_id FOR SHARE OF m""", (pid, want)).fetchall()
     ids = [r['user_id'] for r in rows]
+    if ids:
+        # Hold the recipients' pm_access rows until this transaction ends: an
+        # admin's revoke (DELETE, then the scrub of their notifications)
+        # waits for us, so its scrub sees the row written below instead of
+        # missing it and leaving a title in a bell they may no longer read.
+        # (A removal from the project waits the same way on the member row
+        # locked above.) A row revoked just before we got here is simply
+        # not returned.
+        held = db.execute('SELECT user_id FROM pm_access WHERE user_id = ANY(%s::int[]) '
+                          'ORDER BY user_id FOR SHARE', (ids,)).fetchall()
+        held = {r['user_id'] for r in held}
+        ids = [i for i in ids if i in held]
     if not ids:
         return []
     title = _NOTIFY_TITLES[code]
@@ -618,6 +640,45 @@ def _withdraw(db, pid, key, unread_only=True, user_id=None, keep=None):
     db.execute(sql, args)
 
 
+def _withdraw_task(db, pid, tid, user_id=None, kinds=None, comments=False):
+    """Unread bell rows about ONE task that stopped being true: all of them
+    (the task was deleted — `comments=True` also takes the mentions in its
+    comments), one person's (they are no longer the assignee), or some
+    kinds (`('due', 'overdue')` once it is done). Read rows stay: they are
+    history the person has already seen."""
+    base = f'pm:{int(pid)}:t:{int(tid)}:'
+    pats = [base + k + '%' for k in kinds] if kinds else [base + '%']
+    sql = ("DELETE FROM notifications WHERE kind = 'project' AND read_at IS NULL "
+           "AND field_key LIKE ANY(%s)")
+    args = [pats]
+    if user_id is not None:
+        sql += ' AND user_id = %s'
+        args.append(user_id)
+    db.execute(sql, args)
+    if comments:
+        keys = [f'pm:{int(pid)}:c:{r["id"]}' for r in db.execute(
+            'SELECT id FROM pm_comments WHERE project_id = %s AND task_id = %s', (pid, tid)).fetchall()]
+        if keys:
+            db.execute("DELETE FROM notifications WHERE kind = 'project' AND read_at IS NULL "
+                       "AND field_key = ANY(%s)", (keys,))
+
+
+def _withdraw_budget(db, pid):
+    """Budget notices ('pm:<pid>:b:<line>') held by anyone who may no longer
+    see the budget — after a change of owner, of a member's role or of the
+    project's budget visibility. Read ones too: the row names a budget line.
+    The rule is ctx()'s can_budget, in SQL."""
+    db.execute(
+        """DELETE FROM notifications n
+            WHERE n.kind = 'project' AND n.field_key LIKE %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM pm_members m JOIN pm_projects p ON p.id = m.project_id
+                   WHERE m.project_id = %s AND m.user_id = n.user_id
+                     AND (m.role = 'owner' OR p.budget_visibility = 'members'
+                          OR (p.budget_visibility = 'editors' AND m.role = 'editor')))""",
+        (f'pm:{int(pid)}:b:%', pid))
+
+
 def _scrub(db, pid=None, user_id=None):
     """Remove notifications, READ ones too, when their reader may no longer
     know: a whole project (deleted), one member of it (removed / left), or
@@ -649,6 +710,17 @@ def user_name(db, uid):
 def _owner_id(db, pid):
     r = db.execute("SELECT user_id FROM pm_members WHERE project_id = %s AND role = 'owner'",
                    (pid,)).fetchone()
+    return r['user_id'] if r else None
+
+
+def _acting_owner_id(db, pid):
+    """The owner, if their account can still act as one (module access, not
+    locked — _access_sql). A project whose owner was locked or lost access
+    has nobody who can manage it, so for the takeover it counts as
+    ownerless exactly like one whose owner's account was deleted."""
+    r = db.execute(
+        f"SELECT m.user_id FROM pm_members m WHERE m.project_id = %s AND m.role = 'owner' "
+        f"AND {_access_sql('m.user_id')}", (pid,)).fetchone()
     return r['user_id'] if r else None
 
 
@@ -733,14 +805,16 @@ def _first_in_line(db, pid):
     """Who may claim an ownerless project: the ONE member first in line —
     editors before viewers, then longest on the project — skipping anyone
     who could not act as owner (no module access, a read-only or locked
-    account). None while an owner exists. There is no admin claim."""
+    account). None while an owner who can act exists (_acting_owner_id).
+    There is no admin claim."""
     r = db.execute(
         f"""SELECT m.user_id FROM pm_members m JOIN users u ON u.id = m.user_id
              WHERE m.project_id = %s AND m.role IN ('editor', 'viewer')
                AND {_access_sql('m.user_id')}
                AND COALESCE(u.is_readonly, 0) = 0 AND COALESCE(u.is_locked, 0) = 0
                AND NOT EXISTS (SELECT 1 FROM pm_members o
-                                WHERE o.project_id = m.project_id AND o.role = 'owner')
+                                WHERE o.project_id = m.project_id AND o.role = 'owner'
+                                  AND {_access_sql('o.user_id')})
              ORDER BY (m.role <> 'editor'), m.added_at, m.user_id LIMIT 1""", (pid,)).fetchone()
     return r['user_id'] if r else None
 
@@ -753,7 +827,7 @@ def _project_out(db, p):
         'budget_visibility': p['budget_visibility'],
         'viewers_can_comment': bool(p['viewers_can_comment']),
         'summary_text': p['summary_text'] or '', 'risks_text': p['risks_text'] or '',
-        'rev': p['rev'], 'ownerless': _owner_id(db, p['id']) is None,
+        'rev': p['rev'], 'ownerless': _acting_owner_id(db, p['id']) is None,
         'created_at': ts(p['created_tz']), 'updated_at': ts(p['updated_tz']),
     }
 
@@ -925,21 +999,29 @@ def _shift_plan(tasks, deps, x):
     if len(order) != len(S):
         raise Refuse(409, 'These tasks depend on each other in a loop — fix the dependencies first.')
     new_finish, moves = {}, []
+    # parse_date accepts 1900–2200; a shift must not store a date a later
+    # save would refuse (or run off the end of the calendar: OverflowError).
+    too_far = Refuse(400, 'That would move a task past the year 2200 — shorten or re-date it first.')
     for tid in order:
         t = tasks[tid]
         need = None
-        for d in deps.get(tid, ()):
-            dep = tasks.get(d)
-            if not dep or not _counts(dep):
-                continue
-            fin = new_finish.get(d, _finish(dep))
-            if fin is None:
-                continue
-            cand = fin + _gap(t)
-            need = cand if need is None or cand > need else need
-        delta = max(0, (need - _begin(t)).days) if need is not None else 0
-        step = timedelta(days=delta)
-        new_finish[tid] = _finish(t) + step
+        try:
+            for d in deps.get(tid, ()):
+                dep = tasks.get(d)
+                if not dep or not _counts(dep):
+                    continue
+                fin = new_finish.get(d, _finish(dep))
+                if fin is None:
+                    continue
+                cand = fin + _gap(t)
+                need = cand if need is None or cand > need else need
+            delta = max(0, (need - _begin(t)).days) if need is not None else 0
+            step = timedelta(days=delta)
+            new_finish[tid] = _finish(t) + step
+        except OverflowError:
+            raise too_far
+        if delta and new_finish[tid] > _DATE_MAX:
+            raise too_far
         if delta:
             moves.append({
                 'id': tid, 'title': t['title'],
@@ -1178,10 +1260,10 @@ def my_work(db, uid):
              LEFT JOIN LATERAL (
                   SELECT COUNT(*) FILTER (WHERE x.status <> 'done') AS open,
                          COUNT(*) FILTER (WHERE x.status <> 'done' AND x.due_date < %s) AS overdue,
-                         MIN(x.due_date) FILTER (WHERE x.status <> 'done') AS next_due
+                         MIN(x.due_date) FILTER (WHERE x.status <> 'done' AND x.due_date >= %s) AS next_due
                     FROM pm_tasks x WHERE x.project_id = p.id AND x.deleted_at IS NULL) t ON TRUE
             WHERE p.status <> 'archived'
-            ORDER BY LOWER(p.name), p.id LIMIT 200""", (uid, today)).fetchall()]
+            ORDER BY LOWER(p.name), p.id LIMIT 200""", (uid, today, today)).fetchall()]
     tasks = [{
         'id': r['id'], 'project_id': r['project_id'], 'project_name': r['project_name'],
         'title': r['title'], 'status': r['status'], 'priority': r['priority'],
@@ -1213,12 +1295,47 @@ def on_show_merge(db, source_id, keeper_id):
         (source_id, source_id)).fetchall()}
     if not pids:
         return
+    _lock_projects(db, pids)
     db.execute(
         'DELETE FROM pm_shows WHERE show_id = %s AND project_id IN '
         '(SELECT k.project_id FROM pm_shows k WHERE k.show_id = %s)', (source_id, keeper_id))
     db.execute('UPDATE pm_shows SET show_id = %s WHERE show_id = %s', (keeper_id, source_id))
     db.execute('UPDATE pm_tasks SET show_id = %s WHERE show_id = %s', (keeper_id, source_id))
     db.execute('UPDATE pm_projects SET rev = rev + 1 WHERE id = ANY(%s::int[])', (sorted(pids),))
+
+
+def _lock_projects(db, pids):
+    """Take the project row locks FIRST and in id order — the order every
+    module write uses (ctx(lock=True), then its child rows). A hook that
+    touched pm_tasks / pm_shows before the project row could deadlock with
+    a task save, and the loser's error text names a module table to the
+    admin who pressed Merge or Delete."""
+    db.execute('SELECT id FROM pm_projects WHERE id = ANY(%s::int[]) ORDER BY id FOR UPDATE',
+               (sorted(pids),)).fetchall()
+
+
+def on_show_delete(db, show_id):
+    """A show is about to be deleted (app.py's _purge_show calls this first).
+    The foreign keys clean up by themselves (pm_shows rows go, pm_tasks.show_id
+    becomes NULL); this only moves the affected projects' rev so open pages
+    refetch instead of showing a bar for a show that no longer exists.
+    Caller commits."""
+    pids = {r['project_id'] for r in db.execute(
+        'SELECT project_id FROM pm_shows WHERE show_id = %s '
+        'UNION SELECT project_id FROM pm_tasks WHERE show_id = %s',
+        (show_id, show_id)).fetchall()}
+    if not pids:
+        return
+    _lock_projects(db, pids)
+    db.execute('UPDATE pm_projects SET rev = rev + 1 WHERE id = ANY(%s::int[])', (sorted(pids),))
+
+
+def on_user_delete(db, user_id):
+    """An account is about to be deleted (app.py's delete_user calls this
+    first). Its member / access rows cascade away; its bell rows do not
+    (notifications.user_id has no foreign key) and they hold task titles and
+    project names. Caller commits."""
+    _scrub(db, user_id=user_id)
 
 
 def pending_email_items(db, delay_min):
@@ -1466,7 +1583,7 @@ def _routes_projects(app):
         """The STATE bundle: everything the project page needs in one read."""
         c = ctx(db, pid)
         p = c.project
-        owner = _owner_id(db, pid)
+        owner = _acting_owner_id(db, pid)
         sched = _sched(db, pid)
         show_ids = [r['show_id'] for r in db.execute(
             'SELECT show_id FROM pm_shows WHERE project_id = %s ORDER BY id', (pid,)).fetchall()]
@@ -1512,7 +1629,9 @@ def _routes_projects(app):
             'AND m.user_id = %s WHERE p.id = %s', (uid, _url_id(pid))).fetchone()
         if not r:
             raise Refuse(404, _NOT_FOUND)
-        return jsonify({'rev': r['rev']})
+        # `today` lets a page left open overnight notice the date changed
+        # (overdue flags, the Timeline's today line) without any write.
+        return jsonify({'rev': r['rev'], 'today': date.today().isoformat()})
 
     @app.route('/api/projects/<int:pid>', methods=['PUT'], endpoint='pm_api_update')
     @wrap
@@ -1561,7 +1680,7 @@ def _routes_projects(app):
             raise Refuse(400, 'The end date is before the start date.')
         changed = {k: v for k, v in new.items() if not _same(p[k], v)}
         if not changed:             # an identical save changes (and logs) nothing
-            return jsonify({'success': True, 'rev': p['rev'], 'project': _project_out(db, p)})
+            return jsonify({'success': True, 'unchanged': True, 'rev': p['rev'], 'project': _project_out(db, p)})
         sets = ', '.join(f'{k} = %s' for k in changed)      # keys come from the fixed list above
         db.execute(f'UPDATE pm_projects SET {sets} WHERE id = %s', (*changed.values(), pid))
         rev = touch(db, pid)
@@ -1587,6 +1706,8 @@ def _routes_projects(app):
             if not bits or (set(changed) - {'name', 'status', 'budget_visibility', 'viewers_can_comment'}):
                 bits.append('updated the project details')
             activity(db, c, 'updated', 'project', pid, ', '.join(bits))
+            if 'budget_visibility' in changed:
+                _withdraw_budget(db, pid)
             quiet = False
         db.commit()
         if not quiet:
@@ -1609,15 +1730,20 @@ def _routes_projects(app):
     @app.route('/api/projects/<int:pid>/claim-owner', methods=['POST'], endpoint='pm_claim_owner')
     @wrap
     def pm_claim_owner(db, uid, pid):
-        """An ownerless project (its owner's account was deleted) is taken
-        over by the ONE member first in line. Never by an admin."""
+        """An ownerless project (its owner's account was deleted, locked, or
+        lost access to the module) is taken over by the ONE member first in
+        line. Never by an admin. An owner row that can no longer act is
+        demoted to editor first (the unique index allows one owner)."""
         c = ctx(db, pid, 'view', lock=True)
-        if _owner_id(db, pid) is not None:
+        if _acting_owner_id(db, pid) is not None:
             raise Refuse(409, 'This project already has an owner.')
         if c.readonly or _first_in_line(db, pid) != uid:
             raise Refuse(403, "You can't take over this project.")
+        db.execute("UPDATE pm_members SET role = 'editor' WHERE project_id = %s AND role = 'owner'",
+                   (pid,))
         db.execute("UPDATE pm_members SET role = 'owner' WHERE project_id = %s AND user_id = %s",
                    (pid, uid))
+        _withdraw_budget(db, pid)
         rev = touch(db, pid)
         activity(db, c, 'owner', 'member', uid, 'became the owner')
         db.commit()
@@ -1702,10 +1828,12 @@ def _routes_members(app):
                        (role, pid, target))
             rev = touch(db, pid)
             activity(db, c, 'role', 'member', target, f"changed {m['name']} to {role}")
+            _withdraw_budget(db, pid)
             db.commit()
             syslog('PM_MEMBER_ROLE', pid, user_id=target)
         else:
-            rev = c.project['rev']
+            return jsonify({'success': True, 'unchanged': True, 'rev': c.project['rev'],
+                            'members': _members_out(db, pid)})
         return jsonify({'success': True, 'rev': rev, 'members': _members_out(db, pid)})
 
     @app.route('/api/projects/<int:pid>/members/<int:target>', methods=['DELETE'],
@@ -1754,6 +1882,7 @@ def _routes_members(app):
         rev = touch(db, pid)
         activity(db, c, 'owner', 'member', target, f"made {m['name']} the owner")
         notify(db, pid, [target], 'owner', _link(pid), 'o', actor_id=uid)
+        _withdraw_budget(db, pid)
         db.commit()
         syslog('PM_OWNER_TRANSFER', pid, user_id=target)
         return jsonify({'success': True, 'rev': rev, 'members': _members_out(db, pid)})
@@ -1825,7 +1954,7 @@ def _routes_tasks(app):
                 dep_ids = None
         changed = {k: v for k, v in f.items() if not _same(cur[k], v)}
         if not changed and dep_ids is None:     # an identical save is not a write
-            return jsonify({'success': True, 'rev': c.project['rev'], 'new_conflicts': [],
+            return jsonify({'success': True, 'unchanged': True, 'rev': c.project['rev'], 'new_conflicts': [],
                             'tasks': _tasks_out(db, pid, [tid], (tasks, deps))})
         before = _conflicts(tasks, deps)
         sets, args = ['updated_at = CURRENT_TIMESTAMP', 'updated_by = %s', 'updated_name = %s'], [uid, c.name]
@@ -1860,7 +1989,13 @@ def _routes_tasks(app):
             detail = f'updated {_quote(title)}'
         activity(db, c, 'updated', 'task', tid, detail)
         if 'assignee_id' in changed:
+            if cur['assignee_id']:
+                # "Assigned to you" / "Due soon" must not outlive the assignment.
+                _withdraw_task(db, pid, tid, user_id=cur['assignee_id'],
+                               kinds=('assign', 'due', 'overdue'))
             _notify_assignee(db, c, tid, title, changed['assignee_id'])
+        if changed.get('status') == 'done':
+            _withdraw_task(db, pid, tid, kinds=('due', 'overdue'))
         resp = write_response(db, c, before, [tid], rev)
         db.commit()
         syslog('PM_TASK_UPDATE', pid, task_id=tid)
@@ -1876,6 +2011,7 @@ def _routes_tasks(app):
                    'WHERE id = %s AND project_id = %s', (uid, c.name, tid, pid))
         rev = touch(db, pid)
         activity(db, c, 'deleted', 'task', tid, f"deleted task {_quote(cur['title'])}")
+        _withdraw_task(db, pid, tid, comments=True)
         resp = write_response(db, c, before, [], rev, deleted=tid)
         db.commit()
         syslog('PM_TASK_DELETE', pid, task_id=tid)
@@ -1939,7 +2075,7 @@ def _routes_tasks(app):
             new[i] = slot
         moved = sorted(i for i in new if new[i] != cur[i])
         if not moved:
-            return jsonify({'success': True, 'rev': c.project['rev'], 'tasks': []})
+            return jsonify({'success': True, 'unchanged': True, 'rev': c.project['rev'], 'tasks': []})
         # sort_order only: never updated_at / updated_by (a reorder is not an
         # edit of the task — open dialogs must not say "updated by …").
         db.execute(
@@ -1982,7 +2118,7 @@ def _routes_tasks(app):
         if not isinstance(token, str) or token != _shift_token(moves):
             raise Refuse(409, 'Dates changed since the preview — review again.')
         if not moves:
-            return jsonify({'success': True, 'rev': c.project['rev'], 'tasks': [],
+            return jsonify({'success': True, 'unchanged': True, 'rev': c.project['rev'], 'tasks': [],
                             'new_conflicts': [], 'moved': 0})
         before = _conflicts(tasks, deps)
         for m in moves:
@@ -2122,7 +2258,7 @@ def _routes_comments(app):
         if not text:
             raise Refuse(400, 'Write a comment first.')
         if text == cur['body']:
-            return jsonify({'success': True, 'rev': c.project['rev'], 'comment': one(db, c, cid)})
+            return jsonify({'success': True, 'unchanged': True, 'rev': c.project['rev'], 'comment': one(db, c, cid)})
         db.execute('UPDATE pm_comments SET body = %s, edited_at = CURRENT_TIMESTAMP '
                    'WHERE id = %s AND project_id = %s', (text, cid, pid))
         rev = touch(db, pid)
@@ -2331,7 +2467,7 @@ def _routes_contacts(app):
         cur = live_contact(db, pid, cid, code=404)
         f = {k: v for k, v in fields(_body(), cur).items() if (cur[k] or '') != v}
         if not f:
-            return jsonify({'success': True, 'rev': c.project['rev'],
+            return jsonify({'success': True, 'unchanged': True, 'rev': c.project['rev'],
                             'contact': _contacts_out(db, pid, cid)[0]})
         sets = ', '.join(f'{k} = %s' for k in f)        # keys from _CONTACT_FIELDS
         db.execute(f'UPDATE pm_contacts SET {sets}, updated_at = CURRENT_TIMESTAMP '
@@ -2473,8 +2609,8 @@ def _routes_search(app):
 def _routes_admin(app):
     """The admin page's API. Works with the module off. An admin here manages
     WHO may use the module — never what is in a project: nothing below reads
-    a project's name or content (orphans are listed by id)."""
-    log_audit = lambda *a, **k: _d['log_audit'](*a, **k)
+    a project's name or content (orphans are listed by id). No audit_log
+    rows (see the module docstring): syslog carries who did what."""
 
     @app.route('/api/projects/admin/access', methods=['GET'], endpoint='pm_admin_access')
     @wrap_admin
@@ -2525,7 +2661,6 @@ def _routes_admin(app):
             # still open must not keep project and task titles.
             _scrub(db, user_id=target)
             action = 'PM_ACCESS_REVOKE'
-        log_audit(db, action, 'user', target)
         db.commit()
         syslog(action, user_id=target)
         return jsonify({'success': True, 'user_id': target, 'has_access': body['grant']})
@@ -2534,15 +2669,14 @@ def _routes_admin(app):
     @wrap_admin
     def pm_admin_module(db, uid):
         """The module switch (it is not listed in Settings → Modules for
-        admins without access, so it lives here). Same row, audit entry and
-        syslog line as POST /settings/modules."""
+        admins without access, so it lives here). Same row and syslog line
+        as POST /settings/modules; no audit row (see the module docstring)."""
         v = _body().get('enabled')
         if not isinstance(v, bool):
             raise Refuse(400, 'Bad request.')
         enabled = '1' if v else '0'
         db.execute('INSERT INTO app_settings (key, value) VALUES (%s, %s) '
                    'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', (_SETTING, enabled))
-        log_audit(db, 'SETTINGS_CHANGE', 'setting', None, detail=f'{_SETTING}={enabled}')
         db.commit()
         try:
             _d['syslog_logger'].info(f'MODULE_TOGGLE key={MODULE_KEY} enabled={enabled} by={_username()}')
@@ -2563,7 +2697,6 @@ def _routes_admin(app):
         if not p or db.execute('SELECT 1 FROM pm_members WHERE project_id = %s LIMIT 1', (pid,)).fetchone():
             raise Refuse(404, _NOT_FOUND)
         keys = _delete_project(db, pid)
-        log_audit(db, 'PM_ORPHAN_DELETE', 'project', pid)
         db.commit()
         _s3_cleanup(keys, pid)
         syslog('PM_ORPHAN_DELETE', pid)
@@ -2629,9 +2762,20 @@ def register(app, **deps):
             # Display only (base.html renders on error pages during an
             # outage): an unreachable database hides the link. Routes use
             # has_access(), which raises → 503.
+            # ANY failure hides the link (not only an outage): this runs in
+            # base.html for every signed-in page, error pages included, so
+            # an exception here (say the pm_ tables are missing because a
+            # migration was rolled back) would take the whole site down for
+            # a module that is off.
             try:
                 return has_access()
             except _d['db_unavailable']:
+                return False
+            except Exception as e:
+                global _enabled_failed
+                if not _enabled_failed:         # once per process, not per page
+                    _enabled_failed = True
+                    _log_failure('projects_enabled', e)
                 return False
         return {'projects_enabled': projects_enabled}
 

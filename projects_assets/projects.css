@@ -353,7 +353,9 @@ select.pm-status:disabled { cursor: default; opacity: 1; background-image: none;
 
 /* ── Tasks: board ─────────────────────────────────────────────────────────── */
 /* Its own scroll box (never inside a card: cards are overflow:hidden). */
-.pm-board { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 12px; align-items: start; overflow-x: auto; padding-bottom: 6px; }
+/* Columns stretch to the tallest one: the lane under a short column is that
+   column (a card can be dropped anywhere in it). */
+.pm-board { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 12px; align-items: stretch; overflow-x: auto; padding-bottom: 6px; }
 .pm-col {
   --c: var(--pm-st-todo); min-width: 0; border-radius: 10px;
   background: color-mix(in srgb, var(--bg-surface) 70%, transparent); border: 1px solid var(--border);
@@ -535,6 +537,8 @@ html.mobile-view .pm-board {
   scroll-snap-type: x mandatory; scroll-padding: 0 12px; -webkit-overflow-scrolling: touch;
 }
 html.mobile-view .pm-col { scroll-snap-align: start; }
+/* While a card is carried, snapping would pull the board back to the column it left. */
+html.mobile-view .pm-board.is-dragging { scroll-snap-type: none; }
 html.mobile-view .pm-grip { width: 30px; height: 36px; line-height: 36px; font-size: 16px; margin-left: -8px; }
 html.mobile-view .pm-cmt-acts button { padding: 6px 8px; font-size: 12.5px; }
 html.mobile-view .pm-dialog .modal-card.pm-card-xl { width: auto; }
