@@ -1649,6 +1649,16 @@ def _routes_projects(app):
                          ('risks_text', 'Risks')):
             if k in body:
                 new[k] = clean_text(body[k], CAPS['long'], label)
+        # Summary / Risks autosave sends `base` = {key: the text it started
+        # from}. Someone else saved in between → 409 with what is saved now,
+        # and the page asks "Load theirs / Keep mine" instead of writing the
+        # whole box over their text. (Keep mine re-sends with the new base.)
+        base = body.get('base')
+        if isinstance(base, dict):
+            moved = {k: p[k] or '' for k in ('summary_text', 'risks_text')
+                     if k in new and isinstance(base.get(k), str) and base[k] != (p[k] or '')}
+            if moved:
+                raise Refuse(409, 'Someone else changed this while you were typing.', current=moved)
         if 'status' in body:
             new['status'] = one_of(body['status'], PROJECT_STATUSES, 'Status')
         if 'color' in body:

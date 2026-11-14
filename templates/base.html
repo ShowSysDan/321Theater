@@ -1509,12 +1509,12 @@ _HELP_PAGES.project = {
   html: `
     <p><strong>One project.</strong> Owners and editors change things; viewers read (and comment, if the owner allows it). A <strong>VIEW ONLY</strong> badge means you can't edit here. The <strong>search box</strong> in the header looks through tasks, comments, notes, contacts and the text inside files; <strong>Summary PDF</strong> prints a one-look status report.</p>
     <ul style="${_HELP_UL}">
-      <li><strong>Overview</strong> — progress, what is overdue or due this week, milestones, recent activity, and the <strong>Summary</strong> / <strong>Risks</strong> boxes that feed the PDF. <strong>Link a show</strong> attaches an existing show; <strong>New show</strong> creates a real show that everyone in 3·2·1→Theater can see.</li>
+      <li><strong>Overview</strong> — progress, what is overdue or due this week, milestones, recent activity, and the <strong>Summary</strong> / <strong>Risks</strong> boxes that feed the PDF (they save as you type; if someone else changed one meanwhile you choose <strong>Load theirs</strong> or <strong>Keep mine</strong>). <strong>Link a show</strong> attaches an existing show; <strong>New show</strong> creates a real show that everyone in 3·2·1→Theater can see.</li>
       <li><strong>Tasks</strong> — list or board. Give a task an assignee, start and due dates, a group, a priority, and the tasks it <em>depends on</em>. Whoever a task is assigned to can always change its status. A milestone is a single date (◆). <strong>Make a show from this</strong> turns a task into a show.</li>
-      <li><strong>⚠ Schedule conflicts</strong> — a task that starts before something it depends on is finished is flagged; nothing is moved for you. <strong>Shift…</strong> shows exactly which tasks would move and to which dates, and applies it only when you approve. Linked shows never move.</li>
+      <li><strong>⚠ Schedule conflicts</strong> — a task that starts before something it depends on is finished is flagged; nothing is moved for you. <strong>Review shift…</strong> shows exactly which tasks would move and to which dates, and applies it only when you approve. Linked shows never move.</li>
       <li><strong>Timeline</strong> — the tasks and linked shows on a calendar. Zoom Day / Week / Month; with a mouse, editors drag a bar to move it or an end to resize it. Arrows are dependencies (red = conflict).</li>
       <li><strong>Budget</strong> (if the owner lets you see it) — lines by category with estimate, committed and actual. Each line can carry its <strong>sources</strong> (a quote or email from Files, a note, a link) and keeps a history of every change. <strong>From linked shows</strong> adds the asset, labor and piano figures you are allowed to see in Reports.</li>
-      <li><strong>Files</strong> — upload or drop files in; a new upload of the same document becomes a new <strong>version</strong>. PDFs, Office documents, images and saved emails (.eml / .msg) preview in place. Removing a file archives it; only the owner can delete it for good.</li>
+      <li><strong>Files</strong> — upload or drop files in; <strong>Upload new version</strong> on a file keeps the earlier <strong>versions</strong>. PDFs, Office documents, images and saved emails (.eml / .msg) preview in place. Removing a file archives it; only the owner can delete it for good.</li>
       <li><strong>Notes</strong> — shared pages that save as you type, keep earlier versions, and export to PDF or Word. <strong>Contacts</strong> — the outside people on this project (pick from the app's contacts or add new). <strong>Discussion</strong> — comments for the whole team; type @ to mention someone.</li>
       <li><strong>Settings</strong> (owner) — rename, dates, status, people and their roles, who may see the budget, hand the project to a new owner, archive or delete it. Anyone else can leave from the ⋯ menu.</li>
     </ul>
@@ -1528,7 +1528,7 @@ _HELP_PAGES.projects_admin = {
       <li>The <strong>switch</strong> turns the module on or off for everyone; projects are kept while it is off.</li>
       <li><strong>Tick a person</strong> to give them Projects; untick to take it away (their project notifications are removed; their projects and tasks stay).</li>
       <li>Giving someone access does not show them any project: a project's owner still has to add them to it. Administrators cannot open a project they are not on.</li>
-      <li><strong>Empty projects</strong> lists projects that have no members left; they can only be deleted.</li>
+      <li><strong>Projects with no members</strong> lists projects nobody is on any more; they can only be deleted.</li>
     </ul>
   `
 };

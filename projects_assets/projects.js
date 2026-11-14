@@ -987,7 +987,7 @@
         const b = h('div', {class: 'pm-banner pm-banner-warn pm-head-banner', role: 'status'},
                     h('span', null, h('strong', {text: 'This project has no owner.'}),
                       me.can_claim ? ' You have been on it longest — you can take it over.'
-                                   : ' Its owner’s account was removed; the member first in line can take it over.'));
+                                   : ' Its owner can no longer use it (account removed, locked or without access); the member first in line can take it over.'));
         if (me.can_claim) {
           b.appendChild(h('button', {type: 'button', class: 'btn btn-sm btn-primary', text: 'Become the owner', data: {fk: 'claim'},
             onclick: e => busy(e.currentTarget, PM.api('POST', '/claim-owner')).then(() => {
@@ -2095,8 +2095,9 @@
           const sent = n.ta.value;
           n.saving = true;
           n.status.textContent = 'Saving…';
-          const body = {};
+          const body = {base: {}};
           body[key] = sent;
+          body.base[key] = n.base;                  // the server refuses (409) if someone saved since
           PM.api('PUT', '', body).then(resp => {
             n.saving = false;
             // What the server now holds (it trims the text) is the baseline.
@@ -2107,6 +2108,12 @@
             if (n.dirty && !n.conflict) later(1500);
           }, e => {
             n.saving = false;
+            if (e.status === 409 && e.data && e.data.current && typeof e.data.current[key] === 'string') {
+              // Someone saved this box after the text I started from: ask.
+              PM.state.project[key] = e.data.current[key];
+              n.ask();
+              return;
+            }
             n.status.textContent = 'Not saved — ' + e.message;
             syncNotes();                            // a server text that arrived while this was in flight
             // Try again by itself while the text is still unsaved. A refusal
@@ -2200,9 +2207,13 @@
         const body = {};
         Object.keys(notes).forEach(key => {
           const n = notes[key];
-          if (n.dirty && !n.conflict) { clearTimeout(n.timer); body[key] = n.ta.value; }
+          if (n.dirty && !n.conflict) {
+            clearTimeout(n.timer);
+            body[key] = n.ta.value;
+            (body.base = body.base || {})[key] = n.base;     // never over a newer text
+          }
         });
-        if (!Object.keys(body).length) return;
+        if (!body.base) return;
         try {
           fetch('/api/projects/' + PM.pid, {method: 'PUT', keepalive: true, credentials: 'same-origin',
             headers: {'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
