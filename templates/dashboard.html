@@ -4,7 +4,12 @@
   MIT Licensed — see LICENSE for details.
 #}
 {% extends "base.html" %}
-{% block title %}{{ 'My Shows' if my_shows else 'Shows' }} — 3·2·1→Theater{% endblock %}
+{# my_work (my_shows() only): this person has the optional Projects module —
+   the page is then "My Work": the same board plus the module's own partial.
+   Every piece of that is inside an `if my_work`, inline, so the page of
+   someone without it is byte-for-byte unchanged. #}
+{% block title %}{{ ('My Work' if my_work else 'My Shows') if my_shows else 'Shows' }} — 3·2·1→Theater{% endblock %}
+{% block head %}{% if my_work %}<link rel="stylesheet" href="/projects/assets/projects.css?v={{ asset_v }}">{% endif %}{% endblock %}
 
 {% block content %}
 {# Frosted page header (3.15.0): pins to the top while the board scrolls under
@@ -21,8 +26,8 @@
         {% endif %}
       </span>
       <div>
-        <h1 class="page-title">{{ 'My Shows' if my_shows else 'Shows' }}</h1>
-        <p class="phead-context">{{ today_label }}{% if _on_boards %} · <span class="mono">{{ _on_boards }}</span> on the boards today{% endif %}{% if my_shows %} · where you're the PM or a covering PM{% endif %}</p>
+        <h1 class="page-title">{{ ('My Work' if my_work else 'My Shows') if my_shows else 'Shows' }}</h1>
+        <p class="phead-context">{{ today_label }}{% if _on_boards %} · <span class="mono">{{ _on_boards }}</span> on the boards today{% endif %}{% if my_shows %} · {% if my_work %}your shows, projects and tasks{% else %}where you're the PM or a covering PM{% endif %}{% endif %}</p>
       </div>
     </div>
     {% if not my_shows and not restricted %}
@@ -182,6 +187,9 @@
 
 <p id="dash-no-results" class="text-dim" style="display:none;font-size:13px;padding:24px 0">No active shows match your search.{% if not my_shows %} <a id="dash-arch-link" href="{{ url_for('archived_shows_page') }}">Search the archive →</a>{% endif %} <a id="dash-search-link" href="/search">Search everything →</a></p>
 
+{% elif my_work %}
+{# My Work with no shows: one quiet line — the page goes on below. #}
+<p class="text-dim" style="font-size:13px;margin:8px 0 20px">No shows where you're the PM. <a href="{{ url_for('dashboard') }}">All shows →</a></p>
 {% else %}
 <div class="empty-state">
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
@@ -192,7 +200,9 @@
   <p>No active shows.{% if not restricted %} <a href="{{ url_for('new_show') }}">Create one →</a>{% endif %}</p>
   {% endif %}
 </div>
-{% endif %}
+{% endif %}{% if my_work %}
+{# The module's own partial (My projects + My tasks), after the board. #}
+{% include 'projects/_my_work.html' ignore missing %}{% endif %}
 
 {% endblock %}
 

@@ -6639,7 +6639,13 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
    with the words filled in), Esc closes. "/" anywhere focuses the box.
    The popover lives on <body> (the mobile drawer's transform would make a
    fixed child relative to the drawer). Fetches are sequence-guarded and
-   aborted, so a slow answer never overwrites a newer one. */
+   aborted, so a slow answer never overwrites a newer one.
+   Extra result groups: a page may define window.NavSearchExtra(q, signal)
+   → Promise<{groups: [{head, items: [{href, title, sub}]}]}>. It is asked
+   alongside every plain-text search (never a '#tag' one), under the same
+   sequence / abort guard, and its groups are listed after the shows. It
+   may fail or be absent: the show results never depend on it. Items are
+   built with textContent and only same-site paths are linked. */
 (function _initNavSearch() {
   const input = document.getElementById('nav-search-q');
   const form = document.getElementById('nav-search');
@@ -6725,12 +6731,29 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
     });
     if (pos < name.length) el.appendChild(document.createTextNode(name.slice(pos)));
   }
-  function render(q, data) {
+  // window.NavSearchExtra's answer → [{head, items}] with only usable
+  // items: a title and a same-site path ('/…', never '//…' or a backslash,
+  // which browsers read as another host). At most 3 groups of 8.
+  function extraGroups(extra) {
+    const out = [];
+    const groups = extra && Array.isArray(extra.groups) ? extra.groups : [];
+    groups.slice(0, 3).forEach(g => {
+      const items = (g && Array.isArray(g.items) ? g.items : []).filter(it =>
+        it && typeof it.title === 'string' && it.title &&
+        typeof it.href === 'string' && /^\/(?![\/\\])[^\\\u0000-\u001f]*$/.test(it.href)
+      ).slice(0, LIMIT);
+      if (items.length) out.push({head: typeof g.head === 'string' ? g.head : '', items});
+    });
+    return out;
+  }
+  function render(q, data, extra) {
     pop.textContent = '';
     const res = data.results || [];
     const terms = isTag(q) ? [] : q.toLowerCase().split(/\s+/).filter(Boolean);
+    const groups = extraGroups(extra);
     if (!res.length) {
-      note(isTag(q) ? `No shows tagged ${q}.` : `No shows match “${q}”.`);
+      // "No shows match" would be wrong above a group that did match.
+      if (!groups.length) note(isTag(q) ? `No shows tagged ${q}.` : `No shows match “${q}”.`);
     } else {
       const h = document.createElement('div');
       h.className = 'nav-sr-head';
@@ -6778,6 +6801,38 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
         pop.appendChild(a);
       });
     }
+    let n = 0;
+    groups.forEach(g => {
+      if (g.head) {
+        const h = document.createElement('div');
+        h.className = 'nav-sr-head';
+        h.setAttribute('role', 'presentation');
+        h.textContent = g.head;
+        pop.appendChild(h);
+      }
+      g.items.forEach(it => {
+        const a = document.createElement('a');
+        a.className = 'nav-sr-item';
+        a.href = it.href;
+        a.id = 'nav-sr-x' + (n++);
+        a.setAttribute('role', 'option');
+        const main = document.createElement('span');
+        main.className = 'nav-sr-main';
+        const nm = document.createElement('span');
+        nm.className = 'nav-sr-name';
+        nameInto(nm, it.title, terms);
+        nm.title = it.title;
+        main.appendChild(nm);
+        if (typeof it.sub === 'string' && it.sub) {
+          const meta = document.createElement('span');
+          meta.className = 'nav-sr-meta';
+          meta.textContent = it.sub;
+          main.appendChild(meta);
+        }
+        a.appendChild(main);
+        pop.appendChild(a);
+      });
+    });
     pop.appendChild(allLink(q, data.total || 0));
     setActive(-1);
     show();
@@ -6789,14 +6844,22 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
     const p = new URLSearchParams({limit: String(LIMIT), status: 'all'});
     if (isTag(q)) q.split(/\s+/).filter(Boolean).forEach(t => p.append('tag', t));
     else p.set('q', q);
+    const signal = ctrl ? ctrl.signal : undefined;
+    // The optional provider is asked at the same time; it can only ever
+    // resolve to its answer or to null (a throw, a rejection, an abort).
+    const extraP = (!isTag(q) && typeof window.NavSearchExtra === 'function')
+      ? Promise.resolve().then(() => window.NavSearchExtra(q, signal)).catch(() => null)
+      : Promise.resolve(null);
     try {
       const r = await fetch('/api/search?' + p.toString(), {
         headers: {'X-Requested-With': 'XMLHttpRequest'}, credentials: 'same-origin',
-        signal: ctrl ? ctrl.signal : undefined});
+        signal});
       const data = await r.json().catch(() => null);
       if (my !== seq || input.value.trim() !== q) return;
       if (!r.ok || !data || data.success === false) { note((data && data.error) || 'Search failed — try again.', true); show(); return; }
-      render(q, data);
+      const extra = await extraP;
+      if (my !== seq || input.value.trim() !== q) return;
+      render(q, data, extra);
     } catch (e) {
       if (e && e.name === 'AbortError') return;
       if (my === seq) { note('Search failed — try again.', true); show(); }

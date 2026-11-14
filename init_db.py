@@ -912,6 +912,7 @@ CREATE TABLE IF NOT EXISTS user_notify_prefs (
     email_messages  INTEGER DEFAULT 1,
     email_mentions  INTEGER DEFAULT 1,
     email_reminders INTEGER DEFAULT 1,
+    email_tasks     INTEGER DEFAULT 1,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -1911,6 +1912,319 @@ CREATE TABLE IF NOT EXISTS file_migration_runs (
     message TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_file_migration_runs_started ON file_migration_runs(started_at);
+
+-- Projects (3.49.0, projects_module.py + projects_docs_module.py): an
+-- optional, default-OFF module. Every table is pm_* ("project" already means
+-- Overhead & Project Crew: overhead_projects). PRIVATE: a project is readable
+-- only by its pm_members rows, with no admin bypass, so none of these tables
+-- may ever be listed in find_module, the audit log, the File Manager or
+-- snapshot inspection (snapshot_module.PRIVATE_TABLES + RESTORE_BLOCKED).
+-- Conventions: member / access rows die with the user (CASCADE), authorship
+-- columns are SET NULL with a *_name snapshot stamped at write time (history
+-- outlives accounts), timestamps are the DB clock, money DOUBLE PRECISION,
+-- booleans INTEGER 0/1. Every child table carries project_id so each read
+-- can be written "WHERE id = .. AND project_id = .." (never by id alone).
+
+-- Who may use the module at all (granted on /settings/projects). An
+-- app-schema table on purpose: the shared users table is read by other apps.
+CREATE TABLE IF NOT EXISTS pm_access (
+    user_id    INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    granted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- rev is bumped by every write to the project or anything in it. Open pages
+-- poll it and refetch on change.
+CREATE TABLE IF NOT EXISTS pm_projects (
+    id                  SERIAL PRIMARY KEY,
+    name                TEXT NOT NULL,
+    description         TEXT DEFAULT '',
+    status              TEXT NOT NULL DEFAULT 'active',
+    color               TEXT DEFAULT '',
+    start_date          DATE,
+    end_date            DATE,
+    budget_visibility   TEXT NOT NULL DEFAULT 'members',
+    viewers_can_comment INTEGER DEFAULT 1,
+    summary_text        TEXT DEFAULT '',
+    risks_text          TEXT DEFAULT '',
+    rev                 INTEGER NOT NULL DEFAULT 0,
+    created_by          INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- role: owner | editor | viewer. At most ONE owner per project, enforced by
+-- the partial unique index (an ownership transfer demotes first, then
+-- promotes, in one transaction).
+CREATE TABLE IF NOT EXISTS pm_members (
+    project_id INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role       TEXT NOT NULL DEFAULT 'viewer',
+    added_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    added_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (project_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pm_members_user ON pm_members(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pm_members_one_owner ON pm_members(project_id) WHERE role = 'owner';
+
+-- A project's own address book. source_contact_id remembers which row of the
+-- app's contacts list it was copied from (no FK: a copy, never a live link).
+CREATE TABLE IF NOT EXISTS pm_contacts (
+    id                SERIAL PRIMARY KEY,
+    project_id        INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    name              TEXT NOT NULL,
+    company           TEXT DEFAULT '',
+    role              TEXT DEFAULT '',
+    email             TEXT DEFAULT '',
+    phone             TEXT DEFAULT '',
+    notes             TEXT DEFAULT '',
+    source_contact_id INTEGER,
+    created_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at        TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_pm_contacts_project ON pm_contacts(project_id);
+
+-- status: todo | doing | blocked | done. priority: 0 low .. 3 urgent.
+-- Deleting is soft (deleted_at). updated_* move only for writes to the
+-- task's own columns or its dependencies, never for comments or reorder.
+CREATE TABLE IF NOT EXISTS pm_tasks (
+    id           SERIAL PRIMARY KEY,
+    project_id   INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    title        TEXT NOT NULL,
+    description  TEXT DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'todo',
+    priority     INTEGER NOT NULL DEFAULT 1,
+    assignee_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    group_name   TEXT DEFAULT '',
+    start_date   DATE,
+    due_date     DATE,
+    is_milestone INTEGER DEFAULT 0,
+    sort_order   INTEGER DEFAULT 0,
+    show_id      INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+    contact_id   INTEGER REFERENCES pm_contacts(id) ON DELETE SET NULL,
+    completed_at TIMESTAMP,
+    completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    updated_name TEXT DEFAULT '',
+    deleted_at   TIMESTAMP,
+    deleted_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    deleted_name TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_pm_tasks_project ON pm_tasks(project_id);
+CREATE INDEX IF NOT EXISTS idx_pm_tasks_assignee ON pm_tasks(assignee_id);
+CREATE INDEX IF NOT EXISTS idx_pm_tasks_show ON pm_tasks(show_id);
+
+-- task_id depends on depends_on_id (finish-to-start). Both tasks are always
+-- in the same project (checked on write).
+CREATE TABLE IF NOT EXISTS pm_task_deps (
+    task_id       INTEGER NOT NULL REFERENCES pm_tasks(id) ON DELETE CASCADE,
+    depends_on_id INTEGER NOT NULL REFERENCES pm_tasks(id) ON DELETE CASCADE,
+    PRIMARY KEY (task_id, depends_on_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pm_task_deps_depends ON pm_task_deps(depends_on_id);
+
+-- One row per due / overdue alert already sent (kind + ref = the due date
+-- it was sent for). The hourly job claims with INSERT .. ON CONFLICT DO
+-- NOTHING RETURNING, so several workers can never send the same alert twice.
+CREATE TABLE IF NOT EXISTS pm_task_alerts (
+    task_id    INTEGER NOT NULL REFERENCES pm_tasks(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL,
+    ref        TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (task_id, kind, ref)
+);
+
+-- task_id NULL = the project's discussion. Comments outlive their author
+-- (SET NULL + author_name), as show comments do.
+CREATE TABLE IF NOT EXISTS pm_comments (
+    id          SERIAL PRIMARY KEY,
+    project_id  INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    task_id     INTEGER REFERENCES pm_tasks(id) ON DELETE CASCADE,
+    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    author_name TEXT DEFAULT '',
+    body        TEXT NOT NULL,
+    edited_at   TIMESTAMP,
+    deleted_at  TIMESTAMP,
+    deleted_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_pm_comments_project ON pm_comments(project_id);
+CREATE INDEX IF NOT EXISTS idx_pm_comments_task ON pm_comments(task_id);
+
+-- The project's own history (the app's audit_log is admin-readable, so
+-- project writes never go there). detail is a server-built sentence
+-- fragment that may hold titles but NEVER an amount. Entities budget_line /
+-- budget_source are hidden from members who may not see the budget.
+CREATE TABLE IF NOT EXISTS pm_activity (
+    id         SERIAL PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    actor_name TEXT DEFAULT '',
+    verb       TEXT NOT NULL,
+    entity     TEXT NOT NULL DEFAULT '',
+    entity_id  INTEGER,
+    detail     TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_pm_activity_project ON pm_activity(project_id);
+
+-- Shows linked to a project. Unlinking deletes only this row, never the show.
+CREATE TABLE IF NOT EXISTS pm_shows (
+    id         SERIAL PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    show_id    INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+    linked_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    linked_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (project_id, show_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pm_shows_show ON pm_shows(show_id);
+
+-- A file = a title + its versions. current_version_id is the newest REAL
+-- version (set in the transaction that inserts it. no FK: the two tables
+-- point at each other). budget_only 1 = exists only for members who may see
+-- the budget. Archive stamps deleted_at here AND on every version row.
+CREATE TABLE IF NOT EXISTS pm_files (
+    id                 SERIAL PRIMARY KEY,
+    project_id         INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    title              TEXT NOT NULL DEFAULT '',
+    folder             TEXT DEFAULT '',
+    current_version_id INTEGER,
+    budget_only        INTEGER DEFAULT 0,
+    created_by         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at         TIMESTAMP,
+    deleted_by         INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pm_files_project ON pm_files(project_id);
+
+-- The file_store kind 'project_files' (file_data / s3_key / content_sha256
+-- of the UNCOMPRESSED bytes). Real versions: version >= 1 and preview_of
+-- NULL. A cached PDF preview of an office document is a row with preview_of
+-- = the source version id and version = -(source version number), at most
+-- one per source (the partial unique index), so every query that lists,
+-- counts, numbers, searches or extracts versions adds "preview_of IS NULL".
+-- kind: pdf | image | office | email | text | other. extract_status: ''
+-- (pending) then done | none | error.
+CREATE TABLE IF NOT EXISTS pm_file_versions (
+    id             SERIAL PRIMARY KEY,
+    file_id        INTEGER NOT NULL REFERENCES pm_files(id) ON DELETE CASCADE,
+    project_id     INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    version        INTEGER NOT NULL,
+    filename       TEXT NOT NULL,
+    mime_type      TEXT DEFAULT 'application/octet-stream',
+    kind           TEXT NOT NULL DEFAULT 'other',
+    file_size      INTEGER DEFAULT 0,
+    file_data      BYTEA,
+    s3_key         TEXT,
+    is_compressed  INTEGER DEFAULT 0,
+    content_sha256 TEXT,
+    extracted_text TEXT,
+    extract_status TEXT NOT NULL DEFAULT '',
+    email_json     TEXT,
+    preview_of     INTEGER,
+    uploaded_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    uploader_name  TEXT DEFAULT '',
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at     TIMESTAMP,
+    UNIQUE (file_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_pm_file_versions_project ON pm_file_versions(project_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pm_file_versions_preview ON pm_file_versions(preview_of) WHERE preview_of IS NOT NULL;
+
+-- Budget lines. The three amounts are NULL when not entered (never 0 by
+-- default: "no estimate yet" is not "estimated at nothing").
+CREATE TABLE IF NOT EXISTS pm_budget_lines (
+    id          SERIAL PRIMARY KEY,
+    project_id  INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    category    TEXT DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    estimate    DOUBLE PRECISION,
+    committed   DOUBLE PRECISION,
+    actual      DOUBLE PRECISION,
+    contact_id  INTEGER REFERENCES pm_contacts(id) ON DELETE SET NULL,
+    task_id     INTEGER REFERENCES pm_tasks(id) ON DELETE SET NULL,
+    notes       TEXT DEFAULT '',
+    sort_order  INTEGER DEFAULT 0,
+    created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at  TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_pm_budget_lines_project ON pm_budget_lines(project_id);
+
+-- One row per changed field of a budget line (old / new as text, plus the
+-- optional "why" note of that save).
+CREATE TABLE IF NOT EXISTS pm_budget_history (
+    id         SERIAL PRIMARY KEY,
+    line_id    INTEGER NOT NULL REFERENCES pm_budget_lines(id) ON DELETE CASCADE,
+    project_id INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    actor_name TEXT DEFAULT '',
+    field      TEXT NOT NULL,
+    old_value  TEXT,
+    new_value  TEXT,
+    note       TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_pm_budget_history_project ON pm_budget_history(project_id);
+CREATE INDEX IF NOT EXISTS idx_pm_budget_history_line ON pm_budget_history(line_id);
+
+-- Where a budget figure came from. kind: file (file_id + the version it was
+-- pinned to) | note (label + body) | link (label + url).
+CREATE TABLE IF NOT EXISTS pm_budget_sources (
+    id           SERIAL PRIMARY KEY,
+    line_id      INTEGER NOT NULL REFERENCES pm_budget_lines(id) ON DELETE CASCADE,
+    project_id   INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL,
+    file_id      INTEGER REFERENCES pm_files(id) ON DELETE SET NULL,
+    version_id   INTEGER,
+    label        TEXT DEFAULT '',
+    body         TEXT DEFAULT '',
+    url          TEXT DEFAULT '',
+    created_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    creator_name TEXT DEFAULT '',
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_pm_budget_sources_project ON pm_budget_sources(project_id);
+CREATE INDEX IF NOT EXISTS idx_pm_budget_sources_line ON pm_budget_sources(line_id);
+CREATE INDEX IF NOT EXISTS idx_pm_budget_sources_file ON pm_budget_sources(file_id);
+
+-- Notes: body_html is sanitized on the way in, body_text is its plain text
+-- (search). rev is the note's own save counter (a save names the rev it was
+-- based on and is refused when someone saved in between).
+CREATE TABLE IF NOT EXISTS pm_notes (
+    id           SERIAL PRIMARY KEY,
+    project_id   INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    title        TEXT NOT NULL DEFAULT 'Untitled',
+    body_html    TEXT DEFAULT '',
+    body_text    TEXT DEFAULT '',
+    rev          INTEGER NOT NULL DEFAULT 1,
+    updated_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    updated_name TEXT DEFAULT '',
+    created_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at   TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_pm_notes_project ON pm_notes(project_id);
+
+CREATE TABLE IF NOT EXISTS pm_note_versions (
+    id         SERIAL PRIMARY KEY,
+    note_id    INTEGER NOT NULL REFERENCES pm_notes(id) ON DELETE CASCADE,
+    project_id INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    title      TEXT,
+    body_html  TEXT,
+    saved_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    saver_name TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_pm_note_versions_project ON pm_note_versions(project_id);
+CREATE INDEX IF NOT EXISTS idx_pm_note_versions_note ON pm_note_versions(note_id);
 """
 
 
@@ -2336,6 +2650,9 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         # A completed tuning's Service entry in the unit's log — 3.19.0
         f'ALTER TABLE "{app_schema}".asset_logs ADD COLUMN IF NOT EXISTS piano_tuning_id INTEGER DEFAULT NULL',
         f'CREATE INDEX IF NOT EXISTS idx_asset_logs_piano ON "{app_schema}".asset_logs(piano_tuning_id)',
+        # 3.49.0: the "tasks and projects" email switch (optional Projects
+        # module). Shown and honoured only for users with module access.
+        f'ALTER TABLE "{app_schema}".user_notify_prefs ADD COLUMN IF NOT EXISTS email_tasks INTEGER DEFAULT 1',
     ]
 
     shared_alters = [

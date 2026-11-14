@@ -97,6 +97,42 @@ RESTORE_BLOCKED = {
 # RESTORE_BLOCKED, so no restore path can touch them.)
 PRIVATE_TABLES = {'chat_threads', 'chat_participants', 'chat_messages'}
 
+# The tables of the optional, per-user-access module (projects_module, 3.49.0).
+# Private like the conversations above — and, beyond that, UNLISTED: to an
+# admin this tool must behave as if these tables did not exist (the module is
+# invisible to everyone it was not given to, admins included). So they are
+# never in the table list, and the diff / preview / apply paths answer for
+# them exactly as they do for a table name that is not in the snapshot —
+# never with a "private" or "not restorable" message that would confirm the
+# name. A new table of that module MUST be added here (the `pm_` prefix test
+# in _unlisted() is only the safety net for one that was forgotten).
+UNLISTED_TABLES = {
+    'pm_access', 'pm_projects', 'pm_members', 'pm_contacts', 'pm_tasks',
+    'pm_task_deps', 'pm_task_alerts', 'pm_comments', 'pm_activity', 'pm_shows',
+    'pm_files', 'pm_file_versions', 'pm_budget_lines', 'pm_budget_history',
+    'pm_budget_sources', 'pm_notes', 'pm_note_versions',
+}
+PRIVATE_TABLES |= UNLISTED_TABLES
+RESTORE_BLOCKED |= UNLISTED_TABLES
+
+# Rows this tool never shows, counts, diffs or restores, in tables that are
+# otherwise inspectable: {table: (column, hidden values)}.
+#   notifications / kind 'project' — that module's bell rows carry a task
+#       title and a project name for ONE recipient; an admin reading a backup
+#       must not see them.
+#   app_settings / module_projects_enabled — the module's own on/off switch
+#       (the key alone names it).
+# The filter sits in the FOUR functions every path reads rows or counts
+# through — _scan_pg_dump and _read_pg_dump_table for the snapshot side,
+# _live_count and _read_live_table for the live side — so the table list, the
+# diff (both sides), restore preview and restore apply all see a table that
+# simply does not contain those rows: they can't be listed, counted, compared,
+# picked, updated or deleted from here. Never read a table's rows any other way.
+ROW_FILTERS = {
+    'notifications': ('kind', frozenset({'project'})),
+    'app_settings': ('key', frozenset({'module_projects_enabled'})),
+}
+
 # Churny operational tables — sorted to the bottom of the tables list so the
 # content tables people actually care about stay on top.
 SYSTEM_TABLES = RESTORE_BLOCKED | {
@@ -254,6 +290,32 @@ def _split_cols(col_list_sql):
     return [c.strip().strip('"') for c in col_list_sql.split(',') if c.strip()]
 
 
+def _unlisted(table):
+    """True for a table this tool must treat as nonexistent (UNLISTED_TABLES)."""
+    return table in UNLISTED_TABLES or (table or '').startswith('pm_')
+
+
+def _row_filter(table, columns):
+    """(column index, hidden values) when `table` has rows to hide
+    (ROW_FILTERS) and carries the deciding column, else None. A dump from
+    before that column existed has no such rows."""
+    f = ROW_FILTERS.get(table)
+    if not f or f[0] not in columns:
+        return None
+    return columns.index(f[0]), f[1]
+
+
+def _live_hidden_sql(table, columns):
+    """(' AND-able SQL condition', params) that leaves ROW_FILTERS rows out of
+    a live read of `table`, or ('', []). NULL in the deciding column is an
+    ordinary row."""
+    f = _row_filter(table, columns)
+    if not f:
+        return '', []
+    col = _qi(columns[f[0]])
+    return f'({col} IS NULL OR {col} <> ALL(%s))', [sorted(f[1])]
+
+
 def _iter_dump_lines(path):
     """Yield decoded lines (no trailing newline) of the FIRST gzip member of
     a .sql.gz dump, zcat-style: trailing garbage after a complete gzip stream
@@ -291,10 +353,18 @@ def _scan_pg_dump(path):
         if m:
             schema, table = (m.group(1) or 'public'), m.group(2)
             cols = _split_cols(m.group(3))
+            hide = _row_filter(table, cols)
             count = 0
             for data_line in it:
                 if data_line == '\\.':
                     break
+                if hide:
+                    # Hidden rows (ROW_FILTERS) are not even counted: the
+                    # table list shows this number next to the live count.
+                    fields = data_line.split('\t')
+                    if (len(fields) > hide[0]
+                            and _copy_unescape(fields[hide[0]]) in hide[1]):
+                        continue
                 count += 1
             tables[(schema, table)] = {'columns': cols, 'rows': count, 'pk': None}
             continue
@@ -320,7 +390,11 @@ def _scan_pg_dump(path):
 
 def _read_pg_dump_table(path, schema, table):
     """Stream the dump to one table's COPY block; return (columns, rows).
-    Row values are Python strings or None — exactly the COPY text values."""
+    Row values are Python strings or None — exactly the COPY text values.
+    An UNLISTED table reads as absent and ROW_FILTERS rows are dropped here,
+    so no caller can ever hold them."""
+    if _unlisted(table):
+        return None, None
     it = _iter_dump_lines(path)
     for line in it:
         m = _COPY_RE.match(line)
@@ -333,11 +407,15 @@ def _read_pg_dump_table(path, schema, table):
                     break
             continue
         cols = _split_cols(m.group(3))
+        hide = _row_filter(table, cols)
         rows = []
         for data_line in it:
             if data_line == '\\.':
                 break
-            rows.append([_copy_unescape(f) for f in data_line.split('\t')])
+            row = [_copy_unescape(f) for f in data_line.split('\t')]
+            if hide and len(row) > hide[0] and row[hide[0]] in hide[1]:
+                continue
+            rows.append(row)
         return cols, rows
     return None, None
 
@@ -450,9 +528,14 @@ def _live_columns(db, schema, table):
 
 
 def _live_count(db, schema, table):
+    """Live row count as this tool shows it — ROW_FILTERS rows not counted."""
     try:
+        cond, params = ('', [])
+        if table in ROW_FILTERS:
+            cond, params = _live_hidden_sql(table, _live_columns(db, schema, table))
         return db.execute(
             f'SELECT COUNT(*) AS n FROM {_qtable(db, schema, table)}'
+            + (f' WHERE {cond}' if cond else ''), params or None
         ).fetchone()['n']
     except Exception:
         return None
@@ -462,19 +545,27 @@ def _read_live_table(db, schema, table, where_show_id=None):
     """Every live row of a table — or, in per-show mode, only that show's
     rows. Pushing the show filter into SQL matters since 3.1.0: the child
     tables include show_attachments / show_external_rentals, whose BYTEA
-    columns can hold every show's files."""
+    columns can hold every show's files. An UNLISTED table reads as absent
+    and ROW_FILTERS rows are left out in SQL (they never leave PostgreSQL)."""
+    if _unlisted(table):
+        return None, None
     cols = _live_columns(db, schema, table)
     if not cols:
         return None, None
     col_sql = ', '.join(_qi(c) for c in cols)
     show_col = 'id' if table == 'shows' else 'show_id'
+    conds, params = [], []
     if where_show_id is not None and show_col in cols:
-        rows = db.execute(
-            f'SELECT {col_sql} FROM {_qtable(db, schema, table)} WHERE {_qi(show_col)} = %s',
-            (where_show_id,)).fetchall()
-    else:
-        rows = db.execute(
-            f'SELECT {col_sql} FROM {_qtable(db, schema, table)}').fetchall()
+        conds.append(f'{_qi(show_col)} = %s')
+        params.append(where_show_id)
+    hidden, hidden_params = _live_hidden_sql(table, cols)
+    if hidden:
+        conds.append(hidden)
+        params += hidden_params
+    rows = db.execute(
+        f'SELECT {col_sql} FROM {_qtable(db, schema, table)}'
+        + (' WHERE ' + ' AND '.join(conds) if conds else ''),
+        params or None).fetchall()
     return cols, [[r[c] for c in cols] for r in (dict(row) for row in rows)]
 
 
@@ -628,7 +719,8 @@ def _plan_table(db, snap, schema, table, restore_keys=None, delete_keys=None,
     (None = none). where_show_id: per-show mode — make live rows for that
     show match the snapshot's (upsert all snapshot rows, delete live-only).
     """
-    meta = snap.scan().get((schema, table))
+    # An UNLISTED table gets the very answer an unknown table name gets.
+    meta = None if _unlisted(table) else snap.scan().get((schema, table))
     if meta is None:
         return None, f'table {table} not present in snapshot'
     snap_cols, snap_rows = snap.read_table(schema, table)
@@ -713,7 +805,9 @@ def _build_plan(db, snap, payload):
         table = payload.get('table') or ''
         if not _SAFE_IDENT_RE.match(table) or not _SAFE_IDENT_RE.match(schema):
             return None, 'invalid table'
-        if table in RESTORE_BLOCKED:
+        # (An UNLISTED table falls through to _plan_table's "not present in
+        # snapshot" — saying "not restorable" would confirm that it exists.)
+        if table in RESTORE_BLOCKED and not _unlisted(table):
             return None, f'table {table} is not restorable from snapshots'
         restore_keys = payload.get('restore') or []
         delete_keys = payload.get('delete') or []
@@ -903,7 +997,7 @@ def _tables_view():
         ok, reason = _restore_allowed(db, snap)
         tables = []
         for (schema, table) in keys:
-            if table in PRIVATE_TABLES:
+            if table in PRIVATE_TABLES or _unlisted(table):
                 continue
             meta = scan.get((schema, table))
             in_live = (schema, table) in live_set
@@ -937,6 +1031,9 @@ def _diff_view():
     table = request.args.get('table') or ''
     if not _SAFE_IDENT_RE.match(schema) or not _SAFE_IDENT_RE.match(table):
         return _json_error('Invalid table.')
+    if _unlisted(table):
+        # Word for word the answer for a table that isn't in the snapshot.
+        return _json_error('Table not found in snapshot.', 404)
     if table in PRIVATE_TABLES:
         return _json_error('This table holds private conversations and cannot be inspected.', 403)
     try:

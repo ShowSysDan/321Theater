@@ -4,8 +4,8 @@
 """
 File storage redundancy — S3 (SeaweedFS) <-> PostgreSQL (3.1.0).
 
-Every file the app stores lives on a row of one of five tables, each of which
-already has BOTH an inline BYTEA column and an S3 key column:
+Every file the app stores lives on a row of one of these tables, each of
+which has BOTH an inline BYTEA column and an S3 key column:
 
   kind           table                   bytes column  S3 key column
   attachments    show_attachments        file_data     s3_key
@@ -13,10 +13,15 @@ already has BOTH an inline BYTEA column and an S3 key column:
   asset_photos   asset_types             photo         photo_s3_key
   rentals        show_external_rentals   pdf_data      s3_key
   pdf_templates  pdf_templates           pdf_data      s3_key
+  project_files  pm_file_versions        file_data     s3_key
 
 The row itself carries the show association (show_id), the file type
 (mime_type / photo_mime / always-PDF) and name, and — new in 3.1.0 — a
-`content_sha256` of the file's (uncompressed) content. A file can therefore
+`content_sha256` of the file's (uncompressed) content. (The last kind
+belongs to an optional module and has no show: its files are private to
+that module's users, so its `meta` names a file by its row id only — the
+migration tool's progress line, error list and syslog never carry a
+filename — and its S3 key is built from ids alone. Keep both that way.) A file can therefore
 exist in S3, in the database, or in BOTH. This module owns the rules for that:
 
   * Read order (`file_read_preference` app_setting, 's3' default | 'db'):
@@ -112,6 +117,24 @@ KINDS = OrderedDict([
         'meta': ("NULL::INTEGER AS show_id, name, 'application/pdf' AS mime, "
                  "0 AS is_compressed, FALSE AS archived"),
         's3_key_for': lambda r: f"pdf-templates/{r['id']}.pdf",
+    }),
+    # An optional module's files (one row per stored VERSION). Private to that
+    # module's users: `name` is the row id, never the filename, because the
+    # migration engine puts `name` in file_migration_runs (current_item, the
+    # error list), which every admin can read; the S3 key is ids only for the
+    # same reason. Not in the admin File Manager. Archived versions are gzip
+    # in the database like archived attachments (compressible).
+    ('project_files', {
+        'label': 'Module files',
+        'table': 'pm_file_versions', 'blob': 'file_data', 'key': 's3_key',
+        'compressible': True,
+        'meta': ("NULL::INTEGER AS show_id, project_id, file_id, version, "
+                 "('file #' || CAST(id AS TEXT)) AS name, "
+                 "COALESCE(NULLIF(mime_type,''),'application/octet-stream') AS mime, "
+                 "COALESCE(is_compressed,0) AS is_compressed, "
+                 "(deleted_at IS NOT NULL) AS archived"),
+        's3_key_for': lambda r: (f"project-files/{r['project_id']}/{r['file_id']}/"
+                                 f"v{r['version']}-{r['id']}"),
     }),
 ])
 

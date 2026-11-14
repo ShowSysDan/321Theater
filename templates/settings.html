@@ -2115,7 +2115,10 @@
         <p class="text-dim" style="font-size:12px;line-height:1.5;margin:0 0 12px">Everything below always shows in your <strong>inbox</strong> (the envelope button). These switches decide what is <em>also</em> emailed to <strong id="np-email">your address</strong> when you haven't seen it in the app.</p>
         <label class="np-row"><input type="checkbox" id="np-messages"> <span><strong>New messages</strong><span class="text-dim np-sub">A message someone sent you that is still unread after <span id="np-delay">10</span> minutes. One email covers everything unread.</span></span></label>
         <label class="np-row"><input type="checkbox" id="np-mentions"> <span><strong>@mentions</strong><span class="text-dim np-sub">Someone typed @your name in a show's comments and you haven't opened the notification.</span></span></label>
-        <label class="np-row"><input type="checkbox" id="np-reminders"> <span><strong>Reminders</strong><span class="text-dim np-sub">A reminder you set on a message or a note to self has come due.</span></span></label>
+        <label class="np-row"><input type="checkbox" id="np-reminders"> <span><strong>Reminders</strong><span class="text-dim np-sub">A reminder you set on a message or a note to self has come due.</span></span></label>{% if projects_enabled() %}
+        {# Only in the page of someone with the optional Projects module, and
+           shown only once the GET returned the switch (same rule, server side). #}
+        <label class="np-row" id="np-tasks-row" hidden><input type="checkbox" id="np-tasks"> <span><strong>Tasks and projects</strong><span class="text-dim np-sub">You were added to a project, given a task or mentioned, or a task of yours is due — and you haven't opened the notification.</span></span></label>{% endif %}
         <div id="np-msg" class="field-msg" style="display:none"></div>
         <button class="btn btn-primary" type="button" onclick="saveNotifyPrefs()">Save</button>
       </div>
@@ -3185,7 +3188,11 @@ async function loadNotifyPrefs() {
     if (!d.success) return;
     document.getElementById('np-messages').checked = !!d.prefs.email_messages;
     document.getElementById('np-mentions').checked = !!d.prefs.email_mentions;
-    document.getElementById('np-reminders').checked = !!d.prefs.email_reminders;
+    document.getElementById('np-reminders').checked = !!d.prefs.email_reminders;{% if projects_enabled() %}
+    if ('email_tasks' in d.prefs) {
+      document.getElementById('np-tasks').checked = !!d.prefs.email_tasks;
+      document.getElementById('np-tasks-row').hidden = false;
+    }{% endif %}
     document.getElementById('np-delay').textContent = d.delay_minutes;
     document.getElementById('np-email').textContent = d.email || 'your address (none on your account yet — ask an admin to add one)';
   } catch (e) {}
@@ -3197,7 +3204,9 @@ async function saveNotifyPrefs() {
       method: 'POST', headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
       body: JSON.stringify({email_messages: document.getElementById('np-messages').checked,
                             email_mentions: document.getElementById('np-mentions').checked,
-                            email_reminders: document.getElementById('np-reminders').checked})});
+                            email_reminders: document.getElementById('np-reminders').checked{% if projects_enabled() %},
+                            // Sent only when the switch was shown; a key left out keeps its stored value.
+                            ...(document.getElementById('np-tasks-row').hidden ? {} : {email_tasks: document.getElementById('np-tasks').checked}){% endif %}})});
     const d = await resp.json();
     showMsg(msg, d.success ? 'Saved.' : (d.error || 'Could not save.'), d.success ? 'success' : 'error');
   } catch (e) { showMsg(msg, 'Could not save.', 'error'); }

@@ -71,6 +71,7 @@ import security_module  # security sign-in sheets — wired up near the bottom
 import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
 import spot_module  # Spot sound-level integration — wired up near the bottom
 import chat_module  # Messages / inbox — wired up near the bottom
+import projects_module  # optional, sandboxed — wired up near the bottom
 import file_store  # S3 <-> PostgreSQL file redundancy + migration — wired up near the bottom
 from init_db import pg_name_key  # SQL twin of _name_key (idx_contacts_name_key's text)
 
@@ -901,7 +902,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.48.1'
+APP_VERSION = '3.49.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1168,6 +1169,21 @@ APP_MODULES = [
         'default': '0',
         'settings_endpoint': 'spot_settings_page',
     },
+    {
+        # 'unlisted': Settings → Modules shows this entry only to an admin
+        # who personally has access to it (_modules_see_unlisted); everyone
+        # else's module list does not contain it at all. Its switch and its
+        # per-user access list live on its own settings page.
+        'key': 'projects',
+        'name': 'Projects',
+        'description': 'Private projects for the people given access: tasks, '
+                       'a timeline, budgets, files, notes and linked shows. '
+                       'Switched on, and access granted per person, on its '
+                       'settings page.',
+        'default': '0',
+        'settings_endpoint': 'pm_settings',
+        'unlisted': True,
+    },
 ]
 
 # Integrations that show under Settings → Modules beside the switchable
@@ -1319,6 +1335,10 @@ _PERF_LIVE_FLUSH = 2.0
 _PERF_LIVE_BUFFER_MAX = 500
 _PERF_LIVE_TTL = 600             # seconds a Live-view renewal keeps capture on
 _PERF_LIVE_SKIP = frozenset(('static', 'performance_live_feed', 'performance_live_control'))
+# Endpoints with this prefix belong to a module whose pages are private to
+# the people given access: their requests (path + username, one row each)
+# never go into the Live request log, which every admin can watch.
+_PERF_LIVE_SKIP_PREFIX = 'pm_'
 _perf_live = {'until': 0.0, 'checked': 0.0, 'flushed': time.time()}
 _perf_live_buf = []
 _PERF_WORKER = f"{socket.gethostname()}:{os.getpid()}"
@@ -1525,7 +1545,9 @@ def _perf_finish_request(exc=None):
         # worker's buffer, so a quiet worker's last requests don't sit unseen.
         if _perf_live_on() or _perf_live_buf:
             with _perf_lock:
-                if (endpoint not in _PERF_LIVE_SKIP and now.timestamp() < _perf_live['until']
+                if (endpoint not in _PERF_LIVE_SKIP
+                        and not endpoint.startswith(_PERF_LIVE_SKIP_PREFIX)
+                        and now.timestamp() < _perf_live['until']
                         and len(_perf_live_buf) < _PERF_LIVE_BUFFER_MAX):
                     _perf_live_buf.append((
                         now, endpoint, request.method, path,
@@ -4210,6 +4232,24 @@ def _run_spot_capture_job():
         spot_module.run_spot_capture()
 
 
+def _run_pm_hourly():
+    """Hourly job of the optional sandboxed module (projects_module): its
+    due / overdue alerts and its retry queue. Leader-gated like every job
+    with side effects (so TEST_MODE never runs it), and a database outage
+    skips the run with an ERROR log — the module itself returns at once
+    while it is switched off. Log lines carry the exception TYPE only: its
+    text could quote a row."""
+    if not am_i_leader():
+        return
+    try:
+        with app.app_context():
+            projects_module.run_hourly()
+    except db_adapter.DatabaseUnavailable:
+        syslog_logger.error('PM_HOURLY_SKIPPED reason=database_unavailable')
+    except Exception as e:
+        app.logger.error(f'pm hourly job failed: {type(e).__name__}')
+
+
 def start_scheduler():
     """Register all background jobs.
 
@@ -4292,6 +4332,10 @@ def start_scheduler():
         scheduler.add_job(_run_spot_capture_job, 'interval', minutes=5,
                           id='spot_capture', misfire_grace_time=240,
                           coalesce=True, max_instances=1)
+        # Optional module's hourly job (sandboxed): leader-gated inside the
+        # wrapper; every alert is claimed atomically in the module, so a
+        # late or doubled fire sends nothing twice.
+        scheduler.add_job(_run_pm_hourly, 'interval', hours=1, id='pm_hourly')
         scheduler.start()
         # Backfill contact↔user link once on boot.
         try:
@@ -5005,7 +5049,11 @@ def notify_users(db, user_ids, title, body='', link_url=None, kind='system',
                 'INSERT INTO notifications (user_id, kind, title, body, link_url, show_id, field_key) '
                 'VALUES (%s,%s,%s,%s,%s,%s,%s)', rows)
     except Exception as e:
-        app.logger.warning(f'notify_users failed ({kind}): {e}')
+        # A PostgreSQL error can quote the failing row — title and body. For
+        # the private kind (the optional module's rows: a task title, a
+        # project name) the log gets the exception TYPE only.
+        app.logger.warning(f'notify_users failed ({kind}): '
+                           f'{type(e).__name__ if kind == "project" else e}')
 
 
 _MENTION_SCAN_MAX = 4000      # comment bodies are ≤ 2000 chars
@@ -5111,49 +5159,74 @@ def _mention_notifications_sync(db, show_id, comment_id, new_body=None):
 # ── Inbox emails (3.47.0) ────────────────────────────────────────────────────
 # Per-user switches (My Account → Email notifications), stored in
 # user_notify_prefs; a missing row = all on.
-_NOTIFY_PREF_KEYS = ('email_messages', 'email_mentions', 'email_reminders')
+# email_tasks belongs to the optional, per-user-access module: it is always
+# honoured by the email job, but it is only SHOWN to / accepted from someone
+# who has that access (_notify_pref_keys_for_me) — for everyone else the
+# key is not in any response.
+_NOTIFY_PREF_KEYS = ('email_messages', 'email_mentions', 'email_reminders', 'email_tasks')
+_NOTIFY_PREF_GATED = frozenset(('email_tasks',))
 _INBOX_EMAIL_DELAY_MIN = 10     # a message must sit unread this long first
 _INBOX_MENTION_DELAY_MIN = 3
 
 
 def _notify_prefs(db, user_ids):
-    """{user_id: {email_messages, email_mentions, email_reminders}} (bools)."""
+    """{user_id: {email_messages, email_mentions, email_reminders,
+    email_tasks}} (bools). A missing row, or a NULL, = on."""
     out = {int(u): {k: True for k in _NOTIFY_PREF_KEYS} for u in user_ids}
     if out:
         for r in db.execute('SELECT * FROM user_notify_prefs WHERE user_id = ANY(%s)',
                             (list(out),)).fetchall():
-            out[r['user_id']] = {k: bool(r[k]) if r[k] is not None else True
+            out[r['user_id']] = {k: bool(r.get(k)) if r.get(k) is not None else True
                                  for k in _NOTIFY_PREF_KEYS}
     return out
+
+
+def _notify_pref_keys_for_me():
+    """The switches the signed-in user may see and set: the gated ones only
+    with access to the module they belong to."""
+    gated_ok = projects_module.has_access()
+    return tuple(k for k in _NOTIFY_PREF_KEYS if gated_ok or k not in _NOTIFY_PREF_GATED)
 
 
 @app.route('/account/notify-prefs', methods=['GET', 'POST'])
 @login_required
 def account_notify_prefs():
-    """The signed-in user's inbox email switches."""
+    """The signed-in user's inbox email switches. A POST changes ONLY the
+    keys present in its body — an absent key keeps its stored value, so a
+    page that doesn't know a switch (an old tab, or one that isn't shown
+    it) can never turn it off."""
     uid = session['user_id']
+    keys = _notify_pref_keys_for_me()
     db = get_db()
     try:
         if request.method == 'POST':
             if session.get('is_document_viewer'):
                 return jsonify({'success': False, 'error': 'Not available.'}), 403
-            data = request.get_json(silent=True) or {}
-            vals = [1 if data.get(k) else 0 for k in _NOTIFY_PREF_KEYS]
-            db.execute(
-                """INSERT INTO user_notify_prefs (user_id, email_messages, email_mentions, email_reminders)
-                   VALUES (%s, %s, %s, %s)
-                   ON CONFLICT (user_id) DO UPDATE SET
-                     email_messages = EXCLUDED.email_messages,
-                     email_mentions = EXCLUDED.email_mentions,
-                     email_reminders = EXCLUDED.email_reminders,
-                     updated_at = CURRENT_TIMESTAMP""", [uid] + vals)
-            db.commit()
-            syslog_logger.info(f"NOTIFY_PREFS user_id={uid} messages={vals[0]} mentions={vals[1]} "
-                               f"reminders={vals[2]} by={session.get('username')}")
-        prefs = _notify_prefs(db, [uid])[uid]
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                data = {}
+            given = [(k, 1 if data[k] else 0) for k in keys if k in data]
+            if given:
+                # Column names come from _NOTIFY_PREF_KEYS, never the request.
+                cols = [k for k, _v in given]
+                db.execute(
+                    f"""INSERT INTO user_notify_prefs (user_id, {', '.join(cols)})
+                        VALUES (%s, {', '.join(['%s'] * len(cols))})
+                        ON CONFLICT (user_id) DO UPDATE SET
+                          {', '.join(f'{c} = EXCLUDED.{c}' for c in cols)},
+                          updated_at = CURRENT_TIMESTAMP""",
+                    [uid] + [v for _k, v in given])
+                db.commit()
+        prefs = {k: v for k, v in _notify_prefs(db, [uid])[uid].items() if k in keys}
         me = db.execute('SELECT email FROM users WHERE id=%s', (uid,)).fetchone()
     finally:
         db.close()
+    if request.method == 'POST':
+        # The stored values after the save (a partial POST changes only some).
+        syslog_logger.info(
+            f"NOTIFY_PREFS user_id={uid} "
+            + ' '.join(f"{k[len('email_'):]}={int(prefs[k])}" for k in keys)
+            + f" by={session.get('username')}")
     return jsonify({'success': True, 'prefs': prefs,
                     'email': ((me['email'] if me else '') or '').strip(),
                     'delay_minutes': _INBOX_EMAIL_DELAY_MIN})
@@ -5184,6 +5257,24 @@ def run_inbox_emails():
         for m in mentions:
             items.setdefault(m['user_id'], {'messages': [], 'reminders': []}) \
                  .setdefault('mentions', []).append(dict(m))
+        if module_enabled('projects'):
+            # The optional module's unread bell rows, stamped by the one
+            # statement that returns them (so each is mailed once, even with
+            # several workers here at once) and only for people who still
+            # have access. A failure aborts the whole run: none of the stamps
+            # taken above is committed (the handler below closes the
+            # connection, which discards them), so sending anything now would
+            # send it again next time. It is logged by TYPE only — the error
+            # text could quote a row.
+            try:
+                updates = projects_module.pending_email_items(db, _INBOX_MENTION_DELAY_MIN)
+            except db_adapter.DatabaseUnavailable:
+                raise
+            except Exception as e:
+                raise RuntimeError(f'updates ({type(e).__name__})') from None
+            for u in updates:
+                items.setdefault(u['user_id'], {'messages': [], 'reminders': []}) \
+                     .setdefault('updates', []).append(dict(u))
         people = {}
         if items:
             prefs = _notify_prefs(db, list(items))
@@ -5210,7 +5301,8 @@ def run_inbox_emails():
         msgs = it.get('messages') if pref['email_messages'] else []
         rems = it.get('reminders') if pref['email_reminders'] else []
         ments = it.get('mentions') if pref['email_mentions'] else []
-        if not (msgs or rems or ments):
+        ups = it.get('updates') if pref['email_tasks'] else []
+        if not (msgs or rems or ments or ups):
             continue
         blocks, bits = [], []
 
@@ -5236,6 +5328,15 @@ def run_inbox_emails():
             blocks.append({'heading': 'Mentions in show comments',
                            'items': [f"{m['title']}: {_line(m['body'], 200)}" for m in ments]})
             bits.append(f"{len(ments)} mention{'' if len(ments) == 1 else 's'}")
+        if ups:
+            # The block names things (the body is `sensitive`: never stored).
+            # The SUBJECT bit is a bare count — subjects are kept in the
+            # email log, which every admin can read.
+            blocks.append({'heading': 'Projects',
+                           'items': [_line(u['title'], 200)
+                                     + (f" — {_line(u['body'], 120)}" if u['body'] else '')
+                                     for u in ups]})
+            bits.append(f"{len(ups)} update{'' if len(ups) == 1 else 's'}")
         title = ' · '.join(bits)
         title = title[:1].upper() + title[1:]
         text, html = _mail(
@@ -6545,13 +6646,26 @@ def _my_pm_show_ids(db, user_id):
 @app.route('/my-shows')
 @login_required
 def my_shows():
-    return _render_show_board(mine=True)
+    # For someone with access to the optional module this page is "My Work":
+    # the same board plus their projects and tasks (rendered by the module's
+    # own partial). Everyone else gets exactly the page they always had —
+    # `my_work` stays False and nothing about it reaches their browser.
+    extra = {}
+    if projects_module.has_access():
+        db = get_db()
+        try:
+            extra = {'my_work': True,
+                     'pm_work': projects_module.my_work(db, session['user_id']),
+                     'asset_v': APP_VERSION}
+        finally:
+            db.close()
+    return _render_show_board(mine=True, extra=extra)
 
 
-def _render_show_board(mine=False):
+def _render_show_board(mine=False, extra=None):
     """The Shows board (/shows — Home until 3.35.0); mine=True is the My
     Shows view — the same board narrowed to the active shows I PM or cover
-    (no archive count)."""
+    (no archive count). `extra` = more template variables (my_shows only)."""
     auto_archive_past_shows()
     accessible = get_accessible_shows(session['user_id'])
     db = get_db()
@@ -6765,7 +6879,8 @@ def _render_show_board(mine=False):
                            home_density=home_density,
                            my_shows=mine,
                            archived_count=archived_count,
-                           user=get_current_user())
+                           user=get_current_user(),
+                           **{'my_work': False, **(extra or {})})
 
 
 _EN_DAYS = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
@@ -11694,6 +11809,12 @@ def merge_shows(keeper_id):
     keeper, source = dict(keeper), dict(source)
     try:
         moved = {t: c['count'] for t, c in _show_child_counts(db, source_id).items()}
+        # 0. The optional module's links to the duplicate follow it to the
+        #    keeper. Its own tables, moved by its own function — deliberately
+        #    NOT in _SHOW_MERGE_MOVE_TABLES, whose row counts this screen
+        #    shows to admins. Must run before the duplicate is deleted (the
+        #    links cascade away with it) and whether or not the module is on.
+        projects_module.on_show_merge(db, source_id, keeper_id)
         # 1. Reassign additive child rows onto the keeper.
         for tbl in _SHOW_MERGE_MOVE_TABLES:
             db.execute(f'UPDATE {tbl} SET show_id=%s WHERE show_id=%s', (keeper_id, source_id))
@@ -15679,23 +15800,46 @@ def venue_colors_save():
     return jsonify({'success': True})
 
 
+def _modules_see_unlisted():
+    """True when the signed-in admin may see the 'unlisted' APP_MODULES
+    entries on Settings → Modules: only an admin who has their own row in
+    that module's access table. Asked of the table directly (not the
+    module's has_access()) because the entry must show while the module is
+    still switched OFF — that is where it gets switched on. A database where
+    the table does not exist yet is simply "no access"; an outage is NOT
+    caught (the page 503s like any other)."""
+    uid = session.get('user_id')
+    if not uid or session.get('user_role') != 'admin':
+        return False
+    db = get_db()
+    try:
+        if db.execute("SELECT to_regclass('pm_access') AS t").fetchone()['t'] is None:
+            return False
+        return db.execute('SELECT 1 FROM pm_access WHERE user_id = %s',
+                          (uid,)).fetchone() is not None
+    finally:
+        db.close()
+
+
 @app.route('/settings/modules', methods=['GET'])
 @admin_required
 def modules_list():
     """The optional feature modules (APP_MODULES) with their current state,
-    for the Settings → Modules panel."""
+    for the Settings → Modules panel. 'unlisted' entries are left out
+    entirely unless _modules_see_unlisted()."""
     def _url(m):
         try:
             return url_for(m['settings_endpoint']) if m.get('settings_endpoint') else None
         except Exception:
             return None
+    see_unlisted = _modules_see_unlisted()
     return jsonify({'modules': [{
         'key': m['key'],
         'name': m['name'],
         'description': m['description'],
         'enabled': module_enabled(m['key']),
         'settings_url': _url(m),
-    } for m in APP_MODULES], 'integrations': [{
+    } for m in APP_MODULES if see_unlisted or not m.get('unlisted')], 'integrations': [{
         'key': m['key'], 'name': m['name'], 'description': m['description'],
         'settings_url': _url(m),
     } for m in APP_INTEGRATIONS]})
@@ -15706,8 +15850,12 @@ def modules_list():
 def modules_save():
     """Switch optional feature modules on/off. Body: {key: bool, ...} — only
     keys present in APP_MODULES are accepted. Applies immediately (module
-    routes re-check the flag per request), no restart needed."""
+    routes re-check the flag per request), no restart needed. An 'unlisted'
+    module can be switched here like any other, but it is echoed back only
+    to a caller who named it or may see it listed."""
     data = request.get_json(force=True) or {}
+    if not isinstance(data, dict):
+        data = {}
     changed = []
     db = get_db()
     for m in APP_MODULES:
@@ -15723,9 +15871,11 @@ def modules_save():
     for key, enabled in changed:
         syslog_logger.info(
             f"MODULE_TOGGLE key={key} enabled={enabled} by={session.get('username')}")
+    see_unlisted = _modules_see_unlisted()
     return jsonify({'success': True, 'modules': [{
         'key': m['key'], 'enabled': module_enabled(m['key']),
-    } for m in APP_MODULES]})
+    } for m in APP_MODULES
+        if see_unlisted or not m.get('unlisted') or m['key'] in data]})
 
 
 @app.route('/settings/upload-size', methods=['POST'])
@@ -32265,6 +32415,233 @@ chat_module.register(
     module_enabled=module_enabled,
     can_access_show=can_access_show,
     notify_mentions=_notify_comment_mentions,
+)
+
+# ─── Optional module (sandboxed, default OFF, per-user access) ───────────────
+# Everything it needs from this file is passed in here; it never imports app.py.
+# The four _pm_* helpers below are how it reaches main-app data: a show it
+# creates is an ordinary show (same inserts, same audit row as New Show), and
+# every figure it shows comes from the report helpers / the two labor engines,
+# gated for whoever is LOOKING. The rest of this file's wiring for it is small
+# and marked where it sits: APP_MODULES ('unlisted'), _modules_see_unlisted,
+# the show-merge hook, _run_pm_hourly, the perf Live skip, email_tasks in the
+# notify prefs + run_inbox_emails, and my_shows.
+
+def _pm_int_ids(show_ids):
+    """Sorted, de-duplicated positive ints from whatever the module passed."""
+    out = set()
+    for v in show_ids or ():
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            out.add(v)
+    return sorted(out)
+
+
+def _pm_can_create_show():
+    """The rule new_show enforces, for the current session: signed in, not a
+    read-only / restricted account (the raw session rule — read-only admins
+    too). Document viewers never reach New Show (the viewer gate)."""
+    return bool(session.get('user_id')
+                and not session.get('is_readonly')
+                and not session.get('is_restricted')
+                and not session.get('is_document_viewer'))
+
+
+def _pm_create_show(db, name, show_date, venue, show_mode, user_id):
+    """Create an ordinary show exactly as new_show does — the shows row, the
+    advance_data seeds, one performance when dated — and return its id.
+    The audit row is byte-for-byte new_show's (same action, entity, `after`
+    keys in the same order, NO detail): the audit log is admin-readable, so
+    nothing in it may say where the show was created from. Raises ValueError
+    on a bad argument. Caller commits (and writes new_show's syslog line)."""
+    name = (name or '').strip()
+    if not name:
+        raise ValueError('name')
+    if show_mode not in ('show', 'event'):
+        raise ValueError('show_mode')
+    if show_date:
+        d = _as_date(show_date)
+        if d is None:
+            raise ValueError('show_date')
+        show_date = d.isoformat()       # new_show stores / audits the ISO text
+    else:
+        show_date = None
+    venue = (venue or '').strip()
+    show_time = ''                      # no time is asked for: set on the show
+    show_id = db.execute("""
+        INSERT INTO shows (name, show_date, show_time, venue, show_mode, created_by)
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+    """, (name, show_date, show_time, venue, show_mode, user_id)).fetchone()['id']
+
+    for key, val in [('show_name', name), ('show_date', show_date or ''),
+                     ('show_time', show_time), ('venue', venue)]:
+        if val:
+            db.execute("""
+                INSERT INTO advance_data (show_id, field_key, field_value)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
+            """, (show_id, key, val))
+
+    if show_date:
+        db.execute("""
+            INSERT INTO show_performances (show_id, perf_date, perf_time, sort_order)
+            VALUES (%s, %s, %s, 0)
+        """, (show_id, show_date, show_time))
+
+    log_audit(db, 'SHOW_CREATE', 'show', show_id, show_id=show_id,
+              after={'name': name, 'show_date': show_date, 'venue': venue})
+    return show_id
+
+
+def _pm_show_bars(db, show_ids):
+    """[{id, name, venue, show_mode, status, start, end, perf_dates, is_past,
+    prism_status, is_test}] for these shows (ISO strings), ordered by start.
+    start / end = the envelope of load-in, load-out and the performance
+    dates; a show with none of those falls back to its show_date; both are
+    None when it has no date at all. is_past is the Shows board's PAST rule
+    (_show_last_date; an undated performance could still be ahead)."""
+    ids = _pm_int_ids(show_ids)
+    if not ids:
+        return []
+    perfs, undated = {}, set()
+    for p in db.execute("""
+        SELECT show_id, perf_date FROM show_performances
+         WHERE show_id = ANY(%s) ORDER BY perf_date, sort_order, id
+    """, (ids,)).fetchall():
+        d = _as_date(p['perf_date'])
+        if d is None:
+            undated.add(p['show_id'])
+        elif d not in perfs.setdefault(p['show_id'], []):
+            perfs[p['show_id']].append(d)
+    today = date.today()
+    out = []
+    for r in db.execute("""
+        SELECT id, name, venue, show_mode, status, show_date, load_in_date,
+               load_out_date, prism_status, is_test
+          FROM shows WHERE id = ANY(%s)
+    """, (ids,)).fetchall():
+        pd = perfs.get(r['id'], [])
+        show_date = _as_date(r['show_date'])
+        span = [d for d in (_as_date(r['load_in_date']), _as_date(r['load_out_date']), *pd) if d]
+        if not span and show_date:
+            span = [show_date]
+        last = _show_last_date(show_date, r['load_out_date'], pd)
+        out.append({
+            'id': r['id'], 'name': r['name'], 'venue': (r['venue'] or '').strip(),
+            'show_mode': r['show_mode'] or 'show', 'status': r['status'] or 'active',
+            'start': min(span).isoformat() if span else None,
+            'end': max(span).isoformat() if span else None,
+            'perf_dates': [d.isoformat() for d in pd],
+            'is_past': bool(last and last < today and r['id'] not in undated),
+            'prism_status': r['prism_status'], 'is_test': bool(r['is_test']),
+        })
+    out.sort(key=lambda s: (s['start'] is None, s['start'] or '', s['id']))
+    return out
+
+
+def _pm_show_figures(db, show_ids):
+    """Money on these shows, for the CURRENT session: {'can': {assets, labor,
+    piano}, 'shows': [{show_id, name, assets, external, piano,
+    labor_estimate, labor_actual, settled}], 'totals': {...}}.
+    Every number is one the Reports page would give this same person, from
+    the same helpers — never re-derived here: asset lines and external
+    rentals need _can_report_assets, piano lines _can_report_piano, labor
+    _can_report_labor (estimate = _calc_labor_cost_for_show; actual =
+    _calc_post_show_labor_cost, SETTLED shows only, as in every report). A
+    figure the caller may not see is None, never 0. Read-only; nothing is
+    stored."""
+    ids = _pm_int_ids(show_ids)
+    can = {'assets': bool(_can_report_assets()), 'labor': bool(_can_report_labor()),
+           'piano': bool(_can_report_piano())}
+    keys = ('assets', 'external', 'piano', 'labor_estimate', 'labor_actual')
+    gate = {'assets': 'assets', 'external': 'assets', 'piano': 'piano',
+            'labor_estimate': 'labor', 'labor_actual': 'labor'}
+    uid = session.get('user_id')
+    rows = [r for r in db.execute(
+        'SELECT id, name FROM shows WHERE id = ANY(%s) ORDER BY id', (ids,)).fetchall()
+        if can_access_show(uid, r['id'])] if ids else []
+    ids = [r['id'] for r in rows]
+    shows = {r['id']: {'show_id': r['id'], 'name': r['name'],
+                       **{k: (0.0 if can[gate[k]] else None) for k in keys},
+                       'settled': False} for r in rows}
+    if ids:
+        for sid in set(ids) - set(_unsettled_show_ids(db, ids)):
+            shows[sid]['settled'] = True
+    if ids and can['assets']:
+        for r in _report_asset_lines(db, ids):
+            shows[r['show_id']]['assets'] += float(r['locked_price'] or 0) * int(r['quantity'] or 1)
+    if ids and (can['assets'] or can['piano']):
+        for sid, (ext, piano) in _report_externals(db, ids).items():
+            if can['assets']:
+                shows[sid]['external'] = ext
+            if can['piano']:
+                shows[sid]['piano'] = piano
+    if can['labor']:
+        for sid, s in shows.items():
+            # One show's engine failing must not take the others down. A
+            # failed figure is None ("not available"), never a made-up 0.
+            # (A database outage is not a figure problem: let it 503.)
+            try:
+                s['labor_estimate'] = float(_calc_labor_cost_for_show(db, sid)[1] or 0)
+            except db_adapter.DatabaseUnavailable:
+                raise
+            except Exception as e:
+                s['labor_estimate'] = None
+                app.logger.warning(f'show figures: estimate failed for show {sid}: {type(e).__name__}')
+            if not s['settled']:
+                s['labor_actual'] = None        # nothing is billed until Settle Now
+                continue
+            try:
+                s['labor_actual'] = float(_calc_post_show_labor_cost(db, sid)[1] or 0)
+            except db_adapter.DatabaseUnavailable:
+                raise
+            except Exception as e:
+                s['labor_actual'] = None
+                app.logger.warning(f'show figures: settlement failed for show {sid}: {type(e).__name__}')
+    totals = {}
+    for k in keys:
+        if not can[gate[k]]:
+            totals[k] = None
+            continue
+        vals = [s[k] for s in shows.values() if s[k] is not None]
+        totals[k] = round(float(sum(vals)), 2)
+        for s in shows.values():
+            if s[k] is not None:
+                s[k] = round(s[k], 2)
+    return {'can': can, 'shows': [shows[i] for i in ids], 'totals': totals}
+
+
+projects_module.register(
+    app,
+    get_db=get_db,
+    get_current_user=get_current_user,
+    log_audit=log_audit,
+    syslog_logger=syslog_logger,
+    module_enabled=module_enabled,
+    can_access_show=can_access_show,
+    ts_out=_ts_out,
+    as_date=_as_date,
+    notify_users=notify_users,
+    mention_user_ids=_mention_user_ids,
+    get_distinct_venues=_get_distinct_venues,
+    get_upload_max=_get_upload_max,
+    served_type=_served_type,
+    safe_content_disposition=_safe_content_disposition,
+    cols_except=_cols_except,
+    office_to_pdf=_libreoffice_convert_to_pdf,
+    pdf_font_config=_wp_font_config,
+    get_logo=lambda: get_app_setting('logo_data', ''),
+    file_store=file_store,
+    s3_storage=s3_storage,
+    db_unavailable=db_adapter.DatabaseUnavailable,
+    app_version=APP_VERSION,
+    create_show=_pm_create_show,
+    can_create_show=_pm_can_create_show,
+    show_bars=_pm_show_bars,
+    show_figures=_pm_show_figures,
 )
 
 find_module.register(
