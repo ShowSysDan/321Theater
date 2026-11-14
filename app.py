@@ -5260,9 +5260,15 @@ def run_inbox_emails():
         items = (chat_module.pending_email_items(db, _INBOX_EMAIL_DELAY_MIN)
                  if module_enabled('messages') else {})
         mentions = db.execute(
+            # SKIP LOCKED: never wait on a row someone is marking read (that
+            # deadlocked against "mark all read", 3.49.0 review); it is
+            # picked up on a later run if it is still unread.
             """UPDATE notifications SET emailed_at = CURRENT_TIMESTAMP
-                WHERE kind = 'mention' AND read_at IS NULL AND emailed_at IS NULL
-                  AND created_at <= NOW() - %s * INTERVAL '1 minute'
+                WHERE id IN (SELECT id FROM notifications
+                              WHERE kind = 'mention' AND read_at IS NULL AND emailed_at IS NULL
+                                AND created_at <= NOW() - %s * INTERVAL '1 minute'
+                              ORDER BY id FOR UPDATE SKIP LOCKED)
+                  AND read_at IS NULL AND emailed_at IS NULL
             RETURNING user_id, title, body, link_url""", (_INBOX_MENTION_DELAY_MIN,)).fetchall()
         for m in mentions:
             items.setdefault(m['user_id'], {'messages': [], 'reminders': []}) \
@@ -5337,16 +5343,18 @@ def run_inbox_emails():
         if ments:
             blocks.append({'heading': 'Mentions in show comments',
                            'items': [f"{m['title']}: {_line(m['body'], 200)}" for m in ments]})
-            bits.append(f"{len(ments)} mention{'' if len(ments) == 1 else 's'}")
         if ups:
             # The block names things (the body is `sensitive`: never stored).
-            # The SUBJECT bit is a bare count — subjects are kept in the
-            # email log, which every admin can read.
             blocks.append({'heading': 'Projects',
                            'items': [_line(u['title'], 200)
                                      + (f" — {_line(u['body'], 120)}" if u['body'] else '')
                                      for u in ups]})
-            bits.append(f"{len(ups)} update{'' if len(ups) == 1 else 's'}")
+        # Mentions and the optional module's updates share ONE neutral word in
+        # the subject: subjects are kept in the email log every admin reads,
+        # and a word of its own would show who uses that module (3.49.0).
+        n_notes = len(ments or []) + len(ups or [])
+        if n_notes:
+            bits.append(f"{n_notes} notification{'' if n_notes == 1 else 's'}")
         title = ' · '.join(bits)
         title = title[:1].upper() + title[1:]
         text, html = _mail(
@@ -9793,7 +9801,7 @@ def _parse_ua(ua):
 @app.route('/api/client-info', methods=['POST'])
 @login_required
 def api_client_info():
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
 
     def _n(key, lo, hi, cast=int, default=0):
         try:
@@ -10375,14 +10383,71 @@ _LO_HARDENED_XCU = '''<?xml version="1.0" encoding="UTF-8"?>
 '''
 
 
+def _json_obj():
+    """The request's JSON body as a dict — {} for a missing, invalid or
+    non-object body (a bare string / number / list): routes then answer with
+    their own 400 instead of an AttributeError 500 (3.49.0 review)."""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+# Concurrent LibreOffice runs per worker process. Each soffice is hundreds of
+# MB and a CPU core; without a cap one user could start one per request
+# thread (16 per worker). A caller that can't get a slot within
+# _LO_SLOT_WAIT seconds gets None (no preview / the file is listed as not
+# embedded) — never an unbounded queue.
+_LO_SLOTS = threading.BoundedSemaphore(2)
+_LO_SLOT_WAIT = 60
+_LO_TIMEOUT = 90
+# What reaches LibreOffice must be a real Office container: OOXML / ODF
+# (zip), legacy Office (OLE compound file) or RTF. Anything else under an
+# office name — HTML, XML, SVG… — is refused: LibreOffice would detect it by
+# content and its HTML filter fetches <link> URLs on loopback despite the
+# hardened profile (3.49.0 review).
+_LO_MAGIC = (b'PK\x03\x04', b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1', b'{\\rtf')
+# RTF fields (INCLUDEPICTURE / INCLUDETEXT / IMPORT …) are resolved by the
+# RTF importer at load time, past BlockUntrustedRefererLinks: a field naming a
+# local image or PDF put that file into the preview (3.49.0 review). Renaming
+# the control word makes every field render only its cached result text;
+# linked OLE objects lose their link the same way.
+_RTF_NEUTRALIZE = re.compile(rb'\\(fldinst|objautlink|objlink|objupdate|linkself)', re.I)
+
+
+def _lo_prepare(data):
+    """The bytes to hand LibreOffice, or None when they must not be converted."""
+    data = bytes(data or b'')
+    head = data[:64].lstrip(b'\xef\xbb\xbf \t\r\n')
+    if not head.startswith(_LO_MAGIC):
+        return None
+    if head.startswith(b'{\\rtf'):
+        data = _RTF_NEUTRALIZE.sub(rb'\\x\1x', data)
+    return data
+
+
 def _libreoffice_convert_to_pdf(data, filename):
     """Convert an Office / OpenDocument file to PDF via LibreOffice headless.
-    Each call uses an isolated user-installation dir so concurrent requests
-    don't collide on the shared profile lock, pre-seeded with
-    _LO_HARDENED_XCU so the document cannot make LibreOffice fetch anything
-    outside itself. Returns PDF bytes or None."""
+    Every input is an UPLOAD, so (3.49.0 review):
+      - only real Office containers are converted (_lo_prepare), RTF with its
+        fields neutralised;
+      - an isolated user-installation dir seeded with _LO_HARDENED_XCU (no
+        remote / linked content, no macros) and TMPDIR inside the work dir;
+      - its own process group, killed as a whole on timeout or error
+        (/usr/bin/soffice is a shell script: killing it alone left
+        soffice.bin running, orphaned, at full CPU);
+      - prlimit CPU / core limits when prlimit exists (no preexec_fn — not
+        safe in threaded workers);
+      - at most _LO_SLOTS conversions at once per worker.
+    Returns PDF bytes or None."""
+    import subprocess, tempfile, os, signal
+    data = _lo_prepare(data)
+    if data is None:
+        app.logger.warning(f"LibreOffice convert skipped for {filename}: not an Office file")
+        return None
+    if not _LO_SLOTS.acquire(timeout=_LO_SLOT_WAIT):
+        app.logger.warning(f"LibreOffice convert skipped for {filename}: converter busy")
+        return None
+    proc = None
     try:
-        import subprocess, tempfile, os
         from werkzeug.utils import secure_filename as _sf
         safe = _sf(filename or '') or 'document'
         ext = _file_ext(filename or '')
@@ -10397,22 +10462,24 @@ def _libreoffice_convert_to_pdf(data, filename):
             with open(os.path.join(profile_dir, 'user', 'registrymodifications.xcu'),
                       'w', encoding='utf-8') as f:
                 f.write(_LO_HARDENED_XCU)
-            result = subprocess.run(
-                [
-                    'soffice',
-                    f'-env:UserInstallation=file://{profile_dir}',
+            argv = ['soffice', f'-env:UserInstallation=file://{profile_dir}',
                     '--headless', '--nologo', '--nofirststartwizard',
-                    '--convert-to', 'pdf',
-                    '--outdir', workdir,
-                    src_path,
-                ],
-                # Parses user-uploaded files: none of the app's secrets.
-                capture_output=True, timeout=90, env=app_config.child_env(),
-            )
-            if result.returncode != 0:
+                    '--convert-to', 'pdf', '--outdir', workdir, src_path]
+            if shutil.which('prlimit'):
+                argv = ['prlimit', f'--cpu={_LO_TIMEOUT + 30}', '--core=0', '--'] + argv
+            # Parses user-uploaded files: none of the app's secrets.
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, start_new_session=True,
+                                    env=app_config.child_env(TMPDIR=workdir))
+            try:
+                _out, err = proc.communicate(timeout=_LO_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                app.logger.warning(f"LibreOffice convert timed out for {filename}")
+                return None
+            if proc.returncode != 0:
                 app.logger.warning(
                     f"LibreOffice convert failed for {filename}: "
-                    f"rc={result.returncode} stderr={result.stderr[:200]!r}")
+                    f"rc={proc.returncode} stderr={(err or b'')[:200]!r}")
                 return None
             for fn in os.listdir(workdir):
                 if fn.lower().endswith('.pdf') and fn != safe:
@@ -10423,8 +10490,21 @@ def _libreoffice_convert_to_pdf(data, filename):
         app.logger.warning("LibreOffice (soffice) not installed — cannot convert office files")
         return None
     except Exception as e:
-        app.logger.warning(f"LibreOffice convert error for {filename}: {e}")
+        app.logger.warning(f"LibreOffice convert error for {filename}: {type(e).__name__}")
         return None
+    finally:
+        # The whole tree (shell script → oosplash → soffice.bin), whatever
+        # happened above; a finished group is simply gone.
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                proc.communicate(timeout=5)
+            except Exception:
+                pass
+        _LO_SLOTS.release()
 
 
 def _render_omitted_files_index_pdf(omitted, base_url):
@@ -11726,8 +11806,13 @@ _ADVANCE_SCALAR_FIELDS = [
 def _purge_show(db, show_id):
     """Delete a show plus the child rows not handled by ON DELETE CASCADE.
     Caller commits. Used by both delete_show and merge_shows."""
+    # Conversations tagged with this show lose the tag FIRST (what the FK's
+    # ON DELETE SET NULL would do, but taking the chat_threads row locks
+    # before the shows row): a message being sent in such a thread locks the
+    # thread, then needs the show row — the other order deadlocked.
+    db.execute('UPDATE chat_threads SET show_id = NULL WHERE show_id = %s', (show_id,))
     # The optional module's own bookkeeping for its links to this show (its
-    # tables cascade by FK). First, before any row of the show is touched.
+    # tables cascade by FK). Before any row of the show is touched.
     projects_module.on_show_delete(db, show_id)
     for tbl in _SHOW_PURGE_TABLES:
         db.execute(f'DELETE FROM {tbl} WHERE show_id=%s', (show_id,))
@@ -12310,7 +12395,7 @@ def performance_live_control():
     """Start (or renew) / stop live request capture. Capture lapses on its own
     _PERF_LIVE_TTL s after the last renewal, so a closed Live tab can't leave
     every worker writing a row per request forever."""
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     on = bool(data.get('on'))
     until = time.time() + _PERF_LIVE_TTL if on else 0.0
     db = get_db()
@@ -12369,7 +12454,7 @@ def performance_reset():
     """Delete collected performance stats — everything, or a date range
     (inclusive). Covers the daily + hourly rollups, slow queries and the live
     log. Already-buffered (unflushed) stats from the last minute still land."""
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     scope = data.get('scope')
     if scope == 'all':
         d_from = d_to = None
@@ -13087,7 +13172,7 @@ def toggle_user_lock(uid):
     if uid == session.get('user_id'):
         return jsonify({'success': False,
                         'error': "You can't lock your own account."}), 400
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     db = get_db()
     row = db.execute('SELECT username, is_locked FROM users WHERE id=%s', (uid,)).fetchone()
     if not row:
@@ -13150,7 +13235,7 @@ def toggle_force_password_change(uid):
     blocked) until they pick a new password meeting the complexity policy.
 
     Body: {"force": true|false}. If omitted, the current state is toggled."""
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     db = get_db()
     row = db.execute('SELECT username, must_change_password FROM users WHERE id=%s',
                      (uid,)).fetchone()
@@ -13182,7 +13267,7 @@ def set_view_mode():
     login gate this is the endpoint's only CSRF guard."""
     if not _origin_matches():
         abort(403)
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     mode = data.get('mode') or request.form.get('mode') or ''
     if mode not in ('mobile', 'desktop', 'auto'):
         return jsonify({'error': 'mode must be mobile, desktop, or auto'}), 400
@@ -16687,7 +16772,7 @@ def email_errors_clear():
     'resolved' is the safe default — only removes rows already marked
     handled. Pass 'all' to wipe everything (e.g. before re-running tests).
     """
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     scope = (data.get('scope') or 'resolved').lower()
     db = get_db()
     if scope == 'all':
@@ -21260,7 +21345,7 @@ def archive_crew_member(mid):
     """Archive (or with {"restore": true} restore) a technician. Archived
     technicians keep their skills, notes and every shift that names them;
     they only leave the scheduling pickers and the active lists."""
-    restore = bool((request.get_json(silent=True) or {}).get('restore'))
+    restore = bool(_json_obj().get('restore'))
     db = get_db()
     before = _snapshot_row(db, 'crew_members', mid)
     if not before:
@@ -28115,14 +28200,21 @@ def _run_update(service_name):
         syslog_logger.info('APP_UPDATE applied successfully')
 
     except Exception as exc:
-        _update_state['error'] = str(exc)
-        _update_log(f'ERROR: {exc}')
+        # Error text (git's stderr can list paths) and the restored file
+        # names go through the same filter as the file list above; the raw
+        # text is in syslog only.
+        err = '\n'.join(_update_public(str(exc).split('\n')))
+        _update_state['error'] = err
+        _update_log(f'ERROR: {err}')
         _update_log('Attempting rollback…')
         _update_state['phase'] = 'rolling_back'
         try:
+            restored = []
             for src, bak in archived_files:
                 shutil.copy2(bak, src)
-                _update_log(f'  Restored {os.path.basename(src)}')
+                restored.append(os.path.basename(src))
+            if restored:
+                _update_log('  Restored ' + ', '.join(_update_public(restored)))
             _update_log('Rollback complete.')
             if service_name:
                 _update_log(f'Restarting {service_name} after rollback…')
@@ -32113,7 +32205,7 @@ def saved_reports_list():
 @reports_required
 def saved_reports_create():
     uid = session['user_id']
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     name = _saved_report_name(data.get('name'))
     if not name:
         return jsonify({'error': 'Give the report a name.'}), 400
@@ -32122,6 +32214,10 @@ def saved_reports_create():
         return jsonify({'error': err}), 400
     db = get_db()
     try:
+        # One save per person at a time (transaction-scoped lock — nothing
+        # stays on the pooled connection): the count below then sees any
+        # save that just committed, so the cap holds under double-clicks.
+        db.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', (f'saved_reports:{uid}',))
         # Only reports I saved myself count — copies other people sent me
         # have their own limit, so nobody can use up my room.
         n = db.execute('SELECT COUNT(*) AS n FROM saved_reports WHERE user_id = %s '
@@ -32174,7 +32270,7 @@ def saved_reports_edit(rid):
             db.commit()
             syslog_logger.info(f"REPORT_SAVED_DELETE id={rid} by={session.get('username')}")
             return jsonify({'success': True})
-        data = request.get_json(silent=True) or {}
+        data = _json_obj()
         sets, args = [], []
         if 'name' in data:
             name = _saved_report_name(data.get('name'))
@@ -32233,7 +32329,7 @@ def saved_reports_send(rid):
     and an inbox notification that opens it. Only the filters travel — the
     recipient sees whatever their own permissions allow."""
     uid = session['user_id']
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     try:
         to = sorted({int(x) for x in (data.get('user_ids') or [])} - {uid})
     except (TypeError, ValueError):
@@ -32269,7 +32365,11 @@ def saved_reports_send(rid):
             ok = [i for i in ok if i not in no_access]
         skipped, sent = [], 0
         view_text = json.dumps(view)
-        for rcpt in ok:
+        for rcpt in sorted(ok):
+            # The recipient's list, one writer at a time (sorted order: two
+            # sends can't deadlock): the duplicate check and the limits below
+            # then see a copy a concurrent send just committed.
+            db.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', (f'saved_reports:{rcpt}',))
             # Sending the same report again doesn't stack a second copy.
             dup = db.execute(
                 'SELECT id FROM saved_reports WHERE user_id = %s AND sent_by = %s '
@@ -32315,7 +32415,7 @@ def saved_reports_to_dashboard(rid):
     {dashboard_id} or {new_name} for a new private dashboard. Appends to the
     dashboard's widget list (never replaces it)."""
     uid = session['user_id']
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     db = get_db()
     try:
         if not db.execute('SELECT 1 FROM saved_reports WHERE id = %s AND user_id = %s',

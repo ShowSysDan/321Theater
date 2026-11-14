@@ -74,6 +74,14 @@ _ACTIVE_USER_SQL = ("COALESCE(u.is_locked, 0) = 0 AND COALESCE(u.pending_approva
 _NAME_SQL = "COALESCE(NULLIF(TRIM(u.display_name), ''), u.username)"
 
 
+def _json_obj():
+    """The request's JSON body as a dict — {} for a missing, invalid or
+    non-object body (a bare string / number / list), so routes answer 400
+    with their own message instead of an AttributeError 500."""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
 def pending_email_items(db, delay_minutes):
     """What the inbox email job should mail right now (3.47.0), and stamp it
     so it is mailed once: {user_id: {'messages': [...], 'reminders': [...]}}.
@@ -344,7 +352,7 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
         """Active shows / events a message can be tagged with (newest dates
         first within upcoming; `q` narrows by name or venue)."""
         _guard()
-        q = (request.args.get('q') or '').strip()[:80]
+        q = (request.args.get('q') or '').replace('\x00', '').strip()[:80]
         like = '%' + q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
         db = get_db()
         try:
@@ -426,7 +434,7 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
         optionally tagged with an active show. The same people + show reuse
         their existing thread."""
         uid = _guard()
-        data = request.get_json(silent=True) or {}
+        data = _json_obj()
         body, err = _clean_body(data.get('body'))
         if err:
             return _err(err)
@@ -558,7 +566,7 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
     @login_required
     def api_chat_read(tid):
         uid = _guard()
-        data = request.get_json(silent=True) or {}
+        data = _json_obj()
         try:
             up_to = int(data.get('up_to') or 0)
         except (TypeError, ValueError):
@@ -582,7 +590,7 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
     @login_required
     def api_chat_send(tid):
         uid = _guard()
-        data = request.get_json(silent=True) or {}
+        data = _json_obj()
         body, err = _clean_body(data.get('body'))
         if err:
             return _err(err)
@@ -626,7 +634,7 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
         """Switch "also post to the show's comments" on or off for a thread
         (any participant; needs a tagged show)."""
         uid = _guard()
-        on = bool((request.get_json(silent=True) or {}).get('on'))
+        on = bool(_json_obj().get('on'))
         db = get_db()
         try:
             t = _member(db, tid, uid, lock=True)
@@ -652,7 +660,7 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
         """Set / move / clear the reminder on one of MY messages, or mark a
         due one done: {remind_at: iso|null} or {done: true}."""
         uid = _guard()
-        data = request.get_json(silent=True) or {}
+        data = _json_obj()
         db = get_db()
         try:
             m = db.execute(

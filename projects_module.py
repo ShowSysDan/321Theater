@@ -1432,10 +1432,17 @@ def pending_email_items(db, delay_min):
     if not _module_on(db):
         return []
     return [dict(r) for r in db.execute(
+        # SKIP LOCKED: a row locked by someone marking it read (or by another
+        # run of the job) is left for later instead of waited on — waiting
+        # here, after the mention claim, deadlocked against "mark all read".
         f"""UPDATE notifications n SET emailed_at = CURRENT_TIMESTAMP
-             WHERE n.kind = 'project' AND n.read_at IS NULL AND n.emailed_at IS NULL
-               AND n.created_at <= NOW() - %s * INTERVAL '1 minute'
-               AND {_access_sql('n.user_id')}
+             WHERE n.id IN (
+                   SELECT x.id FROM notifications x
+                    WHERE x.kind = 'project' AND x.read_at IS NULL AND x.emailed_at IS NULL
+                      AND x.created_at <= NOW() - %s * INTERVAL '1 minute'
+                      AND {_access_sql('x.user_id')}
+                    ORDER BY x.id FOR UPDATE SKIP LOCKED)
+               AND n.read_at IS NULL AND n.emailed_at IS NULL
          RETURNING n.user_id, n.title, n.body""", (delay_min,)).fetchall()]
 
 
@@ -1891,6 +1898,8 @@ def _routes_members(app):
     @wrap
     def pm_member_add(db, uid, pid):
         c = ctx(db, pid, 'owner', lock=True)
+        if c.archived:              # read-only until reopened (members too)
+            raise Refuse(403, _ARCHIVED)
         body = _body()
         target = to_int(body.get('user_id'), 'Person')
         role = one_of(body.get('role'), ('editor', 'viewer'), 'Role')
@@ -1916,6 +1925,8 @@ def _routes_members(app):
     @wrap
     def pm_member_role(db, uid, pid, target):
         c = ctx(db, pid, 'owner', lock=True)
+        if c.archived:              # read-only until reopened (members too)
+            raise Refuse(403, _ARCHIVED)
         role = one_of(_body().get('role'), ('editor', 'viewer'), 'Role')
         m = member_row(db, pid, target)
         if m['role'] == 'owner':
@@ -1942,6 +1953,8 @@ def _routes_members(app):
         their notifications about this project are scrubbed, read or not."""
         c = ctx(db, pid, 'view', lock=True)
         leaving = target == uid
+        if c.archived and not leaving:    # leaving an archived project is still allowed
+            raise Refuse(403, _ARCHIVED)
         if c.readonly:
             raise Refuse(403, _VIEW_ONLY)
         if not leaving and c.role != 'owner':
@@ -1969,6 +1982,8 @@ def _routes_members(app):
         longer the owner); the old owner is demoted FIRST — the one-owner
         unique index would refuse two owners even for a moment."""
         c = ctx(db, pid, 'owner', lock=True)
+        if c.archived:              # read-only until reopened (members too)
+            raise Refuse(403, _ARCHIVED)
         m = member_row(db, pid, target)
         if target == uid or m['role'] == 'owner' or not m['active'] or m['ro']:
             raise Refuse(400, "That person can't be made the owner.")

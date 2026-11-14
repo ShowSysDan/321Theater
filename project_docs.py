@@ -62,7 +62,7 @@ import zlib
 from html.parser import HTMLParser
 
 __all__ = [
-    'extract_text', 'extract_isolated', 'parse_email', 'email_attachment', 'has_msg_support',
+    'extract_text', 'extract_isolated', 'email_attachment_isolated', 'parse_email', 'email_attachment', 'has_msg_support',
     'sniff', 'sanitize_note_html', 'html_to_text', 'html_to_docx',
     'NOTE_HTML_MAX',
 ]
@@ -2406,26 +2406,79 @@ _ISOLATED_MEM = 1536 * 1024 ** 2  # RLIMIT_AS (bytes of address space)
 _ISOLATED_OUT_MAX = 8_000_000     # bytes of JSON the parent will read back
 
 
+def _run_child(head, data, out_max, env):
+    """Run `python project_docs.py --extract` with one job: a JSON `head`
+    and the file bytes on stdin (never argv: a process list is readable by
+    other users of the machine). Its stdout is read in chunks and the child
+    is killed — its whole process group — when it writes more than
+    `out_max` bytes, runs past _ISOLATED_WALL_S, or anything goes wrong.
+    Returns stdout bytes, or None. Never raises."""
+    import subprocess, signal, threading as _th
+    proc = None
+    try:
+        hb = json.dumps(head).encode('utf-8')
+        payload = len(hb).to_bytes(4, 'big') + hb + bytes(data or b'')
+        proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), '--extract'],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=env, start_new_session=True)
+        timer = _th.Timer(_ISOLATED_WALL_S, lambda: os.killpg(proc.pid, signal.SIGKILL))
+        timer.daemon = True
+        timer.start()
+        try:
+            def feed():
+                try:
+                    proc.stdin.write(payload)
+                except (BrokenPipeError, OSError):
+                    pass
+                finally:
+                    try:
+                        proc.stdin.close()
+                    except OSError:
+                        pass
+            writer = _th.Thread(target=feed, daemon=True)
+            writer.start()
+            chunks, size = [], 0
+            while True:
+                b = proc.stdout.read(65536)
+                if not b:
+                    break
+                size += len(b)
+                if size > out_max:
+                    return None
+                chunks.append(b)
+            proc.wait()
+            writer.join(5)
+            return b''.join(chunks) if proc.returncode == 0 else None
+        finally:
+            timer.cancel()
+    except Exception:
+        return None
+    finally:
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+
+
 def extract_isolated(data, filename, mime='', want_email=False, env=None):
     """extract_text() — and parse_email() when `want_email` — run in a child
     process under CPU / memory / time limits. Returns (text, info, ok):
     ok is False when the child could not be run, was stopped by a limit or
     answered nonsense (text '' and info None then). Never raises, never logs.
     `env` is the child's environment (the caller passes one without the
-    app's secrets). The file name travels on stdin, never in argv (a process
-    list is readable by other users of the machine)."""
+    app's secrets)."""
     try:
-        import subprocess
-        head = json.dumps({'filename': str(filename or ''), 'mime': str(mime or ''),
-                           'email': bool(want_email)}).encode('utf-8')
-        payload = len(head).to_bytes(4, 'big') + head + bytes(data or b'')
-        r = subprocess.run([sys.executable, os.path.abspath(__file__), '--extract'],
-                           input=payload, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                           timeout=_ISOLATED_WALL_S, env=env)
-        if r.returncode != 0 or not r.stdout or len(r.stdout) > _ISOLATED_OUT_MAX:
+        out = _run_child({'filename': str(filename or ''), 'mime': str(mime or ''),
+                          'email': bool(want_email)}, data, _ISOLATED_OUT_MAX, env)
+        if not out:
             return '', None, False
-        out = json.loads(r.stdout.decode('utf-8'))
-        text, info = out.get('text'), out.get('info')
+        got = json.loads(out.decode('utf-8'))
+        text, info = got.get('text'), got.get('info')
         if not isinstance(text, str) or not (info is None or isinstance(info, dict)):
             return '', None, False
         return text, info, True
@@ -2433,10 +2486,36 @@ def extract_isolated(data, filename, mime='', want_email=False, env=None):
         return '', None, False
 
 
+def email_attachment_isolated(data, filename, index, max_bytes, env=None):
+    """email_attachment() in the same limited child (a hostile e-mail's
+    headers alone can cost gigabytes and minutes in the stdlib parser —
+    3.49.0 review). Returns (name, mime, bytes) or None — also None when the
+    attachment is larger than `max_bytes` (the child checks, the parent caps
+    what it reads). Never raises."""
+    try:
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            return None
+        out = _run_child({'filename': str(filename or ''), 'attachment': index,
+                          'max_bytes': int(max_bytes)}, data, int(max_bytes) + 65536, env)
+        if not out or len(out) < 4:
+            return None
+        n = int.from_bytes(out[:4], 'big')
+        if n <= 0 or n > 65536 or len(out) < 4 + n:
+            return None
+        meta = json.loads(out[4:4 + n].decode('utf-8'))
+        blob = out[4 + n:]
+        if not isinstance(meta, dict) or not meta.get('ok') or not blob:
+            return None
+        return str(meta.get('name') or ''), str(meta.get('mime') or ''), blob
+    except Exception:
+        return None
+
+
 def _extract_child():
-    """`python project_docs.py --extract`: the child side of
-    extract_isolated(). Limits itself first, then reads one job from stdin
-    and writes one JSON object to stdout."""
+    """`python project_docs.py --extract`: the child side of extract_isolated()
+    and email_attachment_isolated(). Limits itself first, then reads one job
+    from stdin and writes its answer to stdout: one JSON object, or for an
+    attachment a 4-byte length + JSON {ok, name, mime} + the raw bytes."""
     try:
         import resource
         resource.setrlimit(resource.RLIMIT_CPU, (_ISOLATED_CPU_S, _ISOLATED_CPU_S + 5))
@@ -2449,6 +2528,16 @@ def _extract_child():
     head = json.loads(raw[4:4 + n].decode('utf-8'))
     data = raw[4 + n:]
     del raw
+    if 'attachment' in head:
+        got = email_attachment(data, head.get('filename') or '', head.get('attachment'))
+        blob = got[2] if got else b''
+        ok = bool(got) and 0 < len(blob) <= int(head.get('max_bytes') or 0)
+        meta = json.dumps({'ok': ok, 'name': got[0] if ok else '', 'mime': got[1] if ok else ''},
+                          ensure_ascii=True).encode('ascii')
+        out = sys.stdout.buffer
+        out.write(len(meta).to_bytes(4, 'big') + meta + (blob if ok else b''))
+        out.flush()
+        return
     info = parse_email(data, head.get('filename') or '') if head.get('email') else None
     text = extract_text(data, head.get('filename') or '', head.get('mime') or '')
     sys.stdout.write(json.dumps({'text': text, 'info': info}, ensure_ascii=True))

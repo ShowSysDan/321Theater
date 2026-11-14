@@ -219,6 +219,31 @@ server may share production's database, so it must never act for production:
   handler; a handler that fails to build is retried every tick and logged
   once per settings value.
 
+## LibreOffice conversions — `_libreoffice_convert_to_pdf` is the ONE way (3.49.0)
+Every input is an upload (show attachments merged into the advance PDF,
+Projects previews). The function: converts only real Office containers
+(`_lo_prepare`: zip / OLE / RTF magic — HTML or XML under an office name made
+LibreOffice fetch loopback URLs); neutralises RTF field / link control words
+(`_RTF_NEUTRALIZE` — INCLUDEPICTURE embedded server-local files despite the
+profile); runs with a fresh profile seeded with `_LO_HARDENED_XCU`, TMPDIR in
+the work dir, `child_env()`, `prlimit` CPU / core limits, in its OWN process
+group killed on timeout / error (/usr/bin/soffice is a shell script —
+killing it alone orphaned soffice.bin at full CPU); at most `_LO_SLOTS` (2)
+per worker. Never call soffice any other way, and never `preexec_fn` (unsafe
+in threaded workers).
+
+## Request bodies and small shared rules (3.49.0 review)
+- JSON bodies: `_json_obj()` (app.py and chat_module) — a dict or {}; a bare
+  string / number / list body must give the route's own 400, not a 500.
+- Jobs that claim notification rows to e-mail use `… WHERE id IN (SELECT …
+  FOR UPDATE SKIP LOCKED)` — never wait on a row someone is marking read
+  (that deadlocked against "mark all read").
+- `_purge_show` first sets `chat_threads.show_id = NULL` (thread locks
+  before the show row: a message send locks the thread, then the show).
+- Count-then-insert limits (saved reports: per-user cap, send de-dup) take
+  `pg_advisory_xact_lock(hashtext('saved_reports:<uid>'))` first; recipients
+  in sorted order. Transaction-scoped only (the pool keeps the connection).
+
 ## PDF rendering (WeasyPrint) — always pass the shared font config
 Every `HTML(...).write_pdf(...)` must pass `font_config=_wp_font_config()`
 (security_module gets it as the `pdf_font_config` dep). Without it WeasyPrint
@@ -1211,7 +1236,9 @@ in full. Module key `projects`, default OFF.
 - **Roles:** owner / editor / viewer. Viewers may comment (owner can switch
   that off) and may change the STATUS of a task assigned to them — nothing
   else. A read-only ACCOUNT never writes, whatever its project role. An
-  archived project is read-only for everyone until restored.
+  archived project is read-only for everyone until restored — its member
+  list too (add / role / transfer / remove refused; a member may still
+  leave).
   "Can use the module" = `_access_sql()`: a pm_access row on an account that
   is not a document viewer, not LOCKED and not pending approval (locking is
   how people are offboarded; they keep their rows). A locked / revoked owner
@@ -1262,7 +1289,13 @@ in full. Module key `projects`, default OFF.
   office→PDF preview is a version row with `preview_of` set (negative
   version): every list / count / download query says `preview_of IS NULL`.
   Uploaded content is never served as active content (downloads are
-  attachments; inline only for the sniffed safe types). Text extraction runs
+  attachments; inline only for the sniffed safe types). Saving an
+  attachment out of a stored e-mail runs `email_attachment_isolated()` (same
+  child, `--extract` with an `attachment` job) — never parse an uploaded
+  e-mail in the web process. Office previews (`_office_preview`): per
+  worker at most `_PREVIEW_SLOTS`, one run per version at a time (others get
+  503 "being prepared"; projects_docs.js retries), failures remembered for
+  `_PREVIEW_FAIL_TTL`. Text extraction runs
   `project_docs.extract_isolated()`: a child process (`python project_docs.py
   --extract`, `child_env()`, RLIMIT_CPU 60 s / RLIMIT_AS 1.5 GB, 120 s wall)
   — the readers bound their OUTPUT but not one pathological page (a 2 KB PDF
@@ -1272,7 +1305,9 @@ in full. Module key `projects`, default OFF.
   blocks external / file:// references and macros — without it an uploaded
   .odt made the server fetch internal URLs and embed a local image.
   note.pdf refuses (413) a note with more than `_NOTE_PDF_MAX_TAGS` tags
-  (WeasyPrint time grows super-linearly; Word export has no such cost).
+  (WeasyPrint time grows super-linearly; Word export has no such cost) and
+  inserts `<wbr>` every 60 characters of an unbroken run (`_LONG_RUN`,
+  entities counted whole) — one 100k-character word took ~40 s.
 - **Notes** are sanitized HTML: `project_docs.sanitize_note_html()` REBUILDS
   from an allow-list (never strips) on every write and again when served or
   rendered; the client's paste cleaner is a convenience, the server is the

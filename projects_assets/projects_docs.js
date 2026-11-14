@@ -586,9 +586,17 @@
         view.appendChild(wait);
         const my = seq;
         // Ask first (a JSON 404 = no preview) so pdf.js only ever gets a PDF.
-        fetch(fileUrl(fid, v.id, 'preview.pdf'), {method: 'GET', credentials: 'same-origin', cache: 'no-store',
+        // 503 = someone else's preview of this file (or the server's
+        // converter) is busy right now: wait and ask again, a few times.
+        const ask = tries => fetch(fileUrl(fid, v.id, 'preview.pdf'), {method: 'GET', credentials: 'same-origin', cache: 'no-store',
                                                    headers: {'X-Requested-With': 'XMLHttpRequest'}})
-          .then(r => (r.ok && (r.headers.get('Content-Type') || '').indexOf('application/pdf') === 0) ? r.arrayBuffer() : null, () => null)
+          .then(r => {
+            if (r.status === 503 && tries > 0 && alive && my === seq) {
+              return new Promise(res => setTimeout(res, 4000)).then(() => (alive && my === seq) ? ask(tries - 1) : null);
+            }
+            return (r.ok && (r.headers.get('Content-Type') || '').indexOf('application/pdf') === 0) ? r.arrayBuffer() : null;
+          }, () => null);
+        ask(25)
           .then(buf => {
             if (!alive || my !== seq) return;
             wait.remove();

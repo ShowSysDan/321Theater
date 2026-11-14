@@ -56,6 +56,7 @@ import json
 import queue
 import re
 import threading
+import time
 import unicodedata
 from datetime import date, datetime, timedelta
 from urllib.parse import urlsplit
@@ -74,6 +75,10 @@ _TOO_LONG = 'This note is too long.'
 _NO_PREVIEW = 'No preview available.'
 _NO_SUCH_FILE = 'That file is not on this project.'
 _NOTE_PDF_MAX_TAGS = 24_000      # see pm_note_pdf (≈ 12,000 elements, a few seconds)
+# 60 characters with no break opportunity; an entity (&amp; &#39; …) counts
+# as ONE character, so it is never split and can't hide a long run.
+_LONG_RUN = re.compile(r'(?:[^\s<>&]|&#?\w{1,10};){60}(?=[^\s<>&]|&#?\w{1,10};)')
+_TEXT_SPAN = re.compile(r'>([^<]+)')
 
 _MONEY = (('estimate', 'Estimate'), ('committed', 'Committed'), ('actual', 'Actual'))
 # (column, cap key in core.caps, label, single line)
@@ -1304,11 +1309,16 @@ def _routes_files(app):
         v = _version(db, f, vid)
         if v['kind'] != 'email':
             raise _refuse(404, _NOT_FOUND)
-        got = project_docs.email_attachment(_read(db, v), v['filename'], n)
+        mx = _upload_max()
+        # Parsed in the limited child (a crafted e-mail must not cost this
+        # worker gigabytes or minutes); it refuses an attachment over mx.
+        src = _read(db, v)
+        got = project_docs.email_attachment_isolated(src, v['filename'], n, mx + 1,
+                                                     env=app_config.child_env())
+        del src
         if not got:
             raise _refuse(404, _NOT_FOUND)
         name, _claimed, data = got
-        mx = _upload_max()
         if len(data) > mx:
             raise _too_large(mx)
         name = _clean_filename(name)
@@ -1357,6 +1367,21 @@ def _routes_files(app):
             core.d['safe_content_disposition'](f'preview_{int(vid)}.pdf', True), sandbox=False)
 
 
+# Office previews cost a LibreOffice run (seconds, hundreds of MB). Per
+# worker process (3.49.0 security review): at most _PREVIEW_SLOTS at once,
+# ONE run per version at a time (a second viewer gets 503 "being prepared"
+# and the drawer retries), and a version that could not be converted is not
+# tried again for _PREVIEW_FAIL_TTL seconds — the drawer asks for the
+# preview every time it opens. A successful run is cached as the preview row.
+_PREVIEW_SLOTS = threading.BoundedSemaphore(2)
+_PREVIEW_MU = threading.Lock()
+_PREVIEW_BUSY = set()
+_PREVIEW_FAILED = {}             # version id -> time.monotonic() of the failure
+_PREVIEW_FAIL_TTL = 600
+_PREVIEW_FAILED_MAX = 2000
+_PREVIEW_BUSY_MSG = 'The preview is being prepared — try again in a moment.'
+
+
 def _office_preview(db, pid, fid, v):
     cached = db.execute(
         f"""SELECT {_vcols(db)} FROM pm_file_versions v
@@ -1364,16 +1389,36 @@ def _office_preview(db, pid, fid, v):
         (v['id'], fid, pid)).fetchone()
     if cached:
         return _read(db, cached)
-    src = _read(db, v)                       # ends the read transaction first
+    vid = v['id']
+    with _PREVIEW_MU:
+        failed = _PREVIEW_FAILED.get(vid)
+        if failed is not None and time.monotonic() - failed < _PREVIEW_FAIL_TTL:
+            raise _refuse(404, _NO_PREVIEW)
+        if vid in _PREVIEW_BUSY:
+            raise _refuse(503, _PREVIEW_BUSY_MSG)
+        if not _PREVIEW_SLOTS.acquire(blocking=False):
+            raise _refuse(503, _PREVIEW_BUSY_MSG)
+        _PREVIEW_BUSY.add(vid)
     try:
-        # Only the extension reaches the converter (its temp file, its
-        # process list) — never the person's filename.
-        pdf = core.d['office_to_pdf'](src, 'file.' + _ext(v['filename']))
-    except Exception as e:
-        core.log_failure('office_preview', e, version_id=v['id'])
-        pdf = None
-    if not pdf or bytes(pdf[:5]) != b'%PDF-':
-        raise _refuse(404, _NO_PREVIEW)
+        src = _read(db, v)                   # ends the read transaction first
+        try:
+            # Only the extension reaches the converter (its temp file, its
+            # process list) — never the person's filename.
+            pdf = core.d['office_to_pdf'](src, 'file.' + _ext(v['filename']))
+        except Exception as e:
+            core.log_failure('office_preview', e, version_id=vid)
+            pdf = None
+        del src
+        if not pdf or bytes(pdf[:5]) != b'%PDF-':
+            with _PREVIEW_MU:
+                if len(_PREVIEW_FAILED) >= _PREVIEW_FAILED_MAX:
+                    _PREVIEW_FAILED.clear()
+                _PREVIEW_FAILED[vid] = time.monotonic()
+            raise _refuse(404, _NO_PREVIEW)
+    finally:
+        with _PREVIEW_MU:
+            _PREVIEW_BUSY.discard(vid)
+        _PREVIEW_SLOTS.release()
     pdf = bytes(pdf)
     if len(pdf) <= _PREVIEW_CACHE_MAX:
         try:
@@ -1677,6 +1722,12 @@ def _routes_notes(app):
         # export has no such cost, so it is the way out for those.
         if body.count('<') > _NOTE_PDF_MAX_TAGS:
             raise _refuse(413, 'This note has too many lines and cells to print as a PDF — use Word instead.')
+        # A long run with no break opportunity makes WeasyPrint's line
+        # breaking quadratic (100k characters: ~40 s of one thread). Offer a
+        # break every 60 characters (_LONG_RUN), in TEXT only: the sanitizer's
+        # output escapes < and > everywhere but real tags, so '>…<' spans are
+        # text; entities are matched whole, so one is never split.
+        body = _TEXT_SPAN.sub(lambda m: '>' + _LONG_RUN.sub(lambda k: k.group(0) + '<wbr>', m.group(1)), body)
         html = render_template(
             'pdf/project_note_pdf.html', title=n['title'], project=c.project['name'],
             # Sanitized AGAIN here: this is the one place the stored HTML is
