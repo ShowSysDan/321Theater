@@ -508,3 +508,42 @@ html.mobile-view .inbox-bubble { font-size: 15px; }
 html.mobile-view .inbox-link-btn { font-size: 13px; padding: 4px 0; }
 html.mobile-view .inbox-msg-foot .inbox-link-btn { font-size: 12px; }
 html.mobile-view .inbox-time-input { height: 38px; }
+/* Inbox tap targets (UX pass): message-footer links (Change / Remove
+   reminder / Remind me) and the compose links were 26–28px tall and 8px
+   apart; the chip × was 18px. */
+html.mobile-view .inbox-msg-foot { gap: 4px; }
+html.mobile-view .inbox-msg-foot .inbox-link-btn,
+html.mobile-view .inbox-due .inbox-link-btn,
+html.mobile-view .inbox-remind-row .inbox-link-btn { min-height: 40px; padding: 0 8px; }
+html.mobile-view .inbox-chip-x { width: 32px; height: 32px; font-size: 18px; }
+
+/* ── Reports on phones (UX pass) ─────────────────────────────────────────
+   Filters: two columns (From | To, Venue | Arts Group) with the actions on
+   their own line and the date presets as one swipeable row, so the tab
+   strip and the results start on the first screen. */
+html.mobile-view .rpt-filter-row:not([hidden]) { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: end; }
+html.mobile-view .rpt-filter-row .field-group,
+html.mobile-view .rpt-filter-row .field-group select,
+html.mobile-view .rpt-filter-row .field-group input { min-width: 0 !important; width: 100%; }
+html.mobile-view .rpt-filter-row .rpt-filter-actions,
+html.mobile-view .rpt-filter-row > .rpt-note,
+html.mobile-view #rf-more .field-group:first-child { grid-column: 1 / -1; margin-left: 0; }
+html.mobile-view .rpt-presets { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; flex: 1 1 100%; max-width: 100%; }
+html.mobile-view .rpt-presets .btn { flex-shrink: 0; }
+/* The tab strip stays one sideways-scrolling row on a phone. */
+html.mobile-view .rpt-tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+/* Report tables keep dates / times / barcodes on one line and scroll
+   sideways (app.js _initMobileTableScroll treats .rpt-table as wide). */
+html.mobile-view .rpt-table td { white-space: nowrap; }
+html.mobile-view .rpt-table td.wrap, html.mobile-view .rpt-table .sub { white-space: normal; }
+html.mobile-view .rpt-table td.wrap { min-width: 140px; }
+/* Item / unit / sensor picker: a sheet above the bottom tab bar with
+   finger-sized rows (it ran under the tab bar, Apply out of reach). */
+html.mobile-view .rpt-multi-panel {
+  position: fixed; left: 12px; right: 12px; top: auto;
+  bottom: calc(76px + env(safe-area-inset-bottom));
+  width: auto; max-width: none; max-height: 65vh; max-height: 65dvh; z-index: 1300;
+}
+html.mobile-view .rpt-multi-opt { min-height: 44px; }
+html.mobile-view .rpt-multi-group button { font-size: 12px; padding: 8px 6px; }
+html.mobile-view .rpt-multi-foot .btn { min-height: 40px; }

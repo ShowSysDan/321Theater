@@ -33,8 +33,10 @@
       </span>
       <div style="min-width:0">
         <a class="pm-back" href="/projects">← Projects</a>
-        <h1 class="page-title"><span id="pm-name">Loading…</span><span class="pm-head-tags" id="pm-head-tags"></span></h1>
-        <div class="pm-head-meta" id="pm-head-meta"></div>
+        <h1 class="page-title"><span id="pm-name">Loading…</span></h1>
+        {# The status pill / badges lead the meta line (not inside the h1): a
+           title that wraps never leaves the pill alone on a line of its own. #}
+        <div class="pm-head-sub"><span class="pm-head-tags" id="pm-head-tags"></span><div class="pm-head-meta" id="pm-head-meta"></div></div>
       </div>
     </div>
     <div class="pm-head-actions" id="pm-head-actions" hidden>

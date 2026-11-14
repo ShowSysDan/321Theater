@@ -49,7 +49,7 @@
           <button type="button" class="btn btn-xs btn-ghost" data-preset="next12">Next 12 months</button>
           <button type="button" class="btn btn-xs btn-ghost" data-preset="all">All time</button>
         </div>
-        <button type="button" class="btn btn-primary btn-sm" onclick="rptRun()">Run</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="rptRun()" title="Run this tab again with the filters above (they apply as you change them)">Refresh</button>
         <button type="button" class="btn btn-ghost btn-sm" onclick="rptPdf()" title="This tab as a PDF, with the current filters">PDF</button>
         <button type="button" class="btn btn-ghost btn-sm" onclick="rptSavedOpen()" title="Save this tab and its filters, re-open a saved report, send one to someone or pin it to a dashboard">Saved reports <span id="rs-count" class="rpt-more-count"></span></button>
       </div>
@@ -199,9 +199,13 @@
       <label class="field-label">SENSORS</label>
       <div class="rpt-multi" id="rs-sensors"></div>
     </div>
-    <div class="field-group" style="min-width:120px;max-width:150px">
-      <label class="field-label">FLAG AT (dB)</label>
+    <div class="field-group" style="min-width:120px;max-width:160px">
+      <label class="field-label" for="rs-limit">FLAG LEQ AT (dB)</label>
       <input type="number" id="rs-limit" class="field-input" min="1" max="199" step="0.5" placeholder="e.g. 95" onchange="rptSoundApply()">
+    </div>
+    <div class="field-group" style="min-width:120px;max-width:160px">
+      <label class="field-label" for="rs-peak-limit">FLAG PEAK AT (dB)</label>
+      <input type="number" id="rs-peak-limit" class="field-input" min="1" max="199" step="0.5" placeholder="e.g. 110" onchange="rptSoundApply()">
     </div>
   </div>
 </template>
@@ -304,8 +308,11 @@
 .rpt-filter-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-left: auto; }
 .rpt-presets { display: flex; gap: 4px; flex-wrap: wrap; }
 .rpt-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 14px; overflow-x: auto; }
+/* Desktop: every tab visible — the strip wraps instead of clipping (phones
+   keep one swipeable row, mobile.css). */
+html:not(.mobile-view) .rpt-tabs { flex-wrap: wrap; row-gap: 0; overflow-x: visible; }
 .rpt-tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-dim); padding: 9px 14px; font-size: 13px; cursor: pointer; white-space: nowrap; }
-.rpt-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.rpt-tab.active { color: var(--orange-text, var(--accent)); border-bottom-color: var(--accent); font-weight: 600; }
 .rpt-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
 .rpt-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
 .rpt-card .v { font-size: 22px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
@@ -319,7 +326,15 @@
 .rpt-table td.num, .rpt-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .rpt-table tr.clickable { cursor: pointer; }
 .rpt-table tr.clickable:hover td { background: var(--bg-hover); }
-.rpt-table .sub { font-size: 11px; color: var(--text-dim); }
+.rpt-table .sub { font-size: 11px; color: var(--text-dim); white-space: normal; }
+/* Dates, times, barcodes and numbers never break mid-value; only the long
+   name columns (Show, Item, Arts Group, Answer…) wrap. Wide tables scroll
+   sideways in .rpt-scroll. */
+.rpt-table td { white-space: nowrap; }
+.rpt-table td.wrap { white-space: normal; min-width: 180px; }
+.rpt-table th:last-child, .rpt-table td:last-child { padding-right: 20px; }
+/* Room to scroll the last rows clear of the floating inbox button. */
+html.has-inbox:not(.mobile-view) #rpt-body { padding-bottom: 72px; }
 .rpt-scroll { overflow-x: auto; }
 .rpt-loading { padding: 30px; text-align: center; }
 .rpt-note { font-size: 11px; color: var(--text-dim); margin: 6px 0 0; line-height: 1.45; }
@@ -381,10 +396,15 @@
 .rpt-pill { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .rpt-pill-bad { background: rgba(229,72,77,.14); color: #e5484d; }
 .rpt-pill-warn { background: rgba(229,165,10,.16); color: #c98a00; }
+html[data-theme="light"] .rpt-pill-warn { color: #8a5a00; }
 .rpt-pill-ok { background: rgba(48,164,108,.15); color: #30a46c; }
 .rpt-pill-dim { background: var(--bg-hover); color: var(--text-dim); }
 .rpt-up { color: #e5484d; font-weight: 600; }
 .rpt-down { color: #30a46c; font-weight: 600; }
+.rpt-warn-text { color: #c98a00; font-weight: 600; }
+html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
+.rs-person.off { cursor: default; opacity: .55; }
+.rs-person.off:hover { background: none; }
 </style>
 {% endblock %}
 
@@ -393,7 +413,9 @@
 (function() {
   const H = {'X-Requested-With': 'XMLHttpRequest'};
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const money = v => (v === null || v === undefined) ? '—' : '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  // A negative amount reads −$2,726.25 (sign before the dollar sign).
+  const money = v => (v === null || v === undefined) ? '—'
+    : (Number(v) < 0 ? '−' : '') + '$' + Math.abs(Number(v)).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
   const num = (v, d = 0) => (v === null || v === undefined) ? '—' : Number(v).toLocaleString(undefined, {maximumFractionDigits: d});
   const TABS = Array.from(document.querySelectorAll('.rpt-tab')).map(b => b.dataset.tab);
   let _tab = new URLSearchParams(location.search).get('tab');
@@ -461,6 +483,7 @@
       history.replaceState(null, '', u);
     } catch (e) {}
   }
+  const _unitNames = {}, _sensorNames = {};     // id -> name, for saved-report labels
   const _itemParams = () => ({type_ids: _item.types.join(','), unit_ids: _item.units.join(',')});
   window.rptItemClear = function() { _item.types = []; _item.units = []; rptLoad(); };
   window.rptOpenItem = function(typeId, unitId) {
@@ -485,9 +508,12 @@
 
   // Sound Levels selection — kept across reloads of the tab and in the URL.
   const _sound = {group: _q0.get('group') || 'sensor', monitors: _idList(_q0.get('monitors')),
-                  limit: _q0.get('limit') || ''};
+                  limit: _q0.get('limit') || '', peak: _q0.get('peak_limit') || ''};
+  // Leq and peak have their own flag levels: peaks run 10-15 dB above Leq,
+  // so one number for both flagged every row's peak.
   const _soundParams = () => ({group: _sound.group === 'sensor' ? '' : _sound.group,
-                               monitors: _sound.monitors.join(','), limit: _sound.limit});
+                               monitors: _sound.monitors.join(','), limit: _sound.limit,
+                               peak_limit: _sound.peak});
   function _soundUrl() {
     try {
       const u = new URL(location.href);
@@ -498,21 +524,44 @@
   window.rptSoundApply = function() {
     _sound.group = _val('rs-group') || 'sensor';
     _sound.limit = _val('rs-limit');
+    _sound.peak = _val('rs-peak-limit');
     rptLoad();
   };
 
   // ── multi-select picker: a button + a panel of searchable checkboxes ──
   // groups = [{label, options: [{id, label, sub?}]}]. The choice is applied
-  // (onApply(ids)) when the panel closes — Apply, Esc or a click outside —
-  // so ticking ten boxes reloads the report once.
+  // (onApply(ids)) when the panel closes with Apply or a click outside — so
+  // ticking ten boxes reloads the report once. Esc cancels: the ticks made
+  // since the panel opened are discarded.
+  // A group (a type with child items) is marked as one and listed first in
+  // its category; its items say which group they are in.
+  const ASSET_TYPES = {{ asset_types | tojson }};
+  const TYPE_BY_ID = {};
+  ASSET_TYPES.forEach(t => { TYPE_BY_ID[String(t.id)] = t; });
+  const KIDS = {};
+  ASSET_TYPES.forEach(t => { if (t.parent_type_id && TYPE_BY_ID[String(t.parent_type_id)]) (KIDS[String(t.parent_type_id)] = KIDS[String(t.parent_type_id)] || []).push(t); });
   const ITEM_GROUPS = (function() {
-    const cats = {{ asset_categories | tojson }}, types = {{ asset_types | tojson }};
-    const out = cats.map(c => ({label: c.name, options: types.filter(t => t.category_id === c.id)
-      .map(t => ({id: String(t.id), label: t.name}))})).filter(g => g.options.length);
-    const rest = types.filter(t => !cats.some(c => c.id === t.category_id));
-    if (rest.length) out.push({label: 'Other', options: rest.map(t => ({id: String(t.id), label: t.name}))});
+    const cats = {{ asset_categories | tojson }};
+    const opt = t => {
+      const id = String(t.id), n = (KIDS[id] || []).length, parent = TYPE_BY_ID[String(t.parent_type_id || '')];
+      return {id, label: t.name, group: n > 0,
+              sub: n ? `group · all ${n} item${n === 1 ? '' : 's'}` : (parent ? `in ${parent.name}` : '')};
+    };
+    const order = list => list.map(opt).sort((a, b) => (b.group - a.group) || 0);
+    const out = cats.map(c => ({label: c.name, options: order(ASSET_TYPES.filter(t => t.category_id === c.id))}))
+      .filter(g => g.options.length);
+    const rest = ASSET_TYPES.filter(t => !cats.some(c => c.id === t.category_id));
+    if (rest.length) out.push({label: 'Other', options: order(rest)});
     return out;
   })();
+  // "Projectors" rather than "3 items (Projector 10K, Projector 20K Laser,
+  // Projectors)": an item whose group is also picked is already in it.
+  function itemsTitle(ids, fallback) {
+    const top = ids.filter(id => { const t = TYPE_BY_ID[id]; return !(t && t.parent_type_id && ids.includes(String(t.parent_type_id))); });
+    const names = top.map(id => (TYPE_BY_ID[id] || {}).name).filter(Boolean);
+    if (!names.length || names.length !== top.length) return fallback;
+    return names.length === 1 ? names[0] : `${names.length} items (${names.slice(0, 4).join(', ')}${names.length > 4 ? ', …' : ''})`;
+  }
   let _multiOpen = null;      // {host, close}
   function rptMulti(hostId, o) {
     const host = document.getElementById(hostId);
@@ -540,7 +589,9 @@
       btn.querySelector('.lbl').textContent = label();
       btn.title = all.filter(x => sel.has(x.id)).map(x => x.label).join(', ');
       const n = btn.querySelector('.n'); n.hidden = sel.size < 3; n.textContent = sel.size;
-      host.querySelector('.cnt').textContent = sel.size ? `${sel.size} picked` : (o.empty || 'Any');
+      const pending = !panel.hidden && before() !== opened;
+      host.querySelector('.cnt').textContent = (sel.size ? `${sel.size} picked` : (o.empty || 'Any'))
+        + (pending ? ' · Apply to use these' : '');
     };
     const draw = () => {
       const needle = q.value.trim().toLowerCase();
@@ -601,7 +652,12 @@
       else if (act.act === 'all') { list.querySelectorAll('input[type=checkbox]').forEach(c => sel.add(c.dataset.id)); draw(); paint(); }
       else if (act.act === 'none') { list.querySelectorAll('input[type=checkbox]').forEach(c => sel.delete(c.dataset.id)); draw(); paint(); }
     });
-    panel.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); close(); btn.focus(); } });
+    panel.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      sel = new Set(opened ? opened.split(',') : []);   // discard this visit's edits
+      close(false); paint(); btn.focus();
+    });
     paint();
   }
   document.addEventListener('mousedown', e => {
@@ -666,6 +722,20 @@
   window.rptRentApply = function() { _rent.cat = _val('rr-category'); _rent.type = _val('rr-type'); rptLoad(); };
   window.rptBrkMin = function(v) { _brk.min = v || '5'; rptLoad(); };
   ['rf-from', 'rf-to'].forEach(id => document.getElementById(id).addEventListener('input', () => { _preset = null; rptSavedDirty(); }));
+  // The four main filters re-run the report as they change, like every
+  // other filter on the page — so the screen (and what Save stores) always
+  // matches the controls. A date runs once it is complete or cleared.
+  ['rf-venue', 'rf-company'].forEach(id => document.getElementById(id).addEventListener('change', () => rptLoad()));
+  let _dateTimer = null;
+  ['rf-from', 'rf-to'].forEach(id => {
+    const el = document.getElementById(id);
+    el.addEventListener('change', () => {
+      clearTimeout(_dateTimer);
+      const v = el.value;
+      if (v && !(/^\d{4}-\d{2}-\d{2}$/.test(v) && v >= '1900')) return;
+      _dateTimer = setTimeout(() => rptLoad(), 300);
+    });
+  });
   function preset(kind) {
     _preset = kind;
     const now = new Date();
@@ -683,7 +753,17 @@
   // ── tabs ──
   function setTab(tab) {
     _tab = tab;
-    document.querySelectorAll('.rpt-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    document.querySelectorAll('.rpt-tab').forEach(b => {
+      b.classList.toggle('active', b.dataset.tab === tab);
+      if (b.dataset.tab === tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+    });
+    // A one-row strip that scrolls sideways (phones): bring the active tab
+    // into view — horizontally only, the page itself never jumps.
+    const strip = document.querySelector('.rpt-tabs'), a = document.querySelector('.rpt-tab.active');
+    if (strip && a && strip.scrollWidth > strip.clientWidth + 1) {
+      const left = a.offsetLeft - strip.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+      try { strip.scrollTo({left: Math.max(0, left), behavior: 'smooth'}); } catch (e) { strip.scrollLeft = Math.max(0, left); }
+    }
     try { const u = new URL(location.href); u.searchParams.set('tab', tab); history.replaceState(null, '', u); } catch (e) {}
     rptLoad();
   }
@@ -730,6 +810,11 @@
     const n = shownRows(t).length, c = document.getElementById(id + '-count');
     if (c) c.textContent = (t.q.trim() ? `${n} of ${t.rows.length}` : t.rows.length) + ` row${t.rows.length === 1 ? '' : 's'}`;
   };
+  // Cells stay on one line (a date, time or barcode never breaks at its
+  // hyphen); the long name columns wrap. `wrap: true/false` on a column
+  // overrides the label rule.
+  const WRAP_LABELS = new Set(['Show', 'Item', 'Arts Group', 'Answer', 'Exception', 'Piano', 'Vendor', 'Technician']);
+  const _wraps = c => c.wrap != null ? !!c.wrap : WRAP_LABELS.has(c.label);
   function drawTable(id) {
     const t = _tables[id], el = document.getElementById(id);
     if (!t || !el) return;
@@ -745,7 +830,7 @@
     }
     el.innerHTML = `<thead><tr>${t.cols.map(c => `<th data-k="${c.key}" class="${c.num ? 'num' : ''}${t.sortKey === c.key ? ' sorted' + (t.asc ? ' asc' : '') : ''}">${esc(c.label)}</th>`).join('')}</tr></thead>
       <tbody>${rows.length ? rows.map((r, i) => `<tr data-i="${t.rows.indexOf(r)}" class="${t.onRow ? 'clickable ' : ''}${t.rowClass ? t.rowClass(r) : ''}">${t.cols.map(c =>
-        `<td class="${c.num ? 'num' : ''}">${c.fmt ? c.fmt(r[c.key], r) : esc(r[c.key] == null ? '—' : r[c.key])}${c.sub ? `<div class="sub">${c.sub(r)}</div>` : ''}</td>`).join('')}</tr>`).join('')
+        `<td class="${c.num ? 'num' : ''}${_wraps(c) ? ' wrap' : ''}">${c.fmt ? c.fmt(r[c.key], r) : esc(r[c.key] == null ? '—' : r[c.key])}${c.sub ? `<div class="sub">${c.sub(r)}</div>` : ''}</td>`).join('')}</tr>`).join('')
         : `<tr><td colspan="${t.cols.length}" class="text-dim">${t.q && t.q.trim() ? 'No row contains that text.' : 'Nothing for these filters.'}</td></tr>`}</tbody>`;
     el.querySelectorAll('th').forEach(th => th.addEventListener('click', () => {
       t.asc = t.sortKey === th.dataset.k ? !t.asc : false;
@@ -777,7 +862,12 @@
   const showLink = (name, id) => id ? `<a href="/shows/${encodeURIComponent(id)}">${esc(name)}</a>` : esc(name);
 
   // ── loaders per tab ──
+  // The filters the screen was last loaded with (Save re-runs first when
+  // the controls hold something else).
+  let _loadedKey = null;
+  const _shownKey = () => _tab + '?' + params(tabExtras());
   window.rptLoad = async function() {
+    clearTimeout(_dateTimer);
     rptSavedDirty();
     const seq = ++_seq;
     const body = document.getElementById('rpt-body');
@@ -792,8 +882,11 @@
     } catch (e) {
       if (seq === _seq) body.innerHTML = `<div class="rpt-loading" style="color:#e53e3e">Couldn't load this report: ${esc(e.message)}</div>`;
     }
-    // After the tab's own controls are restored (they do that in a timeout).
-    if (seq === _seq) setTimeout(rptSavedLoaded, 60);
+    if (seq === _seq) {
+      _loadedKey = _shownKey();
+      // After the tab's own controls are restored (they do that in a timeout).
+      setTimeout(rptSavedLoaded, 60);
+    }
   };
 
   const LOADERS = {
@@ -952,6 +1045,7 @@
       const d = await get('/api/reports/item-shows?' + params(_itemParams()));
       // The server drops ids it doesn't know — keep the URL in step.
       _item.types = (d.type_ids || []).map(String); _item.units = (d.unit_ids || []).map(String);
+      (d.unit_choices || []).forEach(u => { _unitNames[String(u.id)] = `${u.item} · ${u.label}`; });
       _itemUrl();
       mount(d);
       const t = d.totals;
@@ -964,7 +1058,7 @@
         {key: 'last_date', label: 'Last out', sub: r => esc(r.last_show || '')},
       ];
       const multi = d.by_item.length > 1;
-      const what = `${d.item}${d.unit ? ' · ' + (_item.units.length === 1 ? 'unit ' : '') + d.unit : ''}`;
+      const what = `${itemsTitle(_item.types, d.item)}${d.unit ? ' · ' + (_item.units.length === 1 ? 'unit ' : '') + d.unit : ''}`;
       return head + cards([
         [num(t.shows), 'Shows'], [num(t.lines), 'Rental lines'], [num(t.units), 'Units out'],
         [num(t.unit_days), 'Days rented (unit-days)'], [money(t.revenue), 'Income'], [esc(t.last || '—'), 'Last show'],
@@ -1006,38 +1100,41 @@
       _sound.group = d.group;
       // The server drops a picked sensor with no readings in this show set.
       _sound.monitors = (d.monitors || []).map(String);
+      (d.sensors || []).forEach(m => { _sensorNames[String(m.id)] = m.name; });
       _soundUrl();
       setTimeout(() => {
         const g = document.getElementById('rs-group'); if (g) g.value = _sound.group;
         const l = document.getElementById('rs-limit'); if (l) l.value = _sound.limit;
+        const pl = document.getElementById('rs-peak-limit'); if (pl) pl.value = _sound.peak;
         rptMulti('rs-sensors', {groups: [{label: 'Sensors', options: (d.sensors || []).map(m => (
           {id: String(m.id), label: m.name, sub: [m.location, m.unit].filter(Boolean).join(' · ')}))}],
           selected: _sound.monitors, empty: 'All sensors', none: 'No sensor has readings for these filters.',
           onApply: ids => { _sound.monitors = ids; rptLoad(); }});
       });
       const t = d.totals, db = v => v == null ? '—' : Number(v).toFixed(1);
-      const lim = d.limit != null;
+      const lim = d.limit != null, plim = d.peak_limit != null;
       const u = t.unit ? ' ' + esc(t.unit) : '';
       if (!d.rows.length) {
         return head + '<div class="rpt-loading text-dim">No captured sound levels for these filters. Levels are pulled from Spot after each performance at a venue with linked sensors (Settings → Modules → Spot Sound Levels).</div>';
       }
-      const overCell = (v, r, flag) => db(v) + (lim && r[flag] ? ' <span class="rpt-pill rpt-pill-bad">over</span>' : '');
+      const overCell = (v, r, flag, on) => db(v) + (on && r[flag] ? ' <span class="rpt-pill rpt-pill-bad">over</span>' : '');
       return head + cards([
         [num(t.performances), 'Performances measured'], [num(t.shows), 'Shows'],
         t.avg_leq != null ? [db(t.avg_leq) + u, 'Average level (Leq)'] : null,
         t.high_leq != null ? [db(t.high_leq) + u, 'Loudest performance (Leq)'] : null,
         t.high_peak != null ? [db(t.high_peak) + u, 'Highest peak' + (t.high_peak_show ? ' — ' + t.high_peak_show : '')] : null,
         lim ? [num(t.over), `Readings with Leq ≥ ${d.limit}`] : null,
-        lim ? [num(t.peak_over), `Readings with a peak ≥ ${d.limit}`] : null,
+        plim ? [num(t.peak_over), `Readings with a peak ≥ ${d.peak_limit}`] : null,
       ]) + table('t-sound-group', `Compared by ${d.group_label}`, [
-        {key: 'group', label: d.group_label}, {key: 'unit', label: 'Unit'},
+        {key: 'group', label: d.group_label, wrap: true}, {key: 'unit', label: 'Unit'},
         {key: 'performances', label: 'Performances', num: true}, {key: 'shows', label: 'Shows', num: true},
         {key: 'avg_leq', label: 'Avg Leq', num: true, fmt: db},
         {key: 'low_leq', label: 'Quietest Leq', num: true, fmt: db},
         {key: 'high_leq', label: 'Loudest Leq', num: true, fmt: db},
         {key: 'avg_peak', label: 'Avg peak', num: true, fmt: db},
         {key: 'high_peak', label: 'Highest peak', num: true, fmt: db},
-        ...(lim ? [{key: 'over', label: `Leq ≥ ${d.limit}`, num: true}, {key: 'peak_over', label: `Peak ≥ ${d.limit}`, num: true}] : []),
+        ...(lim ? [{key: 'over', label: `Leq ≥ ${d.limit}`, num: true}] : []),
+        ...(plim ? [{key: 'peak_over', label: `Peak ≥ ${d.peak_limit}`, num: true}] : []),
       ], d.by_group, {
         note: 'Leq = the equivalent continuous level over the measured performance — the fair “how loud was it” figure. Averages of Leq are taken on the energy scale (decibels are logarithmic), and levels in different units (dBA / dBC) are never mixed. To see what goes with louder shows, change Compare by — including any advance-sheet answer — or narrow the shows with the filters above: More filters → Had item booked (e.g. the subs), Job position or Technician (who mixed) all apply here.'})
         + table('t-sound', 'Every performance', [
@@ -1046,13 +1143,14 @@
           {key: 'company', label: 'Arts Group'},
           {key: 'sensor', label: 'Sensor', sub: r => esc([r.location, r.unit].filter(Boolean).join(' · '))},
           {key: 'minutes', label: 'Minutes', num: true},
-          {key: 'leq', label: 'Leq', num: true, fmt: (v, r) => overCell(v, r, 'over')},
-          {key: 'max', label: 'Peak', num: true, fmt: (v, r) => overCell(v, r, 'peak_over'), sub: r => r.max_at ? 'at ' + esc(r.max_at) : ''},
+          {key: 'leq', label: 'Leq', num: true, fmt: (v, r) => overCell(v, r, 'over', lim)},
+          {key: 'max', label: 'Peak', num: true, fmt: (v, r) => overCell(v, r, 'peak_over', plim), sub: r => r.max_at ? 'at ' + esc(r.max_at) : ''},
           {key: 'l10', label: 'L10', num: true, fmt: db},
           {key: 'l50', label: 'L50', num: true, fmt: db},
           {key: 'l90', label: 'L90', num: true, fmt: db},
         ], d.rows, {sortKey: 'date', rowClass: r => r.over ? 'rpt-over' : '',
-          note: 'One row per performance and sensor. Minutes = the window Spot measured' + (d.rows.some(r => r.detected) ? ' (curtain times detected where Spot could)' : '') + '. L10 / L50 / L90 = the level exceeded 10 / 50 / 90 % of the time (L10 ≈ the loud passages, L90 ≈ the background).' + (lim ? ` Rows tinted red had a Leq at or over ${d.limit}.` : ' Enter a level under Flag at to mark performances at or over it.')});
+          note: 'One row per performance and sensor. Minutes = the window Spot measured' + (d.rows.some(r => r.detected) ? ' (curtain times detected where Spot could)' : '') + '. L10 / L50 / L90 = the level exceeded 10 / 50 / 90 % of the time (L10 ≈ the loud passages, L90 ≈ the background).' + (lim ? ` Rows tinted red had a Leq at or over ${d.limit}.` : ' Enter a level under Flag Leq at to mark performances at or over it.')
+          + (plim ? ` Peaks at or over ${d.peak_limit} are marked “over”.` : ' Flag peak at marks peaks separately (peaks run well above Leq).')});
     },
     async rentals() {
       const extra = {asset_category_id: _rent.cat, asset_type_id: _rent.type};
@@ -1144,7 +1242,9 @@
       const d = await get('/api/reports/breaks?' + params({min_diff: min}));
       const kc = {'Not taken': 'bad', Shorter: 'warn', Longer: 'warn', Added: 'dim', Moved: 'dim'};
       const k = d.kinds || {};
-      const diff = v => v === 0 ? '0' : `<span class="${v < 0 ? 'rpt-down' : 'rpt-up'}">${v > 0 ? '+' : ''}${v}</span>`;
+      // Every break change is an exception: a shorter / skipped lunch reads
+      // red, a longer one amber (never green — that means "good" elsewhere).
+      const diff = v => v == null ? '—' : v === 0 ? '0' : `<span class="${v < 0 ? 'rpt-up' : 'rpt-warn-text'}">${v > 0 ? '+' : ''}${v}</span>`;
       const gcols = key => [
         {key, label: key === 'tech' ? 'Technician' : key === 'position' ? 'Position' : 'Show'},
         {key: 'exceptions', label: 'Exceptions', num: true}, {key: 'not_taken', label: 'Not taken', num: true},
@@ -1291,7 +1391,7 @@
   // A saved report = this page's tab + filters under a name (server:
   // saved_reports). Opening one only sets the filters and runs the tab's
   // normal endpoints, so what shows is what the person looking may see.
-  const RS = {list: [], dashboards: [], people: null, active: null, loaded: false};
+  const RS = {list: [], dashboards: [], people: {}, active: null, loaded: false};
   const TAB_LABEL = {};
   document.querySelectorAll('.rpt-tab').forEach(b => { TAB_LABEL[b.dataset.tab] = b.textContent.trim(); });
   const ALL_TAB_LABEL = {overview: 'Overview', advance: 'Advance Fields', groups: 'Arts Groups', assets: 'Assets',
@@ -1316,7 +1416,21 @@
     const p = {};
     new URLSearchParams(params(tabExtras())).forEach((v, k) => { p[k] = v; });
     if (_preset) { delete p.from; delete p.to; }
-    return {tab: _tab, preset: _preset, params: p, show_text: p.show ? _val('rf-show') : ''};
+    return {tab: _tab, preset: _preset, params: p, show_text: p.show ? _val('rf-show') : '', labels: viewLabels(p)};
+  }
+  // Display names of the id filters, stored with the view so that a filter
+  // that later disappears can be NAMED ("Had item booked “Hazer MDG” is
+  // retired or deleted") instead of shown as a bare id.
+  function viewLabels(p) {
+    const L = {};
+    const put = (k, t) => { t = String(t || '').trim(); if (t && Object.keys(L).length < 60) L[k] = t.slice(0, 80); };
+    const optText = id => { const el = document.getElementById(id); const o = el && el.selectedOptions && el.selectedOptions[0]; return o && o.value ? o.textContent : ''; };
+    [['has_type', 'rf-has-type'], ['has_category', 'rf-has-category'], ['position', 'rf-position'], ['tech', 'rf-tech']]
+      .forEach(([k, id]) => { if (p[k]) put(k, optText(id)); });
+    _idList(p.type_ids).concat(_idList(p.types)).forEach(id => { if (TYPE_BY_ID[id]) put('type:' + id, TYPE_BY_ID[id].name); });
+    _idList(p.unit_ids).forEach(id => put('unit:' + id, _unitNames[id]));
+    _idList(p.monitors).forEach(id => put('monitor:' + id, _sensorNames[id]));
+    return L;
   }
   const viewKey = v => JSON.stringify([v.tab, v.preset || '', Object.keys(v.params).sort().map(k => [k, v.params[k]])]);
   function describe(v) {
@@ -1331,25 +1445,44 @@
   // Put a saved view on screen. Returns the list of things that could not
   // be applied (a filter value that no longer exists must be SAID — setting
   // a select to a missing option silently widens the report).
+  const _plural = (n, one, many) => n === 1 ? one : many;
+  // "1 saved item is retired or deleted (Hazer MDG)"
+  function lostIds(ids, labels, prefix, one, many, gone) {
+    if (!ids.length) return null;
+    const names = ids.map(id => labels[prefix + id]).filter(Boolean);
+    return `${ids.length} saved ${_plural(ids.length, one, many)} ${gone(ids.length)}${names.length ? ` (${names.join(', ')})` : ''}`;
+  }
   function applyView(v) {
-    const lost = [], p = v.params || {};
-    if (!TABS.includes(v.tab)) {
-      return {ok: false, lost: [`You don't have access to the ${ALL_TAB_LABEL[v.tab] || v.tab} report.`]};
-    }
+    const lost = [], p = v.params || {}, labels = (v.labels && typeof v.labels === 'object') ? v.labels : {};
+    if (!TABS.includes(v.tab)) return {ok: false, denied: true, lost: []};
     if (v.preset) preset(v.preset);
     else { _preset = null; document.getElementById('rf-from').value = p.from || ''; document.getElementById('rf-to').value = p.to || ''; }
-    const pick = (id, val, what) => {
+    // key = a filter whose value is an id: never print the id, print the
+    // name saved with it (or say the saved choice is gone).
+    const pick = (id, val, what, key) => {
       const el = document.getElementById(id);
       if (!el) { if (val) lost.push(`${what} (you don't have that filter)`); return; }
       el.value = val || '';
-      if (val && el.value !== String(val)) { el.value = ''; lost.push(`${what} “${val}” no longer exists`); }
+      if (val && el.value !== String(val)) {
+        el.value = '';
+        if (!key) lost.push(`${what} “${val}” no longer exists`);
+        else lost.push(labels[key] ? `${what} “${labels[key]}” is retired or deleted` : `${what}: the saved choice is retired or deleted`);
+      }
     };
     pick('rf-venue', p.venue, 'Venue');
     pick('rf-company', p.company, 'Arts Group');
-    pick('rf-has-type', p.has_type, 'Had item booked');
-    pick('rf-has-category', p.has_category, 'Had category booked');
-    pick('rf-position', p.position, 'Job position');
-    pick('rf-tech', p.tech, 'Technician');
+    pick('rf-has-type', p.has_type, 'Had item booked', 'has_type');
+    pick('rf-has-category', p.has_category, 'Had category booked', 'has_category');
+    pick('rf-position', p.position, 'Job position', 'position');
+    pick('rf-tech', p.tech, 'Technician', 'tech');
+    // Item lists: an item no longer offered (retired / deleted) is dropped
+    // and said — the picker could not show it anyway.
+    const keepItems = (ids) => {
+      const ok = ids.filter(id => TYPE_BY_ID[id]), gone = ids.filter(id => !TYPE_BY_ID[id]);
+      const line = lostIds(gone, labels, 'type:', 'item', 'items', n => _plural(n, 'is', 'are') + ' retired or deleted');
+      if (line) lost.push(line);
+      return ok;
+    };
     // The show box reads the id off the end of its text ("… #123").
     const sid = /^\d+$/.test(String(p.show || '')) ? String(p.show) : '';
     const stxt = String(v.show_text || ''), sm = /#(\d+)\s*$/.exec(stxt);
@@ -1357,12 +1490,16 @@
     moreCount();
     if (Object.values(drill()).some(Boolean)) document.getElementById('rf-more').hidden = false;
     // Tab state: only the saved tab's own filters are touched.
-    if (v.tab === 'items') { _item.types = _idList(p.type_ids); _item.units = _idList(p.unit_ids); }
-    if (v.tab === 'assets') { _assetSel.ids = _idList(p.types); _assetSel.mode = p.types_mode === 'exclude' ? 'exclude' : 'only'; }
+    if (v.tab === 'items') { _item.types = keepItems(_idList(p.type_ids)); _item.units = _idList(p.unit_ids); }
+    if (v.tab === 'assets') { _assetSel.ids = keepItems(_idList(p.types)); _assetSel.mode = p.types_mode === 'exclude' ? 'exclude' : 'only'; }
     if (v.tab === 'advance') { _adv.field = p.field || ''; _adv.answer = p.answer || ''; _adv.q = p.q || ''; _adv.include = p.include || 'answered'; }
-    if (v.tab === 'sound') { _sound.group = p.group || 'sensor'; _sound.monitors = _idList(p.monitors); _sound.limit = p.limit || ''; }
+    if (v.tab === 'sound') { _sound.group = p.group || 'sensor'; _sound.monitors = _idList(p.monitors); _sound.limit = p.limit || ''; _sound.peak = p.peak_limit || ''; }
     if (v.tab === 'rentals') { _rent.cat = p.asset_category_id || ''; _rent.type = p.asset_type_id || ''; }
     if (v.tab === 'breaks') _brk.min = p.min_diff || '5';
+    // Units and sensors are checked after the first load: the server keeps
+    // only those that still belong to the report (rptSavedLoaded).
+    RS.listCheck = {tab: v.tab, labels, units: v.tab === 'items' ? _item.units.slice() : [],
+                    monitors: v.tab === 'sound' ? _sound.monitors.slice() : []};
     return {ok: true, lost};
   }
   function paintBar() {
@@ -1383,17 +1520,37 @@
   // moment its "unchanged" fingerprint is taken — the server may have
   // normalised ids, and the tab's controls are back in place by now.
   window.rptSavedLoaded = function() {
-    if (RS.active && RS.markPending) { RS.markPending = false; RS.activeKey = viewKey(currentView()); }
+    if (RS.active && RS.markPending) {
+      RS.markPending = false; RS.activeKey = viewKey(currentView());
+      const c = RS.listCheck; RS.listCheck = null;
+      if (c && c.tab === _tab) {
+        const more = [
+          lostIds(c.units.filter(id => !_item.units.includes(id)), c.labels, 'unit:', 'unit', 'units',
+                  n => _plural(n, 'no longer exists', 'no longer exist')),
+          lostIds(c.monitors.filter(id => !_sound.monitors.includes(id)), c.labels, 'monitor:', 'sensor', 'sensors',
+                  n => _plural(n, 'has', 'have') + ' no readings for these filters'),
+        ].filter(Boolean);
+        if (more.length) warn((RS.lost || []).concat(more));
+      }
+    }
     if (RS.active) paintBar();
   };
   function warn(lines) {
+    RS.lost = lines.slice();
     const w = document.getElementById('rs-warn');
     w.hidden = !lines.length;
-    w.textContent = lines.length ? 'This saved report could not be applied in full: ' + lines.join('; ') + '. It is showing more than was saved.' : '';
+    w.textContent = lines.length ? 'This saved report could not be applied in full: ' + lines.join('; ') + '. The report below runs without them.' : '';
   }
   function openSaved(r) {
     const res = applyView(r.view);
-    if (!res.ok) { warn([]); RS.active = null; paintBar(); msg(res.lost[0], true); return false; }
+    if (!res.ok) {
+      warn([]); RS.active = null; RS.listCheck = null; paintBar();
+      const text = `“${r.name}”${r.sent_by_name ? ` (from ${r.sent_by_name})` : ''} is a ${ALL_TAB_LABEL[r.view.tab] || r.view.tab} report, which your account can't open. You can delete it under Saved reports.`;
+      if (document.getElementById('rs-modal').style.display !== 'none') msg(text, true);
+      else { const w = document.getElementById('rs-warn'); w.hidden = false; w.textContent = text; }
+      try { const u = new URL(location.href); u.searchParams.delete('saved'); history.replaceState(null, '', u); } catch (e) {}
+      return false;
+    }
     RS.active = r;
     warn(res.lost);
     try { const u = new URL(location.href); u.searchParams.set('saved', r.id); history.replaceState(null, '', u); } catch (e) {}
@@ -1428,11 +1585,19 @@
     const nm = document.getElementById('rs-name'); if (!nm.value) nm.focus();
   };
   window.rptSavedCloseModal = function() { document.getElementById('rs-modal').style.display = 'none'; };
+  let _rsSaving = false;
   window.rptSavedSave = async function() {
+    if (_rsSaving) return;
+    _rsSaving = true;
+    try { await _rptSavedSave(); } finally { _rsSaving = false; }
+  };
+  async function _rptSavedSave() {
     const nm = document.getElementById('rs-name'), name = nm.value.trim();
     if (!name) { msg('Give the report a name.', true); nm.focus(); return; }
     if (_tab === 'advance' && !_adv.field) { msg('Pick an advance field first.', true); return; }
     if (_tab === 'items' && !_item.types.length) { msg('Pick an item first.', true); return; }
+    // Safety net: never store filters the screen isn't showing.
+    if (_loadedKey !== _shownKey()) await rptLoad();
     const same = RS.list.find(x => x.name.toLowerCase() === name.toLowerCase());
     if (same && !confirm(`You already have a saved report called “${same.name}”. Replace its filters with what is on screen?`)) return;
     try {
@@ -1446,7 +1611,7 @@
       paintBar(); drawSaved();
       msg(same ? `Updated “${d.report.name}”.` : `Saved “${d.report.name}”.`);
     } catch (e) { msg(e.message, true); }
-  };
+  }
   window.rptSavedUpdateActive = async function() {
     if (!RS.active) return;
     try {
@@ -1483,7 +1648,7 @@
       btn('Send to…', () => togglePanel(r, 'send'), 'Give someone their own copy of this report');
       btn('Add to dashboard…', () => togglePanel(r, 'dash'), 'Show this report as a widget on one of your dashboards');
       const del = btn('Delete', async () => {
-        if (!confirm(`Delete the saved report “${r.name}”? Copies you sent to other people stay with them; a dashboard widget showing it will say it is gone.`)) return;
+        if (!confirm(`Delete the saved report “${r.name}”? Copies you sent to other people stay with them. It is also taken off your dashboards.`)) return;
         try {
           await send(`/api/reports/saved/${r.id}`, 'DELETE');
           if (RS.active && RS.active.id === r.id) rptSavedClose();
@@ -1500,7 +1665,12 @@
     _rsOpenPanel = (_rsOpenPanel && _rsOpenPanel.id === r.id && _rsOpenPanel.kind === kind) ? null : {id: r.id, kind};
     drawSaved();
   }
+  // Which area of Reports a tab belongs to (the server says per person
+  // whether they can open it: `can_open`).
+  const TAB_AREA = {groups: 'Assets', assets: 'Assets', items: 'Assets', rentals: 'Assets',
+    labor: 'Labor', lines: 'Labor', breaks: 'Labor', variance: 'Labor', piano: 'Piano Tuning'};
   function sendPanel(r) {
+    const tab = r.view.tab;
     const box = mk('div', 'rs-panel');
     box.appendChild(mk('div', 'rpt-note', 'Each person gets their own copy in their Saved reports and a notification in their inbox. Only the tab and filters are sent — they see what their own access allows. Changes you make later are not sent along.'));
     const find = mk('input', 'field-input');
@@ -1511,15 +1681,21 @@
     const picked = new Set();
     const draw = () => {
       list.textContent = '';
-      if (!RS.people) { list.appendChild(mk('div', 'rpt-loading text-dim', 'Loading…')); return; }
+      const people = RS.people[tab];
+      if (!people) { list.appendChild(mk('div', 'rpt-loading text-dim', 'Loading…')); return; }
       const q = find.value.trim().toLowerCase();
-      const rows = RS.people.filter(p => !q || p.name.toLowerCase().includes(q));
-      if (!rows.length) { list.appendChild(mk('div', 'rpt-loading text-dim', RS.people.length ? 'No one by that name.' : 'No one else can open Reports.')); return; }
+      const rows = people.filter(p => !q || p.name.toLowerCase().includes(q));
+      if (!rows.length) { list.appendChild(mk('div', 'rpt-loading text-dim', people.length ? 'No one by that name.' : 'No one else can open Reports.')); return; }
       rows.forEach(p => {
-        const l = mk('label', 'rs-person');
-        const c = mk('input'); c.type = 'checkbox'; c.checked = picked.has(p.id);
+        // Someone who can't open this tab is listed but can't be picked —
+        // a copy would only greet them with "you don't have access".
+        const off = p.can_open === false;
+        const l = mk('label', 'rs-person' + (off ? ' off' : ''));
+        const c = mk('input'); c.type = 'checkbox'; c.checked = !off && picked.has(p.id); c.disabled = off;
         c.addEventListener('change', () => { c.checked ? picked.add(p.id) : picked.delete(p.id); go.disabled = !picked.size; });
-        l.append(c, mk('span', null, p.name), mk('span', 'sub', p.role));
+        const sub = off ? `can't open ${TAB_AREA[tab] || ALL_TAB_LABEL[tab] || ''} reports` : (p.access || p.role || '');
+        l.append(c, mk('span', null, p.name), mk('span', 'sub', sub));
+        if (off) l.title = `${p.name} can't open the ${ALL_TAB_LABEL[tab] || tab} report.`;
         list.appendChild(l);
       });
     };
@@ -1532,12 +1708,14 @@
       try {
         const d = await send(`/api/reports/saved/${r.id}/send`, 'POST', {user_ids: Array.from(picked)});
         _rsOpenPanel = null; drawSaved();
-        msg(`Sent “${r.name}” to ${d.sent} ${d.sent === 1 ? 'person' : 'people'}.` + (d.skipped && d.skipped.length ? ` Not sent to ${d.skipped.join(', ')} — they already hold too many reports sent to them.` : ''));
+        msg(`Sent “${r.name}” to ${d.sent} ${d.sent === 1 ? 'person' : 'people'}.`
+          + (d.no_access && d.no_access.length ? ` Not sent to ${d.no_access.join(', ')} — they can't open the ${ALL_TAB_LABEL[tab] || tab} report.` : '')
+          + (d.skipped && d.skipped.length ? ` Not sent to ${d.skipped.join(', ')} — they already hold too many reports sent to them.` : ''));
       } catch (e) { go.disabled = false; msg(e.message, true); }
     });
     row.appendChild(go);
     box.appendChild(row);
-    if (!RS.people) get('/api/reports/saved/people').then(d => { RS.people = d.people || []; draw(); }).catch(e => { list.textContent = e.message; });
+    if (!RS.people[tab]) get('/api/reports/saved/people?tab=' + encodeURIComponent(tab)).then(d => { RS.people[tab] = d.people || []; draw(); }).catch(e => { list.textContent = e.message; });
     draw();
     return box;
   }
@@ -1573,7 +1751,9 @@
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && document.getElementById('rs-modal').style.display !== 'none') rptSavedCloseModal();
   });
-  ['rf-venue', 'rf-company'].forEach(id => document.getElementById(id).addEventListener('change', rptSavedDirty));
+  document.getElementById('rs-name').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); rptSavedSave(); }
+  });
 
   // ?saved=<id> (a notification link, a dashboard widget, a bookmark) opens
   // that saved report; otherwise the default range and tab.

@@ -5129,7 +5129,9 @@ def _notify_comment_mentions(db, show_id, body, actor_id, actor_name=None, old_b
         notify_users(db, who,
                      f"{actor_name} mentioned you — {show['name'] if show else 'a show'}",
                      _mention_excerpt(text),
-                     link_url=f'/shows/{show_id}?tab=comments', kind='mention', show_id=show_id,
+                     link_url=(f'/shows/{show_id}?tab=comments&comment={int(comment_id)}'
+                               if comment_id else f'/shows/{show_id}?tab=comments'),
+                     kind='mention', show_id=show_id,
                      coalesce_key=f'comment:{int(comment_id)}' if comment_id else None)
         return sorted(who)
     except Exception as e:
@@ -5157,8 +5159,9 @@ def _mention_notifications_sync(db, show_id, comment_id, new_body=None):
         still = sorted(_mention_user_ids(db, new_body))
         db.execute(f'DELETE FROM notifications WHERE {cond} AND NOT (user_id = ANY(%s))',
                    (show_id, key, still))
-        db.execute(f'UPDATE notifications SET body = %s WHERE {cond}',
-                   (_mention_excerpt(new_body), show_id, key))
+        db.execute(f'UPDATE notifications SET body = %s, link_url = %s WHERE {cond}',
+                   (_mention_excerpt(new_body),
+                    f'/shows/{show_id}?tab=comments&comment={int(comment_id)}', show_id, key))
     except Exception as e:
         app.logger.warning(f'_mention_notifications_sync failed (comment {comment_id}): {e}')
 
@@ -30238,7 +30241,8 @@ def reports_page():
     asset_categories = [dict(r) for r in db.execute(
         'SELECT id, name FROM asset_categories ORDER BY sort_order, name').fetchall()]
     asset_types = [dict(r) for r in db.execute(
-        'SELECT id, name, category_id FROM asset_types WHERE is_retired=0 ORDER BY name').fetchall()]
+        'SELECT id, name, category_id, parent_type_id FROM asset_types WHERE is_retired=0 '
+        'ORDER BY name').fetchall()]
     positions = [dict(r) for r in db.execute(
         'SELECT id, name FROM job_positions ORDER BY name').fetchall()] if _can_report_labor() else []
     techs = [dict(r) for r in db.execute(
@@ -30707,9 +30711,13 @@ def report_item_shows():
         c['revenue'] += x['total'] or 0
     by_company = sorted(({**c, 'shows': len(c['shows']), 'revenue': round(c['revenue'], 2)}
                          for c in companies.values()), key=lambda c: (-c['shows'], c['company']))
-    item_label = (picked[0]['name'] if len(picked) == 1
-                  else f"{len(picked)} items ({', '.join(r['name'] for r in picked[:4])}"
-                       f"{', …' if len(picked) > 4 else ''})")
+    # A picked item whose group is also picked is already in that group:
+    # "Projectors", not "3 items (Projector 10K, Projector 20K Laser, Projectors)".
+    in_group = {r['id'] for r in kids}
+    top = [r for r in picked if r['id'] not in in_group] or list(picked)
+    item_label = (top[0]['name'] if len(top) == 1
+                  else f"{len(top)} items ({', '.join(r['name'] for r in top[:4])}"
+                       f"{', …' if len(top) > 4 else ''})")
     unit_label = None
     if uids:
         labels = [_ulabel(units[u]) for u in uids]
@@ -31073,7 +31081,8 @@ def report_sound():
     performance × sensor for the shows _report_shows() selects — so every
     shared filter and drill (venue, Arts Group, had item / category booked,
     job position, technician) narrows it. `monitors` = only these sensors;
-    `limit` = a dB level to flag (Leq at or over it); `group` = what the
+    `limit` = a dB level to flag (Leq at or over it); `peak_limit` = its own
+    level for peaks (they run 10-15 dB above Leq); `group` = what the
     summary table compares: sensor / venue / company / show / month /
     weekday / hour, or `field:<advance field key>` to compare by the answers
     to one advance field. Any Reports user; 404 while the module is off."""
@@ -31086,6 +31095,13 @@ def report_sound():
         limit = None
     if limit is not None and not (0 < limit < 200):
         limit = None
+    try:
+        peak_limit = (float(request.args.get('peak_limit'))
+                      if (request.args.get('peak_limit') or '').strip() else None)
+    except ValueError:
+        peak_limit = None
+    if peak_limit is not None and not (0 < peak_limit < 200):
+        peak_limit = None
     group = (request.args.get('group') or 'sensor').strip()
     db = get_db()
     try:
@@ -31160,7 +31176,7 @@ def report_sound():
                 'l90': _f(st.get('l90')), 'readings': int(st.get('count') or 0),
                 'events': int(st.get('events') or 0),
                 'over': bool(limit is not None and leq is not None and leq >= limit),
-                'peak_over': bool(limit is not None and peak is not None and peak >= limit),
+                'peak_over': bool(peak_limit is not None and peak is not None and peak >= peak_limit),
                 '_month': d.strftime('%Y-%m') if d else '(no date)',
                 '_weekday': d.strftime('%A') if d else '(no date)',
                 '_wd': d.weekday() if d else 9,
@@ -31216,7 +31232,7 @@ def report_sound():
     group_label = (field['label'] if field else dict(_RPT_SOUND_GROUPS)[group])
     return jsonify({
         'rows': rows, 'by_group': by_group, 'group': group, 'group_label': group_label,
-        'limit': limit, 'units': units, 'monitors': sorted(want_live),
+        'limit': limit, 'peak_limit': peak_limit, 'units': units, 'monitors': sorted(want_live),
         'sensors': sorted(sensors.values(), key=lambda m: (m['name'].lower(), m['id'] or 0)),
         'totals': {
             'performances': len({(r['show_id'], r['date'], r['time']) for r in rows}),
@@ -31228,7 +31244,7 @@ def report_sound():
             'high_peak_show': loudest['show'] if loudest and len(units) == 1 else None,
             'unit': units[0] if len(units) == 1 else None,
             'over': sum(1 for r in rows if r['over']) if limit is not None else None,
-            'peak_over': sum(1 for r in rows if r['peak_over']) if limit is not None else None}})
+            'peak_over': sum(1 for r in rows if r['peak_over']) if peak_limit is not None else None}})
 
 
 def _report_line_filter():
@@ -31763,10 +31779,17 @@ def _rpt_filter_summary(db):
         out.append(f"Break difference ≥ {a.get('min_diff')[:4]} min")
     if a.get('report') == 'sound':
         if a.get('limit'):
-            out.append(f"Limit flagged: {a.get('limit')[:6]} dB")
+            out.append(f"Leq flagged at: {a.get('limit')[:6]} dB")
+        if a.get('peak_limit'):
+            out.append(f"Peak flagged at: {a.get('peak_limit')[:6]} dB")
         g = a.get('group') or 'sensor'
-        out.append('Compared by: ' + (dict(_RPT_SOUND_GROUPS).get(g) or
-                                      ('advance field ' + g[6:60] if g.startswith('field:') else 'Sensor')))
+        if g.startswith('field:'):
+            # The field's label as the page shows it, never its database key.
+            label = next((f['label'] or f['field_key'] for f in _report_adv_fields(db)
+                          if f['field_key'] == g[6:]), None)
+            out.append('Compared by: ' + (label[:120] if label else 'Sensor'))
+        else:
+            out.append('Compared by: ' + (dict(_RPT_SOUND_GROUPS).get(g) or 'Sensor'))
         if a.get('monitors'):
             out.append(f"Sensors: {len(_report_id_list('monitors'))} picked")
     return out or ['All shows (no filters)']
@@ -31797,7 +31820,9 @@ def _rpt_assemble(key, row_cap):
     for t_title, rows_key, cols in table_spec:
         rows = data.get(rows_key) or []
         tables.append({'title': t_title, 'total': len(rows),
-                       'cols': [(label, f in 'imhp') for _k, label, f in cols],
+                       'cols': [((data.get('group_label') or label)
+                                 if (key == 'sound' and _k == 'group') else label, f in 'imhp')
+                                for _k, label, f in cols],
                        'rows': [[_rpt_fmt(r.get(k), f) for k, _l, f in cols]
                                 for r in rows[:row_cap]]})
     db = get_db()
@@ -31875,7 +31900,7 @@ _SAVED_RPT_PRESETS = ('month', 'year', '12m', 'next12', 'all')
 _SAVED_RPT_PARAMS = ('from', 'to', 'venue', 'company', 'show', 'has_type', 'has_category',
                      'position', 'tech', 'type_ids', 'unit_ids', 'types', 'types_mode',
                      'field', 'answer', 'q', 'include', 'asset_category_id', 'asset_type_id',
-                     'min_diff', 'group', 'monitors', 'limit')
+                     'min_diff', 'group', 'monitors', 'limit', 'peak_limit')
 _SAVED_RPT_MAX_PER_USER = 100
 _SAVED_RPT_NAME_MAX = 80
 _SAVED_RPT_VALUE_MAX = 600
@@ -31936,8 +31961,27 @@ def _saved_report_clean_view(raw):
                     params[k] = date.fromisoformat(params[k][:10]).isoformat()
                 except ValueError:
                     params.pop(k)
+    # Display names of the id filters (so the page can NAME a filter that
+    # later disappears instead of printing its id): only for ids this view
+    # holds, short plain strings — the page writes them with textContent.
+    lists = {'type': set(f"{params.get('type_ids', '')},{params.get('types', '')}".split(',')),
+             'unit': set(params.get('unit_ids', '').split(',')),
+             'monitor': set(params.get('monitors', '').split(','))}
+    labels = {}
+    src_labels = raw.get('labels') if isinstance(raw.get('labels'), dict) else {}
+    for k, v in list(src_labels.items())[:400]:
+        if len(labels) >= 60 or not isinstance(k, str) or not isinstance(v, str):
+            continue
+        m = re.fullmatch(r'(type|unit|monitor):([0-9]{1,10})', k)
+        if not ((k in ('has_type', 'has_category', 'position', 'tech') and k in params)
+                or (m and m.group(2) in lists[m.group(1)])):
+            continue
+        text = ' '.join(v.split())[:80]
+        if text:
+            labels[k] = text
     return {'tab': tab, 'preset': preset, 'params': params,
-            'show_text': str(raw.get('show_text') or '')[:300] if 'show' in params else ''}, None
+            'show_text': str(raw.get('show_text') or '')[:300] if 'show' in params else '',
+            'labels': labels}, None
 
 
 def _saved_report_view(row):
@@ -31949,7 +31993,7 @@ def _saved_report_view(row):
         raw = {}
     raw = dict(raw if isinstance(raw, dict) else {}, tab=row['tab'])
     view, _err = _saved_report_clean_view(raw)
-    return view or {'tab': 'overview', 'preset': 'year', 'params': {}, 'show_text': ''}
+    return view or {'tab': 'overview', 'preset': 'year', 'params': {}, 'show_text': '', 'labels': {}}
 
 
 def _saved_report_preset_dates(preset, today=None):
@@ -32006,6 +32050,39 @@ def _saved_report_recipient_sql():
             "AND COALESCE(u.is_document_viewer, 0) = 0 "
             "AND (u.role IN ('admin', 'staff') OR COALESCE(u.is_scheduler, 0) = 1 "
             f"OR COALESCE(u.is_asset_manager, 0) = 1{piano})")
+
+
+# The report area a saved-report tab needs (missing = any Reports user).
+_SAVED_RPT_TAB_AREA = {'groups': 'assets', 'assets': 'assets', 'items': 'assets', 'rentals': 'assets',
+                       'labor': 'labor', 'lines': 'labor', 'breaks': 'labor', 'variance': 'labor',
+                       'piano': 'piano'}
+_SAVED_RPT_AREA_LABEL = (('assets', 'Assets'), ('labor', 'Labor'), ('piano', 'Piano'))
+_SAVED_RPT_USER_FLAGS = ('u.role, COALESCE(u.is_asset_manager, 0) AS is_asset_manager, '
+                         'COALESCE(u.is_scheduler, 0) AS is_scheduler, '
+                         'COALESCE(u.is_piano_manager, 0) AS is_piano_manager')
+
+
+def _saved_report_user_areas(u, piano_on):
+    """Report areas a users row (with _SAVED_RPT_USER_FLAGS) opens — the
+    row-level mirror of _can_report_assets / _can_report_labor /
+    _can_report_piano (role admin/staff = content admin = labor scheduler).
+    321Theater flags only, never is_app_*."""
+    role = u['role'] or ''
+    areas = set()
+    if role in ('admin', 'staff') or u['is_asset_manager']:
+        areas.add('assets')
+    if role in ('admin', 'staff') or u['is_scheduler']:
+        areas.add('labor')
+    if piano_on and (role == 'admin' or u['is_piano_manager']):
+        areas.add('piano')
+    return areas
+
+
+def _saved_report_access_label(areas, piano_on):
+    if areas >= ({'assets', 'labor', 'piano'} if piano_on else {'assets', 'labor'}):
+        return 'All reports'
+    names = [label for a, label in _SAVED_RPT_AREA_LABEL if a in areas]
+    return (' + '.join(names) + ' reports') if names else 'Overview reports'
 
 
 def _saved_report_name(v):
@@ -32077,6 +32154,23 @@ def saved_reports_edit(rid):
             return jsonify({'error': 'Saved report not found.'}), 404
         if request.method == 'DELETE':
             db.execute('DELETE FROM saved_reports WHERE id = %s', (rid,))
+            # Take it off my own dashboards too — a widget for a deleted
+            # report could only say it is gone.
+            for d in db.execute('SELECT id, config_json FROM asset_dashboards '
+                                'WHERE user_id = %s FOR UPDATE', (uid,)).fetchall():
+                try:
+                    cfg = json.loads(d['config_json'] or '{}')
+                except ValueError:
+                    continue
+                ws = cfg.get('widgets') if isinstance(cfg, dict) else None
+                if not isinstance(ws, list):
+                    continue
+                keep = [w for w in ws if not (isinstance(w, dict) and w.get('type') == 'saved_report'
+                                              and str(w.get('saved_report_id')) == str(rid))]
+                if len(keep) != len(ws):
+                    cfg['widgets'] = keep
+                    db.execute('UPDATE asset_dashboards SET config_json = %s, '
+                               'updated_at = CURRENT_TIMESTAMP WHERE id = %s', (json.dumps(cfg), d['id']))
             db.commit()
             syslog_logger.info(f"REPORT_SAVED_DELETE id={rid} by={session.get('username')}")
             return jsonify({'success': True})
@@ -32107,18 +32201,28 @@ def saved_reports_edit(rid):
 @app.route('/api/reports/saved/people')
 @reports_required
 def saved_reports_people():
-    """Who a saved report can be sent to (accounts that can open Reports)."""
+    """Who a saved report can be sent to (accounts that can open Reports).
+    `?tab=<tab>`: per person, whether they can open THAT tab (`can_open`),
+    plus a plain `access` label ('Assets reports', 'All reports' …)."""
+    area = _SAVED_RPT_TAB_AREA.get(request.args.get('tab') or '')
+    piano_on = module_enabled('piano_tuning')
     db = get_db()
     try:
         rows = db.execute(
-            f"""SELECT u.id, COALESCE(NULLIF(TRIM(u.display_name), ''), u.username) AS name, u.role
+            f"""SELECT u.id, COALESCE(NULLIF(TRIM(u.display_name), ''), u.username) AS name,
+                       {_SAVED_RPT_USER_FLAGS}
                   FROM users u WHERE {_saved_report_recipient_sql()} AND u.id <> %s
                  ORDER BY LOWER(COALESCE(NULLIF(TRIM(u.display_name), ''), u.username)), u.id""",
             (session['user_id'],)).fetchall()
     finally:
         db.close()
-    return jsonify({'people': [{'id': r['id'], 'name': r['name'], 'role': r['role'] or ''}
-                               for r in rows]})
+    out = []
+    for r in rows:
+        areas = _saved_report_user_areas(r, piano_on)
+        out.append({'id': r['id'], 'name': r['name'], 'role': r['role'] or '',
+                    'access': _saved_report_access_label(areas, piano_on),
+                    'can_open': area is None or area in areas})
+    return jsonify({'people': out})
 
 
 @app.route('/api/reports/saved/<int:rid>/send', methods=['POST'])
@@ -32153,6 +32257,16 @@ def saved_reports_send(rid):
                         'FROM users WHERE id = %s', (uid,)).fetchone()
         my_name = (me['n'] if me else '') or 'Someone'
         view = _saved_report_view(row)
+        # Someone who can't open this tab would only get a notification that
+        # leads to "you don't have access" — they're skipped and named.
+        no_access = []
+        area = _SAVED_RPT_TAB_AREA.get(view['tab'])
+        if area:
+            piano_on = module_enabled('piano_tuning')
+            no_access = [r['id'] for r in db.execute(
+                f'SELECT u.id, {_SAVED_RPT_USER_FLAGS} FROM users u WHERE u.id = ANY(%s)',
+                (ok,)).fetchall() if area not in _saved_report_user_areas(r, piano_on)]
+            ok = [i for i in ok if i not in no_access]
         skipped, sent = [], 0
         view_text = json.dumps(view)
         for rcpt in ok:
@@ -32182,16 +32296,16 @@ def saved_reports_send(rid):
                          coalesce_key=f'report_from:{uid}')
             sent += 1
         db.commit()
-        names = []
-        if skipped:
-            names = [r['n'] for r in db.execute(
+        def _names(ids):
+            return [r['n'] for r in db.execute(
                 "SELECT COALESCE(NULLIF(TRIM(display_name), ''), username) AS n FROM users "
-                'WHERE id = ANY(%s)', (skipped,)).fetchall()]
+                'WHERE id = ANY(%s) ORDER BY 1', (ids,)).fetchall()] if ids else []
+        names, no_access_names = _names(skipped), _names(no_access)
     finally:
         db.close()
     syslog_logger.info(f"REPORT_SAVED_SEND id={rid} recipients={sent} skipped={len(skipped)} "
-                       f"by={session.get('username')}")
-    return jsonify({'success': True, 'sent': sent, 'skipped': names})
+                       f"no_access={len(no_access)} by={session.get('username')}")
+    return jsonify({'success': True, 'sent': sent, 'skipped': names, 'no_access': no_access_names})
 
 
 @app.route('/api/reports/saved/<int:rid>/dashboard', methods=['POST'])

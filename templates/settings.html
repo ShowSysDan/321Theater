@@ -2112,13 +2112,14 @@
     <div class="form-section-header"><span class="section-icon">◈</span> EMAIL NOTIFICATIONS</div>
     <div class="form-section-body">
       <div style="max-width:560px">
-        <p class="text-dim" style="font-size:12px;line-height:1.5;margin:0 0 12px">Everything below always shows in your <strong>inbox</strong> (the envelope button). These switches decide what is <em>also</em> emailed to <strong id="np-email">your address</strong> when you haven't seen it in the app.</p>
+        <p class="text-dim" style="font-size:12px;line-height:1.5;margin:0 0 12px">Everything below always shows in your <strong>inbox</strong> {{ "(the Inbox tab at the bottom)" if is_mobile_view else "(the envelope button, bottom right)" }}. These switches decide what is <em>also</em> emailed to <strong id="np-email">your address</strong> when you haven't seen it in the app.</p>
         <label class="np-row"><input type="checkbox" id="np-messages"> <span><strong>New messages</strong><span class="text-dim np-sub">A message someone sent you that is still unread after <span id="np-delay">10</span> minutes. One email covers everything unread.</span></span></label>
         <label class="np-row"><input type="checkbox" id="np-mentions"> <span><strong>@mentions</strong><span class="text-dim np-sub">Someone typed @your name in a show's comments and you haven't opened the notification.</span></span></label>
         <label class="np-row"><input type="checkbox" id="np-reminders"> <span><strong>Reminders</strong><span class="text-dim np-sub">A reminder you set on a message or a note to self has come due.</span></span></label>{% if projects_enabled() %}
         {# Only in the page of someone with the optional Projects module, and
            shown only once the GET returned the switch (same rule, server side). #}
         <label class="np-row" id="np-tasks-row" hidden><input type="checkbox" id="np-tasks"> <span><strong>Tasks and projects</strong><span class="text-dim np-sub">You were added to a project, given a task or mentioned, or a task of yours is due — and you haven't opened the notification.</span></span></label>{% endif %}
+        <p class="text-dim" style="font-size:12px;line-height:1.5;margin:0 0 12px">Approval, piano and advance-change notifications aren’t covered by these switches: they always show in your inbox, and any email about them is set up separately by an administrator.</p>
         <div id="np-msg" class="field-msg" style="display:none"></div>
         <button class="btn btn-primary" type="button" onclick="saveNotifyPrefs()">Save</button>
       </div>

@@ -1924,7 +1924,7 @@ html[data-theme="light"] .modal-overlay {
   word-break: break-word;
 }
 .comment-mention {
-  color: var(--accent);
+  color: var(--orange-text, var(--accent));
   font-weight: 600;
 }
 .comment-input-area {
@@ -3462,3 +3462,30 @@ a.inbox-show-chip:hover { color: var(--orange-text, var(--accent)); }
 /* The floating button sits over the bottom-right corner: keep the show
    page's comment box (pinned to the bottom of the window) clear of it. */
 html.has-inbox:not(.mobile-view) .comment-input-area { padding-right: 78px; }
+/* A mention notification lands on its comment (?comment=<id>) and marks it
+   for a moment (app.js renderComments). Flat tint, no glow. */
+.comment-item.comment-focus .comment-bubble { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg-card)); }
+
+/* UX pass (inbox): a conversation that posts to comments keeps the required
+   "Send + post to comments" label, so the text box takes the whole first
+   line and the buttons sit right-aligned below it. Private stays one row. */
+.inbox-composer.public .inbox-composer-row { flex-wrap: wrap; }
+.inbox-composer.public .inbox-composer-row textarea { flex: 1 1 100%; }
+.inbox-composer.public #inbox-remind-btn { margin-left: auto; }
+/* "Later…" in the due bar opens the time picker inside it: let it grow. */
+.inbox-due:has(.inbox-timepick) { max-height: none; }
+/* "Remind me" under every own bubble is noise on a long conversation:
+   desktop shows it on hover / keyboard focus; phones keep it visible. */
+html:not(.mobile-view) .inbox-msg-foot .inbox-remind-idle { opacity: 0; }
+html:not(.mobile-view) .inbox-msg:hover .inbox-remind-idle,
+html:not(.mobile-view) .inbox-msg:focus-within .inbox-remind-idle { opacity: 1; }
+/* Group conversations: first person's initials + how many more. */
+.inbox-avatar-more { margin-left: 1px; font-size: 9px; font-weight: 700; opacity: .9; }
+/* "With …" members line in a group conversation's header. */
+.inbox-meta-with { flex: 1 1 100%; font-size: 11.5px; line-height: 1.4; color: var(--text-dim); overflow-wrap: anywhere; }
+.inbox-meta-with .inbox-meta-label { margin-right: 6px; }
+/* Compose: the existing conversation this message continues + who can't
+   reply while it posts to comments. */
+.inbox-c-continue { padding: 6px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-surface); }
+.inbox-public-banner .inbox-warn-more { display: block; margin-top: 5px; }
+.inbox-pub-row input[type=checkbox], .np-row input[type=checkbox] { accent-color: var(--accent); }

@@ -364,7 +364,7 @@ function _initMobileTableScroll() {
       if (t.closest('.m-scroll') || t.closest('.modal-overlay')) return;
       const box = t.parentElement;
       if (!box) return;
-      const labor = t.matches('.lo-table, .sched-day-block table, #labor-days-container table, .labor-day-table, .oh-summary-table');
+      const labor = t.matches('.lo-table, .sched-day-block table, #labor-days-container table, .labor-day-table, .oh-summary-table, .rpt-table');
       const ov = getComputedStyle(box).overflowX;
       if (ov === 'auto' || ov === 'scroll') {                 // already a scroller:
         if (labor) t.classList.add('m-wide');                  // just stop the table squeezing
@@ -4455,8 +4455,11 @@ async function _loadNotifPanel() {
     const r = await fetch('/api/notifications', {credentials: 'same-origin'});
     if (!r.ok) throw new Error('fetch failed');
     const j = await r.json();
+    const markAll = document.getElementById('notif-mark-all');
+    if (markAll) markAll.disabled = !(j.unread > 0);
     if (!j.notifications || !j.notifications.length) {
-      list.innerHTML = '<div class="notif-empty">No notifications yet.</div>';
+      list.innerHTML = '<div class="inbox-empty">No notifications yet.<div class="inbox-empty-sub">@mentions, asset approvals, piano requests'
+        + (list.dataset.tasks === '1' ? ', advance changes and task updates' : ' and advance changes') + ' show up here.</div></div>';
     } else {
       list.innerHTML = j.notifications.map(n => {
         const cls = n.read_at ? 'notif-item' : 'notif-item unread';
@@ -4984,8 +4987,32 @@ function renderComments(comments) {
         </div>
       </div>`;
   }).join('');
-  list.scrollTop = list.scrollHeight;
+  // A mention notification links to ?tab=comments&comment=<id>: land on that
+  // comment (and mark it a moment) on the FIRST render only — later renders
+  // (polls, own posts) keep sticking to the newest one at the bottom.
+  let focus = null;
+  if (_commentFocusPending) {
+    _commentFocusPending = false;
+    const want = new URLSearchParams(location.search).get('comment');
+    if (want && /^\d+$/.test(want)) {
+      focus = list.querySelector(`.comment-item[data-id="${want}"]`);
+      try {
+        const u = new URL(location.href);
+        u.searchParams.delete('comment');
+        history.replaceState(history.state, '', u);
+      } catch (_) {}
+    }
+  }
+  if (focus) {
+    list.scrollTop = 0;
+    focus.classList.add('comment-focus');
+    focus.scrollIntoView({block: 'center'});
+    setTimeout(() => focus.classList.remove('comment-focus'), 3000);
+  } else {
+    list.scrollTop = list.scrollHeight;
+  }
 }
+let _commentFocusPending = true;
 
 function startEditComment(cid) {
   document.getElementById('comment-body-' + cid).style.display = 'none';
@@ -5076,8 +5103,22 @@ function _renderCommentBody(text) {
   // (Tags.richHtml — each segment escaped, #tags link to their tag page,
   // @mentions keep their highlight, URLs stay plain text). Never regex over
   // the escaped HTML: '&#39;' would read as a tag and URLs swallowed entities.
-  if (window.Tags && typeof Tags.richHtml === 'function') return Tags.richHtml(text);
+  if (window.Tags && typeof Tags.richHtml === 'function') return Tags.richHtml(text, _mentionNames());
   return _esc(text == null ? '' : text).replace(/\n/g, '<br>');
+}
+// The names an @mention can name (the users the mention picker offers),
+// longest first, so '@Dan Okafor' highlights whole — built once per page.
+let _mentionNamesCache = null;
+function _mentionNames() {
+  if (_mentionNamesCache) return _mentionNamesCache;
+  const all = typeof ALL_USERS !== 'undefined' && Array.isArray(ALL_USERS) ? ALL_USERS : [];
+  const seen = new Set(), out = [];
+  all.forEach(u => [u.display_name, u.username].forEach(n => {
+    n = String(n || '').trim();
+    if (n && !seen.has(n.toLowerCase())) { seen.add(n.toLowerCase()); out.push(n); }
+  }));
+  _mentionNamesCache = out.sort((a, b) => b.length - a.length);
+  return _mentionNamesCache;
 }
 
 async function submitComment() {

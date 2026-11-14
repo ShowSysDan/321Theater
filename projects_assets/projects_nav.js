@@ -42,7 +42,13 @@
           sub: (tid ? 'Task · ' : 'Project · ') + (typeof x.sub === 'string' ? x.sub : ''),
         });
       });
-      return items.length ? {groups: [{head: 'Projects', items: items}]} : null;
+      if (!items.length) return null;
+      items = items.slice(0, 7);         // app.js shows ≤ 8 per group: keep room for the last row
+      // Advanced Search never covers projects (by design): this row leads
+      // to the projects' own results list. The words are the person's own
+      // search, going to their own page (projects.js reads ?q=).
+      items.push({href: '/projects?q=' + encodeURIComponent(q), title: 'All matches in my projects →', sub: ''});
+      return {groups: [{head: 'Projects', items: items}]};
     });
   };
 

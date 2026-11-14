@@ -70,6 +70,9 @@
   .two { display: flex; gap: 18px; align-items: flex-start; }
   .two > div { flex: 1 1 0; min-width: 0; }
   .footer-left { position: running(footerLeft); font-size: 6.5pt; color: #888; }
+  .keep { break-inside: avoid; }
+  .about { margin-top: 8px; color: #333; }
+  .sub-title { font-size: 7.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: #a33a1c; margin: 6px 0 2px 0; break-after: avoid; }
 </style>
 </head>
 <body>
@@ -92,6 +95,10 @@
     <span><b>Owner</b> {{ s.owner or 'No owner' }}</span>
     <span><b>Tasks</b> {{ s.progress.done }} of {{ s.progress.total }} done</span>
   </div>
+
+  {% if s.description %}
+  <div class="prose about">{{ s.description }}</div>
+  {% endif %}
 
   {% if s.summary_text %}
   <div class="section-title">Summary</div>
@@ -126,6 +133,36 @@
   </table>
   {% else %}
   <div class="muted">No tasks yet.</div>
+  {% endif %}
+
+  {% if s.conflicts or s.blocked %}
+  <div class="section-title">Needs attention <span class="n">· {{ s.conflicts|length + s.conflicts_more + s.blocked|length + s.blocked_more }}</span></div>
+  {% if s.conflicts %}
+  <div class="sub-title">Schedule conflicts · {{ s.conflicts|length + s.conflicts_more }}</div>
+  <table>
+    <colgroup><col style="width: 31%"><col style="width: 38%"><col style="width: 18%"><col style="width: 13%"></colgroup>
+    <thead><tr><th>Task</th><th>Why</th><th>Assigned to</th><th>Starts</th></tr></thead>
+    <tbody>
+      {% for t in s.conflicts %}
+      <tr><td>{{ t.title }}</td><td>{{ t.why }}</td><td>{{ t.assignee or 'Unassigned' }}</td><td>{{ t.start }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if s.conflicts_more %}<div class="more">and {{ s.conflicts_more }} more</div>{% endif %}
+  {% endif %}
+  {% if s.blocked %}
+  <div class="sub-title">Blocked · {{ s.blocked|length + s.blocked_more }}</div>
+  <table>
+    <colgroup><col style="width: 31%"><col style="width: 51%"><col style="width: 18%"></colgroup>
+    <thead><tr><th>Task</th><th>Note</th><th>Assigned to</th></tr></thead>
+    <tbody>
+      {% for t in s.blocked %}
+      <tr><td>{{ t.title }}</td><td>{% if t.why %}{{ t.why }}{% else %}<span class="muted">No note</span>{% endif %}</td><td>{{ t.assignee or 'Unassigned' }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if s.blocked_more %}<div class="more">and {{ s.blocked_more }} more</div>{% endif %}
+  {% endif %}
   {% endif %}
 
   {% if s.milestones %}
@@ -180,24 +217,26 @@
     <thead><tr><th>Show</th><th>Dates</th><th>Venue</th></tr></thead>
     <tbody>
       {% for sh in s.shows %}
-      <tr><td>{{ sh.name }}{% if sh.kind == 'Event' %} <span class="muted">(event)</span>{% endif %}</td><td>{{ sh.dates }}{% if sh.past %} <span class="muted">· past</span>{% endif %}</td><td>{{ sh.venue }}</td></tr>
+      <tr><td>{{ sh.name }}{% if sh.kind == 'Event' %} <span class="muted">(event)</span>{% endif %}{% if sh.from_task %}<br><span class="muted">Created from task “{{ sh.from_task }}”</span>{% endif %}</td><td>{{ sh.dates }}{% if sh.past %} <span class="muted">· past</span>{% endif %}</td><td>{{ sh.venue }}</td></tr>
       {% endfor %}
     </tbody>
   </table>
   {% endif %}
 
   {% if s.budget %}
+  <div class="keep">
   <div class="section-title">Budget{% if s.budget.lines %} <span class="n">· {{ s.budget.lines }} line{{ '' if s.budget.lines == 1 else 's' }}{% if s.budget.over_lines %}, {{ s.budget.over_lines }} over estimate{% endif %}</span>{% endif %}</div>
   {% if s.budget.total %}
   <div class="cards">
     <div class="card"><div class="v">{{ s.budget.total.estimate }}</div><div class="l">Estimate</div></div>
     <div class="card"><div class="v">{{ s.budget.total.committed }}</div><div class="l">Committed</div></div>
-    <div class="card{{ ' warn' if s.budget.total.over }}"><div class="v">{{ s.budget.total.actual }}</div><div class="l">Actual</div></div>
-    <div class="card{{ ' warn' if s.budget.total.over }}"><div class="v">{{ s.budget.total.variance }}</div><div class="l">Variance</div></div>
+    <div class="card"><div class="v">{{ s.budget.total.actual }}</div><div class="l">Actual (paid so far)</div></div>
+    <div class="card{{ ' warn' if s.budget.total.over }}"><div class="v">{{ s.budget.total.variance }}</div><div class="l">Variance (vs committed/paid)</div></div>
+    <div class="card"><div class="v">{{ s.budget.total.remaining }}</div><div class="l">Remaining to pay</div></div>
   </div>
   <table>
     <colgroup><col style="width: 25%"><col style="width: 14%"><col style="width: 14%"><col style="width: 14%"><col style="width: 15%"><col style="width: 18%"></colgroup>
-    <thead><tr><th>Category</th><th class="num">Estimate</th><th class="num">Committed</th><th class="num">Actual</th><th class="num">Variance</th><th>Spent of estimate</th></tr></thead>
+    <thead><tr><th>Category</th><th class="num">Estimate</th><th class="num">Committed</th><th class="num">Actual</th><th class="num">Variance<br>(vs committed/paid)</th><th>Spent of estimate</th></tr></thead>
     <tbody>
       {% for b in s.budget.categories %}
       <tr>
@@ -213,7 +252,9 @@
       </tr>
     </tbody>
   </table>
+  <div class="more" style="color: #777">Variance = estimate minus the larger of committed and paid, on lines that have both; "—" where there is nothing to compare yet.</div>
   {% endif %}
+  </div>
   {% if s.budget.figures %}
   <div class="section-title" style="border-bottom-color: #ccc; color: #555; margin-top: 11px">Costs on the linked shows</div>
   <table>

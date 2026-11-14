@@ -32,7 +32,7 @@
 .pm-f-kind-email  { --k: var(--pm-warn);       --ki: var(--pm-warn-ink); }
 
 /* ── Budget ───────────────────────────────────────────────────────────────── */
-.pm-b-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+.pm-b-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
 .pm-b-stat {
   display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 12px 14px;
   background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--hl), var(--lift);
@@ -81,7 +81,9 @@
 .pm-b-sub .pm-link-btn { font-size: 12px; overflow-wrap: anywhere; }
 .pm-b-notes { flex: 1 1 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 460px; color: var(--text-muted); }
 .pm-b-srcs { margin-top: 8px; }
-.pm-b-src { max-width: 260px; }
+/* Room for a readable file name on desktop (the full name is the chip's title). */
+.pm-b-src { max-width: min(100%, 460px); }
+.pm-b-src .pm-chip-text { max-width: 300px; }
 .pm-b-src-g { flex-shrink: 0; font-size: 12px; line-height: 1; }
 .pm-b-src .pm-badge { flex-shrink: 0; text-transform: none; letter-spacing: .02em; font-family: var(--font-main); font-weight: 600; }
 .pm-b-src.is-missing { border-style: dashed; color: var(--text-muted); }
@@ -311,6 +313,7 @@ html[data-theme="light"] .pm-b-src-wrap > .pm-chip-x { background: var(--bg-surf
 
 /* ═══ Phones (html.mobile-view) ═══════════════════════════════════════════ */
 html.mobile-view .pm-b-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+html.mobile-view .pm-b-stat:last-child:nth-child(odd) { grid-column: 1 / -1; }
 html.mobile-view .pm-b-stat .v { font-size: 16px; }
 /* The lines table STACKS on a phone: each line is a block — what it is, then
    its four amounts side by side, each under its own label — so nothing has
@@ -340,6 +343,7 @@ html.mobile-view .pm-b-lines .pm-b-line.is-target td:first-child { box-shadow: n
 html.mobile-view .pm-b-main { min-width: 0; }
 html.mobile-view .pm-b-notes { white-space: normal; }
 html.mobile-view .pm-b-src { max-width: 210px; padding-top: 6px; padding-bottom: 6px; }
+html.mobile-view .pm-b-src .pm-chip-text { max-width: none; }
 html.mobile-view .pm-b-addsrc { padding-top: 6px; padding-bottom: 6px; }
 html.mobile-view .pm-b-modes .pm-seg-btn { flex: 1 1 45%; }
 html.mobile-view .pm-b-hhead time { margin-left: 0; }

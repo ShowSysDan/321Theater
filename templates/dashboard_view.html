@@ -314,6 +314,9 @@
 .srw-table { width: 100%; font-size: 12px; }
 .srw-table td.num, .srw-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .srw-table td { white-space: nowrap; }
+.srw-table th:last-child, .srw-table td:last-child { padding-right: 20px; }
+/* Room to scroll the last widget clear of the floating inbox button. */
+html.has-inbox:not(.mobile-view) #widgets-container { padding-bottom: 72px; }
 
 /* ── Date range row per widget ───────────────────────────────────── */
 .widget-date-row {
@@ -646,18 +649,24 @@ async function loadSavedReportWidget(idx, section, loadEl, contentEl) {
   const getJson = async url => {
     const r = await fetch(url, H);
     const ct = r.headers.get('content-type') || '';
+    const fail = text => { const e = new Error(text); e.status = r.status; return e; };
     if (!ct.includes('application/json')) {
       // A signed-out session answers with the sign-in PAGE (200, HTML).
-      throw new Error(r.ok ? 'Could not load — you may need to sign in again.'
+      throw fail(r.ok ? 'Could not load — you may need to sign in again.'
         : (r.status === 403 ? 'You do not have access to this report.' : `Could not load (${r.status}).`));
     }
     const d = await r.json();
-    if (!r.ok) throw new Error(d.error || (r.status === 403 ? 'You do not have access to this report.' : `Could not load (${r.status}).`));
+    if (!r.ok) throw fail(d.error || (r.status === 403 ? 'You do not have access to this report.' : `Could not load (${r.status}).`));
     return d;
   };
   let meta;
   try { meta = await getJson(`/api/reports/saved/${id}/widget`); }
-  catch (e) { note(e.message); show(); return; }
+  catch (e) {
+    // The report was deleted: tell the dashboard's owner how to tidy up.
+    note(e.message + (e.status === 404 && CAN_EDIT
+      ? ' Remove this widget with × (top right), or add another report from Reports → Saved reports → Add to dashboard.' : ''));
+    show(); return;
+  }
   if (!meta.query) { note('Could not load this report.'); show(); return; }
   title.textContent = meta.name;
   if (!meta.mine && meta.owner) {

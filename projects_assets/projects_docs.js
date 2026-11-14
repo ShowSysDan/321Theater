@@ -685,13 +685,18 @@
     let data = null, seq = 0, latest = null, target = null, targetTimer = null;
     let shows = null, showsBusy = false, showsErr = '';
 
-    // estimate − actual, as the summary PDF words it. null = nothing to say.
-    function variance(est, act) {
-      if (est == null || act == null) return null;
-      const v = Math.round((est - act) * 100) / 100;
+    // The variance is the SERVER's number (projects_docs_module._line_variance:
+    // estimate − the larger of committed and paid, only where a line has an
+    // estimate and a committed or paid amount; a group sums the lines that
+    // have one) — the Summary PDF prints the same value, worded the same way
+    // (_variance_text). null = nothing to compare ("—").
+    function variance(v) {
+      if (v == null || !isFinite(+v)) return null;
+      v = Math.round(+v * 100) / 100;
       if (v === 0) return {text: 'On estimate', over: false};
       return v < 0 ? {text: 'Over by ' + PM.money(-v), over: true} : {text: PM.money(v) + ' under', over: false};
     }
+    const VAR_HINT = 'Estimate minus the larger of committed and paid, on lines that have both';
     // Every cell carries its column name (phones stack the cells) and an
     // explicit role (restyling a table must not cost it its semantics).
     function varianceCell(v) {
@@ -769,7 +774,8 @@
       const mail = s.file_kind === 'email';
       const name = s.file_missing ? (s.file_title ? s.file_title + ' (file removed)' : 'File removed') : (s.file_title || 'File');
       const b = h('button', {type: 'button', class: 'pm-chip pm-b-src' + (s.file_missing ? ' is-missing' : ''), data: {fk: 's' + s.id},
-        title: s.file_missing ? 'This file is no longer in the project' : (s.newer_version ? 'Opens the version this number came from — a newer version exists' : 'Open the file'),
+        title: s.file_missing ? 'This file is no longer in the project'
+                              : name + (s.newer_version ? ' — opens the version this number came from; a newer version exists' : ''),
         onclick: () => {
           if (s.file_missing) { PM.toast('That file is no longer in the project.', true); return; }
           openFile(s.file_id, {version: s.version_id});
@@ -800,7 +806,7 @@
         h('td', {class: 'pm-b-main', role: 'cell'},
           h('button', {type: 'button', class: 'pm-b-desc', text: l.description, data: {fk: 'l' + l.id}, onclick: () => lineDialog(l)}),
           sub.firstChild ? sub : null, srcs),
-        amounts(l), varianceCell(variance(l.estimate, l.actual)),
+        amounts(l), varianceCell(variance(l.variance)),
         h('td', {class: 'pm-b-act', role: 'cell'}, menu('pm-budget-line', {line: l.id}, 'Line actions')));
     }
 
@@ -808,12 +814,16 @@
       if (!pane || !data) return;
       addBtn.hidden = !canBudgetEdit();
       const lines = data.lines, t = data.totals;
-      const anyActual = lines.some(l => l.actual != null), anyEst = lines.some(l => l.estimate != null);
-      const tv = (anyActual && anyEst) ? variance(t.estimate, t.actual) : null;
+      const tv = variance(t.variance);
+      const nv = t.variance_lines || 0;
       keepFocus(pane, () => {
         clear(statsBox).append(
-          stat('Estimate', PM.money(t.estimate)), stat('Committed', PM.money(t.committed)), stat('Actual', PM.money(t.actual)),
-          stat('Variance', tv ? tv.text : '—', tv ? null : 'Needs an estimate and an actual', tv && tv.over));
+          stat('Estimate', PM.money(t.estimate)), stat('Committed', PM.money(t.committed)), stat('Actual', PM.money(t.actual), 'Paid so far'),
+          stat('Variance (vs committed/paid)', tv ? tv.text : '—',
+               tv ? (nv === lines.length ? 'All lines' : nv + ' of ' + lines.length + ' lines') : 'Needs an estimate and a committed or paid amount',
+               tv && tv.over),
+          stat('Remaining to pay', PM.money(t.remaining || 0), 'Committed, not paid yet'));
+        statsBox.title = VAR_HINT;
         clear(tableBox);
         if (!lines.length) {
           tableBox.appendChild(h('div', {class: 'pm-empty'}, 'No budget lines yet.',
@@ -825,7 +835,7 @@
         const col = (text, cls) => h('th', {scope: 'col', role: 'columnheader', class: cls || null, text});
         const table = h('table', {class: 'data-table pm-b-table pm-b-lines', role: 'table', 'aria-label': 'Budget lines'},
           h('thead', {role: 'rowgroup'}, h('tr', {role: 'row'},
-            col('Line'), col('Estimate', 'pm-b-num'), col('Committed', 'pm-b-num'), col('Actual', 'pm-b-num'), col('Variance', 'pm-b-num'),
+            col('Line'), col('Estimate', 'pm-b-num'), col('Committed', 'pm-b-num'), col('Actual', 'pm-b-num'), h('th', {scope: 'col', role: 'columnheader', class: 'pm-b-num', title: VAR_HINT, text: 'Variance (vs committed/paid)'}),
             h('th', {scope: 'col', role: 'columnheader', class: 'pm-b-act', 'aria-label': 'Actions'}))));
         // Categories in the order their first line appears (the server's order).
         const cats = [], at = {};
@@ -835,8 +845,8 @@
           cats[at[k]].lines.push(l);
         });
         cats.forEach(c => {
-          const sum = (data.by_category || []).find(x => (x.category || '') === c.name) || {estimate: 0, committed: 0, actual: 0};
-          const cv = (c.lines.some(l => l.actual != null) && c.lines.some(l => l.estimate != null)) ? variance(sum.estimate, sum.actual) : null;
+          const sum = (data.by_category || []).find(x => (x.category || '') === c.name) || {estimate: 0, committed: 0, actual: 0, variance: null};
+          const cv = variance(sum.variance);
           const body = h('tbody', {role: 'rowgroup'});
           body.appendChild(h('tr', {class: 'pm-b-cat', role: 'row'},
             h('th', {scope: 'rowgroup', role: 'rowheader'}, c.name || 'Uncategorized', h('span', {class: 'pm-count', text: String(c.lines.length)})),
@@ -927,9 +937,9 @@
         d.body.appendChild(field('Why are you changing it? (optional)', f.why, {hint: 'Kept with the change in this line’s history.'}));
       }
       if (!isNew) {
-        const v = variance(line.estimate, line.actual);
+        const v = variance(line.variance);
         if (v && v.over) d.body.prepend(h('div', {class: 'pm-banner pm-banner-warn', role: 'status'},
-          h('span', null, h('strong', {text: v.text + '.'}), ' The actual is above the estimate.')));
+          h('span', null, h('strong', {text: v.text + '.'}), ' What is committed or paid is above the estimate.')));
       }
 
       const save = h('button', {type: 'button', class: 'btn btn-primary', text: isNew ? 'Add line' : 'Save'});

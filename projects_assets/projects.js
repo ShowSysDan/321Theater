@@ -364,8 +364,10 @@
     // The house convention: an overlay is open while style.display is 'flex'
     // (app.js's unsaved-changes guard watches exactly that).
     overlay.style.display = 'flex';
-    if (opts.noDirtyGuard) overlay.dataset.noDirtyGuard = '1';
-    let closed = false;
+    // This file asks its own (styled) "Discard?" question on every close
+    // path — app.js's native confirm() on a backdrop press stays out.
+    overlay.dataset.noDirtyGuard = '1';
+    let closed = false, asking = null;
     const d = {
       el: card, overlay, body, footer, titleEl,
       setTitle(t) { titleEl.textContent = t; },
@@ -389,9 +391,20 @@
         }
         if (to && to.isConnected && typeof to.focus === 'function') to.focus({preventScroll: true});
       },
+      // ×, Esc, a backdrop press, Cancel. A dialog with unsaved input asks
+      // first (opts.askClose decides for itself when given: → Promise<bool
+      // may close>). Resolves true once the dialog is closed.
       ask() {
-        if (d.dirty() && !window.confirm('You have unsaved changes in this dialog. Discard them?')) return;
-        d.close();
+        if (closed) return Promise.resolve(true);
+        if (asking) return asking;
+        const may = typeof opts.askClose === 'function' ? opts.askClose()
+          : (d.dirty() ? PM.confirm('You have unsaved changes. Discard them?', 'Discard') : Promise.resolve(true));
+        asking = Promise.resolve(may).then(ok => {
+          asking = null;
+          if (ok) d.close();
+          return closed;
+        }, () => { asking = null; return closed; });
+        return asking;
       },
       focusFirst() {
         const first = body.querySelector('input:not([type="hidden"]):not([disabled]):not([readonly]), ' +
@@ -402,9 +415,9 @@
       },
     };
     x.addEventListener('click', () => d.ask());
-    // A backdrop press: app.js's capture-phase guard has already asked
-    // "Discard them?" when the dialog is dirty (and swallowed the click on No).
-    overlay.addEventListener('click', e => { if (e.target === overlay) d.close(); });
+    // A backdrop press asks like × does (overlay.dataset.noDirtyGuard keeps
+    // app.js's own native question out of it).
+    overlay.addEventListener('click', e => { if (e.target === overlay) d.ask(); });
     document.body.appendChild(overlay);
     dialogs.push(d);
     // The caller fills body/footer right after this returns: focus next frame.
@@ -448,6 +461,21 @@
       d.footer.append(cancel, ok);
       // A destructive question starts on Cancel (an accidental Enter is safe).
       requestAnimationFrame(() => (danger ? cancel : ok).focus({preventScroll: true}));
+    });
+  };
+  // A question with more than two answers. buttons: [{label, value, kind:
+  // 'primary' | 'danger' | (ghost)}]; resolves the value picked, or null
+  // when dismissed (×, Esc, backdrop). Starts on the first (safe) button.
+  PM.choose = function (message, buttons) {
+    return new Promise(resolve => {
+      let answer = null;
+      const d = PM.dialog({title: 'Please confirm', noDirtyGuard: true, onClose: () => resolve(answer)});
+      d.body.appendChild(h('p', {class: 'pm-desc', text: message}));
+      const els = buttons.map(b => h('button', {type: 'button',
+        class: 'btn ' + (b.kind === 'primary' ? 'btn-primary' : b.kind === 'danger' ? 'btn-danger-ghost' : 'btn-ghost'),
+        text: b.label, onclick: () => { answer = b.value === undefined ? null : b.value; d.close(); }}));
+      d.footer.append(...els);
+      requestAnimationFrame(() => { if (els[0]) els[0].focus({preventScroll: true}); });
     });
   };
   // "Type DELETE" — for the two things that cannot be undone.
@@ -606,11 +634,52 @@
       return a;
     }
 
+    // /projects?q=… — the sidebar search's "All matches in my projects":
+    // the words are the person's own, typed on their own page; the results
+    // come from the membership-scoped POST /api/projects/search.
+    let q = '', loaded = false;
+    try { q = (new URLSearchParams(window.location.search).get('q') || '').trim().slice(0, 200); } catch (e) { q = ''; }
+    let found = null, foundErr = '';
+    function drawFound() {
+      if (!q) return null;
+      const sec = h('section', {class: 'form-section pm-found', 'aria-label': 'Search results'});
+      const head = h('div', {class: 'form-section-header'},
+        h('span', {text: found ? 'Matches for “' + q + '” · ' + found.length : 'Searching for “' + q + '”…'}),
+        h('span', {class: 'pm-h-actions'}, h('a', {class: 'btn btn-ghost btn-sm', href: '/projects', text: 'Clear'})));
+      sec.appendChild(head);
+      const list = h('div', {class: 'pm-list'});
+      if (foundErr) list.appendChild(h('p', {class: 'pm-empty', text: foundErr}));
+      else if (found && !found.length) list.appendChild(h('p', {class: 'pm-empty', text: q.length < 2 ? 'Type at least 2 characters.' : 'No project or task names match.'}));
+      (found || []).forEach(r => {
+        const pid = Number.isInteger(r.project_id) && r.project_id > 0 ? r.project_id : 0;
+        const tid = r.type === 'task' && Number.isInteger(r.task_id) && r.task_id > 0 ? r.task_id : 0;
+        if (!pid || (r.type === 'task' && !tid)) return;
+        const a = h('a', {class: 'pm-row', href: '/projects/' + pid + (tid ? '?tab=tasks&task=' + tid : '')},
+          h('span', {class: 'pm-badge', text: tid ? 'Task' : 'Project'}),
+          h('span', {class: 'pm-row-main'}, h('span', {class: 'pm-row-title', text: String(r.title || '')}),
+            r.sub ? h('span', {class: 'pm-row-sub', style: 'display:block', text: String(r.sub)}) : null));
+        list.appendChild(a);
+      });
+      sec.appendChild(list);
+      return sec;
+    }
+    async function search() {
+      try {
+        const j = await req('POST', '/api/projects/search', {q, limit: 50});
+        found = Array.isArray(j.results) ? j.results : [];
+      } catch (e) {
+        found = []; foundErr = e.message;
+      }
+      if (loaded) render();             // else load() draws both
+    }
+
     function render() {
       const live = projects.filter(p => p.status !== 'archived');
       const arch = projects.filter(p => p.status === 'archived');
       $('pm-index-count').textContent = String(live.length);
       clear(box);
+      const fsec = drawFound();
+      if (fsec) box.appendChild(fsec);
       if (!live.length) {
         const e = h('div', {class: 'pm-empty'}, arch.length ? 'No active projects.' : 'No projects yet.',
                     h('span', {class: 'pm-empty-sub', text: 'A project is private to the people its owner adds to it.'}));
@@ -633,6 +702,7 @@
       try {
         const j = await req('GET', '/api/projects');
         projects = j.projects || [];
+        loaded = true;
         render();
       } catch (e) {
         clear(box).appendChild(h('div', {class: 'pm-empty'}, e.message,
@@ -675,6 +745,7 @@
     const btn = $('pm-new-project');
     if (btn) btn.addEventListener('click', newProject);
     load();
+    if (q) search();
   }
 
   /* ═══ One project (/projects/<id>) ═════════════════════════════════════ */
@@ -684,7 +755,7 @@
     PM.can = {edit: false, manage: false, comment: false, budget: false, createShow: false};
 
     const TABS = ['overview', 'tasks', 'timeline', 'budget', 'files', 'notes', 'contacts', 'discussion', 'settings'];
-    const LINK_PARAMS = ['task', 'comment', 'contact', 'line', 'file', 'note'];
+    const LINK_PARAMS = ['task', 'comment', 'contact', 'line', 'file', 'note', 'mine'];
     const tabs = {};                 // name → {impl, mounted}
     const taskMap = new Map();
     let knownRev = null;             // the project rev PM.state reflects
@@ -959,7 +1030,8 @@
       const tile = $('pm-tile');
       if (isHex(p.color)) tile.style.setProperty('--pm-tile', p.color); else tile.style.removeProperty('--pm-tile');
       const tags = clear($('pm-head-tags'));
-      tags.appendChild(projectPill(p.status));
+      // Archived: the one badge below says it (no second "Archived" pill).
+      if (!me.archived) tags.appendChild(projectPill(p.status));
       if (me.archived) {
         tags.appendChild(h('span', {class: 'pm-badge pm-badge-muted', text: 'Archived — read only'}));
         if (PM.can.manage) {
@@ -980,7 +1052,11 @@
       s.members.slice(0, 6).forEach(m => av.appendChild(avatar(m.name, false, !m.active)));
       if (s.members.length > 6) av.appendChild(h('span', {class: 'pm-avatars-more', text: '+' + (s.members.length - 6)}));
       meta.appendChild(av);
-      meta.appendChild(h('span', {text: 'You: ' + (ROLE_LABEL[me.role] || me.role)}));
+      // Phones hide this line (the People dialog says it) — except the
+      // read-only explanation, which a phone can't get from a hover title.
+      meta.appendChild(me.readonly
+        ? h('span', {class: 'pm-you pm-you-ro', text: 'You: ' + (ROLE_LABEL[me.role] || me.role) + ' · your account is read-only'})
+        : h('span', {class: 'pm-you', text: 'You: ' + (ROLE_LABEL[me.role] || me.role)}));
 
       const ban = clear($('pm-head-banner'));
       if (p.ownerless) {
@@ -1395,19 +1471,19 @@
                                   'aria-label': 'Write a comment', 'aria-autocomplete': 'list', 'aria-expanded': 'false'});
         const post = h('button', {type: 'button', class: 'btn btn-primary btn-sm', text: 'Post'});
         const key = attachMentions(ta);
-        let sending = false;           // Enter twice must not post twice
+        let sending = null;            // Enter twice must not post twice
+        // → Promise<bool posted> (the task dialog's Save posts a draft too).
         const send = () => {
-          if (sending) return;
+          if (sending) return sending;
           if (!PM.can.comment) {
             // The right went away (role, archive, "Viewers can comment") while a draft was here.
             PM.toast('You can no longer comment on this project — copy your text if you need it.', true);
-            return;
+            return Promise.resolve(false);
           }
           const text = ta.value.trim();
-          if (!text) { ta.focus(); return; }
-          sending = true;
-          busy(post, PM.api('POST', '/comments', taskId ? {task_id: taskId, body: text} : {body: text})).then(resp => {
-            sending = false;
+          if (!text) { ta.focus(); return Promise.resolve(false); }
+          sending = busy(post, PM.api('POST', '/comments', taskId ? {task_id: taskId, body: text} : {body: text})).then(resp => {
+            sending = null;
             ta.value = '';
             if (resp.comment) comments.push(resp.comment);
             bump(1);
@@ -1416,7 +1492,9 @@
             draw();
             const last = list.lastElementChild;
             if (last) last.scrollIntoView({block: 'nearest'});
-          }, e => { sending = false; say(e); });
+            return true;
+          }, e => { sending = null; say(e); return false; });
+          return sending;
         };
         post.addEventListener('click', send);
         const phone = document.documentElement.classList.contains('mobile-view');
@@ -1426,17 +1504,23 @@
           // rule). Phones: Enter is a new line, the button posts.
           if (e.key === 'Enter' && !e.shiftKey && !phone && !e.isComposing) { e.preventDefault(); send(); }
         });
-        composer = h('div', null, h('div', {class: 'pm-composer'}, ta, post),
-                     h('p', {class: 'pm-composer-hint', text: phone ? 'Type @ to mention someone.' : 'Enter to post · Shift+Enter for a new line'}));
+        // Post sits on its own line under the box, right-aligned, with the hint.
+        composer = h('div', null, h('div', {class: 'pm-composer'}, ta),
+                     h('div', {class: 'pm-composer-foot'},
+                       h('p', {class: 'pm-composer-hint', text: phone ? 'Type @ to mention someone.' : 'Enter to post · Shift+Enter for a new line'}),
+                       post));
         composer.textarea = ta;
-      } else if (PM.me.archived || PM.me.readonly) {
-        composer = null;
+        composer.send = send;
       } else {
-        composer = h('p', {class: 'pm-note', text: 'Viewers can’t comment on this project.'});
+        // Say WHY there is no comment box (a phone can't show a hover title).
+        composer = h('p', {class: 'pm-note pm-no-comment', text: PM.me.readonly ? 'Your account is read-only, so you can’t comment.'
+          : PM.me.archived ? 'This project is archived, so comments are closed.'
+          : 'The owner has turned off comments for viewers.'});
       }
       return {
         el, composer, load,
         hasDraft: () => !!(composer && composer.textarea && composer.textarea.value.trim()),
+        postDraft: () => (composer && composer.send) ? composer.send() : Promise.resolve(false),
         // On 'state': refetch when the project moved since this thread loaded.
         sync() { if (!mine && loadedRev != null && knownRev !== loadedRev) load(); },
       };
@@ -1562,6 +1646,7 @@
       let saving = false, deleted = false;
       const d = PM.dialog({title: isNew ? 'New task' : 'Task', xl: true,
                            noDirtyGuard: !editable && !ownStatus && !PM.can.comment,
+                           askClose: () => askClose(),
                            onClose: () => { if (taskDlg && taskDlg.d === d) taskDlg = null; }});
       const ro = !editable;
 
@@ -1761,6 +1846,23 @@
         thread.load();
       }
 
+      // Closing (×, Esc, backdrop, Cancel): a comment typed but not posted
+      // is never dropped silently — and neither are unsaved field changes.
+      function askClose() {
+        const draft = !!(thread && thread.hasDraft());
+        const dirtyFields = (editable || ownStatus) && !deleted && Object.keys(changes()).length > 0;
+        if (!draft) return dirtyFields ? PM.confirm('You have unsaved changes. Discard them?', 'Discard') : Promise.resolve(true);
+        return PM.choose(dirtyFields ? 'Your comment hasn’t been posted, and your changes to this task aren’t saved.'
+                                     : 'Your comment hasn’t been posted yet.',
+          [{label: 'Keep editing', value: null}, {label: 'Discard', value: 'discard', kind: 'danger'},
+           {label: dirtyFields ? 'Post and save' : 'Post comment', value: 'post', kind: 'primary'}]).then(v => {
+          if (v === 'discard') return true;
+          if (v !== 'post') return false;
+          if (dirtyFields) { save(); return false; }      // save() closes when both went through
+          return thread.postDraft();
+        });
+      }
+
       // Footer
       const saveBtn = h('button', {type: 'button', class: 'btn btn-primary', text: isNew ? 'Add task' : 'Save'});
       async function save() {
@@ -1773,6 +1875,13 @@
         }
         saving = true;
         try {
+          // Save takes a typed comment with it (it used to vanish silently):
+          // post it first; a failed post keeps the dialog open with the text.
+          let posted = false;
+          if (thread && thread.hasDraft()) {
+            if (!(await thread.postDraft())) return;
+            posted = true;
+          }
           if (isNew) {
             const resp = await busy(saveBtn, PM.api('POST', '/tasks', v));
             d.close();
@@ -1784,10 +1893,10 @@
             // field of this task is never written back over.
             const ch = changes();
             if (!editable) Object.keys(ch).forEach(k => { if (k !== 'status') delete ch[k]; });
-            if (!Object.keys(ch).length) { d.close(); return; }
+            if (!Object.keys(ch).length) { d.close(); if (posted) PM.toast('✓ Comment posted'); return; }
             const resp = await busy(saveBtn, PM.saveTask(id, ch));
             d.close();
-            if (!(resp.new_conflicts && resp.new_conflicts.length)) PM.toast('✓ Saved');
+            if (!(resp.new_conflicts && resp.new_conflicts.length)) PM.toast(posted ? '✓ Saved · comment posted' : '✓ Saved');
           }
         } catch (e) {
           if (isNew) say(e);              // PM.saveTask already toasted
@@ -1943,6 +2052,23 @@
       if (!PM.can.edit) return;
       contactDialog(null, defaults || {});
     };
+    // mailto: / tel: for a contact's email / phone, with the app's ONE
+    // normalisation (app.js LaborDays.mailtoHref / telHref: no header
+    // injection, first dialable number). Text that makes no link stays text.
+    function contactHref(v, kind) {
+      const L = window.LaborDays;
+      if (!v || !L) return '';
+      try { return (kind === 'tel' ? L.telHref(v) : L.mailtoHref(v)) || ''; } catch (e) { return ''; }
+    }
+    function contactLink(v, kind) {
+      if (!v) return null;
+      const href = contactHref(v, kind);
+      const cls = 'l' + (kind === 'tel' ? ' mono' : '');
+      if (!href) return h('span', {class: cls, text: v});
+      const a = h('a', {class: cls + ' no-prefetch', text: v, title: (kind === 'tel' ? 'Call ' : 'Email ') + v});
+      a.setAttribute('href', href);
+      return a;
+    }
     function contactDialog(contact, defaults) {
       const isNew = !contact;
       const editable = PM.can.edit;
@@ -1957,6 +2083,20 @@
                  email: mk('email', 254, 'email'), phone: mk('phone', 120, 'tel'),
                  notes: h('textarea', {class: 'field-input field-textarea', rows: 3, maxLength: 10000, readOnly: !editable})};
       f.notes.value = v0.notes || '';
+      if (!isNew) {
+        // Call / Email straight from the contact (an editor's fields are inputs).
+        const mh = contactHref(contact.email, 'mail'), th = contactHref(contact.phone, 'tel');
+        if (mh || th) {
+          const row = h('div', {class: 'pm-contact-acts'});
+          [[th, 'Call'], [mh, 'Email']].forEach(([href, label]) => {
+            if (!href) return;
+            const a = h('a', {class: 'btn btn-ghost btn-sm no-prefetch', text: label});
+            a.setAttribute('href', href);
+            row.appendChild(a);
+          });
+          d.body.appendChild(row);
+        }
+      }
       d.body.append(field('Name', f.name, {required: true}),
         h('div', {class: 'form-row cols-2'}, field('Company', f.company), field('Role', f.role)),
         h('div', {class: 'form-row cols-2'}, field('Email', f.email), field('Phone', f.phone)),
@@ -1967,7 +2107,7 @@
         d.body.appendChild(h('span', {class: 'pm-section-label', text: 'Tasks for this contact'}));
         if (mine.length) {
           const list = h('div', {class: 'pm-list', style: 'margin:0 -22px'});
-          mine.forEach(t => list.appendChild(h('button', {type: 'button', class: 'pm-row', onclick: () => { d.ask(); if (!dialogs.includes(d)) PM.openTask(t.id); }},
+          mine.forEach(t => list.appendChild(h('button', {type: 'button', class: 'pm-row', onclick: () => { d.ask().then(ok => { if (ok) PM.openTask(t.id); }); }},
             statusPill(t.status), h('span', {class: 'pm-row-main pm-row-title', text: t.title}),
             t.due_date ? h('span', {class: 'pm-row-date' + (isOverdue(t) ? ' is-over' : ''), text: PM.fmtDate(t.due_date)}) : null)));
           d.body.appendChild(list);
@@ -1982,7 +2122,7 @@
             const lines = (j.lines || []).filter(l => l.contact_id === contact.id);
             if (!lines.length || !d.el.isConnected) return;
             const list = h('div', {class: 'pm-list', style: 'margin:0 -22px'});
-            lines.forEach(l => list.appendChild(h('button', {type: 'button', class: 'pm-row', onclick: () => { d.ask(); if (!dialogs.includes(d)) PM.setTab('budget', {line: l.id}); }},
+            lines.forEach(l => list.appendChild(h('button', {type: 'button', class: 'pm-row', onclick: () => { d.ask().then(ok => { if (ok) PM.setTab('budget', {line: l.id}); }); }},
               h('span', {class: 'pm-row-main'}, h('span', {class: 'pm-row-title', text: l.description || l.category || 'Budget line'}),
                 l.category ? h('span', {class: 'pm-row-sub', style: 'display:block', text: l.category}) : null),
               h('span', {class: 'pm-row-date', text: PM.money(l.actual != null ? l.actual : (l.committed != null ? l.committed : l.estimate))}))));
@@ -2367,7 +2507,8 @@
       };
 
       /* toolbar (built once; only its counts and option lists are refreshed) */
-      let tg = {}, selStatus, selWho, selSort, segList, segBoard, newBtn, toolsWrap;
+      let tg = {}, selStatus, selWho, selSort, segList, segBoard, newBtn, toolsWrap, filtersBtn = null;
+      const phone = document.documentElement.classList.contains('mobile-view');
       function toggle(key, label) {
         const b = h('button', {type: 'button', class: 'pm-toggle', 'aria-pressed': 'false'}, label, ' ', h('span', {class: 'pm-count'}));
         b.addEventListener('click', () => { f[key] = !f[key]; b.setAttribute('aria-pressed', f[key] ? 'true' : 'false'); draw(); });
@@ -2395,11 +2536,26 @@
         selSort.addEventListener('change', () => { sort = selSort.value; draw(); });
         newBtn = h('button', {type: 'button', class: 'btn btn-primary btn-sm', text: '+ New task', onclick: () => PM.newTask()});
         toolsWrap = menu('pm-tasks', {label: 'Tools', title: 'Task tools'});
-        bar = h('div', {class: 'pm-toolbar'},
-          h('div', {class: 'pm-seg', role: 'group', 'aria-label': 'View'}, segList, segBoard),
-          toggle('mine', 'Mine'), toggle('overdue', 'Overdue'), toggle('conflicts', 'Conflicts'),
-          selStatus, selWho, selSort,
-          h('div', {class: 'pm-toolbar-right'}, toolsWrap, newBtn));
+        if (phone) {
+          // Phones: two short rows — the view + New task, then the quick
+          // filters and ONE Filters button for status / assignee / sort /
+          // tools — so the first task is not two-thirds down the screen.
+          filtersBtn = h('button', {type: 'button', class: 'pm-toggle pm-filters-btn', 'aria-haspopup': 'dialog', 'aria-pressed': 'false',
+                                    data: {fk: 'filters'}, onclick: filtersSheet},
+                         'Filters', ' ', h('span', {class: 'pm-count', hidden: true}));
+          bar = h('div', {class: 'pm-toolbar pm-toolbar-phone'},
+            h('div', {class: 'pm-toolbar-row'},
+              h('div', {class: 'pm-seg', role: 'group', 'aria-label': 'View'}, segList, segBoard),
+              h('span', {class: 'pm-toolbar-end'}, newBtn)),
+            h('div', {class: 'pm-toolbar-row'},
+              toggle('mine', 'Mine'), toggle('overdue', 'Overdue'), toggle('conflicts', 'Conflicts'), filtersBtn));
+        } else {
+          bar = h('div', {class: 'pm-toolbar'},
+            h('div', {class: 'pm-seg', role: 'group', 'aria-label': 'View'}, segList, segBoard),
+            toggle('mine', 'Mine'), toggle('overdue', 'Overdue'), toggle('conflicts', 'Conflicts'),
+            selStatus, selWho, selSort,
+            h('div', {class: 'pm-toolbar-right'}, toolsWrap, newBtn));
+        }
         body = h('div');
         // Quick add: its own node, never rebuilt, so it keeps focus and text
         // through every redraw.
@@ -2543,6 +2699,35 @@
         body.appendChild(board);
       }
 
+      // Phones: the status / assignee / sort selects live in this sheet (the
+      // same nodes — their change handlers filter the list live behind it).
+      function filtersSheet() {
+        const d = PM.dialog({title: 'Filters', noDirtyGuard: true, onClose: () => {
+          [selStatus, selWho, selSort].forEach(n => n.remove());
+          drawFiltersBtn();
+        }});
+        d.body.append(field('Status', selStatus), field('Assigned to', selWho));
+        if (view === 'list') { selSort.hidden = false; d.body.appendChild(field('Sort', selSort)); }
+        const reset = h('button', {type: 'button', class: 'btn btn-ghost', text: 'Reset', onclick: () => {
+          f.status = f.assignee = ''; sort = 'manual';
+          selStatus.value = ''; selWho.value = ''; selSort.value = 'manual';
+          draw();
+        }});
+        if (PM.can.edit) {
+          d.footer.appendChild(h('div', {class: 'pm-foot-left'}, h('button', {type: 'button', class: 'btn btn-ghost', text: 'Deleted tasks…',
+            onclick: () => { d.close(); deletedDialog(); }})));
+        }
+        d.footer.append(reset, h('button', {type: 'button', class: 'btn btn-primary', text: 'Done', onclick: () => d.close()}));
+      }
+      function drawFiltersBtn() {
+        if (!filtersBtn) return;
+        const n = (f.status ? 1 : 0) + (f.assignee ? 1 : 0) + (view === 'list' && sort !== 'manual' ? 1 : 0);
+        const c = filtersBtn.lastChild;
+        c.textContent = String(n);
+        c.hidden = !n;
+        filtersBtn.setAttribute('aria-pressed', n ? 'true' : 'false');
+        filtersBtn.setAttribute('aria-label', n ? 'Filters, ' + n + ' on' : 'Filters');
+      }
       function clearFilters() {
         f.mine = f.overdue = f.conflicts = false; f.status = f.assignee = '';
         selStatus.value = ''; selWho.value = '';
@@ -2574,6 +2759,7 @@
         segBoard.setAttribute('aria-pressed', view === 'board' ? 'true' : 'false');
         selSort.hidden = view !== 'list';
         newBtn.hidden = toolsWrap.hidden = quick.hidden = !PM.can.edit;
+        drawFiltersBtn();
         // A focused row that left the list (filtered out, deleted elsewhere):
         // the first control of the list, not <body>.
         keepFocus(body, view === 'list' ? drawList : drawBoard, () => body.querySelector('button[data-fk], select[data-fk]:not(:disabled)'));
@@ -2804,6 +2990,11 @@
       return {
         mount,
         show(params) {
+          // ?mine=1 (the "Assigned to you: N tasks" notice): the Mine filter on.
+          if (params && params.mine && !f.mine) {
+            f.mine = true;
+            tg.mine.setAttribute('aria-pressed', 'true');
+          }
           draw();
           if (params && params.task) PM.openTask(params.task, {comment: params.comment});
         },
@@ -2841,12 +3032,15 @@
           const g = h('div', {class: 'pm-contact-grid'});
           list.forEach(c => {
             const n = PM.state.tasks.filter(t => t.contact_id === c.id).length;
-            g.appendChild(h('button', {type: 'button', class: 'pm-contact' + (target === c.id ? ' is-target' : ''), data: {fk: 'c' + c.id},
-                                       onclick: () => contactDialog(c)},
-              h('span', {class: 'n', text: c.name}),
-              (c.company || c.role) ? h('span', {class: 's', text: [c.role, c.company].filter(Boolean).join(' · ')}) : null,
-              c.email ? h('span', {class: 'l', text: c.email}) : null,
-              c.phone ? h('span', {class: 'l mono', text: c.phone}) : null,
+            // A card, not one big button: the name opens the contact, and
+            // the email / phone are real mailto: / tel: links (tap to write
+            // or call — the vendor on a phone is the point).
+            const em = contactLink(c.email, 'mail'), ph = contactLink(c.phone, 'tel');
+            g.appendChild(h('div', {class: 'pm-contact' + (target === c.id ? ' is-target' : '')},
+              h('button', {type: 'button', class: 'pm-contact-open', data: {fk: 'c' + c.id}, onclick: () => contactDialog(c)},
+                h('span', {class: 'n', text: c.name}),
+                (c.company || c.role) ? h('span', {class: 's', text: [c.role, c.company].filter(Boolean).join(' · ')}) : null),
+              em, ph,
               n ? h('span', {class: 's', text: plural(n, 'task')}) : null));
           });
           grid.appendChild(g);

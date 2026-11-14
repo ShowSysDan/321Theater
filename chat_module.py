@@ -188,16 +188,21 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
             (uid, tid)).fetchone()
 
     def _members(db, tids):
-        """{thread_id: [{id, name}]} — current participants, by name."""
+        """{thread_id: [{id, name, read_only}]} — current participants, by
+        name. `read_only`: a read-only account can read a conversation that
+        posts to comments but not send in it — chat.js says so before
+        anyone switches that on."""
         out = {t: [] for t in tids}
         if not tids:
             return out
         for r in db.execute(
-                f"""SELECT p.thread_id, u.id, {_NAME_SQL} AS name
+                f"""SELECT p.thread_id, u.id, {_NAME_SQL} AS name,
+                           COALESCE(u.is_readonly, 0) = 1 AS read_only
                       FROM chat_participants p JOIN users u ON u.id = p.user_id
                      WHERE p.thread_id = ANY(%s) ORDER BY LOWER({_NAME_SQL}), u.id""",
                 (list(tids),)).fetchall():
-            out[r['thread_id']].append({'id': r['id'], 'name': r['name']})
+            out[r['thread_id']].append({'id': r['id'], 'name': r['name'],
+                                        'read_only': bool(r['read_only'])})
         return out
 
     def _msg_out(r, uid):
@@ -323,12 +328,14 @@ def register(app, *, get_db, login_required, ts_out, log_audit, syslog_logger,
         db = get_db()
         try:
             rows = db.execute(
-                f"""SELECT u.id, {_NAME_SQL} AS name, u.role
+                f"""SELECT u.id, {_NAME_SQL} AS name, u.role,
+                           COALESCE(u.is_readonly, 0) = 1 AS read_only
                       FROM users u WHERE {_ACTIVE_USER_SQL} AND u.id <> %s
                      ORDER BY LOWER({_NAME_SQL}), u.id""", (uid,)).fetchall()
         finally:
             db.close()
-        return jsonify({'people': [{'id': r['id'], 'name': r['name'], 'role': r['role'] or ''}
+        return jsonify({'people': [{'id': r['id'], 'name': r['name'], 'role': r['role'] or '',
+                                    'read_only': bool(r['read_only'])}
                                    for r in rows]})
 
     @app.route('/api/chat/shows')

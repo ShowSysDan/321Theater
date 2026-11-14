@@ -1105,7 +1105,9 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   `#inbox-panel` exists); the open thread polls 5 s; all GETs are
   side-effect free — reading is `POST …/read`. chat.js builds everything
   with textContent.
-- **@mentions**: `_notify_comment_mentions()` (post + edit of a comment, and
+- **@mentions** (links carry `&comment=<id>`; app.js renderComments() lands
+  on and highlights that comment on the FIRST render only, then drops the
+  param so polls keep sticking to the bottom): `_notify_comment_mentions()` (post + edit of a comment, and
   public chat messages via the injected dep) → `notify_users(kind='mention')`.
   `_mention_user_ids()`: longest names first and consumed (locked / pending /
   viewer names consume too, they just aren't notified), and a mention needs
@@ -1285,7 +1287,18 @@ in full. Module key `projects`, default OFF.
   true: `_withdraw_task` (reassigned → the old assignee's assign / due /
   overdue; done → due / overdue; deleted → everything, incl. mentions in its
   comments), `_withdraw_budget` (after an owner, role or budget-visibility
-  change), `_scrub` (removed member, revoked access, deleted project or user). The hourly job
+  change), `_scrub` (removed member, revoked access, deleted project or user).
+  "Assigned to you" is ONE notice per assignee per project (key
+  `pm:<pid>:a:<uid>`, title = the task or "N tasks"): the tasks it counts are
+  `pm_task_alerts` rows of kind 'assign' (ref = assignee id, created_at on the
+  DB clock, compared with the notice's read_at — same clock); every write
+  that takes a task out of that set recounts via `_assign_notice` (a recount
+  never creates or re-raises a notice). The body names the actor
+  ('<Project> · by <name>').
+- **Budget variance** = estimate − forecast, forecast = max(committed,
+  actual) per line; '—' unless the line / category has an estimate AND a
+  committed or actual. projects_docs.js `variance()` and the PDF builder in
+  projects_docs_module.py must use the same rule (they disagreed once). The hourly job
   `pm_hourly` (`run_hourly()`; app.py wrapper is leader-gated and skips on
   DatabaseUnavailable) sends due / overdue alerts — each CLAIMED in
   `pm_task_alerts` with `INSERT … ON CONFLICT DO NOTHING RETURNING` — and

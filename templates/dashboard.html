@@ -42,6 +42,15 @@
     <a class="phead-tab" role="tab" aria-selected="true" href="{{ url_for('dashboard') }}">Active <span class="count">{{ active_shows|length }}</span></a>
     <a class="phead-tab" role="tab" aria-selected="false" href="{{ url_for('archived_shows_page') }}">Archived <span class="count">{{ archived_count }}</span></a>
   </nav>
+  {% elif my_work %}
+  {# My Work: one count per list on the page (the shows I PM, my projects,
+     my open tasks) — in-page links to each list, not tabs. #}
+  {% set _mw = pm_work or {} %}
+  <nav class="phead-tabs" aria-label="On this page">
+    <span class="phead-tab" aria-selected="true">Shows <span class="count">{{ active_shows|length }}</span></span>
+    <a class="phead-tab" href="#pm-mw-projects">Projects <span class="count">{{ (_mw.get('projects') or [])|length }}</span></a>
+    {% if _mw.get('projects') %}<a class="phead-tab" href="#pm-mw-tasks">Tasks <span class="count">{{ (_mw.get('tasks') or [])|length }}</span></a>{% endif %}
+  </nav>
   {% else %}
   <div class="phead-tabs" aria-hidden="true"><span class="phead-tab" aria-selected="true">Active <span class="count">{{ active_shows|length }}</span></span></div>
   {% endif %}

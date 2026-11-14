@@ -579,8 +579,8 @@ def notify(db, pid, user_ids, code, link, key, actor_id=None, subject=''):
     one — the filter is here, not at the call sites. Never reads the session
     (jobs pass no actor). Caller commits. Returns the ids notified.
     title = the fixed text for `code` (+ ': ' + subject, i.e. a task title),
-    body = the project's name; neither is ever logged or put in an email
-    subject."""
+    body = the project's name (+ ' · by ' + the actor's name); neither is
+    ever logged or put in an email subject."""
     want = sorted({int(u) for u in (user_ids or ()) if u} - {actor_id})
     if not want:
         return []
@@ -608,12 +608,18 @@ def notify(db, pid, user_ids, code, link, key, actor_id=None, subject=''):
     title = _NOTIFY_TITLES[code]
     if subject:
         title += ': ' + str(subject)[:120]
+    # "<Project> · by <Actor>": who did it, readable without opening it.
+    # Project-private like the rest of the row (never logged).
+    body = rows[0]['name']
+    actor = user_name(db, actor_id) if actor_id else ''
+    if actor:
+        body += ' · by ' + actor
     # notify_users never raises — but when one of its statements fails, the
     # adapter has already rolled the WHOLE transaction back, taking the
     # caller's own writes with it. Carrying on would commit nothing and
     # still answer "saved". So: same transaction before and after, or stop.
     xid = db.execute('SELECT txid_current() AS x').fetchone()['x']
-    _d['notify_users'](db, ids, title, rows[0]['name'], link_url=link, kind='project',
+    _d['notify_users'](db, ids, title, body, link_url=link, kind='project',
                        coalesce_key=f'pm:{int(pid)}:{key}')
     if db.execute('SELECT txid_current() AS x').fetchone()['x'] != xid:
         raise WriteLost()
@@ -1108,10 +1114,74 @@ def _after_task_write(db, c, before, saved=()):
     return _tasks_out(db, pid, changed | set(saved), sched), new
 
 
+# "Assigned to you" is ONE notice per assignee per project ('pm:<pid>:a:<uid>')
+# while it is unread — building out a project must not bury the assignee's
+# bell under one row per task. Which tasks it counts is kept as markers in
+# pm_task_alerts (kind 'assign', ref = the assignee's id, created_at = when
+# someone else assigned it): the notice covers the marked tasks that are
+# still open, still theirs and newer than the last time they READ the
+# notice. Every write that can take a task out of that set recounts.
+
+def _assign_unseen(db, pid, user_id):
+    """[{id, title}] counted by user_id's 'Assigned to you' notice in pid,
+    newest first."""
+    return [dict(r) for r in db.execute(
+        """SELECT t.id, t.title FROM pm_task_alerts a
+             JOIN pm_tasks t ON t.id = a.task_id
+            WHERE a.kind = 'assign' AND a.ref = %s AND t.project_id = %s
+              AND t.assignee_id = %s AND t.deleted_at IS NULL AND t.status <> 'done'
+              AND a.created_at > COALESCE(
+                    (SELECT MAX(n.read_at) FROM notifications n
+                      WHERE n.kind = 'project' AND n.user_id = %s AND n.field_key = %s
+                        AND n.read_at IS NOT NULL), '-infinity'::timestamp)
+            ORDER BY a.created_at DESC, t.id DESC""",
+        (str(int(user_id)), pid, user_id, user_id, f'pm:{int(pid)}:a:{int(user_id)}')).fetchall()]
+
+
+def _assign_notice(db, pid, user_id, actor_id=None, task=None):
+    """Write user_id's 'Assigned to you' notice for pid. With `actor_id`
+    (someone just assigned `task` = {id, title} to them): notify() — the
+    unread notice is refreshed (or a new one made) with the count. Without
+    (a recount after a task left the set — done, deleted, reassigned): the
+    UNREAD notice is rewritten in place, or withdrawn when nothing is left;
+    a recount never creates or re-raises a notice."""
+    if not user_id:
+        return
+    rows = _assign_unseen(db, pid, user_id)
+    if task and not any(r['id'] == task['id'] for r in rows):
+        rows.insert(0, task)
+    key = f'a:{int(user_id)}'
+    if not rows:
+        _withdraw(db, pid, key, user_id=user_id)
+        return
+    n = len(rows)
+    subject = rows[0]['title'] if n == 1 else f'{n} tasks'
+    link = _link(pid, 'tasks', task=rows[0]['id']) if n == 1 else _link(pid, 'tasks', mine=1)
+    if actor_id is not None:
+        notify(db, pid, [user_id], 'assign', link, key, actor_id=actor_id, subject=subject)
+    else:
+        db.execute("UPDATE notifications SET title = %s, link_url = %s "
+                   "WHERE kind = 'project' AND read_at IS NULL AND user_id = %s AND field_key = %s",
+                   (_NOTIFY_TITLES['assign'] + ': ' + str(subject)[:120], link, user_id,
+                    f'pm:{int(pid)}:{key}'))
+
+
 def _notify_assignee(db, c, tid, title, assignee_id):
     if assignee_id and assignee_id != c['uid']:
-        notify(db, c['pid'], [assignee_id], 'assign', _link(c['pid'], 'tasks', task=tid),
-               f't:{tid}:assign', actor_id=c['uid'], subject=title)
+        db.execute("INSERT INTO pm_task_alerts (task_id, kind, ref) VALUES (%s, 'assign', %s) "
+                   "ON CONFLICT (task_id, kind, ref) DO UPDATE SET created_at = CURRENT_TIMESTAMP",
+                   (tid, str(int(assignee_id))))
+        _assign_notice(db, c['pid'], assignee_id, actor_id=c['uid'], task={'id': tid, 'title': title})
+
+
+def _unassign(db, pid, tid, user_id):
+    """user_id is no longer the assignee of tid: forget the marker and
+    recount their notice (the legacy per-task key goes too)."""
+    if not user_id:
+        return
+    db.execute("DELETE FROM pm_task_alerts WHERE task_id = %s AND kind = 'assign' AND ref = %s",
+               (tid, str(int(user_id))))
+    _assign_notice(db, pid, user_id)
 
 
 def _task_fields(db, c, body, cur=None):
@@ -1195,15 +1265,28 @@ def _live_task_count(db, pid):
                       (pid,)).fetchone()['n']
 
 
-def _snippet(text, q, radius=60):
-    """±`radius` chars around the first hit of q in text, as one plain line."""
+def _snippet(text, q, radius=60, head=False, tail=False):
+    """±`radius` chars around the first hit of q in text, as one plain line,
+    cut at word boundaries: a cut end moves to the nearest whitespace within
+    15 chars (never into the hit) and says so with '…'. head / tail = the
+    text was ALREADY cut at that end (PostgreSQL's substr around the hit)."""
     text = text or ''
     i = text.lower().find(q.lower())
     if i < 0:
         i = 0
-    a, b = max(0, i - radius), min(len(text), i + len(q) + radius)
+    hit_end = i + len(q)
+    a, b = max(0, i - radius), min(len(text), hit_end + radius)
+    cut_a, cut_b = a > 0 or head, b < len(text) or tail
+    if cut_a and a < i and not (a > 0 and text[a - 1].isspace()):     # not already at a word start
+        ws = [k for k in range(a, min(a + 15, i)) if text[k].isspace()]
+        if ws:
+            a = ws[0] + 1
+    if cut_b and b > hit_end and not (b < len(text) and text[b].isspace()):
+        ws = [k for k in range(b - 1, max(b - 16, hit_end - 1), -1) if text[k].isspace()]
+        if ws:
+            b = ws[0]
     s = ' '.join(text[a:b].split())
-    return ('…' if a > 0 else '') + s + ('…' if b < len(text) else '')
+    return ('…' if cut_a else '') + s + ('…' if cut_b else '')
 
 
 def _new_show_fields(raw):
@@ -1552,8 +1635,11 @@ def _routes_projects(app):
     @wrap
     def pm_api_search(db, uid):
         """The sidebar box: my projects by name and my projects' live tasks by
-        title, ≤ 8. POST so the text never sits in a url (perf log, history)."""
-        q = clean_text(_body().get('q'), CAPS['q'], 'Search', line=True)
+        title, ≤ 8 — or ≤ `limit` (up to 50) for the /projects?q= results
+        list. POST so the text never sits in a url (perf log, history)."""
+        body = _body()
+        q = clean_text(body.get('q'), CAPS['q'], 'Search', line=True)
+        n = to_int(body['limit'], 'Limit', 1, 50) if body.get('limit') is not None else 8
         if len(q) < 2:
             return jsonify({'results': []})
         like = _like(q)
@@ -1561,22 +1647,22 @@ def _routes_projects(app):
             """SELECT p.id, p.name, p.status FROM pm_projects p
                  JOIN pm_members m ON m.project_id = p.id AND m.user_id = %s
                 WHERE p.name ILIKE %s
-                ORDER BY (p.status = 'archived'), p.updated_at DESC, p.id LIMIT 8""",
-            (uid, like)).fetchall()
+                ORDER BY (p.status = 'archived'), p.updated_at DESC, p.id LIMIT %s""",
+            (uid, like, n)).fetchall()
         tasks = db.execute(
             """SELECT t.id, t.project_id, t.title, p.name FROM pm_tasks t
                  JOIN pm_members m ON m.project_id = t.project_id AND m.user_id = %s
                  JOIN pm_projects p ON p.id = t.project_id
                 WHERE t.deleted_at IS NULL AND p.status <> 'archived' AND t.title ILIKE %s
-                ORDER BY (t.status = 'done'), t.updated_at DESC, t.id LIMIT 8""",
-            (uid, like)).fetchall()
+                ORDER BY (t.status = 'done'), t.updated_at DESC, t.id LIMIT %s""",
+            (uid, like, n)).fetchall()
         pr = [{'type': 'project', 'project_id': r['id'], 'title': r['name'],
                'sub': _PROJECT_STATUS_LABEL.get(r['status'], '')} for r in projects]
         tk = [{'type': 'task', 'project_id': r['project_id'], 'task_id': r['id'],
                'title': r['title'], 'sub': r['name']} for r in tasks]
         # Projects first, but leave room for tasks when both match.
-        head = pr[:max(4, 8 - len(tk))]
-        return jsonify({'results': (head + tk)[:8]})
+        head = pr[:max(n // 2, n - len(tk))]
+        return jsonify({'results': (head + tk)[:n]})
 
     @app.route('/api/projects/<int:pid>', methods=['GET'], endpoint='pm_api_state')
     @wrap
@@ -2004,7 +2090,11 @@ def _routes_tasks(app):
                 # "Assigned to you" / "Due soon" must not outlive the assignment.
                 _withdraw_task(db, pid, tid, user_id=cur['assignee_id'],
                                kinds=('assign', 'due', 'overdue'))
+                _unassign(db, pid, tid, cur['assignee_id'])
             _notify_assignee(db, c, tid, title, changed['assignee_id'])
+        elif 'status' in changed and cur['assignee_id']:
+            # Done (or back from done): the count of their notice follows.
+            _assign_notice(db, pid, cur['assignee_id'])
         if changed.get('status') == 'done':
             _withdraw_task(db, pid, tid, kinds=('due', 'overdue'))
         resp = write_response(db, c, before, [tid], rev)
@@ -2023,6 +2113,7 @@ def _routes_tasks(app):
         rev = touch(db, pid)
         activity(db, c, 'deleted', 'task', tid, f"deleted task {_quote(cur['title'])}")
         _withdraw_task(db, pid, tid, comments=True)
+        _assign_notice(db, pid, cur['assignee_id'])      # recount: the task left it
         resp = write_response(db, c, before, [], rev, deleted=tid)
         db.commit()
         syslog('PM_TASK_DELETE', pid, task_id=tid)
@@ -2032,7 +2123,7 @@ def _routes_tasks(app):
     @wrap
     def pm_task_restore(db, uid, pid, tid):
         c = ctx(db, pid, 'edit', lock=True)
-        cur = db.execute('SELECT id, title FROM pm_tasks WHERE id = %s AND project_id = %s '
+        cur = db.execute('SELECT id, title, assignee_id FROM pm_tasks WHERE id = %s AND project_id = %s '
                          'AND deleted_at IS NOT NULL', (_url_id(tid), pid)).fetchone()
         if not cur:
             raise Refuse(404, _NOT_FOUND)
@@ -2043,6 +2134,7 @@ def _routes_tasks(app):
                    'WHERE id = %s AND project_id = %s', (tid, pid))
         rev = touch(db, pid)
         activity(db, c, 'restored', 'task', tid, f"restored task {_quote(cur['title'])}")
+        _assign_notice(db, pid, cur['assignee_id'])      # recount: back in it, if still unseen
         resp = write_response(db, c, before, [tid], rev)
         db.commit()
         syslog('PM_TASK_RESTORE', pid, task_id=tid)
@@ -2545,9 +2637,15 @@ def _routes_search(app):
         like, out = _like(q), []
         span = 120 + len(q)
 
-        def add(kind, rid, title, text, tab, **params):
+        def add(kind, rid, title, text, tab, cut=(False, False), **params):
             out.append({'type': kind, 'id': rid, 'title': title or '',
-                        'snippet': _snippet(text, q) if text else '', 'tab': tab, 'params': params})
+                        'snippet': _snippet(text, q, head=cut[0], tail=cut[1]) if text else '',
+                        'tab': tab, 'params': params})
+
+        def cut_of(r):
+            # (cut before, cut after) of a PostgreSQL substr window.
+            return (bool(r['off'] and r['off'] > 1),
+                    bool(r['off'] and r['len'] and r['off'] - 1 + span < r['len']))
 
         for r in db.execute(
                 """SELECT id, title, description FROM pm_tasks
@@ -2578,15 +2676,18 @@ def _routes_search(app):
         # Long texts (a note's body, a file's extracted text) are cut around
         # the hit by PostgreSQL — never shipped whole just to make a snippet.
         for r in db.execute(
-                """SELECT id, title,
-                          substr(body_text, GREATEST(strpos(lower(body_text), lower(%s)) - 60, 1), %s) AS hit
-                     FROM pm_notes
+                """SELECT id, title, x.off, length(body_text) AS len,
+                          substr(body_text, x.off, %s) AS hit
+                     FROM pm_notes,
+                          LATERAL (SELECT GREATEST(strpos(lower(body_text), lower(%s)) - 60, 1) AS off) x
                     WHERE project_id = %s AND deleted_at IS NULL
                       AND (title ILIKE %s OR body_text ILIKE %s)
-                    ORDER BY updated_at DESC, id LIMIT 8""", (q, span, pid, like, like)).fetchall():
-            add('note', r['id'], r['title'], r['hit'], 'notes', note=r['id'])
+                    ORDER BY updated_at DESC, id LIMIT 8""", (span, q, pid, like, like)).fetchall():
+            add('note', r['id'], r['title'], r['hit'], 'notes', cut=cut_of(r), note=r['id'])
         for r in db.execute(
                 f"""SELECT f.id, f.title, v.filename,
+                           GREATEST(strpos(lower(v.extracted_text), lower(%s)) - 60, 1) AS off,
+                           length(v.extracted_text) AS len,
                            substr(v.extracted_text,
                                   GREATEST(strpos(lower(v.extracted_text), lower(%s)) - 60, 1), %s) AS hit,
                            (v.extracted_text ILIKE %s) AS in_text
@@ -2596,9 +2697,11 @@ def _routes_search(app):
                            AND v.preview_of IS NULL AND v.deleted_at IS NULL
                      WHERE f.project_id = %s AND f.deleted_at IS NULL AND {can_see_file_sql(c)}
                        AND (f.title ILIKE %s OR v.filename ILIKE %s OR v.extracted_text ILIKE %s)
-                     ORDER BY f.id DESC LIMIT 10""", (q, span, like, pid, like, like, like)).fetchall():
-            add('file', r['id'], r['title'] or r['filename'],
-                r['hit'] if r['in_text'] else (r['filename'] or ''), 'files', file=r['id'])
+                     ORDER BY f.id DESC LIMIT 10""", (q, q, span, like, pid, like, like, like)).fetchall():
+            if r['in_text']:
+                add('file', r['id'], r['title'] or r['filename'], r['hit'], 'files', cut=cut_of(r), file=r['id'])
+            else:
+                add('file', r['id'], r['title'] or r['filename'], r['filename'] or '', 'files', file=r['id'])
         if c.can_budget:
             for r in db.execute(
                     """SELECT id, category, description, notes FROM pm_budget_lines

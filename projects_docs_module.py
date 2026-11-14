@@ -100,6 +100,8 @@ _PROJECT_STATUS = {'planning': 'Planning', 'active': 'Active', 'on_hold': 'On ho
                    'done': 'Done', 'archived': 'Archived'}
 _ROLE = {'owner': 'Owner', 'editor': 'Editor', 'viewer': 'Viewer'}
 _PDF_LIST_MAX = 40              # rows per table in the summary PDF
+_PDF_SHORT_MAX = 10             # … in its short lists (Attention, Next 30 days)
+_PDF_ABOUT_MAX = 1500           # the project description printed under the title
 
 
 # ─── Small helpers ────────────────────────────────────────────────────────────
@@ -121,6 +123,29 @@ def _money_text(v):
 
 def _over(estimate, actual):
     return estimate is not None and actual is not None and float(actual) > float(estimate)
+
+
+def _line_variance(ln):
+    """THE budget variance rule — the Budget tab and the Summary PDF both
+    print the value computed here, never their own. A line's forecast is
+    the larger of what is committed and what is paid so far (money only
+    "paid" is not money saved while more is signed for); variance =
+    estimate − forecast. None ("—") unless the line has an estimate AND a
+    committed or paid amount: with nothing to compare there is no variance."""
+    est, com, act = ln['estimate'], ln['committed'], ln['actual']
+    if est is None or (com is None and act is None):
+        return None
+    return round(est - max(com or 0.0, act or 0.0), 2)
+
+
+def _variance_text(v):
+    """'Over by $X' / '$X under' / 'On estimate' / '—' (projects_docs.js
+    varianceText() words it the same way)."""
+    if v is None:
+        return '—'
+    if v == 0:
+        return 'On estimate'
+    return f'Over by {_fmt_money(-v)}' if v < 0 else f'{_fmt_money(v)} under'
 
 
 def _ext(filename):
@@ -303,11 +328,22 @@ def _budget(db, pid, lid=None):
             'notes': r['notes'] or '', 'sort_order': r['sort_order'] or 0,
             'over': _over(r['estimate'], r['actual']),
             'sources': by_line.get(r['id'], []), 'updated_at': core.ts(r['updated_tz'])})
+        lines[-1]['variance'] = _line_variance(lines[-1])
 
     def total(rows):
         # Sums are always numbers (an empty column is 0.00); only a single
         # line's own amount can be null ("not entered").
-        return {k: round(sum(x[k] for x in rows if x[k] is not None), 2) for k, _ in _MONEY}
+        out = {k: round(sum(x[k] for x in rows if x[k] is not None), 2) for k, _ in _MONEY}
+        # Variance of a group = the sum over the lines that HAVE one (see
+        # _line_variance), None when none does — a line with only an
+        # estimate never reads as money saved. Remaining to pay = what is
+        # committed but not paid yet, per line, never negative.
+        vs = [x['variance'] for x in rows if x['variance'] is not None]
+        out['variance'] = round(sum(vs), 2) if vs else None
+        out['variance_lines'] = len(vs)
+        out['remaining'] = round(sum(max(x['committed'] - (x['actual'] or 0.0), 0.0)
+                                     for x in rows if x['committed'] is not None), 2)
+        return out
 
     cats = {}
     for ln in lines:
@@ -1717,9 +1753,9 @@ def _render_pdf(html):
         font_config=core.d['pdf_font_config']())
 
 
-def _capped(rows):
+def _capped(rows, cap=_PDF_LIST_MAX):
     """(rows shown, how many more)."""
-    return rows[:_PDF_LIST_MAX], max(0, len(rows) - _PDF_LIST_MAX)
+    return rows[:cap], max(0, len(rows) - cap)
 
 
 def _summary(db, c, uid):
@@ -1752,13 +1788,36 @@ def _summary(db, c, uid):
     overdue = sorted((t for t in open_tasks if d(t['due_date']) and d(t['due_date']) < today),
                      key=lambda t: (t['due_date'], t['id']))
     horizon = today + timedelta(days=30)
-    coming = sorted((t for t in open_tasks if d(t['due_date']) and today <= d(t['due_date']) <= horizon),
+    # Milestones have their own table: "Next 30 days" lists the work only.
+    coming = sorted((t for t in open_tasks if not t['is_milestone']
+                     and d(t['due_date']) and today <= d(t['due_date']) <= horizon),
                     key=lambda t: (t['due_date'], t['id']))
     label_of = dict(_TASK_STATUS)
 
     def task_row(t):
         return {'title': t['title'], 'assignee': who(t), 'due': _fmt_date(t['due_date']),
                 'days': (today - d(t['due_date'])).days if d(t['due_date']) else 0}
+
+    # Attention: WHICH tasks conflict or are blocked, and why — the first
+    # thing a reader of "2 schedule conflicts" / "1 blocked" asks.
+    title_of = {t['id']: t['title'] for t in tasks}
+    conflict_rows = []
+    for t in sorted((t for t in tasks if t['conflict']),
+                    key=lambda t: (t['start_date'] or t['due_date'] or '9999', t['id'])):
+        deps = [title_of[x] for x in t['conflict_with'] if x in title_of]
+        why = ('Starts before \u201c' + deps[0] + '\u201d finishes' if len(deps) == 1 else
+               f'Starts before \u201c{deps[0]}\u201d and {len(deps) - 1} more finish' if deps else
+               'Starts before a task it depends on finishes')
+        conflict_rows.append({'title': t['title'], 'why': why, 'assignee': who(t),
+                              'start': _fmt_date(t['start_date'] or t['due_date'])})
+    blocked_rows = []
+    for t in tasks:
+        if t['status'] != 'blocked':
+            continue
+        first = next((ln.strip() for ln in (t['description'] or '').splitlines() if ln.strip()), '')
+        if len(first) > 160:
+            first = first[:159].rstrip() + '\u2026'
+        blocked_rows.append({'title': t['title'], 'assignee': who(t), 'why': first})
 
     miles = []
     for t in tasks:
@@ -1772,28 +1831,34 @@ def _summary(db, c, uid):
 
     shows = []
     show_ids = _linked_show_ids(db, uid, pid)
+    # A task's show_id is only ever set by "Create a show from this task".
+    from_task = {}
+    for t in tasks:
+        if t['show_id'] and t['show_id'] not in from_task:
+            from_task[t['show_id']] = t['title']
     for s in (core.d['show_bars'](db, show_ids) if show_ids else []):
         a, b = _fmt_date(s.get('start')), _fmt_date(s.get('end'))
         shows.append({'name': s['name'], 'venue': s.get('venue') or '',
                       'kind': 'Event' if s.get('show_mode') == 'event' else 'Show',
                       'dates': (a if a == b or not b else f'{a} – {b}') or 'No date yet',
-                      'past': bool(s.get('is_past'))})
+                      'past': bool(s.get('is_past')), 'from_task': from_task.get(s.get('id'), '')})
 
     budget = None
     if c.can_budget:
         b = _budget(db, pid)
         if b['lines']:
             def brow(name, t):
-                var = round(t['estimate'] - t['actual'], 2)
+                var = t['variance']             # THE rule: _line_variance, summed by _budget
                 return {'name': name, 'estimate': _fmt_money(t['estimate']),
                         'committed': _fmt_money(t['committed']), 'actual': _fmt_money(t['actual']),
-                        'variance': (_fmt_money(abs(var)) + (' over' if var < 0 else ' under')) if var else '—',
-                        'over': var < 0,
+                        'variance': _variance_text(var), 'over': var is not None and var < 0,
+                        'remaining': _fmt_money(t['remaining']),
                         'committed_pct': _pct(t['committed'], t['estimate']),
                         'actual_pct': _pct(t['actual'], t['estimate'])}
             budget = {'total': brow('Total', b['totals']),
                       'categories': [brow(x['category'] or 'Uncategorized', x) for x in b['by_category']],
-                      'lines': len(b['lines']), 'over_lines': sum(1 for x in b['lines'] if x['over']),
+                      'lines': len(b['lines']),
+                      'over_lines': sum(1 for x in b['lines'] if x['variance'] is not None and x['variance'] < 0),
                       'figures': None}
         else:
             budget = {'total': None, 'categories': [], 'lines': 0, 'over_lines': 0, 'figures': None}
@@ -1810,7 +1875,10 @@ def _summary(db, c, uid):
                     'rows': [{'name': s['name'], 'settled': bool(s.get('settled')),
                               'cells': [_fmt_money(s.get(k)) for k, _l in cols]}
                              for s in figs['shows']],
-                    'totals': [_fmt_money((figs.get('totals') or {}).get(k)) for k, _l in cols]}
+                    # A column where no show has a figure yet (Labor actual
+                    # before any settlement) totals "—", never "$0.00".
+                    'totals': ['—' if all(s.get(k) is None for s in figs['shows'])
+                               else _fmt_money((figs.get('totals') or {}).get(k)) for k, _l in cols]}
         if not budget['lines'] and not budget['figures']:
             budget = None           # nothing to print: the section is omitted
 
@@ -1818,20 +1886,27 @@ def _summary(db, c, uid):
                 for k in pm._contacts_out(db, pid)]
     owner = next((m['name'] for m in members if m['role'] == 'owner'), '')
     over_rows, over_more = _capped([task_row(t) for t in overdue])
-    next_rows, next_more = _capped([task_row(t) for t in coming])
+    next_rows, next_more = _capped([task_row(t) for t in coming], _PDF_SHORT_MAX)
     mile_rows, mile_more = _capped(miles)
     contact_rows, contact_more = _capped(contacts)
+    conf_rows, conf_more = _capped(conflict_rows, _PDF_SHORT_MAX)
+    block_rows, block_more = _capped(blocked_rows, _PDF_SHORT_MAX)
     start, end = _fmt_date(p['start_date']), _fmt_date(p['end_date'])
+    about = (p['description'] or '').strip()
+    if len(about) > _PDF_ABOUT_MAX:
+        about = about[:_PDF_ABOUT_MAX - 1].rstrip() + '\u2026'
     return {
         'name': p['name'], 'status': _PROJECT_STATUS.get(p['status'], p['status']),
         'dates': f'{start} – {end}' if start and end else (start and f'From {start}') or (end and f'Until {end}') or '',
-        'description': p['description'] or '', 'owner': owner,
+        'description': about, 'owner': owner,
         'summary_text': p['summary_text'] or '', 'risks_text': p['risks_text'] or '',
         'progress': {'total': total, 'done': done, 'pct': _pct(done, total), 'statuses': statuses,
                      'overdue': len(overdue), 'conflicts': sum(1 for t in tasks if t['conflict'])},
         'milestones': mile_rows, 'milestones_more': mile_more,
         'overdue': over_rows, 'overdue_more': over_more,
         'coming': next_rows, 'coming_more': next_more,
+        'conflicts': conf_rows, 'conflicts_more': conf_more,
+        'blocked': block_rows, 'blocked_more': block_more,
         'shows': shows, 'budget': budget,
         'team': [{'name': m['name'], 'role': _ROLE.get(m['role'], m['role'])} for m in members],
         'contacts': contact_rows, 'contacts_more': contact_more,

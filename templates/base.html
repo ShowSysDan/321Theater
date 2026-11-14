@@ -428,7 +428,7 @@
     {# Conversations #}
     <div id="inbox-view-threads" class="inbox-view" hidden>
       <div class="inbox-toolbar">
-        <input type="search" id="inbox-search" class="field-input" placeholder="Search people, shows, messages…" aria-label="Search conversations">
+        <input type="search" id="inbox-search" class="field-input" placeholder="Search people or shows…" aria-label="Search conversations by person or show">
         <button type="button" id="inbox-group-btn" class="btn btn-xs btn-ghost" aria-pressed="false" title="Group conversations under the show they are about">By show</button>
       </div>
       <div id="inbox-thread-list" class="inbox-list"><div class="inbox-empty">Loading…</div></div>
@@ -437,10 +437,10 @@
     {# Notifications (the list app.js fills — same ids as the old bell panel) #}
     <div id="inbox-view-notifications" class="inbox-view" hidden>
       <div class="inbox-toolbar">
-        <span class="text-dim" style="font-size:11px;flex:1">Approvals, piano tunings, advance changes…</span>
-        <button type="button" class="btn btn-xs btn-ghost" onclick="markAllNotifRead()">Mark all read</button>
+        <span class="text-dim" style="font-size:11px;flex:1">Mentions, approvals, piano tunings{% if _proj_on %}, tasks{% endif %}…</span>
+        <button type="button" id="notif-mark-all" class="btn btn-xs btn-ghost" onclick="markAllNotifRead()">Mark all read</button>
       </div>
-      <div id="notif-panel-list" class="inbox-list notif-panel-list">
+      <div id="notif-panel-list" class="inbox-list notif-panel-list"{% if _proj_on %} data-tasks="1"{% endif %}>
         <div class="notif-empty">No notifications yet.</div>
       </div>
     </div>
@@ -490,6 +490,7 @@
           <input type="text" id="inbox-c-show" class="field-input" autocomplete="off" placeholder="Search active shows and events…">
           <div id="inbox-c-show-sug" class="inbox-sug" hidden></div>
         </div>
+        <div id="inbox-c-continue" class="inbox-hint inbox-c-continue" role="note" hidden></div>
 
         <label id="inbox-c-pub-row" class="inbox-pub-row disabled">
           <input type="checkbox" id="inbox-c-pub" disabled>
@@ -1511,12 +1512,12 @@ _HELP_PAGES.project = {
     <ul style="${_HELP_UL}">
       <li><strong>Overview</strong> — progress, what is overdue or due this week, milestones, recent activity, and the <strong>Summary</strong> / <strong>Risks</strong> boxes that feed the PDF (they save as you type; if someone else changed one meanwhile you choose <strong>Load theirs</strong> or <strong>Keep mine</strong>). <strong>Link a show</strong> attaches an existing show; <strong>New show</strong> creates a real show that everyone in 3·2·1→Theater can see.</li>
       <li><strong>Tasks</strong> — list or board. Give a task an assignee, start and due dates, a group, a priority, and the tasks it <em>depends on</em>. Whoever a task is assigned to can always change its status. A milestone is a single date (◆). <strong>Make a show from this</strong> turns a task into a show.</li>
-      <li><strong>⚠ Schedule conflicts</strong> — a task that starts before something it depends on is finished is flagged; nothing is moved for you. <strong>Review shift…</strong> shows exactly which tasks would move and to which dates, and applies it only when you approve. Linked shows never move.</li>
+      <li><strong>⚠ Schedule conflicts</strong> — a task that starts before something it depends on is finished is flagged; nothing is moved for you. Open the task and press <strong>Move this task and the ones after it…</strong> (or <strong>Shift dependent tasks…</strong> on the task it waits for); a <strong>Review the shift</strong> list shows every move and its new dates, and nothing changes until you press <strong>Move N tasks</strong>. Linked shows never move.</li>
       <li><strong>Timeline</strong> — the tasks and linked shows on a calendar. Zoom Day / Week / Month; with a mouse, editors drag a bar to move it or an end to resize it. Arrows are dependencies (red = conflict).</li>
-      <li><strong>Budget</strong> (if the owner lets you see it) — lines by category with estimate, committed and actual. Each line can carry its <strong>sources</strong> (a quote or email from Files, a note, a link) and keeps a history of every change. <strong>From linked shows</strong> adds the asset, labor and piano figures you are allowed to see in Reports.</li>
+      <li><strong>Budget</strong> (if the owner lets you see it) — lines by category with estimate, committed and actual. Each line can carry its <strong>sources</strong> (a quote or email from Files, a note, a link) and keeps a history of every change. <strong>From linked shows</strong> shows (doesn't add) the asset, labor and piano costs of the linked shows that you are allowed to see in Reports — nothing is copied into the budget.</li>
       <li><strong>Files</strong> — upload or drop files in; <strong>Upload new version</strong> on a file keeps the earlier <strong>versions</strong>. PDFs, Office documents, images and saved emails (.eml / .msg) preview in place. Removing a file archives it; only the owner can delete it for good.</li>
       <li><strong>Notes</strong> — shared pages that save as you type, keep earlier versions, and export to PDF or Word. <strong>Contacts</strong> — the outside people on this project (pick from the app's contacts or add new). <strong>Discussion</strong> — comments for the whole team; type @ to mention someone.</li>
-      <li><strong>Settings</strong> (owner) — rename, dates, status, people and their roles, who may see the budget, hand the project to a new owner, archive or delete it. Anyone else can leave from the ⋯ menu.</li>
+      <li><strong>Settings</strong> (owner) — rename, dates, status, people and their roles, who may see the budget, hand the project to a new owner, or delete it; set <strong>Status</strong> to Archived to make it read-only (setting it back reopens it). Anyone else can leave from the ⋯ menu.</li>
     </ul>
   `
 };

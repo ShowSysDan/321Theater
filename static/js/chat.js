@@ -54,6 +54,11 @@
   function initials(name) {
     return String(name || '?').trim().split(/\s+/).slice(0, 2).map(function (w) { return w.charAt(0).toUpperCase(); }).join('') || '?';
   }
+  // "a", "a or b", "a, b or c" (word = 'or' / 'and')
+  function joinWith(names, word) {
+    if (names.length < 2) return names.join('');
+    return names.slice(0, -1).join(', ') + ' ' + word + ' ' + names[names.length - 1];
+  }
   function color(name) {
     return (typeof _userColor === 'function') ? _userColor(name) : 'var(--accent)';
   }
@@ -134,7 +139,16 @@
       b.classList.toggle('active', on);
       b.setAttribute('aria-selected', on ? 'true' : 'false');
     });
-    if (top) $('inbox-title').textContent = CHAT ? 'Inbox' : 'Notifications';
+    if (top) { $('inbox-title').textContent = CHAT ? 'Inbox' : 'Notifications'; $('inbox-title').title = ''; }
+    // Phones: the full-screen inbox is a screen of its own, so the system
+    // back gesture walks back through it (conversation → list → closed)
+    // instead of leaving the page. One history entry for "open", one more
+    // while a conversation / new message is on screen.
+    if (MOBILE && S.open) {
+      var hs = history.state || {};
+      if (top && hs.inbox === 2) history.back();
+      else if (!top && hs.inbox !== 2) history.pushState({inbox: 2}, '');
+    }
     clearInterval(timers.thread); timers.thread = null;
     clearInterval(timers.list); timers.list = null;
     if (!S.open) return;
@@ -149,6 +163,10 @@
   }
   function open(view) {
     if (view === 'threads' && !CHAT) view = 'notifications';
+    if (!S.open) {
+      S.returnFocus = document.activeElement;
+      if (MOBILE && !(history.state && history.state.inbox)) history.pushState({inbox: 1}, '');
+    }
     S.open = true;
     panel.hidden = false;
     document.documentElement.classList.add('inbox-open');
@@ -158,9 +176,22 @@
       : (CHAT ? 'threads' : 'notifications')));
     if (S.view === 'thread') pollThread();
   }
-  function close() {
+  function close(fromHistory) {
+    if (!S.open) return;
+    var hadFocus = !document.activeElement || document.activeElement === document.body
+      || panel.contains(document.activeElement);
     S.open = false;
     panel.hidden = true;
+    // Take our history entries back off (phones) — popstate then finds the
+    // panel already closed and does nothing.
+    if (MOBILE && !fromHistory && history.state && history.state.inbox) history.go(-history.state.inbox);
+    // Keyboard users go back to where they were, not to the top of the page.
+    if (hadFocus) {
+      var back = S.returnFocus;
+      if (!back || !back.isConnected || back === document.body || panel.contains(back)) back = $('inbox-fab') || $('m-inbox-tab');
+      if (back && back.focus) { try { back.focus({preventScroll: true}); } catch (e) {} }
+    }
+    S.returnFocus = null;
     document.documentElement.classList.remove('inbox-open');
     var fab = $('inbox-fab');
     if (fab) fab.setAttribute('aria-expanded', 'false');
@@ -174,11 +205,22 @@
   }
 
   // ── thread list ──────────────────────────────────────────────────────────
-  function threadTitle(t) {
+  function others(t) { return t.members.filter(function (m) { return m.id !== ME; }); }
+  // Full names — the header tooltip, a row's tooltip and the search.
+  function fullTitle(t) {
     if (t.is_self) return 'Notes to self';
     // No one else left: the other person's account was deleted.
-    return t.members.filter(function (m) { return m.id !== ME; })
-      .map(function (m) { return m.name; }).join(', ') || 'Former user';
+    return others(t).map(function (m) { return m.name; }).join(', ') || 'Former user';
+  }
+  // A group (3+ people) lists FIRST names so every member fits: 'Jane, Rory,
+  // Steve' (a first name two of them share stays in full).
+  function threadTitle(t) {
+    var o = others(t);
+    if (t.is_self || o.length < 2) return fullTitle(t);
+    var first = function (m) { return String(m.name || '').trim().split(/\s+/)[0] || m.name; };
+    var n = {};
+    o.forEach(function (m) { var f = first(m).toLowerCase(); n[f] = (n[f] || 0) + 1; });
+    return o.map(function (m) { return n[first(m).toLowerCase()] > 1 ? m.name : first(m); }).join(', ');
   }
   async function loadThreads() {
     if (!CHAT) return;
@@ -200,9 +242,14 @@
     var row = el('button', 'inbox-thread' + (t.unread || t.reminders ? ' unread' : ''));
     row.type = 'button';
     row.addEventListener('click', function () { openThread(t.id); });
-    var title = threadTitle(t);
-    var av = el('span', 'inbox-avatar', t.is_self ? '✎' : (t.members.length > 2 ? String(t.members.length - 1) : initials(title)));
-    av.style.background = t.is_self ? 'var(--bg-hover)' : color(title);
+    var title = threadTitle(t), o = others(t);
+    if (o.length > 1) row.title = fullTitle(t);
+    // A group: the first person's initials + "+N" (a bare number read as an
+    // unread count).
+    var lead = o.length > 1 ? o[0].name : title;
+    var av = el('span', 'inbox-avatar', t.is_self ? '✎' : initials(lead));
+    if (!t.is_self && o.length > 1) av.appendChild(el('span', 'inbox-avatar-more', '+' + (o.length - 1)));
+    av.style.background = t.is_self ? 'var(--bg-hover)' : color(lead);
     if (t.is_self) av.style.color = 'var(--text)';
     row.appendChild(av);
     var main = el('span', 'inbox-thread-main');
@@ -235,7 +282,7 @@
     var q = ($('inbox-search').value || '').trim().toLowerCase();
     var rows = S.threads.filter(function (t) {
       if (!q) return true;
-      return (threadTitle(t) + ' ' + (t.show ? t.show.name : '') + ' ' + (t.last ? t.last.body : '')).toLowerCase().indexOf(q) !== -1;
+      return (fullTitle(t) + ' ' + (t.show ? t.show.name : '') + ' ' + (t.last ? t.last.body : '')).toLowerCase().indexOf(q) !== -1;
     });
     var keep = list.scrollTop;
     clear(list);
@@ -288,6 +335,7 @@
     S.msgs = []; S.due = []; S.more = false;
     if (!S.open) open('thread'); else show('thread');
     $('inbox-title').textContent = 'Loading…';
+    $('inbox-title').title = '';
     clear($('inbox-msgs'));
     $('inbox-thread-meta').hidden = true;
     $('inbox-public-banner').hidden = true;
@@ -370,11 +418,19 @@
     var t = S.thread;
     if (!t) return;
     $('inbox-title').textContent = threadTitle(t);
-    // meta line: the tagged show + the comments switch
+    $('inbox-title').title = fullTitle(t);
+    // meta line: who is in a group, the tagged show + the comments switch
     var meta = $('inbox-thread-meta');
     clear(meta);
+    var o = others(t);
+    if (o.length > 1) {
+      var w = el('div', 'inbox-meta-with');
+      w.appendChild(el('span', 'inbox-meta-label', 'With'));
+      w.appendChild(document.createTextNode(o.map(function (m) { return m.name; }).join(', ')));
+      meta.appendChild(w);
+    }
+    meta.hidden = !t.show && o.length < 2;
     if (t.show) {
-      meta.hidden = false;
       meta.appendChild(el('span', 'inbox-meta-label', 'About'));
       var a = el('a', 'inbox-show-chip no-prefetch', t.show.name);
       a.href = '/shows/' + encodeURIComponent(t.show.id) + '?tab=comments';
@@ -386,7 +442,7 @@
         on.addEventListener('click', function () { setCommentsMode(true); });
         meta.appendChild(on);
       }
-    } else meta.hidden = true;
+    }
     paintPublic();
     S.redrawPending = false;
     var box = $('inbox-msgs');
@@ -438,18 +494,30 @@
         var chip = el('span', 'inbox-remind-chip' + (m.remind_due ? ' due' : ''),
           '⏰ ' + (m.remind_due ? 'Reminder due' : when(m.remind_at, true)));
         foot.appendChild(chip);
-        if (m.remind_due) foot.appendChild(remindBtn('Done', m, {done: true}));
-        foot.appendChild(remindBtn(m.remind_due ? 'Later…' : 'Change', m, 'pick'));
-        if (!m.remind_due) foot.appendChild(remindBtn('Cancel', m, {remind_at: null}));
+        // A due one's Done / Later… live in the due bar above the composer.
+        if (!m.remind_due) {
+          foot.appendChild(remindBtn('Change', m, 'pick'));
+          foot.appendChild(remindBtn('Remove reminder', m, {remind_at: null}));
+        }
       } else {
-        foot.appendChild(remindBtn(m.remind_done ? '⏰ Remind again' : '⏰ Remind me', m, 'pick'));
+        foot.appendChild(remindBtn(m.remind_done ? '⏰ Remind again' : '⏰ Remind me', m, 'pick', true));
       }
+    } else if (m.kind === 'message') {
+      // Someone else's message: the reminder becomes a private note to self
+      // (tagged with this show) — nothing is sent to anyone.
+      var rb = el('button', 'inbox-link-btn inbox-remind-idle', '⏰ Remind me');
+      rb.type = 'button';
+      rb.title = 'Saves a private note to self that comes back at the time you pick';
+      rb.addEventListener('click', function () {
+        pickTime(rb.closest('.inbox-msg'), function (iso) { remindOther(m, t, iso); });
+      });
+      foot.appendChild(rb);
     }
     wrap.appendChild(foot);
     return wrap;
   }
-  function remindBtn(label, m, action) {
-    var b = el('button', 'inbox-link-btn', label);
+  function remindBtn(label, m, action, idle) {
+    var b = el('button', 'inbox-link-btn' + (idle ? ' inbox-remind-idle' : ''), label);
     b.type = 'button';
     b.addEventListener('click', function () {
       if (action === 'pick') {
@@ -465,6 +533,28 @@
       S.due = S.due.filter(function (x) { return x.id !== m.id; });
       var stick = nearBottom();
       drawThread(stick);
+      pollStatus();
+    } catch (e) { flash(e.message); }
+  }
+  async function remindOther(m, t, iso) {
+    var text = String(m.body || '').replace(/\s+/g, ' ').trim();
+    var body = 'Follow up: ' + m.author + ' — “' + (text.length > 300 ? text.slice(0, 300) + '…' : text) + '”';
+    var send = function (showId) {
+      return api('/api/chat/threads', {user_ids: [], show_id: showId, post_to_comments: false,
+                                       body: body, remind_at: iso});
+    };
+    var tagged = t.show && t.show.status === 'active' ? t.show : null;
+    try {
+      try { await send(tagged ? tagged.id : null); }
+      catch (e) {
+        // That show's notes to self post to its comments (409) or the show
+        // is gone (404): keep the note private and untagged instead.
+        if (!tagged || (e.status !== 409 && e.status !== 404)) throw e;
+        tagged = null;
+        await send(null);
+      }
+      flash('⏰ Reminder saved in Notes to self' + (tagged ? ' (about “' + tagged.name + '”)' : '')
+        + ', ' + when(iso, true) + '. Nothing was sent to anyone.');
       pollStatus();
     } catch (e) { flash(e.message); }
   }
@@ -510,6 +600,15 @@
       box.scrollTop = box.scrollHeight - h;
     } catch (e) { flash(e.message); }
   }
+  // Read-only accounts can read a conversation that posts to comments but
+  // can't send in it — say so before anyone switches it on.
+  function roNote(people, sep) {
+    if (!people.length) return '';
+    var names = people.map(function (p) { return p.name; });
+    return sep + joinWith(names, 'and') + ' can read this conversation but, with '
+      + (names.length > 1 ? 'read-only accounts' : 'a read-only account')
+      + ', can’t reply while it posts to comments.';
+  }
   async function setCommentsMode(on) {
     var t = S.thread;
     if (!t || !t.show) return;
@@ -519,6 +618,7 @@
         + 'From now on EVERY message sent here' + (others ? ' — by you or ' + others : '')
         + ' — is also posted to that show’s comments, where anyone with access to the show can read it.\n\n'
         + 'Messages already sent stay private.' + (others ? ' ' + others + ' will see a notice in the conversation.' : '')
+        + roNote(t.members.filter(function (m) { return m.id !== ME && m.read_only; }), '\n\n')
       : 'Stop posting this conversation to the comments of “' + t.show.name + '”?\n\n'
         + 'New messages will be private again. Comments already posted stay on the show.';
     if (!window.confirm(msg)) return;
@@ -672,6 +772,7 @@
     if (!S.people) {
       api('/api/chat/people').then(function (d) { S.people = d.people || []; }).catch(function () { S.people = []; });
     }
+    if (!S.threadsLoaded) loadThreads().then(paintCompose);
     if (!MOBILE) $('inbox-c-to').focus();
   }
   function paintCompose() {
@@ -711,19 +812,45 @@
     $('inbox-c-pub-row').classList.toggle('disabled', !canPub);
     $('inbox-c-pub-hint').textContent = !c.show ? 'Tag a show first.'
       : (panel.dataset.canComment === '1' ? '' : 'Your account is read-only, so it cannot post comments.');
+    var ex = existingThread(c);
+    var cont = $('inbox-c-continue');
+    cont.hidden = !ex;
+    if (ex) {
+      cont.textContent = (ex.is_self ? 'This is added to your notes to self' : 'This continues your conversation with ' + fullTitle(ex))
+        + (ex.show ? ' about “' + ex.show.name + '”' : '')
+        + (ex.last_at ? ' (last message ' + when(ex.last_at, true) + ')' : '') + '.'
+        + (ex.post_to_comments && !c.pub ? ' That conversation posts to the show’s comments: it opens for you to check before anything is sent.' : '');
+    }
     var warn = $('inbox-c-pub-warn');
     warn.hidden = !c.pub;
     if (c.pub) {
-      var names = c.to.map(function (p) { return p.name; }).join(', ');
+      var names = c.to.map(function (p) { return p.name; });
       warn.textContent = 'Public: this message — and every reply'
-        + (names ? ' ' + names + ' sends' : '') + ' in this conversation — will be posted to the comments of “'
+        + (names.length ? ' from ' + joinWith(names, 'or') : '') + ' in this conversation — will be posted to the comments of “'
         + c.show.name + '”, where anyone with access to the show can read it. '
-        + (names ? names + ' will see this stated at the top of the conversation.' : '');
+        + (names.length ? joinWith(names, 'and') + ' will see this stated at the top of the conversation.' : '');
+      var more = (ex && !ex.post_to_comments
+        ? 'That conversation is private now — sending this turns on posting to comments for it from here on (earlier messages stay private).' : '')
+        + roNote(c.to.filter(function (p) { return p.read_only; }), ex && !ex.post_to_comments ? ' ' : '');
+      if (more) warn.appendChild(el('span', 'inbox-warn-more', more));
     }
     $('inbox-c-remind-text').textContent = c.remind ? '⏰ Remind me ' + when(c.remind, true) : '';
     $('inbox-c-remind-clear').hidden = !c.remind;
     $('inbox-c-remind-btn').textContent = c.remind ? 'Change' : '⏰ Remind me…';
     $('inbox-c-send').textContent = c.pub ? 'Send + post to comments' : (c.to.length ? 'Send' : 'Save note');
+  }
+  // The conversation a new message would land in: the server reuses the one
+  // with exactly these people (+ me) and this show.
+  function existingThread(c) {
+    if (!S.threadsLoaded) return null;
+    var want = c.to.map(function (p) { return p.id; }).concat([ME]).sort(function (a, b) { return a - b; }).join(',');
+    var sid = c.show ? c.show.id : null;
+    var hits = S.threads.filter(function (t) {
+      return (t.show ? t.show.id : null) === sid
+        && t.members.map(function (m) { return m.id; }).sort(function (a, b) { return a - b; }).join(',') === want;
+    });
+    // Like the server: one already in the mode asked for first.
+    return hits.filter(function (t) { return !!t.post_to_comments === !!c.pub; })[0] || hits[0] || null;
   }
   function hideSug() {
     ['inbox-c-to-sug', 'inbox-c-show-sug'].forEach(function (id) { var n = $(id); clear(n); n.hidden = true; });
@@ -852,8 +979,8 @@
     if (typeof mCloseDrawer === 'function') mCloseDrawer();
     toggle();
   });
-  $('inbox-close').addEventListener('click', close);
-  $('inbox-back').addEventListener('click', function () {
+  $('inbox-close').addEventListener('click', function () { close(); });
+  function goBack() {
     if (S.view === 'thread') {
       if (S.thread && !S.thread.loading) S.drafts[S.thread.id] = $('inbox-input').value;
       S.threadSeq++;                 // a fetch still in flight is for a view we left
@@ -861,7 +988,16 @@
       $('inbox-input').value = '';
       _draftPub = null;
     }
+    else if (S.view === 'compose') S.compose = null;
     show(CHAT ? 'threads' : 'notifications');
+  }
+  $('inbox-back').addEventListener('click', goBack);
+  // Phones: the system back gesture (see show()).
+  if (MOBILE) window.addEventListener('popstate', function (e) {
+    if (!S.open) return;
+    var st = e.state || {};
+    if (!st.inbox) close(true);
+    else if (st.inbox === 1 && (S.view === 'thread' || S.view === 'compose')) goBack();
   });
   $('inbox-new').addEventListener('click', function () { compose(); });
   Array.prototype.forEach.call(document.querySelectorAll('#inbox-tabs [data-view]'), function (b) {
@@ -921,9 +1057,9 @@
     if (panel.contains(e.target) || (fab && fab.contains(e.target))) return;
     var bell = $('notif-bell-btn');
     if (bell && bell.contains(e.target)) return;
-    // Keep it open while the writer has unsent text.
-    if (S.view === 'compose' && $('inbox-c-body').value.trim()) return;
-    if (S.view === 'thread' && $('inbox-input').value.trim()) return;
+    // A conversation / new message stays open while the page is used
+    // (looking up a call time to answer): Esc, × and the button close it.
+    if (S.view === 'thread' || S.view === 'compose') return;
     close();
   });
   document.addEventListener('visibilitychange', function () {
