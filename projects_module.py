@@ -68,7 +68,6 @@ from functools import wraps
 
 from flask import (abort, g, has_request_context, jsonify, render_template,
                    request, send_file, session)
-from jinja2 import TemplateNotFound
 from werkzeug.exceptions import HTTPException
 
 MODULE_KEY = 'projects'
@@ -1315,16 +1314,9 @@ def run_hourly():
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
 def _page(template, **kw):
-    """Render a module page. Until its template exists (another engineer
-    writes them) the route still answers — a bare placeholder with no
-    feature text — so the routes can be built and tested first."""
-    try:
-        return render_template(template, user=_d['get_current_user'](),
-                               asset_v=str(_d.get('app_version') or ''), **kw)
-    except TemplateNotFound as e:
-        if e.name != template:
-            raise                   # a missing include is a real error
-        return '<!doctype html><meta charset="utf-8"><title>Loading…</title><p>Loading…</p>'
+    """Render a module page (asset_v cache-busts the module's CSS / JS)."""
+    return render_template(template, user=_d['get_current_user'](),
+                           asset_v=str(_d.get('app_version') or ''), **kw)
 
 
 def _routes_pages(app):
@@ -2653,12 +2645,8 @@ def register(app, **deps):
     _routes_contacts(app)
     _routes_search(app)
 
-    # Budgets, files and notes. Optional while the build is in progress.
-    try:
-        import projects_docs_module
-    except ImportError:
-        projects_docs_module = None
-    if projects_docs_module is not None:
-        projects_docs_module.register(app, core)
-        _d['docs'] = projects_docs_module
+    # Budgets, files and notes (registers its routes through `core`).
+    import projects_docs_module
+    projects_docs_module.register(app, core)
+    _d['docs'] = projects_docs_module
     return core
