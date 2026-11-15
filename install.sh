@@ -72,11 +72,15 @@ step "Installing Python dependencies..."
 "$PIP" install -r "${APP_DIR}/requirements.txt" --quiet
 info "Dependencies installed."
 
+# Truly installed — `dpkg -s` also succeeds for a package that was REMOVED but
+# left its config files behind (status "deinstall ok config-files").
+pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q ' ok installed$'; }
+
 # ── LibreOffice (recommended; enables Office/OpenDocument → PDF append) ───────
 # Used by the advance PDF generator to embed .doc/.docx/.odt/.rtf/.ppt/.pptx/
 # .odp/.xls/.xlsx/.ods uploads. Without these packages, those files are
 # listed on the trailing "omitted files" index page instead of embedded.
-if dpkg -s libreoffice-writer >/dev/null 2>&1; then
+if pkg_installed libreoffice-writer; then
     info "LibreOffice writer already installed — skipping."
 elif [ "$(id -u)" -eq 0 ] && command -v apt-get &>/dev/null; then
     step "Installing LibreOffice (headless) for Office-document → PDF conversion..."
@@ -89,6 +93,59 @@ elif [ "$(id -u)" -eq 0 ] && command -v apt-get &>/dev/null; then
 else
     warn "LibreOffice writer/calc/impress not detected. To embed Office/OpenDocument uploads in the advance PDF,"
     warn "  install: sudo apt-get install -y libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress"
+fi
+
+# ── Bring LibreOffice up to date (it converts files users upload) ─────────────
+# Debian's automatic security updates (below) keep it patched from now on;
+# this catches up an install that has been sitting on an old version.
+if [ "$(id -u)" -eq 0 ] && command -v apt-get &>/dev/null && pkg_installed libreoffice-core; then
+    step "Checking for LibreOffice updates..."
+    if apt-get update -qq >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --only-upgrade \
+            libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-common \
+            >/dev/null 2>&1 || warn "LibreOffice upgrade skipped (apt-get failed)."
+        info "LibreOffice: $(dpkg-query -W -f='${Version}' libreoffice-core 2>/dev/null)"
+    else
+        warn "apt-get update failed — LibreOffice not checked for updates."
+    fi
+fi
+
+# ── Automatic security updates (Debian unattended-upgrades) ───────────────────
+# Installs Debian's security updates for the WHOLE server every day (LibreOffice,
+# Python, OpenSSL, PostgreSQL client…), as root, outside the app. Debian's
+# default unattended-upgrades policy takes only the security archive. An
+# existing /etc/apt/apt.conf.d/20auto-upgrades is left exactly as it is — an
+# admin who configured updates their own way keeps it. Settings → About
+# 321Theater shows whether this is on and when it last ran.
+if [ "$(id -u)" -eq 0 ] && command -v apt-get &>/dev/null; then
+    step "Automatic security updates..."
+    # Remember whether an admin's own config exists BEFORE the package is
+    # installed: the package's own setup may write that file itself (on
+    # Debian possibly with updates switched OFF) — that one is replaced.
+    AUTO_CONF_PREEXISTING=0
+    [ -e /etc/apt/apt.conf.d/20auto-upgrades ] && AUTO_CONF_PREEXISTING=1
+    if ! pkg_installed unattended-upgrades; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades >/dev/null 2>&1 \
+            && info "unattended-upgrades installed." \
+            || warn "Could not install unattended-upgrades (apt-get failed)."
+    fi
+    if pkg_installed unattended-upgrades; then
+        if [ "$AUTO_CONF_PREEXISTING" -eq 0 ]; then
+            cat > /etc/apt/apt.conf.d/20auto-upgrades <<'APTCONF'
+// Written by 321Theater install.sh — Debian's daily security updates.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APTCONF
+            info "Automatic security updates switched on (/etc/apt/apt.conf.d/20auto-upgrades)."
+        else
+            info "Kept the existing /etc/apt/apt.conf.d/20auto-upgrades."
+        fi
+        if command -v systemctl &>/dev/null; then
+            systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+        fi
+    fi
+else
+    warn "Not root — automatic security updates not checked. Run: sudo bash install.sh"
 fi
 
 # ── Backup directories ────────────────────────────────────────────────────────

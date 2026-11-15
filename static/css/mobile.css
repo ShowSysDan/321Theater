@@ -547,3 +547,10 @@ html.mobile-view .rpt-multi-panel {
 html.mobile-view .rpt-multi-opt { min-height: 44px; }
 html.mobile-view .rpt-multi-group button { font-size: 12px; padding: 8px 6px; }
 html.mobile-view .rpt-multi-foot .btn { min-height: 40px; }
+
+/* Settings → About 321Theater (3.50.0) */
+html.mobile-view .about-grid { grid-template-columns: 1fr; }
+html.mobile-view .about-kv { grid-template-columns: 1fr; gap: 1px 0; }
+html.mobile-view .about-kv dd { margin-bottom: 7px; }
+html.mobile-view .about-table td, html.mobile-view .about-table th { white-space: nowrap; }
+html.mobile-view .about-table .about-purpose { white-space: normal; min-width: 180px; }

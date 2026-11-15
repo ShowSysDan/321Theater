@@ -232,6 +232,33 @@ killing it alone orphaned soffice.bin at full CPU); at most `_LO_SLOTS` (2)
 per worker. Never call soffice any other way, and never `preexec_fn` (unsafe
 in threaded workers).
 
+## Settings → About 321Theater + server dependencies (3.50.0)
+- `/settings/about` (`about_page`, `templates/about.html`, admin) is a shell;
+  its data is `/settings/about/data` (`about_data` → `_about_build()`),
+  cached per worker `_ABOUT_TTL` (10 min) under `_ABOUT_LOCK`, `?refresh=1`
+  re-runs. All facts come from `system_info.py` (dependency-free, never
+  imports app.py, never raises; fixed argv, LANG=C, `child_env()`, no root:
+  dpkg-query, `apt list --upgradable`, `apt-config`, `systemctl show`,
+  /proc). Read-only: the app NEVER runs apt or anything that changes the
+  server — updating is Debian's job (unattended-upgrades) or `sudo bash
+  install.sh`. Debian-family only; elsewhere the package sections are empty.
+- A new system program the app shells out to → an entry in
+  `_SYSTEM_PROGRAMS` (binary, Debian packages, purpose, what breaks without
+  it, level error / warn / info). A new requirements.txt package → a plain
+  purpose in `_PY_PURPOSES`. Purposes must not name the Projects module.
+- `_DEPS_PROBLEMS` (computed once per process at import: missing / too-old
+  requirements, missing level-'error' programs) → `deps_alert` from
+  `inject_version()` → a red banner in base.html for ADMINS only, and the
+  `STARTUP_DEPS` / `STARTUP_DEPS_MISSING` syslog lines each worker writes
+  at start. That is how a release needing `install.sh` shows itself after
+  a plain git pull + restart.
+- install.sh (root, Debian): `pkg_installed()` (dpkg status "ok installed" —
+  never `dpkg -s`, which succeeds for removed-with-config packages);
+  upgrades LibreOffice with `--only-upgrade`; installs `unattended-upgrades`
+  and writes `/etc/apt/apt.conf.d/20auto-upgrades` ONLY when no such file
+  existed before the script ran (an admin's own config is kept; one the
+  package itself just wrote is replaced).
+
 ## Request bodies and small shared rules (3.49.0 review)
 - JSON bodies: `_json_obj()` (app.py and chat_module) — a dict or {}; a bare
   string / number / list body must give the route's own 400, not a 500.

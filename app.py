@@ -73,6 +73,7 @@ import spot_module  # Spot sound-level integration — wired up near the bottom
 import chat_module  # Messages / inbox — wired up near the bottom
 import projects_module  # optional, sandboxed — wired up near the bottom
 import file_store  # S3 <-> PostgreSQL file redundancy + migration — wired up near the bottom
+import system_info  # Settings → About 321Theater: this server, its service, its dependencies
 from init_db import pg_name_key  # SQL twin of _name_key (idx_contacts_name_key's text)
 
 from flask import (Flask, render_template, request, redirect, url_for,
@@ -540,8 +541,12 @@ def inject_version():
     readonly_view = bool(has_request_context() and session.get('user_id')
                          and session.get('is_readonly')
                          and session.get('user_role') != 'admin')
+    # deps_alert: what this server is missing that `sudo bash install.sh`
+    # fixes (computed once per process at import) — shown to admins only.
+    deps_alert = (_DEPS_PROBLEMS if has_request_context()
+                  and session.get('user_role') == 'admin' else [])
     return {'app_version': APP_VERSION, 'page_rendered_at': int(time.time()),
-            'test_mode': TEST_MODE, 'readonly_view': readonly_view}
+            'test_mode': TEST_MODE, 'readonly_view': readonly_view, 'deps_alert': deps_alert}
 
 
 # ── Mobile view mode ──────────────────────────────────────────────────────────
@@ -902,7 +907,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.49.0'
+APP_VERSION = '3.50.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -28285,6 +28290,282 @@ def update_status_api():
 @admin_required
 def detect_service():
     return jsonify({'service': _detect_service_name()})
+
+
+# ─── Settings → About 321Theater (3.50.0) ─────────────────────────────────────
+# One admin page about THIS server: release, service, hardware, database, the
+# venv's Python packages against requirements.txt, the system programs the app
+# shells out to (with Debian's pending updates for them) and whether Debian's
+# automatic security updates are on. Everything comes from system_info.py
+# (no root, fixed commands, child_env). The slow part (apt, systemctl, dpkg —
+# a few seconds) is cached per worker for _ABOUT_TTL and computed under a lock
+# so several admins opening the page run it once. Nothing here changes the
+# server: updating packages is Debian's job (unattended-upgrades, which
+# install.sh switches on) or the admin's (sudo bash install.sh).
+_ABOUT_TTL = 600
+_ABOUT_LOCK = threading.Lock()
+_ABOUT_CACHE = {'at': 0.0, 'data': None}
+_PROCESS_STARTED = time.time()
+_REQUIREMENTS_PATH = os.path.join(APP_DIR, 'requirements.txt')
+_RELEASE_INFO = system_info.release_info(APP_DIR, env=app_config.child_env())
+
+# What each requirements.txt package is for, in plain words (shown on the page).
+_PY_PURPOSES = {
+    'flask': 'Web framework', 'werkzeug': 'Web framework (requests, uploads)',
+    'weasyprint': 'Builds every PDF', 'apscheduler': 'Background jobs (backups, e-mails)',
+    'gunicorn': 'The web server the service runs', 'flask-limiter': 'Sign-in rate limiting',
+    'qrcode': 'QR codes', 'pillow': 'Images (photos, logos, QR codes)',
+    'psycopg2-binary': 'PostgreSQL driver', 'pdfplumber': 'Reading text from PDFs',
+    'python-docx': 'Word files', 'striprtf': 'RTF files', 'openpyxl': 'Excel files (.xlsx)',
+    'xlrd': 'Old Excel files (.xls)', 'extract-msg': 'Outlook .msg e-mail files',
+    'dnspython': 'E-mail domain checks', 'boto3': 'S3 / SeaweedFS file storage',
+    'pdfrw': 'Merging PDFs', 'pymupdf': 'Reading and merging PDFs',
+}
+
+# The system programs the app shells out to. `packages` are the Debian
+# packages whose pending updates matter; `level` = how bad missing is.
+_SYSTEM_PROGRAMS = (
+    {'key': 'libreoffice', 'name': 'LibreOffice', 'binary': 'soffice', 'level': 'warn',
+     'packages': ('libreoffice-core', 'libreoffice-writer', 'libreoffice-calc', 'libreoffice-impress',
+                  'libreoffice-common'),
+     'purpose': 'Turns Word / Excel / PowerPoint / RTF uploads into PDF pages (advance PDFs, document previews)',
+     'missing': 'Office files are listed as "not embedded" instead of converted.'},
+    {'key': 'pg_dump', 'name': 'PostgreSQL client (pg_dump)', 'binary': 'pg_dump', 'level': 'error',
+     'packages': (), 'pattern': 'postgresql-client-[0-9]*',
+     'purpose': 'Hourly and daily database backups',
+     'missing': 'Database backups cannot run.'},
+    {'key': 'python3', 'name': 'Python 3', 'binary': 'python3', 'level': 'error',
+     'packages': ('python3', 'python3-minimal'), 'purpose': 'Runs the app (the venv is built from it)',
+     'missing': ''},
+    {'key': 'pango', 'name': 'Pango text layout', 'binary': '', 'level': 'error',
+     'packages': ('libpango-1.0-0', 'libpangoft2-1.0-0'), 'purpose': 'Lays out the text of every PDF (used by WeasyPrint)',
+     'missing': 'PDFs cannot be built.'},
+    {'key': 'prlimit', 'name': 'prlimit (util-linux)', 'binary': 'prlimit', 'level': 'warn',
+     'packages': ('util-linux',), 'purpose': 'Caps the CPU time of LibreOffice conversions',
+     'missing': 'LibreOffice runs without a CPU limit (the timeout still stops it).'},
+    {'key': 'git', 'name': 'git', 'binary': 'git', 'level': 'info',
+     'packages': ('git',), 'purpose': 'Settings → System → Update (in-app updates)',
+     'missing': 'In-app updates are unavailable; update with git pull.'},
+    {'key': 'node', 'name': 'Node.js', 'binary': 'node', 'level': 'info',
+     'packages': ('nodejs',), 'purpose': 'Prism Sync only',
+     'missing': 'Only needed for Prism Sync.'},
+)
+
+
+def _deps_startup_problems():
+    """Problems a restart can't fix but `sudo bash install.sh` can: missing /
+    too-old Python packages and missing required programs. Cheap (package
+    metadata + PATH lookups) — computed once per process at import."""
+    out = []
+    try:
+        for p in system_info.python_packages(_REQUIREMENTS_PATH):
+            if p['status'] == 'missing':
+                out.append(f"Python package {p['name']} is not installed")
+            elif p['status'] == 'old':
+                out.append(f"Python package {p['name']} {p['installed']} is older than {p['spec']}")
+    except Exception:
+        pass
+    for prog in _SYSTEM_PROGRAMS:
+        if prog['level'] == 'error' and prog['binary'] and not shutil.which(prog['binary']):
+            out.append(f"{prog['name']} is not installed")
+    return out
+
+
+_DEPS_PROBLEMS = _deps_startup_problems()
+
+
+def _log_startup_deps():
+    """One syslog line per worker start: what it runs with (LibreOffice and
+    pg_dump versions) and what is missing — so an upgrade that needed
+    install.sh shows up in the log, not only on the About page."""
+    try:
+        env = app_config.child_env()
+        lo = system_info.dpkg_versions(['libreoffice-core'], env).get('libreoffice-core', '-')
+        pgd = system_info.program_version(['pg_dump', '--version'], env) or '-'
+        missing = ';'.join(_DEPS_PROBLEMS) or '-'
+        syslog_logger.info(f'STARTUP_DEPS version={APP_VERSION} libreoffice={lo} pg_dump={pgd} '
+                           f'problems={len(_DEPS_PROBLEMS)}')
+        if _DEPS_PROBLEMS:
+            syslog_logger.warning(f'STARTUP_DEPS_MISSING run "sudo bash install.sh": {missing}')
+    except Exception:
+        pass
+
+
+threading.Thread(target=_log_startup_deps, name='startup-deps', daemon=True).start()
+
+
+def _about_service_name():
+    try:
+        return _detect_service_name()
+    except Exception:
+        return None
+
+
+def _about_build():
+    """The whole About payload (slow: a few seconds of dpkg / apt / systemd)."""
+    env = app_config.child_env()
+    problems = []
+
+    def problem(level, text):
+        problems.append({'level': level, 'text': text})
+
+    # Service
+    svc_name = _about_service_name()
+    svc = system_info.service_status(svc_name, env) if svc_name else {}
+    workers = system_info.worker_info()
+    try:
+        from importlib import metadata as _md
+        gunicorn_v = _md.version('gunicorn')
+    except Exception:
+        gunicorn_v = ''
+    service = {'name': svc_name or '', 'status': svc, 'app_dir': APP_DIR, 'user': workers['user'],
+               'pid': workers['pid'], 'master_pid': workers['master_pid'], 'workers': workers['workers'],
+               'python': sys.version.split()[0], 'python_path': sys.executable, 'gunicorn': gunicorn_v,
+               'process_started': datetime.fromtimestamp(_PROCESS_STARTED).astimezone().isoformat(),
+               'test_mode': TEST_MODE}
+    if not svc_name:
+        problem('info', 'Could not tell which systemd service runs the app (started by hand?).')
+    elif svc.get('active') and svc['active'] != 'active':
+        problem('warn', f"Service {svc_name} reports {svc['active']}.")
+
+    # Server
+    server = system_info.server_info([('App folder', APP_DIR), ('Backups', BACKUP_DIR),
+                                      ('Temp files', tempfile.gettempdir())])
+    for d in server['disks']:
+        if d['total'] and d['free'] / d['total'] < 0.10:
+            problem('warn', f"{d['label']}: only {d['free'] // (1024 ** 3)} GB free "
+                            f"({round(100 * d['free'] / d['total'])}%).")
+    mem = server['memory']
+    if mem.get('total') and mem.get('available') is not None and mem['available'] / mem['total'] < 0.10:
+        problem('warn', 'Less than 10% of memory is free.')
+
+    # Database
+    database, server_major = {}, None
+    db = get_db()
+    try:
+        r = db.execute(
+            "SELECT version() AS v, current_setting('server_version_num') AS num, current_database() AS db, "
+            "pg_database_size(current_database()) AS size, current_setting('max_connections') AS maxc, "
+            "(SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database()) AS conns, "
+            "(SELECT COUNT(*) FROM pg_stat_activity) AS conns_all").fetchone()
+        server_major = int(r['num']) // 10000
+        database = {'version': r['v'].split(',')[0], 'major': server_major, 'name': r['db'],
+                    'size': int(r['size'] or 0), 'connections': int(r['conns']),
+                    'connections_all': int(r['conns_all']), 'max_connections': int(r['maxc'])}
+        if int(r['conns_all']) > 0.8 * int(r['maxc']):
+            problem('warn', f"PostgreSQL has {r['conns_all']} of {r['maxc']} connections in use.")
+    except db_adapter.DatabaseUnavailable:
+        raise
+    except Exception:
+        problem('warn', 'Could not read the database details.')
+    finally:
+        db.close()
+
+    # Python packages
+    py = system_info.python_packages(_REQUIREMENTS_PATH, _PY_PURPOSES)
+    for p in py:
+        if p['status'] == 'missing':
+            problem('error', f"Python package {p['name']} is not installed — run sudo bash install.sh.")
+        elif p['status'] == 'old':
+            problem('error', f"Python package {p['name']} {p['installed']} is older than required "
+                             f"({p['spec']}) — run sudo bash install.sh.")
+
+    # System programs + Debian's pending updates
+    apt = system_info.apt_upgradable(env)
+    pending = (apt or {}).get('packages', {})
+    programs = []
+    for spec in _SYSTEM_PROGRAMS:
+        pk = system_info.dpkg_versions(list(spec['packages']), env) if spec['packages'] else {}
+        if spec.get('pattern'):
+            pk.update(system_info.dpkg_matching(spec['pattern'], env))
+        found = bool(shutil.which(spec['binary'])) if spec['binary'] else bool(pk)
+        version = ''
+        if spec['key'] == 'pg_dump':
+            version = system_info.program_version(['pg_dump', '--version'], env)
+        elif spec['key'] == 'node':
+            version = system_info.program_version(['node', '--version'], env)
+        elif spec['key'] == 'python3':
+            version = system_info.program_version(['python3', '--version'], env)
+        elif pk:
+            version = next(iter(pk.values()))
+        updates = [{'package': n, **pending[n]} for n in sorted(pending) if n in pk]
+        row = {'key': spec['key'], 'name': spec['name'], 'purpose': spec['purpose'], 'found': found,
+               'version': version, 'packages': pk, 'updates': updates, 'level': spec['level'],
+               # Installed some other way (a tarball, nodesource…): Debian can't
+               # say whether it is current, so the page must not claim it is.
+               'debian': bool(pk), 'apt_known': apt is not None,
+               'note': '' if found else spec['missing']}
+        if spec['key'] == 'pg_dump' and found and version and server_major:
+            try:
+                if int(version.split('.')[0]) < server_major:
+                    row['note'] = (f'pg_dump {version} is older than the PostgreSQL {server_major} server — '
+                                   'backups will fail. Install postgresql-client-' + str(server_major) + '.')
+                    problem('error', row['note'])
+            except ValueError:
+                pass
+        if not found and spec['level'] in ('error', 'warn'):
+            problem(spec['level'], f"{spec['name']} is not installed. {spec['missing']}")
+        if updates:
+            sec = any(u['security'] for u in updates)
+            problem('warn' if sec else 'info',
+                    f"{spec['name']}: {'security ' if sec else ''}update waiting "
+                    f"({updates[0]['installed'] or '?'} → {updates[0]['candidate']}).")
+        programs.append(row)
+
+    auto = system_info.auto_updates(env)
+    updates = {'apt': None if apt is None else {k: apt[k] for k in ('total', 'security', 'lists_age_s')},
+               'auto': auto}
+    if apt is not None:
+        if apt['security']:
+            problem('warn', f"{apt['security']} security update(s) waiting for this server.")
+        age = apt['lists_age_s'] if apt['lists_age_s'] is not None else auto.get('lists_stamp_s')
+        if age is None:
+            problem('info', "Can't tell when the package lists were last refreshed, so “no updates waiting” "
+                            'may be out of date.')
+        elif age > 3 * 86400:
+            problem('warn', f'The package lists are {age // 86400} days old — pending updates may be missing '
+                            'from this page (the daily apt timer may be off).')
+        if not auto['installed']:
+            problem('warn', 'Automatic security updates (unattended-upgrades) are not installed — '
+                            'run sudo bash install.sh.')
+        elif not auto['enabled']:
+            problem('warn', 'unattended-upgrades is installed but switched off '
+                            '(APT::Periodic::Unattended-Upgrade).')
+    order = {'error': 0, 'warn': 1, 'info': 2}
+    problems.sort(key=lambda p: order[p['level']])
+    return {
+        'release': {'version': APP_VERSION, **_RELEASE_INFO},
+        'service': service, 'server': server, 'database': database, 'python': py,
+        'programs': programs, 'updates': updates, 'problems': problems,
+        'checked_at': datetime.now().astimezone().isoformat(),
+    }
+
+
+@app.route('/settings/about')
+@admin_required
+def about_page():
+    """Settings → About 321Theater. The page is a shell; its data comes from
+    /settings/about/data (slow checks, cached)."""
+    return render_template('about.html', user=get_current_user())
+
+
+@app.route('/settings/about/data')
+@admin_required
+def about_data():
+    """The About payload. `?refresh=1` re-runs the checks now (otherwise a
+    result up to _ABOUT_TTL old is reused). Read-only: it changes nothing."""
+    refresh = request.args.get('refresh') == '1'
+    now = time.time()
+    with _ABOUT_LOCK:
+        cached = _ABOUT_CACHE['data']
+        if cached is None or refresh or now - _ABOUT_CACHE['at'] > _ABOUT_TTL:
+            cached = _about_build()
+            _ABOUT_CACHE.update(at=time.time(), data=cached)
+    out = dict(cached)
+    # Live numbers are cheap — always fresh.
+    out['live'] = {'load': list(os.getloadavg()) if hasattr(os, 'getloadavg') else None,
+                   'workers': system_info.worker_info()['workers']}
+    return jsonify(out)
 
 
 # ─── User Registration & Recovery ─────────────────────────────────────────────
