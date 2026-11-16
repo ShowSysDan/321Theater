@@ -54,6 +54,8 @@ import fcntl
 import tempfile
 import html as _html_mod
 from datetime import datetime, date, timedelta
+from urllib.parse import urlencode
+from werkzeug.exceptions import HTTPException
 from functools import wraps
 from io import BytesIO
 
@@ -68,7 +70,10 @@ import prism_module  # sandboxed Prism FM integration — wired up near the bott
 import security_module  # security sign-in sheets — wired up near the bottom
 import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
 import spot_module  # Spot sound-level integration — wired up near the bottom
+import chat_module  # Messages / inbox — wired up near the bottom
+import projects_module  # optional, sandboxed — wired up near the bottom
 import file_store  # S3 <-> PostgreSQL file redundancy + migration — wired up near the bottom
+import system_info  # Settings → About 321Theater: this server, its service, its dependencies
 from init_db import pg_name_key  # SQL twin of _name_key (idx_contacts_name_key's text)
 
 from flask import (Flask, render_template, request, redirect, url_for,
@@ -536,8 +541,12 @@ def inject_version():
     readonly_view = bool(has_request_context() and session.get('user_id')
                          and session.get('is_readonly')
                          and session.get('user_role') != 'admin')
+    # deps_alert: what this server is missing that `sudo bash install.sh`
+    # fixes (computed once per process at import) — shown to admins only.
+    deps_alert = (_DEPS_PROBLEMS if has_request_context()
+                  and session.get('user_role') == 'admin' else [])
     return {'app_version': APP_VERSION, 'page_rendered_at': int(time.time()),
-            'test_mode': TEST_MODE, 'readonly_view': readonly_view}
+            'test_mode': TEST_MODE, 'readonly_view': readonly_view, 'deps_alert': deps_alert}
 
 
 # ── Mobile view mode ──────────────────────────────────────────────────────────
@@ -898,7 +907,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.46.0'
+APP_VERSION = '3.50.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1138,10 +1147,22 @@ APP_MODULES = [
         'name': 'Piano Tuning',
         'description': 'PMs request piano tunings from the show page (Advance '
                        'tab); the piano tuning manager works the running list, '
-                       'schedules them onto the production schedule and adds '
-                       'the cost to the show settlement.',
+                       'schedules them onto the production schedule and records '
+                       'the cost on the show (billed on its invoices only when '
+                       'the manager chooses to).',
         'default': '1',
         'settings_endpoint': 'piano_tuning_page',
+    },
+    {
+        'key': 'messages',
+        'name': 'Messages',
+        'description': 'Private conversations between users from the floating '
+                       'inbox button: tag a show, optionally post the '
+                       'conversation to that show\'s comments, notes to self '
+                       'and reminders. Off = the inbox shows notifications only; '
+                       'conversations are kept.',
+        'default': '1',
+        'settings_endpoint': None,
     },
     {
         'key': 'spot',
@@ -1152,6 +1173,21 @@ APP_MODULES = [
                        'Set up on its settings page.',
         'default': '0',
         'settings_endpoint': 'spot_settings_page',
+    },
+    {
+        # The master switch is listed for every admin (the owner's call,
+        # 3.49.0). WHO may use it is still per person, on its settings page
+        # (/settings/projects): with the switch on, nobody without a grant
+        # sees anything of it. (The 'unlisted' flag below this list's
+        # readers still supports hiding an entry; nothing uses it now.)
+        'key': 'projects',
+        'name': 'Projects',
+        'description': 'Private project workspaces — tasks, a timeline, '
+                       'budgets, files, notes and linked shows. Only the people '
+                       'given access on its settings page can see or use it; '
+                       'a project is seen only by the people on it.',
+        'default': '0',
+        'settings_endpoint': 'pm_settings',
     },
 ]
 
@@ -1304,6 +1340,15 @@ _PERF_LIVE_FLUSH = 2.0
 _PERF_LIVE_BUFFER_MAX = 500
 _PERF_LIVE_TTL = 600             # seconds a Live-view renewal keeps capture on
 _PERF_LIVE_SKIP = frozenset(('static', 'performance_live_feed', 'performance_live_control'))
+# Endpoints with this prefix belong to a module that is private to the
+# people given access, and every admin can open the Performance pages. So
+# their requests are not recorded at all — not in the Live request log
+# (path + username), not in the per-page stats (endpoint name, slowest
+# path), not in the slow-query list — and a statement that names one of the
+# module's tables never has its SQL text kept, whichever page ran it
+# (_PERF_PRIVATE_SQL; its time still counts).
+_PERF_LIVE_SKIP_PREFIX = 'pm_'
+_PERF_PRIVATE_SQL = ' pm_'
 _perf_live = {'until': 0.0, 'checked': 0.0, 'flushed': time.time()}
 _perf_live_buf = []
 _PERF_WORKER = f"{socket.gethostname()}:{os.getpid()}"
@@ -1319,8 +1364,8 @@ def _perf_record_query(sql, duration_s):
     g._perf_db_count = getattr(g, '_perf_db_count', 0) + 1
     if ms > getattr(g, '_perf_db_max_ms', 0.0):
         g._perf_db_max_ms = ms
-        g._perf_db_max_sql = sql[:_PERF_SQL_SNIPPET_LEN]
-    if ms >= _perf_conf['slow_ms']:
+        g._perf_db_max_sql = '' if _PERF_PRIVATE_SQL in sql else sql[:_PERF_SQL_SNIPPET_LEN]
+    if ms >= _perf_conf['slow_ms'] and _PERF_PRIVATE_SQL not in sql:
         slow = getattr(g, '_perf_slow', None)
         if slow is None:
             slow = g._perf_slow = []
@@ -1510,7 +1555,9 @@ def _perf_finish_request(exc=None):
         # worker's buffer, so a quiet worker's last requests don't sit unseen.
         if _perf_live_on() or _perf_live_buf:
             with _perf_lock:
-                if (endpoint not in _PERF_LIVE_SKIP and now.timestamp() < _perf_live['until']
+                if (endpoint not in _PERF_LIVE_SKIP
+                        and not endpoint.startswith(_PERF_LIVE_SKIP_PREFIX)
+                        and now.timestamp() < _perf_live['until']
                         and len(_perf_live_buf) < _PERF_LIVE_BUFFER_MAX):
                     _perf_live_buf.append((
                         now, endpoint, request.method, path,
@@ -1522,6 +1569,8 @@ def _perf_finish_request(exc=None):
                     _perf_live_buf.clear()
         if live_rows:
             _perf_live_flush(live_rows)
+        if endpoint.startswith(_PERF_LIVE_SKIP_PREFIX):
+            return              # private module: no stats row (see above)
 
         flush_pages = flush_slow = None
         with _perf_lock:
@@ -4195,6 +4244,24 @@ def _run_spot_capture_job():
         spot_module.run_spot_capture()
 
 
+def _run_pm_hourly():
+    """Hourly job of the optional sandboxed module (projects_module): its
+    due / overdue alerts and its retry queue. Leader-gated like every job
+    with side effects (so TEST_MODE never runs it), and a database outage
+    skips the run with an ERROR log — the module itself returns at once
+    while it is switched off. Log lines carry the exception TYPE only: its
+    text could quote a row."""
+    if not am_i_leader():
+        return
+    try:
+        with app.app_context():
+            projects_module.run_hourly()
+    except db_adapter.DatabaseUnavailable:
+        syslog_logger.error('PM_HOURLY_SKIPPED reason=database_unavailable')
+    except Exception as e:
+        app.logger.error(f'pm hourly job failed: {type(e).__name__}')
+
+
 def start_scheduler():
     """Register all background jobs.
 
@@ -4250,6 +4317,9 @@ def start_scheduler():
         # quiet long enough.
         scheduler.add_job(run_field_change_alerts, 'interval', minutes=10,
                           id='field_change_alerts')
+        # Inbox emails (3.47.0): unread messages, due reminders, @mentions —
+        # leader-gated inside the job; each item is mailed at most once.
+        scheduler.add_job(run_inbox_emails, 'interval', minutes=5, id='inbox_emails')
         # Prism auto-sync (sandboxed module): leader-gated inside the job;
         # fires hourly but only acts during the configured hour, only when
         # both prism_enabled and prism_auto_sync_enabled are '1', and skips
@@ -4274,6 +4344,10 @@ def start_scheduler():
         scheduler.add_job(_run_spot_capture_job, 'interval', minutes=5,
                           id='spot_capture', misfire_grace_time=240,
                           coalesce=True, max_instances=1)
+        # Optional module's hourly job (sandboxed): leader-gated inside the
+        # wrapper; every alert is claimed atomically in the module, so a
+        # late or doubled fire sends nothing twice.
+        scheduler.add_job(_run_pm_hourly, 'interval', hours=1, id='pm_hourly')
         scheduler.start()
         # Backfill contact↔user link once on boot.
         try:
@@ -4987,7 +5061,320 @@ def notify_users(db, user_ids, title, body='', link_url=None, kind='system',
                 'INSERT INTO notifications (user_id, kind, title, body, link_url, show_id, field_key) '
                 'VALUES (%s,%s,%s,%s,%s,%s,%s)', rows)
     except Exception as e:
-        app.logger.warning(f'notify_users failed ({kind}): {e}')
+        # A PostgreSQL error can quote the failing row — title and body. For
+        # the private kind (the optional module's rows: a task title, a
+        # project name) the log gets the exception TYPE only.
+        app.logger.warning(f'notify_users failed ({kind}): '
+                           f'{type(e).__name__ if kind == "project" else e}')
+
+
+_MENTION_SCAN_MAX = 4000      # comment bodies are ≤ 2000 chars
+
+
+def _mention_user_ids(db, text):
+    """User ids @mentioned in `text`. A mention is '@' + a display name or
+    username (any case), NOT preceded by a word character (so the 'steve' in
+    booking@steve.com is not one) and not followed by one. Longest names are
+    matched first and their span consumed, so '@Dan Lupo' never also matches
+    a user called 'Dan' — and that holds for accounts that can't be notified
+    too (locked / pending / document viewer): their names still consume the
+    span, they just aren't returned."""
+    text = (text or '')[:_MENTION_SCAN_MAX]
+    if '@' not in text:
+        return set()
+    names = []
+    for u in db.execute(
+            """SELECT id, username, display_name,
+                      (COALESCE(is_locked, 0) = 0 AND COALESCE(pending_approval, 0) = 0
+                       AND COALESCE(is_document_viewer, 0) = 0) AS ok
+                 FROM users""").fetchall():
+        for n in {(u['display_name'] or '').strip(), (u['username'] or '').strip()}:
+            if n:
+                names.append((n.lower(), u['id'], bool(u['ok'])))
+    names.sort(key=lambda x: -len(x[0]))
+    low, hit = text.lower(), set()
+    for n, uid, ok in names:
+        start = 0
+        while True:
+            i = low.find('@' + n, start)
+            if i < 0:
+                break
+            end = i + 1 + len(n)
+            prev, nxt = low[i - 1:i] if i else '', low[end:end + 1]
+            if not (prev.isalnum() or prev == '_' or nxt.isalnum() or nxt == '_'):
+                if ok:
+                    hit.add(uid)
+                low = low[:i] + ' ' * (end - i) + low[end:]       # consumed
+            start = end
+    return hit
+
+
+def _notify_comment_mentions(db, show_id, body, actor_id, actor_name=None, old_body=None,
+                             comment_id=None):
+    """@mentions in a show comment → an inbox notification for each person
+    named (3.47.0; matching rules: _mention_user_ids). With `old_body` (an
+    edit) only people newly mentioned are told. Never the actor. With
+    `comment_id` the notification is tied to that comment (field_key
+    'comment:<id>'), so deleting or editing the comment can withdraw or
+    correct a notification nobody has read or been emailed yet
+    (_mention_notifications_sync). Caller commits; never raises. Returns the
+    user ids notified."""
+    try:
+        text = (body or '')[:_MENTION_SCAN_MAX]
+        who = _mention_user_ids(db, text) - {actor_id}
+        if old_body:
+            who -= _mention_user_ids(db, old_body)
+        if not who:
+            return []
+        show = db.execute('SELECT name FROM shows WHERE id=%s', (show_id,)).fetchone()
+        if actor_name is None:
+            a = db.execute("SELECT COALESCE(NULLIF(TRIM(display_name), ''), username) AS n "
+                           'FROM users WHERE id=%s', (actor_id,)).fetchone()
+            actor_name = a['n'] if a else 'Someone'
+        notify_users(db, who,
+                     f"{actor_name} mentioned you — {show['name'] if show else 'a show'}",
+                     _mention_excerpt(text),
+                     link_url=(f'/shows/{show_id}?tab=comments&comment={int(comment_id)}'
+                               if comment_id else f'/shows/{show_id}?tab=comments'),
+                     kind='mention', show_id=show_id,
+                     coalesce_key=f'comment:{int(comment_id)}' if comment_id else None)
+        return sorted(who)
+    except Exception as e:
+        app.logger.warning(f'_notify_comment_mentions failed (show {show_id}): {e}')
+        return []
+
+
+def _mention_excerpt(text):
+    excerpt = ' '.join((text or '').split())
+    return excerpt[:240] + ('…' if len(excerpt) > 240 else '')
+
+
+def _mention_notifications_sync(db, show_id, comment_id, new_body=None):
+    """A comment was deleted (new_body None) or edited: its mention
+    notifications that nobody has read or been emailed yet are withdrawn —
+    or, after an edit, kept only for people still mentioned, with the new
+    text. Read / already-emailed ones are history and stay. Never raises."""
+    try:
+        key = f'comment:{int(comment_id)}'
+        cond = ("kind = 'mention' AND show_id = %s AND field_key = %s "
+                'AND read_at IS NULL AND emailed_at IS NULL')
+        if new_body is None:
+            db.execute(f'DELETE FROM notifications WHERE {cond}', (show_id, key))
+            return
+        still = sorted(_mention_user_ids(db, new_body))
+        db.execute(f'DELETE FROM notifications WHERE {cond} AND NOT (user_id = ANY(%s))',
+                   (show_id, key, still))
+        db.execute(f'UPDATE notifications SET body = %s, link_url = %s WHERE {cond}',
+                   (_mention_excerpt(new_body),
+                    f'/shows/{show_id}?tab=comments&comment={int(comment_id)}', show_id, key))
+    except Exception as e:
+        app.logger.warning(f'_mention_notifications_sync failed (comment {comment_id}): {e}')
+
+
+# ── Inbox emails (3.47.0) ────────────────────────────────────────────────────
+# Per-user switches (My Account → Email notifications), stored in
+# user_notify_prefs; a missing row = all on.
+# email_tasks belongs to the optional, per-user-access module: it is always
+# honoured by the email job, but it is only SHOWN to / accepted from someone
+# who has that access (_notify_pref_keys_for_me) — for everyone else the
+# key is not in any response.
+_NOTIFY_PREF_KEYS = ('email_messages', 'email_mentions', 'email_reminders', 'email_tasks')
+_NOTIFY_PREF_GATED = frozenset(('email_tasks',))
+_INBOX_EMAIL_DELAY_MIN = 10     # a message must sit unread this long first
+_INBOX_MENTION_DELAY_MIN = 3
+
+
+def _notify_prefs(db, user_ids):
+    """{user_id: {email_messages, email_mentions, email_reminders,
+    email_tasks}} (bools). A missing row, or a NULL, = on."""
+    out = {int(u): {k: True for k in _NOTIFY_PREF_KEYS} for u in user_ids}
+    if out:
+        for r in db.execute('SELECT * FROM user_notify_prefs WHERE user_id = ANY(%s)',
+                            (list(out),)).fetchall():
+            out[r['user_id']] = {k: bool(r.get(k)) if r.get(k) is not None else True
+                                 for k in _NOTIFY_PREF_KEYS}
+    return out
+
+
+def _notify_pref_keys_for_me():
+    """The switches the signed-in user may see and set: the gated ones only
+    with access to the module they belong to."""
+    gated_ok = projects_module.has_access()
+    return tuple(k for k in _NOTIFY_PREF_KEYS if gated_ok or k not in _NOTIFY_PREF_GATED)
+
+
+@app.route('/account/notify-prefs', methods=['GET', 'POST'])
+@login_required
+def account_notify_prefs():
+    """The signed-in user's inbox email switches. A POST changes ONLY the
+    keys present in its body — an absent key keeps its stored value, so a
+    page that doesn't know a switch (an old tab, or one that isn't shown
+    it) can never turn it off."""
+    uid = session['user_id']
+    keys = _notify_pref_keys_for_me()
+    db = get_db()
+    try:
+        if request.method == 'POST':
+            if session.get('is_document_viewer'):
+                return jsonify({'success': False, 'error': 'Not available.'}), 403
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                data = {}
+            given = [(k, 1 if data[k] else 0) for k in keys if k in data]
+            if given:
+                # Column names come from _NOTIFY_PREF_KEYS, never the request.
+                cols = [k for k, _v in given]
+                db.execute(
+                    f"""INSERT INTO user_notify_prefs (user_id, {', '.join(cols)})
+                        VALUES (%s, {', '.join(['%s'] * len(cols))})
+                        ON CONFLICT (user_id) DO UPDATE SET
+                          {', '.join(f'{c} = EXCLUDED.{c}' for c in cols)},
+                          updated_at = CURRENT_TIMESTAMP""",
+                    [uid] + [v for _k, v in given])
+                db.commit()
+        prefs = {k: v for k, v in _notify_prefs(db, [uid])[uid].items() if k in keys}
+        me = db.execute('SELECT email FROM users WHERE id=%s', (uid,)).fetchone()
+    finally:
+        db.close()
+    if request.method == 'POST':
+        # The stored values after the save (a partial POST changes only some).
+        syslog_logger.info(
+            f"NOTIFY_PREFS user_id={uid} "
+            + ' '.join(f"{k[len('email_'):]}={int(prefs[k])}" for k in keys)
+            + f" by={session.get('username')}")
+    return jsonify({'success': True, 'prefs': prefs,
+                    'email': ((me['email'] if me else '') or '').strip(),
+                    'delay_minutes': _INBOX_EMAIL_DELAY_MIN})
+
+
+def run_inbox_emails():
+    """Every 5 minutes (leader-gated): one email per person for what is
+    waiting in their inbox and they haven't seen — messages left unread for
+    _INBOX_EMAIL_DELAY_MIN minutes, reminders that came due, and @mentions
+    still unread after a few minutes — each mailed at most once, honouring
+    the person's switches (user_notify_prefs). Stamps are committed BEFORE
+    sending: a failed send is logged (Email log), never retried in a loop."""
+    if not am_i_leader():
+        return
+    try:
+        db = get_db()
+    except db_adapter.DatabaseUnavailable as e:
+        syslog_logger.error(f'INBOX_EMAIL_SKIPPED reason=database_unavailable detail={e}')
+        return
+    try:
+        items = (chat_module.pending_email_items(db, _INBOX_EMAIL_DELAY_MIN)
+                 if module_enabled('messages') else {})
+        mentions = db.execute(
+            # SKIP LOCKED: never wait on a row someone is marking read (that
+            # deadlocked against "mark all read", 3.49.0 review); it is
+            # picked up on a later run if it is still unread.
+            """UPDATE notifications SET emailed_at = CURRENT_TIMESTAMP
+                WHERE id IN (SELECT id FROM notifications
+                              WHERE kind = 'mention' AND read_at IS NULL AND emailed_at IS NULL
+                                AND created_at <= NOW() - %s * INTERVAL '1 minute'
+                              ORDER BY id FOR UPDATE SKIP LOCKED)
+                  AND read_at IS NULL AND emailed_at IS NULL
+            RETURNING user_id, title, body, link_url""", (_INBOX_MENTION_DELAY_MIN,)).fetchall()
+        for m in mentions:
+            items.setdefault(m['user_id'], {'messages': [], 'reminders': []}) \
+                 .setdefault('mentions', []).append(dict(m))
+        if module_enabled('projects'):
+            # The optional module's unread bell rows, stamped by the one
+            # statement that returns them (so each is mailed once, even with
+            # several workers here at once) and only for people who still
+            # have access. A failure aborts the whole run: none of the stamps
+            # taken above is committed (the handler below closes the
+            # connection, which discards them), so sending anything now would
+            # send it again next time. It is logged by TYPE only — the error
+            # text could quote a row.
+            try:
+                updates = projects_module.pending_email_items(db, _INBOX_MENTION_DELAY_MIN)
+            except db_adapter.DatabaseUnavailable:
+                raise
+            except Exception as e:
+                raise RuntimeError(f'updates ({type(e).__name__})') from None
+            for u in updates:
+                items.setdefault(u['user_id'], {'messages': [], 'reminders': []}) \
+                     .setdefault('updates', []).append(dict(u))
+        people = {}
+        if items:
+            prefs = _notify_prefs(db, list(items))
+            for u in db.execute(
+                    """SELECT id, email, COALESCE(NULLIF(TRIM(display_name), ''), username) AS name
+                         FROM users WHERE id = ANY(%s) AND COALESCE(is_locked, 0) = 0
+                          AND COALESCE(pending_approval, 0) = 0
+                          AND COALESCE(is_document_viewer, 0) = 0""", (list(items),)).fetchall():
+                addr = (u['email'] or '').strip()
+                if _EMAIL_ADDR_RE.match(addr):
+                    people[u['id']] = (addr, u['name'], prefs[u['id']])
+        db.commit()            # the stamps — before any SMTP round-trip
+    except Exception as e:
+        app.logger.error(f'run_inbox_emails failed: {e}')
+        db.close()
+        return
+    db.close()
+    base = (get_app_setting('public_base_url', '') or '').rstrip('/')
+    sent = 0
+    for uid, it in items.items():
+        if uid not in people:
+            continue
+        addr, name, pref = people[uid]
+        msgs = it.get('messages') if pref['email_messages'] else []
+        rems = it.get('reminders') if pref['email_reminders'] else []
+        ments = it.get('mentions') if pref['email_mentions'] else []
+        ups = it.get('updates') if pref['email_tasks'] else []
+        if not (msgs or rems or ments or ups):
+            continue
+        blocks, bits = [], []
+
+        def _line(text, n=280):
+            text = ' '.join((text or '').split())
+            return text[:n] + ('…' if len(text) > n else '')
+        if msgs:
+            by_thread = {}
+            for m in msgs:
+                by_thread.setdefault(m['thread_id'], []).append(m)
+            for tid, ms in by_thread.items():
+                senders = ', '.join(sorted({m['author_name'] or 'Someone' for m in ms
+                                            if m['kind'] != 'system'})) or 'Conversation'
+                head = senders + (f" — about {ms[0]['show_name']}" if ms[0]['show_name'] else '')
+                blocks.append({'heading': head, 'items': [_line(m['body']) for m in ms[-8:]]})
+            bits.append(f"{len(msgs)} unread message{'' if len(msgs) == 1 else 's'}")
+        if rems:
+            blocks.append({'heading': 'Reminders due',
+                           'items': [_line(r['body']) + (f" ({r['show_name']})" if r['show_name'] else '')
+                                     for r in rems]})
+            bits.append(f"{len(rems)} reminder{'' if len(rems) == 1 else 's'} due")
+        if ments:
+            blocks.append({'heading': 'Mentions in show comments',
+                           'items': [f"{m['title']}: {_line(m['body'], 200)}" for m in ments]})
+        if ups:
+            # The block names things (the body is `sensitive`: never stored).
+            blocks.append({'heading': 'Projects',
+                           'items': [_line(u['title'], 200)
+                                     + (f" — {_line(u['body'], 120)}" if u['body'] else '')
+                                     for u in ups]})
+        # Mentions and the optional module's updates share ONE neutral word in
+        # the subject: subjects are kept in the email log every admin reads,
+        # and a word of its own would show who uses that module (3.49.0).
+        n_notes = len(ments or []) + len(ups or [])
+        if n_notes:
+            bits.append(f"{n_notes} notification{'' if n_notes == 1 else 's'}")
+        title = ' · '.join(bits)
+        title = title[:1].upper() + title[1:]
+        text, html = _mail(
+            title, eyebrow='Inbox',
+            intro=f'Hi {name}, this is waiting for you in 3·2·1→Theater.',
+            blocks=blocks,
+            button=('Open your inbox', (base + '/shows?inbox=open') if base else ''),
+            note='You get this because something sat unread in your inbox. Change what is '
+                 'emailed under Settings → My Account → Email notifications.')
+        ok, _msg = _send_email(f'3·2·1→THEATER: {title}', [addr], text, html,
+                               error_context={'purpose': 'inbox_digest', 'sensitive': True,
+                                              'triggered_by': 'inbox_job'})
+        sent += 1 if ok else 0
+    if sent:
+        syslog_logger.info(f'INBOX_EMAIL sent={sent}')
 
 
 def _role_user_ids(db, flag, exclude_user_id=None):
@@ -6282,13 +6669,26 @@ def _my_pm_show_ids(db, user_id):
 @app.route('/my-shows')
 @login_required
 def my_shows():
-    return _render_show_board(mine=True)
+    # For someone with access to the optional module this page is "My Work":
+    # the same board plus their projects and tasks (rendered by the module's
+    # own partial). Everyone else gets exactly the page they always had —
+    # `my_work` stays False and nothing about it reaches their browser.
+    extra = {}
+    if projects_module.has_access():
+        db = get_db()
+        try:
+            extra = {'my_work': True,
+                     'pm_work': projects_module.my_work(db, session['user_id']),
+                     'asset_v': APP_VERSION}
+        finally:
+            db.close()
+    return _render_show_board(mine=True, extra=extra)
 
 
-def _render_show_board(mine=False):
+def _render_show_board(mine=False, extra=None):
     """The Shows board (/shows — Home until 3.35.0); mine=True is the My
     Shows view — the same board narrowed to the active shows I PM or cover
-    (no archive count)."""
+    (no archive count). `extra` = more template variables (my_shows only)."""
     auto_archive_past_shows()
     accessible = get_accessible_shows(session['user_id'])
     db = get_db()
@@ -6502,7 +6902,8 @@ def _render_show_board(mine=False):
                            home_density=home_density,
                            my_shows=mine,
                            archived_count=archived_count,
-                           user=get_current_user())
+                           user=get_current_user(),
+                           **{'my_work': False, **(extra or {})})
 
 
 _EN_DAYS = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
@@ -8531,7 +8932,13 @@ def get_comments(show_id):
         SELECT sc.id, sc.body, sc.created_at::timestamptz AS created_at,
                sc.edited_at::timestamptz AS edited_at, sc.deleted_at::timestamptz AS deleted_at,
                u.display_name, u.username, u.id as uid, sc.author_name,
-               du.display_name as deleted_by_name, du.username as deleted_by_username
+               du.display_name as deleted_by_name, du.username as deleted_by_username,
+               sc.chat_thread_id,
+               (SELECT string_agg(COALESCE(NULLIF(TRIM(pu.display_name), ''), pu.username), ', '
+                                  ORDER BY LOWER(COALESCE(NULLIF(TRIM(pu.display_name), ''), pu.username)))
+                  FROM chat_participants cp JOIN users pu ON pu.id = cp.user_id
+                 WHERE cp.thread_id = sc.chat_thread_id
+                   AND cp.user_id IS DISTINCT FROM sc.user_id) AS chat_to
         FROM show_comments sc
         LEFT JOIN users u ON sc.user_id = u.id
         LEFT JOIN users du ON sc.deleted_by = du.id
@@ -8554,6 +8961,10 @@ def get_comments(show_id):
             'initials':    ''.join(w[0].upper() for w in author.split()[:2]),
             'is_own':      r['uid'] is not None and r['uid'] == session['user_id'],
         }
+        if r['chat_thread_id']:
+            # Posted from a Messages conversation set to "also post to the
+            # show's comments" (3.47.0): say who it was written to.
+            entry['via_message'] = r['chat_to'] or ''
         if is_admin and r['deleted_at']:
             entry['deleted_by'] = r['deleted_by_name'] or r['deleted_by_username'] or 'Unknown'
         result.append(entry)
@@ -8583,6 +8994,7 @@ def post_comment(show_id):
     cid = cur.fetchone()['id']
     log_audit(db, 'COMMENT_POST', 'comment', cid, show_id=show_id,
               after={'body': body})
+    _notify_comment_mentions(db, show_id, body, session['user_id'], comment_id=cid)
     db.commit()
     row = db.execute("""
         SELECT sc.id, sc.body, sc.created_at,
@@ -8628,6 +9040,8 @@ def delete_comment(show_id, cid):
         'UPDATE show_comments SET deleted_at=CURRENT_TIMESTAMP, deleted_by=%s WHERE id=%s',
         (session['user_id'], cid)
     )
+    # A withdrawn comment must not be emailed to the people it mentioned.
+    _mention_notifications_sync(db, show_id, cid)
     db.commit()
     db.close()
     syslog_logger.info(f"COMMENT_DELETE show_id={show_id} comment_id={cid} by={session.get('username')}")
@@ -8670,6 +9084,11 @@ def edit_comment(show_id, cid):
     )
     log_audit(db, 'COMMENT_EDIT', 'comment', cid, show_id=show_id,
               before={'body': old_body}, after={'body': new_body})
+    # Unseen notifications follow the edit (dropped for people no longer
+    # mentioned, new text for the rest); only newly mentioned people are told.
+    _mention_notifications_sync(db, show_id, cid, new_body)
+    _notify_comment_mentions(db, show_id, new_body, session['user_id'], old_body=old_body,
+                             comment_id=cid)
     db.commit()
     db.close()
     syslog_logger.info(f"COMMENT_EDIT show_id={show_id} comment_id={cid} by={session.get('username')}")
@@ -9387,7 +9806,7 @@ def _parse_ua(ua):
 @app.route('/api/client-info', methods=['POST'])
 @login_required
 def api_client_info():
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
 
     def _n(key, lo, hi, cast=int, default=0):
         try:
@@ -9938,12 +10357,102 @@ def _convert_attachment_to_pdf(data, mime, filename, section_label,
     return None
 
 
+# LibreOffice profile for conversions of UPLOADED documents. A document can
+# reference things outside itself — an image at http://10.x.x.x/… or at
+# file:///etc/… — and a stock LibreOffice fetches them while converting: a
+# request made from inside the network (SSRF) and, for a file the service
+# can read, its picture embedded in the PDF handed back to the uploader.
+# So every conversion runs with this profile:
+#   - BlockUntrustedRefererLinks: links from a document that is not in a
+#     trusted location are not loaded (the temp dir is not one);
+#   - macros off (level 3 + DisableMacrosExecution), no link updates in
+#     Writer / Calc;
+#   - a manual proxy pointing at a closed local port, so anything that still
+#     tried the network gets nowhere.
+# Verified (3.49.0) with an .odt holding an http:// and a file:// image:
+# neither is fetched. Keep it for every soffice call that touches an upload.
+_LO_HARDENED_XCU = '''<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="BlockUntrustedRefererLinks" oor:op="fuse"><value>true</value></prop></item>
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="MacroSecurityLevel" oor:op="fuse"><value>3</value></prop></item>
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="DisableMacrosExecution" oor:op="fuse"><value>true</value></prop></item>
+<item oor:path="/org.openoffice.Office.Writer/Content/Update"><prop oor:name="Link" oor:op="fuse"><value>0</value></prop></item>
+<item oor:path="/org.openoffice.Office.Calc/Content/Update"><prop oor:name="Link" oor:op="fuse"><value>1</value></prop></item>
+<item oor:path="/org.openoffice.Inet/Settings"><prop oor:name="ooInetProxyType" oor:op="fuse"><value>1</value></prop></item>
+<item oor:path="/org.openoffice.Inet/Settings"><prop oor:name="ooInetHTTPProxyName" oor:op="fuse"><value>127.0.0.1</value></prop></item>
+<item oor:path="/org.openoffice.Inet/Settings"><prop oor:name="ooInetHTTPProxyPort" oor:op="fuse"><value>9</value></prop></item>
+<item oor:path="/org.openoffice.Inet/Settings"><prop oor:name="ooInetHTTPSProxyName" oor:op="fuse"><value>127.0.0.1</value></prop></item>
+<item oor:path="/org.openoffice.Inet/Settings"><prop oor:name="ooInetHTTPSProxyPort" oor:op="fuse"><value>9</value></prop></item>
+<item oor:path="/org.openoffice.Inet/Settings"><prop oor:name="ooInetNoProxy" oor:op="fuse"><value></value></prop></item>
+</oor:items>
+'''
+
+
+def _json_obj():
+    """The request's JSON body as a dict — {} for a missing, invalid or
+    non-object body (a bare string / number / list): routes then answer with
+    their own 400 instead of an AttributeError 500 (3.49.0 review)."""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+# Concurrent LibreOffice runs per worker process. Each soffice is hundreds of
+# MB and a CPU core; without a cap one user could start one per request
+# thread (16 per worker). A caller that can't get a slot within
+# _LO_SLOT_WAIT seconds gets None (no preview / the file is listed as not
+# embedded) — never an unbounded queue.
+_LO_SLOTS = threading.BoundedSemaphore(2)
+_LO_SLOT_WAIT = 60
+_LO_TIMEOUT = 90
+# What reaches LibreOffice must be a real Office container: OOXML / ODF
+# (zip), legacy Office (OLE compound file) or RTF. Anything else under an
+# office name — HTML, XML, SVG… — is refused: LibreOffice would detect it by
+# content and its HTML filter fetches <link> URLs on loopback despite the
+# hardened profile (3.49.0 review).
+_LO_MAGIC = (b'PK\x03\x04', b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1', b'{\\rtf')
+# RTF fields (INCLUDEPICTURE / INCLUDETEXT / IMPORT …) are resolved by the
+# RTF importer at load time, past BlockUntrustedRefererLinks: a field naming a
+# local image or PDF put that file into the preview (3.49.0 review). Renaming
+# the control word makes every field render only its cached result text;
+# linked OLE objects lose their link the same way.
+_RTF_NEUTRALIZE = re.compile(rb'\\(fldinst|objautlink|objlink|objupdate|linkself)', re.I)
+
+
+def _lo_prepare(data):
+    """The bytes to hand LibreOffice, or None when they must not be converted."""
+    data = bytes(data or b'')
+    head = data[:64].lstrip(b'\xef\xbb\xbf \t\r\n')
+    if not head.startswith(_LO_MAGIC):
+        return None
+    if head.startswith(b'{\\rtf'):
+        data = _RTF_NEUTRALIZE.sub(rb'\\x\1x', data)
+    return data
+
+
 def _libreoffice_convert_to_pdf(data, filename):
     """Convert an Office / OpenDocument file to PDF via LibreOffice headless.
-    Each call uses an isolated user-installation dir so concurrent requests
-    don't collide on the shared profile lock. Returns PDF bytes or None."""
+    Every input is an UPLOAD, so (3.49.0 review):
+      - only real Office containers are converted (_lo_prepare), RTF with its
+        fields neutralised;
+      - an isolated user-installation dir seeded with _LO_HARDENED_XCU (no
+        remote / linked content, no macros) and TMPDIR inside the work dir;
+      - its own process group, killed as a whole on timeout or error
+        (/usr/bin/soffice is a shell script: killing it alone left
+        soffice.bin running, orphaned, at full CPU);
+      - prlimit CPU / core limits when prlimit exists (no preexec_fn — not
+        safe in threaded workers);
+      - at most _LO_SLOTS conversions at once per worker.
+    Returns PDF bytes or None."""
+    import subprocess, tempfile, os, signal
+    data = _lo_prepare(data)
+    if data is None:
+        app.logger.warning(f"LibreOffice convert skipped for {filename}: not an Office file")
+        return None
+    if not _LO_SLOTS.acquire(timeout=_LO_SLOT_WAIT):
+        app.logger.warning(f"LibreOffice convert skipped for {filename}: converter busy")
+        return None
+    proc = None
     try:
-        import subprocess, tempfile, os
         from werkzeug.utils import secure_filename as _sf
         safe = _sf(filename or '') or 'document'
         ext = _file_ext(filename or '')
@@ -9954,23 +10463,28 @@ def _libreoffice_convert_to_pdf(data, filename):
             with open(src_path, 'wb') as f:
                 f.write(data)
             profile_dir = os.path.join(workdir, 'profile')
-            os.makedirs(profile_dir, exist_ok=True)
-            result = subprocess.run(
-                [
-                    'soffice',
-                    f'-env:UserInstallation=file://{profile_dir}',
+            os.makedirs(os.path.join(profile_dir, 'user'), exist_ok=True)
+            with open(os.path.join(profile_dir, 'user', 'registrymodifications.xcu'),
+                      'w', encoding='utf-8') as f:
+                f.write(_LO_HARDENED_XCU)
+            argv = ['soffice', f'-env:UserInstallation=file://{profile_dir}',
                     '--headless', '--nologo', '--nofirststartwizard',
-                    '--convert-to', 'pdf',
-                    '--outdir', workdir,
-                    src_path,
-                ],
-                # Parses user-uploaded files: none of the app's secrets.
-                capture_output=True, timeout=90, env=app_config.child_env(),
-            )
-            if result.returncode != 0:
+                    '--convert-to', 'pdf', '--outdir', workdir, src_path]
+            if shutil.which('prlimit'):
+                argv = ['prlimit', f'--cpu={_LO_TIMEOUT + 30}', '--core=0', '--'] + argv
+            # Parses user-uploaded files: none of the app's secrets.
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, start_new_session=True,
+                                    env=app_config.child_env(TMPDIR=workdir))
+            try:
+                _out, err = proc.communicate(timeout=_LO_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                app.logger.warning(f"LibreOffice convert timed out for {filename}")
+                return None
+            if proc.returncode != 0:
                 app.logger.warning(
                     f"LibreOffice convert failed for {filename}: "
-                    f"rc={result.returncode} stderr={result.stderr[:200]!r}")
+                    f"rc={proc.returncode} stderr={(err or b'')[:200]!r}")
                 return None
             for fn in os.listdir(workdir):
                 if fn.lower().endswith('.pdf') and fn != safe:
@@ -9981,8 +10495,21 @@ def _libreoffice_convert_to_pdf(data, filename):
         app.logger.warning("LibreOffice (soffice) not installed — cannot convert office files")
         return None
     except Exception as e:
-        app.logger.warning(f"LibreOffice convert error for {filename}: {e}")
+        app.logger.warning(f"LibreOffice convert error for {filename}: {type(e).__name__}")
         return None
+    finally:
+        # The whole tree (shell script → oosplash → soffice.bin), whatever
+        # happened above; a finished group is simply gone.
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                proc.communicate(timeout=5)
+            except Exception:
+                pass
+        _LO_SLOTS.release()
 
 
 def _render_omitted_files_index_pdf(omitted, base_url):
@@ -11259,7 +11786,7 @@ _SHOW_PURGE_TABLES = ['advance_data', 'schedule_rows', 'schedule_meta',
 _SHOW_MERGE_MOVE_TABLES = ['labor_requests', 'post_show_labor', 'show_assets',
     'show_external_rentals', 'show_performances', 'show_comments',
     'show_attachments', 'security_signin_names', 'piano_tunings',
-    'spot_captures']
+    'spot_captures', 'chat_threads']
 
 # Friendly labels for the merge preview's "what will move" summary.
 _SHOW_MERGE_MOVE_LABELS = {
@@ -11269,6 +11796,7 @@ _SHOW_MERGE_MOVE_LABELS = {
     'show_attachments': 'Files', 'security_signin_names': 'Security sign-in names',
     'piano_tunings': 'Piano tunings',
     'spot_captures': 'Spot sound levels',
+    'chat_threads': 'Message conversations',
 }
 
 # Advance fields stored as scalar columns on the shows row (vs the advance_data
@@ -11283,6 +11811,14 @@ _ADVANCE_SCALAR_FIELDS = [
 def _purge_show(db, show_id):
     """Delete a show plus the child rows not handled by ON DELETE CASCADE.
     Caller commits. Used by both delete_show and merge_shows."""
+    # Conversations tagged with this show lose the tag FIRST (what the FK's
+    # ON DELETE SET NULL would do, but taking the chat_threads row locks
+    # before the shows row): a message being sent in such a thread locks the
+    # thread, then needs the show row — the other order deadlocked.
+    db.execute('UPDATE chat_threads SET show_id = NULL WHERE show_id = %s', (show_id,))
+    # The optional module's own bookkeeping for its links to this show (its
+    # tables cascade by FK). Before any row of the show is touched.
+    projects_module.on_show_delete(db, show_id)
     for tbl in _SHOW_PURGE_TABLES:
         db.execute(f'DELETE FROM {tbl} WHERE show_id=%s', (show_id,))
     db.execute('DELETE FROM shows WHERE id=%s', (show_id,))
@@ -11412,6 +11948,12 @@ def merge_shows(keeper_id):
     keeper, source = dict(keeper), dict(source)
     try:
         moved = {t: c['count'] for t, c in _show_child_counts(db, source_id).items()}
+        # 0. The optional module's links to the duplicate follow it to the
+        #    keeper. Its own tables, moved by its own function — deliberately
+        #    NOT in _SHOW_MERGE_MOVE_TABLES, whose row counts this screen
+        #    shows to admins. Must run before the duplicate is deleted (the
+        #    links cascade away with it) and whether or not the module is on.
+        projects_module.on_show_merge(db, source_id, keeper_id)
         # 1. Reassign additive child rows onto the keeper.
         for tbl in _SHOW_MERGE_MOVE_TABLES:
             db.execute(f'UPDATE {tbl} SET show_id=%s WHERE show_id=%s', (keeper_id, source_id))
@@ -11858,7 +12400,7 @@ def performance_live_control():
     """Start (or renew) / stop live request capture. Capture lapses on its own
     _PERF_LIVE_TTL s after the last renewal, so a closed Live tab can't leave
     every worker writing a row per request forever."""
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     on = bool(data.get('on'))
     until = time.time() + _PERF_LIVE_TTL if on else 0.0
     db = get_db()
@@ -11917,7 +12459,7 @@ def performance_reset():
     """Delete collected performance stats — everything, or a date range
     (inclusive). Covers the daily + hourly rollups, slow queries and the live
     log. Already-buffered (unflushed) stats from the last minute still land."""
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     scope = data.get('scope')
     if scope == 'all':
         d_from = d_to = None
@@ -12615,6 +13157,8 @@ def delete_user(uid):
                          user_id = NULL
                     FROM users u
                    WHERE u.id = %s AND show_comments.user_id = u.id""", (uid,))
+    # The optional module's bell rows for this person (no FK on notifications).
+    projects_module.on_user_delete(db, uid)
     db.execute('DELETE FROM users WHERE id=%s', (uid,))
     db.commit(); db.close()
     syslog_logger.info(f"USER_DELETE user_id={uid} by={session.get('username')}")
@@ -12633,7 +13177,7 @@ def toggle_user_lock(uid):
     if uid == session.get('user_id'):
         return jsonify({'success': False,
                         'error': "You can't lock your own account."}), 400
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     db = get_db()
     row = db.execute('SELECT username, is_locked FROM users WHERE id=%s', (uid,)).fetchone()
     if not row:
@@ -12696,7 +13240,7 @@ def toggle_force_password_change(uid):
     blocked) until they pick a new password meeting the complexity policy.
 
     Body: {"force": true|false}. If omitted, the current state is toggled."""
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     db = get_db()
     row = db.execute('SELECT username, must_change_password FROM users WHERE id=%s',
                      (uid,)).fetchone()
@@ -12728,7 +13272,7 @@ def set_view_mode():
     login gate this is the endpoint's only CSRF guard."""
     if not _origin_matches():
         abort(403)
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     mode = data.get('mode') or request.form.get('mode') or ''
     if mode not in ('mobile', 'desktop', 'auto'):
         return jsonify({'error': 'mode must be mobile, desktop, or auto'}), 400
@@ -15397,23 +15941,46 @@ def venue_colors_save():
     return jsonify({'success': True})
 
 
+def _modules_see_unlisted():
+    """True when the signed-in admin may see the 'unlisted' APP_MODULES
+    entries on Settings → Modules: only an admin who has their own row in
+    that module's access table. Asked of the table directly (not the
+    module's has_access()) because the entry must show while the module is
+    still switched OFF — that is where it gets switched on. A database where
+    the table does not exist yet is simply "no access"; an outage is NOT
+    caught (the page 503s like any other)."""
+    uid = session.get('user_id')
+    if not uid or session.get('user_role') != 'admin':
+        return False
+    db = get_db()
+    try:
+        if db.execute("SELECT to_regclass('pm_access') AS t").fetchone()['t'] is None:
+            return False
+        return db.execute('SELECT 1 FROM pm_access WHERE user_id = %s',
+                          (uid,)).fetchone() is not None
+    finally:
+        db.close()
+
+
 @app.route('/settings/modules', methods=['GET'])
 @admin_required
 def modules_list():
     """The optional feature modules (APP_MODULES) with their current state,
-    for the Settings → Modules panel."""
+    for the Settings → Modules panel. 'unlisted' entries are left out
+    entirely unless _modules_see_unlisted()."""
     def _url(m):
         try:
             return url_for(m['settings_endpoint']) if m.get('settings_endpoint') else None
         except Exception:
             return None
+    see_unlisted = _modules_see_unlisted()
     return jsonify({'modules': [{
         'key': m['key'],
         'name': m['name'],
         'description': m['description'],
         'enabled': module_enabled(m['key']),
         'settings_url': _url(m),
-    } for m in APP_MODULES], 'integrations': [{
+    } for m in APP_MODULES if see_unlisted or not m.get('unlisted')], 'integrations': [{
         'key': m['key'], 'name': m['name'], 'description': m['description'],
         'settings_url': _url(m),
     } for m in APP_INTEGRATIONS]})
@@ -15424,8 +15991,12 @@ def modules_list():
 def modules_save():
     """Switch optional feature modules on/off. Body: {key: bool, ...} — only
     keys present in APP_MODULES are accepted. Applies immediately (module
-    routes re-check the flag per request), no restart needed."""
+    routes re-check the flag per request), no restart needed. An 'unlisted'
+    module can be switched here like any other, but it is echoed back only
+    to a caller who named it or may see it listed."""
     data = request.get_json(force=True) or {}
+    if not isinstance(data, dict):
+        data = {}
     changed = []
     db = get_db()
     for m in APP_MODULES:
@@ -15435,15 +16006,21 @@ def modules_save():
         db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
                    (f"module_{m['key']}_enabled", enabled))
         changed.append((m['key'], enabled))
-        log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
-                  detail=f"module_{m['key']}_enabled={enabled}")
+        if not m.get('unlisted'):
+            # An unlisted module (none today) leaves no Audit Log row: every
+            # admin reads that page, and the setting's name alone would give
+            # it away. Its MODULE_TOGGLE syslog line below is the trail.
+            log_audit(db, 'SETTINGS_CHANGE', 'setting', None,
+                      detail=f"module_{m['key']}_enabled={enabled}")
     db.commit(); db.close()
     for key, enabled in changed:
         syslog_logger.info(
             f"MODULE_TOGGLE key={key} enabled={enabled} by={session.get('username')}")
+    see_unlisted = _modules_see_unlisted()
     return jsonify({'success': True, 'modules': [{
         'key': m['key'], 'enabled': module_enabled(m['key']),
-    } for m in APP_MODULES]})
+    } for m in APP_MODULES
+        if see_unlisted or not m.get('unlisted') or m['key'] in data]})
 
 
 @app.route('/settings/upload-size', methods=['POST'])
@@ -15870,6 +16447,7 @@ _EMAIL_PURPOSE_LABELS = {
     'password_reset': 'Password reset', 'email_confirm': 'Email confirmation',
     'gateway_otp': 'Sign-in code', 'test': 'Email test',
     'maintenance_notice': 'Maintenance notice', 'maintenance_complete': 'Maintenance complete',
+    'inbox_digest': 'Inbox (messages / mentions / reminders)',
 }
 
 
@@ -16199,7 +16777,7 @@ def email_errors_clear():
     'resolved' is the safe default — only removes rows already marked
     handled. Pass 'all' to wipe everything (e.g. before re-running tests).
     """
-    data = request.get_json(silent=True) or {}
+    data = _json_obj()
     scope = (data.get('scope') or 'resolved').lower()
     db = get_db()
     if scope == 'all':
@@ -20772,7 +21350,7 @@ def archive_crew_member(mid):
     """Archive (or with {"restore": true} restore) a technician. Archived
     technicians keep their skills, notes and every shift that names them;
     they only leave the scheduling pickers and the active lists."""
-    restore = bool((request.get_json(silent=True) or {}).get('restore'))
+    restore = bool(_json_obj().get('restore'))
     db = get_db()
     before = _snapshot_row(db, 'crew_members', mid)
     if not before:
@@ -23270,8 +23848,9 @@ def show_assets_list(show_id):
 
     # External rentals
     ext_rows = db.execute(f"""
-        SELECT {_cols_except(db, 'show_external_rentals', ('pdf_data', 's3_key'))}
-        FROM show_external_rentals WHERE show_id=%s ORDER BY sort_order, id
+        SELECT {_cols_except(db, 'show_external_rentals', ('pdf_data', 's3_key'), alias='er')},
+               CASE WHEN {_ER_BILLED_SQL} THEN 1 ELSE 0 END AS on_invoice
+        FROM show_external_rentals er WHERE er.show_id=%s ORDER BY er.sort_order, er.id
     """, (show_id,)).fetchall()
 
     # Approval state
@@ -25404,12 +25983,24 @@ def _merge_pdfs(base_pdf_bytes, extra_pdfs, extras_watermark=None):
         return base_pdf_bytes
 
 
+# External-rental lines that are BILLED (3.47.0). A piano tuning's line
+# (piano_tuning_id) stays on the show — Assets tab, Reports — as a show
+# expense, but is settled separately: it reaches the Asset Estimate / Final /
+# Combined Invoice (line, total and appended paperwork) only when the piano
+# manager ticked "Bill on the show's invoices" (piano_tunings.bill_on_invoice,
+# default 0). Every billing query filters with this; alias the table `er`.
+_ER_BILLED_SQL = ("(er.piano_tuning_id IS NULL OR EXISTS (SELECT 1 FROM piano_tunings pt "
+                  "WHERE pt.id = er.piano_tuning_id AND pt.bill_on_invoice = 1))")
+
+
 def _fetch_external_rental_pdfs(db, show_id):
-    """Return list of PDF byte-strings for all external rentals that have attached PDFs."""
+    """PDF byte-strings of the paperwork attached to the show's BILLED
+    external rentals (see _ER_BILLED_SQL) — appended to the invoices."""
     rows = db.execute(
-        f"SELECT id, s3_key, pdf_filename, {file_store.in_db_col('rentals')} "
-        "FROM show_external_rentals WHERE show_id=%s AND COALESCE(pdf_filename, '') <> '' "
-        'ORDER BY sort_order',
+        f"SELECT er.id, er.s3_key, er.pdf_filename, {file_store.in_db_col('rentals')} "
+        "FROM show_external_rentals er WHERE er.show_id=%s "
+        f"AND COALESCE(er.pdf_filename, '') <> '' AND {_ER_BILLED_SQL} "
+        'ORDER BY er.sort_order',
         (show_id,)
     ).fetchall()
     result = []
@@ -25436,8 +26027,8 @@ def _fetch_external_rental_pdfs(db, show_id):
 def _fetch_show_assets_and_externals(db, show_id):
     """Assets + external rentals for a show's invoices, with subtotals.
     Shared by the asset invoice and the final (post-show) invoice so the
-    two stay in lock-step. Piano tunings arrive as their linked external
-    rental lines (3.9.1)."""
+    two stay in lock-step. A piano tuning's linked external-rental line is
+    included only when its manager chose to bill it (_ER_BILLED_SQL, 3.47.0)."""
     assets = db.execute("""
         SELECT sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end, sa.notes,
                sa.asset_item_id, ai.barcode AS unit_barcode,
@@ -25450,11 +26041,11 @@ def _fetch_show_assets_and_externals(db, show_id):
         WHERE sa.show_id = %s AND sa.is_hidden = 0
         ORDER BY ac.sort_order, at.name
     """, (show_id,)).fetchall()
-    external_rentals = db.execute("""
-        SELECT description, cost, pdf_filename
-        FROM show_external_rentals
-        WHERE show_id = %s
-        ORDER BY sort_order
+    external_rentals = db.execute(f"""
+        SELECT er.description, er.cost, er.pdf_filename
+        FROM show_external_rentals er
+        WHERE er.show_id = %s AND {_ER_BILLED_SQL}
+        ORDER BY er.sort_order
     """, (show_id,)).fetchall()
     assets_list = [dict(a) for a in assets]
     ext_list    = [dict(e) for e in external_rentals]
@@ -25943,7 +26534,7 @@ _PIANO_REQUEST_FIELDS = ('piano_asset_type_id', 'piano_asset_item_id', 'piano',
 # Fields only the piano manager edits.
 # Only a start time (3.10.2): tuning_end is no longer set or shown.
 _PIANO_MANAGER_FIELDS = ('piano_vendor_id', 'tuning_date', 'tuning_start',
-                         'cost', 'manager_notes', 'purpose')
+                         'cost', 'bill_on_invoice', 'manager_notes', 'purpose')
 # House tunings (3.18.0): no show — maintenance, rehearsal, recording… The
 # piano manager's own: no schedule row, no show charge, no PM cancel flow.
 PIANO_HOUSE_PURPOSES = ('Maintenance', 'Rehearsal', 'Recording', 'Event', 'Seasonal', 'Other')
@@ -26387,8 +26978,10 @@ def _piano_er_description(t):
 def _sync_piano_external_rental(db, tid, s3_deletes):
     """Keep tuning `tid`'s linked show_external_rentals line (3.9.1): it
     exists while the tuning isn't cancelled and has a cost or paperwork, so
-    the charge shows on the Assets tab, the Asset Estimate and the Final /
-    Combined Invoice like any external rental (paperwork PDF appended).
+    the cost shows on the Assets tab and in Reports as a show expense. It is
+    billed on the Asset Estimate / Final / Combined Invoice (paperwork PDF
+    appended) only when the tuning's bill_on_invoice is set (_ER_BILLED_SQL,
+    3.47.0 — tunings are normally settled separately).
     Cancelling removes the line and its paperwork. Caller commits, THEN
     deletes the S3 keys this appended to `s3_deletes` (_piano_s3_cleanup), so
     a rollback never leaves the DB pointing at a deleted object. Returns the
@@ -26600,6 +27193,8 @@ def _piano_clean(data, fields):
                               }.get(k, 'Pick the vendor from the list.')
         elif k in ('requested_time', 'tuning_start'):
             out[k] = _normalize_perf_time(str(v or ''))[:20]
+        elif k == 'bill_on_invoice':
+            out[k] = 1 if v in (1, True, '1', 'true', 'on') else 0
         elif k == 'cost':
             s = str(v if v is not None else '').strip().replace('$', '').replace(',', '')
             if not s:
@@ -27378,8 +27973,9 @@ _PIANO_ER_COLS = ("(SELECT er.id FROM show_external_rentals er WHERE er.piano_tu
 @piano_manager_required
 def piano_tuning_paperwork_upload(tid):
     """Attach the vendor paperwork (PDF) to a tuning. It lives on the
-    tuning's external-rental line, so it shows on the show's Assets tab and
-    is appended to the Asset Estimate / Final / Combined Invoice PDFs."""
+    tuning's external-rental line, so it shows on the show's Assets tab; it
+    is appended to the Asset Estimate / Final / Combined Invoice PDFs only
+    when the tuning is billed on the invoices (bill_on_invoice)."""
     if not _piano_module_on():
         abort(404)
     f = request.files.get('pdf')
@@ -27504,6 +28100,27 @@ def _detect_service_name():
             pass
     return None
 
+def _update_private(line):
+    """True for an updater line (a commit subject, a changed path, a line of
+    `git pull` output) that names the optional per-user-access module — its
+    files are projects_*.py / project_docs.py / projects_assets/ /
+    templates/projects/ / templates/pdf/project_*. Every admin can open
+    Settings → System → Check for updates, and that module must stay
+    invisible to admins who were not given it (CLAUDE.md "Projects module").
+    "Overhead & Project Crew" is an ordinary feature and stays visible."""
+    low = (line or '').lower()
+    return 'project' in low and 'project crew' not in low and 'overhead' not in low
+
+
+def _update_public(lines):
+    """`lines` without the module's, plus one neutral line counting them."""
+    shown = [l for l in lines if not _update_private(l)]
+    hidden = len(lines) - len(shown)
+    if hidden:
+        shown.append(f'(+{hidden} more)')
+    return shown
+
+
 def _run_update(service_name):
     """Background thread: git pull + archive + restart + rollback on failure."""
     import glob as _glob
@@ -27530,7 +28147,7 @@ def _run_update(service_name):
             _update_state['phase'] = 'done'
             return
 
-        _update_log(f'Files to update: {", ".join(changed)}')
+        _update_log(f'Files to update: {", ".join(_update_public(changed))}')
 
         # Archive changed files
         _update_state['phase'] = 'archiving'
@@ -27554,7 +28171,8 @@ def _run_update(service_name):
                            cwd=os.path.dirname(os.path.abspath(__file__)))
         if r.returncode != 0:
             raise RuntimeError(f'git pull failed: {r.stderr.strip() or r.stdout.strip()}')
-        _update_log(r.stdout.strip() or 'Pull successful.')
+        _update_log('\n'.join(_update_public(r.stdout.strip().split('\n'))) if r.stdout.strip()
+                    else 'Pull successful.')
 
         # Run DB migration
         _update_log('Running database migrations…')
@@ -27587,14 +28205,21 @@ def _run_update(service_name):
         syslog_logger.info('APP_UPDATE applied successfully')
 
     except Exception as exc:
-        _update_state['error'] = str(exc)
-        _update_log(f'ERROR: {exc}')
+        # Error text (git's stderr can list paths) and the restored file
+        # names go through the same filter as the file list above; the raw
+        # text is in syslog only.
+        err = '\n'.join(_update_public(str(exc).split('\n')))
+        _update_state['error'] = err
+        _update_log(f'ERROR: {err}')
         _update_log('Attempting rollback…')
         _update_state['phase'] = 'rolling_back'
         try:
+            restored = []
             for src, bak in archived_files:
                 shutil.copy2(bak, src)
-                _update_log(f'  Restored {os.path.basename(src)}')
+                restored.append(os.path.basename(src))
+            if restored:
+                _update_log('  Restored ' + ', '.join(_update_public(restored)))
             _update_log('Rollback complete.')
             if service_name:
                 _update_log(f'Restarting {service_name} after rollback…')
@@ -27621,7 +28246,8 @@ def update_check():
                             capture_output=True, text=True, timeout=10,
                             cwd=os.path.dirname(os.path.abspath(__file__)))
         files = [f.strip() for f in r3.stdout.split('\n') if f.strip()]
-        return jsonify({'available': bool(commits), 'commits': commits, 'files': files})
+        return jsonify({'available': bool(commits), 'commits': _update_public(commits),
+                        'files': _update_public(files)})
     except Exception as e:
         return jsonify({'available': False, 'error': str(e)})
 
@@ -27664,6 +28290,282 @@ def update_status_api():
 @admin_required
 def detect_service():
     return jsonify({'service': _detect_service_name()})
+
+
+# ─── Settings → About 321Theater (3.50.0) ─────────────────────────────────────
+# One admin page about THIS server: release, service, hardware, database, the
+# venv's Python packages against requirements.txt, the system programs the app
+# shells out to (with Debian's pending updates for them) and whether Debian's
+# automatic security updates are on. Everything comes from system_info.py
+# (no root, fixed commands, child_env). The slow part (apt, systemctl, dpkg —
+# a few seconds) is cached per worker for _ABOUT_TTL and computed under a lock
+# so several admins opening the page run it once. Nothing here changes the
+# server: updating packages is Debian's job (unattended-upgrades, which
+# install.sh switches on) or the admin's (sudo bash install.sh).
+_ABOUT_TTL = 600
+_ABOUT_LOCK = threading.Lock()
+_ABOUT_CACHE = {'at': 0.0, 'data': None}
+_PROCESS_STARTED = time.time()
+_REQUIREMENTS_PATH = os.path.join(APP_DIR, 'requirements.txt')
+_RELEASE_INFO = system_info.release_info(APP_DIR, env=app_config.child_env())
+
+# What each requirements.txt package is for, in plain words (shown on the page).
+_PY_PURPOSES = {
+    'flask': 'Web framework', 'werkzeug': 'Web framework (requests, uploads)',
+    'weasyprint': 'Builds every PDF', 'apscheduler': 'Background jobs (backups, e-mails)',
+    'gunicorn': 'The web server the service runs', 'flask-limiter': 'Sign-in rate limiting',
+    'qrcode': 'QR codes', 'pillow': 'Images (photos, logos, QR codes)',
+    'psycopg2-binary': 'PostgreSQL driver', 'pdfplumber': 'Reading text from PDFs',
+    'python-docx': 'Word files', 'striprtf': 'RTF files', 'openpyxl': 'Excel files (.xlsx)',
+    'xlrd': 'Old Excel files (.xls)', 'extract-msg': 'Outlook .msg e-mail files',
+    'dnspython': 'E-mail domain checks', 'boto3': 'S3 / SeaweedFS file storage',
+    'pdfrw': 'Merging PDFs', 'pymupdf': 'Reading and merging PDFs',
+}
+
+# The system programs the app shells out to. `packages` are the Debian
+# packages whose pending updates matter; `level` = how bad missing is.
+_SYSTEM_PROGRAMS = (
+    {'key': 'libreoffice', 'name': 'LibreOffice', 'binary': 'soffice', 'level': 'warn',
+     'packages': ('libreoffice-core', 'libreoffice-writer', 'libreoffice-calc', 'libreoffice-impress',
+                  'libreoffice-common'),
+     'purpose': 'Turns Word / Excel / PowerPoint / RTF uploads into PDF pages (advance PDFs, document previews)',
+     'missing': 'Office files are listed as "not embedded" instead of converted.'},
+    {'key': 'pg_dump', 'name': 'PostgreSQL client (pg_dump)', 'binary': 'pg_dump', 'level': 'error',
+     'packages': (), 'pattern': 'postgresql-client-[0-9]*',
+     'purpose': 'Hourly and daily database backups',
+     'missing': 'Database backups cannot run.'},
+    {'key': 'python3', 'name': 'Python 3', 'binary': 'python3', 'level': 'error',
+     'packages': ('python3', 'python3-minimal'), 'purpose': 'Runs the app (the venv is built from it)',
+     'missing': ''},
+    {'key': 'pango', 'name': 'Pango text layout', 'binary': '', 'level': 'error',
+     'packages': ('libpango-1.0-0', 'libpangoft2-1.0-0'), 'purpose': 'Lays out the text of every PDF (used by WeasyPrint)',
+     'missing': 'PDFs cannot be built.'},
+    {'key': 'prlimit', 'name': 'prlimit (util-linux)', 'binary': 'prlimit', 'level': 'warn',
+     'packages': ('util-linux',), 'purpose': 'Caps the CPU time of LibreOffice conversions',
+     'missing': 'LibreOffice runs without a CPU limit (the timeout still stops it).'},
+    {'key': 'git', 'name': 'git', 'binary': 'git', 'level': 'info',
+     'packages': ('git',), 'purpose': 'Settings → System → Update (in-app updates)',
+     'missing': 'In-app updates are unavailable; update with git pull.'},
+    {'key': 'node', 'name': 'Node.js', 'binary': 'node', 'level': 'info',
+     'packages': ('nodejs',), 'purpose': 'Prism Sync only',
+     'missing': 'Only needed for Prism Sync.'},
+)
+
+
+def _deps_startup_problems():
+    """Problems a restart can't fix but `sudo bash install.sh` can: missing /
+    too-old Python packages and missing required programs. Cheap (package
+    metadata + PATH lookups) — computed once per process at import."""
+    out = []
+    try:
+        for p in system_info.python_packages(_REQUIREMENTS_PATH):
+            if p['status'] == 'missing':
+                out.append(f"Python package {p['name']} is not installed")
+            elif p['status'] == 'old':
+                out.append(f"Python package {p['name']} {p['installed']} is older than {p['spec']}")
+    except Exception:
+        pass
+    for prog in _SYSTEM_PROGRAMS:
+        if prog['level'] == 'error' and prog['binary'] and not shutil.which(prog['binary']):
+            out.append(f"{prog['name']} is not installed")
+    return out
+
+
+_DEPS_PROBLEMS = _deps_startup_problems()
+
+
+def _log_startup_deps():
+    """One syslog line per worker start: what it runs with (LibreOffice and
+    pg_dump versions) and what is missing — so an upgrade that needed
+    install.sh shows up in the log, not only on the About page."""
+    try:
+        env = app_config.child_env()
+        lo = system_info.dpkg_versions(['libreoffice-core'], env).get('libreoffice-core', '-')
+        pgd = system_info.program_version(['pg_dump', '--version'], env) or '-'
+        missing = ';'.join(_DEPS_PROBLEMS) or '-'
+        syslog_logger.info(f'STARTUP_DEPS version={APP_VERSION} libreoffice={lo} pg_dump={pgd} '
+                           f'problems={len(_DEPS_PROBLEMS)}')
+        if _DEPS_PROBLEMS:
+            syslog_logger.warning(f'STARTUP_DEPS_MISSING run "sudo bash install.sh": {missing}')
+    except Exception:
+        pass
+
+
+threading.Thread(target=_log_startup_deps, name='startup-deps', daemon=True).start()
+
+
+def _about_service_name():
+    try:
+        return _detect_service_name()
+    except Exception:
+        return None
+
+
+def _about_build():
+    """The whole About payload (slow: a few seconds of dpkg / apt / systemd)."""
+    env = app_config.child_env()
+    problems = []
+
+    def problem(level, text):
+        problems.append({'level': level, 'text': text})
+
+    # Service
+    svc_name = _about_service_name()
+    svc = system_info.service_status(svc_name, env) if svc_name else {}
+    workers = system_info.worker_info()
+    try:
+        from importlib import metadata as _md
+        gunicorn_v = _md.version('gunicorn')
+    except Exception:
+        gunicorn_v = ''
+    service = {'name': svc_name or '', 'status': svc, 'app_dir': APP_DIR, 'user': workers['user'],
+               'pid': workers['pid'], 'master_pid': workers['master_pid'], 'workers': workers['workers'],
+               'python': sys.version.split()[0], 'python_path': sys.executable, 'gunicorn': gunicorn_v,
+               'process_started': datetime.fromtimestamp(_PROCESS_STARTED).astimezone().isoformat(),
+               'test_mode': TEST_MODE}
+    if not svc_name:
+        problem('info', 'Could not tell which systemd service runs the app (started by hand?).')
+    elif svc.get('active') and svc['active'] != 'active':
+        problem('warn', f"Service {svc_name} reports {svc['active']}.")
+
+    # Server
+    server = system_info.server_info([('App folder', APP_DIR), ('Backups', BACKUP_DIR),
+                                      ('Temp files', tempfile.gettempdir())])
+    for d in server['disks']:
+        if d['total'] and d['free'] / d['total'] < 0.10:
+            problem('warn', f"{d['label']}: only {d['free'] // (1024 ** 3)} GB free "
+                            f"({round(100 * d['free'] / d['total'])}%).")
+    mem = server['memory']
+    if mem.get('total') and mem.get('available') is not None and mem['available'] / mem['total'] < 0.10:
+        problem('warn', 'Less than 10% of memory is free.')
+
+    # Database
+    database, server_major = {}, None
+    db = get_db()
+    try:
+        r = db.execute(
+            "SELECT version() AS v, current_setting('server_version_num') AS num, current_database() AS db, "
+            "pg_database_size(current_database()) AS size, current_setting('max_connections') AS maxc, "
+            "(SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database()) AS conns, "
+            "(SELECT COUNT(*) FROM pg_stat_activity) AS conns_all").fetchone()
+        server_major = int(r['num']) // 10000
+        database = {'version': r['v'].split(',')[0], 'major': server_major, 'name': r['db'],
+                    'size': int(r['size'] or 0), 'connections': int(r['conns']),
+                    'connections_all': int(r['conns_all']), 'max_connections': int(r['maxc'])}
+        if int(r['conns_all']) > 0.8 * int(r['maxc']):
+            problem('warn', f"PostgreSQL has {r['conns_all']} of {r['maxc']} connections in use.")
+    except db_adapter.DatabaseUnavailable:
+        raise
+    except Exception:
+        problem('warn', 'Could not read the database details.')
+    finally:
+        db.close()
+
+    # Python packages
+    py = system_info.python_packages(_REQUIREMENTS_PATH, _PY_PURPOSES)
+    for p in py:
+        if p['status'] == 'missing':
+            problem('error', f"Python package {p['name']} is not installed — run sudo bash install.sh.")
+        elif p['status'] == 'old':
+            problem('error', f"Python package {p['name']} {p['installed']} is older than required "
+                             f"({p['spec']}) — run sudo bash install.sh.")
+
+    # System programs + Debian's pending updates
+    apt = system_info.apt_upgradable(env)
+    pending = (apt or {}).get('packages', {})
+    programs = []
+    for spec in _SYSTEM_PROGRAMS:
+        pk = system_info.dpkg_versions(list(spec['packages']), env) if spec['packages'] else {}
+        if spec.get('pattern'):
+            pk.update(system_info.dpkg_matching(spec['pattern'], env))
+        found = bool(shutil.which(spec['binary'])) if spec['binary'] else bool(pk)
+        version = ''
+        if spec['key'] == 'pg_dump':
+            version = system_info.program_version(['pg_dump', '--version'], env)
+        elif spec['key'] == 'node':
+            version = system_info.program_version(['node', '--version'], env)
+        elif spec['key'] == 'python3':
+            version = system_info.program_version(['python3', '--version'], env)
+        elif pk:
+            version = next(iter(pk.values()))
+        updates = [{'package': n, **pending[n]} for n in sorted(pending) if n in pk]
+        row = {'key': spec['key'], 'name': spec['name'], 'purpose': spec['purpose'], 'found': found,
+               'version': version, 'packages': pk, 'updates': updates, 'level': spec['level'],
+               # Installed some other way (a tarball, nodesource…): Debian can't
+               # say whether it is current, so the page must not claim it is.
+               'debian': bool(pk), 'apt_known': apt is not None,
+               'note': '' if found else spec['missing']}
+        if spec['key'] == 'pg_dump' and found and version and server_major:
+            try:
+                if int(version.split('.')[0]) < server_major:
+                    row['note'] = (f'pg_dump {version} is older than the PostgreSQL {server_major} server — '
+                                   'backups will fail. Install postgresql-client-' + str(server_major) + '.')
+                    problem('error', row['note'])
+            except ValueError:
+                pass
+        if not found and spec['level'] in ('error', 'warn'):
+            problem(spec['level'], f"{spec['name']} is not installed. {spec['missing']}")
+        if updates:
+            sec = any(u['security'] for u in updates)
+            problem('warn' if sec else 'info',
+                    f"{spec['name']}: {'security ' if sec else ''}update waiting "
+                    f"({updates[0]['installed'] or '?'} → {updates[0]['candidate']}).")
+        programs.append(row)
+
+    auto = system_info.auto_updates(env)
+    updates = {'apt': None if apt is None else {k: apt[k] for k in ('total', 'security', 'lists_age_s')},
+               'auto': auto}
+    if apt is not None:
+        if apt['security']:
+            problem('warn', f"{apt['security']} security update(s) waiting for this server.")
+        age = apt['lists_age_s'] if apt['lists_age_s'] is not None else auto.get('lists_stamp_s')
+        if age is None:
+            problem('info', "Can't tell when the package lists were last refreshed, so “no updates waiting” "
+                            'may be out of date.')
+        elif age > 3 * 86400:
+            problem('warn', f'The package lists are {age // 86400} days old — pending updates may be missing '
+                            'from this page (the daily apt timer may be off).')
+        if not auto['installed']:
+            problem('warn', 'Automatic security updates (unattended-upgrades) are not installed — '
+                            'run sudo bash install.sh.')
+        elif not auto['enabled']:
+            problem('warn', 'unattended-upgrades is installed but switched off '
+                            '(APT::Periodic::Unattended-Upgrade).')
+    order = {'error': 0, 'warn': 1, 'info': 2}
+    problems.sort(key=lambda p: order[p['level']])
+    return {
+        'release': {'version': APP_VERSION, **_RELEASE_INFO},
+        'service': service, 'server': server, 'database': database, 'python': py,
+        'programs': programs, 'updates': updates, 'problems': problems,
+        'checked_at': datetime.now().astimezone().isoformat(),
+    }
+
+
+@app.route('/settings/about')
+@admin_required
+def about_page():
+    """Settings → About 321Theater. The page is a shell; its data comes from
+    /settings/about/data (slow checks, cached)."""
+    return render_template('about.html', user=get_current_user())
+
+
+@app.route('/settings/about/data')
+@admin_required
+def about_data():
+    """The About payload. `?refresh=1` re-runs the checks now (otherwise a
+    result up to _ABOUT_TTL old is reused). Read-only: it changes nothing."""
+    refresh = request.args.get('refresh') == '1'
+    now = time.time()
+    with _ABOUT_LOCK:
+        cached = _ABOUT_CACHE['data']
+        if cached is None or refresh or now - _ABOUT_CACHE['at'] > _ABOUT_TTL:
+            cached = _about_build()
+            _ABOUT_CACHE.update(at=time.time(), data=cached)
+    out = dict(cached)
+    # Live numbers are cheap — always fresh.
+    out['live'] = {'load': list(os.getloadavg()) if hasattr(os, 'getloadavg') else None,
+                   'workers': system_info.worker_info()['workers']}
+    return jsonify(out)
 
 
 # ─── User Registration & Recovery ─────────────────────────────────────────────
@@ -29353,7 +30255,7 @@ def dashboard_view(dash_id):
 @login_required
 def dashboard_edit(dash_id):
     db = get_db()
-    d = db.execute('SELECT * FROM asset_dashboards WHERE id=%s', (dash_id,)).fetchone()
+    d = db.execute('SELECT * FROM asset_dashboards WHERE id=%s FOR UPDATE', (dash_id,)).fetchone()
     if not d or d['user_id'] != session['user_id']:
         db.close()
         abort(403)
@@ -29364,6 +30266,27 @@ def dashboard_edit(dash_id):
     slug = d['public_slug']
     if data.get('is_public') and not slug:
         slug = secrets.token_urlsafe(12)
+    # Saved-report widgets are also added from the Reports page (3.48.0),
+    # while this dashboard may be open in a tab that then saves the widget
+    # list it loaded. `base_saved` = the saved-report ids that page knew of:
+    # a stored saved-report widget it never knew about is kept, one it knew
+    # and left out was removed on purpose.
+    config = data.get('config', {})
+    if isinstance(config, dict) and isinstance(config.get('widgets'), list):
+        try:
+            stored = (json.loads(d['config_json'] or '{}') or {}).get('widgets') or []
+        except (ValueError, AttributeError):
+            stored = []
+        known = {w.get('saved_report_id') for w in config['widgets']
+                 if isinstance(w, dict) and w.get('type') == 'saved_report'}
+        base = data.get('base_saved')
+        known |= {x for x in base if isinstance(x, int)} if isinstance(base, list) else set()
+        for w in stored if isinstance(stored, list) else []:
+            if (isinstance(w, dict) and w.get('type') == 'saved_report'
+                    and isinstance(w.get('saved_report_id'), int)
+                    and w['saved_report_id'] not in known and len(config['widgets']) < 40):
+                config['widgets'].append(w)
+                known.add(w['saved_report_id'])
     db.execute("""
         UPDATE asset_dashboards SET name=%s, is_public=%s, public_slug=%s,
                layout=%s, config_json=%s, updated_at=CURRENT_TIMESTAMP
@@ -29373,7 +30296,7 @@ def dashboard_edit(dash_id):
         1 if data.get('is_public') else 0,
         slug if data.get('is_public') else None,
         data.get('layout', 'combined'),
-        json.dumps(data.get('config', {})),
+        json.dumps(config),
         dash_id,
     ))
     db.commit()
@@ -29691,7 +30614,8 @@ def reports_page():
     asset_categories = [dict(r) for r in db.execute(
         'SELECT id, name FROM asset_categories ORDER BY sort_order, name').fetchall()]
     asset_types = [dict(r) for r in db.execute(
-        'SELECT id, name, category_id FROM asset_types WHERE is_retired=0 ORDER BY name').fetchall()]
+        'SELECT id, name, category_id, parent_type_id FROM asset_types WHERE is_retired=0 '
+        'ORDER BY name').fetchall()]
     positions = [dict(r) for r in db.execute(
         'SELECT id, name FROM job_positions ORDER BY name').fetchall()] if _can_report_labor() else []
     techs = [dict(r) for r in db.execute(
@@ -29712,7 +30636,8 @@ def reports_page():
                            asset_categories=asset_categories, asset_types=asset_types,
                            positions=positions, techs=techs, shows=shows, adv_sections=adv_sections,
                            can_assets=_can_report_assets(), can_labor=_can_report_labor(),
-                           can_piano=_can_report_piano(), user=get_current_user())
+                           can_piano=_can_report_piano(), can_sound=module_enabled('spot'),
+                           user=get_current_user())
 
 
 @app.route('/api/reports/overview')
@@ -29880,7 +30805,13 @@ def report_asset_types():
     if denied:
         return denied
     d_from, d_to, _v, _c = _report_filters()
+    # 3.47.0: `types` (ids; a group counts its child items) with types_mode
+    # 'only' (default) or 'exclude' narrows the list to the picked items.
+    pick, exclude = _report_id_list('types'), request.args.get('types_mode') == 'exclude'
     db = get_db()
+    if pick:
+        pick = set(pick) | {r['id'] for r in db.execute(
+            'SELECT id FROM asset_types WHERE parent_type_id = ANY(%s)', (list(pick),)).fetchall()}
     shows = _report_shows(db)
     types = {r['id']: {
         'type_id': r['id'], 'type': r['name'], 'category': r['category_name'],
@@ -29894,7 +30825,7 @@ def report_asset_types():
             FROM asset_types at JOIN asset_categories ac ON ac.id = at.category_id
             WHERE at.is_retired = 0
               AND NOT EXISTS (SELECT 1 FROM asset_types ch WHERE ch.parent_type_id = at.id)
-        """).fetchall()}
+        """).fetchall() if not pick or ((r['id'] in pick) != exclude)}
     for r in _report_asset_lines(db, list(shows)):
         t = types.get(r['asset_type_id'])
         if not t:
@@ -29921,7 +30852,11 @@ def report_asset_types():
                             if span and t['units_owned'] else None)
         out.append(t)
     out.sort(key=lambda t: (-t['lines'], -t['revenue'], t['type'].lower()))
-    return jsonify({'types': out, 'range_days': span})
+    return jsonify({'types': out, 'range_days': span,
+                    'totals': {'items': len(out), 'lines': sum(t['lines'] for t in out),
+                               'units': sum(t['units'] for t in out),
+                               'unit_days': sum(t['unit_days'] for t in out),
+                               'revenue': round(sum(t['revenue'] for t in out), 2)}})
 
 
 @app.route('/api/reports/asset-units')
@@ -29981,33 +30916,63 @@ def report_asset_units():
     return jsonify({'units': list(items.values()), 'pooled': pooled})
 
 
+def _report_id_list(*names, cap=300):
+    """Positive ints from comma-separated query params (first `cap`, no
+    duplicates) — e.g. ?type_ids=3,9 or the older single ?type_id=3."""
+    out = []
+    for n in names:
+        for part in (request.args.get(n) or '').split(','):
+            part = part.strip()
+            if re.fullmatch(r'[0-9]{1,10}', part) and 0 < int(part) < 2 ** 31 and int(part) not in out:
+                out.append(int(part))
+    return out[:cap]
+
+
 @app.route('/api/reports/item-shows')
 @reports_required
 def report_item_shows():
-    """Item History (3.18.0): every show that rented one item — a type (a
-    group counts its child items), optionally one specific unit. Direct
-    lines, plus (whole type only) lines that booked a system/package
-    containing it. Honours the shared date / venue / Arts Group / drill
-    filters via _report_shows()."""
+    """Item History (3.18.0; several items / units since 3.47.0): every show
+    that rented the picked items — `type_ids` (a group counts its child
+    items), optionally narrowed to `unit_ids` (specific units of those items,
+    e.g. four projectors). Direct lines, plus (no unit picked) lines that
+    booked a system/package containing an item. `by_unit` is the usage /
+    income / days-rented summary per unit, idle units included; `by_item`
+    the same per item. Honours the shared date / venue / Arts Group / drill
+    filters via _report_shows(). The single `type_id` / `unit_id` of older
+    links still work."""
     denied = _report_need(_can_report_assets)
     if denied:
         return denied
-    tid = request.args.get('type_id', type=int)
-    uid = request.args.get('unit_id', type=int)
-    if not tid:
+    tids = _report_id_list('type_ids', 'type_id')
+    uids = _report_id_list('unit_ids', 'unit_id')
+    if not tids:
         return jsonify({'error': 'Pick an item.'}), 400
+    d_from, d_to, _v, _c = _report_filters()
     db = get_db()
-    t = db.execute('SELECT id, name FROM asset_types WHERE id=%s', (tid,)).fetchone()
-    if not t:
+    picked = db.execute('SELECT id, name FROM asset_types WHERE id = ANY(%s) ORDER BY name',
+                        (tids,)).fetchall()
+    if not picked:
         db.close()
         return jsonify({'error': 'Item not found.'}), 404
-    type_ids = [tid] + [r['id'] for r in db.execute(
-        'SELECT id FROM asset_types WHERE parent_type_id = %s', (tid,)).fetchall()]
+    tids = [r['id'] for r in picked]
+    kids = db.execute('SELECT id, parent_type_id FROM asset_types WHERE parent_type_id = ANY(%s)',
+                      (tids,)).fetchall()
+    type_ids = sorted(set(tids) | {r['id'] for r in kids})
+    headings = {r['parent_type_id'] for r in kids}     # picked groups: headings over their items
+    # Every unit of the picked items — the choices of the Units picker and
+    # the rows of the per-unit summary. A picked unit must be one of them.
+    units = {r['id']: dict(r) for r in db.execute("""
+        SELECT ai.id, ai.barcode, ai.status, ai.asset_type_id, at.name AS type_name
+        FROM asset_items ai JOIN asset_types at ON at.id = ai.asset_type_id
+        WHERE ai.asset_type_id = ANY(%s)
+        ORDER BY at.name, ai.sort_order, ai.barcode, ai.id""", (type_ids,)).fetchall()}
+    uids = [u for u in uids if u in units]
     shows = _report_shows(db)
     ids = list(shows) or [0]
-    unit_sql, unit_args = ('AND sa.asset_item_id = %s', [uid]) if uid else ('', [])
+    unit_sql, unit_args = ('AND sa.asset_item_id = ANY(%s)', [uids]) if uids else ('', [])
     rows = [dict(r) for r in db.execute(f"""
-        SELECT sa.show_id, sa.quantity, sa.locked_price, sa.rental_start, sa.rental_end,
+        SELECT sa.show_id, sa.asset_type_id, sa.quantity, sa.locked_price,
+               sa.rental_start, sa.rental_end,
                sa.asset_item_id, ai.barcode AS unit_barcode, at.name AS type_name,
                NULL::text AS via_system
         FROM show_assets sa
@@ -30015,10 +30980,11 @@ def report_item_shows():
         LEFT JOIN asset_items ai ON ai.id = sa.asset_item_id
         WHERE sa.show_id = ANY(%s) AND sa.asset_type_id = ANY(%s) AND sa.is_hidden = 0 {unit_sql}
     """, [ids, type_ids] + unit_args).fetchall()]
-    if not uid:
+    if not uids:
         # Inside a booked system/package: priced on the system line, so no $ here.
         rows += [dict(r) for r in db.execute("""
-            SELECT sa.show_id, sa.quantity * COALESCE(m.quantity, 1) AS quantity,
+            SELECT sa.show_id, m.component_type_id AS asset_type_id,
+                   sa.quantity * COALESCE(m.quantity, 1) AS quantity,
                    NULL::double precision AS locked_price, sa.rental_start, sa.rental_end,
                    NULL::integer AS asset_item_id, NULL::text AS unit_barcode,
                    ct.name AS type_name, sys.name AS via_system
@@ -30028,11 +30994,35 @@ def report_item_shows():
             JOIN asset_types ct ON ct.id = m.component_type_id
             WHERE sa.show_id = ANY(%s) AND m.component_type_id = ANY(%s) AND sa.is_hidden = 0
         """, (ids, type_ids)).fetchall()]
-    unit_label = None
-    if uid:
-        u = db.execute('SELECT id, barcode FROM asset_items WHERE id=%s', (uid,)).fetchone()
-        unit_label = ((u['barcode'] or '').strip() or f'#{uid}') if u else f'#{uid}'
+    type_names = {r['id']: r['name'] for r in db.execute(
+        'SELECT id, name FROM asset_types WHERE id = ANY(%s)', (type_ids,)).fetchall()}
     db.close()
+
+    def _ulabel(u):
+        return (u['barcode'] or '').strip() or f"#{u['id']}"
+
+    span = (d_to - d_from).days + 1 if d_from and d_to and d_to >= d_from else None
+
+    def _bucket(**kw):
+        return dict(kw, lines=0, shows=set(), units=0, unit_days=0, revenue=0.0,
+                    last_date=None, last_show='')
+
+    def _add(bk, x):
+        bk['lines'] += 1
+        bk['shows'].add(x['show_id'])
+        bk['units'] += x['quantity']
+        bk['unit_days'] += x['quantity'] * x['days']
+        bk['revenue'] += x['total'] or 0
+        if x['date'] and (not bk['last_date'] or x['date'] > bk['last_date']):
+            bk['last_date'], bk['last_show'] = x['date'], x['show']
+
+    # Per-unit rows exist up front so a unit that never went out still lists
+    # (idle gear is half the point); a retired unit only when it was used.
+    unit_bk = {uid: _bucket(unit_id=uid, type_id=u['asset_type_id'], item=u['type_name'],
+                            unit=_ulabel(u), status=u['status'] or '')
+               for uid, u in units.items() if (uid in uids if uids else True)}
+    pool_bk, item_bk = {}, {tid: _bucket(type_id=tid, item=type_names.get(tid, f'#{tid}'))
+                            for tid in type_ids}
     out = []
     for r in rows:
         sh = shows.get(r['show_id'])
@@ -30040,7 +31030,7 @@ def report_item_shows():
             continue
         qty = int(r['quantity'] or 1)
         price = float(r['locked_price']) if r['locked_price'] is not None else None
-        out.append({
+        x = {
             'show_id': sh['id'], 'show': sh['name'], 'date': sh['date'], 'venue': sh['venue'],
             'company': sh['company'], 'status': sh['status'] or 'active',
             'item': r['type_name'],
@@ -30051,8 +31041,41 @@ def report_item_shows():
             'rental_end': _as_date(r['rental_end']).isoformat() if r['rental_end'] else '',
             'days': _rental_days(r['rental_start'], r['rental_end']),
             'quantity': qty, 'price': price,
-            'total': round(price * qty, 2) if price is not None else None})
+            'total': round(price * qty, 2) if price is not None else None}
+        out.append(x)
+        tid = r['asset_type_id']
+        if tid in item_bk:
+            _add(item_bk[tid], x)
+        if r['asset_item_id'] and r['asset_item_id'] in unit_bk:
+            _add(unit_bk[r['asset_item_id']], x)
+        elif not r['asset_item_id']:
+            _add(pool_bk.setdefault(tid, _bucket(
+                unit_id=None, type_id=tid, item=type_names.get(tid, f'#{tid}'),
+                unit='(no unit picked)', status='')), x)
     out.sort(key=lambda x: (x['date'] or '', x['show']), reverse=True)
+
+    def _done(bk, per_units=1):
+        bk['shows'] = len(bk['shows'])
+        bk['revenue'] = round(bk['revenue'], 2)
+        # Share of the date range the unit was out (needs both dates).
+        bk['utilization'] = (round(100.0 * bk['unit_days'] / (per_units * span), 1)
+                             if span and per_units else None)
+        return bk
+
+    by_unit = [_done(b) for b in unit_bk.values()
+               if b['lines'] or b['status'] != 'retired']
+    by_unit += [_done(b, 0) for b in pool_bk.values()]
+    by_unit.sort(key=lambda b: (b['item'].lower(), b['unit_id'] is None, b['unit'].lower()))
+    owned = {}
+    for u in units.values():
+        if u['status'] != 'retired' and (not uids or u['id'] in uids):
+            owned[u['asset_type_id']] = owned.get(u['asset_type_id'], 0) + 1
+    by_item = []
+    for tid, b in item_bk.items():
+        b['units_owned'] = owned.get(tid, 0)
+        if b['lines'] or b['units_owned'] or (tid in tids and tid not in headings):
+            by_item.append(_done(b, b['units_owned']))
+    by_item.sort(key=lambda b: b['item'].lower())
     companies = {}
     for x in out:
         k = x['company'] or '(No company)'
@@ -30061,7 +31084,25 @@ def report_item_shows():
         c['revenue'] += x['total'] or 0
     by_company = sorted(({**c, 'shows': len(c['shows']), 'revenue': round(c['revenue'], 2)}
                          for c in companies.values()), key=lambda c: (-c['shows'], c['company']))
-    return jsonify({'item': t['name'], 'unit': unit_label, 'lines': out, 'by_company': by_company,
+    # A picked item whose group is also picked is already in that group:
+    # "Projectors", not "3 items (Projector 10K, Projector 20K Laser, Projectors)".
+    in_group = {r['id'] for r in kids}
+    top = [r for r in picked if r['id'] not in in_group] or list(picked)
+    item_label = (top[0]['name'] if len(top) == 1
+                  else f"{len(top)} items ({', '.join(r['name'] for r in top[:4])}"
+                       f"{', …' if len(top) > 4 else ''})")
+    unit_label = None
+    if uids:
+        labels = [_ulabel(units[u]) for u in uids]
+        unit_label = (labels[0] if len(labels) == 1
+                      else f"{len(labels)} units ({', '.join(labels[:6])}{', …' if len(labels) > 6 else ''})")
+    return jsonify({'item': item_label, 'unit': unit_label,
+                    'type_ids': tids, 'unit_ids': uids, 'range_days': span,
+                    'unit_choices': [{'id': u['id'], 'label': _ulabel(u), 'item': u['type_name'],
+                                      'type_id': u['asset_type_id'], 'status': u['status'] or ''}
+                                     for u in units.values()],
+                    'lines': out, 'by_unit': by_unit, 'by_item': by_item,
+                    'by_company': by_company,
                     'totals': {'shows': len({x['show_id'] for x in out}), 'lines': len(out),
                                'units': sum(x['quantity'] for x in out),
                                'unit_days': sum(x['quantity'] * x['days'] for x in out),
@@ -30389,6 +31430,194 @@ def report_advance_field():
         'values': sorted(({'value': k, 'shows': n} for k, n in counts.items()),
                          key=lambda x: (-x['shows'], x['value'].lower())),
         'rows': rows})
+
+
+_RPT_SOUND_GROUPS = (('sensor', 'Sensor'), ('venue', 'Venue'), ('company', 'Arts Group'),
+                     ('show', 'Show'), ('month', 'Month'), ('weekday', 'Day of week'),
+                     ('hour', 'Start hour'))
+
+
+def _db_energy_avg(levels):
+    """Average of decibel levels on the energy scale (dB is logarithmic, so
+    a plain mean under-reads the loud ones): 10·log10(mean(10^(L/10)))."""
+    vals = [float(v) for v in levels if v is not None]
+    if not vals:
+        return None
+    return round(10.0 * math.log10(sum(10.0 ** (v / 10.0) for v in vals) / len(vals)), 1)
+
+
+@app.route('/api/reports/sound')
+@reports_required
+def report_sound():
+    """Sound Levels (3.47.0): the dB readings Spot captured per performance
+    (spot_module), reported and correlated with show data. One row per
+    performance × sensor for the shows _report_shows() selects — so every
+    shared filter and drill (venue, Arts Group, had item / category booked,
+    job position, technician) narrows it. `monitors` = only these sensors;
+    `limit` = a dB level to flag (Leq at or over it); `peak_limit` = its own
+    level for peaks (they run 10-15 dB above Leq); `group` = what the
+    summary table compares: sensor / venue / company / show / month /
+    weekday / hour, or `field:<advance field key>` to compare by the answers
+    to one advance field. Any Reports user; 404 while the module is off."""
+    if not module_enabled('spot'):
+        abort(404)
+    want = set(_report_id_list('monitors'))
+    try:
+        limit = float(request.args.get('limit')) if (request.args.get('limit') or '').strip() else None
+    except ValueError:
+        limit = None
+    if limit is not None and not (0 < limit < 200):
+        limit = None
+    try:
+        peak_limit = (float(request.args.get('peak_limit'))
+                      if (request.args.get('peak_limit') or '').strip() else None)
+    except ValueError:
+        peak_limit = None
+    if peak_limit is not None and not (0 < peak_limit < 200):
+        peak_limit = None
+    group = (request.args.get('group') or 'sensor').strip()
+    db = get_db()
+    try:
+        shows = _report_shows(db)
+        caps = spot_module.captures_for_report(db, list(shows))
+        field = None
+        answers = {}
+        if group.startswith('field:'):
+            key = group[6:]
+            field = next((r for r in _report_adv_fields(db) if r['field_key'] == key), None)
+            if not field:
+                group = 'sensor'
+            else:
+                for r in db.execute(
+                        'SELECT show_id, field_value FROM advance_data '
+                        'WHERE field_key = %s AND show_id = ANY(%s)',
+                        (key, list(shows) or [0])).fetchall():
+                    answers[r['show_id']] = _report_adv_values(
+                        field['field_type'], field['allow_multi'], r['field_value'])
+        elif group not in dict(_RPT_SOUND_GROUPS):
+            group = 'sensor'
+    finally:
+        db.close()
+
+    def _f(v):
+        try:
+            return round(float(v), 1) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    # Sensors that have readings in this show set. A picked sensor outside
+    # it (the date range or venue changed, a saved report's old sensor) is
+    # dropped — the page then shows the same choice it is filtered by.
+    sensors, rows = {}, []
+    live = {m.get('id') for c in caps if c['show_id'] in shows for m in c['monitors']
+            if (m.get('stats') or {}).get('count')}
+    want_live = want & live
+    for c in caps:
+        sh = shows.get(c['show_id'])
+        if not sh:
+            continue
+        for m in c['monitors']:
+            st = m.get('stats') or {}
+            if not (st.get('count') or 0):
+                continue
+            mid = m.get('id')
+            name = (m.get('name') or f'Sensor {mid}').strip()
+            unit = (m.get('unit') or 'dB').strip()
+            sensors.setdefault(mid, {'id': mid, 'name': name, 'unit': unit,
+                                     'location': (m.get('location') or '').strip()})
+            if want_live and mid not in want_live:
+                continue
+            leq = _f(st.get('leq') if st.get('leq') is not None else st.get('avg'))
+            peak = _f(st.get('max'))
+            max_at = ''
+            if st.get('max_at'):
+                try:
+                    max_at = datetime.fromisoformat(str(st['max_at'])).strftime('%H:%M')
+                except ValueError:
+                    max_at = ''
+            try:
+                d = date.fromisoformat(c['date'])
+            except (TypeError, ValueError):
+                d = None
+            rows.append({
+                'show_id': sh['id'], 'show': sh['name'], 'date': c['date'], 'time': c['time'],
+                'venue': sh['venue'], 'company': sh['company'], 'perf_key': c['perf_key'],
+                'sensor_id': mid, 'sensor': name, 'location': (m.get('location') or '').strip(),
+                'unit': unit, 'minutes': c['minutes'], 'detected': c['detected'],
+                'leq': leq, 'avg': _f(st.get('avg')), 'max': peak, 'max_at': max_at,
+                'min': _f(st.get('min')), 'l10': _f(st.get('l10')), 'l50': _f(st.get('l50')),
+                'l90': _f(st.get('l90')), 'readings': int(st.get('count') or 0),
+                'events': int(st.get('events') or 0),
+                'over': bool(limit is not None and leq is not None and leq >= limit),
+                'peak_over': bool(peak_limit is not None and peak is not None and peak >= peak_limit),
+                '_month': d.strftime('%Y-%m') if d else '(no date)',
+                '_weekday': d.strftime('%A') if d else '(no date)',
+                '_wd': d.weekday() if d else 9,
+                '_hour': (c['time'][:2] + ':00') if c['time'] else '(no time)'})
+    rows.sort(key=lambda r: (r['date'] or '', r['time'] or '', r['show'], r['sensor']), reverse=True)
+
+    def _keys(r):
+        if field:
+            return answers.get(r['show_id']) or ['(not answered)']
+        return [{'sensor': r['sensor'], 'venue': r['venue'] or '(No venue)',
+                 'company': r['company'] or '(No company)', 'show': r['show'],
+                 'month': r['_month'], 'weekday': r['_weekday'], 'hour': r['_hour']}[group]]
+
+    # Levels in different units (dBA / dBC) are never averaged together.
+    groups = {}
+    for r in rows:
+        for k in _keys(r):
+            g = groups.setdefault((k, r['unit']), {
+                'group': k, 'unit': r['unit'], 'perfs': set(), 'shows': set(), 'leqs': [],
+                'peaks': [], 'over': 0, 'peak_over': 0, 'minutes': 0, '_wd': r['_wd']})
+            g['perfs'].add(r['perf_key']); g['shows'].add(r['show_id'])
+            if r['leq'] is not None:
+                g['leqs'].append(r['leq'])
+            if r['max'] is not None:
+                g['peaks'].append(r['max'])
+            g['over'] += 1 if r['over'] else 0
+            g['peak_over'] += 1 if r['peak_over'] else 0
+    by_group = []
+    for g in groups.values():
+        by_group.append({
+            'group': g['group'], 'unit': g['unit'], 'performances': len(g['perfs']),
+            'shows': len(g['shows']), 'readings': len(g['leqs']),
+            'avg_leq': _db_energy_avg(g['leqs']),
+            'low_leq': min(g['leqs']) if g['leqs'] else None,
+            'high_leq': max(g['leqs']) if g['leqs'] else None,
+            'avg_peak': round(sum(g['peaks']) / len(g['peaks']), 1) if g['peaks'] else None,
+            'high_peak': max(g['peaks']) if g['peaks'] else None,
+            'over': g['over'], 'peak_over': g['peak_over'], '_wd': g['_wd']})
+    if group == 'weekday':
+        by_group.sort(key=lambda g: (g['_wd'], g['unit']))
+    elif group in ('month', 'hour'):
+        by_group.sort(key=lambda g: (g['group'], g['unit']))
+    else:
+        by_group.sort(key=lambda g: (-(g['avg_leq'] or 0), g['group']))
+    for g in by_group:
+        g.pop('_wd', None)
+    for r in rows:
+        for k in ('_month', '_weekday', '_wd', '_hour', 'perf_key'):
+            r.pop(k, None)
+    units = sorted({r['unit'] for r in rows})
+    leqs = [r['leq'] for r in rows if r['leq'] is not None]
+    loudest = max(rows, key=lambda r: r['max'] if r['max'] is not None else -1) if rows else None
+    group_label = (field['label'] if field else dict(_RPT_SOUND_GROUPS)[group])
+    return jsonify({
+        'rows': rows, 'by_group': by_group, 'group': group, 'group_label': group_label,
+        'limit': limit, 'peak_limit': peak_limit, 'units': units, 'monitors': sorted(want_live),
+        'sensors': sorted(sensors.values(), key=lambda m: (m['name'].lower(), m['id'] or 0)),
+        'totals': {
+            'performances': len({(r['show_id'], r['date'], r['time']) for r in rows}),
+            'shows': len({r['show_id'] for r in rows}), 'readings': len(rows),
+            # One figure only when every row shares a unit.
+            'avg_leq': _db_energy_avg(leqs) if len(units) == 1 else None,
+            'high_leq': max(leqs) if leqs and len(units) == 1 else None,
+            'high_peak': loudest['max'] if loudest and len(units) == 1 else None,
+            'high_peak_show': loudest['show'] if loudest and len(units) == 1 else None,
+            'unit': units[0] if len(units) == 1 else None,
+            'over': sum(1 for r in rows if r['over']) if limit is not None else None,
+            'peak_over': sum(1 for r in rows if r['peak_over']) if peak_limit is not None else None}})
 
 
 def _report_line_filter():
@@ -30761,9 +31990,39 @@ _RPT_PDF = {
                                                 ('via', 'Via system', 't'),
                                                 ('rental_start', 'From', 't'), ('rental_end', 'To', 't'),
                                                 ('quantity', 'Qty', 'i'), ('total', 'Line total', 'm')]),
+        ('Usage by unit', 'by_unit', [('item', 'Item', 't'), ('unit', 'Unit', 't'),
+                                      ('status', 'Status', 't'), ('lines', 'Times rented', 'i'),
+                                      ('shows', 'Shows', 'i'), ('unit_days', 'Days rented', 'i'),
+                                      ('utilization', 'Utilization', 'p'),
+                                      ('revenue', 'Income', 'm'),
+                                      ('last_date', 'Last out', 't'), ('last_show', 'Last show', 't')]),
+        ('Usage by item', 'by_item', [('item', 'Item', 't'), ('units_owned', 'Units owned', 'i'),
+                                      ('lines', 'Times rented', 'i'), ('shows', 'Shows', 'i'),
+                                      ('units', 'Units out', 'i'), ('unit_days', 'Unit-days', 'i'),
+                                      ('utilization', 'Utilization', 'p'),
+                                      ('revenue', 'Income', 'm'), ('last_date', 'Last out', 't')]),
         ('By Arts Group', 'by_company', [('company', 'Arts Group', 't'), ('shows', 'Shows', 'i'),
                                          ('lines', 'Lines', 'i'), ('units', 'Units', 'i'),
                                          ('revenue', 'Revenue', 'm')])]),
+    'sound': ('Sound levels', 'report_sound', [
+        ('Performances', 'totals.performances', 'i'), ('Shows', 'totals.shows', 'i'),
+        ('Average Leq', 'totals.avg_leq', 'h'), ('Loudest Leq', 'totals.high_leq', 'h'),
+        ('Highest peak', 'totals.high_peak', 'h'),
+        ('Leq at / over limit', 'totals.over', 'i'), ('Peak at / over limit', 'totals.peak_over', 'i')], [
+        ('Compared', 'by_group', [('group', 'Group', 't'), ('unit', 'Unit', 't'),
+                                  ('performances', 'Performances', 'i'), ('shows', 'Shows', 'i'),
+                                  ('avg_leq', 'Avg Leq', 'h'), ('low_leq', 'Quietest Leq', 'h'),
+                                  ('high_leq', 'Loudest Leq', 'h'), ('avg_peak', 'Avg peak', 'h'),
+                                  ('high_peak', 'Highest peak', 'h'),
+                                  ('over', 'Leq ≥ limit', 'i'), ('peak_over', 'Peak ≥ limit', 'i')]),
+        ('Every performance', 'rows', [('date', 'Date', 't'), ('time', 'Start', 't'),
+                                       ('show', 'Show', 't'), ('venue', 'Venue', 't'),
+                                       ('company', 'Arts Group', 't'), ('sensor', 'Sensor', 't'),
+                                       ('unit', 'Unit', 't'), ('minutes', 'Minutes', 'i'),
+                                       ('leq', 'Leq', 'h'), ('max', 'Peak', 'h'),
+                                       ('max_at', 'Peak at', 't'), ('l10', 'L10', 'h'),
+                                       ('l50', 'L50', 'h'), ('l90', 'L90', 'h'),
+                                       ('over', 'Leq ≥ limit', 'b')])]),
     'rentals': ('Rental lines', 'asset_reports_data', [
         ('Revenue', 'total_revenue', 'm'), ('Line items', 'count', 'i')], [
         ('Rental lines', 'rows', [('show_name', 'Show', 't'), ('show_date', 'Date', 't'),
@@ -30876,6 +32135,12 @@ def _rpt_filter_summary(db):
         if v:
             r = db.execute(f'SELECT name FROM {table} WHERE id=%s', (v,)).fetchone()
             out.append(f"{label}: {r['name'] if r else '#' + str(v)}")
+    if a.get('report') == 'assets' and _report_id_list('types'):
+        ids = _report_id_list('types')
+        names = [r['name'] for r in db.execute(
+            'SELECT name FROM asset_types WHERE id = ANY(%s) ORDER BY name', (ids,)).fetchall()]
+        out.append(('All items except: ' if a.get('types_mode') == 'exclude' else 'Only items: ')
+                   + ', '.join(names[:12]) + (f' … (+{len(names) - 12})' if len(names) > 12 else ''))
     if a.get('report') == 'advance':
         if a.get('answer'):
             out.append(f"Answer: {a.get('answer')[:120]}")
@@ -30885,20 +32150,34 @@ def _rpt_filter_summary(db):
                    .get(a.get('include'), 'Shows with an answer'))
     if a.get('min_diff'):
         out.append(f"Break difference ≥ {a.get('min_diff')[:4]} min")
+    if a.get('report') == 'sound':
+        if a.get('limit'):
+            out.append(f"Leq flagged at: {a.get('limit')[:6]} dB")
+        if a.get('peak_limit'):
+            out.append(f"Peak flagged at: {a.get('peak_limit')[:6]} dB")
+        g = a.get('group') or 'sensor'
+        if g.startswith('field:'):
+            # The field's label as the page shows it, never its database key.
+            label = next((f['label'] or f['field_key'] for f in _report_adv_fields(db)
+                          if f['field_key'] == g[6:]), None)
+            out.append('Compared by: ' + (label[:120] if label else 'Sensor'))
+        else:
+            out.append('Compared by: ' + (dict(_RPT_SOUND_GROUPS).get(g) or 'Sensor'))
+        if a.get('monitors'):
+            out.append(f"Sensors: {len(_report_id_list('monitors'))} picked")
     return out or ['All shows (no filters)']
 
 
-@app.route('/reports/pdf')
-@reports_required
-def report_pdf():
-    key = request.args.get('report', '')
-    spec = _RPT_PDF.get(key)
-    if not spec:
-        abort(404)
-    title, view, card_spec, table_spec = spec
+def _rpt_assemble(key, row_cap):
+    """Run report `key` (an _RPT_PDF entry) with the CURRENT request's query
+    string and shape it for display: (None, {title, cards, tables, filters})
+    or (the view's own refusal response, None). The tab's JSON view function
+    is called as-is, so its gate applies to whoever is asking. Shared by the
+    PDF and by /api/reports/render (dashboard widgets)."""
+    title, view, card_spec, table_spec = _RPT_PDF[key]
     resp = app.view_functions[view]()
     if isinstance(resp, tuple) or getattr(resp, 'status_code', 200) != 200:
-        return resp            # the view's own 403 / 400
+        return resp, None      # the view's own 403 / 400
     data = resp.get_json() or {}
     if key == 'group_detail':
         title = f"Arts Group — {(request.args.get('group_name') or request.args.get('group') or '(No company)')[:120]}"
@@ -30914,15 +32193,30 @@ def report_pdf():
     for t_title, rows_key, cols in table_spec:
         rows = data.get(rows_key) or []
         tables.append({'title': t_title, 'total': len(rows),
-                       'cols': [(label, f in 'imhp') for _k, label, f in cols],
+                       'cols': [((data.get('group_label') or label)
+                                 if (key == 'sound' and _k == 'group') else label, f in 'imhp')
+                                for _k, label, f in cols],
                        'rows': [[_rpt_fmt(r.get(k), f) for k, _l, f in cols]
-                                for r in rows[:_RPT_PDF_ROW_CAP]]})
+                                for r in rows[:row_cap]]})
     db = get_db()
     try:
         filters = _rpt_filter_summary(db)
-        logo = get_app_setting('logo_data', '')
     finally:
         db.close()
+    return None, {'title': title, 'cards': cards, 'tables': tables, 'filters': filters}
+
+
+@app.route('/reports/pdf')
+@reports_required
+def report_pdf():
+    key = request.args.get('report', '')
+    if key not in _RPT_PDF:
+        abort(404)
+    refusal, r = _rpt_assemble(key, _RPT_PDF_ROW_CAP)
+    if refusal is not None:
+        return refusal
+    title, cards, tables, filters = r['title'], r['cards'], r['tables'], r['filters']
+    logo = get_app_setting('logo_data', '')
     me = get_current_user()
     html = render_template('pdf/report_pdf.html', title=title, cards=cards, tables=tables,
                            filters=filters, row_cap=_RPT_PDF_ROW_CAP, logo=logo,
@@ -30937,6 +32231,561 @@ def report_pdf():
     resp.headers['Content-Disposition'] = (
         f'inline; filename="report_{key}_{date.today().isoformat()}.pdf"')
     return resp
+
+
+@app.route('/api/reports/render')
+@reports_required
+def report_render():
+    """A report as display-ready JSON — summary cards + the first rows of each
+    table, formatted like the PDF (3.48.0). For the saved-report dashboard
+    widget. Same query string as the tab's own endpoint plus `report` (an
+    _RPT_PDF key) and `rows` (per table, default 8, max 50). The tab's view
+    function runs unchanged, so its permission gate decides — a refusal comes
+    back as JSON."""
+    key = request.args.get('report', '')
+    if key not in _RPT_PDF:
+        return jsonify({'error': 'Unknown report.'}), 404
+    try:
+        cap = max(1, min(50, int(request.args.get('rows') or 8)))
+    except ValueError:
+        cap = 8
+    try:
+        refusal, r = _rpt_assemble(key, cap)
+    except HTTPException as e:          # a role decorator's abort(403) / module-off 404
+        return jsonify({'error': 'You do not have access to this report.'
+                        if e.code == 403 else 'This report is not available.'}), e.code or 500
+    if refusal is not None:
+        if getattr(refusal, 'status_code', 200) in (301, 302, 303):
+            return jsonify({'error': 'You do not have access to this report.'}), 403
+        return refusal
+    return jsonify(r)
+
+
+# ── Saved reports (3.48.0) ───────────────────────────────────────────────────
+# A user keeps a Reports tab + its filters under a name (saved_reports), can
+# send a copy to other users and pin it to one of their own dashboards.
+# A view is DATA about which filters to apply — opening it runs the normal
+# report endpoints under the OPENER's own permissions, never the saver's.
+_SAVED_RPT_TABS = ('overview', 'advance', 'groups', 'assets', 'items', 'rentals', 'labor',
+                   'lines', 'breaks', 'variance', 'piano', 'sound')     # each is an _RPT_PDF key
+_SAVED_RPT_PRESETS = ('month', 'year', '12m', 'next12', 'all')
+# Every query parameter a report tab reads. Anything else is dropped.
+_SAVED_RPT_PARAMS = ('from', 'to', 'venue', 'company', 'show', 'has_type', 'has_category',
+                     'position', 'tech', 'type_ids', 'unit_ids', 'types', 'types_mode',
+                     'field', 'answer', 'q', 'include', 'asset_category_id', 'asset_type_id',
+                     'min_diff', 'group', 'monitors', 'limit', 'peak_limit')
+_SAVED_RPT_MAX_PER_USER = 100
+_SAVED_RPT_NAME_MAX = 80
+_SAVED_RPT_VALUE_MAX = 600
+_SAVED_RPT_SEND_MAX = 25
+_SAVED_RPT_FROM_ONE_MAX = 25     # copies one sender may leave in one person's list
+
+
+def _saved_report_clean_view(raw):
+    """(view, error): the stored shape {tab, preset, params, show_text} from
+    client JSON — known tab, known preset or none, whitelisted params as
+    short strings. With a preset the from/to are dropped (the preset is
+    resolved when the report is opened, so "This year" stays this year)."""
+    if not isinstance(raw, dict):
+        return None, 'Unreadable report view.'
+    tab = str(raw.get('tab') or '')
+    if tab not in _SAVED_RPT_TABS:
+        return None, 'Unknown report tab.'
+    preset = raw.get('preset') or None
+    if preset is not None and preset not in _SAVED_RPT_PRESETS:
+        return None, 'Unknown date range.'
+    src = raw.get('params') if isinstance(raw.get('params'), dict) else {}
+    params = {}
+    for k in _SAVED_RPT_PARAMS:
+        v = src.get(k)
+        if v is None or isinstance(v, (dict, list)):
+            continue
+        v = str(v).strip()
+        if v:
+            params[k] = v[:_SAVED_RPT_VALUE_MAX]
+    # Single-id filters are ids, nothing else (the page puts them into
+    # selectors and the show box).
+    for k in ('show', 'has_type', 'has_category', 'position', 'tech',
+              'asset_category_id', 'asset_type_id'):
+        if k in params and not re.fullmatch(r'[0-9]{1,10}', params[k]):
+            params.pop(k)
+    # Id lists keep WHOLE ids (cutting the text at a length would change an
+    # id) — the same first-300 rule the report endpoints apply.
+    for k in ('type_ids', 'unit_ids', 'types', 'monitors'):
+        if k in src and not isinstance(src[k], (dict, list)) and src[k] is not None:
+            ids = []
+            for part in str(src[k]).split(',')[:5000]:
+                part = part.strip()
+                if re.fullmatch(r'[0-9]{1,10}', part) and 0 < int(part) < 2 ** 31 and int(part) not in ids:
+                    ids.append(int(part))
+                    if len(ids) >= 300:
+                        break
+            if ids:
+                params[k] = ','.join(str(i) for i in ids)
+            else:
+                params.pop(k, None)
+    if preset:
+        params.pop('from', None)
+        params.pop('to', None)
+    else:
+        for k in ('from', 'to'):
+            if k in params:
+                try:
+                    params[k] = date.fromisoformat(params[k][:10]).isoformat()
+                except ValueError:
+                    params.pop(k)
+    # Display names of the id filters (so the page can NAME a filter that
+    # later disappears instead of printing its id): only for ids this view
+    # holds, short plain strings — the page writes them with textContent.
+    lists = {'type': set(f"{params.get('type_ids', '')},{params.get('types', '')}".split(',')),
+             'unit': set(params.get('unit_ids', '').split(',')),
+             'monitor': set(params.get('monitors', '').split(','))}
+    labels = {}
+    src_labels = raw.get('labels') if isinstance(raw.get('labels'), dict) else {}
+    for k, v in list(src_labels.items())[:400]:
+        if len(labels) >= 60 or not isinstance(k, str) or not isinstance(v, str):
+            continue
+        m = re.fullmatch(r'(type|unit|monitor):([0-9]{1,10})', k)
+        if not ((k in ('has_type', 'has_category', 'position', 'tech') and k in params)
+                or (m and m.group(2) in lists[m.group(1)])):
+            continue
+        text = ' '.join(v.split())[:80]
+        if text:
+            labels[k] = text
+    return {'tab': tab, 'preset': preset, 'params': params,
+            'show_text': str(raw.get('show_text') or '')[:300] if 'show' in params else '',
+            'labels': labels}, None
+
+
+def _saved_report_view(row):
+    """A stored row's view, re-validated on the way out (a hand-edited or
+    older row can never hand the page something unexpected)."""
+    try:
+        raw = json.loads(row['view_json'] or '{}')
+    except ValueError:
+        raw = {}
+    raw = dict(raw if isinstance(raw, dict) else {}, tab=row['tab'])
+    view, _err = _saved_report_clean_view(raw)
+    return view or {'tab': 'overview', 'preset': 'year', 'params': {}, 'show_text': '', 'labels': {}}
+
+
+def _saved_report_preset_dates(preset, today=None):
+    """(from, to) ISO strings for a date preset — the same ranges as the
+    Reports page's preset buttons (reports.html preset())."""
+    t = today or date.today()
+
+    def _shift_year(d, n):
+        try:
+            return d.replace(year=d.year + n)
+        except ValueError:          # Feb 29 → Mar 1, as the page's JS Date does
+            return date(d.year + n, 3, 1)
+    if preset == 'month':
+        nxt = (t.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return t.replace(day=1).isoformat(), (nxt - timedelta(days=1)).isoformat()
+    if preset == 'year':
+        return f'{t.year}-01-01', f'{t.year}-12-31'
+    if preset == '12m':
+        return _shift_year(t, -1).isoformat(), t.isoformat()
+    if preset == 'next12':
+        return t.isoformat(), _shift_year(t, 1).isoformat()
+    return '', ''
+
+
+def _saved_report_query(view):
+    """The query-string dict a saved view means TODAY (preset resolved)."""
+    q = dict(view['params'])
+    if view['preset']:
+        d_from, d_to = _saved_report_preset_dates(view['preset'])
+        if d_from:
+            q['from'] = d_from
+        if d_to:
+            q['to'] = d_to
+    return q
+
+
+def _saved_report_out(row):
+    return {'id': row['id'], 'name': row['name'], 'tab': row['tab'],
+            'view': _saved_report_view(row),
+            'sent_by_name': (row['sent_by_name'] or '') if row['sent_by'] else '',
+            'created_at': _ts_out(row['created_at']), 'updated_at': _ts_out(row['updated_at'])}
+
+
+_SAVED_RPT_COLS = ('id, user_id, name, tab, view_json, sent_by, sent_by_name, '
+                   'created_at::timestamptz AS created_at, updated_at::timestamptz AS updated_at')
+# Accounts a report can be sent to: unlocked, approved, not a document
+# viewer, and holding a role / 321Theater flag that opens the Reports page.
+def _saved_report_recipient_sql():
+    # Mirrors _can_view_reports(): the piano flag opens Reports only while
+    # the Piano Tuning module is on.
+    piano = (" OR COALESCE(u.is_piano_manager, 0) = 1"
+             if module_enabled('piano_tuning') else '')
+    return ("COALESCE(u.is_locked, 0) = 0 AND COALESCE(u.pending_approval, 0) = 0 "
+            "AND COALESCE(u.is_document_viewer, 0) = 0 "
+            "AND (u.role IN ('admin', 'staff') OR COALESCE(u.is_scheduler, 0) = 1 "
+            f"OR COALESCE(u.is_asset_manager, 0) = 1{piano})")
+
+
+# The report area a saved-report tab needs (missing = any Reports user).
+_SAVED_RPT_TAB_AREA = {'groups': 'assets', 'assets': 'assets', 'items': 'assets', 'rentals': 'assets',
+                       'labor': 'labor', 'lines': 'labor', 'breaks': 'labor', 'variance': 'labor',
+                       'piano': 'piano'}
+_SAVED_RPT_AREA_LABEL = (('assets', 'Assets'), ('labor', 'Labor'), ('piano', 'Piano'))
+_SAVED_RPT_USER_FLAGS = ('u.role, COALESCE(u.is_asset_manager, 0) AS is_asset_manager, '
+                         'COALESCE(u.is_scheduler, 0) AS is_scheduler, '
+                         'COALESCE(u.is_piano_manager, 0) AS is_piano_manager')
+
+
+def _saved_report_user_areas(u, piano_on):
+    """Report areas a users row (with _SAVED_RPT_USER_FLAGS) opens — the
+    row-level mirror of _can_report_assets / _can_report_labor /
+    _can_report_piano (role admin/staff = content admin = labor scheduler).
+    321Theater flags only, never is_app_*."""
+    role = u['role'] or ''
+    areas = set()
+    if role in ('admin', 'staff') or u['is_asset_manager']:
+        areas.add('assets')
+    if role in ('admin', 'staff') or u['is_scheduler']:
+        areas.add('labor')
+    if piano_on and (role == 'admin' or u['is_piano_manager']):
+        areas.add('piano')
+    return areas
+
+
+def _saved_report_access_label(areas, piano_on):
+    if areas >= ({'assets', 'labor', 'piano'} if piano_on else {'assets', 'labor'}):
+        return 'All reports'
+    names = [label for a, label in _SAVED_RPT_AREA_LABEL if a in areas]
+    return (' + '.join(names) + ' reports') if names else 'Overview reports'
+
+
+def _saved_report_name(v):
+    name = ' '.join(str(v or '').split())[:_SAVED_RPT_NAME_MAX]
+    return name or None
+
+
+@app.route('/api/reports/saved')
+@reports_required
+def saved_reports_list():
+    """My saved reports (newest first) + my dashboards (for "Add to
+    dashboard")."""
+    uid = session['user_id']
+    db = get_db()
+    try:
+        rows = db.execute(f'SELECT {_SAVED_RPT_COLS} FROM saved_reports WHERE user_id = %s '
+                          'ORDER BY LOWER(name), id', (uid,)).fetchall()
+        dashes = db.execute('SELECT id, name FROM asset_dashboards WHERE user_id = %s '
+                            'ORDER BY LOWER(name), id', (uid,)).fetchall()
+    finally:
+        db.close()
+    return jsonify({'reports': [_saved_report_out(r) for r in rows],
+                    'dashboards': [{'id': d['id'], 'name': d['name']} for d in dashes],
+                    'max': _SAVED_RPT_MAX_PER_USER})
+
+
+@app.route('/api/reports/saved', methods=['POST'])
+@reports_required
+def saved_reports_create():
+    uid = session['user_id']
+    data = _json_obj()
+    name = _saved_report_name(data.get('name'))
+    if not name:
+        return jsonify({'error': 'Give the report a name.'}), 400
+    view, err = _saved_report_clean_view(data.get('view'))
+    if err:
+        return jsonify({'error': err}), 400
+    db = get_db()
+    try:
+        # One save per person at a time (transaction-scoped lock — nothing
+        # stays on the pooled connection): the count below then sees any
+        # save that just committed, so the cap holds under double-clicks.
+        db.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', (f'saved_reports:{uid}',))
+        # Only reports I saved myself count — copies other people sent me
+        # have their own limit, so nobody can use up my room.
+        n = db.execute('SELECT COUNT(*) AS n FROM saved_reports WHERE user_id = %s '
+                       'AND sent_by IS NULL', (uid,)).fetchone()['n']
+        if n >= _SAVED_RPT_MAX_PER_USER:
+            return jsonify({'error': f'You have {_SAVED_RPT_MAX_PER_USER} saved reports — '
+                                     'delete one first.'}), 409
+        rid = db.execute(
+            'INSERT INTO saved_reports (user_id, name, tab, view_json) VALUES (%s, %s, %s, %s) '
+            'RETURNING id', (uid, name, view['tab'], json.dumps(view))).fetchone()['id']
+        db.commit()
+        row = db.execute(f'SELECT {_SAVED_RPT_COLS} FROM saved_reports WHERE id = %s',
+                         (rid,)).fetchone()
+    finally:
+        db.close()
+    syslog_logger.info(f"REPORT_SAVED id={rid} tab={view['tab']} by={session.get('username')}")
+    return jsonify({'success': True, 'report': _saved_report_out(row)})
+
+
+@app.route('/api/reports/saved/<int:rid>', methods=['PUT', 'DELETE'])
+@reports_required
+def saved_reports_edit(rid):
+    """Rename / replace the view of one of MY saved reports, or delete it."""
+    uid = session['user_id']
+    db = get_db()
+    try:
+        row = db.execute(f'SELECT {_SAVED_RPT_COLS} FROM saved_reports '
+                         'WHERE id = %s AND user_id = %s FOR UPDATE', (rid, uid)).fetchone()
+        if not row:
+            return jsonify({'error': 'Saved report not found.'}), 404
+        if request.method == 'DELETE':
+            db.execute('DELETE FROM saved_reports WHERE id = %s', (rid,))
+            # Take it off my own dashboards too — a widget for a deleted
+            # report could only say it is gone.
+            for d in db.execute('SELECT id, config_json FROM asset_dashboards '
+                                'WHERE user_id = %s FOR UPDATE', (uid,)).fetchall():
+                try:
+                    cfg = json.loads(d['config_json'] or '{}')
+                except ValueError:
+                    continue
+                ws = cfg.get('widgets') if isinstance(cfg, dict) else None
+                if not isinstance(ws, list):
+                    continue
+                keep = [w for w in ws if not (isinstance(w, dict) and w.get('type') == 'saved_report'
+                                              and str(w.get('saved_report_id')) == str(rid))]
+                if len(keep) != len(ws):
+                    cfg['widgets'] = keep
+                    db.execute('UPDATE asset_dashboards SET config_json = %s, '
+                               'updated_at = CURRENT_TIMESTAMP WHERE id = %s', (json.dumps(cfg), d['id']))
+            db.commit()
+            syslog_logger.info(f"REPORT_SAVED_DELETE id={rid} by={session.get('username')}")
+            return jsonify({'success': True})
+        data = _json_obj()
+        sets, args = [], []
+        if 'name' in data:
+            name = _saved_report_name(data.get('name'))
+            if not name:
+                return jsonify({'error': 'Give the report a name.'}), 400
+            sets.append('name = %s'); args.append(name)
+        if 'view' in data:
+            view, err = _saved_report_clean_view(data.get('view'))
+            if err:
+                return jsonify({'error': err}), 400
+            sets += ['tab = %s', 'view_json = %s']; args += [view['tab'], json.dumps(view)]
+        if sets:
+            db.execute(f"UPDATE saved_reports SET {', '.join(sets)}, updated_at = CURRENT_TIMESTAMP "
+                       'WHERE id = %s', args + [rid])
+            db.commit()
+        row = db.execute(f'SELECT {_SAVED_RPT_COLS} FROM saved_reports WHERE id = %s',
+                         (rid,)).fetchone()
+    finally:
+        db.close()
+    syslog_logger.info(f"REPORT_SAVED_EDIT id={rid} by={session.get('username')}")
+    return jsonify({'success': True, 'report': _saved_report_out(row)})
+
+
+@app.route('/api/reports/saved/people')
+@reports_required
+def saved_reports_people():
+    """Who a saved report can be sent to (accounts that can open Reports).
+    `?tab=<tab>`: per person, whether they can open THAT tab (`can_open`),
+    plus a plain `access` label ('Assets reports', 'All reports' …)."""
+    area = _SAVED_RPT_TAB_AREA.get(request.args.get('tab') or '')
+    piano_on = module_enabled('piano_tuning')
+    db = get_db()
+    try:
+        rows = db.execute(
+            f"""SELECT u.id, COALESCE(NULLIF(TRIM(u.display_name), ''), u.username) AS name,
+                       {_SAVED_RPT_USER_FLAGS}
+                  FROM users u WHERE {_saved_report_recipient_sql()} AND u.id <> %s
+                 ORDER BY LOWER(COALESCE(NULLIF(TRIM(u.display_name), ''), u.username)), u.id""",
+            (session['user_id'],)).fetchall()
+    finally:
+        db.close()
+    out = []
+    for r in rows:
+        areas = _saved_report_user_areas(r, piano_on)
+        out.append({'id': r['id'], 'name': r['name'], 'role': r['role'] or '',
+                    'access': _saved_report_access_label(areas, piano_on),
+                    'can_open': area is None or area in areas})
+    return jsonify({'people': out})
+
+
+@app.route('/api/reports/saved/<int:rid>/send', methods=['POST'])
+@reports_required
+def saved_reports_send(rid):
+    """Send one of MY saved reports to other users: each gets their OWN copy
+    in their Saved reports (so my later edits or delete don't change theirs)
+    and an inbox notification that opens it. Only the filters travel — the
+    recipient sees whatever their own permissions allow."""
+    uid = session['user_id']
+    data = _json_obj()
+    try:
+        to = sorted({int(x) for x in (data.get('user_ids') or [])} - {uid})
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Unreadable recipients.'}), 400
+    if not to:
+        return jsonify({'error': 'Pick who to send it to.'}), 400
+    if len(to) > _SAVED_RPT_SEND_MAX:
+        return jsonify({'error': f'Send to at most {_SAVED_RPT_SEND_MAX} people at a time.'}), 400
+    db = get_db()
+    try:
+        row = db.execute(f'SELECT {_SAVED_RPT_COLS} FROM saved_reports '
+                         'WHERE id = %s AND user_id = %s', (rid, uid)).fetchone()
+        if not row:
+            return jsonify({'error': 'Saved report not found.'}), 404
+        ok = [r['id'] for r in db.execute(
+            f'SELECT u.id FROM users u WHERE u.id = ANY(%s) AND {_saved_report_recipient_sql()}',
+            (to,)).fetchall()]
+        if len(ok) != len(to):
+            return jsonify({'error': 'One of those people can no longer open Reports.'}), 409
+        me = db.execute("SELECT COALESCE(NULLIF(TRIM(display_name), ''), username) AS n "
+                        'FROM users WHERE id = %s', (uid,)).fetchone()
+        my_name = (me['n'] if me else '') or 'Someone'
+        view = _saved_report_view(row)
+        # Someone who can't open this tab would only get a notification that
+        # leads to "you don't have access" — they're skipped and named.
+        no_access = []
+        area = _SAVED_RPT_TAB_AREA.get(view['tab'])
+        if area:
+            piano_on = module_enabled('piano_tuning')
+            no_access = [r['id'] for r in db.execute(
+                f'SELECT u.id, {_SAVED_RPT_USER_FLAGS} FROM users u WHERE u.id = ANY(%s)',
+                (ok,)).fetchall() if area not in _saved_report_user_areas(r, piano_on)]
+            ok = [i for i in ok if i not in no_access]
+        skipped, sent = [], 0
+        view_text = json.dumps(view)
+        for rcpt in sorted(ok):
+            # The recipient's list, one writer at a time (sorted order: two
+            # sends can't deadlock): the duplicate check and the limits below
+            # then see a copy a concurrent send just committed.
+            db.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', (f'saved_reports:{rcpt}',))
+            # Sending the same report again doesn't stack a second copy.
+            dup = db.execute(
+                'SELECT id FROM saved_reports WHERE user_id = %s AND sent_by = %s '
+                'AND name = %s AND view_json = %s ORDER BY id LIMIT 1',
+                (rcpt, uid, row['name'], view_text)).fetchone()
+            if dup:
+                new_id = dup['id']
+            else:
+                got = db.execute(
+                    'SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE sent_by = %s) AS mine '
+                    'FROM saved_reports WHERE user_id = %s AND sent_by IS NOT NULL',
+                    (uid, rcpt)).fetchone()
+                if got['n'] >= _SAVED_RPT_MAX_PER_USER or got['mine'] >= _SAVED_RPT_FROM_ONE_MAX:
+                    skipped.append(rcpt)
+                    continue
+                new_id = db.execute(
+                    'INSERT INTO saved_reports (user_id, name, tab, view_json, sent_by, sent_by_name) '
+                    'VALUES (%s, %s, %s, %s, %s, %s) RETURNING id',
+                    (rcpt, row['name'], view['tab'], view_text, uid, my_name)).fetchone()['id']
+            # The link is built here from an int id — never from client text.
+            # One unread item per sender: a second send refreshes it.
+            notify_users(db, [rcpt], f'{my_name} sent you a report', row['name'],
+                         link_url=f'/reports?saved={int(new_id)}', kind='report_shared',
+                         coalesce_key=f'report_from:{uid}')
+            sent += 1
+        db.commit()
+        def _names(ids):
+            return [r['n'] for r in db.execute(
+                "SELECT COALESCE(NULLIF(TRIM(display_name), ''), username) AS n FROM users "
+                'WHERE id = ANY(%s) ORDER BY 1', (ids,)).fetchall()] if ids else []
+        names, no_access_names = _names(skipped), _names(no_access)
+    finally:
+        db.close()
+    syslog_logger.info(f"REPORT_SAVED_SEND id={rid} recipients={sent} skipped={len(skipped)} "
+                       f"no_access={len(no_access)} by={session.get('username')}")
+    return jsonify({'success': True, 'sent': sent, 'skipped': names, 'no_access': no_access_names})
+
+
+@app.route('/api/reports/saved/<int:rid>/dashboard', methods=['POST'])
+@reports_required
+def saved_reports_to_dashboard(rid):
+    """Pin one of MY saved reports to one of MY dashboards as a widget —
+    {dashboard_id} or {new_name} for a new private dashboard. Appends to the
+    dashboard's widget list (never replaces it)."""
+    uid = session['user_id']
+    data = _json_obj()
+    db = get_db()
+    try:
+        if not db.execute('SELECT 1 FROM saved_reports WHERE id = %s AND user_id = %s',
+                          (rid, uid)).fetchone():
+            return jsonify({'error': 'Saved report not found.'}), 404
+        widget = {'type': 'saved_report', 'saved_report_id': rid}
+        if data.get('dashboard_id') in (None, ''):
+            name = ' '.join(str(data.get('new_name') or '').split())[:80] or 'My Reports'
+            did = db.execute(
+                "INSERT INTO asset_dashboards (user_id, name, is_public, public_slug, layout, config_json) "
+                "VALUES (%s, %s, 0, NULL, 'saved_report', %s) RETURNING id",
+                (uid, name, json.dumps({'widgets': [widget]}))).fetchone()['id']
+            already = False
+        else:
+            try:
+                did = int(data.get('dashboard_id'))
+            except (TypeError, ValueError):
+                return jsonify({'error': 'Pick a dashboard.'}), 400
+            d = db.execute('SELECT id, layout, config_json FROM asset_dashboards '
+                           'WHERE id = %s AND user_id = %s FOR UPDATE', (did, uid)).fetchone()
+            if not d:
+                return jsonify({'error': 'Dashboard not found.'}), 404
+            try:
+                cfg = json.loads(d['config_json'] or '{}')
+            except ValueError:
+                cfg = {}
+            cfg = cfg if isinstance(cfg, dict) else {}
+            widgets = cfg.get('widgets')
+            if not isinstance(widgets, list) or not widgets:
+                widgets = [{'type': d['layout'] or 'combined'}]    # a pre-widget dashboard
+            already = any(isinstance(w, dict) and w.get('type') == 'saved_report'
+                          and w.get('saved_report_id') == rid for w in widgets)
+            if not already:
+                if len(widgets) >= 40:
+                    return jsonify({'error': 'That dashboard is full.'}), 409
+                widgets.append(widget)
+                cfg['widgets'] = widgets
+                db.execute('UPDATE asset_dashboards SET config_json = %s, '
+                           'updated_at = CURRENT_TIMESTAMP WHERE id = %s', (json.dumps(cfg), did))
+        db.commit()
+    finally:
+        db.close()
+    syslog_logger.info(f"REPORT_SAVED_DASHBOARD id={rid} dashboard={did} by={session.get('username')}")
+    return jsonify({'success': True, 'dashboard_id': did, 'already': already,
+                    'url': url_for('dashboard_view', dash_id=did)})
+
+
+@app.route('/api/reports/saved/<int:rid>/widget')
+@login_required
+def saved_reports_widget(rid):
+    """What a saved-report dashboard widget needs to draw itself: the name
+    and today's query string — the widget then calls /api/reports/render,
+    whose gates run for the PERSON LOOKING, never the dashboard's owner.
+    Readable by the report's owner, and by another signed-in user only when
+    the owner put it on a PUBLIC dashboard. Never anonymous, never a
+    document viewer (not in the public-dashboard endpoint list on purpose)."""
+    uid = session['user_id']
+    db = get_db()
+    try:
+        row = db.execute(
+            f"""SELECT {_SAVED_RPT_COLS},
+                       (SELECT COALESCE(NULLIF(TRIM(u.display_name), ''), u.username)
+                          FROM users u WHERE u.id = saved_reports.user_id) AS owner_name
+                  FROM saved_reports WHERE id = %s""", (rid,)).fetchone()
+        mine = bool(row) and row['user_id'] == uid
+        shared = False
+        if row and not mine:
+            for d in db.execute('SELECT config_json FROM asset_dashboards '
+                                'WHERE user_id = %s AND is_public = 1', (row['user_id'],)).fetchall():
+                try:
+                    ws = (json.loads(d['config_json'] or '{}') or {}).get('widgets') or []
+                except (ValueError, AttributeError):
+                    ws = []
+                if any(isinstance(w, dict) and w.get('type') == 'saved_report'
+                       and w.get('saved_report_id') == rid for w in ws):
+                    shared = True
+                    break
+    finally:
+        db.close()
+    if not row or not (mine or shared):
+        # One answer for "deleted" and "not yours": ids can't be probed.
+        return jsonify({'error': 'This saved report is no longer available.'}), 404
+    view = _saved_report_view(row)
+    q = _saved_report_query(view)
+    q['report'] = view['tab']
+    return jsonify({'name': row['name'], 'tab': view['tab'], 'mine': mine,
+                    'owner': row['owner_name'] or '',
+                    'query': urlencode(q),
+                    'open_url': f'/reports?saved={int(rid)}' if mine else ''})
 
 
 @app.route('/reports/assets')
@@ -31125,6 +32974,245 @@ security_module.register(
 # tags.html, tag.html, search.html + static/js/tags.js behind this one call.
 # Read-only: it owns no table and never writes.
 import find_module  # noqa: E402
+
+chat_module.register(
+    app,
+    get_db=get_db,
+    login_required=login_required,
+    ts_out=_ts_out,
+    log_audit=log_audit,
+    syslog_logger=syslog_logger,
+    module_enabled=module_enabled,
+    can_access_show=can_access_show,
+    notify_mentions=_notify_comment_mentions,
+)
+
+# ─── Optional module (sandboxed, default OFF, per-user access) ───────────────
+# Everything it needs from this file is passed in here; it never imports app.py.
+# The four _pm_* helpers below are how it reaches main-app data: a show it
+# creates is an ordinary show (same inserts, same audit row as New Show), and
+# every figure it shows comes from the report helpers / the two labor engines,
+# gated for whoever is LOOKING. The rest of this file's wiring for it is small
+# and marked where it sits: APP_MODULES (listed; access is per person),
+# the show-merge hook, _run_pm_hourly, the perf Live skip, email_tasks in the
+# notify prefs + run_inbox_emails, and my_shows.
+
+def _pm_int_ids(show_ids):
+    """Sorted, de-duplicated positive ints from whatever the module passed."""
+    out = set()
+    for v in show_ids or ():
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            out.add(v)
+    return sorted(out)
+
+
+def _pm_can_create_show():
+    """The rule new_show enforces, for the current session: signed in, not a
+    read-only / restricted account (the raw session rule — read-only admins
+    too). Document viewers never reach New Show (the viewer gate)."""
+    return bool(session.get('user_id')
+                and not session.get('is_readonly')
+                and not session.get('is_restricted')
+                and not session.get('is_document_viewer'))
+
+
+def _pm_create_show(db, name, show_date, venue, show_mode, user_id):
+    """Create an ordinary show exactly as new_show does — the shows row, the
+    advance_data seeds, one performance when dated — and return its id.
+    The audit row is byte-for-byte new_show's (same action, entity, `after`
+    keys in the same order, NO detail): the audit log is admin-readable, so
+    nothing in it may say where the show was created from. Raises ValueError
+    on a bad argument. Caller commits (and writes new_show's syslog line)."""
+    name = (name or '').strip()
+    if not name:
+        raise ValueError('name')
+    if show_mode not in ('show', 'event'):
+        raise ValueError('show_mode')
+    if show_date:
+        d = _as_date(show_date)
+        if d is None:
+            raise ValueError('show_date')
+        show_date = d.isoformat()       # new_show stores / audits the ISO text
+    else:
+        show_date = None
+    venue = (venue or '').strip()
+    show_time = ''                      # no time is asked for: set on the show
+    show_id = db.execute("""
+        INSERT INTO shows (name, show_date, show_time, venue, show_mode, created_by)
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+    """, (name, show_date, show_time, venue, show_mode, user_id)).fetchone()['id']
+
+    for key, val in [('show_name', name), ('show_date', show_date or ''),
+                     ('show_time', show_time), ('venue', venue)]:
+        if val:
+            db.execute("""
+                INSERT INTO advance_data (show_id, field_key, field_value)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (show_id, field_key) DO UPDATE SET field_value = EXCLUDED.field_value
+            """, (show_id, key, val))
+
+    if show_date:
+        db.execute("""
+            INSERT INTO show_performances (show_id, perf_date, perf_time, sort_order)
+            VALUES (%s, %s, %s, 0)
+        """, (show_id, show_date, show_time))
+
+    log_audit(db, 'SHOW_CREATE', 'show', show_id, show_id=show_id,
+              after={'name': name, 'show_date': show_date, 'venue': venue})
+    return show_id
+
+
+def _pm_show_bars(db, show_ids):
+    """[{id, name, venue, show_mode, status, start, end, perf_dates, is_past,
+    prism_status, is_test}] for these shows (ISO strings), ordered by start.
+    start / end = the envelope of load-in, load-out and the performance
+    dates; a show with none of those falls back to its show_date; both are
+    None when it has no date at all. is_past is the Shows board's PAST rule
+    (_show_last_date; an undated performance could still be ahead)."""
+    ids = _pm_int_ids(show_ids)
+    if not ids:
+        return []
+    perfs, undated = {}, set()
+    for p in db.execute("""
+        SELECT show_id, perf_date FROM show_performances
+         WHERE show_id = ANY(%s) ORDER BY perf_date, sort_order, id
+    """, (ids,)).fetchall():
+        d = _as_date(p['perf_date'])
+        if d is None:
+            undated.add(p['show_id'])
+        elif d not in perfs.setdefault(p['show_id'], []):
+            perfs[p['show_id']].append(d)
+    today = date.today()
+    out = []
+    for r in db.execute("""
+        SELECT id, name, venue, show_mode, status, show_date, load_in_date,
+               load_out_date, prism_status, is_test
+          FROM shows WHERE id = ANY(%s)
+    """, (ids,)).fetchall():
+        pd = perfs.get(r['id'], [])
+        show_date = _as_date(r['show_date'])
+        span = [d for d in (_as_date(r['load_in_date']), _as_date(r['load_out_date']), *pd) if d]
+        if not span and show_date:
+            span = [show_date]
+        last = _show_last_date(show_date, r['load_out_date'], pd)
+        out.append({
+            'id': r['id'], 'name': r['name'], 'venue': (r['venue'] or '').strip(),
+            'show_mode': r['show_mode'] or 'show', 'status': r['status'] or 'active',
+            'start': min(span).isoformat() if span else None,
+            'end': max(span).isoformat() if span else None,
+            'perf_dates': [d.isoformat() for d in pd],
+            'is_past': bool(last and last < today and r['id'] not in undated),
+            'prism_status': r['prism_status'], 'is_test': bool(r['is_test']),
+        })
+    out.sort(key=lambda s: (s['start'] is None, s['start'] or '', s['id']))
+    return out
+
+
+def _pm_show_figures(db, show_ids):
+    """Money on these shows, for the CURRENT session: {'can': {assets, labor,
+    piano}, 'shows': [{show_id, name, assets, external, piano,
+    labor_estimate, labor_actual, settled}], 'totals': {...}}.
+    Every number is one the Reports page would give this same person, from
+    the same helpers — never re-derived here: asset lines and external
+    rentals need _can_report_assets, piano lines _can_report_piano, labor
+    _can_report_labor (estimate = _calc_labor_cost_for_show; actual =
+    _calc_post_show_labor_cost, SETTLED shows only, as in every report). A
+    figure the caller may not see is None, never 0. Read-only; nothing is
+    stored."""
+    ids = _pm_int_ids(show_ids)
+    can = {'assets': bool(_can_report_assets()), 'labor': bool(_can_report_labor()),
+           'piano': bool(_can_report_piano())}
+    keys = ('assets', 'external', 'piano', 'labor_estimate', 'labor_actual')
+    gate = {'assets': 'assets', 'external': 'assets', 'piano': 'piano',
+            'labor_estimate': 'labor', 'labor_actual': 'labor'}
+    uid = session.get('user_id')
+    rows = [r for r in db.execute(
+        'SELECT id, name FROM shows WHERE id = ANY(%s) ORDER BY id', (ids,)).fetchall()
+        if can_access_show(uid, r['id'])] if ids else []
+    ids = [r['id'] for r in rows]
+    shows = {r['id']: {'show_id': r['id'], 'name': r['name'],
+                       **{k: (0.0 if can[gate[k]] else None) for k in keys},
+                       'settled': False} for r in rows}
+    if ids:
+        for sid in set(ids) - set(_unsettled_show_ids(db, ids)):
+            shows[sid]['settled'] = True
+    if ids and can['assets']:
+        for r in _report_asset_lines(db, ids):
+            shows[r['show_id']]['assets'] += float(r['locked_price'] or 0) * int(r['quantity'] or 1)
+    if ids and (can['assets'] or can['piano']):
+        for sid, (ext, piano) in _report_externals(db, ids).items():
+            if can['assets']:
+                shows[sid]['external'] = ext
+            if can['piano']:
+                shows[sid]['piano'] = piano
+    if can['labor']:
+        for sid, s in shows.items():
+            # One show's engine failing must not take the others down. A
+            # failed figure is None ("not available"), never a made-up 0.
+            # (A database outage is not a figure problem: let it 503.)
+            try:
+                s['labor_estimate'] = float(_calc_labor_cost_for_show(db, sid)[1] or 0)
+            except db_adapter.DatabaseUnavailable:
+                raise
+            except Exception as e:
+                s['labor_estimate'] = None
+                app.logger.warning(f'show figures: estimate failed for show {sid}: {type(e).__name__}')
+            if not s['settled']:
+                s['labor_actual'] = None        # nothing is billed until Settle Now
+                continue
+            try:
+                s['labor_actual'] = float(_calc_post_show_labor_cost(db, sid)[1] or 0)
+            except db_adapter.DatabaseUnavailable:
+                raise
+            except Exception as e:
+                s['labor_actual'] = None
+                app.logger.warning(f'show figures: settlement failed for show {sid}: {type(e).__name__}')
+    totals = {}
+    for k in keys:
+        if not can[gate[k]]:
+            totals[k] = None
+            continue
+        vals = [s[k] for s in shows.values() if s[k] is not None]
+        totals[k] = round(float(sum(vals)), 2)
+        for s in shows.values():
+            if s[k] is not None:
+                s[k] = round(s[k], 2)
+    return {'can': can, 'shows': [shows[i] for i in ids], 'totals': totals}
+
+
+projects_module.register(
+    app,
+    get_db=get_db,
+    get_current_user=get_current_user,
+    log_audit=log_audit,
+    syslog_logger=syslog_logger,
+    module_enabled=module_enabled,
+    can_access_show=can_access_show,
+    ts_out=_ts_out,
+    as_date=_as_date,
+    notify_users=notify_users,
+    mention_user_ids=_mention_user_ids,
+    get_distinct_venues=_get_distinct_venues,
+    get_upload_max=_get_upload_max,
+    served_type=_served_type,
+    safe_content_disposition=_safe_content_disposition,
+    cols_except=_cols_except,
+    office_to_pdf=_libreoffice_convert_to_pdf,
+    pdf_font_config=_wp_font_config,
+    get_logo=lambda: get_app_setting('logo_data', ''),
+    file_store=file_store,
+    s3_storage=s3_storage,
+    db_unavailable=db_adapter.DatabaseUnavailable,
+    app_version=APP_VERSION,
+    create_show=_pm_create_show,
+    can_create_show=_pm_can_create_show,
+    show_bars=_pm_show_bars,
+    show_figures=_pm_show_figures,
+)
 
 find_module.register(
     app,

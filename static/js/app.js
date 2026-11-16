@@ -364,7 +364,7 @@ function _initMobileTableScroll() {
       if (t.closest('.m-scroll') || t.closest('.modal-overlay')) return;
       const box = t.parentElement;
       if (!box) return;
-      const labor = t.matches('.lo-table, .sched-day-block table, #labor-days-container table, .labor-day-table, .oh-summary-table');
+      const labor = t.matches('.lo-table, .sched-day-block table, #labor-days-container table, .labor-day-table, .oh-summary-table, .rpt-table');
       const ov = getComputedStyle(box).overflowX;
       if (ov === 'auto' || ov === 'scroll') {                 // already a scroller:
         if (labor) t.classList.add('m-wide');                  // just stop the table squeezing
@@ -4444,6 +4444,7 @@ async function refreshNotifBadge() {
 const _NOTIF_KIND_LABELS = {
   asset_approval: 'Asset approval', piano_tuning: 'Piano tuning',
   field_alert: 'Advance change', no_labor_alert: 'Labor', mention: 'Mention', system: 'System',
+  report_shared: 'Report',
 };
 
 async function _loadNotifPanel() {
@@ -4454,8 +4455,11 @@ async function _loadNotifPanel() {
     const r = await fetch('/api/notifications', {credentials: 'same-origin'});
     if (!r.ok) throw new Error('fetch failed');
     const j = await r.json();
+    const markAll = document.getElementById('notif-mark-all');
+    if (markAll) markAll.disabled = !(j.unread > 0);
     if (!j.notifications || !j.notifications.length) {
-      list.innerHTML = '<div class="notif-empty">No notifications yet.</div>';
+      list.innerHTML = '<div class="inbox-empty">No notifications yet.<div class="inbox-empty-sub">@mentions, asset approvals, piano requests'
+        + (list.dataset.tasks === '1' ? ', advance changes and task updates' : ' and advance changes') + ' show up here.</div></div>';
     } else {
       list.innerHTML = j.notifications.map(n => {
         const cls = n.read_at ? 'notif-item' : 'notif-item unread';
@@ -4485,6 +4489,13 @@ async function _loadNotifPanel() {
 
 function toggleNotifPanel(ev) {
   if (ev) ev.stopPropagation();
+  // 3.47.0: the list lives in the inbox panel (chat.js) — the bell opens
+  // its Notifications tab.
+  if (window.Inbox) {
+    if (typeof mCloseDrawer === 'function') mCloseDrawer();
+    window.Inbox.toggle('notifications');
+    return;
+  }
   const panel = document.getElementById('notif-panel');
   if (!panel) return;
   _notifPanelOpen = !_notifPanelOpen;
@@ -4497,6 +4508,7 @@ async function markNotifRead(nid) {
     await fetch(`/api/notifications/${nid}/read`, {method: 'POST', credentials: 'same-origin'});
   } catch (e) {}
   refreshNotifBadge();
+  if (window.Inbox) window.Inbox.refresh();
 }
 
 async function markAllNotifRead() {
@@ -4505,6 +4517,7 @@ async function markAllNotifRead() {
   } catch (e) {}
   _loadNotifPanel();
   refreshNotifBadge();
+  if (window.Inbox) window.Inbox.refresh();
 }
 
 // Close the panel when clicking outside of it (but allow clicks inside the
@@ -4524,6 +4537,9 @@ document.addEventListener('click', (e) => {
 // sign-in pages).
 function _startNotifPolling() {
   if (!document.getElementById('notif-bell-btn')) return;
+  // With the inbox on the page (3.47.0) chat.js's one status poll paints
+  // this badge too — don't run a second poll beside it.
+  if (document.getElementById('inbox-panel')) return;
   refreshNotifBadge();
   _notifPollTimer = setInterval(refreshNotifBadge, _NOTIF_POLL_MS);
 }
@@ -4956,6 +4972,7 @@ function renderComments(comments) {
         <div class="comment-bubble" style="${isDeleted ? 'opacity:.6' : ''}">
           <div class="comment-header">
             <strong>${_esc(c.author)}</strong>
+            ${c.via_message !== undefined ? `<span class="comment-via-msg" title="Sent as a message that is also posted to this show's comments">✉ message${c.via_message ? ' to ' + _esc(c.via_message) : ''}</span>` : ''}
             <span class="comment-time">${dt}${editedIndicator}</span>
             <span style="margin-left:auto;display:flex;gap:4px;align-items:center">${actions.join('')}</span>
           </div>
@@ -4970,8 +4987,32 @@ function renderComments(comments) {
         </div>
       </div>`;
   }).join('');
-  list.scrollTop = list.scrollHeight;
+  // A mention notification links to ?tab=comments&comment=<id>: land on that
+  // comment (and mark it a moment) on the FIRST render only — later renders
+  // (polls, own posts) keep sticking to the newest one at the bottom.
+  let focus = null;
+  if (_commentFocusPending) {
+    _commentFocusPending = false;
+    const want = new URLSearchParams(location.search).get('comment');
+    if (want && /^\d+$/.test(want)) {
+      focus = list.querySelector(`.comment-item[data-id="${want}"]`);
+      try {
+        const u = new URL(location.href);
+        u.searchParams.delete('comment');
+        history.replaceState(history.state, '', u);
+      } catch (_) {}
+    }
+  }
+  if (focus) {
+    list.scrollTop = 0;
+    focus.classList.add('comment-focus');
+    focus.scrollIntoView({block: 'center'});
+    setTimeout(() => focus.classList.remove('comment-focus'), 3000);
+  } else {
+    list.scrollTop = list.scrollHeight;
+  }
 }
+let _commentFocusPending = true;
 
 function startEditComment(cid) {
   document.getElementById('comment-body-' + cid).style.display = 'none';
@@ -5062,8 +5103,22 @@ function _renderCommentBody(text) {
   // (Tags.richHtml — each segment escaped, #tags link to their tag page,
   // @mentions keep their highlight, URLs stay plain text). Never regex over
   // the escaped HTML: '&#39;' would read as a tag and URLs swallowed entities.
-  if (window.Tags && typeof Tags.richHtml === 'function') return Tags.richHtml(text);
+  if (window.Tags && typeof Tags.richHtml === 'function') return Tags.richHtml(text, _mentionNames());
   return _esc(text == null ? '' : text).replace(/\n/g, '<br>');
+}
+// The names an @mention can name (the users the mention picker offers),
+// longest first, so '@Dan Okafor' highlights whole — built once per page.
+let _mentionNamesCache = null;
+function _mentionNames() {
+  if (_mentionNamesCache) return _mentionNamesCache;
+  const all = typeof ALL_USERS !== 'undefined' && Array.isArray(ALL_USERS) ? ALL_USERS : [];
+  const seen = new Set(), out = [];
+  all.forEach(u => [u.display_name, u.username].forEach(n => {
+    n = String(n || '').trim();
+    if (n && !seen.has(n.toLowerCase())) { seen.add(n.toLowerCase()); out.push(n); }
+  }));
+  _mentionNamesCache = out.sort((a, b) => b.length - a.length);
+  return _mentionNamesCache;
 }
 
 async function submitComment() {
@@ -6625,7 +6680,13 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
    with the words filled in), Esc closes. "/" anywhere focuses the box.
    The popover lives on <body> (the mobile drawer's transform would make a
    fixed child relative to the drawer). Fetches are sequence-guarded and
-   aborted, so a slow answer never overwrites a newer one. */
+   aborted, so a slow answer never overwrites a newer one.
+   Extra result groups: a page may define window.NavSearchExtra(q, signal)
+   → Promise<{groups: [{head, items: [{href, title, sub}]}]}>. It is asked
+   alongside every plain-text search (never a '#tag' one), under the same
+   sequence / abort guard, and its groups are listed after the shows. It
+   may fail or be absent: the show results never depend on it. Items are
+   built with textContent and only same-site paths are linked. */
 (function _initNavSearch() {
   const input = document.getElementById('nav-search-q');
   const form = document.getElementById('nav-search');
@@ -6711,12 +6772,29 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
     });
     if (pos < name.length) el.appendChild(document.createTextNode(name.slice(pos)));
   }
-  function render(q, data) {
+  // window.NavSearchExtra's answer → [{head, items}] with only usable
+  // items: a title and a same-site path ('/…', never '//…' or a backslash,
+  // which browsers read as another host). At most 3 groups of 8.
+  function extraGroups(extra) {
+    const out = [];
+    const groups = extra && Array.isArray(extra.groups) ? extra.groups : [];
+    groups.slice(0, 3).forEach(g => {
+      const items = (g && Array.isArray(g.items) ? g.items : []).filter(it =>
+        it && typeof it.title === 'string' && it.title &&
+        typeof it.href === 'string' && /^\/(?![\/\\])[^\\\u0000-\u001f]*$/.test(it.href)
+      ).slice(0, LIMIT);
+      if (items.length) out.push({head: typeof g.head === 'string' ? g.head : '', items});
+    });
+    return out;
+  }
+  function render(q, data, extra) {
     pop.textContent = '';
     const res = data.results || [];
     const terms = isTag(q) ? [] : q.toLowerCase().split(/\s+/).filter(Boolean);
+    const groups = extraGroups(extra);
     if (!res.length) {
-      note(isTag(q) ? `No shows tagged ${q}.` : `No shows match “${q}”.`);
+      // "No shows match" would be wrong above a group that did match.
+      if (!groups.length) note(isTag(q) ? `No shows tagged ${q}.` : `No shows match “${q}”.`);
     } else {
       const h = document.createElement('div');
       h.className = 'nav-sr-head';
@@ -6764,6 +6842,38 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
         pop.appendChild(a);
       });
     }
+    let n = 0;
+    groups.forEach(g => {
+      if (g.head) {
+        const h = document.createElement('div');
+        h.className = 'nav-sr-head';
+        h.setAttribute('role', 'presentation');
+        h.textContent = g.head;
+        pop.appendChild(h);
+      }
+      g.items.forEach(it => {
+        const a = document.createElement('a');
+        a.className = 'nav-sr-item';
+        a.href = it.href;
+        a.id = 'nav-sr-x' + (n++);
+        a.setAttribute('role', 'option');
+        const main = document.createElement('span');
+        main.className = 'nav-sr-main';
+        const nm = document.createElement('span');
+        nm.className = 'nav-sr-name';
+        nameInto(nm, it.title, terms);
+        nm.title = it.title;
+        main.appendChild(nm);
+        if (typeof it.sub === 'string' && it.sub) {
+          const meta = document.createElement('span');
+          meta.className = 'nav-sr-meta';
+          meta.textContent = it.sub;
+          main.appendChild(meta);
+        }
+        a.appendChild(main);
+        pop.appendChild(a);
+      });
+    });
     pop.appendChild(allLink(q, data.total || 0));
     setActive(-1);
     show();
@@ -6775,14 +6885,22 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
     const p = new URLSearchParams({limit: String(LIMIT), status: 'all'});
     if (isTag(q)) q.split(/\s+/).filter(Boolean).forEach(t => p.append('tag', t));
     else p.set('q', q);
+    const signal = ctrl ? ctrl.signal : undefined;
+    // The optional provider is asked at the same time; it can only ever
+    // resolve to its answer or to null (a throw, a rejection, an abort).
+    const extraP = (!isTag(q) && typeof window.NavSearchExtra === 'function')
+      ? Promise.resolve().then(() => window.NavSearchExtra(q, signal)).catch(() => null)
+      : Promise.resolve(null);
     try {
       const r = await fetch('/api/search?' + p.toString(), {
         headers: {'X-Requested-With': 'XMLHttpRequest'}, credentials: 'same-origin',
-        signal: ctrl ? ctrl.signal : undefined});
+        signal});
       const data = await r.json().catch(() => null);
       if (my !== seq || input.value.trim() !== q) return;
       if (!r.ok || !data || data.success === false) { note((data && data.error) || 'Search failed — try again.', true); show(); return; }
-      render(q, data);
+      const extra = await extraP;
+      if (my !== seq || input.value.trim() !== q) return;
+      render(q, data, extra);
     } catch (e) {
       if (e && e.name === 'AbortError') return;
       if (my === seq) { note('Search failed — try again.', true); show(); }

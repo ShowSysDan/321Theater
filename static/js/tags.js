@@ -85,8 +85,27 @@
 
   function textHtml(s) { return esc(s).replace(/\n/g, '<br>'); }
 
-  /** Comment body: URL | #tag | @mention on the raw text; newlines → <br>. */
-  function richHtml(text) {
+  function isWord(c) { return !!c && /[A-Za-z0-9_]/.test(c); }
+  /** The known name `s` continues with right after the '@' at `at` (longest
+      first, any case, ending at a non-word character or the end) — the same
+      rule the server uses to decide who was mentioned — or ''. */
+  function mentionName(s, at, names) {
+    if (!names || !names.length || isWord(s.charAt(at - 1))) return '';
+    for (var i = 0; i < names.length; i++) {
+      var n = names[i];
+      if (!n) continue;
+      var span = s.substr(at + 1, n.length);
+      if (span.length === n.length && span.toLowerCase() === n.toLowerCase()
+          && !isWord(s.charAt(at + 1 + n.length))) return span;
+    }
+    return '';
+  }
+
+  /** Comment body: URL | #tag | @mention on the raw text; newlines → <br>.
+      `names` (optional): display names / usernames, LONGEST FIRST — an
+      '@' followed by one of them highlights the whole name ('@Dan Okafor'),
+      otherwise the single-word look applies. */
+  function richHtml(text, names) {
     var s = String(text == null ? '' : text);
     var re = richRe(), m, pos = 0, out = '';
     while ((m = re.exec(s))) {
@@ -99,9 +118,16 @@
         out += t.length <= TAG_MAX
           ? '<a class="tag-link" href="' + href(t) + '">#' + esc(m[3]) + '</a>'
           : textHtml('#' + m[3]);
+      } else if (isWord(s.charAt(m.index - 1))) {   // x@steve.com: not a mention
+        out += textHtml(s.slice(pos, m.index + m[0].length));
       } else {                          // @mention
+        var full = mentionName(s, m.index, names);
         out += textHtml(s.slice(pos, m.index)) +
-          '<span class="comment-mention">@' + esc(m[4]) + '</span>';
+          '<span class="comment-mention">@' + esc(full || m[4]) + '</span>';
+        if (full) {                     // continue right after the name
+          pos = re.lastIndex = m.index + 1 + full.length;
+          continue;
+        }
       }
       pos = m.index + m[0].length;
     }

@@ -697,6 +697,50 @@ def _hm(iso):
         return ''
 
 
+def captures_for_report(db, show_ids):
+    """Captured sound levels for Reports → Sound Levels (3.47.0): one dict
+    per captured performance of `show_ids` — {show_id, perf_key, date, time,
+    minutes (measured window), detected (curtain times detected), monitors:
+    [{id, name, unit, location, stats}]}. Read-only; [] when nothing is
+    captured. Same row filter as captures_for_show()."""
+    if not show_ids:
+        return []
+    rows = db.execute("""
+        SELECT c.show_id, c.perf_key, c.stats_json, c.detection_json,
+               c.report_start, c.report_end, c.sched_start, c.sched_end
+          FROM spot_captures c
+          LEFT JOIN show_performances p ON p.id = c.perf_id
+         WHERE c.show_id = ANY(%s) AND c.status='captured' AND c.stats_json IS NOT NULL
+           AND (c.perf_id IS NULL OR p.id IS NOT NULL)
+         ORDER BY c.sched_start, c.id""", (list(show_ids),)).fetchall()
+    out = []
+    for r in rows:
+        try:
+            mons = json.loads(r['stats_json'] or '[]')
+        except ValueError:
+            mons = []
+        try:
+            det = json.loads(r['detection_json']) if r['detection_json'] else None
+        except ValueError:
+            det = None
+        minutes = None
+        try:
+            a = datetime.fromisoformat(r['report_start'] or r['sched_start'])
+            b = datetime.fromisoformat(r['report_end'] or r['sched_end'])
+            minutes = max(0, int(round((b - a).total_seconds() / 60)))
+        except (TypeError, ValueError):
+            pass
+        out.append({
+            'show_id': r['show_id'], 'perf_key': r['perf_key'],
+            'date': (r['sched_start'] or '')[:10], 'time': _hm(r['sched_start']),
+            'minutes': minutes,
+            'detected': bool(isinstance(det, dict)
+                             and (det.get('start_detected') or det.get('end_detected'))),
+            'monitors': [m for m in mons if isinstance(m, dict)] if isinstance(mons, list) else [],
+        })
+    return out
+
+
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
 def _module_required(f):

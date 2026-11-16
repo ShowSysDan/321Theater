@@ -1,0 +1,354 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Projects module — the Timeline tab (Gantt). Served ONLY by the gated route
+   /projects/assets/projects_gantt.css; nothing of the module is in static/.
+
+   Every class is `.pm-g-*`; status colours come from the --pm-st-* tokens
+   and the .pm-st-* classes of projects.css (which set --c). Rules kept:
+   - flat color-mix tints only (no gradients, no glows); a solid 2px ring
+     marks a schedule conflict; orange = action (Add, the focus ring).
+   - status is never colour alone: done carries ✓, blocked ⊘, a conflict ⚠,
+     a milestone is a ◆ — and every bar says it all in its label.
+   - ONE scroll box (.pm-g-scroll): the date axis sticks to its top, the
+     name column to its left. Lanes use overflow: clip (not hidden), which
+     keeps the sticky pieces inside them working.
+   - touch-action: none is on the resize handles ONLY, so a finger always
+     scrolls the chart / the page.
+   - phone rules (html.mobile-view) and print rules are at the end of THIS
+     file (mobile.css is served to everyone and must not name the module).
+
+   Stacking inside the box (.pm-g-body is the stacking context), bottom up:
+     the background (weekends, month lines, project band, today line),
+     the dependency arrows (one SVG), then the rows IN DOM ORDER — each row
+     is its own stacking context (content-visibility: auto skips the layout
+     and paint of rows that are off screen: 600 tasks stay quick) holding its
+     bars and, above them, the sticky name cell. Rows and lanes let the
+     pointer through (pointer-events: none) so a red arrow under them can be
+     clicked; names, bars and lane buttons take it back.
+     Above the body: 6 the sticky axis, 7 its corner.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* The box fills the window: give back the page's bottom padding while the
+   Timeline is the visible tab. */
+html:not(.mobile-view) .main-content:has(#pm-pane-timeline:not([hidden])) { padding-bottom: 18px; }
+
+.pm-g-toolbar { margin-bottom: 10px; }
+.pm-g-conf {
+  color: var(--pm-warn-ink); font-weight: 700;
+  border-color: color-mix(in srgb, var(--pm-warn) 45%, transparent);
+  background: color-mix(in srgb, var(--pm-warn) 12%, transparent);
+}
+.pm-g-conf:hover { background: color-mix(in srgb, var(--pm-warn) 22%, transparent); color: var(--pm-warn-ink); }
+.pm-g-add .tools-menu-btn[aria-expanded="true"] { background: var(--accent); border-color: var(--accent); }
+.pm-g-capnote { margin: 0 0 10px; }
+
+/* ── Legend ───────────────────────────────────────────────────────────────── */
+.pm-g-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0 0 10px; font-size: 12px; color: var(--text-dim); }
+.pm-g-lg { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.pm-g-sw {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 24px; height: 12px; border-radius: 3px; font-size: 9px; line-height: 1;
+}
+.pm-g-sw.pm-g-bar, .pm-g-sw.pm-g-showbar { position: static; height: 12px; padding: 0; cursor: default; border-radius: 3px; }
+.pm-g-sw.pm-g-bar.is-conflict { box-shadow: 0 0 0 2px var(--pm-warn); margin: 0 2px; }
+.pm-g-sw-ms { width: 10px; height: 10px; margin: 0 4px; transform: rotate(45deg); border-radius: 1px; background: var(--pm-st-doing); }
+.pm-g-sw-dep { position: relative; height: 0; border-radius: 0; border-top: 1.5px solid color-mix(in srgb, var(--text-dim) 80%, transparent); }
+.pm-g-sw-dep::after {
+  content: ""; position: absolute; right: -1px; top: -4.5px;
+  border-left: 6px solid color-mix(in srgb, var(--text-dim) 80%, transparent);
+  border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent;
+}
+.pm-g-sw-dep.is-conflict { border-top-color: var(--pm-st-blocked); border-top-width: 2px; }
+.pm-g-sw-dep.is-conflict::after { border-left-color: var(--pm-st-blocked); top: -4.5px; }
+.pm-g-sw-band {
+  background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 0;
+  border-left: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent);
+  border-right: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.pm-g-sw-today { width: 0; height: 14px; margin: 0 6px; border-radius: 0; border-left: 2px solid var(--brand-red); }
+
+/* ── The scroll box ───────────────────────────────────────────────────────── */
+.pm-g-scroll {
+  --pm-g-namew: 280px; --pm-g-row: 34px; --pm-g-grp: 30px; --pm-g-barh: 22px;
+  --pm-g-dep: color-mix(in srgb, var(--text-dim) 78%, var(--bg-card));
+  position: relative; overflow: auto; isolation: isolate; overflow-anchor: none;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: var(--hl), var(--lift);
+}
+.pm-g-inner { position: relative; box-sizing: content-box; min-width: 100%; }
+/* The floating inbox button sits over the bottom-right corner: leave room so
+   the last days and the last rows can be scrolled clear of it. */
+html.has-inbox:not(.mobile-view) .pm-g-inner { padding: 0 78px 64px 0; }
+
+/* Axis */
+.pm-g-head {
+  position: sticky; top: 0; z-index: 6; display: flex; height: 48px;
+  background: var(--bg-card); border-bottom: 1px solid var(--line-strong);
+}
+.pm-g-corner {
+  position: sticky; left: 0; z-index: 7; flex: 0 0 var(--pm-g-namew); width: var(--pm-g-namew); box-sizing: border-box;
+  display: flex; align-items: flex-end; padding: 0 12px 7px;
+  background: var(--bg-card); border-right: 1px solid var(--line-strong);
+  font: 700 10.5px var(--font-cond); letter-spacing: .09em; text-transform: uppercase; color: var(--text-muted);
+}
+.pm-g-axis { position: relative; flex: none; height: 100%; }
+.pm-g-ax-top {
+  position: absolute; top: 0; height: 22px; box-sizing: border-box; white-space: nowrap; overflow: clip;
+  border-left: 1px solid var(--line-strong); font: 600 11.5px/22px var(--font-main); color: var(--ink);
+}
+/* The month name stays in view while its month is on screen. */
+.pm-g-ax-top > span { position: sticky; left: calc(var(--pm-g-namew) + 1px); display: inline-block; padding: 0 8px; }
+.pm-g-ax-cell {
+  position: absolute; top: 22px; height: 26px; box-sizing: border-box; overflow: hidden; white-space: nowrap;
+  display: flex; align-items: center; padding-left: 6px;
+  border-left: 1px solid var(--pm-line); border-top: 1px solid var(--pm-line);
+  font: 11px/1 var(--font-mono); color: var(--text-dim);
+}
+.pm-g-ax-cell b { font-weight: 500; }
+.pm-g-ax-cell i { font-style: normal; font-size: 9px; color: var(--text-muted); letter-spacing: .04em; }
+.pm-g-scroll[data-zoom="day"] .pm-g-ax-cell { flex-direction: column; justify-content: center; gap: 2px; padding: 0; }
+.pm-g-ax-cell.is-we { background: color-mix(in srgb, var(--text-dim) 7%, transparent); color: var(--text-muted); }
+.pm-g-ax-cell.is-today b { background: var(--brand-red); color: #fff; border-radius: 999px; padding: 2px 5px; margin: -2px 0; font-weight: 700; }
+.pm-g-ax-now {
+  position: absolute; bottom: -1px; width: 0; height: 0; margin-left: -5px;
+  border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 7px solid var(--brand-red);
+}
+
+/* Body + background layer */
+.pm-g-body { position: relative; isolation: isolate; }
+.pm-g-bg { position: absolute; top: 0; left: var(--pm-g-namew); pointer-events: none; }
+.pm-g-bg > div { position: absolute; top: 0; bottom: 0; box-sizing: border-box; }
+.pm-g-we { background: color-mix(in srgb, var(--text-dim) 7%, transparent); }
+.pm-g-vl { border-left: 1px solid var(--pm-line); }
+.pm-g-vl.is-month { border-left-color: var(--line-strong); }
+.pm-g-band { background: color-mix(in srgb, var(--pm-g-proj, var(--accent)) 6%, transparent); }
+.pm-g-band.has-l { border-left: 1px dashed color-mix(in srgb, var(--pm-g-proj, var(--accent)) 65%, transparent); }
+.pm-g-band.has-r { border-right: 1px dashed color-mix(in srgb, var(--pm-g-proj, var(--accent)) 65%, transparent); }
+.pm-g-now { border-left: 2px solid var(--brand-red); margin-left: -1px; }
+
+/* Rows */
+.pm-g-row {
+  display: flex; height: var(--pm-g-row); box-shadow: inset 0 -1px 0 var(--pm-line);
+  content-visibility: auto; contain-intrinsic-size: auto var(--pm-g-row); pointer-events: none;
+}
+.pm-g-name, .pm-g-lane > * { pointer-events: auto; }
+.pm-g-row:hover { background: color-mix(in srgb, var(--text-dim) 6%, transparent); }
+.pm-g-name {
+  position: sticky; left: 0; z-index: 4; flex: 0 0 var(--pm-g-namew); width: var(--pm-g-namew); box-sizing: border-box; min-width: 0;
+  display: flex; align-items: center; gap: 7px; padding: 0 8px 0 12px;
+  background: var(--bg-card); border-right: 1px solid var(--line-strong); box-shadow: inset 0 -1px 0 var(--pm-line);
+}
+.pm-g-row:hover .pm-g-name { background: var(--bg-card-hover); }
+.pm-g-lane { position: relative; flex: none; overflow: clip; }
+.pm-g-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c, var(--pm-st-todo)); flex: none; }
+.pm-g-dot.pm-st-todo { background: transparent; box-shadow: inset 0 0 0 2px var(--pm-st-todo); }
+.pm-g-title {
+  flex: 0 1 auto; min-width: 0; border: 0; background: none; padding: 2px 0; cursor: pointer; text-align: left;
+  font: 13px/1.3 var(--font-main); color: var(--ink); text-decoration: none !important;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pm-g-title:hover { color: var(--orange-text); }
+.pm-g-title.is-done { color: var(--text-dim); }
+.pm-g-name .pm-badge { flex: none; }
+.pm-g-name .pm-glyph { flex: none; }
+.pm-g-warnbtn {
+  flex: none; border: 0; background: none; cursor: pointer; padding: 2px 5px; border-radius: 4px;
+  color: var(--pm-warn-ink); font-size: 13px; line-height: 1.2;
+}
+.pm-g-warnbtn:hover { background: color-mix(in srgb, var(--pm-warn) 20%, transparent); }
+.pm-g-showlink { flex: none; display: inline-flex; padding: 3px; border-radius: 4px; color: var(--text-dim); }
+.pm-g-showlink:hover { color: var(--orange-text); background: var(--bg-hover); }
+.pm-g-linkico { flex: none; display: block; }
+
+/* Group heading rows */
+.pm-g-grow { height: var(--pm-g-grp); contain-intrinsic-size: auto var(--pm-g-grp); background: color-mix(in srgb, var(--text-dim) 7%, transparent); }
+.pm-g-grow .pm-g-name, .pm-g-grow:hover .pm-g-name { background: var(--bg-surface); }
+.pm-g-gtoggle {
+  flex: 1 1 auto; min-width: 0; height: 100%; display: flex; align-items: center; gap: 7px;
+  border: 0; background: none; padding: 0; cursor: pointer; text-align: left;
+  font: 700 11.5px var(--font-cond); letter-spacing: .04em; text-transform: uppercase; color: var(--text-dim);
+}
+.pm-g-gtoggle:hover { color: var(--ink); }
+.pm-g-caret { flex: none; width: 10px; font-size: 10px; text-align: center; }
+.pm-g-gname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-g-gtoggle .pm-count { flex: none; font: 600 11px var(--font-mono); color: var(--text-muted); letter-spacing: 0; }
+.pm-g-sum {
+  position: absolute; z-index: 3; top: 50%; height: 6px; margin-top: -3px; box-sizing: border-box; border-radius: 3px;
+  background: color-mix(in srgb, var(--text-dim) 50%, var(--bg-card));
+}
+
+/* ── Bars ─────────────────────────────────────────────────────────────────── */
+/* --c comes from the bar's .pm-st-* class (projects.css). */
+.pm-g-bar {
+  position: absolute; z-index: 3; top: calc((var(--pm-g-row) - var(--pm-g-barh)) / 2); height: var(--pm-g-barh);
+  box-sizing: border-box; display: flex; align-items: center; min-width: 0; border-radius: 5px; cursor: pointer;
+  background: color-mix(in srgb, var(--c) 30%, var(--bg-card));
+  border: 1px solid color-mix(in srgb, var(--c) 66%, var(--bg-card));
+  color: var(--ink); font: 600 11.5px/1 var(--font-main);
+  user-select: none; -webkit-user-select: none;
+}
+.pm-g-bar.pm-st-doing   { background: color-mix(in srgb, var(--c) 46%, var(--bg-card)); }
+.pm-g-bar.pm-st-blocked { background: color-mix(in srgb, var(--c) 40%, var(--bg-card)); }
+.pm-g-bar.is-done {
+  background: color-mix(in srgb, var(--c) 15%, var(--bg-card));
+  border-color: color-mix(in srgb, var(--c) 38%, var(--bg-card)); color: var(--text-dim); font-weight: 400;
+}
+.pm-g-bar:hover { border-color: var(--c); }
+.pm-g-bar.is-late { border-right: 3px solid var(--pm-st-blocked); }
+/* A schedule conflict: a solid warning ring (and ⚠ inside when it fits). */
+.pm-g-bar.is-conflict { box-shadow: 0 0 0 2px var(--pm-warn); }
+.pm-g-bar.is-clip-l { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left-style: dashed; }
+.pm-g-bar.is-clip-r { border-top-right-radius: 0; border-bottom-right-radius: 0; border-right-style: dashed; }
+.pm-g-bar.is-pending { border-style: dashed; }
+.pm-g-scroll .pm-g-bar:focus-visible, .pm-g-scroll .pm-g-showbar:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+/* Sticky: a long bar keeps its label in view while its start is scrolled away. */
+.pm-g-bar-in {
+  position: sticky; left: calc(var(--pm-g-namew) + 4px); flex: 0 1 auto; min-width: 0; max-width: 100%; box-sizing: border-box;
+  display: flex; align-items: center; gap: 5px; padding: 0 7px; overflow: hidden; pointer-events: none;
+}
+.pm-g-bar-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-g-tick { flex: none; font-size: 11px; }
+.pm-g-bar.is-done .pm-g-tick { color: var(--pm-st-done-ink); font-weight: 700; }
+.pm-g-warn { flex: none; font-size: 12px; color: var(--pm-warn-ink); }
+.pm-g-warn[data-review] { pointer-events: auto; cursor: pointer; }
+.pm-g-bar .pm-g-linkico { opacity: .8; }
+
+/* Milestone: a diamond on its day */
+.pm-g-bar.is-ms { height: 16px; top: calc((var(--pm-g-row) - 16px) / 2); background: none; border: 0; border-radius: 0; box-shadow: none; }
+.pm-g-dia {
+  position: absolute; inset: 2px; transform: rotate(45deg); border-radius: 2px;
+  background: color-mix(in srgb, var(--c) 78%, var(--bg-card)); border: 1px solid var(--c);
+}
+.pm-g-bar.is-ms.is-done .pm-g-dia { background: color-mix(in srgb, var(--c) 26%, var(--bg-card)); }
+.pm-g-bar.is-ms.is-conflict .pm-g-dia { box-shadow: 0 0 0 2px var(--pm-warn); }
+.pm-g-bar.is-ms.is-late .pm-g-dia { border-color: var(--pm-st-blocked); border-width: 2px; }
+.pm-g-warn-ms { position: absolute; left: 100%; top: 50%; transform: translateY(-50%); margin-left: 6px; }
+
+/* Drag (editors, a mouse or pen, desktop only — the JS adds .can-drag) */
+.pm-g-bar.can-drag { cursor: grab; }
+.pm-g-h { position: absolute; top: -1px; bottom: -1px; width: 8px; cursor: ew-resize; touch-action: none; }
+.pm-g-h-l { left: -1px; }
+.pm-g-h-r { right: -1px; }
+.pm-g-h::after {
+  content: ""; position: absolute; top: 5px; bottom: 5px; left: 3px; width: 2px; border-radius: 1px;
+  background: color-mix(in srgb, var(--ink) 60%, transparent); opacity: 0;
+}
+.pm-g-bar.can-drag:hover .pm-g-h::after, .pm-g-bar.is-dragging .pm-g-h::after { opacity: 1; }
+.pm-g-bar.is-dragging { cursor: grabbing; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+html.pm-g-moving, html.pm-g-moving * { cursor: grabbing !important; }
+html.pm-g-resizing, html.pm-g-resizing * { cursor: ew-resize !important; }
+.pm-g-tip {
+  position: fixed; z-index: 1500; pointer-events: none; white-space: nowrap;
+  padding: 5px 9px; border-radius: 6px; background: var(--ink); color: var(--bg);
+  font: 600 12px/1.3 var(--font-mono); box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+}
+
+@keyframes pm-g-flash {
+  0%, 55% { box-shadow: 0 0 0 4px var(--accent); }
+  100%    { box-shadow: 0 0 0 4px transparent; }
+}
+.pm-g-bar.is-flash, .pm-g-bar.is-ms.is-flash .pm-g-dia, .pm-g-off.is-flash { animation: pm-g-flash 1.7s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .pm-g-bar.is-flash, .pm-g-bar.is-ms.is-flash .pm-g-dia, .pm-g-off.is-flash { animation: none; box-shadow: 0 0 0 4px var(--accent); }
+}
+
+/* ── Shows ────────────────────────────────────────────────────────────────── */
+.pm-g-showbar {
+  --c: var(--accent);
+  position: absolute; z-index: 3; top: calc((var(--pm-g-row) - var(--pm-g-barh)) / 2); height: var(--pm-g-barh);
+  box-sizing: border-box; display: flex; align-items: center; overflow: hidden; padding: 0 7px; border-radius: 5px;
+  background: color-mix(in srgb, var(--c) 22%, var(--bg-card));
+  border: 1px solid color-mix(in srgb, var(--c) 62%, var(--bg-card));
+  color: var(--ink) !important; font: 600 11.5px/1 var(--font-main); text-decoration: none !important;
+  user-select: none; -webkit-user-select: none; -webkit-user-drag: none;
+}
+.pm-g-showbar:hover { border-color: var(--c); }
+.pm-g-showbar.is-event { --c: var(--event); }
+.pm-g-showbar.is-past { --c: var(--past); color: var(--text-dim) !important; }
+.pm-g-showbar.is-clip-l { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left-style: dashed; }
+.pm-g-showbar.is-clip-r { border-top-right-radius: 0; border-bottom-right-radius: 0; border-right-style: dashed; }
+.pm-g-showbar .pm-g-bar-t { position: relative; }
+/* A performance date */
+.pm-g-perf { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -2.5px; background: color-mix(in srgb, var(--c) 80%, var(--bg-card)); }
+.pm-g-sw.pm-g-showbar { position: relative; }
+
+/* Lane notes: "no date yet", "set dates", an off-range marker */
+.pm-g-nodate, .pm-g-setdates, .pm-g-off {
+  position: sticky; left: calc(var(--pm-g-namew) + 12px); display: block; width: max-content; box-sizing: border-box;
+  height: 22px; margin-top: calc((var(--pm-g-row) - 22px) / 2); font: 12px/20px var(--font-main); white-space: nowrap;
+}
+.pm-g-nodate { color: var(--text-muted); font-style: italic; }
+.pm-g-setdates, .pm-g-off {
+  padding: 0 10px; border-radius: 999px; background: var(--bg-card); cursor: pointer;
+  border: 1px dashed var(--border-light); color: var(--orange-text); font-weight: 600; font-size: 11.5px;
+}
+.pm-g-setdates:hover, button.pm-g-off:hover { border-color: var(--accent); border-style: solid; }
+.pm-g-off { color: var(--text-dim); font-family: var(--font-mono); font-weight: 500; }
+span.pm-g-off { cursor: default; }
+.pm-g-off.is-r { left: auto; right: 12px; margin-left: auto; }
+
+/* ── Dependency arrows ────────────────────────────────────────────────────── */
+.pm-g-arrows { position: absolute; top: 0; left: var(--pm-g-namew); pointer-events: none; overflow: visible; }
+.pm-g-dep-line { fill: none; stroke: var(--pm-g-dep); stroke-width: 1.5; stroke-linejoin: round; }
+.pm-g-dep-head { fill: var(--pm-g-dep); stroke: none; }
+.pm-g-dep-hl { fill: none; stroke: var(--orange-text); stroke-width: 2; stroke-linejoin: round; }
+.pm-g-dep.is-conflict .pm-g-dep-line { stroke: var(--pm-st-blocked); stroke-width: 2; }
+.pm-g-dep.is-conflict .pm-g-dep-head { fill: var(--pm-st-blocked); }
+.pm-g-dep-hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; }
+.pm-g-dep.can-review { cursor: pointer; }
+.pm-g-dep.can-review .pm-g-dep-head { pointer-events: fill; }
+.pm-g-dep.can-review:hover .pm-g-dep-line { stroke-width: 3.5; }
+
+/* ── Empty state ──────────────────────────────────────────────────────────── */
+.pm-g-emptybox .form-section { max-width: 720px; margin: 0 auto; }
+.pm-g-emptybox .pm-row-title { text-decoration: none; }
+.pm-g-emptybox .form-section-header .pm-count { font: 600 11px var(--font-mono); color: var(--text-muted); }
+
+/* ═══ Phones (html.mobile-view): no drag — a tap opens the task ═══════════ */
+html.mobile-view .pm-g-scroll { margin: 0 -12px; border-radius: 0; border-left: 0; border-right: 0; -webkit-overflow-scrolling: touch; }
+html.mobile-view .pm-g-toolbar { gap: 8px 6px; }
+html.mobile-view .pm-g-toolbar .btn { min-height: 40px; }
+html.mobile-view .pm-g-toolbar .pm-toolbar-right { width: auto; margin-left: auto; }
+html.mobile-view .pm-g-name { padding: 0 4px 0 8px; gap: 5px; }
+html.mobile-view .pm-g-corner { padding: 0 8px 7px; }
+/* A narrow name column: names wrap to two lines instead of losing most of the title. */
+html.mobile-view .pm-g-title {
+  font-size: 12.5px; line-height: 1.25; padding: 4px 0; white-space: normal; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+}
+html.mobile-view .pm-g-warnbtn { min-width: 30px; min-height: 36px; font-size: 15px; }
+html.mobile-view .pm-g-showlink { padding: 8px 4px; }
+html.mobile-view .pm-g-nodate, html.mobile-view .pm-g-setdates, html.mobile-view .pm-g-off {
+  height: 30px; line-height: 28px; margin-top: calc((var(--pm-g-row) - 30px) / 2); left: calc(var(--pm-g-namew) + 8px);
+}
+html.mobile-view .pm-g-off.is-r { left: auto; right: 8px; }
+html.mobile-view .pm-g-name .pm-badge { display: none; }      /* the bar colour + its label say Show / Event */
+html.mobile-view .pm-g-legend { gap: 6px 12px; }
+
+/* ═══ Print: no toolbar, the whole chart ═══════════════════════════════════ */
+@media print {
+  /* Paper is white whatever the theme: while the Timeline is the visible tab
+     the page prints with the light values (dark-theme ink is white). */
+  html:has(#pm-pane-timeline:not([hidden])) {
+    --bg: #fff; --bg-card: #fff; --bg-card-hover: #fff; --bg-surface: #eef0f3; --bg-hover: #e7e9ed;
+    --text: #2b2f36; --ink: #14161a; --text-dim: #5b616b; --text-muted: #6b7079;
+    --border: rgba(15,23,42,.12); --border-light: rgba(15,23,42,.2); --line-strong: rgba(15,23,42,.24);
+    --orange-text: #B85A12; --accent: #D06810; --brand-red: #D03818; --event: #0d9488; --past: #475569;
+    --pm-st-todo: #6b7483; --pm-st-doing: #2563eb; --pm-st-blocked: #dc2626; --pm-st-done: #16a34a;
+    --pm-st-todo-ink: #4b5563; --pm-st-doing-ink: #1d4fa8; --pm-st-blocked-ink: #b42318; --pm-st-done-ink: #1f7a3d;
+    --pm-warn: #ca8a04; --pm-warn-ink: #8a5a00;
+    --glass: transparent; --glass-line: rgba(15,23,42,.12);
+  }
+  html:has(#pm-pane-timeline:not([hidden])) body { background: #fff !important; }
+  .pm-g-toolbar, .pm-g-tip { display: none !important; }
+  body:has(#pm-pane-timeline:not([hidden])) .sidebar,
+  body:has(#pm-pane-timeline:not([hidden])) .m-header,
+  body:has(#pm-pane-timeline:not([hidden])) .m-tabbar,
+  body:has(#pm-pane-timeline:not([hidden])) .pm-head-actions,
+  body:has(#pm-pane-timeline:not([hidden])) .pm-tabs { display: none !important; }
+  .pm-g-scroll { max-height: none !important; overflow: visible !important; box-shadow: none; }
+  .pm-g-inner { padding: 0 !important; }
+  .pm-g-head, .pm-g-corner, .pm-g-name, .pm-g-ax-top > span { position: static !important; }
+  .pm-g-scroll, .pm-g-scroll *, .pm-g-legend * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .pm-g-h { display: none; }
+  .pm-g-row { content-visibility: visible; }
+}

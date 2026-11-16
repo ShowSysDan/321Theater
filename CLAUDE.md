@@ -219,6 +219,58 @@ server may share production's database, so it must never act for production:
   handler; a handler that fails to build is retried every tick and logged
   once per settings value.
 
+## LibreOffice conversions — `_libreoffice_convert_to_pdf` is the ONE way (3.49.0)
+Every input is an upload (show attachments merged into the advance PDF,
+Projects previews). The function: converts only real Office containers
+(`_lo_prepare`: zip / OLE / RTF magic — HTML or XML under an office name made
+LibreOffice fetch loopback URLs); neutralises RTF field / link control words
+(`_RTF_NEUTRALIZE` — INCLUDEPICTURE embedded server-local files despite the
+profile); runs with a fresh profile seeded with `_LO_HARDENED_XCU`, TMPDIR in
+the work dir, `child_env()`, `prlimit` CPU / core limits, in its OWN process
+group killed on timeout / error (/usr/bin/soffice is a shell script —
+killing it alone orphaned soffice.bin at full CPU); at most `_LO_SLOTS` (2)
+per worker. Never call soffice any other way, and never `preexec_fn` (unsafe
+in threaded workers).
+
+## Settings → About 321Theater + server dependencies (3.50.0)
+- `/settings/about` (`about_page`, `templates/about.html`, admin) is a shell;
+  its data is `/settings/about/data` (`about_data` → `_about_build()`),
+  cached per worker `_ABOUT_TTL` (10 min) under `_ABOUT_LOCK`, `?refresh=1`
+  re-runs. All facts come from `system_info.py` (dependency-free, never
+  imports app.py, never raises; fixed argv, LANG=C, `child_env()`, no root:
+  dpkg-query, `apt list --upgradable`, `apt-config`, `systemctl show`,
+  /proc). Read-only: the app NEVER runs apt or anything that changes the
+  server — updating is Debian's job (unattended-upgrades) or `sudo bash
+  install.sh`. Debian-family only; elsewhere the package sections are empty.
+- A new system program the app shells out to → an entry in
+  `_SYSTEM_PROGRAMS` (binary, Debian packages, purpose, what breaks without
+  it, level error / warn / info). A new requirements.txt package → a plain
+  purpose in `_PY_PURPOSES`. Purposes must not name the Projects module.
+- `_DEPS_PROBLEMS` (computed once per process at import: missing / too-old
+  requirements, missing level-'error' programs) → `deps_alert` from
+  `inject_version()` → a red banner in base.html for ADMINS only, and the
+  `STARTUP_DEPS` / `STARTUP_DEPS_MISSING` syslog lines each worker writes
+  at start. That is how a release needing `install.sh` shows itself after
+  a plain git pull + restart.
+- install.sh (root, Debian): `pkg_installed()` (dpkg status "ok installed" —
+  never `dpkg -s`, which succeeds for removed-with-config packages);
+  upgrades LibreOffice with `--only-upgrade`; installs `unattended-upgrades`
+  and writes `/etc/apt/apt.conf.d/20auto-upgrades` ONLY when no such file
+  existed before the script ran (an admin's own config is kept; one the
+  package itself just wrote is replaced).
+
+## Request bodies and small shared rules (3.49.0 review)
+- JSON bodies: `_json_obj()` (app.py and chat_module) — a dict or {}; a bare
+  string / number / list body must give the route's own 400, not a 500.
+- Jobs that claim notification rows to e-mail use `… WHERE id IN (SELECT …
+  FOR UPDATE SKIP LOCKED)` — never wait on a row someone is marking read
+  (that deadlocked against "mark all read").
+- `_purge_show` first sets `chat_threads.show_id = NULL` (thread locks
+  before the show row: a message send locks the thread, then the show).
+- Count-then-insert limits (saved reports: per-user cap, send de-dup) take
+  `pg_advisory_xact_lock(hashtext('saved_reports:<uid>'))` first; recipients
+  in sorted order. Transaction-scoped only (the pool keeps the connection).
+
 ## PDF rendering (WeasyPrint) — always pass the shared font config
 Every `HTML(...).write_pdf(...)` must pass `font_config=_wp_font_config()`
 (security_module gets it as the `pdf_font_config` dep). Without it WeasyPrint
@@ -510,10 +562,11 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   writing S3 settings. The secret key is write-only in the UI (blank keeps).
 
 ## File redundancy S3 <-> PostgreSQL (file_store.py, 3.1.0)
-- A stored file = a row in one of five tables, each with a bytes column AND
+- A stored file = a row in one of six tables, each with a bytes column AND
   an S3 key column (`file_store.KINDS`: show_attachments.file_data/s3_key,
   export_log.pdf_data/s3_key, asset_types.photo/photo_s3_key,
-  show_external_rentals.pdf_data/s3_key, pdf_templates.pdf_data/s3_key) plus
+  show_external_rentals.pdf_data/s3_key, pdf_templates.pdf_data/s3_key,
+  pm_file_versions.file_data/s3_key — kind `module_files`, 3.49.0) plus
   `content_sha256` (hash of the UNCOMPRESSED content). A row can have either
   copy or both. Don't add a central file table without being asked; the
   user chose the existing columns.
@@ -1054,6 +1107,294 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   manager cancels through the normal status change. Refusals syslog
   `PIANO_TUNING_DENIED reason=…`; every write route syslogs.
 
+## Inbox: Messages, reminders, mentions (chat_module.py, 3.47.0) — SANDBOXED
+- `chat_module.py` never imports app.py: ONE `chat_module.register(app, …)`.
+  Module key `messages` (default ON). It owns `chat_threads` /
+  `chat_participants` / `chat_messages` and writes to ONE main-app table:
+  `show_comments` (`chat_thread_id` marks the origin), only for a thread
+  whose `post_to_comments` is on. UI = base.html `#inbox-panel` +
+  `static/js/chat.js` (floating `#inbox-fab` on desktop, `#m-inbox-tab` in
+  the phone tab bar; the old bell panel is gone — `#notif-panel-list` lives
+  in the inbox and `toggleNotifPanel()` opens its Notifications tab).
+- A thread = sorted participant ids (`member_key`) + optional `show_id`; the
+  same people + show reuse it (find-or-create under
+  `pg_advisory_xact_lock`). Own-only thread = "Notes to self". New threads
+  tag ACTIVE shows only. No add/remove-participant route exists — don't add
+  one without thinking about who then reads the history.
+- **PRIVATE: keep every rule.** Every route goes through `_member()`
+  (chat_participants); no admin bypass. Never index chat text in
+  find_module's `_sources_sql`, never put a body in audit before/after or
+  syslog, never add the tables to snapshot inspection
+  (`snapshot_module.PRIVATE_TABLES`: not listed, diff 403, also
+  RESTORE_BLOCKED). Emails quoting messages are `sensitive: True`.
+- **Post to comments is never implicit.** Thread-level switch
+  (`…/comments-mode`, any participant, needs a show + a non-read-only
+  account) that writes a `kind='system'` line into the thread. Every send
+  carries the sender's on-screen belief (`post_to_comments`); a mismatch (or
+  a missing flag) is a 409 `comments_mode_changed` and NOTHING is sent.
+  Composing "private" into a thread that already posts → 409
+  `thread_is_public`; chat.js opens it with the text as a draft. Keep the
+  banner, the orange composer and the "Send + post to comments" label —
+  they are the user's requirement that nobody is caught off guard. Read-only
+  accounts can't send in a posting thread (the show-comment rule).
+- **A draft is sent only in the mode it was written under (3.48.1).**
+  chat.js `_draftPub` records the mode when typing starts; `send()` refuses
+  ONCE with a notice when the mode differs at Send (the poll may have
+  redrawn the banner a moment before Enter) — the server 409 covers only
+  the case where the poll hasn't arrived. Keep both. Drafts belong to a
+  LOADED thread (`!S.thread.loading`); the poll never rebuilds a row that
+  holds an open time picker (`S.redrawPending`, `drawDue` signature).
+- "Public" always means `post_to_comments` AND a `show_id` (a deleted show
+  leaves `show_id` NULL with the flag still set). `is_self` comes from
+  `member_key == str(uid)`, never from "no one else is left" (a deleted
+  account's conversation is not a note to self).
+- Reminders: `chat_messages.remind_at` is TIMESTAMPTZ (the browser sends
+  UTC ISO), compared with `NOW()`; private to the author (`_msg_out` only
+  returns it for `mine`); due ones count in the badge until Done. No job
+  computes "due" — the status poll does.
+- Polling: ONE `/api/chat/status` poll (30 s, visible tabs) paints every
+  badge incl. the sidebar bell (app.js skips its own bell poll when
+  `#inbox-panel` exists); the open thread polls 5 s; all GETs are
+  side-effect free — reading is `POST …/read`. chat.js builds everything
+  with textContent.
+- **@mentions** (links carry `&comment=<id>`; app.js renderComments() lands
+  on and highlights that comment on the FIRST render only, then drops the
+  param so polls keep sticking to the bottom): `_notify_comment_mentions()` (post + edit of a comment, and
+  public chat messages via the injected dep) → `notify_users(kind='mention')`.
+  `_mention_user_ids()`: longest names first and consumed (locked / pending /
+  viewer names consume too, they just aren't notified), and a mention needs
+  a non-word character on BOTH sides (`x@steve.com` is not one). The
+  notification carries `field_key='comment:<id>'`;
+  `_mention_notifications_sync()` withdraws / corrects unseen ones when the
+  comment is deleted / edited.
+- **Email**: `user_notify_prefs` (app schema, missing row = all on; My
+  Account → Email notifications, `/account/notify-prefs`). `run_inbox_emails`
+  (5 min, leader-gated, skips on DatabaseUnavailable): messages unread for
+  `_INBOX_EMAIL_DELAY_MIN`, due reminders (`chat_module.pending_email_items`,
+  which stamps `emailed_up_to_id` / `remind_emailed_at`), unread mentions
+  (`notifications.emailed_at`). Stamps commit BEFORE sending — at most once,
+  never a retry loop. Every claim is ATOMIC (`FOR UPDATE … SKIP LOCKED` on
+  chat_participants, `UPDATE … RETURNING` for reminders and mentions):
+  `am_i_leader()` is true in every worker when the leader is forced or the
+  heartbeat is off, so the job must be safe to run several times at once. Always through `_send_email` (TEST_MODE chokepoint).
+- `_ER_BILLED_SQL` (piano, 3.47.0): a piano tuning's external-rental line is
+  billed (invoice line, totals, appended paperwork) only when
+  `piano_tunings.bill_on_invoice = 1` (default 0, manager-only field). Every
+  BILLING query filters with it; the Assets tab and Reports do not (the cost
+  stays a visible show expense). Don't add a billing read that skips it.
+
+## Projects module (projects_module.py + projects_docs_module.py, 3.49.0) — SANDBOXED, HIDDEN, PRIVATE
+Private projects (a festival, a PA install…): tasks with dependencies, a
+Gantt timeline, linked / generated shows, contacts, comments with @mentions,
+budgets with sources, versioned files with in-page preview, rich-text notes,
+a summary PDF. Read the two module docstrings first — they state the rules
+in full. Module key `projects`, default OFF.
+- **Files:** `projects_module.py` (the gate, `core`, projects / members /
+  tasks / comments / shows / contacts / search / admin), `projects_docs_module.py`
+  (budget, files, notes, PDFs — registers through `core`), `project_docs.py`
+  (pure helpers: text extraction, .eml/.msg parsing, type sniffing, the note
+  HTML sanitizer, html→docx; `python3 project_docs.py` runs its self-test),
+  `templates/projects/`, `templates/pdf/project_*.html`, and
+  `projects_assets/` (ALL the module's CSS + JS). Neither module imports
+  app.py: ONE `projects_module.register(app, **deps)`. Tables are `pm_*`
+  ("project" already means Overhead & Project Crew).
+- **HIDDEN — the owner's requirement: nobody without access can tell it
+  exists** — except that every ADMIN sees its master switch in Settings →
+  Modules (the owner's call, 3.49.0). What is in it and who uses it stays
+  hidden from admins without access too. Keep every rule:
+  - Access = module ON **and** a `pm_access` row (`has_access()`; granted by
+    an admin at `/settings/projects`, which also holds the on/off switch).
+    The role does not matter: an admin without a row has no access.
+  - ONE `before_request` gate (`_pm_gate`): any path equal to or under
+    `/projects`, `/api/projects`, `/settings/projects` — routed or not, any
+    method — is a plain `abort(404)` for anyone else, so the answer is the
+    same as for a URL that does not exist (no 405, no OPTIONS `Allow`).
+    The admin trees (`/settings/projects`, `/api/projects/admin`) answer to
+    any admin, with the module off too. Never add a module URL outside those
+    three trees.
+  - Nothing of the module lives under `static/`: CSS / JS are in
+    `projects_assets/` and served only by the gated
+    `/projects/assets/<name>` (fixed allow-list `_ASSETS` — a new file must
+    be added there). The module's phone rules (`html.mobile-view …`) and
+    light-theme rules live in ITS css files, not mobile.css / style.css —
+    the one sanctioned exception to "all mobile styling lives in mobile.css".
+  - Shared templates render module markup only inside
+    `{% if _proj_on %}` (base.html sets it once from `projects_enabled()`)
+    or `{% if projects_enabled() %}` (settings.html notify prefs). `static/js/app.js`
+    must never contain the word: the sidebar search extension is the generic
+    `window.NavSearchExtra` hook, filled by `projects_nav.js` (loaded only
+    for people with access). With access the sidebar says **My Work** and
+    `/my-shows` adds the tasks / projects block (`templates/projects/_my_work.html`
+    via `projects_module.my_work()`); without it the page is byte-identical
+    to before ("My Shows").
+  - The `APP_MODULES` entry is listed (its "Open settings →" is the access
+    page); the `'unlisted'` mechanism (`_modules_see_unlisted`) remains but
+    nothing uses it. `_NOTIFY_PREF_GATED` (`email_tasks`)
+    is neither returned to nor accepted from a user without access, and the
+    notify-prefs POST is partial (an absent key keeps its stored value).
+  - Admin screens must not name it either (review, 3.49.0):
+    the only Audit Log row is the master switch's SETTINGS_CHANGE (same as
+    any module); grants / revokes / orphan deletes are syslog only (every
+    admin reads the Audit Log). `snapshot_module.UNLISTED_TABLES` (every
+    `pm_*` table; the tool behaves as if they did not exist — a NEW pm table
+    must be added) and `ROW_FILTERS` (notifications `kind='project'`) sit in
+    the four row readers. The
+    perf collector records nothing for endpoints starting `pm_`
+    (`_PERF_LIVE_SKIP_PREFIX` — every module endpoint name must start
+    `pm_`) and never keeps SQL text naming a ` pm_` table
+    (`_PERF_PRIVATE_SQL`). The in-app updater filters module paths and
+    commit subjects (`_update_private` / `_update_public`) — still write
+    neutral commit subjects. File storage kind key is `module_files`, S3
+    prefix `mf/`, label "Module files". Accepted, documented limits: that
+    File Storage row, `PM_*` verbs + integer ids in syslog, the
+    `user_notify_prefs.email_tasks` column name in a snapshot diff.
+  - `projects_enabled()` (base.html, every page, error pages too) returns
+    False on ANY exception (logged once per process): a missing pm_ table
+    must never take the site down for a module that is off.
+- **PRIVATE — no admin bypass.** `core.ctx(db, pid, need, lock)` is the one
+  door (`need` = view / comment / edit / budget / owner): a non-member gets
+  the same 404 as a missing project. EVERY child row is read with
+  `AND project_id = %s`. Project text never reaches `log_audit`, syslog
+  (`core.syslog` = verb + ids; failures log the exception TYPE only), a URL,
+  an e-mail subject, or DB-snapshot inspection. The project's own history is
+  `pm_activity`. E-mails are `sensitive: True`. An ownerless project can be
+  claimed by its next member (`claim-owner`); an admin can only delete a
+  project with NO members (`/api/projects/admin/orphans/<pid>/delete`).
+- **Roles:** owner / editor / viewer. Viewers may comment (owner can switch
+  that off) and may change the STATUS of a task assigned to them — nothing
+  else. A read-only ACCOUNT never writes, whatever its project role. An
+  archived project is read-only for everyone until restored — its member
+  list too (add / role / transfer / remove refused; a member may still
+  leave).
+  "Can use the module" = `_access_sql()`: a pm_access row on an account that
+  is not a document viewer, not LOCKED and not pending approval (locking is
+  how people are offboarded; they keep their rows). A locked / revoked owner
+  makes the project ownerless (`_acting_owner_id`): the member first in line
+  (`_first_in_line`) may claim it and the old owner row becomes editor.
+  `budget_visibility` = members / editors / owner: a member below it gets
+  404 from every budget route, never sees `budget_only` files, budget
+  activity (`BUDGET_ENTITIES`), budget search hits or budget pages of the
+  summary PDF.
+- **Writes:** every mutating route takes `ctx(…, lock=True)` (the project
+  row, FOR UPDATE), then writes → `core.touch` (bumps `pm_projects.rev`) →
+  `core.activity` → commit → `core.syslog`. PUTs are partial (only keys in
+  the body). GETs never lock or write (sanctioned exception: `preview.pdf`
+  caches the converted PDF). Open pages poll `GET …/rev` (10 s; it also
+  returns `today`, so a page left open overnight reloads) and refetch the
+  bundle when it moved. A write that changed nothing answers
+  `"unchanged": true` with the CURRENT rev — PM.applyWrite never adopts that
+  rev as its own (it may be someone else's write); keep the flag on every
+  no-op answer. Summary / Risks autosave sends `base` = the text it started
+  from; the server 409s with `current` when someone saved in between and the
+  page asks Load theirs / Keep mine — never write a whole text field without
+  a base check. Bad input is a 400 with a plain message through
+  `core.Refuse` — never a 500, never a silent truncation (`LIMITS`, `CAPS`).
+- **Dependencies never move a date by themselves.** Finish-to-start, gap 0
+  for a milestone else 1 day. A save that leaves a dependent starting too
+  early is REPORTED (`conflict` on the task, `new_conflicts` in the write
+  response, a notification). Dates move only via `shift-preview` →
+  `{moves, token}` → `shift {token}` (the token is a hash of the exact
+  moves; a plan that changed in between is a 409). Keep it that way — it is
+  the owner's decision ("warning with an option to approve the shift").
+- **Shows:** app.py calls `on_show_merge` (merge), `on_show_delete`
+  (`_purge_show`) and `on_user_delete` (`delete_user`). Hooks take the
+  project row locks FIRST, in id order (`_lock_projects`) — the order every
+  module write uses; the other order deadlocked a merge against a task save.
+  Linking needs `can_access_show`; "New show" goes through the
+  injected `create_show` (app.py `_pm_create_show`, the same inserts
+  `new_show` makes, gated by `_pm_can_create_show`). The result is an
+  ORDINARY show, visible to everyone, and nothing on it (audit, syslog,
+  fields) names the project. `on_show_merge()` follows a show merge. Show
+  costs on the Budget tab come from `_pm_show_figures` (the app's own
+  billing engines, each block only if the VIEWER has that report permission).
+- **Files** follow "File redundancy" above: bytes on `pm_file_versions`
+  (file_store kind `project_files`), reads only via `file_store.read_bytes`,
+  delete = archive (gzip, keep S3), bytes destroyed only by the owner's purge
+  of an archived file, S3 deletes after commit. Upload is three steps (short
+  transaction → S3 with nothing open → conditional UPDATE); no transaction
+  or project lock is ever held across S3, LibreOffice or a parser. A cached
+  office→PDF preview is a version row with `preview_of` set (negative
+  version): every list / count / download query says `preview_of IS NULL`.
+  Uploaded content is never served as active content (downloads are
+  attachments; inline only for the sniffed safe types). Saving an
+  attachment out of a stored e-mail runs `email_attachment_isolated()` (same
+  child, `--extract` with an `attachment` job) — never parse an uploaded
+  e-mail in the web process. Office previews (`_office_preview`): per
+  worker at most `_PREVIEW_SLOTS`, one run per version at a time (others get
+  503 "being prepared"; projects_docs.js retries), failures remembered for
+  `_PREVIEW_FAIL_TTL`. Text extraction runs
+  `project_docs.extract_isolated()`: a child process (`python project_docs.py
+  --extract`, `child_env()`, RLIMIT_CPU 60 s / RLIMIT_AS 1.5 GB, 120 s wall)
+  — the readers bound their OUTPUT but not one pathological page (a 2 KB PDF
+  of nested form XObjects ran for minutes in-process). A stopped child =
+  status 'error' + syslog PM_EXTRACT_FAILED. Office previews go through
+  app.py `_libreoffice_convert_to_pdf`, whose profile (`_LO_HARDENED_XCU`)
+  blocks external / file:// references and macros — without it an uploaded
+  .odt made the server fetch internal URLs and embed a local image.
+  note.pdf refuses (413) a note with more than `_NOTE_PDF_MAX_TAGS` tags
+  (WeasyPrint time grows super-linearly; Word export has no such cost) and
+  inserts `<wbr>` every 60 characters of an unbroken run (`_LONG_RUN`,
+  entities counted whole) — one 100k-character word took ~40 s.
+- **Notes** are sanitized HTML: `project_docs.sanitize_note_html()` REBUILDS
+  from an allow-list (never strips) on every write and again when served or
+  rendered; the client's paste cleaner is a convenience, the server is the
+  authority. A save is atomic on the note's own `rev` (409 returns the
+  current text); note-body saves do NOT bump the project rev (typing must
+  not make everyone refetch). projects_docs.js lifts blocks out of
+  paragraphs (`liftBlocks`) after every command — Chrome nests `<ul>` in `<p>`.
+- **Notifications** go through `core.notify` → the injected `notify_users`
+  (`kind='project'`, coalesced per key, actor never notified). `notify()`
+  locks the recipients' pm_members / pm_access rows FOR SHARE, so a revoke /
+  removal waits and its scrub sees the new row. Withdrawn when no longer
+  true: `_withdraw_task` (reassigned → the old assignee's assign / due /
+  overdue; done → due / overdue; deleted → everything, incl. mentions in its
+  comments), `_withdraw_budget` (after an owner, role or budget-visibility
+  change), `_scrub` (removed member, revoked access, deleted project or user).
+  "Assigned to you" is ONE notice per assignee per project (key
+  `pm:<pid>:a:<uid>`, title = the task or "N tasks"): the tasks it counts are
+  `pm_task_alerts` rows of kind 'assign' (ref = assignee id, created_at on the
+  DB clock, compared with the notice's read_at — same clock); every write
+  that takes a task out of that set recounts via `_assign_notice` (a recount
+  never creates or re-raises a notice). The body names the actor
+  ('<Project> · by <name>').
+- **Budget variance** = estimate − forecast, forecast = max(committed,
+  actual) per line; '—' unless the line / category has an estimate AND a
+  committed or actual. projects_docs.js `variance()` and the PDF builder in
+  projects_docs_module.py must use the same rule (they disagreed once). The hourly job
+  `pm_hourly` (`run_hourly()`; app.py wrapper is leader-gated and skips on
+  DatabaseUnavailable) sends due / overdue alerts — each CLAIMED in
+  `pm_task_alerts` with `INSERT … ON CONFLICT DO NOTHING RETURNING` — and
+  retries stuck text extractions. E-mail digests ride on `run_inbox_emails`
+  (`pending_email_items`, pref `email_tasks`).
+- **Front end** (`window.PM`, contract in the header of
+  `projects_assets/projects.js`): tabs register with `PM.registerTab`;
+  every dialog / drawer is `PM.dialog`; DOM is built with
+  createElement / textContent ONLY (the single HTML sink is a note's
+  server-sanitized body); no project text in a URL or in localStorage (ids
+  and hashes only); on a `state` event never rebuild what the user is
+  editing, and nothing redraws under an open dialog. View-only, read-only
+  and archived = no write controls AND no-op handlers (`PM.can`). The
+  Timeline drags only for editors with a fine pointer; phones tap to open.
+  Don't put a `ToolsMenu` inside the project page header (its
+  backdrop-filter breaks the fixed panel) and don't use `position:absolute`
+  without a positioned ancestor inside a sideways scroll box (it widened
+  the phone layout).
+- **Every GET that generates a file** (`…/summary.pdf`, `…/note.pdf`,
+  `…/download/docx`, `…/download`, `…/preview.pdf`) ends in a shape the
+  GENERIC hover-prefetch exclusions already cover (`*.pdf`, `*/download`,
+  `*/download/*` in base.html and app.js — never add a module-specific entry
+  there, it would name the module on every page) and its link carries
+  `class="no-prefetch"`. A new file route must keep one of those shapes.
+  Every `write_pdf` passes `font_config`; soffice runs with
+  `app_config.child_env()` (via the injected `office_to_pdf`).
+- New dependency `extract-msg` (reading Outlook `.msg`); without it a .msg
+  uploads and downloads but has no preview.
+- Verifying: the module's test suites are not in the repo; at minimum
+  re-check after any change that (a) a user without access — and an admin
+  without access — gets byte-identical 404s and no mention on any page, the
+  Audit Log, Performance, DB Snapshots or the updater, (b) a non-member gets
+  404 on every route of someone else's project, (c) fresh install == upgrade.
+
 ## Reports (3.12.0)
 - `/reports` (`reports_page`, `templates/reports.html`) is its own nav
   section (nav key `reports`, audience `reports` = `_can_view_reports()`).
@@ -1082,6 +1423,58 @@ reuse the hover's copy — don't widen that window or its conditions. Rules:
   Settle Now) with the actual `break*`; Estimate vs Settlement calls both
   billing engines (`_calc_labor_cost_for_show` vs
   `_calc_post_show_labor_cost`) — never re-derive either.
+- **Several items / units (3.47.0):** `item-shows` takes `type_ids` /
+  `unit_ids` (comma lists via `_report_id_list`; the old single `type_id` /
+  `unit_id` still work) and returns `by_unit` (idle units included, pool
+  bookings on a "(no unit picked)" row), `by_item`, `unit_choices`.
+  `asset-types` takes `types` + `types_mode=exclude`. reports.html's
+  `rptMulti()` is THE multi-select picker (textContent only; applies on
+  close).
+- **Sound Levels (3.47.0)** `/api/reports/sound` (any Reports user; 404
+  while module `spot` is off; `sound` in `_RPT_PDF`): rows come ONLY from
+  `spot_module.captures_for_report()` (read-only). `group` = sensor / venue /
+  company / show / month / weekday / hour / `field:<advance key>`; Leq
+  averages are ENERGY averages (`_db_energy_avg`) and units are never mixed
+  (the group key includes the unit) — keep both.
+- Every `table()` with > 8 rows gets a "Find in table" box (`rptFind`); the
+  CSV exports the rows shown.
+- **Saved reports (3.48.0):** `saved_reports` (app schema, per user, ≤ 100)
+  holds `view_json` = {tab, preset, params, show_text}, always passed
+  through `_saved_report_clean_view` (tab whitelist `_SAVED_RPT_TABS`, param
+  whitelist `_SAVED_RPT_PARAMS`, short strings) on the way in AND out. A
+  view is filter DATA only — nothing ever stores or replays report results.
+  A new tab filter = add its param to `_SAVED_RPT_PARAMS`, to reports.html
+  `tabExtras()` (the ONE builder of a tab's extra params, shared with the
+  PDF) and to `applyView()`. A named date preset is stored as the preset
+  and resolved when opened (`_saved_report_preset_dates` mirrors
+  reports.html `preset()` — keep the two in step). `applyView()` must SAY
+  which saved filter no longer exists (a select set to a missing option
+  silently widens the report). Single-id params must be digits and id
+  lists keep WHOLE ids (never cut text at a length); the page never builds
+  a RegExp or a selector from a stored value. Rental Lines / Break
+  Exceptions keep their filters in `_rent` / `_brk`: their controls sit
+  inside `#rpt-body`, which `rptLoad` wipes BEFORE the loader runs, so a
+  loader must never read its own controls.
+  - **Send** copies the row into each recipient's list (`sent_by`,
+    `sent_by_name`) + `create_notification(kind='report_shared')` with a
+    link built server-side from the int id. Recipients =
+    `_saved_report_recipient_sql()` (mirrors `_can_view_reports()`;
+    321Theater flags only). An identical re-send reuses the copy, the
+    notification coalesces per sender, and received copies have their own
+    limits — they never use up the recipient's own 100.
+  - **Dashboard widget** `{type:'saved_report', saved_report_id}`
+    (dashboard_view.html `loadSavedReportWidget`): `…/saved/<id>/widget`
+    (owner, or a signed-in non-viewer when the owner put it on a PUBLIC
+    dashboard; one 404 for "gone" and "not yours") returns today's query;
+    `/api/reports/render` → `_rpt_assemble(key, row_cap)` — shared with
+    `/reports/pdf` — calls the tab's own view function, so the gates run
+    for whoever is LOOKING. Never add either endpoint to
+    `_PUBLIC_DASH_DATA_ENDPOINTS` / `_VIEWER_ALLOWED_ENDPOINTS`, and never
+    compute a widget with the owner's permissions: report data is not
+    public. The widget makes no request at all when `ANON`.
+    `dashboard_edit` keeps a stored saved-report widget the saving page
+    never knew of (`base_saved`), so a dashboard tab opened before the pin
+    can't wipe it.
 - **Advance Fields (3.20.0)** `/api/reports/advance-field?field=&answer=&q=&include=`
   (any Reports user, `advance` in `_RPT_PDF`): one form field's value per
   `_report_shows()` show. `_report_adv_values()` is the one decoder of

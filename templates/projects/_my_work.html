@@ -1,0 +1,74 @@
+{# My Work — the Projects part of the My Shows page. Included by
+   dashboard.html ONLY when the person has module access (`my_work`), after
+   the show board; `pm_work` = projects_module.my_work(db, uid): my
+   non-archived projects and the open tasks assigned to me, both limited to
+   projects I am still a member of. Server-rendered links, no script, no
+   <link> (dashboard.html already links projects.css for this case).
+   Jinja autoescapes every value; the colour is re-checked here because it
+   lands in a style attribute. #}
+{% set _pw = pm_work or {} %}
+{% set _projects = _pw.get('projects') or [] %}
+{% set _tasks = _pw.get('tasks') or [] %}
+{% set _ps = {'planning': 'Planning', 'active': 'Active', 'on_hold': 'On hold', 'done': 'Done'} %}
+{% set _ts = {'todo': 'To do', 'doing': 'In progress', 'blocked': 'Blocked', 'done': 'Done'} %}
+{% set _pr = {0: 'Low', 2: 'High', 3: 'Urgent'} %}
+{# This year, to print a year only on dates outside it. From the page's own
+   render stamp (epoch seconds, base.html's context) — the template has no
+   date object; within a day of New Year the worst case is one extra or
+   missing year label. #}
+{% set _yr = 1970 + ((page_rendered_at or 0) // 31556952) %}
+{% macro _d(d) %}{{ d.strftime('%b') }} {{ d.day }}{% if d.year != _yr %}, {{ d.year }}{% endif %}{% endmacro %}
+<div class="pm-mywork pm-root">
+  <section aria-labelledby="pm-mw-projects">
+    <h2 id="pm-mw-projects">My projects <span class="pm-count">{{ _projects|length }}</span><a href="/projects">All projects →</a></h2>
+    {% if _projects %}
+    <div class="pm-grid">
+      {% for p in _projects %}
+      {% set _c = p.color if (p.color or '')|length == 7 and (p.color or '')[0] == '#' and (p.color or '')[1:]|select('in', '0123456789abcdefABCDEF')|list|length == 6 else '' %}
+      <a class="pm-card" href="/projects/{{ p.id|int }}"{% if _c %} style="--pm-edge: {{ _c }}"{% endif %}>
+        <div class="pm-card-top">
+          <span class="pm-card-name">{{ p.name }}</span>
+          <span class="pm-pill pm-ps-{{ p.status if p.status in _ps else 'planning' }}">{{ _ps.get(p.status, p.status) }}</span>
+        </div>
+        <div class="pm-card-meta">
+          <span><strong class="mono">{{ p.open or 0 }}</strong> open</span>
+          {% if p.overdue %}<span class="is-over"><strong class="mono">{{ p.overdue }}</strong> overdue</span>{% endif %}
+          {% if p.next_due %}<span>next due <span class="mono">{{ _d(p.next_due) }}</span></span>{% endif %}
+        </div>
+        <div class="pm-card-foot"><span class="pm-badge">{{ p.role }}</span></div>
+      </a>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-dim" style="font-size:13px;margin:0">No projects yet. <a href="/projects">Start one →</a></p>
+    {% endif %}
+  </section>
+
+  {% if _projects %}
+  <section aria-labelledby="pm-mw-tasks">
+    <h2 id="pm-mw-tasks">My tasks <span class="pm-count">{{ _tasks|length }}</span></h2>
+    {% if _tasks %}
+    <div class="form-section">
+      <div class="pm-list">
+        {% for t in _tasks %}
+        <a class="pm-row" href="/projects/{{ t.project_id|int }}?tab=tasks&amp;task={{ t.id|int }}">
+          <span class="pm-pill pm-st-{{ t.status if t.status in _ts else 'todo' }}">{{ _ts.get(t.status, t.status) }}</span>
+          <span class="pm-row-main">
+            <span class="pm-row-title">{% if t.is_milestone %}<span class="pm-glyph pm-glyph-ms" title="Milestone" aria-label="Milestone">◆</span> {% endif %}{{ t.title }}</span>
+            <span class="pm-row-sub" style="display:block">{{ t.project_name }}{% if t.priority in _pr %} · {{ _pr[t.priority] }} priority{% endif %}</span>
+          </span>
+          {% if t.due_date %}
+          <span class="pm-row-date{% if t.overdue %} is-over{% endif %}">{% if t.overdue %}Overdue · {% endif %}{{ _d(t.due_date) }}</span>
+          {% else %}
+          <span class="pm-row-date">No due date</span>
+          {% endif %}
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+    {% else %}
+    <p class="text-dim" style="font-size:13px;margin:0">Nothing assigned to you right now.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+</div>

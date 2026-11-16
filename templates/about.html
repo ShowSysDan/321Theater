@@ -1,0 +1,225 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{% block title %}About 321Theater — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">About 321Theater</h1>
+    <p class="page-sub">This server, the service running the app, and everything it depends on.</p>
+  </div>
+  <div class="about-head-actions">
+    <button type="button" class="btn btn-ghost" id="about-refresh">Check again</button>
+    <a href="{{ url_for('settings') }}" class="btn btn-ghost">← Settings</a>
+  </div>
+</div>
+
+<p class="text-dim about-checked" id="about-checked" role="status">Checking this server… (a few seconds)</p>
+
+<div class="form-section" id="about-summary-card">
+  <div class="form-section-header"><span class="section-icon">◈</span> STATUS</div>
+  <div class="form-section-body" id="about-summary"></div>
+</div>
+
+<div class="about-grid">
+  <div class="form-section">
+    <div class="form-section-header"><span class="section-icon">◈</span> RELEASE &amp; SERVICE</div>
+    <div class="form-section-body"><dl class="about-kv" id="about-service"></dl></div>
+  </div>
+  <div class="form-section">
+    <div class="form-section-header"><span class="section-icon">◈</span> SERVER</div>
+    <div class="form-section-body"><dl class="about-kv" id="about-server"></dl><div id="about-disks"></div></div>
+  </div>
+  <div class="form-section">
+    <div class="form-section-header"><span class="section-icon">◈</span> DATABASE</div>
+    <div class="form-section-body"><dl class="about-kv" id="about-db"></dl></div>
+  </div>
+  <div class="form-section">
+    <div class="form-section-header"><span class="section-icon">◈</span> AUTOMATIC UPDATES</div>
+    <div class="form-section-body"><dl class="about-kv" id="about-auto"></dl>
+      <p class="text-dim about-note">Debian installs security updates for the system (LibreOffice included) by itself when
+        <strong>unattended-upgrades</strong> is on — <code>sudo bash install.sh</code> switches it on. Nothing on this page changes the server.</p>
+    </div>
+  </div>
+</div>
+
+<div class="form-section">
+  <div class="form-section-header"><span class="section-icon">◈</span> SYSTEM PROGRAMS</div>
+  <div class="form-section-body">
+    <p class="text-dim about-note">Programs the app runs. Versions are Debian's packages; "update waiting" comes from this server's own package lists.</p>
+    <div class="about-scroll"><table class="data-table about-table" id="about-programs">
+      <thead><tr><th>Program</th><th>Used for</th><th>Installed</th><th>Status</th></tr></thead><tbody></tbody>
+    </table></div>
+  </div>
+</div>
+
+<div class="form-section">
+  <div class="form-section-header"><span class="section-icon">◈</span> PYTHON PACKAGES (VENV)</div>
+  <div class="form-section-body">
+    <p class="text-dim about-note">Everything in <code>requirements.txt</code>, checked against the app's virtual environment. A missing or too-old package is fixed by <code>sudo bash install.sh</code>.</p>
+    <div class="about-scroll"><table class="data-table about-table" id="about-python">
+      <thead><tr><th>Package</th><th>Used for</th><th>Required</th><th>Installed</th><th>Status</th></tr></thead><tbody></tbody>
+    </table></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+  const clear = n => { while (n.firstChild) n.removeChild(n.firstChild); return n; };
+  const bytes = b => {
+    if (b == null) return '—';
+    const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0, v = Number(b);
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return (i ? v.toFixed(v < 10 ? 1 : 0) : v) + ' ' + u[i];
+  };
+  const dur = s => {
+    if (s == null) return '—';
+    const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+    return d ? `${d} d ${h} h` : (h ? `${h} h ${m} min` : `${m} min`);
+  };
+  const when = iso => { if (!iso) return '—'; const d = (typeof parseServerTime === 'function') ? parseServerTime(iso) : new Date(iso); return d && !isNaN(d) ? d.toLocaleString() : iso; };
+  const pill = (level, text) => el('span', 'about-pill about-pill-' + level, text);
+
+  function kv(dl, rows) {
+    clear(dl);
+    rows.forEach(([k, v, extra]) => {
+      if (v == null || v === '') return;
+      dl.appendChild(el('dt', null, k));
+      const dd = el('dd', null, typeof v === 'string' || typeof v === 'number' ? String(v) : null);
+      if (v instanceof Node) dd.appendChild(v);
+      if (extra) dd.appendChild(extra);
+      dl.appendChild(dd);
+    });
+  }
+
+  function draw(d) {
+    // Status
+    const sum = clear($('about-summary'));
+    if (!d.problems.length) sum.appendChild(el('p', 'about-ok', '✓ Everything this page checks is in order.'));
+    else {
+      const ul = el('ul', 'about-problems');
+      d.problems.forEach(p => { const li = el('li', 'about-problem-' + p.level); li.appendChild(pill(p.level, p.level === 'error' ? 'Needs action' : p.level === 'warn' ? 'Check' : 'Note')); li.appendChild(document.createTextNode(' ' + p.text)); ul.appendChild(li); });
+      sum.appendChild(ul);
+    }
+    // Release & service
+    const s = d.service, r = d.release, st = s.status || {};
+    const workers = (d.live && d.live.workers) || s.workers || [];
+    kv($('about-service'), [
+      ['Version', 'v' + r.version + (s.test_mode ? '  (TEST_MODE)' : '')],
+      ['Code', r.commit ? `${r.commit}${r.branch ? ' · ' + r.branch : ''}${r.commit_date ? ' · ' + when(r.commit_date) : ''}` : 'not a git checkout'],
+      ['Service', s.name || 'unknown'],
+      ['Service state', st.active ? `${st.active}${st.since ? ' since ' + st.since : ''}${st.enabled ? ' · ' + st.enabled + ' at boot' : ''}` : '—'],
+      ['App folder', s.app_dir],
+      ['Runs as', s.user],
+      ['Workers', `${workers.length} (gunicorn ${s.gunicorn || '?'}) — ${workers.map(w => bytes(w.rss)).join(', ')}`],
+      ['This worker', `pid ${s.pid} · started ${when(s.process_started)}`],
+      ['Python (venv)', `${s.python} — ${s.python_path}`],
+    ]);
+    // Server
+    const sv = d.server, m = sv.memory || {}, load = (d.live && d.live.load) || sv.load;
+    kv($('about-server'), [
+      ['Host name', sv.hostname],
+      ['System', sv.os],
+      ['Kernel', `${sv.kernel} (${sv.arch})`],
+      ['CPU', `${sv.cpu_model || 'unknown'} · ${sv.cpu_count || '?'} cores`],
+      ['Memory', m.total ? `${bytes(m.total - (m.available || 0))} used of ${bytes(m.total)} (${bytes(m.available)} free)` : '—'],
+      ['Swap', m.swap_total ? `${bytes(m.swap_total - (m.swap_free || 0))} used of ${bytes(m.swap_total)}` : 'none'],
+      ['Load (1 / 5 / 15 min)', load ? load.map(x => x.toFixed(2)).join(' / ') : '—'],
+      ['Up for', dur(sv.uptime_s)],
+    ]);
+    const dk = clear($('about-disks'));
+    (sv.disks || []).forEach(x => {
+      const pct = x.total ? Math.round(100 * x.used / x.total) : 0;
+      const row = el('div', 'about-disk');
+      const top = el('div', 'about-disk-top');
+      top.appendChild(el('strong', null, x.label));
+      top.appendChild(el('span', 'text-dim mono', x.path));
+      top.appendChild(el('span', 'about-disk-num', `${bytes(x.free)} free of ${bytes(x.total)}`));
+      const bar = el('div', 'about-bar'); const fill = el('div', 'about-bar-fill' + (pct >= 90 ? ' is-high' : ''));
+      fill.style.width = pct + '%'; bar.appendChild(fill);
+      row.appendChild(top); row.appendChild(bar); dk.appendChild(row);
+    });
+    // Database
+    const db = d.database || {};
+    kv($('about-db'), [
+      ['Server', db.version || '—'],
+      ['Database', db.name],
+      ['Size', db.size != null ? bytes(db.size) : null],
+      ['Connections', db.max_connections ? `${db.connections} for this database · ${db.connections_all} of ${db.max_connections} on the server` : null],
+    ]);
+    // Automatic updates
+    const a = (d.updates && d.updates.auto) || {}, ap = d.updates && d.updates.apt;
+    const yes = (ok, txt) => pill(ok ? 'ok' : 'warn', txt);
+    kv($('about-auto'), [
+      ['unattended-upgrades', yes(a.installed, a.installed ? 'installed' : 'not installed')],
+      ['Automatic security updates', yes(a.enabled, a.enabled ? 'on' : 'off')],
+      ['Daily package-list refresh', yes(a.update_lists, a.update_lists ? 'on' : 'off')],
+      ['apt timers', Object.keys(a.timers || {}).map(k => `${k.replace('.timer', '')}: ${a.timers[k]}`).join(' · ') || '—'],
+      ['Last automatic upgrade', a.last_run_s != null ? dur(a.last_run_s) + ' ago' : 'never / unknown'],
+      ['Package lists refreshed', ap && ap.lists_age_s != null ? dur(ap.lists_age_s) + ' ago' : (a.lists_stamp_s != null ? dur(a.lists_stamp_s) + ' ago' : 'unknown')],
+      ['Updates waiting (whole server)', ap ? `${ap.total} (${ap.security} security)` : 'apt not available'],
+    ]);
+    // Programs
+    const pb = clear($('about-programs').tBodies[0]);
+    d.programs.forEach(p => {
+      const tr = el('tr');
+      tr.appendChild(el('td', 'about-name', p.name));
+      tr.appendChild(el('td', 'about-purpose', p.purpose));
+      const ver = el('td', 'mono about-ver', p.found ? (p.version || 'yes') : '—');
+      tr.appendChild(ver);
+      const stc = el('td', 'about-status');
+      if (!p.found) stc.appendChild(pill(p.level === 'error' ? 'error' : p.level === 'warn' ? 'warn' : 'info', p.level === 'info' ? 'Not installed (optional)' : 'Not installed'));
+      else if (p.updates.length) {
+        const sec = p.updates.some(u => u.security);
+        stc.appendChild(pill(sec ? 'warn' : 'info', sec ? 'Security update waiting' : 'Update waiting'));
+        stc.appendChild(el('div', 'text-dim about-sub', p.updates.map(u => `${u.package} → ${u.candidate}`).join(', ')));
+      } else if (!p.debian) stc.appendChild(pill('info', 'Not a Debian package — update it by hand'));
+      else if (!p.apt_known) stc.appendChild(pill('info', 'Installed'));
+      else stc.appendChild(pill('ok', 'Up to date'));
+      if (p.note) stc.appendChild(el('div', 'text-dim about-sub', p.note));
+      tr.appendChild(stc);
+      pb.appendChild(tr);
+    });
+    // Python
+    const qb = clear($('about-python').tBodies[0]);
+    d.python.forEach(p => {
+      const tr = el('tr');
+      tr.appendChild(el('td', 'about-name mono', p.name));
+      tr.appendChild(el('td', 'about-purpose', p.purpose || ''));
+      tr.appendChild(el('td', 'mono', p.spec || 'any'));
+      tr.appendChild(el('td', 'mono', p.installed || '—'));
+      const stc = el('td', 'about-status');
+      stc.appendChild(p.status === 'ok' ? pill('ok', 'OK') : pill('error', p.status === 'missing' ? 'Missing' : 'Too old'));
+      tr.appendChild(stc);
+      qb.appendChild(tr);
+    });
+    $('about-checked').textContent = 'Checked ' + when(d.checked_at) + ' — results are kept for 10 minutes; “Check again” re-runs them now.';
+  }
+
+  let seq = 0;
+  async function load(refresh) {
+    const my = ++seq, btn = $('about-refresh');
+    btn.disabled = true;
+    $('about-checked').textContent = 'Checking this server… (a few seconds)';
+    try {
+      const r = await fetch('/settings/about/data' + (refresh ? '?refresh=1' : ''), {credentials: 'same-origin', cache: 'no-store', headers: {'Accept': 'application/json'}});
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      if (my === seq) draw(d);
+    } catch (e) {
+      if (my === seq) $('about-checked').textContent = 'Could not check this server right now (' + e.message + ').';
+    } finally {
+      if (my === seq) btn.disabled = false;
+    }
+  }
+  $('about-refresh').addEventListener('click', () => load(true));
+  load(false);
+})();
+</script>
+{% endblock %}

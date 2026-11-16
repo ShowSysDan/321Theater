@@ -49,6 +49,7 @@
   <button class="tab-btn" onclick="switchSettingsTab('modules')">Modules</button>
   <a href="{{ url_for('nav_editor_page') }}" class="tab-btn">Sidebar Editor</a>
   <a href="{{ url_for('merge_shows_page') }}" class="tab-btn" title="Merge two duplicate show entries into one">Merge Duplicates</a>
+  <a href="{{ url_for('about_page') }}" class="tab-btn" title="This server, the service, and what it depends on">About</a>
   {% endif %}
   <button class="tab-btn" onclick="switchSettingsTab('account')">My Account</button>
 </div>
@@ -2107,6 +2108,24 @@
       </div>
     </div>
   </div>
+  {# Inbox emails (3.47.0) — this person's own switches (user_notify_prefs). #}
+  <div class="form-section">
+    <div class="form-section-header"><span class="section-icon">◈</span> EMAIL NOTIFICATIONS</div>
+    <div class="form-section-body">
+      <div style="max-width:560px">
+        <p class="text-dim" style="font-size:12px;line-height:1.5;margin:0 0 12px">Everything below always shows in your <strong>inbox</strong> {{ "(the Inbox tab at the bottom)" if is_mobile_view else "(the envelope button, bottom right)" }}. These switches decide what is <em>also</em> emailed to <strong id="np-email">your address</strong> when you haven't seen it in the app.</p>
+        <label class="np-row"><input type="checkbox" id="np-messages"> <span><strong>New messages</strong><span class="text-dim np-sub">A message someone sent you that is still unread after <span id="np-delay">10</span> minutes. One email covers everything unread.</span></span></label>
+        <label class="np-row"><input type="checkbox" id="np-mentions"> <span><strong>@mentions</strong><span class="text-dim np-sub">Someone typed @your name in a show's comments and you haven't opened the notification.</span></span></label>
+        <label class="np-row"><input type="checkbox" id="np-reminders"> <span><strong>Reminders</strong><span class="text-dim np-sub">A reminder you set on a message or a note to self has come due.</span></span></label>{% if projects_enabled() %}
+        {# Only in the page of someone with the optional Projects module, and
+           shown only once the GET returned the switch (same rule, server side). #}
+        <label class="np-row" id="np-tasks-row" hidden><input type="checkbox" id="np-tasks"> <span><strong>Tasks and projects</strong><span class="text-dim np-sub">You were added to a project, given a task or mentioned, or a task of yours is due — and you haven't opened the notification.</span></span></label>{% endif %}
+        <p class="text-dim" style="font-size:12px;line-height:1.5;margin:0 0 12px">Approval, piano and advance-change notifications aren’t covered by these switches: they always show in your inbox, and any email about them is set up separately by an administrator.</p>
+        <div id="np-msg" class="field-msg" style="display:none"></div>
+        <button class="btn btn-primary" type="button" onclick="saveNotifyPrefs()">Save</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 {# ── MODALS ────────────────────────────────────────────────────────────────── #}
@@ -3163,6 +3182,38 @@ async function changePassword() {
     if (_acctPwRulesUpdate) _acctPwRulesUpdate();
   }
 }
+
+/* Inbox email switches (My Account) */
+async function loadNotifyPrefs() {
+  try {
+    const d = await (await fetch('/account/notify-prefs', {headers: {'X-Requested-With': 'XMLHttpRequest'}})).json();
+    if (!d.success) return;
+    document.getElementById('np-messages').checked = !!d.prefs.email_messages;
+    document.getElementById('np-mentions').checked = !!d.prefs.email_mentions;
+    document.getElementById('np-reminders').checked = !!d.prefs.email_reminders;{% if projects_enabled() %}
+    if ('email_tasks' in d.prefs) {
+      document.getElementById('np-tasks').checked = !!d.prefs.email_tasks;
+      document.getElementById('np-tasks-row').hidden = false;
+    }{% endif %}
+    document.getElementById('np-delay').textContent = d.delay_minutes;
+    document.getElementById('np-email').textContent = d.email || 'your address (none on your account yet — ask an admin to add one)';
+  } catch (e) {}
+}
+async function saveNotifyPrefs() {
+  const msg = document.getElementById('np-msg');
+  try {
+    const resp = await fetch('/account/notify-prefs', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
+      body: JSON.stringify({email_messages: document.getElementById('np-messages').checked,
+                            email_mentions: document.getElementById('np-mentions').checked,
+                            email_reminders: document.getElementById('np-reminders').checked{% if projects_enabled() %},
+                            // Sent only when the switch was shown; a key left out keeps its stored value.
+                            ...(document.getElementById('np-tasks-row').hidden ? {} : {email_tasks: document.getElementById('np-tasks').checked}){% endif %}})});
+    const d = await resp.json();
+    showMsg(msg, d.success ? 'Saved.' : (d.error || 'Could not save.'), d.success ? 'success' : 'error');
+  } catch (e) { showMsg(msg, 'Could not save.', 'error'); }
+}
+document.addEventListener('DOMContentLoaded', loadNotifyPrefs);
 
 /* ── Arts Groups ────────────────────────────────────────────────── */
 
