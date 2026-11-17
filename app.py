@@ -907,7 +907,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.50.1'
+APP_VERSION = '3.51.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -4422,7 +4422,7 @@ def auto_archive_past_shows():
     # GREATEST() skips NULLs (and is NULL only when every argument is), so a
     # show with no dates at all is left alone.
     db.execute("""
-        UPDATE shows s SET status = 'archived'
+        UPDATE shows s SET status = 'archived', archived_on = CURRENT_DATE
         WHERE s.status = 'active'
           AND NOT EXISTS (SELECT 1 FROM show_performances p
                            WHERE p.show_id = s.id AND p.perf_date IS NULL)
@@ -7087,11 +7087,18 @@ def _timeline_day(db, day, include_test=False, accessible=None):
     if accessible is not None:
         where.append('s.id = ANY(%s)')
         params.append(list(accessible) or [0])
-    # An archived show is history only (3.50.1): it shows on days already
-    # past, never on today or a day still to come — a show archived ahead of
-    # its dates (cancelled) must not look like it is happening.
+    # An archived show is history only: never on today or a day still to
+    # come (3.50.1), and never on a day AFTER it was archived (3.51.0,
+    # shows.archived_on) — archived before a day = that day was cancelled and
+    # did not happen. Days up to the archive date happened and stay, with
+    # the ARCHIVED badge. No archive date on record (archived before 3.51.0
+    # by the auto-archiver, which only runs after the last day) = happened.
     if day >= date.today():
         where.append("COALESCE(s.status, 'active') != 'archived'")
+    else:
+        where.append("NOT (COALESCE(s.status, 'active') = 'archived' "
+                     "AND s.archived_on IS NOT NULL AND s.archived_on < %s)")
+        params.append(d_iso)
     # Candidates for the day AND the day before (its after-midnight items):
     # the date envelope (load-in / show date / performances ↔ load-out) is a
     # cheap superset of the exact span checked below; schedule rows / labor
@@ -11636,7 +11643,9 @@ def archive_show(show_id):
     if session.get('user_role') != 'admin' and not can_access_show(session['user_id'], show_id):
         abort(403)
     db = get_db()
-    db.execute("UPDATE shows SET status='archived' WHERE id=%s", (show_id,))
+    db.execute("UPDATE shows SET status='archived', archived_on=%s "
+               "WHERE id=%s AND COALESCE(status, 'active') != 'archived'",
+               (date.today().isoformat(), show_id))
     log_audit(db, 'SHOW_ARCHIVE', 'show', show_id, show_id=show_id)
     db.commit(); db.close()
     syslog_logger.info(f"SHOW_ARCHIVE show_id={show_id} by={session.get('username')}")
@@ -11652,7 +11661,7 @@ def restore_show(show_id):
     db = get_db()
     # restored_on restarts the auto-archive grace period, so a past show that
     # is brought back isn't re-archived within the minute.
-    db.execute("UPDATE shows SET status='active', restored_on=%s WHERE id=%s",
+    db.execute("UPDATE shows SET status='active', restored_on=%s, archived_on=NULL WHERE id=%s",
                (date.today().isoformat(), show_id))
     log_audit(db, 'SHOW_RESTORE', 'show', show_id, show_id=show_id)
     db.commit(); db.close()
@@ -11721,9 +11730,10 @@ def bulk_archive_shows():
     archived = [r['id'] for r in rows]
     if archived:
         db.execute(
-            f"UPDATE shows SET status='archived', updated_at=CURRENT_TIMESTAMP "
+            f"UPDATE shows SET status='archived', archived_on=%s, "
+            f"updated_at=CURRENT_TIMESTAMP "
             f"WHERE id IN ({','.join('%s' for _ in archived)})",
-            tuple(archived)
+            (date.today().isoformat(),) + tuple(archived)
         )
         for r in rows:
             log_audit(db, 'SHOW_ARCHIVE', 'show', r['id'], show_id=r['id'],

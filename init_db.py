@@ -517,6 +517,10 @@ CREATE TABLE IF NOT EXISTS shows (
     -- auto-archiver gives a restored show the same grace period again,
     -- counted from this date, instead of re-archiving it within a minute.
     restored_on DATE DEFAULT NULL,
+    -- Date the show was archived (3.51.0), cleared by a restore. Archived
+    -- before one of its days = that day never happened (cancelled). NULL on
+    -- an archived show = archived before 3.51.0 with no record of when.
+    archived_on DATE DEFAULT NULL,
     -- When (and by whom) the post-show labor was settled with "Settle Now"
     -- (3.6.0). NULL = not settled yet: no labor snapshot is taken until a
     -- person presses the button, and the Final Invoice bills no labor.
@@ -2616,6 +2620,7 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f"ALTER TABLE \"{app_schema}\".venue_colors ADD COLUMN IF NOT EXISTS banner_text_color TEXT NOT NULL DEFAULT ''",
         # Restore-from-archive date (auto-archive grace restarts) — 3.6.0
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS restored_on DATE DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS archived_on DATE DEFAULT NULL',
         # "Settle Now" — post-show labor settled explicitly — 3.6.0
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS labor_settled_at TIMESTAMP DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS labor_settled_by INTEGER',
@@ -2698,6 +2703,10 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
     # PG_SCHEMA and have nothing to upgrade.
     settle_is_new = ((app_schema, 'shows') in cat['tables']
                      and (app_schema, 'shows', 'labor_settled_at') not in cat['cols'])
+    # 3.51.0: shows archived by hand before the upgrade get archived_on from
+    # the audit log, once, in the transaction that first adds the column.
+    archived_on_is_new = ((app_schema, 'shows') in cat['tables']
+                          and (app_schema, 'shows', 'archived_on') not in cat['cols'])
     # 3.9.1: costed 3.9.0 piano tunings get their external-rental line once,
     # in the transaction that first adds show_external_rentals.piano_tuning_id.
     piano_er_is_new = ((app_schema, 'show_external_rentals') in cat['tables']
@@ -2743,6 +2752,29 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
 
     if settle_is_new:
         _settle_now_upgrade(cur, app_schema)
+    if archived_on_is_new:
+        # Only a manual archive leaves a SHOW_ARCHIVE audit row; one older
+        # than the show's last restore belongs to an earlier archive. Shows
+        # the auto-archiver closed (always after their last day) stay NULL.
+        cur.execute('SAVEPOINT _archived_on')
+        try:
+            cur.execute(f'''
+                UPDATE "{app_schema}".shows s
+                   SET archived_on = x.d
+                  FROM (SELECT a.show_id, MAX(a.timestamp)::date AS d
+                          FROM "{app_schema}".audit_log a
+                         WHERE a.action = 'SHOW_ARCHIVE' AND a.show_id IS NOT NULL
+                           AND a.timestamp > COALESCE(
+                                 (SELECT MAX(r.timestamp) FROM "{app_schema}".audit_log r
+                                   WHERE r.action = 'SHOW_RESTORE' AND r.show_id = a.show_id),
+                                 TIMESTAMP '1900-01-01')
+                         GROUP BY a.show_id) x
+                 WHERE x.show_id = s.id AND s.status = 'archived'
+                   AND s.archived_on IS NULL''')
+            cur.execute('RELEASE SAVEPOINT _archived_on')
+        except Exception as e:
+            cur.execute('ROLLBACK TO SAVEPOINT _archived_on')
+            print(f"[migrate_pg] shows.archived_on backfill warning: {e}")
     if piano_er_is_new:
         cur.execute('SAVEPOINT _piano_er')
         try:

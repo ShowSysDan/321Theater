@@ -1673,7 +1673,10 @@ in full. Module key `projects`, default OFF.
   minutes from the viewed day's midnight; `1+HH:MM` / `24:30` = next day; an
   end before its start crosses midnight; crew out ≤ in = overnight (same rule
   as `_calc_hours`). Archived shows are left out when the viewed day is today
-  or later (3.50.1; past days keep them). The previous day's still-running items come along
+  or later, or is after `shows.archived_on` (3.51.0: archived before a day =
+  cancelled, it never happened; NULL = no record, treated as happened). Every
+  write that archives a show stamps `archived_on`; restore clears it. The
+  previous day's still-running items come along
   (`from_prev`), so the candidate query looks at D−1 and D. Rows group
   EXACTLY as the Schedule tab groups them (only shows with legacy
   no-day_date rows go through `_build_schedule_days`). PM = `_pm_contacts_many`.
