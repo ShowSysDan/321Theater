@@ -907,7 +907,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.50.0'
+APP_VERSION = '3.50.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -7087,6 +7087,11 @@ def _timeline_day(db, day, include_test=False, accessible=None):
     if accessible is not None:
         where.append('s.id = ANY(%s)')
         params.append(list(accessible) or [0])
+    # An archived show is history only (3.50.1): it shows on days already
+    # past, never on today or a day still to come — a show archived ahead of
+    # its dates (cancelled) must not look like it is happening.
+    if day >= date.today():
+        where.append("COALESCE(s.status, 'active') != 'archived'")
     # Candidates for the day AND the day before (its after-midnight items):
     # the date envelope (load-in / show date / performances ↔ load-out) is a
     # cheap superset of the exact span checked below; schedule rows / labor

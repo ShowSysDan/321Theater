@@ -1672,7 +1672,8 @@ in full. Module key `projects`, default OFF.
   (read-only, `_viewer_gate` blocks viewers — don't allowlist it). Times are
   minutes from the viewed day's midnight; `1+HH:MM` / `24:30` = next day; an
   end before its start crosses midnight; crew out ≤ in = overnight (same rule
-  as `_calc_hours`). The previous day's still-running items come along
+  as `_calc_hours`). Archived shows are left out when the viewed day is today
+  or later (3.50.1; past days keep them). The previous day's still-running items come along
   (`from_prev`), so the candidate query looks at D−1 and D. Rows group
   EXACTLY as the Schedule tab groups them (only shows with legacy
   no-day_date rows go through `_build_schedule_days`). PM = `_pm_contacts_many`.
