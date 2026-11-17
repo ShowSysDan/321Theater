@@ -323,7 +323,7 @@ def plan(db, cfg, *, show_id=None, start_date=None, end_date=None, mapping=None)
     show page, so they never disagree."""
     tz = _tz(cfg)
     mapping = load_mapping(db) if mapping is None else mapping
-    conds, params = ["COALESCE(s.is_test, 0) = 0",
+    conds, params = ["COALESCE(s.is_test, 0) = 0", "COALESCE(s.is_cancelled, 0) = 0",
                      "s.status IN ('active', 'archived')"], []
     if show_id is not None:
         conds.append('s.id = %s')

@@ -521,6 +521,11 @@ CREATE TABLE IF NOT EXISTS shows (
     -- before one of its days = that day never happened (cancelled). NULL on
     -- an archived show = archived before 3.51.0 with no record of when.
     archived_on DATE DEFAULT NULL,
+    -- 1 = an archived show that was CANCELLED and never happened (3.52.0):
+    -- set automatically when a show is archived before its show date, and by
+    -- hand on the show page / Settings -> Shows. Cleared by a restore. Left
+    -- out of reports, asset demand and the timeline, like is_test.
+    is_cancelled INTEGER DEFAULT 0,
     -- When (and by whom) the post-show labor was settled with "Settle Now"
     -- (3.6.0). NULL = not settled yet: no labor snapshot is taken until a
     -- person presses the button, and the Final Invoice bills no labor.
@@ -2621,6 +2626,7 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         # Restore-from-archive date (auto-archive grace restarts) — 3.6.0
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS restored_on DATE DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS archived_on DATE DEFAULT NULL',
+        f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS is_cancelled INTEGER DEFAULT 0',
         # "Settle Now" — post-show labor settled explicitly — 3.6.0
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS labor_settled_at TIMESTAMP DEFAULT NULL',
         f'ALTER TABLE "{app_schema}".shows ADD COLUMN IF NOT EXISTS labor_settled_by INTEGER',
@@ -2707,6 +2713,10 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
     # the audit log, once, in the transaction that first adds the column.
     archived_on_is_new = ((app_schema, 'shows') in cat['tables']
                           and (app_schema, 'shows', 'archived_on') not in cat['cols'])
+    # 3.52.0: archived shows whose archive date is before their show date are
+    # marked cancelled, once, in the transaction that first adds the column.
+    cancelled_is_new = ((app_schema, 'shows') in cat['tables']
+                        and (app_schema, 'shows', 'is_cancelled') not in cat['cols'])
     # 3.9.1: costed 3.9.0 piano tunings get their external-rental line once,
     # in the transaction that first adds show_external_rentals.piano_tuning_id.
     piano_er_is_new = ((app_schema, 'show_external_rentals') in cat['tables']
@@ -2775,6 +2785,22 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         except Exception as e:
             cur.execute('ROLLBACK TO SAVEPOINT _archived_on')
             print(f"[migrate_pg] shows.archived_on backfill warning: {e}")
+    if cancelled_is_new:
+        # After the archived_on step above (an upgrade from before 3.51.0
+        # runs both in this start). Same "first date" as app.py
+        # _SHOW_FIRST_DATE_SQL.
+        cur.execute('SAVEPOINT _cancelled')
+        try:
+            cur.execute(f'''
+                UPDATE "{app_schema}".shows s SET is_cancelled = 1
+                 WHERE s.status = 'archived' AND s.archived_on IS NOT NULL
+                   AND s.archived_on < COALESCE(LEAST(s.show_date,
+                              (SELECT MIN(p.perf_date) FROM "{app_schema}".show_performances p
+                                WHERE p.show_id = s.id)), s.load_in_date)''')
+            cur.execute('RELEASE SAVEPOINT _cancelled')
+        except Exception as e:
+            cur.execute('ROLLBACK TO SAVEPOINT _cancelled')
+            print(f"[migrate_pg] shows.is_cancelled backfill warning: {e}")
     if piano_er_is_new:
         cur.execute('SAVEPOINT _piano_er')
         try:

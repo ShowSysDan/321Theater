@@ -907,7 +907,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.51.0'
+APP_VERSION = '3.52.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -7083,7 +7083,8 @@ def _timeline_day(db, day, include_test=False, accessible=None):
     d_iso = day.isoformat()
     prev = day - timedelta(days=1)
     p_iso = prev.isoformat()
-    where, params = [], [d_iso, p_iso, p_iso, d_iso, p_iso, d_iso]
+    # A cancelled show never happened: not on any day.
+    where, params = ['COALESCE(s.is_cancelled, 0) = 0'], [d_iso, p_iso, p_iso, d_iso, p_iso, d_iso]
     if accessible is not None:
         where.append('s.id = ANY(%s)')
         params.append(list(accessible) or [0])
@@ -7333,7 +7334,7 @@ def archived_shows_page():
         f"SELECT COUNT(*) AS n FROM shows s WHERE "
         f"{' AND '.join(['s.status = %s'] + where[1:])}", ['active'] + params).fetchone()['n']
     rows = db.execute(f"""
-        SELECT s.id, s.name, s.venue, s.is_test, s.show_mode, {_eff} AS show_date,
+        SELECT s.id, s.name, s.venue, s.is_test, s.is_cancelled, s.show_mode, {_eff} AS show_date,
                (SELECT field_value FROM advance_data WHERE show_id = s.id
                  AND field_key = 'performance_company') AS company
         FROM shows s WHERE {' AND '.join(where)}
@@ -11559,7 +11560,7 @@ def manage_shows():
         (SELECT MIN(perf_date) FROM show_performances
          WHERE show_id=s.id AND perf_date IS NOT NULL))"""
     rows = db.execute(f"""
-        SELECT s.id, s.name, s.venue, s.is_test,
+        SELECT s.id, s.name, s.venue, s.is_test, s.is_cancelled,
                COALESCE(s.status, 'active') AS status,
                u.display_name AS creator,
                (SELECT COUNT(*) FROM show_performances WHERE show_id=s.id) AS perf_count,
@@ -11637,19 +11638,38 @@ def save_auto_archive_days():
     return jsonify({'success': True, 'days': days})
 
 
+# A show's first date for the "archived before it happened = cancelled" rule:
+# the show date / first performance, else the load-in. Keep in step with
+# init_db's 3.52.0 backfill.
+_SHOW_FIRST_DATE_SQL = '''COALESCE(LEAST(s.show_date,
+        (SELECT MIN(p.perf_date) FROM show_performances p WHERE p.show_id = s.id)),
+        s.load_in_date)'''
+# SET list for a MANUAL archive on `shows s` (one %s = today): stamps the
+# date and marks the show cancelled when it is archived before its first
+# date. The automatic archiver only runs after the last day: never cancelled.
+_SHOW_ARCHIVE_SET_SQL = f'''status = 'archived', archived_on = %s,
+        is_cancelled = CASE WHEN {_SHOW_FIRST_DATE_SQL} > CURRENT_DATE THEN 1 ELSE 0 END'''
+
+
 @app.route('/shows/<int:show_id>/archive', methods=['POST'])
 @staff_or_admin_required
 def archive_show(show_id):
     if session.get('user_role') != 'admin' and not can_access_show(session['user_id'], show_id):
         abort(403)
     db = get_db()
-    db.execute("UPDATE shows SET status='archived', archived_on=%s "
-               "WHERE id=%s AND COALESCE(status, 'active') != 'archived'",
-               (date.today().isoformat(), show_id))
-    log_audit(db, 'SHOW_ARCHIVE', 'show', show_id, show_id=show_id)
+    cur = db.execute(f"UPDATE shows s SET {_SHOW_ARCHIVE_SET_SQL} "
+                     "WHERE s.id=%s AND COALESCE(s.status, 'active') != 'archived' "
+                     "RETURNING s.is_cancelled",
+                     (date.today().isoformat(), show_id)).fetchone()
+    cancelled = bool(cur and cur['is_cancelled'])
+    log_audit(db, 'SHOW_ARCHIVE', 'show', show_id, show_id=show_id,
+              detail='cancelled (archived before the show date)' if cancelled else None)
     db.commit(); db.close()
-    syslog_logger.info(f"SHOW_ARCHIVE show_id={show_id} by={session.get('username')}")
-    flash('Show archived.', 'success')
+    syslog_logger.info(f"SHOW_ARCHIVE show_id={show_id} cancelled={int(cancelled)} "
+                       f"by={session.get('username')}")
+    flash('Show archived and marked CANCELLED (it was archived before its show date): '
+          'it is left out of reports and the timeline. Unmark it on the show page if '
+          'it did happen.' if cancelled else 'Show archived.', 'success')
     return _redirect_after_show_action()
 
 
@@ -11661,7 +11681,8 @@ def restore_show(show_id):
     db = get_db()
     # restored_on restarts the auto-archive grace period, so a past show that
     # is brought back isn't re-archived within the minute.
-    db.execute("UPDATE shows SET status='active', restored_on=%s, archived_on=NULL WHERE id=%s",
+    db.execute("UPDATE shows SET status='active', restored_on=%s, archived_on=NULL, "
+               "is_cancelled=0 WHERE id=%s",
                (date.today().isoformat(), show_id))
     log_audit(db, 'SHOW_RESTORE', 'show', show_id, show_id=show_id)
     db.commit(); db.close()
@@ -11687,6 +11708,35 @@ def toggle_show_test_mode(show_id):
     syslog_logger.info(f"SHOW_TEST_FLAG show_id={show_id} is_test={is_test} "
                        f"by={session.get('username')}")
     return jsonify({'success': True, 'is_test': bool(is_test)})
+
+
+@app.route('/shows/<int:show_id>/cancelled', methods=['POST'])
+@staff_or_admin_required
+def toggle_show_cancelled(show_id):
+    """Mark an ARCHIVED show as cancelled (it never happened) or not. A
+    cancelled show is left out of reports, asset demand and the timeline.
+    Same access rule as the test flag. Idempotent."""
+    if session.get('user_role') != 'admin' and not can_access_show(session['user_id'], show_id):
+        return jsonify({'success': False, 'error': 'Access denied.'}), 403
+    val = 1 if _json_obj().get('is_cancelled') else 0
+    db = get_db()
+    row = db.execute("UPDATE shows SET is_cancelled=%s, updated_at=CURRENT_TIMESTAMP "
+                     "WHERE id=%s AND status='archived' RETURNING id",
+                     (val, show_id)).fetchone()
+    if not row:
+        exists = db.execute('SELECT 1 FROM shows WHERE id=%s', (show_id,)).fetchone()
+        db.close()
+        if not exists:
+            return jsonify({'success': False, 'error': 'Show not found.'}), 404
+        return jsonify({'success': False,
+                        'error': 'Only an archived show can be marked cancelled. '
+                                 'Archive it first.'}), 409
+    log_audit(db, 'SHOW_CANCELLED_FLAG', 'show', show_id, show_id=show_id,
+              detail=f'is_cancelled={val}')
+    db.commit(); db.close()
+    syslog_logger.info(f"SHOW_CANCELLED_FLAG show_id={show_id} is_cancelled={val} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'is_cancelled': bool(val)})
 
 
 @app.route('/shows/<int:show_id>/mode', methods=['POST'])
@@ -11730,9 +11780,9 @@ def bulk_archive_shows():
     archived = [r['id'] for r in rows]
     if archived:
         db.execute(
-            f"UPDATE shows SET status='archived', archived_on=%s, "
+            f"UPDATE shows s SET {_SHOW_ARCHIVE_SET_SQL}, "
             f"updated_at=CURRENT_TIMESTAMP "
-            f"WHERE id IN ({','.join('%s' for _ in archived)})",
+            f"WHERE s.id IN ({','.join('%s' for _ in archived)})",
             (date.today().isoformat(),) + tuple(archived)
         )
         for r in rows:
@@ -22722,7 +22772,8 @@ def _component_demand_many(db, type_ids, start_date=None, end_date=None):
                s.name AS show_name
         FROM show_assets sa
         JOIN shows s ON s.id = sa.show_id
-        WHERE sa.asset_type_id = ANY(%s) AND COALESCE(s.is_test, 0) = 0{date_filter}
+        WHERE sa.asset_type_id = ANY(%s) AND COALESCE(s.is_test, 0) = 0
+          AND COALESCE(s.is_cancelled, 0) = 0{date_filter}
         ORDER BY sa.rental_start, sa.id
     """, [ids] + date_params).fetchall()
     for r in direct:
@@ -22745,7 +22796,8 @@ def _component_demand_many(db, type_ids, start_date=None, end_date=None):
         JOIN show_assets sa  ON sa.asset_type_id = m.system_type_id
         JOIN asset_types sys ON sys.id = m.system_type_id
         JOIN shows s         ON s.id = sa.show_id
-        WHERE m.component_type_id = ANY(%s) AND COALESCE(s.is_test, 0) = 0{date_filter}
+        WHERE m.component_type_id = ANY(%s) AND COALESCE(s.is_test, 0) = 0
+          AND COALESCE(s.is_cancelled, 0) = 0{date_filter}
         ORDER BY sa.rental_start, sa.id, sys.id
     """, [ids] + date_params).fetchall()
     for r in indirect:
@@ -23370,7 +23422,7 @@ def assets_availability_bulk():
     params = []
     # Exclude test/demo shows from the by-show demand summary (mirrors the
     # by_type numbers above, which already skip test shows via _component_demand).
-    where  = ["COALESCE(s.is_test, 0) = 0"]
+    where  = ["COALESCE(s.is_test, 0) = 0", "COALESCE(s.is_cancelled, 0) = 0"]
     if accessible_ids is not None and len(accessible_ids) > 0:
         placeholders = ','.join(['%s'] * len(accessible_ids))
         where.append(f's.id IN ({placeholders})')
@@ -26348,7 +26400,7 @@ def combined_invoice_page():
         (SELECT MIN(perf_date) FROM show_performances
          WHERE show_id=s.id AND perf_date IS NOT NULL))"""
     rows = db.execute(f"""
-        SELECT s.id, s.name, s.venue, s.is_test,
+        SELECT s.id, s.name, s.venue, s.is_test, s.is_cancelled,
                COALESCE(s.status, 'active') AS status,
                {eff_date} AS first_date,
                (SELECT MAX(perf_date) FROM show_performances
@@ -30484,7 +30536,7 @@ def _report_shows(db):
                         NULLIF(TRIM(s.performance_company), ''), '') AS company
         FROM shows s
         LEFT JOIN advance_data ad ON ad.show_id = s.id AND ad.field_key = 'performance_company'
-        WHERE COALESCE(s.is_test, 0) = 0
+        WHERE COALESCE(s.is_test, 0) = 0 AND COALESCE(s.is_cancelled, 0) = 0
     """).fetchall()
     out = {}
     for r in rows:
@@ -30640,7 +30692,8 @@ def reports_page():
     shows = [{'id': r['id'], 'name': r['name'], 'date': _as_date(r['d']).isoformat() if r['d'] else ''}
              for r in db.execute(
                  "SELECT id, name, COALESCE(show_date, load_in_date) AS d FROM shows "
-                 "WHERE COALESCE(is_test, 0) = 0 ORDER BY d DESC NULLS LAST, id DESC LIMIT 3000").fetchall()]
+                 "WHERE COALESCE(is_test, 0) = 0 AND COALESCE(is_cancelled, 0) = 0 "
+                 "ORDER BY d DESC NULLS LAST, id DESC LIMIT 3000").fetchall()]
     adv_sections = []           # [(section label, [{key, label}])] in form order
     for r in _report_adv_fields(db):
         if not adv_sections or adv_sections[-1][0] != r['section']:
@@ -32824,7 +32877,7 @@ def asset_reports_data():
     params = []
     # Test/demo shows are excluded from reporting so a test show's assets never
     # show up as real revenue/inventory usage — see shows.is_test.
-    where = ["COALESCE(s.is_test, 0) = 0"]
+    where = ["COALESCE(s.is_test, 0) = 0", "COALESCE(s.is_cancelled, 0) = 0"]
 
     if company:
         where.append("""

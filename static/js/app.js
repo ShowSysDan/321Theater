@@ -4843,7 +4843,30 @@ async function toggleShowMode(btn, showId) {
   }
 }
 
-async function toggleShowTestMode(btn, showId) {
+// Mark an ARCHIVED show cancelled / not (left out of reports, asset
+// availability and the timeline). Reloads so every badge is right.
+async function toggleShowCancelled(btn, showId) {
+  const next = btn.dataset.isCancelled !== '1';
+  if (next && !confirm('Mark this show as CANCELLED?\n\nIt did not happen: it will be left out of ' +
+                       'reports, asset availability and the timeline. Nothing is deleted, and you can unmark it.')) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/shows/${showId}/cancelled`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify({is_cancelled: next})
+    });
+    const j = await r.json().catch(() => ({}));
+    if (j.success) { location.reload(); return; }
+    alert(j.error || 'Failed to update the cancelled flag.');
+  } catch (e) {
+    alert('Network error.');
+  }
+  btn.disabled = false;
+}
+
+async function toggleShowTestMode(btn, showId, reload) {
   const cur = btn.dataset.isTest === '1';
   const next = !cur;
   btn.disabled = true;
@@ -4858,6 +4881,7 @@ async function toggleShowTestMode(btn, showId) {
     if (j.success) {
       btn.dataset.isTest = next ? '1' : '0';
       btn.textContent = next ? 'Unmark test' : 'Mark as test';
+      if (reload) { location.reload(); return; }
     } else {
       alert(j.error || 'Failed to update test flag.');
     }

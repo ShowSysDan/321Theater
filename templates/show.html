@@ -266,6 +266,8 @@
       {% if show.show_time %} · {{ show.show_time }}{% endif %}
       {% if show.venue %} · {{ show.venue }}{% endif %}
       {% if show.status == 'archived' %}<span class="badge-archived">ARCHIVED</span>{% endif %}
+      {% if show.status == 'archived' and show.is_cancelled %}<span class="badge-archived" style="background:#b4532a"
+            title="Cancelled — this show did not happen. Left out of reports, asset availability and the timeline.">CANCELLED</span>{% endif %}
       {% if show.is_test %}<span class="badge-archived" style="background:#7d4baf"
             title="Marked as test/demo — excluded from reports">TEST</span>{% endif %}
       {% if restricted %}<span class="badge-archived" style="background:#4A5568">VIEW ONLY</span>{% endif %}
@@ -299,6 +301,14 @@
             onclick="toggleShowTestMode(this, {{ show.id }})">
       {{ 'Unmark test' if show.is_test else 'Mark as test' }}
     </button>
+    {% if show.status == 'archived' %}
+    <button type="button" class="btn btn-ghost btn-sm" id="cancelled-btn"
+            data-is-cancelled="{{ '1' if show.is_cancelled else '0' }}"
+            title="Cancelled = the show did not happen: left out of reports, asset availability and the timeline"
+            onclick="toggleShowCancelled(this, {{ show.id }})">
+      {{ 'Unmark cancelled' if show.is_cancelled else 'Mark as cancelled' }}
+    </button>
+    {% endif %}
     {% endif %}
     {% if not restricted and ollama_enabled %}
     <button type="button" class="btn btn-ghost btn-sm" id="ai-extract-btn" onclick="openAiExtract()" title="Extract field values from a document using AI">AI Extract</button>
