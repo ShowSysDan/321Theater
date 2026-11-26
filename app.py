@@ -29105,7 +29105,10 @@ _READINESS_MAX_SHOWS = 400
 
 
 def _readiness_knobs(db):
-    """Stored knobs (readiness_* app_settings), validated (lenient)."""
+    """(knobs, stored, defaults): the effective knobs (validated, lenient),
+    the readiness_* values actually STORED, and the effective defaults —
+    readiness.DEFAULTS except labor_grace_days, which follows the no-labor
+    alert's first trigger (else 14) until an admin sets it."""
     rows = db.execute(
         'SELECT key, value FROM app_settings WHERE key = ANY(%s)',
         (['readiness_' + k for k in readiness.DEFAULTS] + ['no_labor_alert_days_1'],)
@@ -29113,15 +29116,24 @@ def _readiness_knobs(db):
     stored = {r['key']: r['value'] for r in rows}
     raw = {k: stored['readiness_' + k] for k in readiness.DEFAULTS
            if stored.get('readiness_' + k) is not None}
-    if 'labor_grace_days' not in raw:
-        # Default grace = the no-labor alert's first trigger, else 14.
-        try:
-            g = int(stored.get('no_labor_alert_days_1') or 0)
-            if 0 < g <= 120:
-                raw['labor_grace_days'] = g
-        except (TypeError, ValueError):
-            pass
-    return readiness.clean_knobs(raw), raw
+    defaults = dict(readiness.DEFAULTS)
+    try:
+        g = int(stored.get('no_labor_alert_days_1') or 0)
+        if 0 < g <= 120:
+            defaults['labor_grace_days'] = g
+    except (TypeError, ValueError):
+        pass
+    eff = dict(raw)
+    if 'labor_grace_days' not in eff:
+        eff['labor_grace_days'] = defaults['labor_grace_days']
+    return readiness.clean_knobs(eff), raw, defaults
+
+
+def _readiness_same(a, b):
+    """Knob values equal (floats within rounding — the form sends 30/100)."""
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(float(a) - float(b)) < 1e-9
+    return str(a) == str(b)
 
 
 def _readiness_fields(db):
@@ -29366,7 +29378,7 @@ def readiness_data():
     """The panel's list with the SAVED knobs. Read-only."""
     db = get_db()
     try:
-        knobs, stored = _readiness_knobs(db)
+        knobs, stored, _defaults = _readiness_knobs(db)
         out = _readiness_payload(db, knobs, request.args)
         out['meta'] = _readiness_meta()
         out['stored_keys'] = sorted(stored)
@@ -29413,12 +29425,15 @@ def readiness_preview():
 @admin_required
 def readiness_config_save():
     """Save the knobs (`{knobs: {...}}`) or put them back to the defaults
-    (`{reset: true}` deletes every readiness_* key)."""
+    (`{reset: true}` deletes every readiness_* key). Only a knob that differs
+    from its effective default is stored (one equal to it is deleted), so an
+    untouched labor_grace_days keeps following the no-labor alert setting.
+    A save that changes nothing writes no audit row and no syslog line."""
     data = _json_obj()
     keys = ['readiness_' + k for k in readiness.DEFAULTS]
     db = get_db()
     try:
-        before, _ = _readiness_knobs(db)
+        before, _stored, defaults = _readiness_knobs(db)
         if data.get('reset'):
             db.execute('DELETE FROM app_settings WHERE key = ANY(%s)', (keys,))
             detail = 'readiness=reset'
@@ -29428,21 +29443,29 @@ def readiness_config_save():
                     data.get('knobs') if isinstance(data.get('knobs'), dict) else {}, strict=True)
             except readiness.KnobError as e:
                 return jsonify({'success': False, 'error': str(e)}), 400
-            db.execute("""
-                INSERT INTO app_settings (key, value)
-                SELECT * FROM unnest(%s::text[], %s::text[])
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
-                (keys, [str(knobs[k]) for k in readiness.DEFAULTS]))
+            keep = [k for k in readiness.DEFAULTS
+                    if not _readiness_same(knobs[k], defaults[k])]
+            drop = ['readiness_' + k for k in readiness.DEFAULTS if k not in keep]
+            if drop:
+                db.execute('DELETE FROM app_settings WHERE key = ANY(%s)', (drop,))
+            if keep:
+                db.execute("""
+                    INSERT INTO app_settings (key, value)
+                    SELECT * FROM unnest(%s::text[], %s::text[])
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+                    (['readiness_' + k for k in keep], [str(knobs[k]) for k in keep]))
             detail = 'readiness'
-        after, _ = _readiness_knobs(db)
-        changed = sorted(k for k in after if after[k] != before.get(k))
-        log_audit(db, 'SETTINGS_CHANGE', 'setting', None, before=before, after=after,
-                  detail=detail)
+        after = _readiness_knobs(db)[0]
+        changed = sorted(k for k in after if not _readiness_same(after[k], before.get(k)))
+        if changed:
+            log_audit(db, 'SETTINGS_CHANGE', 'setting', None, before=before, after=after,
+                      detail=detail)
         db.commit()
     finally:
         db.close()
-    syslog_logger.info(f"READINESS_CONFIG reset={1 if data.get('reset') else 0} "
-                       f"changed={','.join(changed) or '-'} by={session.get('username')}")
+    if changed:
+        syslog_logger.info(f"READINESS_CONFIG reset={1 if data.get('reset') else 0} "
+                           f"changed={','.join(changed)} by={session.get('username')}")
     return jsonify({'success': True, 'knobs': after, 'changed': changed})
 
 

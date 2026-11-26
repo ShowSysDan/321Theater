@@ -227,6 +227,10 @@
       hm.appendChild(el('div', 'text-dim rd-math',
         'Parts score ' + Math.floor(r.base) + '%' + (r.penalty ? ' − ' + r.penalty + ' penalty point' + (r.penalty === 1 ? '' : 's') +
         (r.penalty_raw > r.penalty ? ' (capped from ' + r.penalty_raw + ')' : '') : '') + ' = ' + (r.score == null ? '—' : r.score + '%')));
+      if (r.scheduler_floor != null) {
+        hm.appendChild(el('div', 'text-dim rd-math',
+          'Scheduling-gap points reduced: starting to schedule never scores below nothing scheduled (' + r.scheduler_floor + '%).'));
+      }
     }
     head.appendChild(hm);
     box.appendChild(head);
@@ -392,7 +396,7 @@
                ['adv_required_keys', 'Must-answer field keys (comma list)', 'keys'],
                ['adv_key_penalty', 'Cut per blank must-answer field', '%']],
     'rd-sched': [['sched_min_rows', 'Schedule rows for a full day'],
-                 ['labor_cue_keys', 'Labor question field keys (load-in, show call, load-out)', 'keys'],
+                 ['labor_cue_keys', 'Labor question field keys, in order: load-in, show call, load-out', 'keys'],
                  ['labor_day_floor', 'Labor credit with some days covered', '%'],
                  ['labor_grace_days', 'Expect labor from this many days out'],
                  ['window_days', 'Default list window (days)']],

@@ -43,6 +43,7 @@ PENALTY_CODES = (
     ('PARTIAL_DAY', 5, 'Day partly scheduled (per day)'),
     ('UNTOUCHED_DAY', 5, 'Day left unscheduled while others are done (per day)'),
     ('DARK_PERF_DAY', 2, 'Performance day flagged dark'),
+    ('DARK_LOAD_DAY', 2, 'Load-in / load-out day flagged dark'),
     ('UNDATED_PERF', 2, 'Performance with no date'),
     ('OFF_DATE_ROWS', 3, 'Schedule rows outside the show dates'),
     ('LABOR_ON_DARK', 3, 'Labor on a dark day'),
@@ -53,6 +54,21 @@ PENALTY_CODES = (
 )
 
 WEIGHT_KEYS = ('advance', 'schedule', 'labor', 'crew', 'gear')
+
+# The component each penalty belongs to: a component turned off (weight 0)
+# takes its penalties with it (the issue still shows, worth 0 points).
+# Codes not listed (UNDATED_PERF) are about the show's dates and always count.
+PENALTY_OWNER = {
+    'NO_LABOR_SOON': 'labor', 'LABOR_EXPECTED_NONE': 'labor',
+    'LABOR_ON_DARK': 'labor', 'UNDATED_LINES': 'labor',
+    'PARTIAL_DAY': 'crew', 'UNTOUCHED_DAY': 'crew', 'ARCHIVED_TECH': 'crew',
+    'DARK_PERF_DAY': 'schedule', 'DARK_LOAD_DAY': 'schedule',
+    'OFF_DATE_ROWS': 'schedule',
+    'GEAR_CHANGED': 'gear', 'GEAR_UNAPPROVED': 'gear',
+}
+# Scheduler-gap penalties: never allowed to drop a show below the score the
+# same show gets with nothing scheduled (starting the work must not cost %).
+SCHEDULER_GAP_CODES = frozenset(('PARTIAL_DAY', 'UNTOUCHED_DAY'))
 
 DEFAULTS = {
     'w_advance': 35, 'w_schedule': 25, 'w_labor': 15, 'w_crew': 15, 'w_gear': 10,
@@ -88,12 +104,19 @@ for _code, _pts, _lbl in PENALTY_CODES:
 
 # Field types / keys that never count toward the advance percentage.
 ADV_SKIP_TYPES = frozenset(('notes', 'piano_tuning', 'checkbox'))
+# Free-text types: a '-' / 'N/A' there is not an answer (a pick list or a
+# contact may still say N/A on purpose).
+ADV_FREE_TEXT_TYPES = frozenset(('text', 'textarea', 'number', 'date', 'time'))
+# Ticked checkboxes add to the answered count, but at most this share of the
+# counted fields (so ticks alone can't reach the target).
+ADV_CHECKBOX_MAX_SHARE = 0.10
 ADV_SKIP_KEYS = frozenset(('load_in_date', 'load_in_time', 'load_out_date',
                            'load_out_time', 'show_name', 'show_date',
                            'show_time', 'venue'))
 
 BANDS = ((90, 'Ready for showtime'), (67, 'Almost there'),
          (34, 'In progress'), (0, 'Getting started'))
+BAND_NO_WEIGHTS = 'Nothing to score'
 
 # Days out → % a show "should" be at by then. Display only (pace chip).
 PACE_CURVE = ((90, 20), (60, 40), (30, 65), (14, 85), (7, 95), (0, 100))
@@ -223,16 +246,71 @@ def score(facts, knobs, today, fields):
     """Readiness of one show. Never raises: an unexpected error returns a
     result with score None and the error type in `error`."""
     try:
-        return _score(facts or {}, clean_knobs(knobs), today, fields or [])
+        facts, k, fields = facts or {}, clean_knobs(knobs), fields or []
+        res = _score(facts, k, today, fields)
+        if any(i['code'] in SCHEDULER_GAP_CODES and i['points'] for i in res['issues']):
+            # The same show with no scheduler work done (nothing scheduled,
+            # no tech picked): the gap penalties may not take it below that.
+            bare = dict(facts, labor=[{'date': ln.get('date')} for ln in (facts.get('labor') or [])])
+            floor = _score(bare, k, today, fields)['score']
+            _cap_scheduler_gaps(res, k, floor, today)
+        return res
     except Exception as e:  # pragma: no cover - defensive
         return {'id': (facts or {}).get('id'), 'score': None, 'band': band_for(None),
                 'error': type(e).__name__, 'components': {}, 'issues': [],
                 'days': [], 'headline': 'Readiness could not be worked out.'}
 
 
+def _pace(final, first, last, today, days_out):
+    if final is None or not first:
+        return None
+    if first <= today <= (last or first):
+        return {'label': 'In progress', 'target': None}
+    if today < first:
+        t = pace_target(days_out)
+        lbl = 'On track' if final >= t else ('Behind' if final >= t - 15 else 'At risk')
+        return {'label': lbl, 'target': t}
+    return None
+
+
+_SEV_RANK = {'error': 0, 'warn': 1, 'info': 2}
+
+
+def _cap_scheduler_gaps(res, k, floor, today):
+    """Trim the scheduler-gap issues' points so the final score is not
+    below `floor` (the nothing-scheduled score) — never below 0, never more
+    than each issue's own points. Updates score / band / headline / penalty."""
+    if res.get('score') is None or floor is None or res['score'] >= floor:
+        return
+    gaps = [i for i in res['issues'] if i['code'] in SCHEDULER_GAP_CODES and i['points']]
+    other = sum(i['points'] for i in res['issues'] if i not in gaps)
+    base100 = int(math.floor(res['base'] + 1e-9))
+    room = base100 - floor          # most penalty points the show may lose
+    allowed = max(0, room - other) if k['penalty_cap'] > room else sum(i['points'] for i in gaps)
+    for i in gaps:                   # later days give up their points first
+        keep = min(i['points'], allowed)
+        if keep != i['points']:
+            i['points_full'] = i['points']
+            i['points'] = keep
+        allowed -= keep
+    raw = sum(i['points'] for i in res['issues'])
+    res['penalty_raw'] = raw
+    res['penalty'] = min(k['penalty_cap'], raw)
+    res['score'] = max(0, min(100, base100 - res['penalty']))
+    res['band'] = band_for(res['score'])
+    res['headline'] = f'This show is {res["score"]}% ready for showtime!'
+    res['scheduler_floor'] = floor
+    first, last = _d(res.get('first_day')), _d(res.get('last_day'))
+    res['pace'] = _pace(res['score'], first, last, today, res.get('days_out'))
+    res['issues'].sort(key=lambda i: (_SEV_RANK.get(i['sev'], 3), -i['points']))
+
+
 def _score(f, k, today, fields):
     issues = []
     pts = {code: k['penalty_' + code.lower()] for code, _p, _l in PENALTY_CODES}
+    for code, owner in PENALTY_OWNER.items():
+        if k['w_' + owner] <= 0:
+            pts[code] = 0
 
     def issue(sev, code, text, tab, points=None):
         issues.append({'sev': sev, 'code': code, 'text': text, 'tab': tab,
@@ -242,10 +320,18 @@ def _score(f, k, today, fields):
     span = sorted({s for s in (f.get('span') or []) if _d(s)})
     perf = {p for p in (f.get('perf_dates') or []) if _d(p)}
     dark_flags = {x for x in (f.get('dark') or []) if _d(x)}
-    dark = (dark_flags & set(span)) - perf
+    # Load-in / load-out are work days by definition: like a performance
+    # day, a dark flag on one is a contradiction, never an exclusion.
+    loads = {x for x in (f.get('load_in'), f.get('load_out')) if x and _d(x)}
+    dark = (dark_flags & set(span)) - perf - loads
     for x in sorted(dark_flags & perf & set(span)):
         issue('warn', 'DARK_PERF_DAY',
               f'{_label(x)} is marked dark but has a performance — still counted.',
+              'schedule')
+    for x in sorted((dark_flags & loads & set(span)) - perf):
+        issue('warn', 'DARK_LOAD_DAY',
+              f'{_label(x)} is marked dark but is the '
+              f'{"load-in" if x == f.get("load_in") else "load-out"} — still counted.',
               'schedule')
     E = [x for x in span if x not in dark]
     if not E and span:
@@ -290,9 +376,15 @@ def _score(f, k, today, fields):
     ans = 0.0
     for fd in counted:
         c = adv.get(fd['key'])
-        ans += float(c[0]) if c else 0.0
-    cb = sum(1 for fd in fields if fd.get('type') == 'checkbox'
-             and adv.get(fd['key']) and adv[fd['key']][0] > 0)
+        if not c:
+            continue
+        if fd.get('type', 'text') in ADV_FREE_TEXT_TYPES and \
+                str(c[1]).strip().upper() in ('N/A', '-', 'NA'):
+            continue                  # '-' typed into a text box is not an answer
+        ans += float(c[0])
+    cb_ticked = sum(1 for fd in fields if fd.get('type') == 'checkbox'
+                    and adv.get(fd['key']) and adv[fd['key']][0] > 0)
+    cb = min(cb_ticked, ADV_CHECKBOX_MAX_SHARE * len(counted))
     req_keys = [x for x in k['adv_required_keys'].split(',') if x]
     missing_req, unknown_req = [], [x for x in req_keys if x not in known]
     pm = ''
@@ -315,7 +407,7 @@ def _score(f, k, today, fields):
                   'advance', points=0)
         answered_n = ans + cb
         lines = [f'{answered_n:g} of {len(counted)} questions answered '
-                 f'({int(fill * 100)}% — {int(round(k["advance_target"] * 100))}% counts as full)',
+                 f'({int(math.floor(100 * fill + 1e-9))}% — {int(round(k["advance_target"] * 100))}% counts as full)',
                  f'Production manager: {pm or "not set"}']
         comp('advance', True, A, detail={
             'answered': answered_n, 'counted': len(counted), 'fill': round(fill, 4),
@@ -351,6 +443,9 @@ def _score(f, k, today, fields):
     # ── 2.4 Labor requests ──────────────────────────────────────────────
     lab = f.get('labor') or []
     cue_keys = [x for x in k['labor_cue_keys'].split(',') if x]
+    # The cue list is positional: 1st = load-in, 2nd = show call, 3rd =
+    # load-out (any further key only decides whether labor applies).
+    cue_role = dict(zip(('load_in', 'show_call', 'load_out'), cue_keys))
     cues = {x: (adv.get(x) or (0, ''))[1] for x in cue_keys}
     cue_yes = [x for x in cue_keys if cues.get(x) == 'Yes']
     all_no = bool(cue_keys) and all(x in known for x in cue_keys) and \
@@ -368,11 +463,13 @@ def _score(f, k, today, fields):
     grace = k['labor_grace_days']
     if lab:
         X = set(E)
-        if cues.get('labor_load_in') == 'No' and load_in:
+        def said_no(role):
+            return role in cue_role and cues.get(cue_role[role]) == 'No'
+        if said_no('load_in') and load_in:
             X.discard(load_in)
-        if cues.get('labor_load_out') == 'No' and load_out:
+        if said_no('load_out') and load_out:
             X.discard(load_out)
-        if cues.get('labor_show_call') == 'No':
+        if said_no('show_call'):
             X -= {x for x in perf_days if x not in (load_in, load_out)}
         cov = (len(ldays & X) / len(X)) if X else 1.0
         L = k['labor_day_floor'] + (1 - k['labor_day_floor']) * cov
@@ -494,6 +591,10 @@ def _score(f, k, today, fields):
     penalty = min(k['penalty_cap'], sum(i['points'] for i in issues))
     if not E or den <= 0:
         final, base = None, (num / den if den else None)
+        if E:
+            issue('info', 'NO_WEIGHTS',
+                  'Nothing to score: every part that applies to this show has weight 0.',
+                  'advance', points=0)
     else:
         base = num / den
         final = max(0, min(100, int(math.floor(100 * base + 1e-9)) - penalty))
@@ -501,14 +602,7 @@ def _score(f, k, today, fields):
         c['share'] = round(100 * c['weight'] / den, 1) if c['applies'] and den else 0
 
     # ── 2.8 Pace chip (display only) ────────────────────────────────────
-    pace = None
-    if final is not None and first:
-        if first <= today <= (last or first):
-            pace = {'label': 'In progress', 'target': None}
-        elif today < first:
-            t = pace_target(days_out)
-            lbl = 'On track' if final >= t else ('Behind' if final >= t - 15 else 'At risk')
-            pace = {'label': lbl, 'target': t}
+    pace = _pace(final, first, last, today, days_out)
 
     days = []
     for x, n, c in day_rows:
@@ -521,17 +615,18 @@ def _score(f, k, today, fields):
                      'labor_req': req_by_day.get(x, 0), 'labor_sched': sched_by_day.get(x, 0)})
     days.sort(key=lambda d: d['date'])
 
-    sev_rank = {'error': 0, 'warn': 1, 'info': 2}
-    issues.sort(key=lambda i: (sev_rank.get(i['sev'], 3), -i['points']))
+    issues.sort(key=lambda i: (_SEV_RANK.get(i['sev'], 3), -i['points']))
     cfg = []
     if unknown_req:
         cfg.append('Required advance key(s) not on the form: ' + ', '.join(unknown_req))
     if unknown_cues:
         cfg.append('Labor question key(s) not on the form: ' + ', '.join(unknown_cues))
     return {
-        'id': f.get('id'), 'score': final, 'band': band_for(final),
+        'id': f.get('id'), 'score': final,
+        'band': band_for(final) if final is not None or not E else BAND_NO_WEIGHTS,
         'headline': (f'This show is {final}% ready for showtime!' if final is not None
-                     else 'Add show dates to get a readiness score.'),
+                     else 'Add show dates to get a readiness score.' if not E
+                     else 'Nothing to score with the current weights.'),
         'base': round(100 * base, 2) if base is not None else None,
         'penalty': penalty, 'penalty_raw': sum(i['points'] for i in issues),
         'first_day': E[0] if E else None, 'last_day': E[-1] if E else None,
@@ -616,7 +711,23 @@ def _selftest():
     assert r['components']['crew']['score'] == (1 + 0.5) / 4
     before = r['score']
     r2 = score(base(labor=lab), dict(K, penalty_partial_day=0, penalty_untouched_day=0), T, fields)
-    assert r2['score'] == before + 10, (before, r2['score'])
+    assert r2['score'] > before, (before, r2['score'])
+    # …but never below the same show with nothing scheduled.
+    bare = score(base(labor=[{'date': ln['date']} for ln in lab]), K, T, fields)
+    assert r['score'] >= bare['score'], (r['score'], bare['score'])
+
+    # Scheduling in day order never scores below doing nothing (4 days ×
+    # 2 lines, full advance + schedule).
+    sched4 = {x: 2 for x in run}
+    adv_yes = dict(full_adv, labor_load_in=(1, 'Yes'), labor_show_call=(1, 'Yes'),
+                   labor_load_out=(1, 'Yes'))
+    for n_done in range(0, 9):
+        lines8 = [{'date': run[i // 2], 'sched': i < n_done, 'crew': i < n_done} for i in range(8)]
+        r = score(base(adv=adv_yes, sched_days=sched4, labor=lines8), K, T, fields)
+        if n_done == 0:
+            nothing = r['score']
+        assert r['score'] >= nothing, (n_done, r['score'], nothing)
+    assert r['score'] == 100, r['score']
     # No scheduling at all → no PARTIAL/UNTOUCHED, "Awaiting scheduler".
     r = score(base(labor=[{'date': run[0]}, {'date': run[1]}]), K, T, fields)
     assert r['scheduler']['status'] == 'Awaiting scheduler'
@@ -629,12 +740,25 @@ def _selftest():
                     ({'lines': 2, 'approved': True}, 100)):
         assert score(base(gear=g), K, T, fields)['components']['gear']['pct'] == want
 
-    # Dark: a non-perf day leaves E; a perf day stays and raises DARK_PERF_DAY.
-    r = score(base(dark=[run[0], run[1]], sched_days={run[2]: 1, run[3]: 1}), K, T, fields)
-    assert r['components']['schedule']['detail']['days'] == 3
+    # Dark: a plain work day leaves E; a perf day stays and raises
+    # DARK_PERF_DAY; load-in / load-out stay and raise DARK_LOAD_DAY.
+    run5 = run + ['2026-12-14']
+    r = score(base(span=run5, load_out=run5[-1], dark=[run[3], run[1]],
+                   sched_days={run[2]: 1}), K, T, fields)
+    assert r['components']['schedule']['detail']['days'] == 4
     assert any(i['code'] == 'DARK_PERF_DAY' for i in r['issues'])
+    r = score(base(dark=[run[0], run[3]]), K, T, fields)
+    assert r['components']['schedule']['detail']['days'] == 4
+    assert sum(1 for i in r['issues'] if i['code'] == 'DARK_LOAD_DAY') == 2
+    assert r['first_day'] == run[0]
+    # Gaming check: dark-flagging the load days can't lift the score.
+    lab2 = [{'date': x, 'sched': True, 'crew': True} for x in run[1:3]]
+    plain = score(base(adv=adv_yes, sched_days={run[1]: 1, run[2]: 1}, labor=lab2), K, T, fields)
+    gamed = score(base(adv=adv_yes, sched_days={run[1]: 1, run[2]: 1}, labor=lab2,
+                       dark=[run[0], run[3]]), K, T, fields)
+    assert gamed['score'] < plain['score'], (plain['score'], gamed['score'])
     # Every day dark → falls back to the full span.
-    r = score(base(dark=run, perf_dates=[]), K, T, fields)
+    r = score(base(dark=run, perf_dates=[], load_in=None, load_out=None), K, T, fields)
     assert r['components']['schedule']['detail']['days'] == 4
 
     # Off-date rows; no dates → score None.
@@ -646,6 +770,41 @@ def _selftest():
     # Weight 0 disables; penalty cap; knob validation.
     r = score(base(adv=full_adv), dict(K, w_schedule=0), T, fields)
     assert not r['components']['schedule']['applies'] and r['score'] == 100
+    # …and takes the component's penalties with it.
+    lab = [{'date': run[i // 2], 'sched': i == 0} for i in range(8)]
+    r = score(base(adv=full_adv, sched_days=sched4, labor=lab), dict(K, w_crew=0), T, fields)
+    assert r['penalty'] == 0 and r['score'] == 100, (r['penalty'], r['score'])
+    assert any(i['code'] == 'PARTIAL_DAY' and i['points'] == 0 for i in r['issues'])
+    r = score(base(adv=full_adv, sched_days=sched4, gear={'lines': 1}), dict(K, w_gear=0), T, fields)
+    assert not any(i['points'] for i in r['issues'] if i['code'].startswith('GEAR')), r['issues']
+    r = score(base(adv=dict(full_adv, labor_load_in=(1, '')), sched_days=sched4),
+              dict(K, w_labor=0), T, fields)
+    assert any(i['code'] == 'NO_LABOR_SOON' for i in r['issues']) and r['penalty'] == 0
+    # Dates but nothing weighted applies → its own headline, not "add dates".
+    r = score(base(), dict(K, w_advance=0, w_schedule=0, w_labor=0, w_crew=0, w_gear=10), T, fields)
+    assert r['score'] is None and r['band'] == BAND_NO_WEIGHTS
+    assert r['headline'].startswith('Nothing to score'), r['headline']
+
+    # Cue keys are positional (load-in, show call, load-out), whatever the names.
+    flds = fields + [{'key': 'li2', 'type': 'yes_no'}]
+    lab = [{'date': run[1], 'sched': True}, {'date': run[2], 'sched': True}]
+    r = score(base(adv={'li2': (1, 'No')}, labor=lab), dict(K, labor_cue_keys='li2'), T, flds)
+    assert r['components']['labor']['detail']['expected_days'] == 3, r['components']['labor']['detail']
+
+    # Advance gaming: checkbox ticks are capped; '-' in a text box isn't an answer.
+    cbf = [{'key': 'production_manager', 'type': 'contact_dropdown'}] + \
+          [{'key': f't{i}', 'type': 'text'} for i in range(19)] + \
+          [{'key': f'c{i}', 'type': 'checkbox'} for i in range(6)]
+    r = score(base(adv=dict({f'c{i}': (1, 'Checked') for i in range(6)},
+                            production_manager=(1, 'Pat'))), K, T, cbf)
+    assert r['components']['advance']['pct'] < 100, r['components']['advance']
+    r = score(base(adv=dict({f't{i}': (1, 'N/A') for i in range(6)},
+                            production_manager=(1, 'Pat'))), K, T, cbf)
+    assert r['components']['advance']['detail']['answered'] == 1, r['components']['advance']['detail']
+    # Detail line percentage has no float drift (29 of 100 → 29%).
+    f100 = [{'key': f'z{i}', 'type': 'text'} for i in range(100)]
+    r = score(base(adv={f'z{i}': (1, 'x') for i in range(29)}), dict(K, adv_required_keys=''), T, f100)
+    assert '(29%' in r['components']['advance']['lines'][0], r['components']['advance']['lines']
     try:
         clean_knobs(dict(K, w_advance=0, w_schedule=0, w_labor=0, w_crew=0, w_gear=0), strict=True)
         raise AssertionError('zero weights accepted')

@@ -1933,7 +1933,17 @@ in full. Module key `projects`, default OFF.
 - Reads the STORED asset approval columns only — never `_reset_asset_approval`,
   `auto_archive_past_shows` or the assets GET. Advance answers via
   `_report_adv_values`. Engagement days = `_schedule_span_dates` (show_date
-  fallback) minus dark days; a dark flag never removes a performance day.
+  fallback) minus dark days; a dark flag never removes a performance,
+  load-in or load-out day (DARK_PERF_DAY / DARK_LOAD_DAY warn instead).
+- Scheduler-gap penalties (`SCHEDULER_GAP_CODES`) are trimmed so a show never
+  scores below the same show with no scheduler work (`score()` re-scores the
+  bare facts; `scheduler_floor` in the result). Every penalty has an owning
+  component (`PENALTY_OWNER`): weight 0 → its penalties are worth 0.
+  `labor_cue_keys` is POSITIONAL (load-in, show call, load-out).
+- Config save stores only knobs that differ from the effective default
+  (`_readiness_knobs` → defaults; labor_grace_days follows
+  `no_labor_alert_days_1` until set) and writes no audit / syslog when
+  nothing changed.
 - No opt-out checkbox (the owner's requirement): labor is N/A only when the
   advance answers 'No' to every labor cue question, or before
   `labor_grace_days` out; gear N/A only with no gear lines. Knobs live in
