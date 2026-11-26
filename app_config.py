@@ -360,7 +360,8 @@ def _main(argv):
         still_needed += [k for k, _v in _not_yet_in_file(path, section, spec)]
     print('\nOther')
     for key in ('SECRET_KEY', 'TEST_MODE_EMAIL_ALLOWLIST', 'SESSION_COOKIE_SECURE',
-                'TRUSTED_PROXY_IPS', 'GATEWAY_SHARED_SECRET', 'GATEWAY_PEER_IPS'):
+                'TRUSTED_PROXY_IPS', 'GATEWAY_SHARED_SECRET', 'GATEWAY_PEER_IPS',
+                'SESSION_COOKIE_DOMAIN', 'CLUSTER_SELF_URL'):
         val, src = lookup(key)
         if key == 'SECRET_KEY' or val is not None:
             shown = _mask(key, val) if val is not None else '(unset — sessions reset on restart)'

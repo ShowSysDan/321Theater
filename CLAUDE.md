@@ -885,6 +885,26 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
   `GATE_SESSION_EXPIRED` in the gateway journal (HTML navigations only —
   XHR polls stay silent).
 
+## Cross-server sign-in (3.56.0) — cookie domain + "Switch server" hand-off
+- `SESSION_COOKIE_DOMAIN` (.env): `_DBSessionInterface.get_cookie_domain()` →
+  `_request_cookie_domain()` returns it ONLY when the request host is the
+  domain or under it (never an IP; else host-only + one CONFIG line per
+  host). Logout / re-issue also expire a host-only twin; `open_session`
+  tries every presented sid (≤3). Never put a Domain on the `__Host-`
+  gateway cookie.
+- Hand-off: `CLUSTER_SELF_URL` (.env, normalised by
+  `_normalize_instance_url`) → `cluster_instances.public_url` in the
+  heartbeat → `_handoff_peers()` (20 s cache) → base.html footer
+  `.srv-switch` (POST `/auth/handoff/start`) → `session_handoffs` row
+  (SHA-256 only, 60 s DB clock, user, sid, target, next, requester IP) →
+  303 to `<target>/auth/handoff?t=` → claimed atomically FIRST (UPDATE …
+  RETURNING), then target == own URL, same client IP, user unlocked / not
+  pending, session row live → SAME sid on this host. Target URLs come only
+  from heartbeat rows; next = `_safe_local_path`. Never log the token.
+  Off (404 + hidden) through the gateway and in TEST_MODE. Both endpoints
+  are in `_VIEWER_ALLOWED_ENDPOINTS`; the redeem is allowed past the
+  forced-password-change gate.
+
 ## Advance sync & field presence (polling — no websockets anywhere)
 - The show page's multi-user behavior is ALL HTTP polling from app.js:
   advance tab → `GET /shows/<id>/sync/advance` every **2 s** (merges other

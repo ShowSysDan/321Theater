@@ -264,6 +264,80 @@ from werkzeug.datastructures import CallbackDict as _CallbackDict
 
 _SID_RE = re.compile(r'^[A-Za-z0-9_-]{20,128}$')
 
+# ── Shared session cookie across instances (3.56.0) ───────────────────────────
+# SESSION_COOKIE_DOMAIN (.env, per machine): when every instance is reached
+# under one parent domain (a.theater.example, b.theater.example), issuing the
+# session cookie for that domain lets the browser send it to all of them, and
+# since app_sessions is shared, signing in once covers every instance. It is
+# honoured ONLY for a request whose host is the domain or under it, and never
+# for an IP: anywhere else the cookie stays host-only, exactly as before, with
+# one CONFIG line per host (capped). The gateway's __Host- cookie is separate
+# and never takes a Domain. Read lazily (syslog_logger is set up later).
+_DNS_NAME_RE = re.compile(r'^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$')
+_cookie_domain_state = {'loaded': False, 'domain': None, 'warned': set()}
+_cookie_domain_lock = threading.Lock()
+
+
+def _session_cookie_domain_setting():
+    """The validated SESSION_COOKIE_DOMAIN (lower-case, no leading dot), or
+    None when unset / invalid (an invalid value is logged once)."""
+    st = _cookie_domain_state
+    if st['loaded']:
+        return st['domain']
+    with _cookie_domain_lock:
+        if st['loaded']:
+            return st['domain']
+        raw = (app_config.get('SESSION_COOKIE_DOMAIN') or '').strip().lower()
+        dom = raw.lstrip('.')
+        if dom:
+            ok = bool(_DNS_NAME_RE.match(dom))
+            try:
+                ipaddress.ip_address(dom)
+                ok = False
+            except ValueError:
+                pass
+            if not ok:
+                try:
+                    syslog_logger.warning(
+                        'CONFIG SESSION_COOKIE_DOMAIN ignored: not a domain name '
+                        '(needs a dot, no IP / port / scheme); the session cookie '
+                        'stays host-only')
+                except Exception:
+                    pass
+                dom = None
+        st['domain'] = dom or None
+        st['loaded'] = True
+        return st['domain']
+
+
+def _request_cookie_domain():
+    """The Domain to put on the session cookie for THIS request: the
+    configured SESSION_COOKIE_DOMAIN when the request's host is that domain
+    or a name under it, else None (host-only cookie)."""
+    dom = _session_cookie_domain_setting()
+    if not dom:
+        return None
+    try:
+        host = (request.host or '').lower()
+    except RuntimeError:
+        return None
+    if host.startswith('['):
+        return None                      # IPv6 literal
+    name = host.rsplit(':', 1)[0] if host.count(':') == 1 else host
+    if name == dom or name.endswith('.' + dom):
+        return dom
+    st = _cookie_domain_state
+    if name not in st['warned'] and len(st['warned']) < 20:
+        st['warned'].add(name)
+        try:
+            syslog_logger.warning(
+                f'CONFIG SESSION_COOKIE_DOMAIN={dom} not used for host '
+                f'{re.sub(r"[^a-z0-9.:-]", "?", name)[:80]} (not under that domain); '
+                f'host-only cookie')
+        except Exception:
+            pass
+    return None
+
 
 def _session_expires_dt(value):
     """`app_sessions.expires_at` → datetime. PostgreSQL returns a datetime;
@@ -341,19 +415,39 @@ class _DBSessionInterface(_FlaskSessionInterface):
         except Exception: pass
         return data, True
 
+    def get_cookie_domain(self, app):
+        # SESSION_COOKIE_DOMAIN from .env, only for hosts under it (3.56.0).
+        return _request_cookie_domain()
+
     def open_session(self, app, request):
         cookie_name = app.config.get('SESSION_COOKIE_NAME', 'session')
-        sid = request.cookies.get(cookie_name)
-        if not sid or not _SID_RE.match(sid):
-            return _DBSession(sid=self._new_sid(), new=True)
-        data, ok = self._load(sid)
-        if not ok:
-            # Never adopt a client-supplied sid that doesn't exist in our store —
-            # mint a fresh one. Otherwise an attacker who plants a known sid via
-            # an open-redirect / XSS-adjacent vector could pre-fixate the victim's
-            # session before login.
-            return _DBSession(sid=self._new_sid(), new=True)
-        return _DBSession(data, sid=sid, new=False)
+        # With SESSION_COOKIE_DOMAIN set, a browser can hold BOTH an old
+        # host-only cookie and the new domain cookie under one name; try each
+        # (at most 3) so a stale one can't hide the live session.
+        sids = [s for s in request.cookies.getlist(cookie_name)
+                if s and _SID_RE.match(s)][:3]
+        for sid in sids:
+            data, ok = self._load(sid)
+            if ok:
+                return _DBSession(data, sid=sid, new=False)
+        # Never adopt a client-supplied sid that doesn't exist in our store —
+        # mint a fresh one. Otherwise an attacker who plants a known sid via
+        # an open-redirect / XSS-adjacent vector could pre-fixate the victim's
+        # session before login.
+        return _DBSession(sid=self._new_sid(), new=True)
+
+    @staticmethod
+    def _drop_host_only_twin(response, cookie_name, domain, path):
+        """With a Domain cookie in effect, also expire a host-only cookie of
+        the same name (left from before SESSION_COOKIE_DOMAIN was set) —
+        only when the browser actually sent that name."""
+        if not domain:
+            return
+        try:
+            if request.cookies.get(cookie_name):
+                response.delete_cookie(cookie_name, path=path)
+        except RuntimeError:
+            pass
 
     def save_session(self, app, session, response):
         domain = self.get_cookie_domain(app)
@@ -373,6 +467,7 @@ class _DBSessionInterface(_FlaskSessionInterface):
                 except Exception:
                     pass
                 response.delete_cookie(cookie_name, domain=domain, path=path)
+                self._drop_host_only_twin(response, cookie_name, domain, path)
             return
 
         # Nothing to persist
@@ -423,6 +518,7 @@ class _DBSessionInterface(_FlaskSessionInterface):
             secure=secure,
             samesite=self.get_cookie_samesite(app),
         )
+        self._drop_host_only_twin(response, cookie_name, domain, path)
 
 
 if not app_config.get_bool('DISABLE_DB_SESSIONS'):
@@ -910,7 +1006,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.55.0'
+APP_VERSION = '3.56.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1719,6 +1815,52 @@ def _ip_sort_key(ip):
         return (999, 999, 999, 999)
 
 
+def _normalize_instance_url(raw):
+    """'scheme://host[:port]' (lower-cased) for an http/https base URL with
+    no user-info, path, query or fragment; None for anything else."""
+    from urllib.parse import urlsplit
+    raw = (raw or '').strip()
+    if not raw or len(raw) > 200 or _NEXT_CONTROL_CHARS.search(raw) or '\\' in raw:
+        return None
+    try:
+        u = urlsplit(raw)
+        port = u.port            # raises ValueError on a bad port
+    except ValueError:
+        return None
+    if (u.scheme not in ('http', 'https') or not u.hostname or u.username
+            or u.password or u.path not in ('', '/') or u.query or u.fragment
+            or '@' in u.netloc):
+        return None
+    host = u.hostname.lower()
+    if ':' in host:
+        host = f'[{host}]'
+    return f'{u.scheme}://{host}' + (f':{port}' if port else '')
+
+
+_self_url_state = {'loaded': False, 'url': None}
+
+
+def _cluster_self_url():
+    """This server's own base URL for the "Switch server" hand-off (.env
+    CLUSTER_SELF_URL, e.g. http://10.201.2.102:5400), normalised; None when
+    unset or invalid (logged once). Published in the heartbeat; a hand-off
+    token is redeemable only on the server whose URL it was minted for."""
+    st = _self_url_state
+    if not st['loaded']:
+        raw = app_config.get('CLUSTER_SELF_URL')
+        url = _normalize_instance_url(raw)
+        if raw and not url:
+            try:
+                syslog_logger.warning(
+                    'CONFIG CLUSTER_SELF_URL ignored: needs http(s)://host[:port] '
+                    'with no path; "Switch server" hand-off to this server is off')
+            except Exception:
+                pass
+        st['url'] = url
+        st['loaded'] = True
+    return st['url']
+
+
 def _cluster_heartbeat_iteration():
     """Upsert this instance's row. Called on a timer; failures are logged."""
     try:
@@ -1741,15 +1883,17 @@ def _cluster_heartbeat_iteration():
             db.execute("""
                 INSERT INTO cluster_instances
                     (instance_id, ip, hostname, port, app_version, started_at, last_seen,
-                     ai_state, ai_checked_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     ai_state, ai_checked_at, public_url)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (instance_id) DO UPDATE SET
                     ip = EXCLUDED.ip, hostname = EXCLUDED.hostname, port = EXCLUDED.port,
                     app_version = EXCLUDED.app_version, started_at = EXCLUDED.started_at,
                     last_seen = EXCLUDED.last_seen, ai_state = EXCLUDED.ai_state,
-                    ai_checked_at = EXCLUDED.ai_checked_at
+                    ai_checked_at = EXCLUDED.ai_checked_at,
+                    public_url = EXCLUDED.public_url
             """, (_CLUSTER_INSTANCE_ID, ip, hostname, port, version,
-                  _CLUSTER_STARTED_AT, now, ai_state, ai_checked_at))
+                  _CLUSTER_STARTED_AT, now, ai_state, ai_checked_at,
+                  _cluster_self_url()))
             db.commit()
         finally:
             db.close()
@@ -2484,6 +2628,9 @@ _VIEWER_ALLOWED_ENDPOINTS = frozenset({
     # A public dashboard link (/d/<slug>) opens for anyone; a viewer gets the
     # same signed-out page a visitor with no account gets.
     'public_dashboard',
+    # "Switch server" hand-off (3.56.0): carries no show data; the redeem
+    # replaces this host's session, the start shares the viewer's own.
+    'auth_handoff', 'auth_handoff_start',
 })
 
 # Widget-data endpoints behind a public dashboard. A viewer may call them only
@@ -2846,6 +2993,8 @@ def _hourly_maintenance_work():
                          (datetime.utcnow(),))
         # Browser/screen records (3.33.0): keep 180 days of last use.
         db.execute("DELETE FROM user_clients WHERE last_seen < NOW() - INTERVAL '180 days'")
+        # "Switch server" hand-off tokens live 60 s; keep a day for tracing.
+        db.execute("DELETE FROM session_handoffs WHERE expires_at < NOW() - INTERVAL '1 day'")
         try:
             harvested = cur.rowcount or 0
         except Exception:
@@ -6081,6 +6230,246 @@ def logout():
     return resp
 
 
+# ─── "Switch server" hand-off (3.56.0) ────────────────────────────────────────
+# Sessions live in the shared app_sessions table, but a browser keeps a
+# separate cookie per host, so moving from one instance to another by IP /
+# a different name asked for a fresh sign-in. (Instances under one parent
+# domain share the cookie instead: SESSION_COOKIE_DOMAIN above.)
+#
+# Flow: the footer's "Switch server" menu lists the OTHER live servers that
+# publish a CLUSTER_SELF_URL in the heartbeat. A click POSTs (same-origin form,
+# _csrf_protect) the server's key → a one-time token (256-bit, only its
+# SHA-256 stored, 60 s on the DB clock, bound to this session's sid, the user,
+# the target URL and the next path) → 302 to <target>/auth/handoff?t=… → the
+# target claims it atomically (UPDATE … RETURNING), checks the token names
+# THIS server, comes from the same client address, the user is still
+# unlocked / approved and the session still live, then issues ITS cookie for the SAME sid (one session: logging out on
+# either server ends both) and redirects to the stored, _safe_local_path'd
+# next path. Target URLs come only from the heartbeat rows (each server's own
+# .env), never from the request, so there is no open redirect.
+#
+# LAN only: through the VPS gateway the menu is hidden and both routes 404 —
+# the gateway's single public name routes to the primary only, and the peers'
+# internal addresses must not be shown to the internet. (The gateway's
+# forward_auth runs before any app route anyway, so /auth/handoff can never
+# skip the email-code gate.) TEST_MODE: off both ways (never in the cluster).
+# The token is never logged: syslog SESSION_HANDOFF user_id / from / to.
+
+_HANDOFF_TTL_S = 60
+_HANDOFF_TOKEN_RE = re.compile(r'^[A-Za-z0-9_-]{43}$')
+_handoff_peers_cache = {'at': 0.0, 'peers': []}
+_HANDOFF_PEERS_TTL = 20.0
+
+
+def _handoff_key(url):
+    return hashlib.sha256(url.encode('utf-8')).hexdigest()[:16]
+
+
+def _handoff_peers():
+    """The OTHER live servers this one can hand a session to:
+    [{key, url, label, host}], from cluster_instances (each server's own
+    CLUSTER_SELF_URL), cached per process for 20 s. [] in TEST_MODE, on a
+    DB error (the last good list is kept) or with one server."""
+    if TEST_MODE:
+        return []
+    now = time.monotonic()
+    c = _handoff_peers_cache
+    if now - c['at'] < _HANDOFF_PEERS_TTL:
+        return c['peers']
+    c['at'] = now
+    try:
+        try:
+            timeout = int(get_app_setting('cluster_peer_timeout_sec', '30'))
+        except ValueError:
+            timeout = 30
+        cutoff = datetime.utcnow() - timedelta(seconds=timeout)
+        db = get_db()
+        try:
+            rows = db.execute(
+                "SELECT public_url, MIN(hostname) AS hostname FROM cluster_instances "
+                "WHERE last_seen > %s AND COALESCE(public_url, '') <> '' "
+                "GROUP BY public_url ORDER BY public_url LIMIT 20", (cutoff,)).fetchall()
+        finally:
+            db.close()
+    except Exception:
+        return c['peers']
+    own = _cluster_self_url()
+    peers = []
+    for r in rows:
+        url = _normalize_instance_url(r['public_url'])
+        if not url or url == own:
+            continue
+        host = url.split('://', 1)[1]
+        label = (r['hostname'] or '').strip()[:60] or host
+        peers.append({'key': _handoff_key(url), 'url': url, 'label': label, 'host': host})
+    c['peers'] = peers
+    return peers
+
+
+@app.context_processor
+def _inject_handoff_peers():
+    """`handoff_peers` for the sidebar footer's "Switch server" menu: signed
+    in, on the LAN (not through the gateway), not mid forced-password-change."""
+    if (not has_request_context() or TEST_MODE or not session.get('user_id')
+            or session.get('must_change_password')
+            or _connection_path() == 'gateway'):
+        return {'handoff_peers': []}
+    try:
+        return {'handoff_peers': _handoff_peers()}
+    except Exception:
+        return {'handoff_peers': []}
+
+
+def _handoff_host(url):
+    return (url or '').split('://', 1)[-1][:80]
+
+
+def _auth_handoff_start_route():
+    if TEST_MODE or _connection_path() == 'gateway':
+        abort(404)
+    if not session.get('user_id') or session.get('must_change_password'):
+        return redirect(url_for('login'))
+    sid = getattr(session, 'sid', None)
+    if not sid or getattr(session, 'new', False):
+        abort(404)       # signed-cookie fallback / unsaved session: nothing to share
+    key = (request.form.get('server') or '').strip()
+    target = next((p for p in _handoff_peers() if p['key'] == key), None)
+    if not target:
+        flash('That server is not available right now.', 'error')
+        return redirect(_safe_local_path(request.form.get('next') or '') or url_for('index'))
+    nxt = request.form.get('next') or ''
+    nxt = (_safe_local_path(nxt) if len(nxt) <= 1000 else None) or '/'
+    token = secrets.token_urlsafe(32)          # 256 bits → 43 chars
+    th = hashlib.sha256(token.encode('ascii')).hexdigest()
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO session_handoffs (token_hash, user_id, sid, target_url, from_url, "
+            "next_path, requester_ip, expires_at) VALUES (%s, %s, %s, %s, %s, %s, %s, "
+            f"NOW() + INTERVAL '{_HANDOFF_TTL_S} seconds')",
+            (th, session['user_id'], sid, target['url'], _cluster_self_url() or '',
+             nxt, (request.remote_addr or '')[:64]))
+        db.commit()
+    finally:
+        db.close()
+    syslog_logger.info(
+        f"SESSION_HANDOFF_START user_id={session['user_id']} "
+        f"from={_handoff_host(_cluster_self_url() or request.host)} "
+        f"to={_handoff_host(target['url'])} ip={request.remote_addr}")
+    resp = redirect(f"{target['url']}/auth/handoff?t={token}", code=303)
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    return resp
+
+
+def _handoff_fail(reason):
+    syslog_logger.warning(
+        f"SESSION_HANDOFF_FAIL reason={reason} ip={request.remote_addr}")
+    flash('That sign-in link has expired or was already used. Please sign in.', 'error')
+    resp = redirect(url_for('login'))
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    return resp
+
+
+def _auth_handoff_route():
+    if TEST_MODE or _connection_path() == 'gateway':
+        abort(404)
+    own = _cluster_self_url()
+    token = request.args.get('t') or ''
+    if not own or not _HANDOFF_TOKEN_RE.match(token):
+        return _handoff_fail('malformed' if own else 'no_self_url')
+    th = hashlib.sha256(token.encode('ascii')).hexdigest()
+    db = get_db()
+    try:
+        # Claim first, check after: the token is spent by this request even
+        # when a later check refuses it (single use, no retry with it).
+        row = db.execute(
+            "UPDATE session_handoffs SET used_at = NOW(), used_ip = %s "
+            "WHERE token_hash = %s AND used_at IS NULL AND expires_at > NOW() "
+            "RETURNING user_id, sid, target_url, from_url, next_path, requester_ip",
+            ((request.remote_addr or '')[:64], th)).fetchone()
+        db.commit()
+        if not row:
+            return _handoff_fail('invalid_or_used')
+        if row['target_url'] != own:
+            return _handoff_fail('wrong_server')
+        # Same browser, same LAN address: a link someone minted for THEIR
+        # account and sent to a colleague must not sign the colleague in as
+        # them (login CSRF).
+        if (row['requester_ip'] or '') != (request.remote_addr or '')[:64]:
+            return _handoff_fail('ip_mismatch')
+        user = db.execute('SELECT * FROM users WHERE id = %s',
+                          (row['user_id'],)).fetchone()
+        if (not user or user.get('is_locked')
+                or user.get('pending_approval')):
+            return _handoff_fail('user_inactive')
+        srow = db.execute(
+            'SELECT data, expires_at, user_id FROM app_sessions WHERE sid = %s',
+            (row['sid'],)).fetchone()
+        if (not srow or srow['user_id'] != row['user_id']
+                or _session_expires_dt(srow['expires_at']) < datetime.utcnow()):
+            return _handoff_fail('session_gone')
+        try:
+            data = json.loads(srow['data']) if srow['data'] else {}
+        except (TypeError, ValueError):
+            data = {}
+        if (not isinstance(data, dict) or data.get('user_id') != row['user_id']
+                or data.get('must_change_password')):
+            return _handoff_fail('session_gone')
+        old_sid = getattr(session, 'sid', None)
+        old_new = getattr(session, 'new', True)
+        if old_sid and not old_new and old_sid != row['sid']:
+            # This browser held a different session on this host: it is
+            # replaced, so drop its row rather than orphan it.
+            db.execute('DELETE FROM app_sessions WHERE sid = %s', (old_sid,))
+            db.commit()
+        session.clear()
+        session.sid = row['sid']
+        session.new = False
+        session.update(data)
+        _populate_session_from_user(user)
+        session.permanent = True
+        session.modified = True      # save_session re-issues THIS host's cookie
+        _record_connection(db, user['id'])
+        log_audit(db, 'SESSION_HANDOFF', 'user', user['id'],
+                  detail=f"from {_handoff_host(row['from_url']) or '?'} to {_handoff_host(own)}")
+        db.commit()
+    finally:
+        db.close()
+    syslog_logger.info(
+        f"SESSION_HANDOFF user_id={row['user_id']} "
+        f"from={_handoff_host(row['from_url']) or '?'} to={_handoff_host(own)} "
+        f"ip={request.remote_addr}")
+    nxt = _safe_local_path(row['next_path'] or '') or url_for('index')
+    if session.get('is_document_viewer'):
+        nxt = url_for('viewer_home')
+    resp = redirect(nxt)
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    return resp
+
+
+if _limiter_available and limiter:
+    @app.route('/auth/handoff/start', methods=['POST'])
+    @limiter.limit("20 per minute")
+    def auth_handoff_start():
+        return _auth_handoff_start_route()
+
+    @app.route('/auth/handoff')
+    @limiter.limit("30 per minute")
+    def auth_handoff():
+        return _auth_handoff_route()
+else:
+    @app.route('/auth/handoff/start', methods=['POST'])
+    def auth_handoff_start():
+        return _auth_handoff_start_route()
+
+    @app.route('/auth/handoff')
+    def auth_handoff():
+        return _auth_handoff_route()
+
+
 # ─── Session expiry status (expiry-warning watchdog) ──────────────────────────
 # Powers the client-side session watchdog in app.js (_initSessionWatch): every
 # logged-in page resyncs to the session's real server-side deadline on load and
@@ -6629,7 +7018,7 @@ def force_change_password():
 def _enforce_password_change():
     """Block all routes except logout/change-password if must_change_password is set."""
     if session.get('must_change_password'):
-        allowed = ('force_change_password', 'logout', 'static')
+        allowed = ('force_change_password', 'logout', 'static', 'auth_handoff')
         if request.endpoint not in allowed:
             return redirect(url_for('force_change_password'))
 

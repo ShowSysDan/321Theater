@@ -2446,6 +2446,24 @@ html.sidebar-collapsed .sidebar-footer-row > .sidebar-user, html.force-rail .sid
 .sidebar-meta-sep { opacity: .5; }
 .sidebar-meta-test { font-size: 9px !important; padding: 1px 5px !important; }
 .sidebar-footer > .rail-only { display: none; }
+/* "Switch server" (3.56.0): a <details> on the meta line; its menu opens
+   upward over the footer, as wide as the footer. */
+.sidebar-meta { position: relative; }
+.sidebar-meta .srv-switch > summary { list-style: none; cursor: pointer; color: inherit; }
+.srv-switch > summary::-webkit-details-marker { display: none; }
+.srv-switch[open] > summary { text-decoration: underline; }
+.srv-switch-menu { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); z-index: 30;
+  display: flex; flex-direction: column; gap: 2px; padding: 4px;
+  background: rgba(12,22,40,.97); border: 1px solid rgba(255,255,255,.16); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+.srv-switch-menu form { margin: 0; }
+.srv-switch-item { display: flex; flex-direction: column; align-items: flex-start; width: 100%;
+  padding: 6px 8px; background: none; border: 0; border-radius: 6px; color: #fff;
+  font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.srv-switch-item:hover, .srv-switch-item:focus-visible { background: rgba(255,255,255,.10); }
+.srv-switch-name { font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srv-switch-host { font-family: var(--font-mono); font-size: 10px; color: rgba(255,255,255,.6);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Settings → Email activity: filters + detail dialog (3.23.0) ── */
 .email-log-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px; }

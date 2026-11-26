@@ -1798,10 +1798,32 @@ CREATE TABLE IF NOT EXISTS cluster_instances (
     started_at  TIMESTAMP,
     last_seen   TIMESTAMP NOT NULL,
     ai_state    TEXT,
-    ai_checked_at TIMESTAMP
+    ai_checked_at TIMESTAMP,
+    public_url  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_cluster_instances_last_seen ON cluster_instances(last_seen);
+
+-- "Switch server" hand-off tokens (3.56.0). One row per click: only the
+-- SHA-256 of the 256-bit token is stored, it lives 60 s (DB clock), is
+-- redeemable once and only on the server whose CLUSTER_SELF_URL it names.
+-- The hourly maintenance trims old rows.
+CREATE TABLE IF NOT EXISTS session_handoffs (
+    id           SERIAL PRIMARY KEY,
+    token_hash   TEXT UNIQUE NOT NULL,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    sid          TEXT NOT NULL,
+    target_url   TEXT NOT NULL,
+    from_url     TEXT DEFAULT '',
+    next_path    TEXT DEFAULT '/',
+    requester_ip TEXT DEFAULT '',
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at   TIMESTAMP NOT NULL,
+    used_at      TIMESTAMP,
+    used_ip      TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_handoffs_expires ON session_handoffs(expires_at);
 
 -- ── Prism FM integration (SANDBOXED — see prism_module.py) ────────────────────
 -- Staging area for events pulled from Prism, the building's scheduling system.
@@ -2747,6 +2769,8 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         # AI slots that a long job keeps alive with a heartbeat.
         f'ALTER TABLE "{app_schema}".cluster_instances ADD COLUMN IF NOT EXISTS ai_state TEXT',
         f'ALTER TABLE "{app_schema}".cluster_instances ADD COLUMN IF NOT EXISTS ai_checked_at TIMESTAMP',
+        # "Switch server" hand-off (3.56.0): each server's CLUSTER_SELF_URL.
+        f'ALTER TABLE "{app_schema}".cluster_instances ADD COLUMN IF NOT EXISTS public_url TEXT',
         f"ALTER TABLE \"{app_schema}\".ai_sessions ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'extract'",
         f'ALTER TABLE "{app_schema}".ai_sessions ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP',
         # Weekly summaries share model output across with/without-labor runs

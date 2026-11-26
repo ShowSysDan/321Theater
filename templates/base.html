@@ -360,6 +360,24 @@
         <span class="sidebar-meta-sep" aria-hidden="true">·</span>
         <button type="button" class="view-mode-link" onclick="setSiteMode('{{ 'desktop' if is_mobile_view else 'mobile' }}')">{{ 'Desktop site' if is_mobile_view else 'Mobile site' }}</button>
         {% if view_mode_forced %}<button type="button" class="view-mode-link" onclick="setSiteMode('auto')" title="Clear the forced mode and follow device auto-detection">(auto)</button>{% endif %}
+        {% if handoff_peers %}
+        {# "Switch server" (3.56.0): open this page on another live server,
+           still signed in. Each entry is a same-origin POST (CSRF-checked);
+           the server builds the link from the heartbeat, never from here. #}
+        <span class="sidebar-meta-sep" aria-hidden="true">·</span>
+        <details class="srv-switch">
+          <summary class="view-mode-link" title="Open this page on another server, still signed in">Switch server ▸</summary>
+          <div class="srv-switch-menu" role="menu">
+            {% for p in handoff_peers %}
+            <form method="post" action="{{ url_for('auth_handoff_start') }}">
+              <input type="hidden" name="server" value="{{ p.key }}">
+              <input type="hidden" name="next" value="{{ request.full_path.rstrip('?') }}">
+              <button type="submit" role="menuitem" class="srv-switch-item"><span class="srv-switch-name">{{ p.label }}</span><span class="srv-switch-host">{{ p.host }}</span></button>
+            </form>
+            {% endfor %}
+          </div>
+        </details>
+        {% endif %}
       </div>
       {% if test_mode %}
       {# Icon rail only: the meta line is hidden there, this short tag stays. #}

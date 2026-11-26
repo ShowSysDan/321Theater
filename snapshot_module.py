@@ -80,7 +80,7 @@ class SnapshotReadError(Exception):
 RESTORE_BLOCKED = {
     'users', 'user_pending_registration',
     'app_sessions', 'active_sessions', 'password_reset_tokens',
-    'gateway_otp_codes', 'ai_sessions',
+    'gateway_otp_codes', 'ai_sessions', 'session_handoffs',
     # AI job queue + weekly e-mail ledger (3.55.0): rewinding the ledger
     # would re-send a week's summary; queue rows are transient work.
     'ai_jobs', 'ai_weekly_email_log',
