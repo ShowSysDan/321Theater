@@ -71,6 +71,7 @@ import security_module  # security sign-in sheets — wired up near the bottom
 import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
 import spot_module  # Spot sound-level integration — wired up near the bottom
 import chat_module  # Messages / inbox — wired up near the bottom
+import readiness  # show readiness % (pure scorer, Settings → Readiness)
 import projects_module  # optional, sandboxed — wired up near the bottom
 import file_store  # S3 <-> PostgreSQL file redundancy + migration — wired up near the bottom
 import system_info  # Settings → About 321Theater: this server, its service, its dependencies
@@ -907,7 +908,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.53.0'
+APP_VERSION = '3.54.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -29088,6 +29089,361 @@ def about_data():
     out['live'] = {'load': list(os.getloadavg()) if hasattr(os, 'getloadavg') else None,
                    'workers': system_info.worker_info()['workers']}
     return jsonify(out)
+
+
+# ─── Show readiness (3.54.0, admin-only beta) ────────────────────────────────
+# "This show is NN% ready for showtime!" The math is the pure readiness.py
+# (never imports app.py); this side gathers facts for MANY shows in a fixed
+# number of batched queries (no per-show N+1 — only shows still holding
+# legacy no-day_date schedule rows take _build_schedule_days, as the
+# timeline does). Everything here is READ-ONLY: it never calls
+# _reset_asset_approval / auto_archive_past_shows, only reads the stored
+# approval columns. Knobs are app_settings `readiness_<name>`. Hidden: the
+# only surface is Settings → Readiness (beta), every route @admin_required.
+
+_READINESS_MAX_SHOWS = 400
+
+
+def _readiness_knobs(db):
+    """Stored knobs (readiness_* app_settings), validated (lenient)."""
+    rows = db.execute(
+        'SELECT key, value FROM app_settings WHERE key = ANY(%s)',
+        (['readiness_' + k for k in readiness.DEFAULTS] + ['no_labor_alert_days_1'],)
+    ).fetchall()
+    stored = {r['key']: r['value'] for r in rows}
+    raw = {k: stored['readiness_' + k] for k in readiness.DEFAULTS
+           if stored.get('readiness_' + k) is not None}
+    if 'labor_grace_days' not in raw:
+        # Default grace = the no-labor alert's first trigger, else 14.
+        try:
+            g = int(stored.get('no_labor_alert_days_1') or 0)
+            if 0 < g <= 120:
+                raw['labor_grace_days'] = g
+        except (TypeError, ValueError):
+            pass
+    return readiness.clean_knobs(raw), raw
+
+
+def _readiness_fields(db):
+    """The advance form's fields in form order (shared by every show)."""
+    return [{'key': r['field_key'], 'label': r['label'], 'type': r['field_type'] or 'text',
+             'allow_multi': r['allow_multi'], 'notes': bool(r['is_notes_field'])}
+            for r in db.execute("""
+                SELECT f.field_key, f.label, f.field_type, f.allow_multi, f.is_notes_field
+                  FROM form_fields f JOIN form_sections s ON s.id = f.section_id
+                 ORDER BY s.sort_order, s.id, f.sort_order, f.id""").fetchall()]
+
+
+def _readiness_facts_many(db, show_ids, fields):
+    """{show_id: facts} for readiness.score() — ten statements whatever the
+    number of shows (plus _build_schedule_days for legacy-row shows only)."""
+    ids = sorted({int(i) for i in show_ids})
+    if not ids:
+        return {}
+    shows = {r['id']: dict(r) for r in db.execute("""
+        SELECT s.id, s.name, s.venue, s.status, s.show_date, s.load_in_date,
+               s.load_out_date, COALESCE(s.is_test, 0) AS is_test,
+               COALESCE(s.is_cancelled, 0) AS is_cancelled,
+               COALESCE(s.assets_approved, 0) AS assets_approved,
+               (s.assets_approval_snapshot IS NOT NULL) AS has_snapshot,
+               s.assets_approved_at::timestamptz AS assets_approved_at,
+               (SELECT COUNT(*) FROM show_assets sa
+                 WHERE sa.show_id = s.id AND COALESCE(sa.is_hidden, 0) = 0) AS asset_lines,
+               (SELECT COUNT(*) FROM show_external_rentals er
+                 WHERE er.show_id = s.id AND er.piano_tuning_id IS NULL) AS ext_lines
+          FROM shows s WHERE s.id = ANY(%s)""", (ids,)).fetchall()}
+    ids = sorted(shows)
+    perfs = {}
+    for r in db.execute('SELECT show_id, id, perf_date FROM show_performances '
+                        'WHERE show_id = ANY(%s)', (ids,)).fetchall():
+        perfs.setdefault(r['show_id'], []).append(r)
+    dark = {}
+    for r in db.execute("SELECT show_id, field_key FROM schedule_meta WHERE show_id = ANY(%s) "
+                        "AND field_key LIKE %s AND field_value = '1'",
+                        (ids, DARK_DAY_PREFIX + '%')).fetchall():
+        d = _as_date(r['field_key'][len(DARK_DAY_PREFIX):])
+        if d:
+            dark.setdefault(r['show_id'], set()).add(d.isoformat())
+    ftype = {f['key']: f for f in fields}
+    adv, adv_upd = {}, {}
+    for r in db.execute('SELECT show_id, field_key, field_value, updated_at::timestamptz AS u '
+                        'FROM advance_data WHERE show_id = ANY(%s)', (ids,)).fetchall():
+        f = ftype.get(r['field_key'])
+        if f and r['u'] is not None:
+            prev = adv_upd.get(r['show_id'])
+            if prev is None or r['u'] > prev:
+                adv_upd[r['show_id']] = r['u']
+        if not f or f['type'] in ('file_upload', 'pdf_form', 'notes', 'piano_tuning'):
+            continue
+        vals = _report_adv_values(f['type'], f['allow_multi'], r['field_value'])
+        if vals:
+            adv.setdefault(r['show_id'], {})[r['field_key']] = (1.0, ', '.join(vals)[:120])
+    file_keys = [f['key'] for f in fields if f['type'] == 'file_upload']
+    if file_keys:
+        for r in db.execute('SELECT DISTINCT show_id, field_key FROM show_attachments '
+                            'WHERE show_id = ANY(%s) AND field_key = ANY(%s) '
+                            'AND deleted_at IS NULL', (ids, file_keys)).fetchall():
+            adv.setdefault(r['show_id'], {})[r['field_key']] = (1.0, 'File attached')
+    pdf_keys = [f['key'] for f in fields if f['type'] == 'pdf_form']
+    if pdf_keys:
+        for r in db.execute('SELECT show_id, field_key, status FROM pdf_submissions '
+                            'WHERE show_id = ANY(%s) AND field_key = ANY(%s)',
+                            (ids, pdf_keys)).fetchall():
+            sub = (r['status'] or '') == 'submitted'
+            adv.setdefault(r['show_id'], {})[r['field_key']] = (
+                1.0 if sub else 0.5, 'Submitted' if sub else 'Draft')
+    # Content schedule rows (piano + blank rows left out, as the editor's
+    # "has content" rule).
+    rows_by, legacy = {}, set()
+    for r in db.execute("""
+            SELECT show_id, day_date, perf_id FROM schedule_rows
+             WHERE show_id = ANY(%s) AND piano_tuning_id IS NULL
+               AND (btrim(COALESCE(start_time, '')) <> '' OR btrim(COALESCE(end_time, '')) <> ''
+                    OR btrim(COALESCE(description, '')) <> '' OR btrim(COALESCE(notes, '')) <> '')
+             ORDER BY show_id, sort_order, id""", (ids,)).fetchall():
+        rows_by.setdefault(r['show_id'], []).append(dict(r))
+        if not r['day_date']:
+            legacy.add(r['show_id'])
+    labor = {}
+    for r in db.execute("""
+            SELECT lr.show_id, lr.work_date, COALESCE(lr.is_scheduled, 0) AS is_scheduled,
+                   lr.scheduled_crew_member_id, COALESCE(lr.requested_name, '') AS requested_name,
+                   lr.scheduled_at::timestamptz AS scheduled_at,
+                   COALESCE(cm.is_archived, 0) AS archived
+              FROM labor_requests lr
+              LEFT JOIN crew_members cm ON cm.id = lr.scheduled_crew_member_id
+             WHERE lr.show_id = ANY(%s) AND COALESCE(lr.is_training_shift, 0) = 0""",
+            (ids,)).fetchall():
+        wd = _as_date(r['work_date'])
+        labor.setdefault(r['show_id'], []).append({
+            'date': wd.isoformat() if wd else None,
+            'sched': r['is_scheduled'] == 1,
+            'crew': r['scheduled_crew_member_id'] is not None,
+            'named': bool(r['requested_name'].strip()),
+            'archived': r['archived'] == 1,
+            'at': _ts_out(r['scheduled_at']) if r['scheduled_at'] else None})
+
+    out = {}
+    for sid, s in shows.items():
+        p = perfs.get(sid, [])
+        pdates = [_as_date(x['perf_date']).isoformat() for x in p if _as_date(x['perf_date'])]
+        span = _schedule_span_dates(s['load_in_date'], s['load_out_date'], pdates)
+        if not span and _as_date(s['show_date']):
+            span = [_as_date(s['show_date']).isoformat()]
+        sched = {}
+        rows = rows_by.get(sid, [])
+        if sid in legacy:
+            _, sdays = _build_schedule_days(db, sid, s, include_orphans=True)
+            for key, rs in _schedule_rows_by_editor_day(rows, sdays).items():
+                d = _as_date(key) if key and not str(key).startswith('__null_') else None
+                if d and rs:
+                    sched[d.isoformat()] = sched.get(d.isoformat(), 0) + len(rs)
+        else:
+            for r in rows:
+                d = _as_date(r['day_date'])
+                if d:
+                    sched[d.isoformat()] = sched.get(d.isoformat(), 0) + 1
+        li, lo = _as_date(s['load_in_date']), _as_date(s['load_out_date'])
+        out[sid] = {
+            'id': sid, 'span': span, 'perf_dates': pdates,
+            'undated_perfs': sum(1 for x in p if not _as_date(x['perf_date'])),
+            'load_in': li.isoformat() if li else None,
+            'load_out': lo.isoformat() if lo else None,
+            'dark': sorted(dark.get(sid, ())), 'adv': adv.get(sid, {}),
+            'adv_updated': _ts_out(adv_upd[sid]) if sid in adv_upd else None,
+            'sched_days': sched, 'labor': labor.get(sid, []),
+            'gear': {'lines': int(s['asset_lines'] or 0) + int(s['ext_lines'] or 0),
+                     'approved': s['assets_approved'] == 1, 'snapshot': bool(s['has_snapshot']),
+                     'approved_at': _ts_out(s['assets_approved_at']) if s['assets_approved_at'] else None},
+            '_show': {'id': sid, 'name': s['name'], 'venue': s['venue'] or '',
+                      'status': s['status'], 'is_test': bool(s['is_test']),
+                      'is_cancelled': bool(s['is_cancelled'])},
+        }
+    return out
+
+
+def _show_readiness_many(db, show_ids, knobs=None, fields=None, today=None):
+    """{show_id: readiness result (+ 'show': id/name/venue/status)}."""
+    if knobs is None:
+        knobs = _readiness_knobs(db)[0]
+    if fields is None:
+        fields = _readiness_fields(db)
+    today = today or date.today()
+    out = {}
+    for sid, f in _readiness_facts_many(db, show_ids, fields).items():
+        res = readiness.score(f, knobs, today, fields)
+        res['show'] = f['_show']
+        out[sid] = res
+    return out
+
+
+def _show_readiness(db, show_id, knobs=None):
+    """One show's readiness — the batched path with one id, so the single
+    and batch answers can't drift."""
+    return _show_readiness_many(db, [show_id], knobs=knobs).get(int(show_id))
+
+
+def _readiness_list_ids(db, window, include_test, q):
+    """Upcoming active shows for the panel: not cancelled (not test unless
+    asked), last day today or later, first day within `window` days
+    (window None = any; undated shows only then). Sorted by first day."""
+    today = date.today()
+    where = ["s.status = 'active'", 'COALESCE(s.is_cancelled, 0) = 0']
+    params = []
+    if not include_test:
+        where.append('COALESCE(s.is_test, 0) = 0')
+    if q:
+        where.append("(s.name ILIKE %s OR COALESCE(s.venue, '') ILIKE %s)")
+        pat = '%' + q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+        params += [pat, pat]
+    rows = db.execute(f"""
+        SELECT s.id,
+               LEAST(s.load_in_date, MIN(p.perf_date), s.show_date) AS first_day,
+               GREATEST(s.load_out_date, MAX(p.perf_date), s.show_date) AS last_day
+          FROM shows s LEFT JOIN show_performances p ON p.show_id = s.id
+         WHERE {' AND '.join(where)}
+         GROUP BY s.id""", tuple(params)).fetchall()
+    keep = []
+    for r in rows:
+        first, last = _as_date(r['first_day']), _as_date(r['last_day'])
+        if first is None or last is None:
+            if window is None:
+                keep.append((date.max, r['id']))
+            continue
+        if last < today:
+            continue
+        if window is not None and first > today + timedelta(days=window):
+            continue
+        keep.append((first, r['id']))
+    keep.sort()
+    return [i for _d, i in keep[:_READINESS_MAX_SHOWS]], len(keep) > _READINESS_MAX_SHOWS
+
+
+def _readiness_list_args(src, knobs):
+    w = str(src.get('window') or '').strip()
+    if w == 'all':
+        window = None
+    else:
+        try:
+            window = max(1, min(365, int(w)))
+        except (TypeError, ValueError):
+            window = int(knobs['window_days'])
+    include_test = str(src.get('include_test') or '') in ('1', 'true', 'True')
+    q = str(src.get('q') or '').strip()[:100]
+    return window, include_test, q
+
+
+def _readiness_payload(db, knobs, src):
+    window, include_test, q = _readiness_list_args(src, knobs)
+    fields = _readiness_fields(db)
+    ids, truncated = _readiness_list_ids(db, window, include_test, q)
+    res = _show_readiness_many(db, ids, knobs=knobs, fields=fields)
+    return {'shows': [res[i] for i in ids if i in res], 'truncated': truncated,
+            'window': window if window is not None else 'all',
+            'include_test': include_test, 'q': q, 'today': date.today().isoformat(),
+            'knobs': knobs}
+
+
+def _readiness_meta():
+    """What the settings form needs to draw itself."""
+    return {'defaults': readiness.DEFAULTS,
+            'ranges': {k: list(v) for k, v in readiness.RANGES.items()},
+            'penalties': [{'key': 'penalty_' + c.lower(), 'code': c, 'label': l}
+                          for c, _p, l in readiness.PENALTY_CODES]}
+
+
+@app.route('/settings/readiness')
+@admin_required
+def readiness_page():
+    """Settings → Readiness (beta): every upcoming show's readiness %, its
+    breakdown, and the scoring knobs. Shell page; data from the JSON GETs."""
+    return render_template('readiness.html', user=get_current_user())
+
+
+@app.route('/settings/readiness/data')
+@admin_required
+def readiness_data():
+    """The panel's list with the SAVED knobs. Read-only."""
+    db = get_db()
+    try:
+        knobs, stored = _readiness_knobs(db)
+        out = _readiness_payload(db, knobs, request.args)
+        out['meta'] = _readiness_meta()
+        out['stored_keys'] = sorted(stored)
+        return jsonify(out)
+    finally:
+        db.close()
+
+
+@app.route('/settings/readiness/show/<int:show_id>')
+@admin_required
+def readiness_show(show_id):
+    """One show's readiness card data (any status — for testing). Read-only."""
+    db = get_db()
+    try:
+        res = _show_readiness(db, show_id)
+        if not res:
+            return jsonify({'error': 'Show not found.'}), 404
+        return jsonify(res)
+    finally:
+        db.close()
+
+
+@app.route('/settings/readiness/preview', methods=['POST'])
+@admin_required
+def readiness_preview():
+    """The list recomputed with UNSAVED knobs from the form. Writes nothing."""
+    data = _json_obj()
+    try:
+        knobs = readiness.clean_knobs(data.get('knobs') if isinstance(data.get('knobs'), dict) else {},
+                                      strict=True)
+    except readiness.KnobError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    db = get_db()
+    try:
+        out = _readiness_payload(db, knobs, data)
+        out['success'] = True
+        out['preview'] = True
+        return jsonify(out)
+    finally:
+        db.close()
+
+
+@app.route('/settings/readiness/config', methods=['POST'])
+@admin_required
+def readiness_config_save():
+    """Save the knobs (`{knobs: {...}}`) or put them back to the defaults
+    (`{reset: true}` deletes every readiness_* key)."""
+    data = _json_obj()
+    keys = ['readiness_' + k for k in readiness.DEFAULTS]
+    db = get_db()
+    try:
+        before, _ = _readiness_knobs(db)
+        if data.get('reset'):
+            db.execute('DELETE FROM app_settings WHERE key = ANY(%s)', (keys,))
+            detail = 'readiness=reset'
+        else:
+            try:
+                knobs = readiness.clean_knobs(
+                    data.get('knobs') if isinstance(data.get('knobs'), dict) else {}, strict=True)
+            except readiness.KnobError as e:
+                return jsonify({'success': False, 'error': str(e)}), 400
+            db.execute("""
+                INSERT INTO app_settings (key, value)
+                SELECT * FROM unnest(%s::text[], %s::text[])
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+                (keys, [str(knobs[k]) for k in readiness.DEFAULTS]))
+            detail = 'readiness'
+        after, _ = _readiness_knobs(db)
+        changed = sorted(k for k in after if after[k] != before.get(k))
+        log_audit(db, 'SETTINGS_CHANGE', 'setting', None, before=before, after=after,
+                  detail=detail)
+        db.commit()
+    finally:
+        db.close()
+    syslog_logger.info(f"READINESS_CONFIG reset={1 if data.get('reset') else 0} "
+                       f"changed={','.join(changed) or '-'} by={session.get('username')}")
+    return jsonify({'success': True, 'knobs': after, 'changed': changed})
 
 
 # ─── User Registration & Recovery ─────────────────────────────────────────────

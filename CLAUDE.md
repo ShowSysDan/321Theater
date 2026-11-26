@@ -1917,6 +1917,29 @@ in full. Module key `projects`, default OFF.
   turns an EMPTY date/month input into text showing "—" — only call it on
   DOM rebuilt on each open.
 
+## Show readiness (readiness.py, 3.54.0) — admin-only beta, read-only
+- `/settings/readiness` (`readiness_page`, `templates/readiness.html`) +
+  `/data`, `/show/<id>` (GETs, side-effect free), `/preview` (POST, unsaved
+  knobs, writes nothing), `/config` (POST save / `{reset:true}`; audit
+  SETTINGS_CHANGE, syslog READINESS_CONFIG). All `@admin_required`; the only
+  entry point is the Settings tab-strip link. No show-page / board / nav
+  surface until the owner asks (rollout: APP_MODULES key, then show card).
+- `readiness.py` is PURE (never imports app.py, no DB, never raises):
+  `DEFAULTS` / `RANGES` / `PENALTY_CODES`, `clean_knobs(raw, strict)`,
+  `score(facts, knobs, today, fields)`; `python3 readiness.py` = self-test.
+  Facts come only from `_readiness_facts_many()` (fixed ~10 `= ANY(%s)`
+  statements; `_build_schedule_days` only for legacy no-day_date shows);
+  `_show_readiness()` is a wrapper over `_show_readiness_many()` — keep it so.
+- Reads the STORED asset approval columns only — never `_reset_asset_approval`,
+  `auto_archive_past_shows` or the assets GET. Advance answers via
+  `_report_adv_values`. Engagement days = `_schedule_span_dates` (show_date
+  fallback) minus dark days; a dark flag never removes a performance day.
+- No opt-out checkbox (the owner's requirement): labor is N/A only when the
+  advance answers 'No' to every labor cue question, or before
+  `labor_grace_days` out; gear N/A only with no gear lines. Knobs live in
+  app_settings `readiness_<name>`; a new knob = DEFAULTS + RANGES + the form
+  (GROUPS in readiness.html).
+
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.
 At the end of any change that touches code/config, **state plainly which

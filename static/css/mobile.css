@@ -554,3 +554,14 @@ html.mobile-view .about-kv { grid-template-columns: 1fr; gap: 1px 0; }
 html.mobile-view .about-kv dd { margin-bottom: 7px; }
 html.mobile-view .about-table td, html.mobile-view .about-table th { white-space: nowrap; }
 html.mobile-view .about-table .about-purpose { white-space: normal; min-width: 180px; }
+/* Show readiness (Settings → Readiness, 3.54.0) */
+html.mobile-view .rd-f-window, html.mobile-view .rd-f-q { width: 100%; }
+html.mobile-view .rd-table td, html.mobile-view .rd-table th { padding: 7px 7px; }
+html.mobile-view .rd-table .rd-name { min-width: 150px; }
+html.mobile-view .rd-table .rd-venue { min-width: 110px; font-size: 12px; }
+html.mobile-view .rd-score .rd-bar { width: 40px; }
+html.mobile-view .rd-big { font-size: 52px; }
+html.mobile-view .rd-comps { grid-template-columns: 1fr; }
+html.mobile-view .rd-grid { grid-template-columns: 1fr 1fr; }
+html.mobile-view .rd-field-wide { grid-column: 1 / -1; }
+html.mobile-view .rd-card-head { gap: 14px; }
