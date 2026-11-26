@@ -623,6 +623,61 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   on-bar text in the templates must go through `C1_ON` / `C1_ON_SOFT` so the
   setting reaches it. Blank keeps today's automatic output byte-identical.
 
+## AI / Ollama: localhost only, a DB job queue (ai_module.py + ollama_client.py, 3.55.0)
+- **Ollama has no auth → each server talks ONLY to the Ollama on its own
+  machine.** `ollama_client.validate_url` (localhost / 127.x / ::1, no path /
+  userinfo; names re-resolved to loopback at call time) is the one
+  validator — save, test and every call. `OLLAMA_URL` in `.env` overrides
+  the shared `ollama_url` per server (same rule). Never add a LAN endpoint,
+  never forward AI calls between instances. The client: no env proxy, no
+  redirects, size caps, overall deadline; errors are content-free codes.
+  `ollama_client` / `ai_module` never import app.py (ONE `ai_module.register`).
+- **Probe + publish:** `ai_module.probe_refresh` (60 s, every worker, NOT
+  leader-gated) probes this machine; the heartbeat writes it to
+  `cluster_instances.ai_state` / `ai_checked_at` (Python utcnow, like
+  last_seen) and never probes inline. Settings → AI → Servers and the
+  Cluster table's AI column read it.
+- **Every AI call is an `ai_jobs` row** (kinds extract / weekly_postshow /
+  pull_model), claimed `FOR UPDATE SKIP LOCKED` by `ai_module.claim()` only in
+  a worker whose OWN probe passes (`local_ok`) — a server without Ollama
+  never calls one. Inference claims take the `ai_sessions` slot in the SAME
+  transaction under `pg_advisory_xact_lock(hashtext('ai_sessions'))` (the
+  ai_max_sessions limit; slots stay alive via `heartbeat_at`). `worker_tick`
+  (10 s, not leader-gated) also recovers: running + heartbeat > 4 min →
+  re-queued (≤ 2 attempts) else interrupted; queued too long →
+  `no_ai_server`. Progress / finish writes are guarded by `claimed_instance
+  AND status='running'` (`_Lost` stops a worker that lost its claim). Never
+  hold a connection across an Ollama call. Jobs carry `test_mode`: a test
+  server claims only its own. The browser polls (`/api/ai/jobs/<id>`,
+  `/api/reports/weekly-summary/runs/<id>`); AI Extract returns 202 + job id.
+- **Privacy:** prompts, documents, notes, comments and model output never
+  reach syslog / audit / URLs / e-mail subjects (ids, counts, codes only).
+  Payloads are nulled when a job ends; extract results within the hour.
+- **Weekly summary** (Reports → Weekly Summary, `_can_view_reports`, 404
+  while AI is off; not a saved-report / `_RPT_PDF` tab): shows per
+  `weekly_shows()` (perf / show date / load-in range in the window; never
+  is_test / is_cancelled; any status). `build_inputs()` is pure (the e-mail
+  job uses it too): facts from the DB (labor only for `with_labor` runs, via
+  `_calc_post_show_labor_cost`), text scrubbed (`scrub()`: e-mail, phone,
+  @mention, known names) — the model never gets $, headcounts or names.
+  Model output is whitelisted / clamped / money-stripped (`validate_show` /
+  `validate_week`), one retry, deterministic fallback (`partial`). A
+  `with_labor` run is 404 for anyone without labor-report permission. The
+  PDF (`/reports/weekly-summary/<id>.pdf`, `no-prefetch`) is rendered from
+  the stored `result_json` (no bytes stored, never re-runs the model),
+  `font_config` passed, condensed to one page, the show table may spill
+  to page 2 — nothing dropped.
+- **Weekly e-mail** (off by default): `weekly_email_tick` is leader-gated,
+  claims the week in `ai_weekly_email_log` (INSERT … ON CONFLICT DO NOTHING)
+  before enqueueing, delivers on queued → sending (the claim), recipients
+  re-checked with `_saved_report_recipient_sql`, only via `_mail` +
+  `_send_email`, never labor $.
+- **Install:** the app never installs anything. `sudo bash install.sh
+  --with-ollama` runs Ollama's installer and writes ONE drop-in
+  (`ollama.service.d/50-321theater-localhost.conf`, OLLAMA_HOST=127.0.0.1)
+  — never an admin's own file — then warns if the effective host isn't
+  loopback. `ollama` is in `_SYSTEM_PROGRAMS` (level info).
+
 ## Optional feature modules (`APP_MODULES` + Settings → Modules)
 - `APP_MODULES` registry + `module_enabled(key)` in app.py; flags live in
   `app_settings` as `module_<key>_enabled` ('1'/'0', missing = the entry's

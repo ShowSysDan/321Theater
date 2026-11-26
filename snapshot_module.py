@@ -81,6 +81,9 @@ RESTORE_BLOCKED = {
     'users', 'user_pending_registration',
     'app_sessions', 'active_sessions', 'password_reset_tokens',
     'gateway_otp_codes', 'ai_sessions',
+    # AI job queue + weekly e-mail ledger (3.55.0): rewinding the ledger
+    # would re-send a week's summary; queue rows are transient work.
+    'ai_jobs', 'ai_weekly_email_log',
     'audit_log', 'email_send_log', 'email_outbox_log', 'export_log',
     'email_messages', 'email_message_attachments',
     'cluster_instances', 'perf_page_stats', 'perf_slow_queries',

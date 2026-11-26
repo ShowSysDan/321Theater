@@ -71,6 +71,8 @@ import security_module  # security sign-in sheets — wired up near the bottom
 import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
 import spot_module  # Spot sound-level integration — wired up near the bottom
 import chat_module  # Messages / inbox — wired up near the bottom
+import ai_module  # Local Ollama per server, AI job queue, weekly summary — wired up near the bottom
+import ollama_client  # The ONE (localhost-only) Ollama HTTP client
 import readiness  # show readiness % (pure scorer, Settings → Readiness)
 import projects_module  # optional, sandboxed — wired up near the bottom
 import file_store  # S3 <-> PostgreSQL file redundancy + migration — wired up near the bottom
@@ -908,7 +910,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.54.0'
+APP_VERSION = '3.55.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1727,20 +1729,27 @@ def _cluster_heartbeat_iteration():
             port = int(port_str)
         except ValueError:
             port = 5400
-        version = get_app_setting('app_version', '') or ''
+        # The running code's version (3.55.0: the old read of an app_setting
+        # nothing ever wrote left this column blank).
+        version = APP_VERSION
+        # This worker's last probe of its OWN Ollama (ai_module.probe_refresh
+        # runs it every 60 s) — published, never probed inline here.
+        ai_state, ai_checked_at = ai_module.heartbeat_state()
         now = datetime.utcnow()
         db = get_db()
         try:
             db.execute("""
                 INSERT INTO cluster_instances
-                    (instance_id, ip, hostname, port, app_version, started_at, last_seen)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (instance_id, ip, hostname, port, app_version, started_at, last_seen,
+                     ai_state, ai_checked_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (instance_id) DO UPDATE SET
                     ip = EXCLUDED.ip, hostname = EXCLUDED.hostname, port = EXCLUDED.port,
                     app_version = EXCLUDED.app_version, started_at = EXCLUDED.started_at,
-                    last_seen = EXCLUDED.last_seen
+                    last_seen = EXCLUDED.last_seen, ai_state = EXCLUDED.ai_state,
+                    ai_checked_at = EXCLUDED.ai_checked_at
             """, (_CLUSTER_INSTANCE_ID, ip, hostname, port, version,
-                  _CLUSTER_STARTED_AT, now))
+                  _CLUSTER_STARTED_AT, now, ai_state, ai_checked_at))
             db.commit()
         finally:
             db.close()
@@ -1775,7 +1784,7 @@ def _query_live_peers():
     try:
         rows = db.execute(
             "SELECT instance_id, ip, hostname, port, app_version, "
-            "started_at, last_seen FROM cluster_instances "
+            "started_at, last_seen, ai_state, ai_checked_at FROM cluster_instances "
             "WHERE last_seen > %s ORDER BY ip, instance_id",
             (cutoff,)
         ).fetchall()
@@ -1856,9 +1865,19 @@ def get_cluster_status():
                 'last_seen':     p.get('last_seen'),
                 'worker_count':  0,
                 '_instance_ids': set(),
+                'ai':            None,
+                'ai_checked_at': None,
             }
         g = groups[key]
         g['worker_count'] += 1
+        # The freshest worker probe of this server's own Ollama (3.55.0).
+        ac = p.get('ai_checked_at')
+        if p.get('ai_state') and (g['ai_checked_at'] is None or (ac and ac > g['ai_checked_at'])):
+            try:
+                g['ai'] = json.loads(p['ai_state'])
+                g['ai_checked_at'] = ac
+            except ValueError:
+                pass
         iid = p.get('instance_id')
         if iid:
             g['_instance_ids'].add(iid)
@@ -1874,7 +1893,7 @@ def get_cluster_status():
     aggregated = []
     for g in groups.values():
         ids = g.pop('_instance_ids')
-        for k in ('started_at', 'last_seen'):
+        for k in ('started_at', 'last_seen', 'ai_checked_at'):
             v = g.get(k)
             if hasattr(v, 'isoformat'):
                 g[k] = v.isoformat()
@@ -2851,6 +2870,9 @@ def _hourly_maintenance_work():
         db.execute('UPDATE email_messages SET body_text=NULL, body_html=NULL, '
                    'body_purged_at=NOW() WHERE body_purged_at IS NULL '
                    'AND created_at < NOW() - %s * INTERVAL \'1 day\'', (keep_days,))
+        # AI queue / slot retention (3.55.0): 30 days of slots, extract
+        # payloads gone within the hour, the newest 100 weekly summaries.
+        ai_module.hourly_trim(db)
         db.commit()
         # Sessions that died unnoticed (logout-less departures, the login
         # sid-rotation orphans). SESSION_EXPIRED in the session loader covers
@@ -4349,6 +4371,20 @@ def start_scheduler():
         # wrapper; every alert is claimed atomically in the module, so a
         # late or doubled fire sends nothing twice.
         scheduler.add_job(_run_pm_hourly, 'interval', hours=1, id='pm_hourly')
+        # AI (3.55.0). NOT leader-gated: every worker probes ITS OWN machine's
+        # Ollama (published by the cluster heartbeat), and claims queued AI
+        # jobs only while that probe passes — the claim is atomic (FOR UPDATE
+        # SKIP LOCKED), so several workers ticking together is safe.
+        scheduler.add_job(ai_module.probe_refresh, 'interval', seconds=60, id='ollama_probe_refresh',
+                          next_run_time=datetime.now() + timedelta(seconds=5),
+                          misfire_grace_time=30, coalesce=True, max_instances=1)
+        scheduler.add_job(ai_module.worker_tick, 'interval', seconds=10, id='ai_job_worker',
+                          misfire_grace_time=10, coalesce=True, max_instances=1)
+        # Weekly AI summary e-mail: leader-gated inside; enqueues once per week
+        # (a capable worker generates it), then mails it once.
+        scheduler.add_job(ai_module.weekly_email_tick, 'interval', minutes=15,
+                          id='ai_weekly_email', misfire_grace_time=600, coalesce=True,
+                          max_instances=1)
         scheduler.start()
         # Backfill contact↔user link once on boot.
         try:
@@ -16695,73 +16731,97 @@ def _is_blocked_host(hostname):
     return False
 
 
-def _validate_ollama_url(url):
-    """Validate that an Ollama URL is safe (no SSRF to internal/metadata endpoints)."""
-    from urllib.parse import urlparse
-    import ipaddress
-    try:
-        parsed = urlparse(url)
-        if parsed.scheme not in ('http', 'https'):
-            return False
-        hostname = parsed.hostname or ''
-        # Allow localhost / 127.x (typical Ollama install)
-        if hostname in ('localhost', '127.0.0.1', '::1') or hostname.startswith('127.'):
-            return True
-        # Block cloud metadata, link-local, and private ranges
-        try:
-            ip = ipaddress.ip_address(hostname)
-            if ip.is_private or ip.is_link_local or ip.is_loopback or ip.is_reserved:
-                return False
-        except ValueError:
-            pass  # hostname is a DNS name, not an IP — allow it
-        if _is_blocked_host(hostname):
-            return False
-        return True
-    except Exception:
-        return False
+# Ollama is reached on each server's OWN machine only (it has no
+# authentication) — ollama_client.validate_url is the one validator (3.55.0).
+# AI work runs through ai_module's queue; these two routes are the settings.
+
+_AI_PROMPT_MAX = 8000
 
 
 @app.route('/settings/ai', methods=['POST'])
 @admin_required
 def save_ai_settings():
-    data = request.get_json(force=True) or {}
+    data = _json_obj()
+    vals = {}
+    if 'ollama_enabled' in data:
+        vals['ollama_enabled'] = '1' if str(data.get('ollama_enabled')) in ('1', 'true', 'True') else '0'
+    if 'ollama_url' in data:
+        ok, msg, norm = ollama_client.validate_url(data.get('ollama_url'))
+        if not ok:
+            return jsonify({'success': False, 'error': msg}), 400
+        vals['ollama_url'] = norm
+    if 'ollama_model' in data:
+        m = data.get('ollama_model')
+        if not ollama_client.valid_model(m if isinstance(m, str) else ''):
+            return jsonify({'success': False, 'error': 'Model names are letters, digits and . _ : / - '
+                                                       '(up to 200), e.g. llama3.2 or mistral:7b.'}), 400
+        vals['ollama_model'] = m.strip()
+    if 'ai_max_sessions' in data:
+        try:
+            n = int(str(data.get('ai_max_sessions')).strip())
+        except (TypeError, ValueError):
+            n = 0
+        if not 1 <= n <= 10:
+            return jsonify({'success': False, 'error': 'Concurrent AI sessions must be 1–10.'}), 400
+        vals['ai_max_sessions'] = str(n)
+    if 'ai_system_prompt' in data:
+        p = data.get('ai_system_prompt')
+        if not isinstance(p, str) or len(p) > _AI_PROMPT_MAX:
+            return jsonify({'success': False,
+                            'error': f'The system prompt is limited to {_AI_PROMPT_MAX} characters.'}), 400
+        vals['ai_system_prompt'] = p
+    if not vals:
+        return jsonify({'success': False, 'error': 'Nothing to save.'}), 400
     db = get_db()
-    for key in ('ollama_enabled', 'ollama_url', 'ollama_model', 'ai_max_sessions', 'ai_system_prompt'):
-        if key in data:
-            db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
-                       (key, str(data[key])))
-    db.commit(); db.close()
+    try:
+        before = {k: get_app_setting(k, '') for k in vals if k != 'ai_system_prompt'}
+        for key, val in vals.items():
+            db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) '
+                       'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', (key, val))
+        # No prompt text in the audit row — only that it changed.
+        after = {k: v for k, v in vals.items() if k != 'ai_system_prompt'}
+        if 'ai_system_prompt' in vals:
+            after['ai_system_prompt'] = '(changed)'
+        log_audit(db, 'SETTINGS_CHANGE', 'app_settings', None, detail='ai', before=before, after=after)
+        db.commit()
+    finally:
+        db.close()
     syslog_logger.info(f"SETTINGS_CHANGE key=ai by={session.get('username')}")
-    return jsonify({'success': True})
+    # Re-probe this worker now (the others pick it up within a minute).
+    threading.Thread(target=ai_module.probe_refresh, daemon=True).start()
+    return jsonify({'success': True, 'ollama_url': vals.get('ollama_url')})
 
 
 @app.route('/settings/ai/test', methods=['POST'])
 @admin_required
 def test_ai_connection():
-    data = request.get_json(force=True) or {}
-    url = data.get('ollama_url', 'http://localhost:11434').rstrip('/')
-    model = data.get('ollama_model', 'llama3.2')
-
-    # SSRF protection — only allow http(s) to non-internal hosts (except localhost for Ollama)
-    if not _validate_ollama_url(url):
-        return jsonify({'success': False, 'message': 'Invalid Ollama URL. Only http/https to localhost or non-internal hosts allowed.'})
-
-    import urllib.request
-    import urllib.error
-    try:
-        req = urllib.request.Request(f'{url}/api/tags', method='GET')
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            body = json.loads(resp.read())
-            models = [m['name'] for m in body.get('models', [])]
-            if model in models or any(m.startswith(model.split(':')[0]) for m in models):
-                return jsonify({'success': True, 'message': f'Connected. Model "{model}" available.', 'models': models})
-            return jsonify({'success': True, 'message': f'Connected, but model "{model}" not found. Available: {", ".join(models[:5])}', 'models': models})
-    except urllib.error.URLError as e:
-        app.logger.warning(f'Ollama connection failed: {e}')
-        return jsonify({'success': False, 'message': 'Cannot reach Ollama. Check URL and ensure Ollama is running.'})
-    except Exception as e:
-        app.logger.warning(f'Ollama test error: {e}')
-        return jsonify({'success': False, 'message': 'Ollama connection test failed.'})
+    """Probe THIS server's Ollama with the (unsaved) URL + model."""
+    data = _json_obj()
+    url = data.get('ollama_url') if isinstance(data.get('ollama_url'), str) else ''
+    model = data.get('ollama_model') if isinstance(data.get('ollama_model'), str) else ''
+    env_url = (app_config.get('OLLAMA_URL') or '').strip()
+    if env_url:
+        url = env_url        # this server's .env wins, exactly as the jobs see it
+    ok, msg, norm = ollama_client.validate_url(url or ollama_client.DEFAULT_URL)
+    if not ok:
+        return jsonify({'success': False, 'message': msg})
+    if not ollama_client.valid_model(model):
+        return jsonify({'success': False, 'message': 'Enter a valid model name.'})
+    st = ollama_client.probe(norm, model.strip())
+    host = socket.gethostname()
+    if not st['running']:
+        hint = ('Ollama is not installed on this server.' if not st['installed']
+                else 'Ollama is installed but not answering — is the service running?')
+        return jsonify({'success': False, 'message': f'{host}: {hint}', 'models': [],
+                        'installed': st['installed'], 'running': False})
+    ver = f" (Ollama {st['version']})" if st['version'] else ''
+    if st['has_model']:
+        return jsonify({'success': True, 'message': f'{host}: connected{ver}. Model "{model}" is installed.',
+                        'models': st['models'], 'installed': True, 'running': True, 'has_model': True})
+    return jsonify({'success': True, 'models': st['models'], 'installed': True, 'running': True,
+                    'has_model': False,
+                    'message': f'{host}: connected{ver}, but model "{model}" is not installed — use '
+                               '"Pull model" below.'})
 
 
 # ─── SMTP / PDF Email Settings ────────────────────────────────────────────────
@@ -16969,6 +17029,7 @@ _EMAIL_PURPOSE_LABELS = {
     'gateway_otp': 'Sign-in code', 'test': 'Email test',
     'maintenance_notice': 'Maintenance notice', 'maintenance_complete': 'Maintenance complete',
     'inbox_digest': 'Inbox (messages / mentions / reminders)',
+    'weekly_summary': 'Weekly post-show summary',
 }
 
 
@@ -17561,18 +17622,16 @@ def toggle_contact_recipient(cid):
 @app.route('/shows/<int:show_id>/ai-extract', methods=['POST'])
 @login_required
 def ai_extract(show_id):
-    """Extract form field values from an uploaded document using Ollama."""
-    ai_sid, slot_error = _claim_ai_session(show_id)
-    if slot_error:
-        return jsonify({'success': False, 'error': slot_error}), 429
+    """Extract form field values from an uploaded document using Ollama.
+    The text is read here; the model call is a queued AI job (3.55.0) run by
+    a server whose own Ollama answers — 202 {job_id}, the page polls
+    /api/ai/jobs/<id>. The AI slot is taken when a worker claims the job."""
     try:
         return _ai_extract_impl(show_id)
     except Exception as e:
         app.logger.exception("ai_extract unhandled error")
         return jsonify({'success': False,
                         'error': f'Server error: {_client_error_text(e)}'}), 500
-    finally:
-        _release_ai_session(ai_sid)
 
 def _ai_extract_impl(show_id):
     if not can_access_show(session['user_id'], show_id):
@@ -17583,8 +17642,6 @@ def _ai_extract_impl(show_id):
     if ollama_enabled != '1':
         return jsonify({'success': False, 'error': 'AI extraction is not enabled. Enable it in Settings → AI.'}), 400
 
-    ollama_url = get_app_setting('ollama_url', 'http://localhost:11434').rstrip('/')
-    ollama_model = get_app_setting('ollama_model', 'llama3.2')
 
     # Get document text
     doc_text = ''
@@ -17706,77 +17763,18 @@ def _ai_extract_impl(show_id):
     )
     _custom_system = get_app_setting('ai_system_prompt', '').strip()
     system_prefix = _custom_system if _custom_system else _default_system
-    prompt = (
-        f'{system_prefix}\n\n'
-        f'Fields to extract (key: description): {json.dumps(field_schema)}\n\n'
-        f'Document text:\n{doc_text[:8000]}'
-    )
-
-    # Call Ollama (with SSRF validation)
-    if not _validate_ollama_url(ollama_url):
-        return jsonify({'success': False, 'error': 'Invalid Ollama URL.'}), 400
-    try:
-        import urllib.request as _urlreq
-        payload = json.dumps({
-            'model': ollama_model,
-            'messages': [{'role': 'user', 'content': prompt}],
-            'format': 'json',
-            'stream': True,  # Stream tokens; timeout applies per-chunk, not total
-        }).encode()
-        req = _urlreq.Request(
-            f'{ollama_url}/api/chat',
-            data=payload,
-            headers={'Content-Type': 'application/json'},
-            method='POST',
-        )
-        raw_content = ''
-        with _urlreq.urlopen(req, timeout=60) as resp:
-            for line in resp:
-                line = line.strip()
-                if not line:
-                    continue
-                chunk = json.loads(line)
-                raw_content += chunk.get('message', {}).get('content', '')
-                if chunk.get('done'):
-                    break
-    except Exception as e:
-        app.logger.error(f'Ollama request failed: {e}')
-        return jsonify({'success': False, 'error': 'AI extraction request failed. Check Ollama connection.'}), 500
-
-    # Parse JSON response
-    try:
-        # Strip markdown code fences if model added them
-        clean = raw_content.strip()
-        if clean.startswith('```'):
-            clean = '\n'.join(clean.split('\n')[1:])
-            if clean.endswith('```'):
-                clean = clean[:-3]
-        extracted = json.loads(clean)
-    except (json.JSONDecodeError, ValueError):
-        app.logger.warning(f'AI returned invalid JSON: {raw_content[:200]}')
-        return jsonify({'success': False, 'error': 'AI returned an unparseable response. Try again or use a different model.'}), 500
-
-    # Build suggestions (only non-null values)
-    suggestions = {}
-    for field_key, value in extracted.items():
-        if value is not None and str(value).strip() and field_key in field_map:
-            suggestions[field_key] = {
-                'value': str(value).strip(),
-                'label': field_map[field_key]['label'],
-            }
-
-    syslog_logger.info(
-        f"AI_EXTRACT show_id={show_id} document={fname} "
-        f"fields_found={len(suggestions)} model={ollama_model} "
-        f"by={session.get('username')}"
-    )
-    return jsonify({
-        'success': True,
-        'suggestions': suggestions,
-        'document': fname,
-        'model': ollama_model,
-        'field_count': len(field_rows),
-    })
+    # The instructions go in a real system message; the field list and the
+    # document are the user message.
+    messages = [
+        {'role': 'system', 'content': system_prefix},
+        {'role': 'user', 'content': (
+            f'Fields to extract (key: description): {json.dumps(field_schema)}\n\n'
+            f'Document text:\n{doc_text[:8000]}')},
+    ]
+    body, status = ai_module.enqueue_extract(
+        show_id, session.get('user_id'), messages,
+        {k: v['label'] for k, v in field_map.items()}, fname, len(field_rows))
+    return jsonify(body), status
 
 
 # ─── Job Positions & Position Categories ─────────────────────────────────────
@@ -28869,6 +28867,11 @@ _SYSTEM_PROGRAMS = (
     {'key': 'git', 'name': 'git', 'binary': 'git', 'level': 'info',
      'packages': ('git',), 'purpose': 'Settings → System → Update (in-app updates)',
      'missing': 'In-app updates are unavailable; update with git pull.'},
+    {'key': 'ollama', 'name': 'Ollama (local AI)', 'binary': 'ollama', 'level': 'info',
+     'packages': (), 'purpose': 'AI Extract and the weekly post-show summary (runs on this server only, '
+     'bound to 127.0.0.1)',
+     'missing': 'This server takes no AI jobs; another server with Ollama can. Install with '
+                'sudo bash install.sh --with-ollama.'},
     {'key': 'node', 'name': 'Node.js', 'binary': 'node', 'level': 'info',
      'packages': ('nodejs',), 'purpose': 'Prism Sync only',
      'missing': 'Only needed for Prism Sync.'},
@@ -30671,51 +30674,17 @@ def maintenance_notice_delete(notice_id):
 
 # ─── AI Session Management ─────────────────────────────────────────────────────
 
+# The limiter lives in ai_module (3.55.0): a slot is an ai_sessions row taken
+# in the SAME transaction that claims a queued AI job, under
+# pg_advisory_xact_lock(hashtext('ai_sessions')), so concurrent claims can't
+# overshoot ai_max_sessions. Long jobs keep their slot alive via heartbeat_at.
+
 def _get_ai_slot_limit():
-    return int(get_app_setting('ai_max_sessions', '2'))
+    return ai_module.slot_limit()
+
 
 def _count_active_ai_sessions():
-    """Count running AI sessions, pruning stale ones (>5 min) first."""
-    db = get_db()
-    # started_at is stamped by the DB clock (DEFAULT CURRENT_TIMESTAMP, the
-    # PostgreSQL server's local time), so the cutoff must use the DB clock too
-    # — a Python utcnow() cutoff timed out every session instantly on a
-    # non-UTC server, silently disabling the ai_max_sessions limit.
-    db.execute("""
-        UPDATE ai_sessions SET status='timeout', ended_at=CURRENT_TIMESTAMP
-        WHERE status='running' AND started_at < NOW() - INTERVAL '5 minutes'
-    """)
-    db.commit()
-    count = db.execute("SELECT COUNT(*) FROM ai_sessions WHERE status='running'").fetchone()[0]
-    db.close()
-    return count
-
-def _claim_ai_session(show_id):
-    """Reserve a slot. Returns (session_id, None) or (None, error)."""
-    db = get_db()
-    limit = _get_ai_slot_limit()
-    count = _count_active_ai_sessions()
-    if count >= limit:
-        db.close()
-        return None, f'All {limit} AI processing slots are busy. Please try again in a moment.'
-    _new_id = db.execute("""
-        INSERT INTO ai_sessions (user_id, show_id, status)
-        VALUES (%s,%s,'running') RETURNING id
-    """, (session.get('user_id'), show_id)).fetchone()['id']
-    db.commit()
-    sid = _new_id
-    db.close()
-    return sid, None
-
-def _release_ai_session(session_id):
-    if not session_id:
-        return
-    db = get_db()
-    db.execute("""
-        UPDATE ai_sessions SET status='done', ended_at=CURRENT_TIMESTAMP WHERE id=%s
-    """, (session_id,))
-    db.commit()
-    db.close()
+    return ai_module.count_active()
 
 
 @app.route('/api/ai/slots')
@@ -31539,6 +31508,7 @@ def reports_page():
                            positions=positions, techs=techs, shows=shows, adv_sections=adv_sections,
                            can_assets=_can_report_assets(), can_labor=_can_report_labor(),
                            can_piano=_can_report_piano(), can_sound=module_enabled('spot'),
+                           can_weekly=ai_module.enabled(),
                            user=get_current_user())
 
 
@@ -33876,6 +33846,38 @@ security_module.register(
 # tags.html, tag.html, search.html + static/js/tags.js behind this one call.
 # Read-only: it owns no table and never writes.
 import find_module  # noqa: E402
+
+ai_module.register(
+    app,
+    get_db=get_db,
+    get_app_setting=get_app_setting,
+    syslog_logger=syslog_logger,
+    login_required=login_required,
+    admin_required=admin_required,
+    test_mode=TEST_MODE,
+    am_i_leader=am_i_leader,
+    json_obj=_json_obj,
+    ts_out=_ts_out,
+    as_date=_as_date,
+    can_view_reports=_can_view_reports,
+    can_report_labor=_can_report_labor,
+    get_accessible_shows=get_accessible_shows,
+    calc_post_show_labor_cost=_calc_post_show_labor_cost,
+    unsettled_show_ids=_unsettled_show_ids,
+    pm_contacts_many=_pm_contacts_many,
+    module_enabled=module_enabled,
+    wp_font_config=_wp_font_config,
+    get_logo_for_venue=_get_logo_for_venue,
+    get_venue_pdf_colors=_get_venue_pdf_colors,
+    mail=_mail,
+    mail_url=_mail_url,
+    send_email=_send_email,
+    recipient_sql=_saved_report_recipient_sql,
+    postnotes_internal_keys=_POSTNOTES_INTERNAL_KEYS,
+    instance_id=_CLUSTER_INSTANCE_ID,
+    log_audit=log_audit,
+    app_dir=os.path.dirname(os.path.abspath(__file__)),
+)
 
 chat_module.register(
     app,
