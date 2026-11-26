@@ -1360,8 +1360,11 @@ in full. Module key `projects`, default OFF.
     (`_PERF_LIVE_SKIP_PREFIX` — every module endpoint name must start
     `pm_`) and never keeps SQL text naming a ` pm_` table
     (`_PERF_PRIVATE_SQL`). The in-app updater filters module paths and
-    commit subjects (`_update_private` / `_update_public`) — still write
-    neutral commit subjects. File storage kind key is `module_files`, S3
+    commit subjects (`_update_private` / `_update_public`). Commit messages
+    and the README MAY name the module (the owner's call, 3.56.2: the goal is
+    that APP USERS don't learn of it before it's tested — the repo is not
+    shown to them); what must stay hidden is everything the running app
+    shows, so keep that updater filter. File storage kind key is `module_files`, S3
     prefix `mf/`, label "Module files". Accepted, documented limits: that
     File Storage row, `PM_*` verbs + integer ids in syslog, the
     `user_notify_prefs.email_tasks` column name in a snapshot diff.
