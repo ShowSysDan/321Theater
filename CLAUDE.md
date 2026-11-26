@@ -1672,7 +1672,19 @@ in full. Module key `projects`, default OFF.
   (read-only, `_viewer_gate` blocks viewers — don't allowlist it). Times are
   minutes from the viewed day's midnight; `1+HH:MM` / `24:30` = next day; an
   end before its start crosses midnight; crew out ≤ in = overnight (same rule
-  as `_calc_hours`). The previous day's still-running items come along
+  as `_calc_hours`). Archived shows are left out when the viewed day is today
+  or later, or is after `shows.archived_on` (3.51.0: archived before a day =
+  cancelled, it never happened; NULL = no record, treated as happened). Every
+  write that archives a show stamps `archived_on`; restore clears it.
+  **`shows.is_cancelled` (3.52.0)** = an archived show that never happened:
+  set by a manual archive before the show's first date
+  (`_SHOW_ARCHIVE_SET_SQL` / `_SHOW_FIRST_DATE_SQL`, mirrored by init_db's
+  one-time backfill), toggled by `POST /shows/<id>/cancelled` (archived
+  shows only), cleared by restore; never by the auto-archiver. Wherever a
+  query excludes `is_test` for reporting / asset demand / the timeline it
+  must exclude `is_cancelled` too (`_report_shows`, `_component_demand_many`,
+  asset reports, spot `plan()`). The
+  previous day's still-running items come along
   (`from_prev`), so the candidate query looks at D−1 and D. Rows group
   EXACTLY as the Schedule tab groups them (only shows with legacy
   no-day_date rows go through `_build_schedule_days`). PM = `_pm_contacts_many`.
