@@ -432,8 +432,15 @@ class _DBSessionInterface(_FlaskSessionInterface):
         # host-only cookie and the new domain cookie under one name; try each
         # (at most 3) so a stale one can't hide the live session.
         sids = [s for s in request.cookies.getlist(cookie_name)
-                if s and _SID_RE.match(s)][:3]
-        for sid in sids:
+                if s and _SID_RE.match(s)]
+        # Browsers send equal-path cookies oldest first, so the left-over
+        # host-only cookie precedes the shared Domain one. Adopting it would
+        # let the next save write that OLD sid into the Domain cookie and
+        # replace the session the browser signed in with on another host
+        # (3.56.2): where a Domain cookie is in effect, try the newest first.
+        if len(sids) > 1 and self.get_cookie_domain(app):
+            sids.reverse()
+        for sid in sids[:3]:
             data, ok = self._load(sid)
             if ok:
                 return _DBSession(data, sid=sid, new=False)
@@ -1013,7 +1020,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.56.1'
+APP_VERSION = '3.56.2'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -12425,6 +12432,35 @@ def _clone_admin_refusal():
     return None
 
 
+def _clone_shortages(db, windows):
+    """Over-booking of a clone's asset lines on their new dates: ([message],
+    {new show_assets id: source line}). `windows` = {(start, end): [line +
+    new_sa_id]}. Run before the commit (the clone's own lines are visible to
+    its transaction) and again after it (POST /shows/<id>/assets' post-commit
+    rule: a booking that committed in between is only visible then)."""
+    short = set()
+    shortages, short_lines = [], {}
+    for (ws, we), rows in windows.items():
+        avail = _get_asset_availability_many(db, [r['asset_type_id'] for r in rows], ws, we)
+        for r in rows:
+            a = avail.get(r['asset_type_id'])
+            if (a and not a.get('unlimited') and a.get('available') is not None
+                    and a['available'] < 0):
+                short_lines[r['new_sa_id']] = r
+                if r['asset_type_id'] not in short:
+                    short.add(r['asset_type_id'])
+                    shortages.append(f'"{r["type_name"]}" is over-booked by '
+                                     f'{-a["available"]} on the new dates.')
+            if r['is_system'] or r['is_package']:
+                for sh in _system_component_shortages(
+                        db, r['asset_type_id'], r['quantity'] or 1, ws, we,
+                        back_out_system_qty=r['quantity'] or 1):
+                    short_lines[r['new_sa_id']] = r
+                    shortages.append(f'"{r["type_name"]}": component '
+                                     f'"{sh["component_name"]}" is short on the new dates.')
+    return shortages, short_lines
+
+
 @app.route('/settings/shows/<int:show_id>/clone-info')
 @admin_required
 def clone_show_info(show_id):
@@ -12577,8 +12613,11 @@ def clone_show(show_id):
                 if not nd or nd.isoformat() not in new_days:
                     continue
                 k = DARK_DAY_PREFIX + nd.isoformat()
+            # Two source days moved onto one new day give the same dark key:
+            # keep the first (like show_labor_days below), never a 500.
             db.execute('INSERT INTO schedule_meta (show_id, field_key, field_value) '
-                       'VALUES (%s,%s,%s)', (new_id, k, r['field_value']))
+                       'VALUES (%s,%s,%s) ON CONFLICT (show_id, field_key) DO NOTHING',
+                       (new_id, k, r['field_value']))
 
         db.execute('INSERT INTO security_signin_names (show_id, name, sort_order, created_by) '
                    'SELECT %s, name, sort_order, %s FROM security_signin_names '
@@ -12591,6 +12630,7 @@ def clone_show(show_id):
                   'assets': 0, 'rentals': 0}
         warnings = []
         short_lines = {}          # new show_assets id → its source line (over-booked)
+        windows = {}              # (start, end) → copied asset lines (post-commit check)
 
         if want['schedule']:
             for r in db.execute(
@@ -12647,7 +12687,6 @@ def clone_show(show_id):
                 FROM show_assets sa JOIN asset_types at ON at.id = sa.asset_type_id
                 WHERE sa.show_id=%s ORDER BY sa.id
             """, (show_id,)).fetchall()
-            windows = {}
             hand_kept = 0
             for r in lines:
                 if r['is_retired']:
@@ -12692,26 +12731,7 @@ def clone_show(show_id):
             # over-booking is refused unless the admin confirmed it
             # (override_availability, sent by the dialog after it listed the
             # shortages) — and an override is audited + syslogged per line.
-            short = set()
-            shortages, short_lines = [], {}
-            for (ws, we), rows in windows.items():
-                avail = _get_asset_availability_many(db, [r['asset_type_id'] for r in rows], ws, we)
-                for r in rows:
-                    a = avail.get(r['asset_type_id'])
-                    if (a and not a.get('unlimited') and a.get('available') is not None
-                            and a['available'] < 0):
-                        short_lines[r['new_sa_id']] = r
-                        if r['asset_type_id'] not in short:
-                            short.add(r['asset_type_id'])
-                            shortages.append(f'"{r["type_name"]}" is over-booked by '
-                                             f'{-a["available"]} on the new dates.')
-                    if r['is_system'] or r['is_package']:
-                        for sh in _system_component_shortages(
-                                db, r['asset_type_id'], r['quantity'] or 1, ws, we,
-                                back_out_system_qty=r['quantity'] or 1):
-                            short_lines[r['new_sa_id']] = r
-                            shortages.append(f'"{r["type_name"]}": component '
-                                             f'"{sh["component_name"]}" is short on the new dates.')
+            shortages, short_lines = _clone_shortages(db, windows)
             if shortages and not override_avail:
                 db.rollback()
                 db.close()
@@ -12747,6 +12767,32 @@ def clone_show(show_id):
         app.logger.error(f'clone_show source={show_id} failed: {type(e).__name__}: {e}')
         return jsonify({'success': False, 'error': 'Clone failed: '
                         + _client_error_text(e)}), 500
+    # Post-commit re-check (POST /shows/<id>/assets' rule): a booking that
+    # committed between the check above and this commit is visible only now.
+    # Over-booked without the admin's override → the clone is removed whole
+    # and the dialog gets the same needs_override answer as before.
+    if windows and not override_avail:
+        try:
+            post_short, _ = _clone_shortages(db, windows)
+            if post_short:
+                _purge_show(db, new_id)
+                log_audit(db, 'SHOW_CLONE_ROLLBACK', 'show', new_id,
+                          detail=f'clone of show {show_id} removed: gear over-booked '
+                                 'by a booking made at the same time')
+                db.commit()
+                db.close()
+                syslog_logger.warning(
+                    f"SHOW_CLONE_ROLLBACK show_id={new_id} source={show_id} "
+                    f"short={len(post_short)} by={session.get('username')}")
+                return jsonify({'success': False, 'needs_override': True,
+                                'shortages': post_short,
+                                'error': 'Some gear was just booked by someone else and is '
+                                         'not available on the new dates.'}), 409
+        except Exception as e:
+            try: db.rollback()
+            except Exception: pass
+            app.logger.error(f'clone_show post-check show_id={new_id} failed: '
+                             f'{type(e).__name__}: {e}')
     db.close()
     for r in short_lines.values():
         syslog_logger.warning(
@@ -12881,6 +12927,8 @@ def _purge_show(db, show_id):
     # The optional module's own bookkeeping for its links to this show (its
     # tables cascade by FK). Before any row of the show is touched.
     projects_module.on_show_delete(db, show_id)
+    # Stored AI output (weekly summaries) quoting this show goes with it.
+    ai_module.on_show_delete(db, show_id)
     for tbl in _SHOW_PURGE_TABLES:
         db.execute(f'DELETE FROM {tbl} WHERE show_id=%s', (show_id,))
     db.execute('DELETE FROM shows WHERE id=%s', (show_id,))

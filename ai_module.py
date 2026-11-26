@@ -18,6 +18,9 @@ The rules (keep every one):
   `ai_sessions` slot in the SAME transaction under
   pg_advisory_xact_lock(hashtext('ai_sessions')) — that is the
   ai_max_sessions limit, cluster-wide, with no count-then-insert race.
+  Slots carry test_mode (3.56.2) and every count / prune filters on it, so
+  a TEST_MODE server sharing production's DB never uses or prunes
+  production's slots.
 * No connection or transaction is held across an Ollama call. Every progress
   write is guarded by `claimed_instance = <this process> AND status =
   'running'`, so a worker that lost its claim (stale-recovered) stops.
@@ -296,16 +299,19 @@ def any_capable(db, kind='infer', target_host=None):
 
 # ── AI session slots (the ai_max_sessions limit) ──────────────────────────────
 
+# Slots are per test_mode (3.56.2): a TEST_MODE server sharing production's
+# database neither counts, takes nor prunes production's slots (or v.v.).
 _PRUNE_SQL = ("UPDATE ai_sessions SET status='timeout', ended_at=NOW() "
-              "WHERE status='running' "
+              "WHERE status='running' AND test_mode = %s "
               "AND COALESCE(heartbeat_at, started_at) < NOW() - INTERVAL '5 minutes'")
 
 
 def count_active():
     db = _d['get_db']()
     try:
-        db.execute(_PRUNE_SQL)
-        n = db.execute("SELECT COUNT(*) AS n FROM ai_sessions WHERE status='running'").fetchone()['n']
+        db.execute(_PRUNE_SQL, (_tm(),))
+        n = db.execute("SELECT COUNT(*) AS n FROM ai_sessions WHERE status='running' "
+                       "AND test_mode = %s", (_tm(),)).fetchone()['n']
         db.commit()
         return int(n or 0)
     finally:
@@ -460,8 +466,9 @@ def claim(infer_ok, pull_ok):
                 return dict(row)
         if infer_ok:
             db.execute("SELECT pg_advisory_xact_lock(hashtext('ai_sessions'))")
-            db.execute(_PRUNE_SQL)
-            n = db.execute("SELECT COUNT(*) AS n FROM ai_sessions WHERE status='running'").fetchone()['n']
+            db.execute(_PRUNE_SQL, (_tm(),))
+            n = db.execute("SELECT COUNT(*) AS n FROM ai_sessions WHERE status='running' "
+                           "AND test_mode = %s", (_tm(),)).fetchone()['n']
             if int(n or 0) >= slot_limit():
                 db.execute("UPDATE ai_jobs SET stage=%s WHERE status='queued' AND test_mode=%s "
                            "AND kind = ANY(%s) AND stage IS DISTINCT FROM %s",
@@ -471,7 +478,7 @@ def claim(infer_ok, pull_ok):
             # Weekly runs hold a slot for up to 30 min: they may use at most
             # limit-1 slots, so interactive AI Extract always has one.
             wk = db.execute("SELECT COUNT(*) AS n FROM ai_sessions WHERE status='running' "
-                            "AND kind=%s", (WEEKLY,)).fetchone()['n']
+                            "AND kind=%s AND test_mode = %s", (WEEKLY, _tm())).fetchone()['n']
             kinds = list(KINDS_INFER) if int(wk or 0) < weekly_slot_limit() else ['extract']
             row = db.execute(_CLAIM_SQL.format(where='kind = ANY(%s)'),
                              (HOST, _d['instance_id'], model(), _tm(), kinds)).fetchone()
@@ -484,9 +491,9 @@ def claim(infer_ok, pull_ok):
                 return None
             job = dict(row)
             sid = db.execute(
-                "INSERT INTO ai_sessions (user_id, show_id, status, kind, heartbeat_at) "
-                "VALUES (%s, %s, 'running', %s, NOW()) RETURNING id",
-                (job['requested_by'], job['show_id'], job['kind'])).fetchone()['id']
+                "INSERT INTO ai_sessions (user_id, show_id, status, kind, heartbeat_at, test_mode) "
+                "VALUES (%s, %s, 'running', %s, NOW(), %s) RETURNING id",
+                (job['requested_by'], job['show_id'], job['kind'], _tm())).fetchone()['id']
             db.execute('UPDATE ai_jobs SET ai_session_id=%s WHERE id=%s', (sid, job['id']))
             db.commit()
             job['ai_session_id'] = sid
@@ -1756,6 +1763,38 @@ def _send_weekly(period_end, job_id):
     finally:
         db.close()
     _log().info(f'AI_WEEKLY_EMAIL status={status} job={job_id} recipients={n}')
+
+
+# ── a show is deleted (app.py _purge_show: delete + merge) ────────────────────
+
+def on_show_delete(db, show_id):
+    """Forget AI output built from a show that is being deleted (3.56.2).
+    A stored weekly result keeps the show's name, venue, PM and the model's
+    summary of its notes / comments; ai_jobs.show_id going NULL does not
+    touch that. Every job of ANY test_mode that names the show loses its
+    payload + result; a finished one reads as an error ("run it again"), a
+    queued / running one is cancelled (the worker's guarded writes then stop
+    it and its slot is released). Its hashes go too, so nothing reuses it.
+    Caller commits (inside the purge's transaction)."""
+    sid = int(show_id)
+    # show_ids is a JSON list of ints: a digit-bounded match, never a
+    # ::jsonb cast (one malformed row must not fail a show delete).
+    hit = "(show_id = %s OR show_ids ~ %s)"
+    args = (sid, r'(^|[^0-9])' + str(sid) + r'([^0-9]|$)')
+    db.execute(
+        "UPDATE ai_jobs SET status='cancelled', stage='Cancelled', finished_at=NOW(), "
+        " cancel_requested=1, payload_json=NULL, result_json=NULL, input_hash=NULL, "
+        " model_hash=NULL, message='A show in this run was deleted.' "
+        f"WHERE status IN ('queued', 'running') AND {hit}", args)
+    db.execute(
+        "UPDATE ai_jobs SET status=CASE WHEN status='done' THEN 'error' ELSE status END, "
+        " error_code=CASE WHEN status='done' THEN 'show_deleted' ELSE error_code END, "
+        " message=CASE WHEN status='done' THEN 'A show in this summary was deleted. Run it again.' "
+        "              ELSE message END, "
+        " payload_json=NULL, result_json=NULL, input_hash=NULL, model_hash=NULL "
+        f"WHERE status NOT IN ('queued', 'running') AND {hit} "
+        " AND (result_json IS NOT NULL OR payload_json IS NOT NULL OR status='done' "
+        "      OR input_hash IS NOT NULL OR model_hash IS NOT NULL)", args)
 
 
 # ── housekeeping (from app.py's hourly maintenance) ───────────────────────────

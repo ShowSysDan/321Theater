@@ -1726,7 +1726,8 @@ CREATE TABLE IF NOT EXISTS ai_sessions (
     ended_at     TIMESTAMP,
     status       TEXT DEFAULT 'running',
     kind         TEXT DEFAULT 'extract',
-    heartbeat_at TIMESTAMP
+    heartbeat_at TIMESTAMP,
+    test_mode    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_ai_sessions_status ON ai_sessions(status);
@@ -2773,6 +2774,9 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".cluster_instances ADD COLUMN IF NOT EXISTS public_url TEXT',
         f"ALTER TABLE \"{app_schema}\".ai_sessions ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'extract'",
         f'ALTER TABLE "{app_schema}".ai_sessions ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP',
+        # 3.56.2: a TEST_MODE server sharing production's DB keeps its own
+        # AI slots (counted and pruned per test_mode, like ai_jobs).
+        f'ALTER TABLE "{app_schema}".ai_sessions ADD COLUMN IF NOT EXISTS test_mode INTEGER NOT NULL DEFAULT 0',
         # Weekly summaries share model output across with/without-labor runs
         # by a hash of exactly what the model is given.
         f'ALTER TABLE "{app_schema}".ai_jobs ADD COLUMN IF NOT EXISTS model_hash TEXT',

@@ -658,7 +658,11 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   `_ask` falls back per show on everything but that and cancel. Progress / finish writes are guarded by `claimed_instance
   AND status='running'` (`_Lost` stops a worker that lost its claim). Never
   hold a connection across an Ollama call. Jobs carry `test_mode`: a test
-  server claims only its own. The browser polls (`/api/ai/jobs/<id>`,
+  server claims only its own. So do slots (3.56.2): `ai_sessions.test_mode`
+  is stamped in `claim()`, and every running-slot count / prune
+  (`_PRUNE_SQL`, `count_active`, both counts in `claim`) filters on
+  `test_mode = _tm()` — a test server must never use or prune
+  production's slots. The browser polls (`/api/ai/jobs/<id>`,
   `/api/reports/weekly-summary/runs/<id>`); AI Extract returns 202 + job id.
 - **Privacy:** prompts, documents, notes, comments and model output never
   reach syslog / audit / URLs / e-mail subjects (ids, counts, codes only).
@@ -686,6 +690,12 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   the stored `result_json` (no bytes stored, never re-runs the model),
   `font_config` passed, condensed to one page, the show table may spill
   to page 2 — nothing dropped.
+- **A deleted show takes its AI output with it (3.56.2):** `_purge_show`
+  (delete + merge) calls `ai_module.on_show_delete()` — every job naming the
+  show (`show_id`, or `show_ids` by a digit-bounded regex, never a `::jsonb`
+  cast) loses payload / result / input + model hash; a finished one reads
+  as an error ("run it again"), a live one is cancelled. Never keep a
+  stored result that quotes a show that no longer exists.
 - **Weekly e-mail** (off by default): `weekly_email_tick` is leader-gated,
   claims the week in `ai_weekly_email_log` (INSERT … ON CONFLICT DO NOTHING)
   before enqueueing, delivers on queued → sending (the claim), recipients
@@ -891,7 +901,9 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
   domain or under it (never an IP; else host-only + one CONFIG line per
   host) AND the request did not come through the gateway (3.56.1: gateway
   requests always get a host-only cookie). Logout / re-issue also expire a host-only twin; `open_session`
-  tries every presented sid (≤3). Never put a Domain on the `__Host-`
+  tries every presented sid (≤3) — NEWEST first while a Domain cookie is in
+  effect (3.56.2: browsers send the old host-only twin first, and adopting
+  it rewrote that old sid into the shared Domain cookie). Never put a Domain on the `__Host-`
   gateway cookie.
 - Hand-off: `CLUSTER_SELF_URL` (.env, normalised by
   `_normalize_instance_url`) → `cluster_instances.public_url` in the
@@ -1505,7 +1517,7 @@ in full. Module key `projects`, default OFF.
 - **Invoice / Quote (3.53.0)** on the Budget tab (`_invoice` in projects_docs_module.py, budget-visibility gated like every budget route): basis estimate / forecast / actual, scope all / tasks / range (task span overlaps the range), show costs only via the injected `_pm_show_figures` (never fork billing; cancelled + test shows never billed). The query string carries only ids / dates / enums; bill-to, number and notes come ONLY from a POST form body and are never stored or logged.
 
 ## Clone show (Settings → Shows, 3.53.0)
-`clone_show` (`POST /settings/shows/<id>/clone`, admin and not read-only) + `clone-info` (GET, read-only). The header comment above them is THE copy / shift / skip decision for every table with a show_id — a new show child table must be added there. Dates move by one offset (new start − source's earliest date) except days that hold a moved performance; show_date/time re-derived with `_sync_show_primary_date`. Gear re-priced via `_price_asset_line` (hand-priced lines kept), units unpinned, `_reset_asset_approval`; over-booking is a 409 unless `override_availability` (audit `availability_override=1`). Never copies comments, files, history, settlement, piano tunings, Prism links or project links.
+`clone_show` (`POST /settings/shows/<id>/clone`, admin and not read-only) + `clone-info` (GET, read-only). The header comment above them is THE copy / shift / skip decision for every table with a show_id — a new show child table must be added there. Dates move by one offset (new start − source's earliest date) except days that hold a moved performance; show_date/time re-derived with `_sync_show_primary_date`. Gear re-priced via `_price_asset_line` (hand-priced lines kept), units unpinned, `_reset_asset_approval`; over-booking is a 409 unless `override_availability` (audit `availability_override=1`); `_clone_shortages()` runs before the commit AND again after it (3.56.2, the post-commit rule: a short found then purges the clone, audit SHOW_CLONE_ROLLBACK, same 409 `needs_override`). Folded days keep the first dark_day / Day PM row (`ON CONFLICT DO NOTHING`, `seen_days`). Never copies comments, files, history, settlement, piano tunings, Prism links or project links.
 
 ## Reports (3.12.0)
 - `/reports` (`reports_page`, `templates/reports.html`) is its own nav
@@ -2015,6 +2027,12 @@ in full. Module key `projects`, default OFF.
   their controls gate on `user.role == 'admin'`. Known gap (the owner's call,
   not decided): a read-only admin on Asset Approvals still sees edits whose
   routes 403, and the scheduler's add/DELETE line routes still let them write.
+  Which rule a NEW admin route takes (decided in 3.56.2, kept as built): a
+  write of SHOW DATA refuses a read-only admin (Clone show,
+  `_clone_admin_refusal`); Settings CONFIGURATION (`@admin_required`:
+  readiness knobs, Settings → AI incl. weekly e-mail / pull / probe, like
+  every other Settings save) follows `_readonly_guard` — admins exempt. Don't
+  mix the two inside one kind of route.
 - Piano: the three `@login_required` write routes (update / pin-unit /
   cancel-request) call `_piano_readonly_refusal()` first, because
   `_is_piano_manager()` never looks at is_readonly.
