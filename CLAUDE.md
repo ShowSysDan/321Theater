@@ -889,18 +889,29 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
 - `SESSION_COOKIE_DOMAIN` (.env): `_DBSessionInterface.get_cookie_domain()` →
   `_request_cookie_domain()` returns it ONLY when the request host is the
   domain or under it (never an IP; else host-only + one CONFIG line per
-  host). Logout / re-issue also expire a host-only twin; `open_session`
+  host) AND the request did not come through the gateway (3.56.1: gateway
+  requests always get a host-only cookie). Logout / re-issue also expire a host-only twin; `open_session`
   tries every presented sid (≤3). Never put a Domain on the `__Host-`
   gateway cookie.
 - Hand-off: `CLUSTER_SELF_URL` (.env, normalised by
   `_normalize_instance_url`) → `cluster_instances.public_url` in the
   heartbeat → `_handoff_peers()` (20 s cache) → base.html footer
   `.srv-switch` (POST `/auth/handoff/start`) → `session_handoffs` row
-  (SHA-256 only, 60 s DB clock, user, sid, target, next, requester IP) →
-  303 to `<target>/auth/handoff?t=` → claimed atomically FIRST (UPDATE …
-  RETURNING), then target == own URL, same client IP, user unlocked / not
-  pending, session row live → SAME sid on this host. Target URLs come only
-  from heartbeat rows; next = `_safe_local_path`. Never log the token.
+  (SHA-256 only, 120 s DB clock, user, sid, target, next, requester IP) →
+  303 to `<target>/auth/handoff#t=` (3.56.1: the FRAGMENT — never put the
+  token in a query string, gunicorn's access log records it; a legacy `?t=`
+  is spent + refused) → auth_handoff.html's script POSTs it same-origin
+  (`_origin_matches()` enforced in the route, since `_csrf_protect` skips
+  signed-out browsers) → `_handoff_check` (target == own URL, same client
+  IP, user unlocked / not pending, session row live) → a **"Continue as
+  <name>?"** page (names any other account it would sign out here; skipped
+  only when this browser is already signed in here as the same user —
+  the same-IP check alone fails behind a terminal server / NAT) → the
+  confirm POST claims atomically FIRST (UPDATE … RETURNING), re-checks →
+  SAME sid on this host. Cancel spends the token. Never delete the
+  browser's existing session here without that confirm. Target URLs come
+  only from heartbeat rows; next = `_safe_local_path`. Never log the token.
+  The menu is hidden without a DB session (`DISABLE_DB_SESSIONS`).
   Off (404 + hidden) through the gateway and in TEST_MODE. Both endpoints
   are in `_VIEWER_ALLOWED_ENDPOINTS`; the redeem is allowed past the
   forced-password-change gate.

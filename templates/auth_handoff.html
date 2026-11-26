@@ -1,0 +1,58 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+
+  "Switch server" landing page (3.56.1). step='load': the one-time token
+  arrives in the URL FRAGMENT (#t=…, never sent to a server or logged); the
+  script strips it from the address bar and POSTs it same-origin.
+  step='confirm': names the account before anything is signed in.
+#}
+{% extends "base.html" %}
+{% block title %}Switch server — 3·2·1→Theater{% endblock %}
+
+{% block auth_content %}
+<div class="login-page">
+  <div class="login-card">
+    <div class="login-brand">
+      <h1>3·2·1→THEATER</h1>
+      <p>Switch server</p>
+      {% if test_mode %}<p style="margin-top:8px"><span class="test-instance-badge">TEST INSTANCE</span></p>{% endif %}
+    </div>
+
+    {% if step == 'confirm' %}
+      <p style="margin:0 0 10px">Continue on this server as <strong>{{ name }}</strong>{% if username and username != name %} ({{ username }}){% endif %}?</p>
+      {% if from_host %}<p style="margin:0 0 10px;font-size:12px;color:var(--text-dim)">Requested from {{ from_host }}.</p>{% endif %}
+      {% if other %}
+        <div class="flash flash-warning" style="display:block">You are signed in on this server as <strong>{{ other }}</strong>. Continuing signs {{ other }} out here.</div>
+      {% endif %}
+      <p style="margin:0 0 14px;font-size:12px;color:var(--text-dim)">If you did not just pick “Switch server” yourself, choose Cancel.</p>
+      <form method="post" action="{{ url_for('auth_handoff') }}" class="login-form">
+        <input type="hidden" name="t" value="{{ token }}">
+        <button type="submit" name="action" value="confirm" class="btn btn-primary btn-full">Continue as {{ name }}</button>
+        <button type="submit" name="action" value="cancel" class="btn btn-full" style="margin-top:8px">Cancel</button>
+      </form>
+    {% else %}
+      <form id="handoff-form" method="post" action="{{ url_for('auth_handoff') }}">
+        <input type="hidden" name="t" id="handoff-t" value="">
+      </form>
+      <p id="handoff-msg" style="margin:0 0 12px">Opening this server…</p>
+      <noscript><p>This page needs JavaScript. <a href="{{ url_for('login') }}">Sign in</a> instead.</p></noscript>
+      <p><a href="{{ url_for('login') }}" style="font-size:12px;color:var(--text-muted)">Sign in instead</a></p>
+      <script>
+      (function () {
+        var m = /^#t=([A-Za-z0-9_-]{43})$/.exec(location.hash || '');
+        try { history.replaceState(null, '', location.pathname); } catch (e) {}
+        if (!m) {
+          document.getElementById('handoff-msg').textContent =
+            'That sign-in link is incomplete or has expired. Please sign in.';
+          return;
+        }
+        document.getElementById('handoff-t').value = m[1];
+        document.getElementById('handoff-form').submit();
+      })();
+      </script>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

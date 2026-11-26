@@ -271,8 +271,9 @@ _SID_RE = re.compile(r'^[A-Za-z0-9_-]{20,128}$')
 # since app_sessions is shared, signing in once covers every instance. It is
 # honoured ONLY for a request whose host is the domain or under it, and never
 # for an IP: anywhere else the cookie stays host-only, exactly as before, with
-# one CONFIG line per host (capped). The gateway's __Host- cookie is separate
-# and never takes a Domain. Read lazily (syslog_logger is set up later).
+# one CONFIG line per host (capped). A request that came through the VPS
+# gateway always gets a host-only cookie (3.56.1), whatever its Host. The
+# gateway's __Host- cookie is separate and never takes a Domain. Read lazily (syslog_logger is set up later).
 _DNS_NAME_RE = re.compile(r'^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$')
 _cookie_domain_state = {'loaded': False, 'domain': None, 'warned': set()}
 _cookie_domain_lock = threading.Lock()
@@ -319,6 +320,12 @@ def _request_cookie_domain():
         return None
     try:
         host = (request.host or '').lower()
+        # Through the VPS gateway the cookie stays host-only (3.56.1): Caddy
+        # keeps the public Host, so a public name under the domain would
+        # otherwise hand a live sid (and a Secure parent-domain cookie that
+        # shadows plain-HTTP LAN hosts) to every host under it.
+        if _connection_path() == 'gateway':
+            return None
     except RuntimeError:
         return None
     if host.startswith('['):
@@ -1006,7 +1013,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.56.0'
+APP_VERSION = '3.56.1'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -6239,13 +6246,21 @@ def logout():
 # Flow: the footer's "Switch server" menu lists the OTHER live servers that
 # publish a CLUSTER_SELF_URL in the heartbeat. A click POSTs (same-origin form,
 # _csrf_protect) the server's key → a one-time token (256-bit, only its
-# SHA-256 stored, 60 s on the DB clock, bound to this session's sid, the user,
-# the target URL and the next path) → 302 to <target>/auth/handoff?t=… → the
-# target claims it atomically (UPDATE … RETURNING), checks the token names
-# THIS server, comes from the same client address, the user is still
-# unlocked / approved and the session still live, then issues ITS cookie for the SAME sid (one session: logging out on
-# either server ends both) and redirects to the stored, _safe_local_path'd
-# next path. Target URLs come only from the heartbeat rows (each server's own
+# SHA-256 stored, 120 s on the DB clock, bound to this session's sid, the
+# user, the target URL and the next path) → 303 to <target>/auth/handoff#t=…
+# (3.56.1: the token rides in the FRAGMENT, which no access log, proxy or
+# Referer ever sees) → that page's script POSTs it same-origin → the target
+# checks the token names THIS server, comes from the same client address,
+# the user is still unlocked / approved and the session still live, and
+# shows "Continue as <name>?" (skipped only when this browser is already
+# signed in here as that same user; it also says which other account the
+# switch would sign out here) → the confirm POST (same-origin, Origin-
+# checked) claims it atomically (UPDATE … RETURNING), re-checks, then
+# issues ITS cookie for the SAME sid (one session: logging out on either
+# server ends both) and redirects to the stored, _safe_local_path'd next
+# path. The confirm page is what stops a link minted for one account from
+# silently signing in a colleague behind the same address (terminal
+# server / NAT). Target URLs come only from the heartbeat rows (each server's own
 # .env), never from the request, so there is no open redirect.
 #
 # LAN only: through the VPS gateway the menu is hidden and both routes 404 —
@@ -6253,9 +6268,10 @@ def logout():
 # internal addresses must not be shown to the internet. (The gateway's
 # forward_auth runs before any app route anyway, so /auth/handoff can never
 # skip the email-code gate.) TEST_MODE: off both ways (never in the cluster).
-# The token is never logged: syslog SESSION_HANDOFF user_id / from / to.
+# The token is never logged: syslog SESSION_HANDOFF user_id / from / to; it
+# is never in a URL the server sees (an old-style ?t= link is spent + refused).
 
-_HANDOFF_TTL_S = 60
+_HANDOFF_TTL_S = 120
 _HANDOFF_TOKEN_RE = re.compile(r'^[A-Za-z0-9_-]{43}$')
 _handoff_peers_cache = {'at': 0.0, 'peers': []}
 _HANDOFF_PEERS_TTL = 20.0
@@ -6312,7 +6328,12 @@ def _inject_handoff_peers():
     in, on the LAN (not through the gateway), not mid forced-password-change."""
     if (not has_request_context() or TEST_MODE or not session.get('user_id')
             or session.get('must_change_password')
-            or _connection_path() == 'gateway'):
+            or _connection_path() == 'gateway'
+            # Signed-cookie sessions (DISABLE_DB_SESSIONS) have no shared sid
+            # to hand over: the start route would only 404 (3.56.1).
+            or not isinstance(app.session_interface, _DBSessionInterface)
+            or not getattr(session, 'sid', None)
+            or getattr(session, 'new', False)):
         return {'handoff_peers': []}
     try:
         return {'handoff_peers': _handoff_peers()}
@@ -6356,7 +6377,7 @@ def _auth_handoff_start_route():
         f"SESSION_HANDOFF_START user_id={session['user_id']} "
         f"from={_handoff_host(_cluster_self_url() or request.host)} "
         f"to={_handoff_host(target['url'])} ip={request.remote_addr}")
-    resp = redirect(f"{target['url']}/auth/handoff?t={token}", code=303)
+    resp = redirect(f"{target['url']}/auth/handoff#t={token}", code=303)
     resp.headers['Cache-Control'] = 'no-store'
     resp.headers['Referrer-Policy'] = 'no-referrer'
     return resp
@@ -6372,16 +6393,159 @@ def _handoff_fail(reason):
     return resp
 
 
+def _handoff_page(**ctx):
+    # user=None: always the signed-out layout, even if this browser is
+    # signed in here (the page must not look like a normal app page).
+    resp = make_response(render_template('auth_handoff.html', user=None, **ctx))
+    resp.headers['Cache-Control'] = 'no-store'
+    # Not no-referrer: under it the browser sends `Origin: null` on this
+    # page's own form POST, which the route's same-origin check refuses.
+    # same-origin still sends nothing to other sites.
+    resp.headers['Referrer-Policy'] = 'same-origin'
+    return resp
+
+
+def _handoff_spend(db, th):
+    """Burn a token without using it (refused / cancelled / legacy link)."""
+    try:
+        db.execute("UPDATE session_handoffs SET used_at = NOW(), used_ip = %s "
+                   "WHERE token_hash = %s AND used_at IS NULL",
+                   ((request.remote_addr or '')[:64], th))
+        db.commit()
+    except Exception:
+        try: db.rollback()
+        except Exception: pass
+
+
+def _handoff_check(db, row, own):
+    """(reason, user, data): reason is None when `row` may be redeemed here
+    by this client. Shared by the confirm page and the claim."""
+    if row['target_url'] != own:
+        return 'wrong_server', None, None
+    # Same browser, same LAN address: a link someone minted for THEIR
+    # account and sent to a colleague must not sign the colleague in as
+    # them (login CSRF). Behind one shared address this alone is not
+    # enough — the confirm page names the account.
+    if (row['requester_ip'] or '') != (request.remote_addr or '')[:64]:
+        return 'ip_mismatch', None, None
+    user = db.execute('SELECT * FROM users WHERE id = %s',
+                      (row['user_id'],)).fetchone()
+    if (not user or user.get('is_locked')
+            or user.get('pending_approval')):
+        return 'user_inactive', None, None
+    srow = db.execute(
+        'SELECT data, expires_at, user_id FROM app_sessions WHERE sid = %s',
+        (row['sid'],)).fetchone()
+    if (not srow or srow['user_id'] != row['user_id']
+            or _session_expires_dt(srow['expires_at']) < datetime.utcnow()):
+        return 'session_gone', None, None
+    try:
+        data = json.loads(srow['data']) if srow['data'] else {}
+    except (TypeError, ValueError):
+        data = {}
+    if (not isinstance(data, dict) or data.get('user_id') != row['user_id']
+            or data.get('must_change_password')):
+        return 'session_gone', None, None
+    return None, user, data
+
+
+def _handoff_complete(db, row, user, data, own):
+    old_sid = getattr(session, 'sid', None)
+    old_new = getattr(session, 'new', True)
+    if old_sid and not old_new and old_sid != row['sid']:
+        # This browser held a different session on this host: the person
+        # confirmed replacing it (or it was their own), so drop its row
+        # rather than orphan it.
+        db.execute('DELETE FROM app_sessions WHERE sid = %s', (old_sid,))
+        db.commit()
+    session.clear()
+    session.sid = row['sid']
+    session.new = False
+    session.update(data)
+    _populate_session_from_user(user)
+    session.permanent = True
+    session.modified = True      # save_session re-issues THIS host's cookie
+    _record_connection(db, user['id'])
+    log_audit(db, 'SESSION_HANDOFF', 'user', user['id'],
+              detail=f"from {_handoff_host(row['from_url']) or '?'} to {_handoff_host(own)}")
+    db.commit()
+    syslog_logger.info(
+        f"SESSION_HANDOFF user_id={row['user_id']} "
+        f"from={_handoff_host(row['from_url']) or '?'} to={_handoff_host(own)} "
+        f"ip={request.remote_addr}")
+    nxt = _safe_local_path(row['next_path'] or '') or url_for('index')
+    if session.get('is_document_viewer'):
+        nxt = url_for('viewer_home')
+    resp = redirect(nxt, code=303)
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    return resp
+
+
 def _auth_handoff_route():
     if TEST_MODE or _connection_path() == 'gateway':
         abort(404)
     own = _cluster_self_url()
-    token = request.args.get('t') or ''
+    if request.method == 'GET':
+        legacy = request.args.get('t') or ''
+        if legacy:
+            # A pre-3.56.1 server put the token in the query string, which the
+            # access log records: spend it and refuse.
+            if _HANDOFF_TOKEN_RE.match(legacy):
+                db = get_db()
+                try:
+                    _handoff_spend(db, hashlib.sha256(legacy.encode('ascii')).hexdigest())
+                finally:
+                    db.close()
+            return _handoff_fail('legacy_link')
+        if not own:
+            return _handoff_fail('no_self_url')
+        # The page's script moves the #t= fragment into a same-origin POST.
+        return _handoff_page(step='load')
+
+    # POST: same-origin only (the session CSRF check is skipped for a browser
+    # not signed in here, so check here too).
+    if not _origin_matches():
+        abort(403)
+    token = request.form.get('t') or ''
     if not own or not _HANDOFF_TOKEN_RE.match(token):
         return _handoff_fail('malformed' if own else 'no_self_url')
     th = hashlib.sha256(token.encode('ascii')).hexdigest()
+    action = request.form.get('action') or ''
     db = get_db()
     try:
+        if action == 'cancel':
+            _handoff_spend(db, th)
+            syslog_logger.info(f"SESSION_HANDOFF_CANCEL ip={request.remote_addr}")
+            resp = redirect(url_for('index') if session.get('user_id') else url_for('login'),
+                            code=303)
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp
+        here_uid = session.get('user_id')
+        if action != 'confirm':
+            row = db.execute(
+                "SELECT user_id, sid, target_url, from_url, next_path, requester_ip "
+                "FROM session_handoffs WHERE token_hash = %s AND used_at IS NULL "
+                "AND expires_at > NOW()", (th,)).fetchone()
+            if not row:
+                return _handoff_fail('invalid_or_used')
+            reason, user, data = _handoff_check(db, row, own)
+            if reason:
+                _handoff_spend(db, th)
+                return _handoff_fail(reason)
+            if here_uid != row['user_id']:
+                # Ask first: name the account, and the one it would sign out.
+                other = None
+                if here_uid:
+                    o = db.execute('SELECT username, display_name FROM users WHERE id = %s',
+                                   (here_uid,)).fetchone()
+                    other = ((o['display_name'] or o['username']) if o else None) or 'another account'
+                return _handoff_page(
+                    step='confirm', token=token,
+                    name=user['display_name'] or user['username'],
+                    username=user['username'], other=other,
+                    from_host=_handoff_host(row['from_url']))
+            # Already signed in here as the same person: nothing to confirm.
         # Claim first, check after: the token is spent by this request even
         # when a later check refuses it (single use, no retry with it).
         row = db.execute(
@@ -6392,62 +6556,14 @@ def _auth_handoff_route():
         db.commit()
         if not row:
             return _handoff_fail('invalid_or_used')
-        if row['target_url'] != own:
-            return _handoff_fail('wrong_server')
-        # Same browser, same LAN address: a link someone minted for THEIR
-        # account and sent to a colleague must not sign the colleague in as
-        # them (login CSRF).
-        if (row['requester_ip'] or '') != (request.remote_addr or '')[:64]:
-            return _handoff_fail('ip_mismatch')
-        user = db.execute('SELECT * FROM users WHERE id = %s',
-                          (row['user_id'],)).fetchone()
-        if (not user or user.get('is_locked')
-                or user.get('pending_approval')):
-            return _handoff_fail('user_inactive')
-        srow = db.execute(
-            'SELECT data, expires_at, user_id FROM app_sessions WHERE sid = %s',
-            (row['sid'],)).fetchone()
-        if (not srow or srow['user_id'] != row['user_id']
-                or _session_expires_dt(srow['expires_at']) < datetime.utcnow()):
-            return _handoff_fail('session_gone')
-        try:
-            data = json.loads(srow['data']) if srow['data'] else {}
-        except (TypeError, ValueError):
-            data = {}
-        if (not isinstance(data, dict) or data.get('user_id') != row['user_id']
-                or data.get('must_change_password')):
-            return _handoff_fail('session_gone')
-        old_sid = getattr(session, 'sid', None)
-        old_new = getattr(session, 'new', True)
-        if old_sid and not old_new and old_sid != row['sid']:
-            # This browser held a different session on this host: it is
-            # replaced, so drop its row rather than orphan it.
-            db.execute('DELETE FROM app_sessions WHERE sid = %s', (old_sid,))
-            db.commit()
-        session.clear()
-        session.sid = row['sid']
-        session.new = False
-        session.update(data)
-        _populate_session_from_user(user)
-        session.permanent = True
-        session.modified = True      # save_session re-issues THIS host's cookie
-        _record_connection(db, user['id'])
-        log_audit(db, 'SESSION_HANDOFF', 'user', user['id'],
-                  detail=f"from {_handoff_host(row['from_url']) or '?'} to {_handoff_host(own)}")
-        db.commit()
+        reason, user, data = _handoff_check(db, row, own)
+        if reason:
+            return _handoff_fail(reason)
+        if action != 'confirm' and here_uid != row['user_id']:
+            return _handoff_fail('not_confirmed')      # signed in/out meanwhile
+        return _handoff_complete(db, row, user, data, own)
     finally:
         db.close()
-    syslog_logger.info(
-        f"SESSION_HANDOFF user_id={row['user_id']} "
-        f"from={_handoff_host(row['from_url']) or '?'} to={_handoff_host(own)} "
-        f"ip={request.remote_addr}")
-    nxt = _safe_local_path(row['next_path'] or '') or url_for('index')
-    if session.get('is_document_viewer'):
-        nxt = url_for('viewer_home')
-    resp = redirect(nxt)
-    resp.headers['Cache-Control'] = 'no-store'
-    resp.headers['Referrer-Policy'] = 'no-referrer'
-    return resp
 
 
 if _limiter_available and limiter:
@@ -6456,7 +6572,7 @@ if _limiter_available and limiter:
     def auth_handoff_start():
         return _auth_handoff_start_route()
 
-    @app.route('/auth/handoff')
+    @app.route('/auth/handoff', methods=['GET', 'POST'])
     @limiter.limit("30 per minute")
     def auth_handoff():
         return _auth_handoff_route()
@@ -6465,7 +6581,7 @@ else:
     def auth_handoff_start():
         return _auth_handoff_start_route()
 
-    @app.route('/auth/handoff')
+    @app.route('/auth/handoff', methods=['GET', 'POST'])
     def auth_handoff():
         return _auth_handoff_route()
 
