@@ -26,6 +26,15 @@ except Exception:
 }
 PORT=5400  # will be updated after DB is ready
 
+# Options: --with-ollama  also install Ollama (local AI) on THIS server,
+#                         bound to 127.0.0.1 only (3.55.0). Idempotent.
+WITH_OLLAMA=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --with-ollama) WITH_OLLAMA=1 ;;
+    esac
+done
+
 # ── Colours ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
@@ -146,6 +155,92 @@ APTCONF
     fi
 else
     warn "Not root — automatic security updates not checked. Run: sudo bash install.sh"
+fi
+
+# ── Ollama — local AI (only with --with-ollama) ───────────────────────────────
+# Ollama has NO authentication, so it must only ever listen on 127.0.0.1:
+# 321Theater talks to the Ollama on its own machine and hands AI work to a
+# server that has one through its job queue — never across the network. The
+# official installer creates ollama.service; we add ONE drop-in of our own
+# that pins OLLAMA_HOST to 127.0.0.1 (an admin's own drop-ins / override.conf
+# are never edited), then check the EFFECTIVE value and warn if anything else
+# opens it up. Re-running is safe. Settings → AI shows each server's status.
+if [ "$WITH_OLLAMA" -eq 1 ]; then
+    step "Ollama (local AI, bound to 127.0.0.1)..."
+    if [ "$(id -u)" -ne 0 ]; then
+        warn "--with-ollama needs root. Run: sudo bash install.sh --with-ollama"
+    elif ! command -v systemctl &>/dev/null; then
+        warn "systemd not found — install Ollama by hand and run it with OLLAMA_HOST=127.0.0.1:11434."
+    else
+        if command -v ollama &>/dev/null || [ -x /usr/local/bin/ollama ] || [ -x /usr/bin/ollama ]; then
+            info "Ollama already installed — not reinstalling (update it with Ollama's own installer)."
+        else
+            if ! command -v curl &>/dev/null && command -v apt-get &>/dev/null; then
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl >/dev/null 2>&1 || true
+            fi
+            OLLAMA_TMP="$(mktemp -d)"
+            if curl -fsSL https://ollama.com/install.sh -o "${OLLAMA_TMP}/ollama-install.sh"; then
+                info "Running the official Ollama installer..."
+                sh "${OLLAMA_TMP}/ollama-install.sh" || warn "The Ollama installer reported an error (see above)."
+            else
+                warn "Could not download the Ollama installer from ollama.com (network / proxy?)."
+            fi
+            rm -rf "$OLLAMA_TMP"
+        fi
+        if systemctl cat ollama.service &>/dev/null; then
+            OLLAMA_DROPIN_DIR=/etc/systemd/system/ollama.service.d
+            OLLAMA_DROPIN="${OLLAMA_DROPIN_DIR}/50-321theater-localhost.conf"
+            OLLAMA_WANT=$'# Written by 321Theater install.sh --with-ollama — Ollama has no password,\n# so it listens on this machine only. Delete this file to manage it yourself.\n[Service]\nEnvironment="OLLAMA_HOST=127.0.0.1:11434"'
+            mkdir -p "$OLLAMA_DROPIN_DIR"
+            OLLAMA_CHANGED=0
+            if [ -e "$OLLAMA_DROPIN" ] && ! grep -q '^# Written by 321Theater' "$OLLAMA_DROPIN"; then
+                info "Kept the existing ${OLLAMA_DROPIN} (not written by 321Theater)."
+            elif [ ! -e "$OLLAMA_DROPIN" ] || [ "$(cat "$OLLAMA_DROPIN")" != "$(printf '%b' "$OLLAMA_WANT")" ]; then
+                printf '%b\n' "$OLLAMA_WANT" > "$OLLAMA_DROPIN"
+                OLLAMA_CHANGED=1
+                info "Ollama pinned to 127.0.0.1:11434 (${OLLAMA_DROPIN})."
+            fi
+            systemctl daemon-reload
+            systemctl enable --now ollama >/dev/null 2>&1 || warn "Could not start ollama.service (journalctl -u ollama)."
+            [ "$OLLAMA_CHANGED" -eq 1 ] && systemctl restart ollama || true
+            # `|| true`: no OLLAMA_HOST at all must not abort the script (set -e / pipefail).
+            OLLAMA_EFF="$( { systemctl show ollama -p Environment --value 2>/dev/null | tr ' ' '\n' | grep '^OLLAMA_HOST=' || true; } | tail -1 | cut -d= -f2-)"
+            case "${OLLAMA_EFF:-127.0.0.1:11434}" in
+                127.*|localhost*|"[::1]"*|::1*) ;;
+                *)
+                    warn "Ollama's effective OLLAMA_HOST is '${OLLAMA_EFF}' — another drop-in opens it to the network."
+                    warn "  Ollama has NO password. Remove that setting (systemctl cat ollama) so it listens on 127.0.0.1." ;;
+            esac
+            # The sockets Ollama ACTUALLY listens on (an EnvironmentFile= or a
+            # manual setting is not in `systemctl show -p Environment`).
+            OLLAMA_LISTEN=""
+            if command -v ss >/dev/null 2>&1; then
+                for _i in 1 2 3 4 5 6 7 8 9 10; do
+                    OLLAMA_LISTEN="$( { ss -Hltnp 2>/dev/null | grep '"ollama"' || true; } | awk '{print $4}' | sort -u | tr '\n' ' ')"
+                    [ -n "$OLLAMA_LISTEN" ] && break
+                    sleep 1
+                done
+            fi
+            OLLAMA_OPEN=""
+            for _a in $OLLAMA_LISTEN; do
+                case "$_a" in
+                    127.*|"[::1]":*|"[::ffff:127."*) ;;
+                    *) OLLAMA_OPEN="${OLLAMA_OPEN}${_a} " ;;
+                esac
+            done
+            if [ -n "$OLLAMA_OPEN" ]; then
+                warn "Ollama is listening on ${OLLAMA_OPEN}— reachable from the network, and it has NO password."
+                warn "  Find what sets OLLAMA_HOST (systemctl cat ollama, any EnvironmentFile=) and make it 127.0.0.1:11434."
+            elif [ -n "$OLLAMA_LISTEN" ]; then
+                info "Ollama listens on ${OLLAMA_LISTEN}(this machine only)."
+            else
+                warn "Could not see Ollama's listening socket — check it with: ss -ltnp | grep ollama"
+            fi
+            info "Next: pull the model from Settings → AI (Pull model), or: ollama pull <model>"
+        else
+            warn "ollama.service was not found after install — check the installer output above."
+        fi
+    fi
 fi
 
 # ── Backup directories ────────────────────────────────────────────────────────

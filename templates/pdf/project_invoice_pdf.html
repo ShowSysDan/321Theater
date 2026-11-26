@@ -1,0 +1,181 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+
+  Project quote / invoice — projects_docs_module._invoice() (+ the POSTed
+  free text `t`: number, bill_to, notes). Same skeleton and neutral palette
+  as project_summary_pdf.html (a project is not tied to one venue, so there
+  is no venue theming). Rules:
+    - every value is pre-formatted text; autoescape keeps it inert — never
+      add |safe here;
+    - the template does no arithmetic: every total comes from the server;
+    - no @font-face and no external resource (the renderer refuses to fetch
+      anything but the inline data: logo).
+#}
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page {
+    size: Letter;
+    margin: 14mm 13mm 16mm 13mm;
+    @bottom-left   { content: element(footerLeft); font-family: Arial, Helvetica, sans-serif; font-size: 6.5pt; color: #888; }
+    @bottom-right  { content: "Page " counter(page) " of " counter(pages); font-family: Arial, Helvetica, sans-serif; font-size: 6.5pt; color: #888; white-space: nowrap; }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 9.5px; color: #1a1a1a; margin: 0; line-height: 1.35; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2.5px solid #1a4a7a; padding-bottom: 10px; margin-bottom: 12px; }
+  .doc-type { font-size: 8px; font-weight: bold; color: #B8840A; letter-spacing: 0.12em; text-transform: uppercase; }
+  .org-name { font-size: 15px; font-weight: 900; color: #1a4a7a; margin-top: 2px; }
+  .doc-title { text-align: right; max-width: 55%; }
+  .doc-title h1 { font-size: 22px; font-weight: 900; color: #1a4a7a; margin: 0 0 3px 0; letter-spacing: .04em; text-transform: uppercase; }
+  .doc-title .meta { font-size: 8.5px; color: #555; }
+  .doc-title .meta b { color: #1a1a1a; }
+  .parties { display: flex; gap: 16px; margin-bottom: 8px; }
+  .parties > div { flex: 1 1 0; min-width: 0; }
+  .box-label { font-size: 7.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #666; margin-bottom: 2px; }
+  .prose { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; }
+  .project-name { font-size: 12px; font-weight: 700; color: #1a1a1a; overflow-wrap: anywhere; }
+  .facts { background: #f5f5f5; border-left: 3px solid #B8840A; padding: 7px 12px; margin-bottom: 4px; font-size: 9px; color: #444; }
+  .facts span { display: inline-block; margin-right: 18px; }
+  .facts b { color: #1a1a1a; }
+  .section-title { font-size: 8.5px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #1a4a7a; border-bottom: 1px solid #1a4a7a; padding-bottom: 3px; margin: 15px 0 5px 0; break-after: avoid; }
+  .section-title .n { color: #888; font-weight: 400; letter-spacing: 0; text-transform: none; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; }
+  th { font-size: 7.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: #666; padding: 4px 5px; border-bottom: 1px solid #ccc; text-align: left; }
+  td { padding: 3.5px 5px; border-bottom: 1px solid #eee; vertical-align: top; overflow-wrap: anywhere; }
+  tr.group td { font-weight: 700; color: #1a4a7a; background: #f1f4f8; border-bottom: 1px solid #dde3ea; padding-top: 5px; }
+  tr.group td .sub { font-weight: 400; color: #666; margin-left: 6px; }
+  tr.subtotal td { font-weight: 700; border-bottom: 1px solid #ccc; }
+  tr.total td { font-weight: 700; border-top: 1.5px solid #1a4a7a; border-bottom: none; background: #fff; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .muted { color: #777; }
+  .totals { margin: 16px 0 0 auto; width: 46%; break-inside: avoid; }
+  .totals td { padding: 4px 6px; }
+  .totals tr.grand td { font-size: 12px; font-weight: 900; color: #1a4a7a; border-top: 2px solid #1a4a7a; border-bottom: none; padding-top: 6px; }
+  .note-list { margin: 4px 0 0 0; padding-left: 14px; color: #555; font-size: 8.5px; }
+  .footer-left { position: running(footerLeft); font-size: 6.5pt; color: #888; }
+  .basis { font-size: 8px; color: #666; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <div class="footer-left">3·2·1→Theater · Project {{ inv.doc_label|lower }} · {{ generated }}</div>
+  <div class="header">
+    <div>
+      {% if logo %}<img src="{{ logo }}" alt="Logo" style="max-height:52px;max-width:180px;object-fit:contain">{% endif %}
+      <div class="doc-type">Project {{ inv.doc_label|lower }}</div>
+      <div class="org-name">Dr. Phillips Center for the Performing Arts</div>
+    </div>
+    <div class="doc-title">
+      <h1>{{ inv.doc_label }}</h1>
+      <div class="meta">
+        {% if t.number %}<b>No.</b> {{ t.number }} · {% endif %}<b>Date</b> {{ issued }}
+      </div>
+      <div class="meta">Prepared by {{ generated_by }}</div>
+    </div>
+  </div>
+
+  <div class="parties">
+    <div>
+      <div class="box-label">Project</div>
+      <div class="project-name">{{ inv.project }}</div>
+    </div>
+    {% if t.bill_to %}
+    <div>
+      <div class="box-label">{{ 'Prepared for' if inv.doc == 'quote' else 'Bill to' }}</div>
+      <div class="prose">{{ t.bill_to }}</div>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="facts">
+    <span><b>Covers</b> {{ inv.scope_text }}</span>
+    <span><b>Figures</b> {{ inv.basis_label }}</span>
+  </div>
+
+  <div class="section-title">Budget lines <span class="n">· {{ inv.line_count }}</span></div>
+  {% if inv.groups %}
+  <table>
+    <colgroup><col style="width: 52%"><col style="width: 30%"><col style="width: 18%"></colgroup>
+    <thead><tr><th>Item</th><th>{{ 'Category' if inv.group == 'task' else 'Task' }}</th><th class="num">{{ inv.basis_label }}</th></tr></thead>
+    <tbody>
+      {% for g in inv.groups %}
+      <tr class="group"><td colspan="3">{{ g.name }}{% if g.sub %}<span class="sub">{{ g.sub }}</span>{% endif %}</td></tr>
+      {% for ln in g.lines %}
+      <tr>
+        <td>{{ ln.description }}</td>
+        <td class="muted">{{ ln.category if inv.group == 'task' else ln.task }}</td>
+        <td class="num">{{ ln.amount_text }}</td>
+      </tr>
+      {% endfor %}
+      {% if inv.groups|length > 1 %}
+      <tr class="subtotal"><td colspan="2" class="num">{{ g.name }} subtotal</td><td class="num">{{ g.total_text }}</td></tr>
+      {% endif %}
+      {% endfor %}
+      <tr class="total"><td colspan="2">Budget lines total</td><td class="num">{{ inv.lines_total_text }}</td></tr>
+    </tbody>
+  </table>
+  {% else %}
+  <div class="muted">No budget lines in this selection.</div>
+  {% endif %}
+
+  {% if inv.shows %}
+  <div class="section-title">Show costs <span class="n">· {{ inv.shows|length }}</span></div>
+  <table>
+    <colgroup>
+      <col style="width: {{ 40 + (0 if inv.show_cols.assets else 24) + (0 if inv.show_cols.piano else 12) + (0 if inv.show_cols.labor else 12) }}%">
+      {% if inv.show_cols.assets %}<col style="width: 12%"><col style="width: 12%">{% endif %}
+      {% if inv.show_cols.piano %}<col style="width: 12%">{% endif %}
+      {% if inv.show_cols.labor %}<col style="width: 12%">{% endif %}
+      <col style="width: 12%">
+    </colgroup>
+    <thead><tr>
+      <th>Show</th>
+      {% if inv.show_cols.assets %}<th class="num">Assets</th><th class="num">External</th>{% endif %}
+      {% if inv.show_cols.piano %}<th class="num">Piano</th>{% endif %}
+      {% if inv.show_cols.labor %}<th class="num">Labor</th>{% endif %}
+      <th class="num">Total</th>
+    </tr></thead>
+    <tbody>
+      {% for s in inv.shows %}
+      <tr>
+        <td>{{ s.name }}<div class="muted">{{ s.dates }}{% if s.venue %} · {{ s.venue }}{% endif %}{% if s.labor_note %} · {{ s.labor_note }}{% endif %}</div></td>
+        {% if inv.show_cols.assets %}<td class="num">{{ s.assets_text }}</td><td class="num">{{ s.external_text }}</td>{% endif %}
+        {% if inv.show_cols.piano %}<td class="num">{{ s.piano_text }}</td>{% endif %}
+        {% if inv.show_cols.labor %}<td class="num">{{ s.labor_text }}</td>{% endif %}
+        <td class="num">{{ s.total_text }}</td>
+      </tr>
+      {% endfor %}
+      <tr class="total">
+        <td colspan="{{ 1 + (2 if inv.show_cols.assets else 0) + (1 if inv.show_cols.piano else 0) + (1 if inv.show_cols.labor else 0) }}">Show costs total</td>
+        <td class="num">{{ inv.shows_total_text }}</td>
+      </tr>
+    </tbody>
+  </table>
+  {% endif %}
+
+  <table class="totals">
+    <tbody>
+      <tr><td>Budget lines</td><td class="num">{{ inv.lines_total_text }}</td></tr>
+      {% if inv.shows %}<tr><td>Show costs</td><td class="num">{{ inv.shows_total_text }}</td></tr>{% endif %}
+      <tr class="grand"><td>{{ 'Quote total' if inv.doc == 'quote' else 'Total due' }}</td><td class="num">{{ inv.total_text }}</td></tr>
+    </tbody>
+  </table>
+
+  {% if t.notes %}
+  <div class="section-title">Notes</div>
+  <div class="prose">{{ t.notes }}</div>
+  {% endif %}
+
+  <div class="basis">{{ inv.basis_label }}: {{ inv.basis_help }}</div>
+  {% if inv.notes %}
+  <ul class="note-list">
+    {% for n in inv.notes %}<li>{{ n }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+</body>
+</html>

@@ -80,7 +80,10 @@ class SnapshotReadError(Exception):
 RESTORE_BLOCKED = {
     'users', 'user_pending_registration',
     'app_sessions', 'active_sessions', 'password_reset_tokens',
-    'gateway_otp_codes', 'ai_sessions',
+    'gateway_otp_codes', 'ai_sessions', 'session_handoffs',
+    # AI job queue + weekly e-mail ledger (3.55.0): rewinding the ledger
+    # would re-send a week's summary; queue rows are transient work.
+    'ai_jobs', 'ai_weekly_email_log',
     'audit_log', 'email_send_log', 'email_outbox_log', 'export_log',
     'email_messages', 'email_message_attachments',
     'cluster_instances', 'perf_page_stats', 'perf_slow_queries',
@@ -110,7 +113,7 @@ UNLISTED_TABLES = {
     'pm_access', 'pm_projects', 'pm_members', 'pm_contacts', 'pm_tasks',
     'pm_task_deps', 'pm_task_alerts', 'pm_comments', 'pm_activity', 'pm_shows',
     'pm_files', 'pm_file_versions', 'pm_budget_lines', 'pm_budget_history',
-    'pm_budget_sources', 'pm_notes', 'pm_note_versions',
+    'pm_budget_sources', 'pm_notes', 'pm_note_versions', 'pm_markers',
 }
 PRIVATE_TABLES |= UNLISTED_TABLES
 RESTORE_BLOCKED |= UNLISTED_TABLES

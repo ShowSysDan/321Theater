@@ -360,6 +360,24 @@
         <span class="sidebar-meta-sep" aria-hidden="true">·</span>
         <button type="button" class="view-mode-link" onclick="setSiteMode('{{ 'desktop' if is_mobile_view else 'mobile' }}')">{{ 'Desktop site' if is_mobile_view else 'Mobile site' }}</button>
         {% if view_mode_forced %}<button type="button" class="view-mode-link" onclick="setSiteMode('auto')" title="Clear the forced mode and follow device auto-detection">(auto)</button>{% endif %}
+        {% if handoff_peers %}
+        {# "Switch server" (3.56.0): open this page on another live server,
+           still signed in. Each entry is a same-origin POST (CSRF-checked);
+           the server builds the link from the heartbeat, never from here. #}
+        <span class="sidebar-meta-sep" aria-hidden="true">·</span>
+        <details class="srv-switch">
+          <summary class="view-mode-link" title="Open this page on another server, still signed in">Switch server ▸</summary>
+          <div class="srv-switch-menu" role="menu">
+            {% for p in handoff_peers %}
+            <form method="post" action="{{ url_for('auth_handoff_start') }}">
+              <input type="hidden" name="server" value="{{ p.key }}">
+              <input type="hidden" name="next" value="{{ request.full_path.rstrip('?') }}">
+              <button type="submit" role="menuitem" class="srv-switch-item"><span class="srv-switch-name">{{ p.label }}</span><span class="srv-switch-host">{{ p.host }}</span></button>
+            </form>
+            {% endfor %}
+          </div>
+        </details>
+        {% endif %}
       </div>
       {% if test_mode %}
       {# Icon rail only: the meta line is hidden there, this short tag stays. #}
@@ -1076,6 +1094,7 @@ const _HELP_PAGES = {
         <li><strong>Item History</strong>: tick one or several items (a group counts everything under it), then optionally just some of their units — for example three of your four projectors. <strong>Usage by unit</strong> gives each unit's times rented, shows, days rented, utilization (pick a From and To date), income and last show; units that never went out are listed dimmed, and bookings made without picking a unit are on a <em>(no unit picked)</em> row. <strong>Usage by item</strong> compares the items when you picked more than one. Below: every show that rented them. Click a unit row to see only that unit. An item's drill-down on the Assets tab links here too.</li>
         <li><strong>Rental Lines</strong>: every asset line. Pick a category and/or item type and press <strong>Apply</strong>.</li>
         <li><strong>Sound Levels</strong> (when the Spot module is on): every performance the venue's sound sensors measured — Leq (the overall level), peak and when, L10 / L50 / L90, minutes measured. <strong>Flag at</strong> marks performances at or over a level you type. <strong>Compare by</strong> groups them by sensor, venue, Arts Group, show, month, day of week, start hour, or the answers to any advance-sheet field. To see what goes with louder shows, also narrow the shows with <em>More filters</em> — Had item booked, Job position, Technician. Averages are worked on the energy scale and dBA / dBC are never mixed.</li>
+        <li><strong>Weekly Summary</strong> (while AI is on): pick the week and <strong>Generate</strong> — a server with the AI model writes a one-page executive summary of that week's post-show notes and comments (headline, highlights, issues, follow-ups, labor settlement, every show). It runs in the background; <strong>Open PDF</strong> opens a finished one without running the AI again, <strong>Regenerate</strong> writes it fresh. Labor dollars show only if you can see labor reports. It is an AI-assisted draft — check against each show's Post-Show tab.</li>
         <li><strong>Labor &amp; Techs</strong>: for each technician, scheduled, settled, training and overhead shifts and hours; for each position, requested against filled.</li>
         <li><strong>Labor Lines</strong>: every shift, with its scheduled tech and, once settled, the actual times and Worked by. Example: Had item = a projector plus Position = Video Tech lists who was the video tech.</li>
         <li><strong>Break Exceptions</strong>: settled shifts whose lunch was not taken, shorter or longer than scheduled, added, or moved, broken down by tech, position and show.</li>
@@ -1184,7 +1203,7 @@ const _HELP_PAGES = {
         <li><strong>Backups</strong> — hourly and daily database backups: <strong>Run Backup Now</strong>, ↓ Download.</li>
         <li><strong>Files</strong> — the upload size limit, and a file manager for every show's files (× archive, ↩ restore, ✕ delete an archived file for good).</li>
         <li><strong>Database</strong> — connection status and Test Connection; file storage (S3 endpoints, keys, bucket); file redundancy (keep copies in S3 and / or the database, which to read first, <strong>Copy S3 → Database</strong>, <strong>Copy Database → S3</strong>, <strong>Verify Both Copies</strong>).</li>
-        <li><strong>AI</strong> — Ollama URL and model, Test Connection, the system prompt, and how many AI sessions may run at once.</li>
+        <li><strong>AI</strong> — turn AI on, the model and this server's Ollama URL (localhost only), Test this server, the Servers list (Ollama installed / running / model on each server, Pull model, the install command), the system prompt, how many AI jobs may run at once, and the weekly summary e-mail.</li>
         <li><strong>Cluster</strong> — this server, the other servers found and which is leader; heartbeat settings and the force-leader override.</li>
       </ul>
       <p style="margin:10px 0 0"><strong>Admin tools</strong></p>

@@ -1,0 +1,486 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+#}
+{% extends "base.html" %}
+{% block title %}Show Readiness — 3·2·1→Theater{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Show Readiness <span class="rd-beta">BETA</span></h1>
+    <p class="page-sub">How ready each upcoming show is for showtime. Admins only — nobody else sees these numbers yet.</p>
+  </div>
+  <div class="about-head-actions">
+    <a href="{{ url_for('settings') }}" class="btn btn-ghost">← Settings</a>
+  </div>
+</div>
+
+<div class="rd-preview-banner" id="rd-preview-banner" hidden role="status">
+  Previewing <strong>unsaved</strong> scoring settings — nothing has been saved.
+  <button type="button" class="btn btn-ghost btn-sm" id="rd-preview-exit">Back to saved settings</button>
+</div>
+
+<div class="form-section" id="rd-card-section" hidden>
+  <div class="form-section-header"><span class="section-icon">◈</span> <span id="rd-card-title">SHOW</span>
+    <button type="button" class="btn btn-ghost btn-sm rd-close" id="rd-card-close" aria-label="Close">Close ✕</button>
+  </div>
+  <div class="form-section-body" id="rd-card"></div>
+</div>
+
+<div class="form-section">
+  <div class="form-section-header"><span class="section-icon">◈</span> UPCOMING SHOWS</div>
+  <div class="form-section-body">
+    <div class="rd-filters">
+      <label class="field-group rd-f-window"><span class="field-label">Starting within</span>
+        <select class="field-input field-input-sm" id="rd-window">
+          <option value="14">14 days</option><option value="30">30 days</option>
+          <option value="60">60 days</option><option value="120">120 days</option>
+          <option value="all">Any time</option>
+        </select></label>
+      <label class="field-group rd-f-q"><span class="field-label">Search</span>
+        <input type="search" class="field-input field-input-sm" id="rd-q" placeholder="Show or venue" maxlength="100" autocomplete="off"></label>
+      <label class="rd-check"><input type="checkbox" id="rd-test"> Include test shows</label>
+      <span class="text-dim rd-count" id="rd-count" role="status"></span>
+    </div>
+    <div class="rd-scroll">
+      <table class="data-table rd-table" id="rd-table">
+        <thead><tr>
+          <th>Show</th><th>Venue</th><th>First day</th><th class="rd-num">Days out</th><th>Ready</th>
+          <th class="rd-mini-h" title="Advance">A</th><th class="rd-mini-h" title="Schedule">S</th>
+          <th class="rd-mini-h" title="Labor requests">L</th><th class="rd-mini-h" title="Crew / scheduler">C</th>
+          <th class="rd-mini-h" title="Gear">G</th><th class="rd-num">Issues</th>
+        </tr></thead>
+        <tbody><tr><td colspan="11" class="text-dim">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<details class="form-section rd-settings" id="rd-settings">
+  <summary class="form-section-header"><span class="section-icon">◈</span> SCORING SETTINGS</summary>
+  <div class="form-section-body">
+    <p class="text-dim about-note">Change any value, press <strong>Preview</strong> to see every show above re-scored with it (nothing is saved), then <strong>Save</strong>. A weight of 0 turns that part off.</p>
+    <form id="rd-form" autocomplete="off" novalidate>
+      <h3 class="rd-h3">Weights</h3>
+      <div class="rd-grid" id="rd-weights"></div>
+      <h3 class="rd-h3">Advance</h3>
+      <div class="rd-grid" id="rd-adv"></div>
+      <h3 class="rd-h3">Schedule &amp; labor</h3>
+      <div class="rd-grid" id="rd-sched"></div>
+      <h3 class="rd-h3">Penalties <span class="text-dim rd-h3-sub">points taken off per problem</span></h3>
+      <div class="rd-grid" id="rd-pen"></div>
+      <p class="rd-form-msg" id="rd-form-msg" role="status"></p>
+      <div class="rd-actions">
+        <button type="button" class="btn btn-ghost" id="rd-btn-preview">Preview</button>
+        <button type="button" class="btn btn-primary" id="rd-btn-save">Save</button>
+        <button type="button" class="btn btn-ghost" id="rd-btn-undo">Discard changes</button>
+        <button type="button" class="btn btn-ghost" id="rd-btn-reset">Reset to defaults</button>
+      </div>
+    </form>
+  </div>
+</details>
+
+<script>
+(function () {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = String(text);
+    return n;
+  };
+  const clear = n => { while (n.firstChild) n.removeChild(n.firstChild); return n; };
+  const COMP = [['advance', 'Advance', 'A'], ['schedule', 'Schedule', 'S'], ['labor', 'Labor requests', 'L'],
+                ['crew', 'Crew / scheduler', 'C'], ['gear', 'Gear', 'G']];
+  const TAB_LABEL = {advance: 'Advance', schedule: 'Schedule', staffing: 'Labor', assets: 'Assets'};
+  // Fractions edited as percentages in the form.
+  const PCT_KEYS = new Set(['advance_target', 'adv_key_penalty', 'labor_day_floor']);
+  const S = {data: null, meta: null, saved: null, preview: null, open: null, seq: 0};
+
+  function tone(score) {
+    if (score == null) return 'none';
+    return score >= 90 ? 'ok' : score >= 67 ? 'good' : score >= 34 ? 'mid' : 'low';
+  }
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso + 'T12:00:00');
+    return d.toLocaleDateString(undefined, {weekday: 'short', month: 'short', day: 'numeric'});
+  }
+  function bar(pct, t) {
+    const b = el('span', 'rd-bar rd-t-' + t);
+    const f = el('span', 'rd-bar-fill');
+    f.style.width = Math.max(0, Math.min(100, pct || 0)) + '%';
+    b.appendChild(f);
+    return b;
+  }
+  function pacePill(p) {
+    if (!p) return null;
+    const cls = {'On track': 'ok', 'Behind': 'warn', 'At risk': 'error', 'In progress': 'info'}[p.label] || 'info';
+    const s = el('span', 'about-pill about-pill-' + cls + ' rd-pace', p.label);
+    if (p.target != null) s.title = 'Pace guide: about ' + p.target + '% by now (display only — it never changes the score)';
+    return s;
+  }
+
+  // ── List ────────────────────────────────────────────────────────────
+  function shows() { return (S.preview || S.data || {}).shows || []; }
+
+  function drawList() {
+    const tb = clear($('rd-table').tBodies[0]);
+    const list = shows(), d = S.preview || S.data;
+    $('rd-count').textContent = list.length + ' show' + (list.length === 1 ? '' : 's') +
+      (d && d.truncated ? ' (first ' + list.length + ' only)' : '');
+    if (!list.length) {
+      const tr = el('tr'), td = el('td', 'text-dim', 'No upcoming shows match.');
+      td.colSpan = 11; tr.appendChild(td); tb.appendChild(tr);
+      return;
+    }
+    list.forEach(r => {
+      const tr = el('tr', 'rd-row' + (S.open === r.id ? ' rd-row-open' : ''));
+      tr.tabIndex = 0;
+      tr.dataset.id = r.id;
+      const name = el('td', 'rd-name');
+      const a = el('a', null, r.show.name || ('Show #' + r.id));
+      a.href = '/shows/' + r.id;
+      a.addEventListener('click', e => e.stopPropagation());
+      name.appendChild(a);
+      if (r.show.is_test) name.appendChild(el('span', 'rd-tag', 'TEST'));
+      tr.appendChild(name);
+      tr.appendChild(el('td', 'rd-venue', r.show.venue || '—'));
+      tr.appendChild(el('td', 'rd-nowrap', fmtDate(r.first_day)));
+      tr.appendChild(el('td', 'rd-num', r.days_out == null ? '—' : r.days_out));
+      const sc = el('td', 'rd-score');
+      const t = tone(r.score);
+      sc.appendChild(el('span', 'rd-pill rd-t-' + t, r.score == null ? '—' : r.score + '%'));
+      sc.appendChild(bar(r.score, t));
+      const pp = pacePill(r.pace); if (pp) sc.appendChild(pp);
+      tr.appendChild(sc);
+      COMP.forEach(([k, label]) => {
+        const c = (r.components || {})[k] || {};
+        const td = el('td', 'rd-mini');
+        if (c.applies) {
+          td.textContent = c.pct;
+          td.classList.add('rd-t-' + tone(c.pct));
+          td.title = label + ': ' + c.pct + '%';
+        } else {
+          td.textContent = 'n/a';
+          td.classList.add(c.amber ? 'rd-na-amber' : 'rd-na');
+          td.title = label + ': ' + (c.reason || 'not counted');
+        }
+        tr.appendChild(td);
+      });
+      const iss = r.issues || [];
+      const errs = iss.filter(i => i.sev === 'error').length;
+      const ic = el('td', 'rd-num');
+      ic.textContent = iss.filter(i => i.sev !== 'info').length || '—';
+      if (errs) ic.classList.add('rd-has-err');
+      tr.appendChild(ic);
+      const open = () => openCard(r.id);
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+      tb.appendChild(tr);
+    });
+  }
+
+  // ── Card ────────────────────────────────────────────────────────────
+  async function openCard(id) {
+    S.open = id;
+    let r = shows().find(x => x.id === id);
+    if (!r) {
+      try {
+        const resp = await fetch('/settings/readiness/show/' + encodeURIComponent(id), {credentials: 'same-origin', headers: {'Accept': 'application/json'}});
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        r = await resp.json();
+      } catch (e) { return; }
+    }
+    drawCard(r);
+    drawList();
+    $('rd-card-section').hidden = false;
+    $('rd-card-section').scrollIntoView({behavior: 'smooth', block: 'start'});
+  }
+
+  function drawCard(r) {
+    $('rd-card-title').textContent = (r.show && r.show.name ? r.show.name : 'Show #' + r.id).toUpperCase();
+    const box = clear($('rd-card'));
+    const t = tone(r.score);
+    const head = el('div', 'rd-card-head');
+    const big = el('div', 'rd-big rd-t-' + t, r.score == null ? '—' : r.score + '%');
+    head.appendChild(big);
+    const hm = el('div', 'rd-head-meta');
+    hm.appendChild(el('div', 'rd-band', r.band));
+    hm.appendChild(el('div', 'rd-headline', r.headline));
+    const sub = el('div', 'rd-sub');
+    const bits = [];
+    if (r.show && r.show.venue) bits.push(r.show.venue);
+    if (r.first_day) bits.push(fmtDate(r.first_day) + (r.last_day && r.last_day !== r.first_day ? ' – ' + fmtDate(r.last_day) : ''));
+    if (r.days_out != null) bits.push(r.days_out >= 0 ? r.days_out + ' days out' : 'started ' + (-r.days_out) + ' days ago');
+    sub.textContent = bits.join(' · ');
+    hm.appendChild(sub);
+    const row = el('div', 'rd-head-row');
+    const pp = pacePill(r.pace); if (pp) row.appendChild(pp);
+    const go = el('a', 'btn btn-ghost btn-sm', 'Open show →'); go.href = '/shows/' + r.id;
+    row.appendChild(go);
+    hm.appendChild(row);
+    if (r.base != null) {
+      hm.appendChild(el('div', 'text-dim rd-math',
+        'Parts score ' + Math.floor(r.base) + '%' + (r.penalty ? ' − ' + r.penalty + ' penalty point' + (r.penalty === 1 ? '' : 's') +
+        (r.penalty_raw > r.penalty ? ' (capped from ' + r.penalty_raw + ')' : '') : '') + ' = ' + (r.score == null ? '—' : r.score + '%')));
+      if (r.scheduler_floor != null) {
+        hm.appendChild(el('div', 'text-dim rd-math',
+          'Scheduling-gap points reduced: starting to schedule never scores below nothing scheduled (' + r.scheduler_floor + '%).'));
+      }
+    }
+    head.appendChild(hm);
+    box.appendChild(head);
+    if (r.error) box.appendChild(el('p', 'rd-err', 'Could not score this show (' + r.error + ').'));
+
+    // Components
+    const comps = el('div', 'rd-comps');
+    COMP.forEach(([k, label]) => {
+      const c = (r.components || {})[k];
+      if (!c) return;
+      const line = el('div', 'rd-comp' + (c.applies ? '' : ' rd-comp-na'));
+      const top = el('div', 'rd-comp-top');
+      top.appendChild(el('span', 'rd-comp-name', label));
+      if (c.applies) {
+        top.appendChild(el('span', 'rd-comp-pct rd-t-' + tone(c.pct), c.pct + '%'));
+        top.appendChild(el('span', 'text-dim rd-comp-w', c.share + '% of the score'));
+      } else {
+        top.appendChild(el('span', 'rd-comp-pct ' + (c.amber ? 'rd-na-amber' : 'rd-na'), 'n/a'));
+        top.appendChild(el('span', 'text-dim rd-comp-w', 'not counted'));
+      }
+      line.appendChild(top);
+      if (c.applies) line.appendChild(bar(c.pct, tone(c.pct)));
+      const ul = el('ul', 'rd-comp-lines');
+      (c.applies ? c.lines : [c.reason]).forEach(x => { if (x) ul.appendChild(el('li', null, x)); });
+      if (k === 'advance' && c.detail && c.detail.last_edit) {
+        ul.appendChild(el('li', 'text-dim', 'Last advance edit ' + new Date(parseServerTime(c.detail.last_edit)).toLocaleString()));
+      }
+      if (k === 'gear' && c.detail && c.detail.approved_at && c.applies) {
+        ul.appendChild(el('li', 'text-dim', 'Approved ' + new Date(parseServerTime(c.detail.approved_at)).toLocaleString()));
+      }
+      line.appendChild(ul);
+      comps.appendChild(line);
+    });
+    box.appendChild(comps);
+
+    // Scheduler
+    const sch = r.scheduler || {};
+    const sd = el('div', 'rd-sched-status');
+    sd.appendChild(el('span', 'field-label', 'Scheduler'));
+    const st = el('span', 'about-pill about-pill-' + (!sch.lines ? 'info' : sch.scheduled === sch.lines ? 'ok' : sch.responded ? 'warn' : 'error'), sch.status || '—');
+    sd.appendChild(st);
+    if (sch.last_update) sd.appendChild(el('span', 'text-dim rd-small', 'last update ' + new Date(parseServerTime(sch.last_update)).toLocaleString()));
+    box.appendChild(sd);
+
+    // Day strip
+    if ((r.days || []).length) {
+      box.appendChild(el('div', 'field-label rd-label', 'Day by day'));
+      const wrap = el('div', 'rd-days');
+      r.days.forEach(d => {
+        const c = el('div', 'rd-day' + (d.dark ? ' rd-day-dark' : ''));
+        c.appendChild(el('div', 'rd-day-date', d.label));
+        c.appendChild(el('div', 'rd-day-role', d.roles.join(' · ')));
+        const sc = el('div', 'rd-day-sched ' + (d.dark ? 'rd-na' : d.sched_credit >= 1 ? 'rd-t-ok' : d.sched_credit > 0 ? 'rd-t-mid' : 'rd-t-low'));
+        sc.textContent = d.dark ? 'dark' : (d.sched_rows ? d.sched_rows + ' sched. row' + (d.sched_rows === 1 ? '' : 's') : 'no schedule');
+        c.appendChild(sc);
+        const lb = el('div', 'rd-day-labor ' + (!d.labor_req ? 'rd-na' : d.labor_sched === d.labor_req ? 'rd-t-ok' : d.labor_sched ? 'rd-t-mid' : 'rd-t-low'));
+        lb.textContent = d.labor_req ? d.labor_sched + '/' + d.labor_req + ' crew' : 'no labor';
+        c.appendChild(lb);
+        wrap.appendChild(c);
+      });
+      box.appendChild(wrap);
+    }
+
+    // Issues
+    const iss = r.issues || [];
+    box.appendChild(el('div', 'field-label rd-label', iss.length ? 'What to fix' : 'Nothing flagged'));
+    if (iss.length) {
+      const ul = el('ul', 'rd-issues');
+      iss.forEach(i => {
+        const li = el('li', 'rd-issue');
+        li.appendChild(el('span', 'about-pill about-pill-' + (i.sev === 'warn' ? 'warn' : i.sev === 'error' ? 'error' : 'info'),
+          i.sev === 'error' ? 'Fix' : i.sev === 'warn' ? 'Check' : 'FYI'));
+        li.appendChild(el('span', 'rd-issue-text', i.text));
+        if (i.points) li.appendChild(el('span', 'rd-issue-pts', '−' + i.points));
+        if (i.tab && TAB_LABEL[i.tab]) {
+          const a = el('a', 'rd-issue-link', 'Open ' + TAB_LABEL[i.tab] + ' →');
+          a.href = '/shows/' + r.id + '?tab=' + encodeURIComponent(i.tab);
+          li.appendChild(a);
+        }
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    }
+    (r.config_warnings || []).forEach(w => box.appendChild(el('p', 'rd-cfg-warn', 'Settings: ' + w)));
+  }
+
+  $('rd-card-close').addEventListener('click', () => {
+    $('rd-card-section').hidden = true; S.open = null; drawList();
+  });
+
+  // ── Loading ─────────────────────────────────────────────────────────
+  function listArgs() {
+    return {window: $('rd-window').value, q: $('rd-q').value.trim(), include_test: $('rd-test').checked ? '1' : ''};
+  }
+  function refreshOpen() {
+    if (S.open == null) return;
+    const r = shows().find(x => x.id === S.open);
+    if (r) drawCard(r);
+  }
+  async function load(first) {
+    const my = ++S.seq;
+    const a = listArgs();
+    const qs = new URLSearchParams();
+    if (!first) { qs.set('window', a.window); if (a.q) qs.set('q', a.q); if (a.include_test) qs.set('include_test', '1'); }
+    try {
+      const r = await fetch('/settings/readiness/data?' + qs, {credentials: 'same-origin', cache: 'no-store', headers: {'Accept': 'application/json'}});
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      if (my !== S.seq) return;
+      S.data = d; S.preview = null; $('rd-preview-banner').hidden = true;
+      if (first) {
+        S.meta = d.meta;
+        $('rd-window').value = String(d.window);
+        if (!$('rd-window').value) $('rd-window').value = '60';
+      }
+      S.saved = d.knobs;
+      if (first || !S.formDirty) fillForm(d.knobs);
+      drawList(); refreshOpen();
+    } catch (e) {
+      if (my === S.seq) $('rd-count').textContent = 'Could not load (' + e.message + ').';
+    }
+  }
+  async function preview() {
+    const knobs = readForm();
+    if (!knobs) return;
+    const my = ++S.seq;
+    msg('Working…');
+    try {
+      const r = await fetch('/settings/readiness/preview', {method: 'POST', credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+        body: JSON.stringify(Object.assign({knobs}, listArgs()))});
+      const d = await r.json().catch(() => ({}));
+      if (my !== S.seq) return;
+      if (!r.ok || !d.success) { msg(d.error || ('Preview failed (HTTP ' + r.status + ')'), true); return; }
+      S.preview = d; $('rd-preview-banner').hidden = false;
+      msg('Preview shown above — not saved.');
+      drawList(); refreshOpen();
+    } catch (e) { if (my === S.seq) msg('Preview failed: ' + e.message, true); }
+  }
+  async function save(reset) {
+    const body = reset ? {reset: true} : {knobs: readForm()};
+    if (!reset && !body.knobs) return;
+    if (reset && !confirm('Put every readiness setting back to its default?')) return;
+    msg('Saving…');
+    try {
+      const r = await fetch('/settings/readiness/config', {method: 'POST', credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+        body: JSON.stringify(body)});
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.success) { msg(d.error || ('Save failed (HTTP ' + r.status + ')'), true); return; }
+      S.formDirty = false;
+      fillForm(d.knobs);
+      msg(reset ? 'Defaults restored.' : (d.changed.length ? 'Saved (' + d.changed.length + ' change' + (d.changed.length === 1 ? '' : 's') + ').' : 'Saved — nothing changed.'));
+      load(false);
+    } catch (e) { msg('Save failed: ' + e.message, true); }
+  }
+
+  // ── Settings form ───────────────────────────────────────────────────
+  const GROUPS = {
+    'rd-weights': [['w_advance', 'Advance'], ['w_schedule', 'Schedule'], ['w_labor', 'Labor requests'],
+                   ['w_crew', 'Crew / scheduler'], ['w_gear', 'Gear']],
+    'rd-adv': [['advance_target', '% filled that counts as full', '%'],
+               ['adv_required_keys', 'Must-answer field keys (comma list)', 'keys'],
+               ['adv_key_penalty', 'Cut per blank must-answer field', '%']],
+    'rd-sched': [['sched_min_rows', 'Schedule rows for a full day'],
+                 ['labor_cue_keys', 'Labor question field keys, in order: load-in, show call, load-out', 'keys'],
+                 ['labor_day_floor', 'Labor credit with some days covered', '%'],
+                 ['labor_grace_days', 'Expect labor from this many days out'],
+                 ['window_days', 'Default list window (days)']],
+  };
+  function buildForm() {
+    const m = S.meta;
+    Object.entries(GROUPS).forEach(([id, items]) => items.forEach(it => addInput($(id), it[0], it[1], it[2])));
+    m.penalties.forEach(p => addInput($('rd-pen'), p.key, p.label));
+    addInput($('rd-pen'), 'penalty_cap', 'Most points taken off in total');
+  }
+  function addInput(box, key, label, kind) {
+    const rng = S.meta.ranges[key] || [];
+    const g = el('label', 'field-group rd-field' + (kind === 'keys' ? ' rd-field-wide' : ''));
+    g.appendChild(el('span', 'field-label', label));
+    const inp = el('input', 'field-input field-input-sm');
+    inp.dataset.key = key;
+    if (kind === 'keys') { inp.type = 'text'; inp.maxLength = 400; }
+    else {
+      inp.type = 'number'; inp.inputMode = 'decimal';
+      const pct = kind === '%';
+      inp.min = pct ? Math.round(rng[1] * 100) : rng[1];
+      inp.max = pct ? Math.round(rng[2] * 100) : rng[2];
+      inp.step = rng[0] === 'int' ? '1' : 'any';
+      if (pct) inp.dataset.pct = '1';
+    }
+    const d = S.meta.defaults[key];
+    const hint = el('span', 'text-dim rd-hint', 'default ' + (kind === '%' ? Math.round(d * 100) + '%' : (d === '' ? 'none' : d)) +
+      (kind !== 'keys' && rng.length ? ' · ' + (kind === '%' ? Math.round(rng[1] * 100) + '–' + Math.round(rng[2] * 100) : rng[1] + '–' + rng[2]) : ''));
+    inp.addEventListener('input', () => { S.formDirty = true; });
+    g.appendChild(inp); g.appendChild(hint);
+    box.appendChild(g);
+  }
+  function fillForm(k) {
+    document.querySelectorAll('#rd-form input[data-key]').forEach(inp => {
+      const v = k[inp.dataset.key];
+      inp.value = inp.dataset.pct ? String(Math.round(v * 1000) / 10) : String(v);
+    });
+  }
+  function readForm() {
+    const out = {};
+    let bad = null;
+    document.querySelectorAll('#rd-form input[data-key]').forEach(inp => {
+      if (inp.type === 'text') { out[inp.dataset.key] = inp.value; return; }
+      const n = Number(inp.value);
+      if (inp.value.trim() === '' || !isFinite(n)) { bad = bad || inp; return; }
+      out[inp.dataset.key] = inp.dataset.pct ? n / 100 : n;
+    });
+    if (bad) { msg('Fill in every number.', true); bad.focus(); return null; }
+    // Range check here so the message speaks the form's units (percent).
+    for (const inp of document.querySelectorAll('#rd-form input[type=number][data-key]')) {
+      const n = Number(inp.value), lo = Number(inp.min), hi = Number(inp.max);
+      if (n < lo || n > hi || (inp.step === '1' && n !== Math.round(n))) {
+        const lbl = inp.closest('label').querySelector('.field-label').textContent;
+        msg(lbl + ': use ' + (inp.step === '1' ? 'a whole number ' : '') + 'from ' + lo + ' to ' + hi + (inp.dataset.pct ? ' (%)' : '') + '.', true);
+        inp.focus();
+        return null;
+      }
+    }
+    const wsum = ['w_advance', 'w_schedule', 'w_labor', 'w_crew', 'w_gear'].reduce((a, k) => a + (out[k] || 0), 0);
+    if (wsum <= 0) { msg('At least one weight must be above 0.', true); return null; }
+    return out;
+  }
+  function msg(t, err) { const m = $('rd-form-msg'); m.textContent = t || ''; m.classList.toggle('rd-err', !!err); }
+
+  $('rd-btn-preview').addEventListener('click', preview);
+  $('rd-btn-save').addEventListener('click', () => save(false));
+  $('rd-btn-reset').addEventListener('click', () => save(true));
+  $('rd-btn-undo').addEventListener('click', () => { S.formDirty = false; if (S.saved) fillForm(S.saved); msg(''); exitPreview(); });
+  function exitPreview() { if (S.preview) { S.preview = null; $('rd-preview-banner').hidden = true; drawList(); refreshOpen(); } }
+  $('rd-preview-exit').addEventListener('click', exitPreview);
+
+  // Filters: a preview stays a preview (re-run with the new filters).
+  let qTimer = null;
+  const refilter = () => (S.preview ? preview() : load(false));
+  $('rd-window').addEventListener('change', refilter);
+  $('rd-test').addEventListener('change', refilter);
+  $('rd-q').addEventListener('input', () => { clearTimeout(qTimer); qTimer = setTimeout(refilter, 300); });
+
+  (async function init() {
+    await load(true);
+    if (S.meta) buildForm(), fillForm(S.saved);
+    const m = /[?&]show=(\d+)/.exec(location.search);
+    if (m) openCard(Number(m[1]));
+  })();
+})();
+</script>
+{% endblock %}

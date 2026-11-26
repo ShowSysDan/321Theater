@@ -623,6 +623,90 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   on-bar text in the templates must go through `C1_ON` / `C1_ON_SOFT` so the
   setting reaches it. Blank keeps today's automatic output byte-identical.
 
+## AI / Ollama: localhost only, a DB job queue (ai_module.py + ollama_client.py, 3.55.0)
+- **Ollama has no auth → each server talks ONLY to the Ollama on its own
+  machine.** `ollama_client.validate_url` (localhost / 127.x / ::1, no path /
+  userinfo; names re-resolved to loopback at call time) is the one
+  validator — save, test and every call. `OLLAMA_URL` in `.env` overrides
+  the shared `ollama_url` per server (same rule). Never add a LAN endpoint,
+  never forward AI calls between instances. The client: no env proxy, no
+  redirects, size caps, overall deadline; errors are content-free codes.
+  `ollama_client` / `ai_module` never import app.py (ONE `ai_module.register`).
+- **Probe + publish:** `ai_module.probe_refresh` (60 s, every worker, NOT
+  leader-gated) probes this machine; the heartbeat writes it to
+  `cluster_instances.ai_state` / `ai_checked_at` (Python utcnow, like
+  last_seen) and never probes inline. Settings → AI → Servers and the
+  Cluster table's AI column read it.
+- **Every AI call is an `ai_jobs` row** (kinds extract / weekly_postshow /
+  pull_model), claimed `FOR UPDATE SKIP LOCKED` by `ai_module.claim()` only in
+  a worker whose OWN probe passes (`local_ok`) — a server without Ollama
+  never calls one. Inference claims take the `ai_sessions` slot in the SAME
+  transaction under `pg_advisory_xact_lock(hashtext('ai_sessions'))` (the
+  ai_max_sessions limit; slots stay alive via `heartbeat_at`). `worker_tick`
+  (10 s, not leader-gated; with AI off it returns after one EXISTS read
+  unless jobs are pending) also recovers: running + heartbeat > 4 min →
+  re-queued (≤ 2 attempts) else interrupted; queued too long →
+  `no_ai_server` only when NO server is capable, else `ai_busy` after a
+  longer wait (15 min extract / 120 min weekly — it is only waiting for a
+  slot). **Weekly runs may hold at most `weekly_slot_limit()` (= limit − 1)
+  slots and extract claims first**, so long runs never lock out AI Extract;
+  a non-admin may have one live weekly run at a time.
+  `ollama_client.chat`: the first byte may take the whole call deadline
+  (cold model load / Ollama's own queue), then `read_timeout` per read; a
+  timeout after the request went out is `OllamaTimeout` (`first_byte` /
+  `read_timeout`), `OllamaUnavailable` ONLY when nothing was delivered —
+  `_ask` falls back per show on everything but that and cancel. Progress / finish writes are guarded by `claimed_instance
+  AND status='running'` (`_Lost` stops a worker that lost its claim). Never
+  hold a connection across an Ollama call. Jobs carry `test_mode`: a test
+  server claims only its own. So do slots (3.56.2): `ai_sessions.test_mode`
+  is stamped in `claim()`, and every running-slot count / prune
+  (`_PRUNE_SQL`, `count_active`, both counts in `claim`) filters on
+  `test_mode = _tm()` — a test server must never use or prune
+  production's slots. The browser polls (`/api/ai/jobs/<id>`,
+  `/api/reports/weekly-summary/runs/<id>`); AI Extract returns 202 + job id.
+- **Privacy:** prompts, documents, notes, comments and model output never
+  reach syslog / audit / URLs / e-mail subjects (ids, counts, codes only).
+  Payloads are nulled when a job ends; extract results within the hour.
+- **Weekly summary** (Reports → Weekly Summary, `_can_view_reports`, 404
+  while AI is off; not a saved-report / `_RPT_PDF` tab): shows per
+  `weekly_shows()` (perf / show date / load-in range in the window; never
+  is_test / is_cancelled; any status). `build_inputs()` is pure (the e-mail
+  job uses it too): facts from the DB (labor only for `with_labor` runs, via
+  `_calc_post_show_labor_cost`), text scrubbed (`scrub()`: e-mail, phone,
+  @mention, known names) — the model never gets $, headcounts or names.
+  `scrub()` also masks money amounts as `[amount]` on the way IN.
+  Model output is whitelisted / clamped / money-stripped (`validate_show` /
+  `validate_week`), one retry, deterministic fallback (`partial`). A run
+  has a 30-min budget (`_WEEKLY_BUDGET_S`): when it runs out the remaining
+  shows / the reduce use the fallback and the run still finishes 'done'
+  (partial) — never fail a run and throw its summaries away. Model output
+  is reused by `ai_jobs.model_hash` (`model_hash()`: exactly what the model
+  is given — never labor): a run whose twin (other with_labor value, the
+  weekly e-mail) already finished non-partial copies its shows/week and
+  attaches its OWN facts (`_derived_result`); `force` (Regenerate) skips
+  that. A
+  `with_labor` run is 404 for anyone without labor-report permission. The
+  PDF (`/reports/weekly-summary/<id>.pdf`, `no-prefetch`) is rendered from
+  the stored `result_json` (no bytes stored, never re-runs the model),
+  `font_config` passed, condensed to one page, the show table may spill
+  to page 2 — nothing dropped.
+- **A deleted show takes its AI output with it (3.56.2):** `_purge_show`
+  (delete + merge) calls `ai_module.on_show_delete()` — every job naming the
+  show (`show_id`, or `show_ids` by a digit-bounded regex, never a `::jsonb`
+  cast) loses payload / result / input + model hash; a finished one reads
+  as an error ("run it again"), a live one is cancelled. Never keep a
+  stored result that quotes a show that no longer exists.
+- **Weekly e-mail** (off by default): `weekly_email_tick` is leader-gated,
+  claims the week in `ai_weekly_email_log` (INSERT … ON CONFLICT DO NOTHING)
+  before enqueueing, delivers on queued → sending (the claim), recipients
+  re-checked with `_saved_report_recipient_sql`, only via `_mail` +
+  `_send_email`, never labor $.
+- **Install:** the app never installs anything. `sudo bash install.sh
+  --with-ollama` runs Ollama's installer and writes ONE drop-in
+  (`ollama.service.d/50-321theater-localhost.conf`, OLLAMA_HOST=127.0.0.1)
+  — never an admin's own file — then warns if the effective host isn't
+  loopback. `ollama` is in `_SYSTEM_PROGRAMS` (level info).
+
 ## Optional feature modules (`APP_MODULES` + Settings → Modules)
 - `APP_MODULES` registry + `module_enabled(key)` in app.py; flags live in
   `app_settings` as `module_<key>_enabled` ('1'/'0', missing = the entry's
@@ -810,6 +894,39 @@ app.py by ONE `prism_module.register(app, …)` call near the bottom plus the
   `SESSION_HARVEST count=N` (hourly sweep), `SESSION_EXTEND`, and
   `GATE_SESSION_EXPIRED` in the gateway journal (HTML navigations only —
   XHR polls stay silent).
+
+## Cross-server sign-in (3.56.0) — cookie domain + "Switch server" hand-off
+- `SESSION_COOKIE_DOMAIN` (.env): `_DBSessionInterface.get_cookie_domain()` →
+  `_request_cookie_domain()` returns it ONLY when the request host is the
+  domain or under it (never an IP; else host-only + one CONFIG line per
+  host) AND the request did not come through the gateway (3.56.1: gateway
+  requests always get a host-only cookie). Logout / re-issue also expire a host-only twin; `open_session`
+  tries every presented sid (≤3) — NEWEST first while a Domain cookie is in
+  effect (3.56.2: browsers send the old host-only twin first, and adopting
+  it rewrote that old sid into the shared Domain cookie). Never put a Domain on the `__Host-`
+  gateway cookie.
+- Hand-off: `CLUSTER_SELF_URL` (.env, normalised by
+  `_normalize_instance_url`) → `cluster_instances.public_url` in the
+  heartbeat → `_handoff_peers()` (20 s cache) → base.html footer
+  `.srv-switch` (POST `/auth/handoff/start`) → `session_handoffs` row
+  (SHA-256 only, 120 s DB clock, user, sid, target, next, requester IP) →
+  303 to `<target>/auth/handoff#t=` (3.56.1: the FRAGMENT — never put the
+  token in a query string, gunicorn's access log records it; a legacy `?t=`
+  is spent + refused) → auth_handoff.html's script POSTs it same-origin
+  (`_origin_matches()` enforced in the route, since `_csrf_protect` skips
+  signed-out browsers) → `_handoff_check` (target == own URL, same client
+  IP, user unlocked / not pending, session row live) → a **"Continue as
+  <name>?"** page (names any other account it would sign out here; skipped
+  only when this browser is already signed in here as the same user —
+  the same-IP check alone fails behind a terminal server / NAT) → the
+  confirm POST claims atomically FIRST (UPDATE … RETURNING), re-checks →
+  SAME sid on this host. Cancel spends the token. Never delete the
+  browser's existing session here without that confirm. Target URLs come
+  only from heartbeat rows; next = `_safe_local_path`. Never log the token.
+  The menu is hidden without a DB session (`DISABLE_DB_SESSIONS`).
+  Off (404 + hidden) through the gateway and in TEST_MODE. Both endpoints
+  are in `_VIEWER_ALLOWED_ENDPOINTS`; the redeem is allowed past the
+  forced-password-change gate.
 
 ## Advance sync & field presence (polling — no websockets anywhere)
 - The show page's multi-user behavior is ALL HTTP polling from app.js:
@@ -1243,8 +1360,11 @@ in full. Module key `projects`, default OFF.
     (`_PERF_LIVE_SKIP_PREFIX` — every module endpoint name must start
     `pm_`) and never keeps SQL text naming a ` pm_` table
     (`_PERF_PRIVATE_SQL`). The in-app updater filters module paths and
-    commit subjects (`_update_private` / `_update_public`) — still write
-    neutral commit subjects. File storage kind key is `module_files`, S3
+    commit subjects (`_update_private` / `_update_public`). Commit messages
+    and the README MAY name the module (the owner's call, 3.56.2: the goal is
+    that APP USERS don't learn of it before it's tested — the repo is not
+    shown to them); what must stay hidden is everything the running app
+    shows, so keep that updater filter. File storage kind key is `module_files`, S3
     prefix `mf/`, label "Module files". Accepted, documented limits: that
     File Storage row, `PM_*` verbs + integer ids in syslog, the
     `user_notify_prefs.email_tasks` column name in a snapshot diff.
@@ -1394,6 +1514,13 @@ in full. Module key `projects`, default OFF.
   without access — gets byte-identical 404s and no mention on any page, the
   Audit Log, Performance, DB Snapshots or the updater, (b) a non-member gets
   404 on every route of someone else's project, (c) fresh install == upgrade.
+
+- **Markers (3.53.0)** `pm_markers` (date + optional inclusive end, label, colour, notes; hard delete, activity line kept): bundle key `markers`, routes `pm_marker_*`, Timeline Markers row + line/band, Overview card, search, summary PDF. Markers are NOT tasks: never read by dependencies, conflicts, shift plans, My Work, alerts or counts — keep it so.
+- **Linking shows (3.53.0)**: `POST …/shows` takes `{show_ids: [...]}` (≤ `LIMITS['link_shows']`, all-or-nothing validation, already-linked skipped; `{show_id}` / `{new}` still work).
+- **Invoice / Quote (3.53.0)** on the Budget tab (`_invoice` in projects_docs_module.py, budget-visibility gated like every budget route): basis estimate / forecast / actual, scope all / tasks / range (task span overlaps the range), show costs only via the injected `_pm_show_figures` (never fork billing; cancelled + test shows never billed). The query string carries only ids / dates / enums; bill-to, number and notes come ONLY from a POST form body and are never stored or logged.
+
+## Clone show (Settings → Shows, 3.53.0)
+`clone_show` (`POST /settings/shows/<id>/clone`, admin and not read-only) + `clone-info` (GET, read-only). The header comment above them is THE copy / shift / skip decision for every table with a show_id — a new show child table must be added there. Dates move by one offset (new start − source's earliest date) except days that hold a moved performance; show_date/time re-derived with `_sync_show_primary_date`. Gear re-priced via `_price_asset_line` (hand-priced lines kept), units unpinned, `_reset_asset_approval`; over-booking is a 409 unless `override_availability` (audit `availability_override=1`); `_clone_shortages()` runs before the commit AND again after it (3.56.2, the post-commit rule: a short found then purges the clone, audit SHOW_CLONE_ROLLBACK, same 409 `needs_override`). Folded days keep the first dark_day / Day PM row (`ON CONFLICT DO NOTHING`, `seen_days`). Never copies comments, files, history, settlement, piano tunings, Prism links or project links.
 
 ## Reports (3.12.0)
 - `/reports` (`reports_page`, `templates/reports.html`) is its own nav
@@ -1903,12 +2030,51 @@ in full. Module key `projects`, default OFF.
   their controls gate on `user.role == 'admin'`. Known gap (the owner's call,
   not decided): a read-only admin on Asset Approvals still sees edits whose
   routes 403, and the scheduler's add/DELETE line routes still let them write.
+  Which rule a NEW admin route takes (decided in 3.56.2, kept as built): a
+  write of SHOW DATA refuses a read-only admin (Clone show,
+  `_clone_admin_refusal`); Settings CONFIGURATION (`@admin_required`:
+  readiness knobs, Settings → AI incl. weekly e-mail / pull / probe, like
+  every other Settings save) follows `_readonly_guard` — admins exempt. Don't
+  mix the two inside one kind of route.
 - Piano: the three `@login_required` write routes (update / pin-unit /
   cancel-request) call `_piano_readonly_refusal()` first, because
   `_is_piano_manager()` never looks at is_readonly.
 - Asset Manager: `_roLockFields()` locks fields for read-only accounts and
   turns an EMPTY date/month input into text showing "—" — only call it on
   DOM rebuilt on each open.
+
+## Show readiness (readiness.py, 3.54.0) — admin-only beta, read-only
+- `/settings/readiness` (`readiness_page`, `templates/readiness.html`) +
+  `/data`, `/show/<id>` (GETs, side-effect free), `/preview` (POST, unsaved
+  knobs, writes nothing), `/config` (POST save / `{reset:true}`; audit
+  SETTINGS_CHANGE, syslog READINESS_CONFIG). All `@admin_required`; the only
+  entry point is the Settings tab-strip link. No show-page / board / nav
+  surface until the owner asks (rollout: APP_MODULES key, then show card).
+- `readiness.py` is PURE (never imports app.py, no DB, never raises):
+  `DEFAULTS` / `RANGES` / `PENALTY_CODES`, `clean_knobs(raw, strict)`,
+  `score(facts, knobs, today, fields)`; `python3 readiness.py` = self-test.
+  Facts come only from `_readiness_facts_many()` (fixed ~10 `= ANY(%s)`
+  statements; `_build_schedule_days` only for legacy no-day_date shows);
+  `_show_readiness()` is a wrapper over `_show_readiness_many()` — keep it so.
+- Reads the STORED asset approval columns only — never `_reset_asset_approval`,
+  `auto_archive_past_shows` or the assets GET. Advance answers via
+  `_report_adv_values`. Engagement days = `_schedule_span_dates` (show_date
+  fallback) minus dark days; a dark flag never removes a performance,
+  load-in or load-out day (DARK_PERF_DAY / DARK_LOAD_DAY warn instead).
+- Scheduler-gap penalties (`SCHEDULER_GAP_CODES`) are trimmed so a show never
+  scores below the same show with no scheduler work (`score()` re-scores the
+  bare facts; `scheduler_floor` in the result). Every penalty has an owning
+  component (`PENALTY_OWNER`): weight 0 → its penalties are worth 0.
+  `labor_cue_keys` is POSITIONAL (load-in, show call, load-out).
+- Config save stores only knobs that differ from the effective default
+  (`_readiness_knobs` → defaults; labor_grace_days follows
+  `no_labor_alert_days_1` until set) and writes no audit / syslog when
+  nothing changed.
+- No opt-out checkbox (the owner's requirement): labor is N/A only when the
+  advance answers 'No' to every labor cue question, or before
+  `labor_grace_days` out; gear N/A only with no gear lines. Knobs live in
+  app_settings `readiness_<name>`; a new knob = DEFAULTS + RANGES + the form
+  (GROUPS in readiness.html).
 
 ## Two deployment targets — ALWAYS tell the user what to redeploy
 This project ships to **two** machines, and a change often only affects one.

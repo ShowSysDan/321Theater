@@ -6,8 +6,12 @@
 
    What is drawn
      ONE scroll box (.pm-g-scroll): a sticky date axis on top, a sticky name
-     column on the left. Rows: PM.taskGroups() (dated tasks, collapsible
+     column on the left. Rows: "Markers" (PM.state.markers — dated notes
+     that are not tasks; the row is there for editors even when empty, as
+     the place to drop one), PM.taskGroups() (dated tasks, collapsible
      groups), then "Shows" (one bar per linked show), then "No dates".
+     A marker is also drawn across the whole chart: a dashed line on its
+     day, or a tinted band over its span, in its colour.
      Dependency arrows live in one SVG overlay (finish → start; red while the
      dependent starts too early).
 
@@ -62,7 +66,7 @@
   const MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September',
                        'October', 'November', 'December'];
   const DOW = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
-  const EMPTY_TEXT = 'Nothing has dates yet — set a start or due date on a task, or link a show.';
+  const EMPTY_TEXT = 'Nothing has dates yet — set a start or due date on a task, link a show, or add a marker.';
 
   // Row metrics: phones get taller rows (touch targets). CSS reads the same
   // numbers through custom properties set on the scroll box.
@@ -229,7 +233,8 @@
         if (!PM.can.edit) return [];
         const items = [{label: 'Task', onSelect: () => PM.newTask(defaultDates())}];
         if (PM.can.createShow) items.push({label: 'New show…', onSelect: () => PM.newShow()});
-        items.push({label: 'Link a show…', onSelect: () => PM.linkShow()});
+        items.push({label: 'Link shows…', onSelect: () => PM.linkShow()});
+        items.push({label: 'Marker…', onSelect: () => PM.newMarker({date: defaultDates().start_date})});
         return items;
       });
     }
@@ -257,6 +262,16 @@
     pane.append(toolbar, legendEl, capNote, scroller, emptyBox, tip);
 
     scroller.addEventListener('click', onClick);
+    // Double-click a date on the axis: a marker on that day (editors).
+    scroller.addEventListener('dblclick', e => {
+      const axis = e.target.closest && e.target.closest('.pm-g-axis');
+      if (!axis || !PM.can.edit || busyNow()) return;
+      const day = dateAt(axis, e.clientX);
+      if (!day) return;
+      e.preventDefault();
+      if (window.getSelection) { try { window.getSelection().removeAllRanges(); } catch (err) { /* nothing selected */ } }
+      PM.newMarker({date: day});
+    });
     scroller.addEventListener('keydown', onKeyDown);
     scroller.addEventListener('pointerdown', onPointerDown);
     scroller.addEventListener('pointerover', onHover);
@@ -300,6 +315,7 @@
     item(sw('pm-g-showbar'), 'Show');
     item(sw('pm-g-showbar is-event'), 'Event');
     item(sw('pm-g-sw-band'), 'Project dates');
+    item(sw('pm-g-sw-mk'), 'Marker');
     item(sw('pm-g-sw-today'), 'Today');
     return box;
   }
@@ -343,9 +359,11 @@
       groups.push({key: named ? 'g' + hash(g.name) : null, name: g.name || 'No group', kind: 'tasks', items: dated});
     });
     const shows = (s.shows || []).slice();
+    // Markers: a fixed first row (not a group: it never collapses).
+    const markers = (s.markers || []).filter(m => m && m.date);
     if (shows.length) groups.push({key: '~shows', name: 'Shows', kind: 'shows', items: shows});
     if (undated.length) groups.push({key: '~nodates', name: 'No dates', kind: 'undated', items: undated});
-    return {groups, undated, shows};
+    return {groups, undated, shows, markers};
   }
 
   function computeRange(model, viewW) {
@@ -361,6 +379,7 @@
       if (g.kind === 'tasks') g.items.forEach(t => { const d = eff(t); take(d.begin, d.finish); });
       else if (g.kind === 'shows') g.items.forEach(x => take(x.start, x.end));
     });
+    model.markers.forEach(m => take(m.date, m.end_date || m.date));
     if (!n) return null;
     const p = s.project;
     if (p.start_date) take(p.start_date, p.end_date || p.start_date);
@@ -428,6 +447,7 @@
       s.tasks.map(t => { const d = eff(t); return [t.id, t.title, t.status, d.start, d.due, t.is_milestone ? 1 : 0, t.group_name,
                                                     t.sort_order, t.show_id, t.assignee_id, t.depends_on, t.conflict_with]; }),
       (s.shows || []).map(x => [x.id, x.name, x.start, x.end, x.perf_dates, x.show_mode, x.is_past ? 1 : 0, x.is_test ? 1 : 0]),
+      (s.markers || []).map(m => [m.id, m.date, m.end_date, m.label, m.color, m.notes]),
       s.members.map(m => [m.id, m.name]),
     ]);
   }
@@ -499,10 +519,10 @@
     if (isHex(pc)) scroller.style.setProperty('--pm-g-proj', pc); else scroller.style.removeProperty('--pm-g-proj');
 
     const frag = document.createDocumentFragment();
-    frag.appendChild(buildAxis(W));
+    frag.appendChild(buildAxis(W, model.markers));
 
     const body = el('div', 'pm-g-body');
-    const bg = buildBackground(W);
+    const bg = buildBackground(W, model.markers);
     const rows = document.createDocumentFragment();
 
     rowsByTask = new Map();
@@ -513,6 +533,10 @@
     const today = todayIso();
     const drag0 = canDrag();
 
+    if (model.markers.length || PM.can.edit) {
+      rows.appendChild(buildMarkerRow(model.markers, W));
+      y += M.row;
+    }
     model.groups.forEach(g => {
       const isCollapsed = !!g.key && collapsed.has(g.key);
       let groupRow = null;
@@ -631,7 +655,7 @@
   }
 
   /* ── The date axis ───────────────────────────────────────────────────── */
-  function buildAxis(W) {
+  function buildAxis(W, markers) {
     const head = el('div', 'pm-g-head');
     const corner = el('div', 'pm-g-corner', 'Task');
     const axis = el('div', 'pm-g-axis');
@@ -690,12 +714,27 @@
       attrs(mark, {title: 'Today, ' + PM.fmtDate(today), role: 'img', 'aria-label': 'Today, ' + PM.fmtDate(today)});
       axis.appendChild(mark);
     }
+    // A small flag on the axis at each marker's first day.
+    (markers || []).forEach(m => {
+      const i = PM.diffDays(R.start, m.date);
+      if (i < 0 || i > R.days - 1) return;
+      const f = el('div', 'pm-g-ax-mk');
+      f.style.left = ((i + 0.5) * dw) + 'px';
+      if (isHex(m.color)) f.style.setProperty('--mk', m.color);
+      f.title = markerTitle(m);
+      f.setAttribute('aria-hidden', 'true');
+      axis.appendChild(f);
+    });
+    if (PM.can.edit) {
+      axis.classList.add('can-add');
+      axis.title = isPhone() ? '' : 'Double-click a date to add a marker';
+    }
     head.append(corner, axis);
     return head;
   }
 
   /* ── Weekend shading, month lines, the project band, the today line ── */
-  function buildBackground(W) {
+  function buildBackground(W, markers) {
     const bg = el('div', 'pm-g-bg');
     bg.style.width = W + 'px';
     bg.setAttribute('aria-hidden', 'true');
@@ -730,6 +769,20 @@
       }
       d.setDate(dom + 1);
     }
+    // Markers across the whole chart: a dashed line on a single day, a
+    // tinted band over a span (under the today line).
+    (markers || []).forEach(m => {
+      const a = PM.diffDays(R.start, m.date), b = PM.diffDays(R.start, m.end_date || m.date);
+      if (b < 0 || a > R.days - 1) return;
+      let x;
+      if (b > a) {
+        const ca = Math.max(0, a), cb = Math.min(R.days - 1, b);
+        x = band('pm-g-mkband' + (a >= 0 ? ' has-l' : '') + (b <= R.days - 1 ? ' has-r' : ''), ca * dw, (cb - ca + 1) * dw);
+      } else {
+        x = band('pm-g-mkline', (a + 0.5) * dw, 0);
+      }
+      if (isHex(m.color)) x.style.setProperty('--mk', m.color);
+    });
     const ti = PM.diffDays(R.start, todayIso());
     if (ti >= 0 && ti < R.days) band('pm-g-now', (ti + 0.5) * dw, 0);
     return bg;
@@ -740,6 +793,84 @@
     const l = el('div', 'pm-g-lane');
     l.style.width = W + 'px';
     return l;
+  }
+
+  /* ── The Markers row ─────────────────────────────────────────────────── */
+  function markerWhen(m) {
+    return (m.end_date && m.end_date !== m.date) ? fmtSpan(m.date, m.end_date) : PM.fmtDate(m.date);
+  }
+  function markerTitle(m) {
+    const notes = (m.notes || '').replace(/\s+/g, ' ').trim();
+    return m.label + ' — ' + markerWhen(m) + (notes ? ' · ' + (notes.length > 200 ? notes.slice(0, 199) + '…' : notes) : '');
+  }
+  function buildMarkerRow(markers, W) {
+    const row = el('div', 'pm-g-row pm-g-mkrow');
+    const name = el('div', 'pm-g-name');
+    const lab = el('span', 'pm-g-mkname', 'Markers');
+    name.appendChild(lab);
+    if (markers.length) name.appendChild(el('span', 'pm-count', String(markers.length)));
+    if (PM.can.edit) {
+      const add = el('button', 'pm-g-mkadd', '+');
+      attrs(add, {type: 'button', 'data-mkadd': '1', 'data-fk': 'mkadd', title: 'Add a marker', 'aria-label': 'Add a marker'});
+      name.appendChild(add);
+    }
+    const l = lane(W);
+    l.classList.add('pm-g-mklane');
+    if (PM.can.edit) {
+      l.classList.add('can-add');
+      l.dataset.mklane = '1';
+    }
+    // Chips: greedy into at most two tiers; a third overlap shares a tier
+    // (its label is still in its tooltip and the dialog).
+    const charW = isPhone() ? 6.4 : 6.8;
+    const ends = [-Infinity, -Infinity];
+    const placed = [], lastIn = [null, null];
+    markers.forEach(m => {
+      const gm = geom(m.date, m.end_date || m.date, false);
+      if (gm.off) return;
+      const want = Math.min(220, Math.round(m.label.length * charW) + 22);
+      const width = Math.max(gm.width, want);
+      let tier = ends[0] <= gm.left ? 0 : (ends[1] <= gm.left ? 1 : (ends[0] <= ends[1] ? 0 : 1));
+      // No free tier: cut the chip before it in that tier short (its label
+      // ellipsizes) instead of drawing over it.
+      const prev = lastIn[tier];
+      if (prev && prev.gm.left + prev.width > gm.left - 2) prev.width = Math.max(14, gm.left - prev.gm.left - 2);
+      ends[tier] = gm.left + width + 3;
+      lastIn[tier] = {m, gm, width, tier};
+      placed.push(lastIn[tier]);
+    });
+    const two = placed.some(p => p.tier === 1);
+    if (two) row.classList.add('is-2tier');
+    placed.forEach(p => {
+      const m = p.m;
+      const span = !!(m.end_date && m.end_date !== m.date);
+      const chip = el('button', 'pm-g-mk' + (span ? ' is-span' : '') + (p.gm.clipL ? ' is-clip-l' : '') + (p.gm.clipR ? ' is-clip-r' : '') +
+                                (two ? ' tier-' + p.tier : ''));
+      attrs(chip, {type: 'button', 'data-marker': m.id, 'data-fk': 'mk' + m.id, title: markerTitle(m),
+                   'aria-label': 'Marker: ' + m.label + ', ' + markerWhen(m).replace(' – ', '–')});
+      chip.style.left = p.gm.left + 'px';
+      chip.style.width = p.width + 'px';
+      if (isHex(m.color)) chip.style.setProperty('--mk', m.color);
+      const t = el('span', 'pm-g-mk-t', m.label);
+      t.setAttribute('aria-hidden', 'true');
+      chip.appendChild(t);
+      l.appendChild(chip);
+    });
+    if (!markers.length && PM.can.edit) {
+      const hint = el('span', 'pm-g-nodate pm-g-mkhint', (isPhone() || !finePointer.matches ? 'Tap' : 'Click') + ' a date on this row to add a marker');
+      hint.setAttribute('aria-hidden', 'true');
+      l.appendChild(hint);
+    }
+    row.append(name, l);
+    return row;
+  }
+  // The date under a pointer over the lanes (clientX → a day of the range).
+  function dateAt(node, clientX) {
+    if (!R) return null;
+    const r = node.getBoundingClientRect();
+    const i = Math.floor((clientX - r.left) / R.dw);
+    if (!(i >= 0 && i < R.days)) return null;
+    return PM.addDays(R.start, i);
   }
 
   function buildGroupRow(g, isCollapsed, W) {
@@ -1101,6 +1232,21 @@
     }
     return true;
   }
+  // A marker (a search hit): scroll its chip into view, flash it, open it.
+  function revealMarker(id) {
+    const chip = R && scroller.querySelector('[data-fk="mk' + (+id) + '"]');
+    if (chip) {
+      scrollToX(parseFloat(chip.style.left) - lanesViewW() / 3, !reducedMotion.matches);
+      scroller.scrollTop = 0;
+      chip.focus({preventScroll: true});
+      chip.classList.remove('is-flash');
+      void chip.offsetWidth;
+      chip.classList.add('is-flash');
+      setTimeout(() => chip.classList.remove('is-flash'), 1800);
+    }
+    PM.openMarker(id);
+  }
+
   // The pill: the first conflicted bar, then the next one on each press.
   function nextConflict() {
     if (!conflictIds.length) return;
@@ -1146,6 +1292,19 @@
       return;
     }
     if (t.closest('a')) return;                              // a show: the browser opens it
+    const mk = t.closest('[data-marker]');
+    if (mk) { flushKbd().then(() => PM.openMarker(+mk.dataset.marker)); return; }
+    if (t.closest('[data-mkadd]')) {
+      if (PM.can.edit) flushKbd().then(() => PM.newMarker({date: defaultDates().start_date}));
+      return;
+    }
+    const mkl = t.closest('[data-mklane]');
+    if (mkl) {
+      if (!PM.can.edit || e.detail > 1) return;          // a double-click opens ONE dialog
+      const day = dateAt(mkl, e.clientX);
+      if (day) flushKbd().then(() => PM.newMarker({date: day}));
+      return;
+    }
     const rev = t.closest('[data-review]');
     if (rev) {
       const bar = rev.closest('.pm-g-bar');
@@ -1401,6 +1560,7 @@
       draw(stale || firstDraw);
       fitHeight();
       if (params && params.task && R) reveal(+params.task);
+      if (params && params.marker) revealMarker(+params.marker);
     },
     hide() {
       if (drag) dragEnd(false);

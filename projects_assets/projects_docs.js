@@ -6,7 +6,8 @@
 
    What lives here
      PM.registerTab('budget')   lines by category, sources, history, the
-                                on-demand "From linked shows" card
+                                on-demand "From linked shows" card, the
+                                Invoice / quote dialog (preview + PDF)
      PM.registerTab('files')    list by folder, upload (button + drop),
                                 versions, archive / restore / purge
      PM.registerTab('notes')    list + rich-text editor with autosave,
@@ -689,7 +690,7 @@
 
   /* ═══ Tab: Budget ═════════════════════════════════════════════════════ */
   PM.registerTab('budget', (function () {
-    let pane = null, statsBox = null, tableBox = null, addBtn = null, showsBox = null;
+    let pane = null, statsBox = null, tableBox = null, addBtn = null, invBtn = null, showsBox = null;
     let data = null, seq = 0, latest = null, target = null, targetTimer = null;
     let shows = null, showsBusy = false, showsErr = '';
 
@@ -721,11 +722,15 @@
       pane = el;
       statsBox = h('div', {class: 'pm-b-stats'});
       addBtn = h('button', {type: 'button', class: 'btn btn-primary btn-sm', text: '+ Add line', data: {fk: 'add'}, onclick: () => lineDialog(null)});
+      // Read-only (nothing is stored): anyone who can see the budget.
+      invBtn = h('button', {type: 'button', class: 'btn btn-ghost btn-sm', text: 'Invoice / quote…', data: {fk: 'inv'},
+                            title: 'A quote or invoice from these lines (and the linked shows) — whole project, some tasks or a date range',
+                            onclick: () => invoiceDialog()});
       tableBox = h('div');
       showsBox = h('div', {class: 'form-section-body'});
       pane.append(statsBox,
         h('div', {class: 'form-section'},
-          h('div', {class: 'form-section-header'}, h('span', {text: 'Budget lines'}), h('span', {class: 'pm-h-actions'}, addBtn)),
+          h('div', {class: 'form-section-header'}, h('span', {text: 'Budget lines'}), h('span', {class: 'pm-h-actions'}, invBtn, addBtn)),
           tableBox),
         h('div', {class: 'form-section'},
           h('div', {class: 'form-section-header'}, h('span', {text: 'From linked shows'})), showsBox));
@@ -1210,6 +1215,221 @@
           h('span', {class: 'pm-note', text: 'Labor actual appears once a show is settled. These figures are not part of the totals above.'}),
           h('button', {type: 'button', class: 'btn btn-ghost btn-xs', text: 'Refresh', data: {fk: 'lsr'}, onclick: loadShows})));
       });
+    }
+
+    /* ── Invoice / quote (read-only: nothing is stored) ──────────────────── */
+    // Options travel as ids, dates and enums in the preview's query string;
+    // the free text (number, bill-to, notes) goes ONLY in the body of the
+    // PDF's POST (projects_docs_module._routes_invoice) — never in a URL,
+    // never in localStorage.
+    const INV_BASIS = [
+      ['estimate', 'Estimate', 'Each line’s estimate. Shows at their labor estimate.'],
+      ['forecast', 'Forecast (larger of committed / paid)', 'Each line’s committed or paid amount, whichever is larger — the same forecast the variance uses. Shows at settled labor, else the labor estimate.'],
+      ['actual', 'Actual (paid so far)', 'What was actually paid on each line. Shows bill labor only once settled.']];
+    const INV_DEFAULT = {quote: 'estimate', invoice: 'actual'};
+    function invoiceDialog() {
+      if (!PM.can.budget) return;
+      // Option clicks are not "unsaved changes", but the free text (number,
+      // bill to, notes) is never stored anywhere: closing with any of it
+      // typed asks first.
+      let num = null, billTo = null, notes = null, printed = '\u0000\u0000';
+      const textNow = () => [num, billTo, notes].map(x => (x ? x.value.trim() : '')).join('\u0000');
+      // Typed and not yet put on a downloaded PDF.
+      const typed = () => textNow() !== printed && textNow() !== '\u0000\u0000';
+      const d = PM.dialog({title: 'Invoice / quote', wide: true, noDirtyGuard: true,
+                           askClose: () => typed()
+                             ? PM.confirm('Close and lose the number, bill-to and notes you typed? They are not saved anywhere.', 'Discard')
+                             : Promise.resolve(true)});
+      const today = typeof window.localTodayIso === 'function' ? window.localTodayIso() : '';
+      const o = {doc: 'quote', basis: 'estimate', scope: 'all', group: 'category', rule: 'finish',
+                 unassigned: false, shows: true, tasks: new Set(),
+                 start: today ? today.slice(0, 8) + '01' : '', end: ''};
+      if (today) {                       // default range: this calendar month
+        const [y, m] = today.split('-').map(Number);
+        o.end = window.localIsoDate(new Date(y, m, 0));
+      }
+      let seq = 0, timer = null;
+      const seg = (name, items, cur, on) => {
+        const g = h('div', {class: 'pm-seg pm-b-iseg', role: 'group', 'aria-label': name});
+        items.forEach(it => g.appendChild(h('button', {type: 'button', class: 'pm-seg-btn', text: it[1], data: {v: it[0]},
+          'aria-pressed': it[0] === cur ? 'true' : 'false',
+          onclick: () => { Array.from(g.children).forEach(b => b.setAttribute('aria-pressed', b.dataset.v === it[0] ? 'true' : 'false')); on(it[0]); }})));
+        return g;
+      };
+      const basisSel = select(INV_BASIS.map(b => ({value: b[0], label: b[1]})), o.basis);
+      const basisHelp = h('p', {class: 'pm-note'});
+      const syncBasisHelp = () => { const b = INV_BASIS.find(x => x[0] === o.basis); basisHelp.textContent = b ? b[2] : ''; };
+      basisSel.addEventListener('change', () => { o.basis = basisSel.value; syncBasisHelp(); refresh(); });
+      const docSeg = seg('Document type', [['quote', 'Quote'], ['invoice', 'Invoice']], o.doc, v => {
+        o.doc = v; o.basis = INV_DEFAULT[v]; basisSel.value = o.basis; syncBasisHelp(); refresh();
+      });
+      const scopeBox = h('div', {class: 'pm-b-iscope'});
+      const scopeSeg = seg('What it covers', [['all', 'Whole project'], ['tasks', 'Selected tasks'], ['range', 'Date range']], o.scope, v => {
+        o.scope = v; drawScope(); refresh();
+      });
+      const groupSel = select([{value: 'category', label: 'Category'}, {value: 'task', label: 'Task'}], o.group);
+      groupSel.addEventListener('change', () => { o.group = groupSel.value; refresh(); });
+      const nShows = (PM.state.shows || []).length;
+      const showsCb = h('input', {type: 'checkbox', checked: o.shows && nShows > 0, disabled: !nShows});
+      if (!nShows) o.shows = false;
+      showsCb.addEventListener('change', () => { o.shows = showsCb.checked; refresh(); });
+      const unCb = h('input', {type: 'checkbox', checked: o.unassigned});
+      unCb.addEventListener('change', () => { o.unassigned = unCb.checked; refresh(); });
+      const showsHelp = h('p', {class: 'pm-note'});
+      num = h('input', {type: 'text', class: 'field-input', maxLength: 60, autocomplete: 'off', placeholder: 'e.g. 2026-014'});
+      billTo = h('textarea', {class: 'field-input field-textarea', rows: 3, maxLength: 4000});
+      notes = h('textarea', {class: 'field-input field-textarea', rows: 3, maxLength: 4000});
+      const preview = h('div', {class: 'pm-b-iprev', role: 'status', 'aria-live': 'polite'});
+      const pdfBtn = h('button', {type: 'button', class: 'btn btn-primary', text: 'Download PDF'});
+
+      // Scope details: the task picker or the range.
+      const filter = h('input', {type: 'search', class: 'field-input', placeholder: 'Filter tasks…', 'aria-label': 'Filter tasks', autocomplete: 'off'});
+      const pick = h('div', {class: 'pm-list pm-b-ipick', role: 'group', 'aria-label': 'Tasks'});
+      const pickCount = h('span', {class: 'pm-note'});
+      const from = h('input', {type: 'date', class: 'field-input', value: o.start});
+      const to = h('input', {type: 'date', class: 'field-input', value: o.end});
+      const ruleSel = select([{value: 'finish', label: 'Finishes in the range'}, {value: 'overlap', label: 'Has any day in the range'}], o.rule);
+      from.addEventListener('change', () => { o.start = from.value; refresh(); });
+      to.addEventListener('change', () => { o.end = to.value; refresh(); });
+      ruleSel.addEventListener('change', () => { o.rule = ruleSel.value; refresh(); });
+      filter.addEventListener('input', drawPick);
+      const span = t => {
+        const a = t.start_date || t.due_date, b = t.due_date || t.start_date;
+        if (!a) return 'No dates';
+        return a === b ? PM.fmtDate(a) : PM.fmtDate(a) + ' – ' + PM.fmtDate(b);
+      };
+      function drawPick() {
+        clear(pick);
+        const needle = filter.value.trim().toLowerCase();
+        let any = false;
+        PM.taskGroups().forEach(g => {
+          const list = g.tasks.filter(t => !needle || t.title.toLowerCase().indexOf(needle) >= 0);
+          if (!list.length) return;
+          any = true;
+          if (g.name) pick.appendChild(h('div', {class: 'pm-section-label pm-b-ipick-g', text: g.name}));
+          list.forEach(t => {
+            const cb = h('input', {type: 'checkbox', checked: o.tasks.has(t.id)});
+            cb.addEventListener('change', () => { if (cb.checked) o.tasks.add(t.id); else o.tasks.delete(t.id); countPick(); refresh(); });
+            pick.appendChild(h('label', {class: 'pm-row pm-pick-row'}, cb,
+              h('span', {class: 'pm-row-main'}, h('span', {class: 'pm-row-title', text: t.title}),
+                h('span', {class: 'pm-row-sub', style: 'display:block', text: span(t)}))));
+          });
+        });
+        if (!any) pick.appendChild(h('p', {class: 'pm-empty', text: PM.state.tasks.length ? 'No tasks match.' : 'This project has no tasks yet.'}));
+        countPick();
+      }
+      function countPick() {
+        // Only ids of tasks that still exist count (one may have been deleted).
+        Array.from(o.tasks).forEach(id => { if (!PM.taskById(id)) o.tasks.delete(id); });
+        pickCount.textContent = o.tasks.size ? plural(o.tasks.size, 'task') + ' picked' : 'No tasks picked';
+      }
+      const unRow = h('label', {class: 'pm-check'}, unCb, 'Also include budget lines without a task');
+      function drawScope() {
+        clear(scopeBox);
+        if (o.scope === 'tasks') {
+          scopeBox.append(h('div', {class: 'pm-b-ipick-head'}, filter, pickCount), pick, unRow);
+          drawPick();
+          showsHelp.textContent = 'Shows: those created from or linked to a picked task (and linked to this project).';
+        } else if (o.scope === 'range') {
+          scopeBox.append(h('div', {class: 'form-row cols-3'}, field('From', from), field('To', to), field('A task or show counts when it', ruleSel)),
+            h('p', {class: 'pm-note', text: 'A task’s days run from its start to its due date (one date if it has only one); tasks with no dates are left out. ' +
+              '“Finishes in the range” never bills a task or show twice across back-to-back ranges — use it for incremental billing. ' +
+              'Shows with no dates yet are left out too.'}),
+            unRow,
+            h('p', {class: 'pm-note', text: 'Budget lines without a task have no date: ticked, they appear on EVERY range invoice (billed again each time).'}));
+          showsHelp.textContent = 'Shows: linked shows whose dates (load-in to load-out and performances) meet the same rule.';
+        } else {
+          scopeBox.appendChild(h('p', {class: 'pm-note', text: 'Every budget line, with or without a task.'}));
+          showsHelp.textContent = 'Shows: every linked show you can open.';
+        }
+      }
+
+      function params() {
+        const q = new URLSearchParams();
+        q.set('doc', o.doc); q.set('basis', o.basis); q.set('scope', o.scope); q.set('group', o.group);
+        q.set('shows', o.shows ? '1' : '0');
+        if (o.scope !== 'all') q.set('unassigned', o.unassigned ? '1' : '0');
+        if (o.scope === 'tasks') q.set('tasks', Array.from(o.tasks).sort((a, b) => a - b).join(','));
+        if (o.scope === 'range') { q.set('rule', o.rule); if (o.start) q.set('start', o.start); if (o.end) q.set('end', o.end); }
+        return q;
+      }
+      function ready() {
+        if (o.scope === 'tasks' && !o.tasks.size) return 'Pick at least one task.';
+        if (o.scope === 'range') {
+          if (!o.start && !o.end) return 'Give the range a start or an end date.';
+          if (o.start && o.end && o.end < o.start) return 'The range ends before it starts.';
+        }
+        return '';
+      }
+      function refresh() {
+        clearTimeout(timer);
+        const my = ++seq;
+        const why = ready();
+        pdfBtn.disabled = !!why;
+        if (why) { clear(preview).appendChild(h('p', {class: 'pm-note', text: why})); return; }
+        clear(preview).appendChild(h('p', {class: 'pm-loading', text: 'Working out the totals…'}));
+        timer = setTimeout(() => {
+          PM.api('GET', '/budget/invoice?' + params().toString()).then(j => { if (my === seq) drawPreview(j); },
+            e => { if (my !== seq) return; pdfBtn.disabled = true; clear(preview).appendChild(h('p', {class: 'pm-note pm-b-err', role: 'alert', text: e.message})); });
+        }, 250);
+      }
+      function drawPreview(j) {
+        pdfBtn.disabled = false;
+        const row = (label, sub, value, cls) => h('div', {class: 'pm-b-irow' + (cls ? ' ' + cls : '')},
+          h('span', {class: 'l'}, label, sub ? h('span', {class: 'pm-note', text: ' · ' + sub}) : null), h('span', {class: 'v', text: value}));
+        const box = clear(preview);
+        box.appendChild(h('div', {class: 'pm-b-ihead'}, h('strong', {text: j.doc_label}), ' · ', j.scope_text, ' · ', j.basis_label));
+        const groups = h('div', {class: 'pm-b-igroups'});
+        (j.groups || []).forEach(g => groups.appendChild(row(g.name, plural(g.lines.length, 'line') + (g.sub ? ' · ' + g.sub : ''), g.total_text)));
+        if (!(j.groups || []).length) groups.appendChild(h('p', {class: 'pm-note', text: 'No budget lines in this selection.'}));
+        box.appendChild(groups);
+        box.appendChild(row('Budget lines', plural(j.line_count, 'line'), j.lines_total_text, 'is-sub'));
+        if (j.include_shows) {
+          (j.shows || []).forEach(s => box.appendChild(row(s.name, [s.dates, s.labor_note].filter(Boolean).join(' · '), s.total_text, 'is-show')));
+          const ns = (j.shows || []).length;
+          box.appendChild(row('Show costs', ns ? plural(ns, 'show') : 'no linked show in this selection', j.shows_total_text, 'is-sub'));
+        }
+        box.appendChild(row(j.doc === 'quote' ? 'Quote total' : 'Total due', '', j.total_text, 'is-total'));
+        if ((j.notes || []).length) box.appendChild(h('ul', {class: 'pm-b-inotes'}, j.notes.map(n => h('li', {text: n}))));
+      }
+
+      // The PDF: a POST form to a new tab, so the free text stays out of the URL.
+      pdfBtn.addEventListener('click', () => {
+        if (ready() || !PM.can.budget) return;
+        const f = document.createElement('form');
+        f.method = 'POST';
+        f.action = '/projects/' + (+PM.pid) + '/budget/invoice.pdf';
+        f.target = '_blank';
+        f.className = 'no-prefetch';
+        f.hidden = true;
+        const put = (k, v) => { const i = document.createElement('input'); i.type = 'hidden'; i.name = k; i.value = v; f.appendChild(i); };
+        params().forEach((v, k) => put(k, v));
+        put('number', num.value.trim());
+        put('bill_to', billTo.value.trim());
+        put('notes', notes.value.trim());
+        printed = textNow();
+        document.body.appendChild(f);
+        try { f.submit(); } finally { f.remove(); }
+      });
+
+      d.body.append(
+        h('div', {class: 'form-row cols-2'}, field('Document', docSeg), field('Figures', basisSel)),
+        basisHelp,
+        field('Covers', scopeSeg),
+        scopeBox,
+        h('div', {class: 'form-row cols-2'}, field('Group lines by', groupSel),
+          h('div', {class: 'field-group'}, h('label', {class: 'pm-check pm-b-ishows'}, showsCb,
+            nShows ? 'Include costs of linked shows' : 'Include costs of linked shows (none linked)'), showsHelp)),
+        h('div', {class: 'pm-section-label pm-b-ipv', text: 'Preview'}), preview,
+        h('details', {class: 'pm-b-itext'}, h('summary', {text: 'Printed details (optional)'}),
+          h('p', {class: 'pm-note', text: 'Printed on the PDF only — not saved anywhere.'}),
+          h('div', {class: 'form-row cols-2'}, field('Number', num), h('div')),
+          field('Prepared for / bill to', billTo), field('Notes', notes)));
+      d.footer.append(h('button', {type: 'button', class: 'btn btn-ghost', text: 'Close', onclick: () => d.ask()}), pdfBtn);
+      syncBasisHelp();
+      drawScope();
+      refresh();
+      d.focusFirst();
     }
 
     budgetChanged = () => { if (pane && PM.activeTab === 'budget') load(); };

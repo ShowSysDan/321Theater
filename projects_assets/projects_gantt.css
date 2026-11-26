@@ -298,6 +298,51 @@ span.pm-g-off { cursor: default; }
 .pm-g-dep.can-review .pm-g-dep-head { pointer-events: fill; }
 .pm-g-dep.can-review:hover .pm-g-dep-line { stroke-width: 3.5; }
 
+/* ── Timeline markers (dated notes, not tasks) ─────────────────────────────
+   --mk = the marker's colour (set inline from a validated #rrggbb), else
+   the default violet. The line / band sit in the background layer (no
+   pointer events); the chip in the Markers row is the click target. */
+.pm-g-scroll { --pm-g-mk: #8b5cf6; }
+.pm-g-mkline { border-left: 2px dashed color-mix(in srgb, var(--mk, var(--pm-g-mk)) 75%, transparent); margin-left: -1px; }
+.pm-g-mkband { background: color-mix(in srgb, var(--mk, var(--pm-g-mk)) 11%, transparent); }
+.pm-g-mkband.has-l { border-left: 1px dashed color-mix(in srgb, var(--mk, var(--pm-g-mk)) 70%, transparent); }
+.pm-g-mkband.has-r { border-right: 1px dashed color-mix(in srgb, var(--mk, var(--pm-g-mk)) 70%, transparent); }
+.pm-g-sw-mk { background: color-mix(in srgb, var(--pm-g-mk, #8b5cf6) 22%, transparent); border-left: 2px dashed #8b5cf6; border-radius: 0; }
+.pm-g-ax-mk {
+  position: absolute; bottom: 0; width: 8px; height: 8px; margin-left: -4px; transform: rotate(45deg) translate(2px, 2px);
+  background: var(--mk, var(--pm-g-mk)); border-radius: 1px; pointer-events: auto;
+}
+.pm-g-axis.can-add { cursor: cell; }
+.pm-g-mkrow { background: color-mix(in srgb, var(--pm-g-mk) 4%, transparent); }
+.pm-g-mkrow .pm-g-name { gap: 6px; }
+.pm-g-mkname { font: 700 11.5px var(--font-cond); letter-spacing: .04em; text-transform: uppercase; color: var(--text-dim); }
+.pm-g-mkrow .pm-count { font: 600 11px var(--font-mono); color: var(--text-muted); }
+.pm-g-mkadd {
+  margin-left: auto; flex: none; width: 24px; height: 24px; border-radius: 6px; cursor: pointer;
+  border: 1px dashed var(--border-light); background: none; color: var(--orange-text); font: 700 15px/1 var(--font-main);
+}
+.pm-g-mkadd:hover { border-style: solid; border-color: var(--accent); }
+.pm-g-mklane.can-add { pointer-events: auto; cursor: cell; }
+.pm-g-mk {
+  position: absolute; z-index: 3; top: calc((var(--pm-g-row) - 20px) / 2); height: 20px; box-sizing: border-box; min-width: 14px;
+  display: flex; align-items: center; padding: 0 6px 0 7px; overflow: hidden; cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--mk, var(--pm-g-mk)) 65%, var(--bg-card));
+  border-left: 3px solid var(--mk, var(--pm-g-mk)); border-radius: 2px 6px 6px 2px;
+  background: color-mix(in srgb, var(--mk, var(--pm-g-mk)) 18%, var(--bg-card));
+  color: var(--ink); font: 600 11px/1 var(--font-main); text-align: left;
+}
+.pm-g-mk.is-span { border-radius: 2px; border-right: 3px solid var(--mk, var(--pm-g-mk)); }
+.pm-g-mk.is-clip-l { border-left-style: dashed; }
+.pm-g-mk.is-clip-r { border-right-style: dashed; }
+.pm-g-mk:hover { background: color-mix(in srgb, var(--mk, var(--pm-g-mk)) 30%, var(--bg-card)); }
+.pm-g-mk:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pm-g-mk-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-g-mkrow.is-2tier .pm-g-mk { height: 14px; font-size: 9.5px; padding: 0 4px 0 5px; }
+.pm-g-mkrow.is-2tier .pm-g-mk.tier-0 { top: calc(var(--pm-g-row) / 2 - 15px); }
+.pm-g-mkrow.is-2tier .pm-g-mk.tier-1 { top: calc(var(--pm-g-row) / 2 + 1px); }
+.pm-g-mk.is-flash { animation: pm-g-flash 1.7s ease-out; }
+@media (prefers-reduced-motion: reduce) { .pm-g-mk.is-flash { animation: none; box-shadow: 0 0 0 4px var(--accent); } }
+
 /* ── Empty state ──────────────────────────────────────────────────────────── */
 .pm-g-emptybox .form-section { max-width: 720px; margin: 0 auto; }
 .pm-g-emptybox .pm-row-title { text-decoration: none; }
@@ -323,6 +368,10 @@ html.mobile-view .pm-g-nodate, html.mobile-view .pm-g-setdates, html.mobile-view
 html.mobile-view .pm-g-off.is-r { left: auto; right: 8px; }
 html.mobile-view .pm-g-name .pm-badge { display: none; }      /* the bar colour + its label say Show / Event */
 html.mobile-view .pm-g-legend { gap: 6px 12px; }
+html.mobile-view .pm-g-mk { height: 26px; top: calc((var(--pm-g-row) - 26px) / 2); }
+html.mobile-view .pm-g-mkrow.is-2tier .pm-g-mk { height: 17px; font-size: 10px; }
+html.mobile-view .pm-g-mkrow.is-2tier .pm-g-mk.tier-0 { top: calc(var(--pm-g-row) / 2 - 18px); }
+html.mobile-view .pm-g-mkadd { width: 32px; height: 32px; }
 
 /* ═══ Print: no toolbar, the whole chart ═══════════════════════════════════ */
 @media print {

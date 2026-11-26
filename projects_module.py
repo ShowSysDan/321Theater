@@ -104,6 +104,7 @@ _TASK_STATUS_LABEL = {'todo': 'To do', 'doing': 'In progress', 'blocked': 'Block
 LIMITS = types.MappingProxyType({
     'tasks': 2000, 'contacts': 500, 'budget_lines': 1000, 'sources_per_line': 20,
     'files': 2000, 'notes': 500, 'members': 100, 'depends_on': 50, 'owned_projects': 200,
+    'markers': 500, 'shows': 500, 'link_shows': 50,
 })
 # Text caps (characters). Over the cap is a 400 '<Field> is too long.'.
 CAPS = types.MappingProxyType({
@@ -1705,6 +1706,7 @@ def _routes_projects(app):
             'tasks': _tasks_out(db, pid, sched=sched),
             'shows': shows,
             'contacts': _contacts_out(db, pid),
+            'markers': _markers_out(db, pid),
             'venues': list(_d['get_distinct_venues'](db)),
             'discussion_count': counts['discussion'],
             # A member who may not see the budget must not learn it has lines.
@@ -2465,32 +2467,64 @@ def _routes_shows(app):
     @app.route('/api/projects/<int:pid>/shows', methods=['POST'], endpoint='pm_show_link')
     @wrap
     def pm_show_link(db, uid, pid):
-        """Link an existing show ({show_id}) or create a real one and link it
-        ({new: {...}})."""
+        """Link existing shows ({show_ids: [...]}, or the single {show_id})
+        or create a real one and link it ({new: {...}}). Several shows link in
+        ONE transaction: each must exist and be one the caller may open
+        (else the whole request is refused); shows someone else linked in the
+        meantime are skipped and counted, and when every one of them is
+        already linked the answer is a 409."""
         c = ctx(db, pid, 'edit', lock=True)
         body = _body()
-        created = None
+        linked_count = db.execute('SELECT COUNT(*) AS n FROM pm_shows WHERE project_id = %s',
+                                  (pid,)).fetchone()['n']
         if body.get('new') is not None:
+            if linked_count >= LIMITS['shows']:
+                raise Refuse(400, f"A project can have at most {LIMITS['shows']} linked shows.")
             sid, created = _create_show(db, c, _new_show_fields(body['new']))
-            detail = f'created and linked the show {_quote(created)}'
-        else:
-            sid = to_int(body.get('show_id'), 'Show')
-            s = db.execute('SELECT id, name FROM shows WHERE id = %s', (sid,)).fetchone()
-            if not s or not _d['can_access_show'](uid, sid):
-                raise Refuse(400, "That show can't be linked.")
-            if db.execute('SELECT 1 FROM pm_shows WHERE project_id = %s AND show_id = %s',
-                          (pid, sid)).fetchone():
-                raise Refuse(409, 'That show is already linked.')
-            db.execute('INSERT INTO pm_shows (project_id, show_id, linked_by) VALUES (%s, %s, %s)',
-                       (pid, sid, uid))
-            detail = f"linked the show {_quote(s['name'])}"
-        rev = touch(db, pid)
-        activity(db, c, 'linked', 'show', sid, detail)
-        db.commit()
-        if created is not None:
+            rev = touch(db, pid)
+            activity(db, c, 'linked', 'show', sid, f'created and linked the show {_quote(created)}')
+            db.commit()
             _show_created_log(sid, created)
-        syslog('PM_SHOW_LINK', pid, show_id=sid)
-        return jsonify({'success': True, 'rev': rev, 'show_id': sid})
+            syslog('PM_SHOW_LINK', pid, show_id=sid)
+            return jsonify({'success': True, 'rev': rev, 'show_id': sid, 'show_ids': [sid], 'skipped': 0})
+        raw = body.get('show_ids')
+        if raw is None:
+            raw = [body.get('show_id')]
+        if not isinstance(raw, list) or not raw:
+            raise Refuse(400, 'Pick at least one show.')
+        if len(raw) > LIMITS['link_shows']:
+            raise Refuse(400, f"Link at most {LIMITS['link_shows']} shows at a time.")
+        ids = []
+        for v in raw:
+            sid = to_int(v, 'Show')
+            if sid not in ids:
+                ids.append(sid)
+        names = {r['id']: r['name'] for r in db.execute(
+            'SELECT id, name FROM shows WHERE id = ANY(%s::int[])', (ids,)).fetchall()}
+        for sid in ids:
+            if sid not in names or not _d['can_access_show'](uid, sid):
+                raise Refuse(400, "That show can't be linked." if len(ids) == 1
+                             else "One of those shows can't be linked.")
+        already = {r['show_id'] for r in db.execute(
+            'SELECT show_id FROM pm_shows WHERE project_id = %s AND show_id = ANY(%s::int[])',
+            (pid, ids)).fetchall()}
+        todo = [sid for sid in ids if sid not in already]
+        if not todo:
+            raise Refuse(409, 'That show is already linked.' if len(ids) == 1
+                         else 'Those shows are already linked.')
+        if linked_count + len(todo) > LIMITS['shows']:
+            raise Refuse(400, f"A project can have at most {LIMITS['shows']} linked shows.")
+        db.execute(
+            'INSERT INTO pm_shows (project_id, show_id, linked_by) '
+            'SELECT %s, x, %s FROM unnest(%s::int[]) AS x',
+            (pid, uid, todo))
+        rev = touch(db, pid)
+        for sid in todo:
+            activity(db, c, 'linked', 'show', sid, f"linked the show {_quote(names[sid])}")
+        db.commit()
+        syslog('PM_SHOW_LINK', pid, show_ids=todo)
+        return jsonify({'success': True, 'rev': rev, 'show_id': todo[0], 'show_ids': todo,
+                        'skipped': len(ids) - len(todo)})
 
     @app.route('/api/projects/<int:pid>/shows/<int:show_id>', methods=['DELETE'], endpoint='pm_show_unlink')
     @wrap
@@ -2514,6 +2548,133 @@ def _routes_shows(app):
         syslog('PM_SHOW_UNLINK', pid, show_id=show_id)
         return jsonify({'success': True, 'rev': rev,
                         'tasks': _tasks_out(db, pid, [t for t in tids])})
+
+
+# ─── Timeline markers ────────────────────────────────────────────────────────
+# A dated note on the Timeline ("Labor Day", "Building closed for
+# fumigation"): one day, or an inclusive span (end_date). NOT a task — markers
+# never enter dependencies, conflicts, shift plans, My Work, due / overdue
+# alerts or task counts; nothing but this section and the state bundle /
+# search / summary PDF reads pm_markers.
+
+_MONTHS = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
+
+
+def _fmt_day(d):
+    """'Sep 7, 2026' (English month names — never %b, it follows the locale)."""
+    return f'{_MONTHS[d.month - 1]} {d.day}, {d.year}' if d else ''
+
+
+def _marker_when(start, end):
+    return _fmt_day(start) + (f' – {_fmt_day(end)}' if end and end != start else '')
+
+
+def _markers_out(db, pid):
+    """The project's markers by date (single days before spans that start
+    the same day)."""
+    return [{
+        'id': r['id'], 'date': iso(r['marker_date']), 'end_date': iso(r['end_date']),
+        'label': r['label'] or '', 'color': r['color'] or '', 'notes': r['notes'] or '',
+    } for r in db.execute(
+        'SELECT id, marker_date, end_date, label, color, notes FROM pm_markers '
+        'WHERE project_id = %s ORDER BY marker_date, end_date NULLS FIRST, id', (pid,)).fetchall()]
+
+
+def _marker_fields(body, cur=None):
+    """Validated columns from a POST (cur None: label + date required) or a
+    partial PUT (only the keys present). end_date == the start day is stored
+    as NULL (one day); an end before the start is a 400."""
+    out = {}
+    if cur is None or 'label' in body:
+        out['label'] = clean_text(body.get('label'), CAPS['title'], 'Label', required=True, line=True)
+    if cur is None or 'date' in body:
+        d = parse_date(body.get('date'), 'Date')
+        if d is None:
+            raise Refuse(400, 'Pick a date for the marker.')
+        out['marker_date'] = d
+    if cur is None or 'end_date' in body:
+        out['end_date'] = parse_date(body.get('end_date'), 'End date')
+    if cur is None or 'color' in body:
+        out['color'] = valid_color(body.get('color'))
+    if cur is None or 'notes' in body:
+        out['notes'] = clean_text(body.get('notes'), CAPS['long'], 'Notes')
+    start = out.get('marker_date', cur['marker_date'] if cur else None)
+    end = out.get('end_date', cur['end_date'] if cur else None)
+    if end is not None and start is not None:
+        if end < start:
+            raise Refuse(400, 'The end date is before the start date.')
+        if end == start:
+            end = None
+            out['end_date'] = None
+    return out
+
+
+def _routes_markers(app):
+
+    def marker_row(db, pid, mid, lock=False):
+        r = db.execute(
+            'SELECT id, marker_date, end_date, label, color, notes FROM pm_markers '
+            f"WHERE id = %s AND project_id = %s {'FOR UPDATE' if lock else ''}",
+            (_url_id(mid), pid)).fetchone()
+        if not r:
+            raise Refuse(404, _NOT_FOUND)
+        return r
+
+    @app.route('/api/projects/<int:pid>/markers', methods=['POST'], endpoint='pm_marker_create')
+    @wrap
+    def pm_marker_create(db, uid, pid):
+        c = ctx(db, pid, 'edit', lock=True)
+        f = _marker_fields(_body())
+        n = db.execute('SELECT COUNT(*) AS n FROM pm_markers WHERE project_id = %s', (pid,)).fetchone()['n']
+        if n >= LIMITS['markers']:
+            raise Refuse(400, f"A project can have at most {LIMITS['markers']} markers.")
+        mid = db.execute(
+            'INSERT INTO pm_markers (project_id, marker_date, end_date, label, color, notes, '
+            'created_by, updated_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id',
+            (pid, f['marker_date'], f['end_date'], f['label'], f['color'], f['notes'], uid, uid)
+        ).fetchone()['id']
+        rev = touch(db, pid)
+        activity(db, c, 'created', 'marker', mid,
+                 f"added the marker {_quote(f['label'])} ({_marker_when(f['marker_date'], f['end_date'])})")
+        db.commit()
+        syslog('PM_MARKER_CREATE', pid, marker_id=mid)
+        return jsonify({'success': True, 'rev': rev, 'marker_id': mid, 'markers': _markers_out(db, pid)})
+
+    @app.route('/api/projects/<int:pid>/markers/<int:mid>', methods=['PUT'], endpoint='pm_marker_update')
+    @wrap
+    def pm_marker_update(db, uid, pid, mid):
+        c = ctx(db, pid, 'edit', lock=True)
+        cur = marker_row(db, pid, mid, lock=True)
+        f = _marker_fields(_body(), cur)
+        changed = {k: v for k, v in f.items() if not _same(cur[k], v)}
+        if not changed:
+            return jsonify({'success': True, 'unchanged': True, 'rev': c.project['rev'],
+                            'markers': _markers_out(db, pid)})
+        cols = sorted(changed)
+        db.execute(
+            'UPDATE pm_markers SET ' + ', '.join(f'{k} = %s' for k in cols) +
+            ', updated_by = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s AND project_id = %s',
+            tuple(changed[k] for k in cols) + (uid, mid, pid))
+        rev = touch(db, pid)
+        label = changed.get('label', cur['label'])
+        activity(db, c, 'updated', 'marker', mid, f'updated the marker {_quote(label)}')
+        db.commit()
+        syslog('PM_MARKER_UPDATE', pid, marker_id=mid)
+        return jsonify({'success': True, 'rev': rev, 'markers': _markers_out(db, pid)})
+
+    @app.route('/api/projects/<int:pid>/markers/<int:mid>', methods=['DELETE'], endpoint='pm_marker_delete')
+    @wrap
+    def pm_marker_delete(db, uid, pid, mid):
+        c = ctx(db, pid, 'edit', lock=True)
+        gone = db.execute('DELETE FROM pm_markers WHERE id = %s AND project_id = %s RETURNING label',
+                          (_url_id(mid), pid)).fetchone()
+        if not gone:
+            raise Refuse(404, _NOT_FOUND)
+        rev = touch(db, pid)
+        activity(db, c, 'deleted', 'marker', mid, f"deleted the marker {_quote(gone['label'])}")
+        db.commit()
+        syslog('PM_MARKER_DELETE', pid, marker_id=mid)
+        return jsonify({'success': True, 'rev': rev, 'markers': _markers_out(db, pid)})
 
 
 _CONTACT_FIELDS = (('name', 'title', 'Name', True), ('company', 'short', 'Company', True),
@@ -2717,6 +2878,12 @@ def _routes_search(app):
                 add('file', r['id'], r['title'] or r['filename'], r['hit'], 'files', cut=cut_of(r), file=r['id'])
             else:
                 add('file', r['id'], r['title'] or r['filename'], r['filename'] or '', 'files', file=r['id'])
+        for r in db.execute(
+                """SELECT id, label, notes FROM pm_markers
+                    WHERE project_id = %s AND (label ILIKE %s OR notes ILIKE %s)
+                    ORDER BY marker_date, id LIMIT 8""", (pid, like, like)).fetchall():
+            text = r['notes'] if r['notes'] and q.lower() in r['notes'].lower() else ''
+            add('marker', r['id'], r['label'], text, 'timeline', marker=r['id'])
         if c.can_budget:
             for r in db.execute(
                     """SELECT id, category, description, notes FROM pm_budget_lines
@@ -2917,6 +3084,7 @@ def register(app, **deps):
     _routes_tasks(app)
     _routes_comments(app)
     _routes_shows(app)
+    _routes_markers(app)
     _routes_contacts(app)
     _routes_search(app)
 

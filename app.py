@@ -71,6 +71,9 @@ import security_module  # security sign-in sheets — wired up near the bottom
 import snapshot_module  # DB snapshot inspection & recovery — wired up near the bottom
 import spot_module  # Spot sound-level integration — wired up near the bottom
 import chat_module  # Messages / inbox — wired up near the bottom
+import ai_module  # Local Ollama per server, AI job queue, weekly summary — wired up near the bottom
+import ollama_client  # The ONE (localhost-only) Ollama HTTP client
+import readiness  # show readiness % (pure scorer, Settings → Readiness)
 import projects_module  # optional, sandboxed — wired up near the bottom
 import file_store  # S3 <-> PostgreSQL file redundancy + migration — wired up near the bottom
 import system_info  # Settings → About 321Theater: this server, its service, its dependencies
@@ -261,6 +264,87 @@ from werkzeug.datastructures import CallbackDict as _CallbackDict
 
 _SID_RE = re.compile(r'^[A-Za-z0-9_-]{20,128}$')
 
+# ── Shared session cookie across instances (3.56.0) ───────────────────────────
+# SESSION_COOKIE_DOMAIN (.env, per machine): when every instance is reached
+# under one parent domain (a.theater.example, b.theater.example), issuing the
+# session cookie for that domain lets the browser send it to all of them, and
+# since app_sessions is shared, signing in once covers every instance. It is
+# honoured ONLY for a request whose host is the domain or under it, and never
+# for an IP: anywhere else the cookie stays host-only, exactly as before, with
+# one CONFIG line per host (capped). A request that came through the VPS
+# gateway always gets a host-only cookie (3.56.1), whatever its Host. The
+# gateway's __Host- cookie is separate and never takes a Domain. Read lazily (syslog_logger is set up later).
+_DNS_NAME_RE = re.compile(r'^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$')
+_cookie_domain_state = {'loaded': False, 'domain': None, 'warned': set()}
+_cookie_domain_lock = threading.Lock()
+
+
+def _session_cookie_domain_setting():
+    """The validated SESSION_COOKIE_DOMAIN (lower-case, no leading dot), or
+    None when unset / invalid (an invalid value is logged once)."""
+    st = _cookie_domain_state
+    if st['loaded']:
+        return st['domain']
+    with _cookie_domain_lock:
+        if st['loaded']:
+            return st['domain']
+        raw = (app_config.get('SESSION_COOKIE_DOMAIN') or '').strip().lower()
+        dom = raw.lstrip('.')
+        if dom:
+            ok = bool(_DNS_NAME_RE.match(dom))
+            try:
+                ipaddress.ip_address(dom)
+                ok = False
+            except ValueError:
+                pass
+            if not ok:
+                try:
+                    syslog_logger.warning(
+                        'CONFIG SESSION_COOKIE_DOMAIN ignored: not a domain name '
+                        '(needs a dot, no IP / port / scheme); the session cookie '
+                        'stays host-only')
+                except Exception:
+                    pass
+                dom = None
+        st['domain'] = dom or None
+        st['loaded'] = True
+        return st['domain']
+
+
+def _request_cookie_domain():
+    """The Domain to put on the session cookie for THIS request: the
+    configured SESSION_COOKIE_DOMAIN when the request's host is that domain
+    or a name under it, else None (host-only cookie)."""
+    dom = _session_cookie_domain_setting()
+    if not dom:
+        return None
+    try:
+        host = (request.host or '').lower()
+        # Through the VPS gateway the cookie stays host-only (3.56.1): Caddy
+        # keeps the public Host, so a public name under the domain would
+        # otherwise hand a live sid (and a Secure parent-domain cookie that
+        # shadows plain-HTTP LAN hosts) to every host under it.
+        if _connection_path() == 'gateway':
+            return None
+    except RuntimeError:
+        return None
+    if host.startswith('['):
+        return None                      # IPv6 literal
+    name = host.rsplit(':', 1)[0] if host.count(':') == 1 else host
+    if name == dom or name.endswith('.' + dom):
+        return dom
+    st = _cookie_domain_state
+    if name not in st['warned'] and len(st['warned']) < 20:
+        st['warned'].add(name)
+        try:
+            syslog_logger.warning(
+                f'CONFIG SESSION_COOKIE_DOMAIN={dom} not used for host '
+                f'{re.sub(r"[^a-z0-9.:-]", "?", name)[:80]} (not under that domain); '
+                f'host-only cookie')
+        except Exception:
+            pass
+    return None
+
 
 def _session_expires_dt(value):
     """`app_sessions.expires_at` → datetime. PostgreSQL returns a datetime;
@@ -338,19 +422,46 @@ class _DBSessionInterface(_FlaskSessionInterface):
         except Exception: pass
         return data, True
 
+    def get_cookie_domain(self, app):
+        # SESSION_COOKIE_DOMAIN from .env, only for hosts under it (3.56.0).
+        return _request_cookie_domain()
+
     def open_session(self, app, request):
         cookie_name = app.config.get('SESSION_COOKIE_NAME', 'session')
-        sid = request.cookies.get(cookie_name)
-        if not sid or not _SID_RE.match(sid):
-            return _DBSession(sid=self._new_sid(), new=True)
-        data, ok = self._load(sid)
-        if not ok:
-            # Never adopt a client-supplied sid that doesn't exist in our store —
-            # mint a fresh one. Otherwise an attacker who plants a known sid via
-            # an open-redirect / XSS-adjacent vector could pre-fixate the victim's
-            # session before login.
-            return _DBSession(sid=self._new_sid(), new=True)
-        return _DBSession(data, sid=sid, new=False)
+        # With SESSION_COOKIE_DOMAIN set, a browser can hold BOTH an old
+        # host-only cookie and the new domain cookie under one name; try each
+        # (at most 3) so a stale one can't hide the live session.
+        sids = [s for s in request.cookies.getlist(cookie_name)
+                if s and _SID_RE.match(s)]
+        # Browsers send equal-path cookies oldest first, so the left-over
+        # host-only cookie precedes the shared Domain one. Adopting it would
+        # let the next save write that OLD sid into the Domain cookie and
+        # replace the session the browser signed in with on another host
+        # (3.56.2): where a Domain cookie is in effect, try the newest first.
+        if len(sids) > 1 and self.get_cookie_domain(app):
+            sids.reverse()
+        for sid in sids[:3]:
+            data, ok = self._load(sid)
+            if ok:
+                return _DBSession(data, sid=sid, new=False)
+        # Never adopt a client-supplied sid that doesn't exist in our store —
+        # mint a fresh one. Otherwise an attacker who plants a known sid via
+        # an open-redirect / XSS-adjacent vector could pre-fixate the victim's
+        # session before login.
+        return _DBSession(sid=self._new_sid(), new=True)
+
+    @staticmethod
+    def _drop_host_only_twin(response, cookie_name, domain, path):
+        """With a Domain cookie in effect, also expire a host-only cookie of
+        the same name (left from before SESSION_COOKIE_DOMAIN was set) —
+        only when the browser actually sent that name."""
+        if not domain:
+            return
+        try:
+            if request.cookies.get(cookie_name):
+                response.delete_cookie(cookie_name, path=path)
+        except RuntimeError:
+            pass
 
     def save_session(self, app, session, response):
         domain = self.get_cookie_domain(app)
@@ -370,6 +481,7 @@ class _DBSessionInterface(_FlaskSessionInterface):
                 except Exception:
                     pass
                 response.delete_cookie(cookie_name, domain=domain, path=path)
+                self._drop_host_only_twin(response, cookie_name, domain, path)
             return
 
         # Nothing to persist
@@ -420,6 +532,7 @@ class _DBSessionInterface(_FlaskSessionInterface):
             secure=secure,
             samesite=self.get_cookie_samesite(app),
         )
+        self._drop_host_only_twin(response, cookie_name, domain, path)
 
 
 if not app_config.get_bool('DISABLE_DB_SESSIONS'):
@@ -907,7 +1020,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.52.0'
+APP_VERSION = '3.56.2'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -1716,6 +1829,52 @@ def _ip_sort_key(ip):
         return (999, 999, 999, 999)
 
 
+def _normalize_instance_url(raw):
+    """'scheme://host[:port]' (lower-cased) for an http/https base URL with
+    no user-info, path, query or fragment; None for anything else."""
+    from urllib.parse import urlsplit
+    raw = (raw or '').strip()
+    if not raw or len(raw) > 200 or _NEXT_CONTROL_CHARS.search(raw) or '\\' in raw:
+        return None
+    try:
+        u = urlsplit(raw)
+        port = u.port            # raises ValueError on a bad port
+    except ValueError:
+        return None
+    if (u.scheme not in ('http', 'https') or not u.hostname or u.username
+            or u.password or u.path not in ('', '/') or u.query or u.fragment
+            or '@' in u.netloc):
+        return None
+    host = u.hostname.lower()
+    if ':' in host:
+        host = f'[{host}]'
+    return f'{u.scheme}://{host}' + (f':{port}' if port else '')
+
+
+_self_url_state = {'loaded': False, 'url': None}
+
+
+def _cluster_self_url():
+    """This server's own base URL for the "Switch server" hand-off (.env
+    CLUSTER_SELF_URL, e.g. http://10.201.2.102:5400), normalised; None when
+    unset or invalid (logged once). Published in the heartbeat; a hand-off
+    token is redeemable only on the server whose URL it was minted for."""
+    st = _self_url_state
+    if not st['loaded']:
+        raw = app_config.get('CLUSTER_SELF_URL')
+        url = _normalize_instance_url(raw)
+        if raw and not url:
+            try:
+                syslog_logger.warning(
+                    'CONFIG CLUSTER_SELF_URL ignored: needs http(s)://host[:port] '
+                    'with no path; "Switch server" hand-off to this server is off')
+            except Exception:
+                pass
+        st['url'] = url
+        st['loaded'] = True
+    return st['url']
+
+
 def _cluster_heartbeat_iteration():
     """Upsert this instance's row. Called on a timer; failures are logged."""
     try:
@@ -1726,20 +1885,29 @@ def _cluster_heartbeat_iteration():
             port = int(port_str)
         except ValueError:
             port = 5400
-        version = get_app_setting('app_version', '') or ''
+        # The running code's version (3.55.0: the old read of an app_setting
+        # nothing ever wrote left this column blank).
+        version = APP_VERSION
+        # This worker's last probe of its OWN Ollama (ai_module.probe_refresh
+        # runs it every 60 s) — published, never probed inline here.
+        ai_state, ai_checked_at = ai_module.heartbeat_state()
         now = datetime.utcnow()
         db = get_db()
         try:
             db.execute("""
                 INSERT INTO cluster_instances
-                    (instance_id, ip, hostname, port, app_version, started_at, last_seen)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (instance_id, ip, hostname, port, app_version, started_at, last_seen,
+                     ai_state, ai_checked_at, public_url)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (instance_id) DO UPDATE SET
                     ip = EXCLUDED.ip, hostname = EXCLUDED.hostname, port = EXCLUDED.port,
                     app_version = EXCLUDED.app_version, started_at = EXCLUDED.started_at,
-                    last_seen = EXCLUDED.last_seen
+                    last_seen = EXCLUDED.last_seen, ai_state = EXCLUDED.ai_state,
+                    ai_checked_at = EXCLUDED.ai_checked_at,
+                    public_url = EXCLUDED.public_url
             """, (_CLUSTER_INSTANCE_ID, ip, hostname, port, version,
-                  _CLUSTER_STARTED_AT, now))
+                  _CLUSTER_STARTED_AT, now, ai_state, ai_checked_at,
+                  _cluster_self_url()))
             db.commit()
         finally:
             db.close()
@@ -1774,7 +1942,7 @@ def _query_live_peers():
     try:
         rows = db.execute(
             "SELECT instance_id, ip, hostname, port, app_version, "
-            "started_at, last_seen FROM cluster_instances "
+            "started_at, last_seen, ai_state, ai_checked_at FROM cluster_instances "
             "WHERE last_seen > %s ORDER BY ip, instance_id",
             (cutoff,)
         ).fetchall()
@@ -1855,9 +2023,19 @@ def get_cluster_status():
                 'last_seen':     p.get('last_seen'),
                 'worker_count':  0,
                 '_instance_ids': set(),
+                'ai':            None,
+                'ai_checked_at': None,
             }
         g = groups[key]
         g['worker_count'] += 1
+        # The freshest worker probe of this server's own Ollama (3.55.0).
+        ac = p.get('ai_checked_at')
+        if p.get('ai_state') and (g['ai_checked_at'] is None or (ac and ac > g['ai_checked_at'])):
+            try:
+                g['ai'] = json.loads(p['ai_state'])
+                g['ai_checked_at'] = ac
+            except ValueError:
+                pass
         iid = p.get('instance_id')
         if iid:
             g['_instance_ids'].add(iid)
@@ -1873,7 +2051,7 @@ def get_cluster_status():
     aggregated = []
     for g in groups.values():
         ids = g.pop('_instance_ids')
-        for k in ('started_at', 'last_seen'):
+        for k in ('started_at', 'last_seen', 'ai_checked_at'):
             v = g.get(k)
             if hasattr(v, 'isoformat'):
                 g[k] = v.isoformat()
@@ -2464,6 +2642,9 @@ _VIEWER_ALLOWED_ENDPOINTS = frozenset({
     # A public dashboard link (/d/<slug>) opens for anyone; a viewer gets the
     # same signed-out page a visitor with no account gets.
     'public_dashboard',
+    # "Switch server" hand-off (3.56.0): carries no show data; the redeem
+    # replaces this host's session, the start shares the viewer's own.
+    'auth_handoff', 'auth_handoff_start',
 })
 
 # Widget-data endpoints behind a public dashboard. A viewer may call them only
@@ -2826,6 +3007,8 @@ def _hourly_maintenance_work():
                          (datetime.utcnow(),))
         # Browser/screen records (3.33.0): keep 180 days of last use.
         db.execute("DELETE FROM user_clients WHERE last_seen < NOW() - INTERVAL '180 days'")
+        # "Switch server" hand-off tokens live 60 s; keep a day for tracing.
+        db.execute("DELETE FROM session_handoffs WHERE expires_at < NOW() - INTERVAL '1 day'")
         try:
             harvested = cur.rowcount or 0
         except Exception:
@@ -2850,6 +3033,9 @@ def _hourly_maintenance_work():
         db.execute('UPDATE email_messages SET body_text=NULL, body_html=NULL, '
                    'body_purged_at=NOW() WHERE body_purged_at IS NULL '
                    'AND created_at < NOW() - %s * INTERVAL \'1 day\'', (keep_days,))
+        # AI queue / slot retention (3.55.0): 30 days of slots, extract
+        # payloads gone within the hour, the newest 100 weekly summaries.
+        ai_module.hourly_trim(db)
         db.commit()
         # Sessions that died unnoticed (logout-less departures, the login
         # sid-rotation orphans). SESSION_EXPIRED in the session loader covers
@@ -4348,6 +4534,20 @@ def start_scheduler():
         # wrapper; every alert is claimed atomically in the module, so a
         # late or doubled fire sends nothing twice.
         scheduler.add_job(_run_pm_hourly, 'interval', hours=1, id='pm_hourly')
+        # AI (3.55.0). NOT leader-gated: every worker probes ITS OWN machine's
+        # Ollama (published by the cluster heartbeat), and claims queued AI
+        # jobs only while that probe passes — the claim is atomic (FOR UPDATE
+        # SKIP LOCKED), so several workers ticking together is safe.
+        scheduler.add_job(ai_module.probe_refresh, 'interval', seconds=60, id='ollama_probe_refresh',
+                          next_run_time=datetime.now() + timedelta(seconds=5),
+                          misfire_grace_time=30, coalesce=True, max_instances=1)
+        scheduler.add_job(ai_module.worker_tick, 'interval', seconds=10, id='ai_job_worker',
+                          misfire_grace_time=10, coalesce=True, max_instances=1)
+        # Weekly AI summary e-mail: leader-gated inside; enqueues once per week
+        # (a capable worker generates it), then mails it once.
+        scheduler.add_job(ai_module.weekly_email_tick, 'interval', minutes=15,
+                          id='ai_weekly_email', misfire_grace_time=600, coalesce=True,
+                          max_instances=1)
         scheduler.start()
         # Backfill contact↔user link once on boot.
         try:
@@ -6044,6 +6244,355 @@ def logout():
     return resp
 
 
+# ─── "Switch server" hand-off (3.56.0) ────────────────────────────────────────
+# Sessions live in the shared app_sessions table, but a browser keeps a
+# separate cookie per host, so moving from one instance to another by IP /
+# a different name asked for a fresh sign-in. (Instances under one parent
+# domain share the cookie instead: SESSION_COOKIE_DOMAIN above.)
+#
+# Flow: the footer's "Switch server" menu lists the OTHER live servers that
+# publish a CLUSTER_SELF_URL in the heartbeat. A click POSTs (same-origin form,
+# _csrf_protect) the server's key → a one-time token (256-bit, only its
+# SHA-256 stored, 120 s on the DB clock, bound to this session's sid, the
+# user, the target URL and the next path) → 303 to <target>/auth/handoff#t=…
+# (3.56.1: the token rides in the FRAGMENT, which no access log, proxy or
+# Referer ever sees) → that page's script POSTs it same-origin → the target
+# checks the token names THIS server, comes from the same client address,
+# the user is still unlocked / approved and the session still live, and
+# shows "Continue as <name>?" (skipped only when this browser is already
+# signed in here as that same user; it also says which other account the
+# switch would sign out here) → the confirm POST (same-origin, Origin-
+# checked) claims it atomically (UPDATE … RETURNING), re-checks, then
+# issues ITS cookie for the SAME sid (one session: logging out on either
+# server ends both) and redirects to the stored, _safe_local_path'd next
+# path. The confirm page is what stops a link minted for one account from
+# silently signing in a colleague behind the same address (terminal
+# server / NAT). Target URLs come only from the heartbeat rows (each server's own
+# .env), never from the request, so there is no open redirect.
+#
+# LAN only: through the VPS gateway the menu is hidden and both routes 404 —
+# the gateway's single public name routes to the primary only, and the peers'
+# internal addresses must not be shown to the internet. (The gateway's
+# forward_auth runs before any app route anyway, so /auth/handoff can never
+# skip the email-code gate.) TEST_MODE: off both ways (never in the cluster).
+# The token is never logged: syslog SESSION_HANDOFF user_id / from / to; it
+# is never in a URL the server sees (an old-style ?t= link is spent + refused).
+
+_HANDOFF_TTL_S = 120
+_HANDOFF_TOKEN_RE = re.compile(r'^[A-Za-z0-9_-]{43}$')
+_handoff_peers_cache = {'at': 0.0, 'peers': []}
+_HANDOFF_PEERS_TTL = 20.0
+
+
+def _handoff_key(url):
+    return hashlib.sha256(url.encode('utf-8')).hexdigest()[:16]
+
+
+def _handoff_peers():
+    """The OTHER live servers this one can hand a session to:
+    [{key, url, label, host}], from cluster_instances (each server's own
+    CLUSTER_SELF_URL), cached per process for 20 s. [] in TEST_MODE, on a
+    DB error (the last good list is kept) or with one server."""
+    if TEST_MODE:
+        return []
+    now = time.monotonic()
+    c = _handoff_peers_cache
+    if now - c['at'] < _HANDOFF_PEERS_TTL:
+        return c['peers']
+    c['at'] = now
+    try:
+        try:
+            timeout = int(get_app_setting('cluster_peer_timeout_sec', '30'))
+        except ValueError:
+            timeout = 30
+        cutoff = datetime.utcnow() - timedelta(seconds=timeout)
+        db = get_db()
+        try:
+            rows = db.execute(
+                "SELECT public_url, MIN(hostname) AS hostname FROM cluster_instances "
+                "WHERE last_seen > %s AND COALESCE(public_url, '') <> '' "
+                "GROUP BY public_url ORDER BY public_url LIMIT 20", (cutoff,)).fetchall()
+        finally:
+            db.close()
+    except Exception:
+        return c['peers']
+    own = _cluster_self_url()
+    peers = []
+    for r in rows:
+        url = _normalize_instance_url(r['public_url'])
+        if not url or url == own:
+            continue
+        host = url.split('://', 1)[1]
+        label = (r['hostname'] or '').strip()[:60] or host
+        peers.append({'key': _handoff_key(url), 'url': url, 'label': label, 'host': host})
+    c['peers'] = peers
+    return peers
+
+
+@app.context_processor
+def _inject_handoff_peers():
+    """`handoff_peers` for the sidebar footer's "Switch server" menu: signed
+    in, on the LAN (not through the gateway), not mid forced-password-change."""
+    if (not has_request_context() or TEST_MODE or not session.get('user_id')
+            or session.get('must_change_password')
+            or _connection_path() == 'gateway'
+            # Signed-cookie sessions (DISABLE_DB_SESSIONS) have no shared sid
+            # to hand over: the start route would only 404 (3.56.1).
+            or not isinstance(app.session_interface, _DBSessionInterface)
+            or not getattr(session, 'sid', None)
+            or getattr(session, 'new', False)):
+        return {'handoff_peers': []}
+    try:
+        return {'handoff_peers': _handoff_peers()}
+    except Exception:
+        return {'handoff_peers': []}
+
+
+def _handoff_host(url):
+    return (url or '').split('://', 1)[-1][:80]
+
+
+def _auth_handoff_start_route():
+    if TEST_MODE or _connection_path() == 'gateway':
+        abort(404)
+    if not session.get('user_id') or session.get('must_change_password'):
+        return redirect(url_for('login'))
+    sid = getattr(session, 'sid', None)
+    if not sid or getattr(session, 'new', False):
+        abort(404)       # signed-cookie fallback / unsaved session: nothing to share
+    key = (request.form.get('server') or '').strip()
+    target = next((p for p in _handoff_peers() if p['key'] == key), None)
+    if not target:
+        flash('That server is not available right now.', 'error')
+        return redirect(_safe_local_path(request.form.get('next') or '') or url_for('index'))
+    nxt = request.form.get('next') or ''
+    nxt = (_safe_local_path(nxt) if len(nxt) <= 1000 else None) or '/'
+    token = secrets.token_urlsafe(32)          # 256 bits → 43 chars
+    th = hashlib.sha256(token.encode('ascii')).hexdigest()
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO session_handoffs (token_hash, user_id, sid, target_url, from_url, "
+            "next_path, requester_ip, expires_at) VALUES (%s, %s, %s, %s, %s, %s, %s, "
+            f"NOW() + INTERVAL '{_HANDOFF_TTL_S} seconds')",
+            (th, session['user_id'], sid, target['url'], _cluster_self_url() or '',
+             nxt, (request.remote_addr or '')[:64]))
+        db.commit()
+    finally:
+        db.close()
+    syslog_logger.info(
+        f"SESSION_HANDOFF_START user_id={session['user_id']} "
+        f"from={_handoff_host(_cluster_self_url() or request.host)} "
+        f"to={_handoff_host(target['url'])} ip={request.remote_addr}")
+    resp = redirect(f"{target['url']}/auth/handoff#t={token}", code=303)
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    return resp
+
+
+def _handoff_fail(reason):
+    syslog_logger.warning(
+        f"SESSION_HANDOFF_FAIL reason={reason} ip={request.remote_addr}")
+    flash('That sign-in link has expired or was already used. Please sign in.', 'error')
+    resp = redirect(url_for('login'))
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    return resp
+
+
+def _handoff_page(**ctx):
+    # user=None: always the signed-out layout, even if this browser is
+    # signed in here (the page must not look like a normal app page).
+    resp = make_response(render_template('auth_handoff.html', user=None, **ctx))
+    resp.headers['Cache-Control'] = 'no-store'
+    # Not no-referrer: under it the browser sends `Origin: null` on this
+    # page's own form POST, which the route's same-origin check refuses.
+    # same-origin still sends nothing to other sites.
+    resp.headers['Referrer-Policy'] = 'same-origin'
+    return resp
+
+
+def _handoff_spend(db, th):
+    """Burn a token without using it (refused / cancelled / legacy link)."""
+    try:
+        db.execute("UPDATE session_handoffs SET used_at = NOW(), used_ip = %s "
+                   "WHERE token_hash = %s AND used_at IS NULL",
+                   ((request.remote_addr or '')[:64], th))
+        db.commit()
+    except Exception:
+        try: db.rollback()
+        except Exception: pass
+
+
+def _handoff_check(db, row, own):
+    """(reason, user, data): reason is None when `row` may be redeemed here
+    by this client. Shared by the confirm page and the claim."""
+    if row['target_url'] != own:
+        return 'wrong_server', None, None
+    # Same browser, same LAN address: a link someone minted for THEIR
+    # account and sent to a colleague must not sign the colleague in as
+    # them (login CSRF). Behind one shared address this alone is not
+    # enough — the confirm page names the account.
+    if (row['requester_ip'] or '') != (request.remote_addr or '')[:64]:
+        return 'ip_mismatch', None, None
+    user = db.execute('SELECT * FROM users WHERE id = %s',
+                      (row['user_id'],)).fetchone()
+    if (not user or user.get('is_locked')
+            or user.get('pending_approval')):
+        return 'user_inactive', None, None
+    srow = db.execute(
+        'SELECT data, expires_at, user_id FROM app_sessions WHERE sid = %s',
+        (row['sid'],)).fetchone()
+    if (not srow or srow['user_id'] != row['user_id']
+            or _session_expires_dt(srow['expires_at']) < datetime.utcnow()):
+        return 'session_gone', None, None
+    try:
+        data = json.loads(srow['data']) if srow['data'] else {}
+    except (TypeError, ValueError):
+        data = {}
+    if (not isinstance(data, dict) or data.get('user_id') != row['user_id']
+            or data.get('must_change_password')):
+        return 'session_gone', None, None
+    return None, user, data
+
+
+def _handoff_complete(db, row, user, data, own):
+    old_sid = getattr(session, 'sid', None)
+    old_new = getattr(session, 'new', True)
+    if old_sid and not old_new and old_sid != row['sid']:
+        # This browser held a different session on this host: the person
+        # confirmed replacing it (or it was their own), so drop its row
+        # rather than orphan it.
+        db.execute('DELETE FROM app_sessions WHERE sid = %s', (old_sid,))
+        db.commit()
+    session.clear()
+    session.sid = row['sid']
+    session.new = False
+    session.update(data)
+    _populate_session_from_user(user)
+    session.permanent = True
+    session.modified = True      # save_session re-issues THIS host's cookie
+    _record_connection(db, user['id'])
+    log_audit(db, 'SESSION_HANDOFF', 'user', user['id'],
+              detail=f"from {_handoff_host(row['from_url']) or '?'} to {_handoff_host(own)}")
+    db.commit()
+    syslog_logger.info(
+        f"SESSION_HANDOFF user_id={row['user_id']} "
+        f"from={_handoff_host(row['from_url']) or '?'} to={_handoff_host(own)} "
+        f"ip={request.remote_addr}")
+    nxt = _safe_local_path(row['next_path'] or '') or url_for('index')
+    if session.get('is_document_viewer'):
+        nxt = url_for('viewer_home')
+    resp = redirect(nxt, code=303)
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    return resp
+
+
+def _auth_handoff_route():
+    if TEST_MODE or _connection_path() == 'gateway':
+        abort(404)
+    own = _cluster_self_url()
+    if request.method == 'GET':
+        legacy = request.args.get('t') or ''
+        if legacy:
+            # A pre-3.56.1 server put the token in the query string, which the
+            # access log records: spend it and refuse.
+            if _HANDOFF_TOKEN_RE.match(legacy):
+                db = get_db()
+                try:
+                    _handoff_spend(db, hashlib.sha256(legacy.encode('ascii')).hexdigest())
+                finally:
+                    db.close()
+            return _handoff_fail('legacy_link')
+        if not own:
+            return _handoff_fail('no_self_url')
+        # The page's script moves the #t= fragment into a same-origin POST.
+        return _handoff_page(step='load')
+
+    # POST: same-origin only (the session CSRF check is skipped for a browser
+    # not signed in here, so check here too).
+    if not _origin_matches():
+        abort(403)
+    token = request.form.get('t') or ''
+    if not own or not _HANDOFF_TOKEN_RE.match(token):
+        return _handoff_fail('malformed' if own else 'no_self_url')
+    th = hashlib.sha256(token.encode('ascii')).hexdigest()
+    action = request.form.get('action') or ''
+    db = get_db()
+    try:
+        if action == 'cancel':
+            _handoff_spend(db, th)
+            syslog_logger.info(f"SESSION_HANDOFF_CANCEL ip={request.remote_addr}")
+            resp = redirect(url_for('index') if session.get('user_id') else url_for('login'),
+                            code=303)
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp
+        here_uid = session.get('user_id')
+        if action != 'confirm':
+            row = db.execute(
+                "SELECT user_id, sid, target_url, from_url, next_path, requester_ip "
+                "FROM session_handoffs WHERE token_hash = %s AND used_at IS NULL "
+                "AND expires_at > NOW()", (th,)).fetchone()
+            if not row:
+                return _handoff_fail('invalid_or_used')
+            reason, user, data = _handoff_check(db, row, own)
+            if reason:
+                _handoff_spend(db, th)
+                return _handoff_fail(reason)
+            if here_uid != row['user_id']:
+                # Ask first: name the account, and the one it would sign out.
+                other = None
+                if here_uid:
+                    o = db.execute('SELECT username, display_name FROM users WHERE id = %s',
+                                   (here_uid,)).fetchone()
+                    other = ((o['display_name'] or o['username']) if o else None) or 'another account'
+                return _handoff_page(
+                    step='confirm', token=token,
+                    name=user['display_name'] or user['username'],
+                    username=user['username'], other=other,
+                    from_host=_handoff_host(row['from_url']))
+            # Already signed in here as the same person: nothing to confirm.
+        # Claim first, check after: the token is spent by this request even
+        # when a later check refuses it (single use, no retry with it).
+        row = db.execute(
+            "UPDATE session_handoffs SET used_at = NOW(), used_ip = %s "
+            "WHERE token_hash = %s AND used_at IS NULL AND expires_at > NOW() "
+            "RETURNING user_id, sid, target_url, from_url, next_path, requester_ip",
+            ((request.remote_addr or '')[:64], th)).fetchone()
+        db.commit()
+        if not row:
+            return _handoff_fail('invalid_or_used')
+        reason, user, data = _handoff_check(db, row, own)
+        if reason:
+            return _handoff_fail(reason)
+        if action != 'confirm' and here_uid != row['user_id']:
+            return _handoff_fail('not_confirmed')      # signed in/out meanwhile
+        return _handoff_complete(db, row, user, data, own)
+    finally:
+        db.close()
+
+
+if _limiter_available and limiter:
+    @app.route('/auth/handoff/start', methods=['POST'])
+    @limiter.limit("20 per minute")
+    def auth_handoff_start():
+        return _auth_handoff_start_route()
+
+    @app.route('/auth/handoff', methods=['GET', 'POST'])
+    @limiter.limit("30 per minute")
+    def auth_handoff():
+        return _auth_handoff_route()
+else:
+    @app.route('/auth/handoff/start', methods=['POST'])
+    def auth_handoff_start():
+        return _auth_handoff_start_route()
+
+    @app.route('/auth/handoff', methods=['GET', 'POST'])
+    def auth_handoff():
+        return _auth_handoff_route()
+
+
 # ─── Session expiry status (expiry-warning watchdog) ──────────────────────────
 # Powers the client-side session watchdog in app.js (_initSessionWatch): every
 # logged-in page resyncs to the session's real server-side deadline on load and
@@ -6592,7 +7141,7 @@ def force_change_password():
 def _enforce_password_change():
     """Block all routes except logout/change-password if must_change_password is set."""
     if session.get('must_change_password'):
-        allowed = ('force_change_password', 'logout', 'static')
+        allowed = ('force_change_password', 'logout', 'static', 'auth_handoff')
         if request.endpoint not in allowed:
             return redirect(url_for('force_change_password'))
 
@@ -11608,6 +12157,10 @@ def manage_shows():
                            # _readonly_guard refuses read-only staff.
                            can_write=(session.get('user_role') == 'admin'
                                       or not session.get('is_readonly')),
+                           # Clone: admin only, and never a read-only admin
+                           # (clone_show refuses them).
+                           can_clone=(session.get('user_role') == 'admin'
+                                      and not session.get('is_readonly')),
                            user=get_current_user())
 
 
@@ -11762,6 +12315,496 @@ def toggle_show_mode(show_id):
     return jsonify({'success': True, 'show_mode': mode})
 
 
+# ─── Clone a show (Settings → Shows, admin) ───────────────────────────────────
+#
+# Builds a NEW show from an existing one, with the new dates asked for up
+# front. One transaction; the source is never touched. What a clone takes,
+# table by table (every table with a show_id — keep this list in step when a
+# new one appears):
+#
+#   COPIED
+#     shows row          name (new), venue, show_mode, performance_company,
+#                        cast/crew counts, is_test, labor_notes, load-in /
+#                        load-out (the dialog's dates). NOT status / archive
+#                        stamps / is_cancelled / restored_on, prism_status,
+#                        labor_settled_*, asset approval state, last_saved_*,
+#                        versions. show_date/time are re-derived from the new
+#                        performances by _sync_show_primary_date.
+#     show_performances  the dialog's list (dates + times, edited by the admin)
+#     advance_data       every field except file_upload / pdf_form /
+#                        piano_tuning fields (they point at files / tunings of
+#                        the source); show_name / dates / load range rewritten;
+#                        other 'date' fields shifted by the offset.
+#     schedule_meta      all keys; dark_day:<date> keys moved to the new date
+#                        (dropped if that date is not a day of the clone).
+#     security_signin_names  the sign-in list (names only).
+#     show_labor_billable_items  the per-show billable extras selection.
+#   COPIED + SHIFTED (optional groups in the dialog)
+#     schedule_rows      day_date moved, perf_id mapped to the new performance;
+#                        piano_tuning_id rows skipped (the tuning isn't cloned).
+#     labor_requests + show_labor_days   work_date moved; NEVER the scheduled
+#                        crew member / scheduled flags / scheduler notes.
+#     show_assets        rental window moved by the offset and kept inside the
+#                        clone's engagement; units UNPINNED; re-priced with
+#                        _price_asset_line at the CURRENT rates (only a line
+#                        whose price was overridden since add — locked !=
+#                        original — keeps its price); retired types skipped;
+#                        approval starts over (_reset_asset_approval).
+#                        Over-booking is a 409 listing the shortages unless
+#                        the request carries override_availability (the
+#                        dialog's confirm) — then audited per line with
+#                        availability_override=1 + ASSET_AVAILABILITY_OVERRIDE.
+#     show_external_rentals  description + cost only (no paperwork file);
+#                        piano-tuning rows skipped.
+#   NOT COPIED
+#     post_show_labor / post_show_notes (settlement), show_comments,
+#     show_attachments, pdf_submissions, export_log, form_history,
+#     advance_reads, field_alert_state, active_sessions, email_* logs
+#     (email_send_log must stay empty or the clone's advance mails would be
+#     treated as already sent), notifications, audit_log, piano_tunings,
+#     spot_captures, chat_threads, ai_sessions, prism_events, pm_* (projects).
+#
+# Dates: the offset = new start − the source's first date (load-in, show date
+# or first performance, whichever is earliest). Each source DAY maps to day +
+# offset, except a day holding a performance the admin moved by a different
+# amount in the dialog, which follows that performance.
+
+_CLONE_MAX_PERFS = 200
+_CLONE_ADV_SKIP_TYPES = ('file_upload', 'pdf_form', 'piano_tuning')
+
+
+def _clone_source_info(db, show_id):
+    """The source show for the clone dialog: dates, performances and how
+    much of each optional group there is. None when the show is gone."""
+    s = db.execute('SELECT id, name, venue, show_date, show_time, load_in_date, load_out_date '
+                   'FROM shows WHERE id=%s', (show_id,)).fetchone()
+    if not s:
+        return None
+    perfs = db.execute(
+        'SELECT id, perf_date, perf_time FROM show_performances WHERE show_id=%s '
+        'ORDER BY CASE WHEN perf_date IS NULL THEN 1 ELSE 0 END, perf_date, perf_time, id',
+        (show_id,)).fetchall()
+    dates = [d for d in [_as_date(s['load_in_date']), _as_date(s['show_date'])]
+             + [_as_date(p['perf_date']) for p in perfs] if d]
+    counts = db.execute("""
+        SELECT (SELECT COUNT(*) FROM schedule_rows WHERE show_id=%s
+                  AND piano_tuning_id IS NULL) AS schedule,
+               (SELECT COUNT(*) FROM labor_requests WHERE show_id=%s) AS labor,
+               (SELECT COUNT(*) FROM show_assets WHERE show_id=%s) AS assets,
+               (SELECT COUNT(*) FROM show_external_rentals WHERE show_id=%s
+                  AND piano_tuning_id IS NULL) AS rentals
+    """, (show_id,) * 4).fetchone()
+    iso = lambda v: _as_date(v).isoformat() if _as_date(v) else ''
+    return {
+        'id': s['id'], 'name': s['name'], 'venue': s['venue'] or '',
+        'anchor': min(dates).isoformat() if dates else '',
+        'load_in_date': iso(s['load_in_date']), 'load_out_date': iso(s['load_out_date']),
+        # A legacy / imported show with a show_date but no performance rows
+        # gets ONE synthetic row (no source id) so the clone keeps a dated
+        # show: show_date is re-derived only from performances.
+        'performances': [{'id': p['id'], 'date': iso(p['perf_date']),
+                          'time': p['perf_time'] or ''} for p in perfs]
+                        or ([{'id': None, 'date': iso(s['show_date']),
+                              'time': s['show_time'] or ''}] if _as_date(s['show_date']) else []),
+        'counts': dict(counts),
+    }
+
+
+def _clone_date(raw, label):
+    """'' / None → None; an ISO date (years 1900–2200) → date; else ValueError
+    with a message for the admin."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    try:
+        d = date.fromisoformat(str(raw).strip())
+    except ValueError:
+        raise ValueError(f'{label} is not a date (YYYY-MM-DD).')
+    if not 1900 <= d.year <= 2200:
+        raise ValueError(f'{label} is out of range.')
+    return d
+
+
+def _clone_admin_refusal():
+    """admin_required lets a read-only admin through; a clone is a write, so
+    refuse them like the raw is_readonly checks elsewhere do."""
+    if session.get('is_readonly'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    return None
+
+
+def _clone_shortages(db, windows):
+    """Over-booking of a clone's asset lines on their new dates: ([message],
+    {new show_assets id: source line}). `windows` = {(start, end): [line +
+    new_sa_id]}. Run before the commit (the clone's own lines are visible to
+    its transaction) and again after it (POST /shows/<id>/assets' post-commit
+    rule: a booking that committed in between is only visible then)."""
+    short = set()
+    shortages, short_lines = [], {}
+    for (ws, we), rows in windows.items():
+        avail = _get_asset_availability_many(db, [r['asset_type_id'] for r in rows], ws, we)
+        for r in rows:
+            a = avail.get(r['asset_type_id'])
+            if (a and not a.get('unlimited') and a.get('available') is not None
+                    and a['available'] < 0):
+                short_lines[r['new_sa_id']] = r
+                if r['asset_type_id'] not in short:
+                    short.add(r['asset_type_id'])
+                    shortages.append(f'"{r["type_name"]}" is over-booked by '
+                                     f'{-a["available"]} on the new dates.')
+            if r['is_system'] or r['is_package']:
+                for sh in _system_component_shortages(
+                        db, r['asset_type_id'], r['quantity'] or 1, ws, we,
+                        back_out_system_qty=r['quantity'] or 1):
+                    short_lines[r['new_sa_id']] = r
+                    shortages.append(f'"{r["type_name"]}": component '
+                                     f'"{sh["component_name"]}" is short on the new dates.')
+    return shortages, short_lines
+
+
+@app.route('/settings/shows/<int:show_id>/clone-info')
+@admin_required
+def clone_show_info(show_id):
+    db = get_db()
+    try:
+        info = _clone_source_info(db, show_id)
+    finally:
+        db.close()
+    if not info:
+        return jsonify({'success': False, 'error': 'Show not found.'}), 404
+    return jsonify({'success': True, 'show': info})
+
+
+@app.route('/settings/shows/<int:show_id>/clone', methods=['POST'])
+@admin_required
+def clone_show(show_id):
+    refused = _clone_admin_refusal()
+    if refused:
+        return refused
+    data = _json_obj()
+    bad = lambda msg: (jsonify({'success': False, 'error': msg}), 400)
+    name = ' '.join(str(data.get('name') or '').split())
+    if not name:
+        return bad('The new show needs a name.')
+    if len(name) > 200:
+        return bad('The name is too long (200 characters at most).')
+    copy = data.get('copy') if isinstance(data.get('copy'), dict) else {}
+    want = {}
+    for k in ('schedule', 'labor', 'assets'):
+        v = copy.get(k, True)
+        # Only a real boolean (or 0/1): the string 'false' must never read
+        # as "copy it".
+        if v in (True, 1, '1', 'true') and v is not False:
+            want[k] = True
+        elif v in (False, 0, '0', 'false') or v is None:
+            want[k] = False
+        else:
+            return bad(f'copy.{k} must be true or false.')
+    override_avail = data.get('override_availability') is True
+    raw_perfs = data.get('performances')
+    if raw_perfs is None:
+        raw_perfs = []
+    if not isinstance(raw_perfs, list):
+        return bad('performances must be a list.')
+    if len(raw_perfs) > _CLONE_MAX_PERFS:
+        return bad(f'At most {_CLONE_MAX_PERFS} performances.')
+    try:
+        start = _clone_date(data.get('start_date'), 'The new start date')
+        load_in = _clone_date(data.get('load_in_date'), 'First Call (load-in)')
+        load_out = _clone_date(data.get('load_out_date'), 'Final Out (load-out)')
+        perfs = []
+        for i, p in enumerate(raw_perfs, 1):
+            if not isinstance(p, dict):
+                return bad(f'Performance {i} is not valid.')
+            pd = _clone_date(p.get('date'), f'Performance {i} date')
+            pt = p.get('time')
+            if pt is not None and not isinstance(pt, str):
+                return bad(f'Performance {i} time is not valid.')
+            pt = _normalize_perf_time(pt)[:40]
+            try:
+                src = int(p['src_id']) if p.get('src_id') not in (None, '') else None
+            except (TypeError, ValueError):
+                src = None
+            perfs.append((pd, pt, src))
+    except ValueError as e:
+        return bad(str(e))
+    if load_in and load_out and load_in > load_out:
+        return bad('First Call (load-in) must be on or before Final Out (load-out).')
+
+    db = get_db()
+    try:
+        src = db.execute('SELECT * FROM shows WHERE id=%s FOR SHARE', (show_id,)).fetchone()
+        if not src:
+            db.close()
+            return jsonify({'success': False, 'error': 'Show not found.'}), 404
+        src = dict(src)
+        info = _clone_source_info(db, show_id)
+        anchor = _as_date(info['anchor'])
+        if anchor and not start:
+            db.close()
+            return bad('Pick the new start date.')
+        offset = timedelta(days=(start - anchor).days) if (anchor and start) else timedelta(0)
+        src_perfs = {p['id']: _as_date(p['date']) for p in info['performances']
+                     if p['id'] is not None}
+        # Day map: each source day → its new day.
+        day_override = {}
+        for pd, _pt, sid in perfs:
+            old = src_perfs.get(sid)
+            if old and pd and old not in day_override:
+                day_override[old] = pd
+
+        def move(d):
+            d = _as_date(d)
+            if not d:
+                return None
+            return day_override.get(d, d + offset)
+
+        uid = session['user_id']
+        new_id = db.execute("""
+            INSERT INTO shows (name, venue, show_mode, performance_company, cast_count,
+                               crew_count, is_test, labor_notes, load_in_date,
+                               load_out_date, created_by, status)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active') RETURNING id
+        """, (name, src.get('venue') or '', src.get('show_mode') or 'show',
+              src.get('performance_company') or '', src.get('cast_count'),
+              src.get('crew_count'), 1 if src.get('is_test') else 0,
+              src.get('labor_notes') or '', load_in, load_out, uid)).fetchone()['id']
+
+        # Performances (the dialog's list, in its order).
+        perf_map = {}
+        for i, (pd, pt, sid) in enumerate(perfs):
+            pid = db.execute(
+                'INSERT INTO show_performances (show_id, perf_date, perf_time, sort_order) '
+                'VALUES (%s,%s,%s,%s) RETURNING id', (new_id, pd, pt, i)).fetchone()['id']
+            if sid in src_perfs and sid not in perf_map:
+                perf_map[sid] = pid
+
+        # Advance fields.
+        types = {r['field_key']: r['field_type'] for r in db.execute(
+            'SELECT field_key, field_type FROM form_fields').fetchall()}
+        rewrite = {'show_name': name,
+                   'load_in_date': load_in.isoformat() if load_in else '',
+                   'load_out_date': load_out.isoformat() if load_out else ''}
+        adv = {}
+        for r in db.execute('SELECT field_key, field_value FROM advance_data WHERE show_id=%s',
+                            (show_id,)).fetchall():
+            k, v = r['field_key'], r['field_value']
+            if types.get(k) in _CLONE_ADV_SKIP_TYPES or k in ('show_date', 'show_time'):
+                continue
+            if types.get(k) == 'date' and _as_date(v) and len(str(v).strip()) == 10:
+                v = (_as_date(v) + offset).isoformat()
+            adv[k] = v
+        adv.update(rewrite)
+        for k, v in adv.items():
+            db.execute('INSERT INTO advance_data (show_id, field_key, field_value) '
+                       'VALUES (%s,%s,%s) ON CONFLICT (show_id, field_key) '
+                       'DO UPDATE SET field_value = EXCLUDED.field_value', (new_id, k, v))
+        _sync_show_primary_date(db, new_id)
+
+        # Schedule meta (dark days follow their day).
+        new_days = None
+        for r in db.execute('SELECT field_key, field_value FROM schedule_meta WHERE show_id=%s',
+                            (show_id,)).fetchall():
+            k = r['field_key']
+            if k.startswith(DARK_DAY_PREFIX):
+                nd = move(k[len(DARK_DAY_PREFIX):])
+                if new_days is None:
+                    new_days = {d['date_key'] for d in _build_schedule_days(db, new_id)[1]
+                                if d.get('perf_date')}
+                if not nd or nd.isoformat() not in new_days:
+                    continue
+                k = DARK_DAY_PREFIX + nd.isoformat()
+            # Two source days moved onto one new day give the same dark key:
+            # keep the first (like show_labor_days below), never a 500.
+            db.execute('INSERT INTO schedule_meta (show_id, field_key, field_value) '
+                       'VALUES (%s,%s,%s) ON CONFLICT (show_id, field_key) DO NOTHING',
+                       (new_id, k, r['field_value']))
+
+        db.execute('INSERT INTO security_signin_names (show_id, name, sort_order, created_by) '
+                   'SELECT %s, name, sort_order, %s FROM security_signin_names '
+                   'WHERE show_id=%s ORDER BY sort_order, id', (new_id, uid, show_id))
+        db.execute('INSERT INTO show_labor_billable_items (show_id, billable_item_id) '
+                   'SELECT %s, billable_item_id FROM show_labor_billable_items '
+                   'WHERE show_id=%s ON CONFLICT DO NOTHING', (new_id, show_id))
+
+        copied = {'performances': len(perfs), 'schedule': 0, 'labor': 0,
+                  'assets': 0, 'rentals': 0}
+        warnings = []
+        short_lines = {}          # new show_assets id → its source line (over-booked)
+        windows = {}              # (start, end) → copied asset lines (post-commit check)
+
+        if want['schedule']:
+            for r in db.execute(
+                    'SELECT * FROM schedule_rows WHERE show_id=%s AND piano_tuning_id IS NULL '
+                    'ORDER BY sort_order, id', (show_id,)).fetchall():
+                day = move(r['day_date']) if r['day_date'] else None
+                new_perf = perf_map.get(r['perf_id'])
+                if not r['day_date'] and r['perf_id'] and not new_perf:
+                    # Legacy row of a performance left out of the clone: keep
+                    # it on that performance's (moved) day.
+                    day = move(src_perfs.get(r['perf_id']))
+                db.execute("""
+                    INSERT INTO schedule_rows (show_id, perf_id, day_date, sort_order,
+                        start_time, end_time, description, notes)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (new_id, new_perf, day.isoformat() if day else None, r['sort_order'],
+                      r['start_time'] or '', r['end_time'] or '', r['description'] or '',
+                      r['notes'] or ''))
+                copied['schedule'] += 1
+
+        if want['labor']:
+            for r in db.execute('SELECT * FROM labor_requests WHERE show_id=%s '
+                                'ORDER BY sort_order, id', (show_id,)).fetchall():
+                db.execute("""
+                    INSERT INTO labor_requests (show_id, position_id, work_date, in_time,
+                        out_time, break_start, break_end, break2_start, break2_end,
+                        requested_name, is_training_shift, sort_order)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (new_id, r['position_id'], move(r['work_date']), r['in_time'] or '',
+                      r['out_time'] or '', r['break_start'] or '', r['break_end'] or '',
+                      r['break2_start'] or '', r['break2_end'] or '',
+                      r['requested_name'] or '', r['is_training_shift'] or 0,
+                      r['sort_order'] or 0))
+                copied['labor'] += 1
+            seen_days = set()
+            for r in db.execute('SELECT * FROM show_labor_days WHERE show_id=%s ORDER BY work_date',
+                                (show_id,)).fetchall():
+                nd = move(r['work_date'])
+                if nd in seen_days:
+                    continue   # two source days folded onto one: keep the first
+                seen_days.add(nd)
+                db.execute("""
+                    INSERT INTO show_labor_days (show_id, work_date, cover_pm, day_notes,
+                                                 updated_by, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
+                """, (new_id, nd, r['cover_pm'] or '', r['day_notes'] or '', uid))
+
+        if want['assets']:
+            win_start, win_end = _show_rental_window(db, new_id)
+            rates = _show_company_rates(db, new_id)[1]
+            lines = db.execute("""
+                SELECT sa.*, at.name AS type_name, at.rental_cost, at.weekly_rate,
+                       at.is_consumable, at.is_system, at.is_package, at.is_retired
+                FROM show_assets sa JOIN asset_types at ON at.id = sa.asset_type_id
+                WHERE sa.show_id=%s ORDER BY sa.id
+            """, (show_id,)).fetchall()
+            hand_kept = 0
+            for r in lines:
+                if r['is_retired']:
+                    warnings.append(f'Skipped "{r["type_name"]}": the item is retired.')
+                    continue
+                rs = _as_date(r['rental_start'])
+                re_ = _as_date(r['rental_end'])
+                rs = rs + offset if rs else None
+                re_ = re_ + offset if re_ else None
+                if win_start and win_end:
+                    rs = min(max(rs or win_start, win_start), win_end)
+                    re_ = max(min(re_ or win_end, win_end), rs)
+                # Hand-priced = a real override on the source line (changed
+                # since it was added). NOT "differs from today's rate card":
+                # that is every line priced before a rate change, and a
+                # season-old show must clone at the CURRENT rates.
+                hand = (r['original_locked_price'] is not None
+                        and round(float(r['locked_price'] or 0), 2)
+                        != round(float(r['original_locked_price']), 2))
+                price, company = _price_asset_line(db, new_id, r, r['asset_type_id'],
+                                                   rs, re_, rates=rates)
+                if hand:
+                    hand_kept += 1
+                locked = float(r['locked_price'] or 0) if hand else price
+                # original = the current card's price, so a kept hand price is
+                # still an override against it (and a re-priced line is not).
+                sa_id = db.execute("""
+                    INSERT INTO show_assets (show_id, asset_type_id, asset_item_id, quantity,
+                        rental_start, rental_end, locked_price, original_locked_price,
+                        is_hidden, notes, added_by, rate_company)
+                    VALUES (%s,%s,NULL,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+                """, (new_id, r['asset_type_id'], r['quantity'] or 1, rs, re_, locked, price,
+                      r['is_hidden'] or 0, r['notes'] or '', uid,
+                      None if hand else company)).fetchone()['id']
+                copied['assets'] += 1
+                windows.setdefault((rs, re_), []).append(dict(r, new_sa_id=sa_id))
+            if hand_kept:
+                warnings.append(f'{hand_kept} asset line(s) kept their hand-set price; '
+                                'every other line is priced at the current rates.')
+            # Over-booking check on the new window (the clone's lines are
+            # visible to this transaction). Like POST /shows/<id>/assets, an
+            # over-booking is refused unless the admin confirmed it
+            # (override_availability, sent by the dialog after it listed the
+            # shortages) — and an override is audited + syslogged per line.
+            shortages, short_lines = _clone_shortages(db, windows)
+            if shortages and not override_avail:
+                db.rollback()
+                db.close()
+                return jsonify({'success': False, 'needs_override': True,
+                                'shortages': shortages,
+                                'error': 'Some gear is not available on the new dates.'}), 409
+            for sa_id, r in short_lines.items():
+                log_audit(db, 'ASSET_ADDED_TO_SHOW', 'show_asset', sa_id, show_id=new_id,
+                          detail=f"type_id={r['asset_type_id']} qty={r['quantity'] or 1} "
+                                 f"availability_override=1 (show clone from {show_id})")
+            warnings.extend(f'{m} (booked anyway — you confirmed the override)' for m in shortages)
+            for r in db.execute('SELECT description, cost, sort_order FROM show_external_rentals '
+                                'WHERE show_id=%s AND piano_tuning_id IS NULL ORDER BY sort_order, id',
+                                (show_id,)).fetchall():
+                db.execute('INSERT INTO show_external_rentals (show_id, description, cost, sort_order) '
+                           'VALUES (%s,%s,%s,%s)',
+                           (new_id, r['description'] or '', r['cost'] or 0, r['sort_order'] or 0))
+                copied['rentals'] += 1
+            if copied['assets'] or copied['rentals']:
+                _reset_asset_approval(db, new_id, 'asset_added')
+
+        log_audit(db, 'SHOW_CLONE', 'show', new_id, show_id=new_id,
+                  after={'name': name, 'source_show_id': show_id,
+                         'start_date': start.isoformat() if start else None,
+                         'offset_days': offset.days, 'copied': copied,
+                         'availability_override': 1 if short_lines else 0},
+                  detail=f"cloned from show {show_id} ('{src.get('name')}')")
+        db.commit()
+    except Exception as e:
+        try: db.rollback()
+        except Exception: pass
+        db.close()
+        app.logger.error(f'clone_show source={show_id} failed: {type(e).__name__}: {e}')
+        return jsonify({'success': False, 'error': 'Clone failed: '
+                        + _client_error_text(e)}), 500
+    # Post-commit re-check (POST /shows/<id>/assets' rule): a booking that
+    # committed between the check above and this commit is visible only now.
+    # Over-booked without the admin's override → the clone is removed whole
+    # and the dialog gets the same needs_override answer as before.
+    if windows and not override_avail:
+        try:
+            post_short, _ = _clone_shortages(db, windows)
+            if post_short:
+                _purge_show(db, new_id)
+                log_audit(db, 'SHOW_CLONE_ROLLBACK', 'show', new_id,
+                          detail=f'clone of show {show_id} removed: gear over-booked '
+                                 'by a booking made at the same time')
+                db.commit()
+                db.close()
+                syslog_logger.warning(
+                    f"SHOW_CLONE_ROLLBACK show_id={new_id} source={show_id} "
+                    f"short={len(post_short)} by={session.get('username')}")
+                return jsonify({'success': False, 'needs_override': True,
+                                'shortages': post_short,
+                                'error': 'Some gear was just booked by someone else and is '
+                                         'not available on the new dates.'}), 409
+        except Exception as e:
+            try: db.rollback()
+            except Exception: pass
+            app.logger.error(f'clone_show post-check show_id={new_id} failed: '
+                             f'{type(e).__name__}: {e}')
+    db.close()
+    for r in short_lines.values():
+        syslog_logger.warning(
+            f"ASSET_AVAILABILITY_OVERRIDE show_id={new_id} type_id={r['asset_type_id']} "
+            f"qty={r['quantity'] or 1} source={show_id} by={session.get('username')}")
+    syslog_logger.info(f"SHOW_CLONE show_id={new_id} source={show_id} offset={offset.days} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'show_id': new_id, 'copied': copied,
+                    'warnings': warnings,
+                    'url': url_for('show_page', show_id=new_id)})
+
+
 @app.route('/settings/shows/bulk-archive', methods=['POST'])
 @admin_required
 def bulk_archive_shows():
@@ -11884,6 +12927,8 @@ def _purge_show(db, show_id):
     # The optional module's own bookkeeping for its links to this show (its
     # tables cascade by FK). Before any row of the show is touched.
     projects_module.on_show_delete(db, show_id)
+    # Stored AI output (weekly summaries) quoting this show goes with it.
+    ai_module.on_show_delete(db, show_id)
     for tbl in _SHOW_PURGE_TABLES:
         db.execute(f'DELETE FROM {tbl} WHERE show_id=%s', (show_id,))
     db.execute('DELETE FROM shows WHERE id=%s', (show_id,))
@@ -16239,73 +17284,97 @@ def _is_blocked_host(hostname):
     return False
 
 
-def _validate_ollama_url(url):
-    """Validate that an Ollama URL is safe (no SSRF to internal/metadata endpoints)."""
-    from urllib.parse import urlparse
-    import ipaddress
-    try:
-        parsed = urlparse(url)
-        if parsed.scheme not in ('http', 'https'):
-            return False
-        hostname = parsed.hostname or ''
-        # Allow localhost / 127.x (typical Ollama install)
-        if hostname in ('localhost', '127.0.0.1', '::1') or hostname.startswith('127.'):
-            return True
-        # Block cloud metadata, link-local, and private ranges
-        try:
-            ip = ipaddress.ip_address(hostname)
-            if ip.is_private or ip.is_link_local or ip.is_loopback or ip.is_reserved:
-                return False
-        except ValueError:
-            pass  # hostname is a DNS name, not an IP — allow it
-        if _is_blocked_host(hostname):
-            return False
-        return True
-    except Exception:
-        return False
+# Ollama is reached on each server's OWN machine only (it has no
+# authentication) — ollama_client.validate_url is the one validator (3.55.0).
+# AI work runs through ai_module's queue; these two routes are the settings.
+
+_AI_PROMPT_MAX = 8000
 
 
 @app.route('/settings/ai', methods=['POST'])
 @admin_required
 def save_ai_settings():
-    data = request.get_json(force=True) or {}
+    data = _json_obj()
+    vals = {}
+    if 'ollama_enabled' in data:
+        vals['ollama_enabled'] = '1' if str(data.get('ollama_enabled')) in ('1', 'true', 'True') else '0'
+    if 'ollama_url' in data:
+        ok, msg, norm = ollama_client.validate_url(data.get('ollama_url'))
+        if not ok:
+            return jsonify({'success': False, 'error': msg}), 400
+        vals['ollama_url'] = norm
+    if 'ollama_model' in data:
+        m = data.get('ollama_model')
+        if not ollama_client.valid_model(m if isinstance(m, str) else ''):
+            return jsonify({'success': False, 'error': 'Model names are letters, digits and . _ : / - '
+                                                       '(up to 200), e.g. llama3.2 or mistral:7b.'}), 400
+        vals['ollama_model'] = m.strip()
+    if 'ai_max_sessions' in data:
+        try:
+            n = int(str(data.get('ai_max_sessions')).strip())
+        except (TypeError, ValueError):
+            n = 0
+        if not 1 <= n <= 10:
+            return jsonify({'success': False, 'error': 'Concurrent AI sessions must be 1–10.'}), 400
+        vals['ai_max_sessions'] = str(n)
+    if 'ai_system_prompt' in data:
+        p = data.get('ai_system_prompt')
+        if not isinstance(p, str) or len(p) > _AI_PROMPT_MAX:
+            return jsonify({'success': False,
+                            'error': f'The system prompt is limited to {_AI_PROMPT_MAX} characters.'}), 400
+        vals['ai_system_prompt'] = p
+    if not vals:
+        return jsonify({'success': False, 'error': 'Nothing to save.'}), 400
     db = get_db()
-    for key in ('ollama_enabled', 'ollama_url', 'ollama_model', 'ai_max_sessions', 'ai_system_prompt'):
-        if key in data:
-            db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
-                       (key, str(data[key])))
-    db.commit(); db.close()
+    try:
+        before = {k: get_app_setting(k, '') for k in vals if k != 'ai_system_prompt'}
+        for key, val in vals.items():
+            db.execute('INSERT INTO app_settings (key, value) VALUES (%s,%s) '
+                       'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', (key, val))
+        # No prompt text in the audit row — only that it changed.
+        after = {k: v for k, v in vals.items() if k != 'ai_system_prompt'}
+        if 'ai_system_prompt' in vals:
+            after['ai_system_prompt'] = '(changed)'
+        log_audit(db, 'SETTINGS_CHANGE', 'app_settings', None, detail='ai', before=before, after=after)
+        db.commit()
+    finally:
+        db.close()
     syslog_logger.info(f"SETTINGS_CHANGE key=ai by={session.get('username')}")
-    return jsonify({'success': True})
+    # Re-probe this worker now (the others pick it up within a minute).
+    threading.Thread(target=ai_module.probe_refresh, daemon=True).start()
+    return jsonify({'success': True, 'ollama_url': vals.get('ollama_url')})
 
 
 @app.route('/settings/ai/test', methods=['POST'])
 @admin_required
 def test_ai_connection():
-    data = request.get_json(force=True) or {}
-    url = data.get('ollama_url', 'http://localhost:11434').rstrip('/')
-    model = data.get('ollama_model', 'llama3.2')
-
-    # SSRF protection — only allow http(s) to non-internal hosts (except localhost for Ollama)
-    if not _validate_ollama_url(url):
-        return jsonify({'success': False, 'message': 'Invalid Ollama URL. Only http/https to localhost or non-internal hosts allowed.'})
-
-    import urllib.request
-    import urllib.error
-    try:
-        req = urllib.request.Request(f'{url}/api/tags', method='GET')
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            body = json.loads(resp.read())
-            models = [m['name'] for m in body.get('models', [])]
-            if model in models or any(m.startswith(model.split(':')[0]) for m in models):
-                return jsonify({'success': True, 'message': f'Connected. Model "{model}" available.', 'models': models})
-            return jsonify({'success': True, 'message': f'Connected, but model "{model}" not found. Available: {", ".join(models[:5])}', 'models': models})
-    except urllib.error.URLError as e:
-        app.logger.warning(f'Ollama connection failed: {e}')
-        return jsonify({'success': False, 'message': 'Cannot reach Ollama. Check URL and ensure Ollama is running.'})
-    except Exception as e:
-        app.logger.warning(f'Ollama test error: {e}')
-        return jsonify({'success': False, 'message': 'Ollama connection test failed.'})
+    """Probe THIS server's Ollama with the (unsaved) URL + model."""
+    data = _json_obj()
+    url = data.get('ollama_url') if isinstance(data.get('ollama_url'), str) else ''
+    model = data.get('ollama_model') if isinstance(data.get('ollama_model'), str) else ''
+    env_url = (app_config.get('OLLAMA_URL') or '').strip()
+    if env_url:
+        url = env_url        # this server's .env wins, exactly as the jobs see it
+    ok, msg, norm = ollama_client.validate_url(url or ollama_client.DEFAULT_URL)
+    if not ok:
+        return jsonify({'success': False, 'message': msg})
+    if not ollama_client.valid_model(model):
+        return jsonify({'success': False, 'message': 'Enter a valid model name.'})
+    st = ollama_client.probe(norm, model.strip())
+    host = socket.gethostname()
+    if not st['running']:
+        hint = ('Ollama is not installed on this server.' if not st['installed']
+                else 'Ollama is installed but not answering — is the service running?')
+        return jsonify({'success': False, 'message': f'{host}: {hint}', 'models': [],
+                        'installed': st['installed'], 'running': False})
+    ver = f" (Ollama {st['version']})" if st['version'] else ''
+    if st['has_model']:
+        return jsonify({'success': True, 'message': f'{host}: connected{ver}. Model "{model}" is installed.',
+                        'models': st['models'], 'installed': True, 'running': True, 'has_model': True})
+    return jsonify({'success': True, 'models': st['models'], 'installed': True, 'running': True,
+                    'has_model': False,
+                    'message': f'{host}: connected{ver}, but model "{model}" is not installed — use '
+                               '"Pull model" below.'})
 
 
 # ─── SMTP / PDF Email Settings ────────────────────────────────────────────────
@@ -16513,6 +17582,7 @@ _EMAIL_PURPOSE_LABELS = {
     'gateway_otp': 'Sign-in code', 'test': 'Email test',
     'maintenance_notice': 'Maintenance notice', 'maintenance_complete': 'Maintenance complete',
     'inbox_digest': 'Inbox (messages / mentions / reminders)',
+    'weekly_summary': 'Weekly post-show summary',
 }
 
 
@@ -17105,18 +18175,16 @@ def toggle_contact_recipient(cid):
 @app.route('/shows/<int:show_id>/ai-extract', methods=['POST'])
 @login_required
 def ai_extract(show_id):
-    """Extract form field values from an uploaded document using Ollama."""
-    ai_sid, slot_error = _claim_ai_session(show_id)
-    if slot_error:
-        return jsonify({'success': False, 'error': slot_error}), 429
+    """Extract form field values from an uploaded document using Ollama.
+    The text is read here; the model call is a queued AI job (3.55.0) run by
+    a server whose own Ollama answers — 202 {job_id}, the page polls
+    /api/ai/jobs/<id>. The AI slot is taken when a worker claims the job."""
     try:
         return _ai_extract_impl(show_id)
     except Exception as e:
         app.logger.exception("ai_extract unhandled error")
         return jsonify({'success': False,
                         'error': f'Server error: {_client_error_text(e)}'}), 500
-    finally:
-        _release_ai_session(ai_sid)
 
 def _ai_extract_impl(show_id):
     if not can_access_show(session['user_id'], show_id):
@@ -17127,8 +18195,6 @@ def _ai_extract_impl(show_id):
     if ollama_enabled != '1':
         return jsonify({'success': False, 'error': 'AI extraction is not enabled. Enable it in Settings → AI.'}), 400
 
-    ollama_url = get_app_setting('ollama_url', 'http://localhost:11434').rstrip('/')
-    ollama_model = get_app_setting('ollama_model', 'llama3.2')
 
     # Get document text
     doc_text = ''
@@ -17250,77 +18316,18 @@ def _ai_extract_impl(show_id):
     )
     _custom_system = get_app_setting('ai_system_prompt', '').strip()
     system_prefix = _custom_system if _custom_system else _default_system
-    prompt = (
-        f'{system_prefix}\n\n'
-        f'Fields to extract (key: description): {json.dumps(field_schema)}\n\n'
-        f'Document text:\n{doc_text[:8000]}'
-    )
-
-    # Call Ollama (with SSRF validation)
-    if not _validate_ollama_url(ollama_url):
-        return jsonify({'success': False, 'error': 'Invalid Ollama URL.'}), 400
-    try:
-        import urllib.request as _urlreq
-        payload = json.dumps({
-            'model': ollama_model,
-            'messages': [{'role': 'user', 'content': prompt}],
-            'format': 'json',
-            'stream': True,  # Stream tokens; timeout applies per-chunk, not total
-        }).encode()
-        req = _urlreq.Request(
-            f'{ollama_url}/api/chat',
-            data=payload,
-            headers={'Content-Type': 'application/json'},
-            method='POST',
-        )
-        raw_content = ''
-        with _urlreq.urlopen(req, timeout=60) as resp:
-            for line in resp:
-                line = line.strip()
-                if not line:
-                    continue
-                chunk = json.loads(line)
-                raw_content += chunk.get('message', {}).get('content', '')
-                if chunk.get('done'):
-                    break
-    except Exception as e:
-        app.logger.error(f'Ollama request failed: {e}')
-        return jsonify({'success': False, 'error': 'AI extraction request failed. Check Ollama connection.'}), 500
-
-    # Parse JSON response
-    try:
-        # Strip markdown code fences if model added them
-        clean = raw_content.strip()
-        if clean.startswith('```'):
-            clean = '\n'.join(clean.split('\n')[1:])
-            if clean.endswith('```'):
-                clean = clean[:-3]
-        extracted = json.loads(clean)
-    except (json.JSONDecodeError, ValueError):
-        app.logger.warning(f'AI returned invalid JSON: {raw_content[:200]}')
-        return jsonify({'success': False, 'error': 'AI returned an unparseable response. Try again or use a different model.'}), 500
-
-    # Build suggestions (only non-null values)
-    suggestions = {}
-    for field_key, value in extracted.items():
-        if value is not None and str(value).strip() and field_key in field_map:
-            suggestions[field_key] = {
-                'value': str(value).strip(),
-                'label': field_map[field_key]['label'],
-            }
-
-    syslog_logger.info(
-        f"AI_EXTRACT show_id={show_id} document={fname} "
-        f"fields_found={len(suggestions)} model={ollama_model} "
-        f"by={session.get('username')}"
-    )
-    return jsonify({
-        'success': True,
-        'suggestions': suggestions,
-        'document': fname,
-        'model': ollama_model,
-        'field_count': len(field_rows),
-    })
+    # The instructions go in a real system message; the field list and the
+    # document are the user message.
+    messages = [
+        {'role': 'system', 'content': system_prefix},
+        {'role': 'user', 'content': (
+            f'Fields to extract (key: description): {json.dumps(field_schema)}\n\n'
+            f'Document text:\n{doc_text[:8000]}')},
+    ]
+    body, status = ai_module.enqueue_extract(
+        show_id, session.get('user_id'), messages,
+        {k: v['label'] for k, v in field_map.items()}, fname, len(field_rows))
+    return jsonify(body), status
 
 
 # ─── Job Positions & Position Categories ─────────────────────────────────────
@@ -28413,6 +29420,11 @@ _SYSTEM_PROGRAMS = (
     {'key': 'git', 'name': 'git', 'binary': 'git', 'level': 'info',
      'packages': ('git',), 'purpose': 'Settings → System → Update (in-app updates)',
      'missing': 'In-app updates are unavailable; update with git pull.'},
+    {'key': 'ollama', 'name': 'Ollama (local AI)', 'binary': 'ollama', 'level': 'info',
+     'packages': (), 'purpose': 'AI Extract and the weekly post-show summary (runs on this server only, '
+     'bound to 127.0.0.1)',
+     'missing': 'This server takes no AI jobs; another server with Ollama can. Install with '
+                'sudo bash install.sh --with-ollama.'},
     {'key': 'node', 'name': 'Node.js', 'binary': 'node', 'level': 'info',
      'packages': ('nodejs',), 'purpose': 'Prism Sync only',
      'missing': 'Only needed for Prism Sync.'},
@@ -28633,6 +29645,384 @@ def about_data():
     out['live'] = {'load': list(os.getloadavg()) if hasattr(os, 'getloadavg') else None,
                    'workers': system_info.worker_info()['workers']}
     return jsonify(out)
+
+
+# ─── Show readiness (3.54.0, admin-only beta) ────────────────────────────────
+# "This show is NN% ready for showtime!" The math is the pure readiness.py
+# (never imports app.py); this side gathers facts for MANY shows in a fixed
+# number of batched queries (no per-show N+1 — only shows still holding
+# legacy no-day_date schedule rows take _build_schedule_days, as the
+# timeline does). Everything here is READ-ONLY: it never calls
+# _reset_asset_approval / auto_archive_past_shows, only reads the stored
+# approval columns. Knobs are app_settings `readiness_<name>`. Hidden: the
+# only surface is Settings → Readiness (beta), every route @admin_required.
+
+_READINESS_MAX_SHOWS = 400
+
+
+def _readiness_knobs(db):
+    """(knobs, stored, defaults): the effective knobs (validated, lenient),
+    the readiness_* values actually STORED, and the effective defaults —
+    readiness.DEFAULTS except labor_grace_days, which follows the no-labor
+    alert's first trigger (else 14) until an admin sets it."""
+    rows = db.execute(
+        'SELECT key, value FROM app_settings WHERE key = ANY(%s)',
+        (['readiness_' + k for k in readiness.DEFAULTS] + ['no_labor_alert_days_1'],)
+    ).fetchall()
+    stored = {r['key']: r['value'] for r in rows}
+    raw = {k: stored['readiness_' + k] for k in readiness.DEFAULTS
+           if stored.get('readiness_' + k) is not None}
+    defaults = dict(readiness.DEFAULTS)
+    try:
+        g = int(stored.get('no_labor_alert_days_1') or 0)
+        if 0 < g <= 120:
+            defaults['labor_grace_days'] = g
+    except (TypeError, ValueError):
+        pass
+    eff = dict(raw)
+    if 'labor_grace_days' not in eff:
+        eff['labor_grace_days'] = defaults['labor_grace_days']
+    return readiness.clean_knobs(eff), raw, defaults
+
+
+def _readiness_same(a, b):
+    """Knob values equal (floats within rounding — the form sends 30/100)."""
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(float(a) - float(b)) < 1e-9
+    return str(a) == str(b)
+
+
+def _readiness_fields(db):
+    """The advance form's fields in form order (shared by every show)."""
+    return [{'key': r['field_key'], 'label': r['label'], 'type': r['field_type'] or 'text',
+             'allow_multi': r['allow_multi'], 'notes': bool(r['is_notes_field'])}
+            for r in db.execute("""
+                SELECT f.field_key, f.label, f.field_type, f.allow_multi, f.is_notes_field
+                  FROM form_fields f JOIN form_sections s ON s.id = f.section_id
+                 ORDER BY s.sort_order, s.id, f.sort_order, f.id""").fetchall()]
+
+
+def _readiness_facts_many(db, show_ids, fields):
+    """{show_id: facts} for readiness.score() — ten statements whatever the
+    number of shows (plus _build_schedule_days for legacy-row shows only)."""
+    ids = sorted({int(i) for i in show_ids})
+    if not ids:
+        return {}
+    shows = {r['id']: dict(r) for r in db.execute("""
+        SELECT s.id, s.name, s.venue, s.status, s.show_date, s.load_in_date,
+               s.load_out_date, COALESCE(s.is_test, 0) AS is_test,
+               COALESCE(s.is_cancelled, 0) AS is_cancelled,
+               COALESCE(s.assets_approved, 0) AS assets_approved,
+               (s.assets_approval_snapshot IS NOT NULL) AS has_snapshot,
+               s.assets_approved_at::timestamptz AS assets_approved_at,
+               (SELECT COUNT(*) FROM show_assets sa
+                 WHERE sa.show_id = s.id AND COALESCE(sa.is_hidden, 0) = 0) AS asset_lines,
+               (SELECT COUNT(*) FROM show_external_rentals er
+                 WHERE er.show_id = s.id AND er.piano_tuning_id IS NULL) AS ext_lines
+          FROM shows s WHERE s.id = ANY(%s)""", (ids,)).fetchall()}
+    ids = sorted(shows)
+    perfs = {}
+    for r in db.execute('SELECT show_id, id, perf_date FROM show_performances '
+                        'WHERE show_id = ANY(%s)', (ids,)).fetchall():
+        perfs.setdefault(r['show_id'], []).append(r)
+    dark = {}
+    for r in db.execute("SELECT show_id, field_key FROM schedule_meta WHERE show_id = ANY(%s) "
+                        "AND field_key LIKE %s AND field_value = '1'",
+                        (ids, DARK_DAY_PREFIX + '%')).fetchall():
+        d = _as_date(r['field_key'][len(DARK_DAY_PREFIX):])
+        if d:
+            dark.setdefault(r['show_id'], set()).add(d.isoformat())
+    ftype = {f['key']: f for f in fields}
+    adv, adv_upd = {}, {}
+    for r in db.execute('SELECT show_id, field_key, field_value, updated_at::timestamptz AS u '
+                        'FROM advance_data WHERE show_id = ANY(%s)', (ids,)).fetchall():
+        f = ftype.get(r['field_key'])
+        if f and r['u'] is not None:
+            prev = adv_upd.get(r['show_id'])
+            if prev is None or r['u'] > prev:
+                adv_upd[r['show_id']] = r['u']
+        if not f or f['type'] in ('file_upload', 'pdf_form', 'notes', 'piano_tuning'):
+            continue
+        vals = _report_adv_values(f['type'], f['allow_multi'], r['field_value'])
+        if vals:
+            adv.setdefault(r['show_id'], {})[r['field_key']] = (1.0, ', '.join(vals)[:120])
+    file_keys = [f['key'] for f in fields if f['type'] == 'file_upload']
+    if file_keys:
+        for r in db.execute('SELECT DISTINCT show_id, field_key FROM show_attachments '
+                            'WHERE show_id = ANY(%s) AND field_key = ANY(%s) '
+                            'AND deleted_at IS NULL', (ids, file_keys)).fetchall():
+            adv.setdefault(r['show_id'], {})[r['field_key']] = (1.0, 'File attached')
+    pdf_keys = [f['key'] for f in fields if f['type'] == 'pdf_form']
+    if pdf_keys:
+        for r in db.execute('SELECT show_id, field_key, status FROM pdf_submissions '
+                            'WHERE show_id = ANY(%s) AND field_key = ANY(%s)',
+                            (ids, pdf_keys)).fetchall():
+            sub = (r['status'] or '') == 'submitted'
+            adv.setdefault(r['show_id'], {})[r['field_key']] = (
+                1.0 if sub else 0.5, 'Submitted' if sub else 'Draft')
+    # Content schedule rows (piano + blank rows left out, as the editor's
+    # "has content" rule).
+    rows_by, legacy = {}, set()
+    for r in db.execute("""
+            SELECT show_id, day_date, perf_id FROM schedule_rows
+             WHERE show_id = ANY(%s) AND piano_tuning_id IS NULL
+               AND (btrim(COALESCE(start_time, '')) <> '' OR btrim(COALESCE(end_time, '')) <> ''
+                    OR btrim(COALESCE(description, '')) <> '' OR btrim(COALESCE(notes, '')) <> '')
+             ORDER BY show_id, sort_order, id""", (ids,)).fetchall():
+        rows_by.setdefault(r['show_id'], []).append(dict(r))
+        if not r['day_date']:
+            legacy.add(r['show_id'])
+    labor = {}
+    for r in db.execute("""
+            SELECT lr.show_id, lr.work_date, COALESCE(lr.is_scheduled, 0) AS is_scheduled,
+                   lr.scheduled_crew_member_id, COALESCE(lr.requested_name, '') AS requested_name,
+                   lr.scheduled_at::timestamptz AS scheduled_at,
+                   COALESCE(cm.is_archived, 0) AS archived
+              FROM labor_requests lr
+              LEFT JOIN crew_members cm ON cm.id = lr.scheduled_crew_member_id
+             WHERE lr.show_id = ANY(%s) AND COALESCE(lr.is_training_shift, 0) = 0""",
+            (ids,)).fetchall():
+        wd = _as_date(r['work_date'])
+        labor.setdefault(r['show_id'], []).append({
+            'date': wd.isoformat() if wd else None,
+            'sched': r['is_scheduled'] == 1,
+            'crew': r['scheduled_crew_member_id'] is not None,
+            'named': bool(r['requested_name'].strip()),
+            'archived': r['archived'] == 1,
+            'at': _ts_out(r['scheduled_at']) if r['scheduled_at'] else None})
+
+    out = {}
+    for sid, s in shows.items():
+        p = perfs.get(sid, [])
+        pdates = [_as_date(x['perf_date']).isoformat() for x in p if _as_date(x['perf_date'])]
+        span = _schedule_span_dates(s['load_in_date'], s['load_out_date'], pdates)
+        if not span and _as_date(s['show_date']):
+            span = [_as_date(s['show_date']).isoformat()]
+        sched = {}
+        rows = rows_by.get(sid, [])
+        if sid in legacy:
+            _, sdays = _build_schedule_days(db, sid, s, include_orphans=True)
+            for key, rs in _schedule_rows_by_editor_day(rows, sdays).items():
+                d = _as_date(key) if key and not str(key).startswith('__null_') else None
+                if d and rs:
+                    sched[d.isoformat()] = sched.get(d.isoformat(), 0) + len(rs)
+        else:
+            for r in rows:
+                d = _as_date(r['day_date'])
+                if d:
+                    sched[d.isoformat()] = sched.get(d.isoformat(), 0) + 1
+        li, lo = _as_date(s['load_in_date']), _as_date(s['load_out_date'])
+        out[sid] = {
+            'id': sid, 'span': span, 'perf_dates': pdates,
+            'undated_perfs': sum(1 for x in p if not _as_date(x['perf_date'])),
+            'load_in': li.isoformat() if li else None,
+            'load_out': lo.isoformat() if lo else None,
+            'dark': sorted(dark.get(sid, ())), 'adv': adv.get(sid, {}),
+            'adv_updated': _ts_out(adv_upd[sid]) if sid in adv_upd else None,
+            'sched_days': sched, 'labor': labor.get(sid, []),
+            'gear': {'lines': int(s['asset_lines'] or 0) + int(s['ext_lines'] or 0),
+                     'approved': s['assets_approved'] == 1, 'snapshot': bool(s['has_snapshot']),
+                     'approved_at': _ts_out(s['assets_approved_at']) if s['assets_approved_at'] else None},
+            '_show': {'id': sid, 'name': s['name'], 'venue': s['venue'] or '',
+                      'status': s['status'], 'is_test': bool(s['is_test']),
+                      'is_cancelled': bool(s['is_cancelled'])},
+        }
+    return out
+
+
+def _show_readiness_many(db, show_ids, knobs=None, fields=None, today=None):
+    """{show_id: readiness result (+ 'show': id/name/venue/status)}."""
+    if knobs is None:
+        knobs = _readiness_knobs(db)[0]
+    if fields is None:
+        fields = _readiness_fields(db)
+    today = today or date.today()
+    out = {}
+    for sid, f in _readiness_facts_many(db, show_ids, fields).items():
+        res = readiness.score(f, knobs, today, fields)
+        res['show'] = f['_show']
+        out[sid] = res
+    return out
+
+
+def _show_readiness(db, show_id, knobs=None):
+    """One show's readiness — the batched path with one id, so the single
+    and batch answers can't drift."""
+    return _show_readiness_many(db, [show_id], knobs=knobs).get(int(show_id))
+
+
+def _readiness_list_ids(db, window, include_test, q):
+    """Upcoming active shows for the panel: not cancelled (not test unless
+    asked), last day today or later, first day within `window` days
+    (window None = any; undated shows only then). Sorted by first day."""
+    today = date.today()
+    where = ["s.status = 'active'", 'COALESCE(s.is_cancelled, 0) = 0']
+    params = []
+    if not include_test:
+        where.append('COALESCE(s.is_test, 0) = 0')
+    if q:
+        where.append("(s.name ILIKE %s OR COALESCE(s.venue, '') ILIKE %s)")
+        pat = '%' + q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+        params += [pat, pat]
+    rows = db.execute(f"""
+        SELECT s.id,
+               LEAST(s.load_in_date, MIN(p.perf_date), s.show_date) AS first_day,
+               GREATEST(s.load_out_date, MAX(p.perf_date), s.show_date) AS last_day
+          FROM shows s LEFT JOIN show_performances p ON p.show_id = s.id
+         WHERE {' AND '.join(where)}
+         GROUP BY s.id""", tuple(params)).fetchall()
+    keep = []
+    for r in rows:
+        first, last = _as_date(r['first_day']), _as_date(r['last_day'])
+        if first is None or last is None:
+            if window is None:
+                keep.append((date.max, r['id']))
+            continue
+        if last < today:
+            continue
+        if window is not None and first > today + timedelta(days=window):
+            continue
+        keep.append((first, r['id']))
+    keep.sort()
+    return [i for _d, i in keep[:_READINESS_MAX_SHOWS]], len(keep) > _READINESS_MAX_SHOWS
+
+
+def _readiness_list_args(src, knobs):
+    w = str(src.get('window') or '').strip()
+    if w == 'all':
+        window = None
+    else:
+        try:
+            window = max(1, min(365, int(w)))
+        except (TypeError, ValueError):
+            window = int(knobs['window_days'])
+    include_test = str(src.get('include_test') or '') in ('1', 'true', 'True')
+    q = str(src.get('q') or '').strip()[:100]
+    return window, include_test, q
+
+
+def _readiness_payload(db, knobs, src):
+    window, include_test, q = _readiness_list_args(src, knobs)
+    fields = _readiness_fields(db)
+    ids, truncated = _readiness_list_ids(db, window, include_test, q)
+    res = _show_readiness_many(db, ids, knobs=knobs, fields=fields)
+    return {'shows': [res[i] for i in ids if i in res], 'truncated': truncated,
+            'window': window if window is not None else 'all',
+            'include_test': include_test, 'q': q, 'today': date.today().isoformat(),
+            'knobs': knobs}
+
+
+def _readiness_meta():
+    """What the settings form needs to draw itself."""
+    return {'defaults': readiness.DEFAULTS,
+            'ranges': {k: list(v) for k, v in readiness.RANGES.items()},
+            'penalties': [{'key': 'penalty_' + c.lower(), 'code': c, 'label': l}
+                          for c, _p, l in readiness.PENALTY_CODES]}
+
+
+@app.route('/settings/readiness')
+@admin_required
+def readiness_page():
+    """Settings → Readiness (beta): every upcoming show's readiness %, its
+    breakdown, and the scoring knobs. Shell page; data from the JSON GETs."""
+    return render_template('readiness.html', user=get_current_user())
+
+
+@app.route('/settings/readiness/data')
+@admin_required
+def readiness_data():
+    """The panel's list with the SAVED knobs. Read-only."""
+    db = get_db()
+    try:
+        knobs, stored, _defaults = _readiness_knobs(db)
+        out = _readiness_payload(db, knobs, request.args)
+        out['meta'] = _readiness_meta()
+        out['stored_keys'] = sorted(stored)
+        return jsonify(out)
+    finally:
+        db.close()
+
+
+@app.route('/settings/readiness/show/<int:show_id>')
+@admin_required
+def readiness_show(show_id):
+    """One show's readiness card data (any status — for testing). Read-only."""
+    db = get_db()
+    try:
+        res = _show_readiness(db, show_id)
+        if not res:
+            return jsonify({'error': 'Show not found.'}), 404
+        return jsonify(res)
+    finally:
+        db.close()
+
+
+@app.route('/settings/readiness/preview', methods=['POST'])
+@admin_required
+def readiness_preview():
+    """The list recomputed with UNSAVED knobs from the form. Writes nothing."""
+    data = _json_obj()
+    try:
+        knobs = readiness.clean_knobs(data.get('knobs') if isinstance(data.get('knobs'), dict) else {},
+                                      strict=True)
+    except readiness.KnobError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    db = get_db()
+    try:
+        out = _readiness_payload(db, knobs, data)
+        out['success'] = True
+        out['preview'] = True
+        return jsonify(out)
+    finally:
+        db.close()
+
+
+@app.route('/settings/readiness/config', methods=['POST'])
+@admin_required
+def readiness_config_save():
+    """Save the knobs (`{knobs: {...}}`) or put them back to the defaults
+    (`{reset: true}` deletes every readiness_* key). Only a knob that differs
+    from its effective default is stored (one equal to it is deleted), so an
+    untouched labor_grace_days keeps following the no-labor alert setting.
+    A save that changes nothing writes no audit row and no syslog line."""
+    data = _json_obj()
+    keys = ['readiness_' + k for k in readiness.DEFAULTS]
+    db = get_db()
+    try:
+        before, _stored, defaults = _readiness_knobs(db)
+        if data.get('reset'):
+            db.execute('DELETE FROM app_settings WHERE key = ANY(%s)', (keys,))
+            detail = 'readiness=reset'
+        else:
+            try:
+                knobs = readiness.clean_knobs(
+                    data.get('knobs') if isinstance(data.get('knobs'), dict) else {}, strict=True)
+            except readiness.KnobError as e:
+                return jsonify({'success': False, 'error': str(e)}), 400
+            keep = [k for k in readiness.DEFAULTS
+                    if not _readiness_same(knobs[k], defaults[k])]
+            drop = ['readiness_' + k for k in readiness.DEFAULTS if k not in keep]
+            if drop:
+                db.execute('DELETE FROM app_settings WHERE key = ANY(%s)', (drop,))
+            if keep:
+                db.execute("""
+                    INSERT INTO app_settings (key, value)
+                    SELECT * FROM unnest(%s::text[], %s::text[])
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+                    (['readiness_' + k for k in keep], [str(knobs[k]) for k in keep]))
+            detail = 'readiness'
+        after = _readiness_knobs(db)[0]
+        changed = sorted(k for k in after if not _readiness_same(after[k], before.get(k)))
+        if changed:
+            log_audit(db, 'SETTINGS_CHANGE', 'setting', None, before=before, after=after,
+                      detail=detail)
+        db.commit()
+    finally:
+        db.close()
+    if changed:
+        syslog_logger.info(f"READINESS_CONFIG reset={1 if data.get('reset') else 0} "
+                           f"changed={','.join(changed)} by={session.get('username')}")
+    return jsonify({'success': True, 'knobs': after, 'changed': changed})
 
 
 # ─── User Registration & Recovery ─────────────────────────────────────────────
@@ -29837,51 +31227,17 @@ def maintenance_notice_delete(notice_id):
 
 # ─── AI Session Management ─────────────────────────────────────────────────────
 
+# The limiter lives in ai_module (3.55.0): a slot is an ai_sessions row taken
+# in the SAME transaction that claims a queued AI job, under
+# pg_advisory_xact_lock(hashtext('ai_sessions')), so concurrent claims can't
+# overshoot ai_max_sessions. Long jobs keep their slot alive via heartbeat_at.
+
 def _get_ai_slot_limit():
-    return int(get_app_setting('ai_max_sessions', '2'))
+    return ai_module.slot_limit()
+
 
 def _count_active_ai_sessions():
-    """Count running AI sessions, pruning stale ones (>5 min) first."""
-    db = get_db()
-    # started_at is stamped by the DB clock (DEFAULT CURRENT_TIMESTAMP, the
-    # PostgreSQL server's local time), so the cutoff must use the DB clock too
-    # — a Python utcnow() cutoff timed out every session instantly on a
-    # non-UTC server, silently disabling the ai_max_sessions limit.
-    db.execute("""
-        UPDATE ai_sessions SET status='timeout', ended_at=CURRENT_TIMESTAMP
-        WHERE status='running' AND started_at < NOW() - INTERVAL '5 minutes'
-    """)
-    db.commit()
-    count = db.execute("SELECT COUNT(*) FROM ai_sessions WHERE status='running'").fetchone()[0]
-    db.close()
-    return count
-
-def _claim_ai_session(show_id):
-    """Reserve a slot. Returns (session_id, None) or (None, error)."""
-    db = get_db()
-    limit = _get_ai_slot_limit()
-    count = _count_active_ai_sessions()
-    if count >= limit:
-        db.close()
-        return None, f'All {limit} AI processing slots are busy. Please try again in a moment.'
-    _new_id = db.execute("""
-        INSERT INTO ai_sessions (user_id, show_id, status)
-        VALUES (%s,%s,'running') RETURNING id
-    """, (session.get('user_id'), show_id)).fetchone()['id']
-    db.commit()
-    sid = _new_id
-    db.close()
-    return sid, None
-
-def _release_ai_session(session_id):
-    if not session_id:
-        return
-    db = get_db()
-    db.execute("""
-        UPDATE ai_sessions SET status='done', ended_at=CURRENT_TIMESTAMP WHERE id=%s
-    """, (session_id,))
-    db.commit()
-    db.close()
+    return ai_module.count_active()
 
 
 @app.route('/api/ai/slots')
@@ -30705,6 +32061,7 @@ def reports_page():
                            positions=positions, techs=techs, shows=shows, adv_sections=adv_sections,
                            can_assets=_can_report_assets(), can_labor=_can_report_labor(),
                            can_piano=_can_report_piano(), can_sound=module_enabled('spot'),
+                           can_weekly=ai_module.enabled(),
                            user=get_current_user())
 
 
@@ -33043,6 +34400,38 @@ security_module.register(
 # Read-only: it owns no table and never writes.
 import find_module  # noqa: E402
 
+ai_module.register(
+    app,
+    get_db=get_db,
+    get_app_setting=get_app_setting,
+    syslog_logger=syslog_logger,
+    login_required=login_required,
+    admin_required=admin_required,
+    test_mode=TEST_MODE,
+    am_i_leader=am_i_leader,
+    json_obj=_json_obj,
+    ts_out=_ts_out,
+    as_date=_as_date,
+    can_view_reports=_can_view_reports,
+    can_report_labor=_can_report_labor,
+    get_accessible_shows=get_accessible_shows,
+    calc_post_show_labor_cost=_calc_post_show_labor_cost,
+    unsettled_show_ids=_unsettled_show_ids,
+    pm_contacts_many=_pm_contacts_many,
+    module_enabled=module_enabled,
+    wp_font_config=_wp_font_config,
+    get_logo_for_venue=_get_logo_for_venue,
+    get_venue_pdf_colors=_get_venue_pdf_colors,
+    mail=_mail,
+    mail_url=_mail_url,
+    send_email=_send_email,
+    recipient_sql=_saved_report_recipient_sql,
+    postnotes_internal_keys=_POSTNOTES_INTERNAL_KEYS,
+    instance_id=_CLUSTER_INSTANCE_ID,
+    log_audit=log_audit,
+    app_dir=os.path.dirname(os.path.abspath(__file__)),
+)
+
 chat_module.register(
     app,
     get_db=get_db,
@@ -33190,12 +34579,14 @@ def _pm_show_figures(db, show_ids):
     _can_report_labor (estimate = _calc_labor_cost_for_show; actual =
     _calc_post_show_labor_cost, SETTLED shows only, as in every report). A
     figure the caller may not see is None, never 0. Read-only; nothing is
-    stored."""
+    stored. `piano_billed` = the part of `piano` the shows' own invoices
+    bill (_ER_BILLED_SQL: the tuning's bill_on_invoice) — what the project
+    invoice / quote prints; `piano` stays the whole expense (Reports' rule)."""
     ids = _pm_int_ids(show_ids)
     can = {'assets': bool(_can_report_assets()), 'labor': bool(_can_report_labor()),
            'piano': bool(_can_report_piano())}
-    keys = ('assets', 'external', 'piano', 'labor_estimate', 'labor_actual')
-    gate = {'assets': 'assets', 'external': 'assets', 'piano': 'piano',
+    keys = ('assets', 'external', 'piano', 'piano_billed', 'labor_estimate', 'labor_actual')
+    gate = {'assets': 'assets', 'external': 'assets', 'piano': 'piano', 'piano_billed': 'piano',
             'labor_estimate': 'labor', 'labor_actual': 'labor'}
     uid = session.get('user_id')
     rows = [r for r in db.execute(
@@ -33217,6 +34608,13 @@ def _pm_show_figures(db, show_ids):
                 shows[sid]['external'] = ext
             if can['piano']:
                 shows[sid]['piano'] = piano
+    if ids and can['piano']:
+        for r in db.execute(f"""
+            SELECT er.show_id, SUM(er.cost) AS c FROM show_external_rentals er
+             WHERE er.show_id = ANY(%s) AND er.piano_tuning_id IS NOT NULL AND {_ER_BILLED_SQL}
+             GROUP BY er.show_id
+        """, (ids,)).fetchall():
+            shows[r['show_id']]['piano_billed'] = float(r['c'] or 0)
     if can['labor']:
         for sid, s in shows.items():
             # One show's engine failing must not take the others down. A

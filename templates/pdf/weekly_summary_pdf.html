@@ -1,0 +1,138 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+
+  Weekly post-show executive summary (3.55.0) — ai_module.build_pdf().
+  Rendered from a STORED result (facts from the DB + validated AI JSON), so
+  a re-download never re-runs the model. Every value is autoescaped; nothing
+  here is |safe. No @font-face (WeasyPrint font_config is shared per thread).
+  `cz` 0–2 = condense steps (ai_module fits the sheet to one page; the show
+  table may continue on page 2 — nothing is ever dropped).
+  Colours: the report palette (navy / gold) unless every show shares one
+  themed venue.
+#}{% set C1 = vc.primary_text if vc else '#1a4a7a' %}{% set C2 = vc.secondary_text if vc else '#B8840A' %}{% set C1_BG = vc.primary_bg2 if vc else '#f4f7fa' %}
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page {
+    size: Letter portrait;
+    margin: .35in .5in .45in .5in;
+    @bottom-left  { content: element(footerLeft); font-family: Arial, Helvetica, sans-serif; font-size: 6.5pt; color: #888; }
+    @bottom-right { content: "Page " counter(page) " of " counter(pages); font-family: Arial, Helvetica, sans-serif; font-size: 6.5pt; color: #888; white-space: nowrap; }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: {{ '8.5pt' if cz >= 1 else '9.5pt' }}; color: #1a1a1a; margin: 0; line-height: {{ 1.25 if cz >= 1 else 1.35 }}; }
+  .footer-left { position: running(footerLeft); font-size: 6.5pt; color: #888; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2.5px solid {{ C1 }}; padding-bottom: 6px; margin-bottom: 7px; }
+  .doc-type { font-size: 7.5pt; font-weight: bold; color: {{ C2 }}; letter-spacing: .12em; text-transform: uppercase; }
+  .title { font-size: 15pt; font-weight: 900; color: {{ C1 }}; margin: 1px 0; }
+  .period { font-size: 10.5pt; font-weight: 700; color: #333; }
+  .meta { text-align: right; font-size: 7.5pt; color: #555; }
+  .meta .ai { font-style: italic; color: #8a5a00; margin-top: 3px; }
+  .kpis { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; }
+  .kpi { border: 1px solid #dde3ea; border-radius: 4px; padding: 3px 9px; min-width: 88px; background: {{ C1_BG }}; }
+  .kpi .v { font-size: 12pt; font-weight: 700; color: {{ C1 }}; }
+  .kpi .l { font-size: 6.5pt; color: #666; text-transform: uppercase; letter-spacing: .06em; }
+  .headline { font-size: {{ '11.5pt' if cz >= 1 else '13pt' }}; font-weight: 700; margin: 2px 0 3px; }
+  .summary { margin: 0 0 6px; }
+  .cols { display: flex; gap: 14px; }
+  .cols > div { flex: 1 1 0; min-width: 0; }
+  .sec { font-size: 7.5pt; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: {{ C1 }}; border-bottom: 1px solid {{ C1 }}; padding-bottom: 2px; margin: {{ '6px' if cz >= 1 else '9px' }} 0 3px; }
+  ul { margin: 0; padding-left: 13px; }
+  li { margin: 0 0 {{ '1px' if cz >= 1 else '2px' }}; }
+  .muted { color: #777; }
+  .shows-ref { color: #666; font-size: 90%; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 4px; vertical-align: 1px; }
+  .dot.high { background: #c62828; } .dot.medium { background: #e08a00; } .dot.low { background: #8a9aa8; }
+  table { width: 100%; border-collapse: collapse; font-size: {{ '7.5pt' if cz >= 2 else ('8pt' if cz >= 1 else '8.5pt') }}; }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; }
+  th { font-size: 6.5pt; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: #666; padding: 3px 4px; border-bottom: 1px solid #ccc; text-align: left; }
+  td { padding: {{ '2px 4px' if cz >= 2 else '3px 4px' }}; border-bottom: 1px solid #eee; vertical-align: top; }
+  .num { text-align: right; white-space: nowrap; }
+  .nowrap { white-space: nowrap; }
+  .issue-line { display: block; }
+</style>
+</head>
+<body>
+  <div class="footer-left">3·2·1→Theater · Post-Show Executive Summary · {{ period }}{% if partial %} · Some sections generated without AI{% endif %}</div>
+
+  <div class="header">
+    <div>
+      {% if logo %}<img src="{{ logo }}" alt="Logo" style="max-height:40px;max-width:160px;object-fit:contain">{% endif %}
+      <div class="doc-type">Weekly report</div>
+      <div class="title">{{ title }}</div>
+      <div class="period">{{ period }}</div>
+    </div>
+    <div class="meta">
+      Generated {{ generated }}{% if model %} · model {{ model }}{% endif %}
+      <div class="ai">AI-assisted draft. Verify against each show’s Post-Show tab.</div>
+    </div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="v">{{ counts.shows or 0 }}</div><div class="l">Shows</div></div>
+    <div class="kpi"><div class="v">{{ counts.performances or 0 }}</div><div class="l">Performances</div></div>
+    <div class="kpi"><div class="v">{{ sev.high }} / {{ sev.medium }} / {{ sev.low }}</div><div class="l">Issues H / M / L</div></div>
+    <div class="kpi"><div class="v">{{ counts.settled or 0 }} of {{ counts.shows or 0 }}</div><div class="l">Labor settled</div></div>
+    {% if with_labor %}
+    <div class="kpi"><div class="v">{{ labor_total }}</div><div class="l">Settled labor</div></div>
+    <div class="kpi"><div class="v">{{ labor_hours }}</div><div class="l">Settled hours</div></div>
+    {% endif %}
+  </div>
+
+  {% if week.headline %}<div class="headline">{{ week.headline }}</div>{% endif %}
+  {% if week.summary %}<p class="summary">{{ week.summary }}</p>{% endif %}
+
+  <div class="cols">
+    <div>
+      <div class="sec">Highlights</div>
+      {% if highlights %}<ul>{% for h in highlights %}<li>{{ h.text }}{% if h.shows %} <span class="shows-ref">({{ h.shows }})</span>{% endif %}</li>{% endfor %}</ul>
+      {% else %}<div class="muted">None noted.</div>{% endif %}
+    </div>
+    <div>
+      <div class="sec">Issues &amp; incidents</div>
+      {% if issues %}<ul style="list-style:none;padding-left:0">{% for i in issues %}<li><span class="dot {{ i.severity }}"></span>{{ i.text }}{% if i.shows %} <span class="shows-ref">({{ i.shows }})</span>{% endif %}</li>{% endfor %}</ul>
+      {% else %}<div class="muted">None reported.</div>{% endif %}
+    </div>
+  </div>
+
+  <div class="cols">
+    <div>
+      <div class="sec">Labor &amp; settlement</div>
+      {% if unsettled %}<div>Not settled yet: {{ unsettled|join(', ') }}</div>{% else %}<div>Every show is settled.</div>{% endif %}
+      {% if week.labor_note %}<div class="muted" style="margin-top:2px">{{ week.labor_note }}</div>{% endif %}
+    </div>
+    <div>
+      <div class="sec">Follow-ups</div>
+      {% if follow_ups %}<ul>{% for f in follow_ups %}<li>{{ f.text }}{% if f.shows %} <span class="shows-ref">({{ f.shows }})</span>{% endif %}</li>{% endfor %}</ul>
+      {% else %}<div class="muted">None open.</div>{% endif %}
+    </div>
+  </div>
+
+  <div class="sec">Shows</div>
+  <table>
+    <thead><tr>
+      <th>Show</th><th>Venue</th><th>Dates</th><th class="num">Perfs</th>
+      {% if with_labor %}<th class="num">Labor</th>{% endif %}
+      <th>How it went</th><th>Issues</th>
+    </tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><strong>{{ r.name }}</strong>{% if r.pm %}<div class="muted">PM {{ r.pm }}</div>{% endif %}</td>
+        <td>{{ r.venue or '—' }}</td>
+        <td class="nowrap">{{ r.dates }}</td>
+        <td class="num">{{ r.perfs }}</td>
+        {% if with_labor %}<td class="num">{{ r.labor }}</td>{% endif %}
+        <td>{% if r.ai_failed %}<span class="muted">{{ r.one_liner or '—' }}</span>{% else %}{{ r.one_liner }}{% endif %}{% if r.peak_leq is not none %}<div class="muted">Peak Leq {{ r.peak_leq }} dB</div>{% endif %}</td>
+        <td>{% for i in r.issues %}<span class="issue-line"><span class="dot {{ i.severity }}"></span>{{ i.text }}</span>{% else %}<span class="muted">—</span>{% endfor %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>

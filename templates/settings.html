@@ -50,6 +50,7 @@
   <a href="{{ url_for('nav_editor_page') }}" class="tab-btn">Sidebar Editor</a>
   <a href="{{ url_for('merge_shows_page') }}" class="tab-btn" title="Merge two duplicate show entries into one">Merge Duplicates</a>
   <a href="{{ url_for('about_page') }}" class="tab-btn" title="This server, the service, and what it depends on">About</a>
+  <a href="{{ url_for('readiness_page') }}" class="tab-btn" title="How ready each upcoming show is for showtime (beta, admins only)">Readiness (beta)</a>
   {% endif %}
   <button class="tab-btn" onclick="switchSettingsTab('account')">My Account</button>
 </div>
@@ -933,9 +934,9 @@
       <table class="data-table" id="cluster-peers-table">
         <thead><tr>
           <th>IP</th><th>HOSTNAME</th><th>WORKERS</th><th>PORT</th><th>STARTED</th>
-          <th>LAST SEEN</th><th>VERSION</th><th>ROLE</th>
+          <th>LAST SEEN</th><th>VERSION</th><th>AI</th><th>ROLE</th>
         </tr></thead>
-        <tbody><tr><td colspan="8" class="text-dim" style="padding:16px;font-size:12px">Loading...</td></tr></tbody>
+        <tbody><tr><td colspan="9" class="text-dim" style="padding:16px;font-size:12px">Loading...</td></tr></tbody>
       </table>
       <p class="text-dim" style="padding:10px 14px;font-size:11px;margin:0">
         Backups run on <strong>every</strong> instance; scheduled emails only on the leader.
@@ -1089,36 +1090,63 @@
 {# ── AI / OLLAMA ────────────────────────────────────────────────────────────── #}
 {% if user.role == 'admin' %}
 <div id="stab-ai" class="stab-pane" style="display:none">
+  <style>
+    .ai-servers-scroll { overflow-x: auto; }
+    #ai-servers-table td, #ai-servers-table th { white-space: nowrap; }
+    .ai-yes { color: #30a46c; font-weight: 600; }
+    .ai-no { color: #e5484d; font-weight: 600; }
+    .ai-install { margin-top: 12px; padding: 10px 12px; border: 1px dashed var(--border); border-radius: 6px; }
+    .ai-cmd { display: flex; gap: 8px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
+    .ai-cmd code { font-family: var(--font-mono); font-size: 11.5px; padding: 4px 8px; border-radius: 4px; background: var(--bg-hover); word-break: break-all; }
+    .ai-people { max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
+    .ai-people label { display: flex; gap: 6px; align-items: center; font-size: 12.5px; padding: 2px 0; }
+  </style>
   <div class="form-section">
     <div class="form-section-header"><span class="section-icon">◈</span> AI EXTRACTION (OLLAMA)</div>
     <div class="form-section-body" style="max-width:600px">
-      <p class="field-hint" style="margin-bottom:16px">A local Ollama model suggests values from an uploaded PDF for fields with an AI Hint.</p>
+      <p class="field-hint" style="margin-bottom:16px">A local Ollama model suggests values from an uploaded document for fields with an AI Hint, and writes the weekly post-show summary on the Reports page. Each server only talks to the Ollama on its <strong>own machine</strong> (Ollama has no password); a server without Ollama hands its AI work to one that has it.</p>
       <div class="field-group">
         <label class="checkbox-label">
           <input type="checkbox" id="ollama-enabled" {% if ai_settings.ollama_enabled == '1' %}checked{% endif %}
             onchange="saveAiSettings()">
-          Enable AI extraction
+          Enable AI
         </label>
       </div>
       <div class="form-row cols-2">
         <div class="field-group">
-          <label class="field-label">OLLAMA URL</label>
-          <input type="text" id="ollama-url" class="field-input" value="{{ ai_settings.ollama_url or 'http://localhost:11434' }}" placeholder="http://localhost:11434"
+          <label class="field-label">OLLAMA URL (EACH SERVER'S OWN)</label>
+          <input type="text" id="ollama-url" class="field-input" value="{{ ai_settings.ollama_url or 'http://127.0.0.1:11434' }}" placeholder="http://127.0.0.1:11434"
             onblur="_aiAutosave()">
+          <div class="field-hint" id="ai-url-hint">localhost / 127.0.0.1 / [::1] only. <code>OLLAMA_URL</code> in a server's <code>.env</code> overrides this for that server.</div>
         </div>
         <div class="field-group">
           <label class="field-label">MODEL</label>
           <input type="text" id="ollama-model" class="field-input" value="{{ ai_settings.ollama_model or 'llama3.2' }}" placeholder="llama3.2"
-            onblur="_aiAutosave()">
+            list="ollama-models" onblur="_aiAutosave()">
+          <datalist id="ollama-models"></datalist>
         </div>
       </div>
       <div id="ai-msg" class="field-msg" style="display:none;margin-top:8px"></div>
-      <div style="display:flex;gap:8px;margin-top:12px">
-        <button class="btn btn-ghost" onclick="testAiConnection()">Test Connection</button>
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+        <button class="btn btn-ghost" onclick="testAiConnection()">Test this server</button>
+        <button class="btn btn-ghost" onclick="aiProbeNow()">Re-check now</button>
       </div>
-      <div class="field-hint" style="margin-top:16px">
-        <strong>Setup:</strong> Install <a href="https://ollama.com" target="_blank" style="color:var(--accent)">Ollama</a>, then run: <code style="font-family:var(--font-mono);font-size:11px">ollama pull llama3.2</code><br>
-        For better accuracy on structured extraction, <code style="font-family:var(--font-mono);font-size:11px">mistral</code> or <code style="font-family:var(--font-mono);font-size:11px">llama3.1:8b</code> may perform better.
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
+      <h3 class="sub-section-label">SERVERS</h3>
+      <p class="field-hint">What each running server found on its own machine (checked every minute). AI jobs run only on a server marked Ready.</p>
+      <div class="ai-servers-scroll">
+        <table class="data-table" id="ai-servers-table">
+          <thead><tr><th>Server</th><th>Installed</th><th>Running</th><th>Version</th><th>Model</th><th>Checked</th><th></th></tr></thead>
+          <tbody><tr><td colspan="7" class="text-dim">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <div id="ai-servers-note" class="field-msg field-msg-error" style="display:none;margin-top:8px"></div>
+      <div id="ai-pull-status" class="field-hint" style="margin-top:8px"></div>
+      <div id="ai-install" class="ai-install" style="display:none">
+        <div class="field-hint"><strong>Install Ollama on a server</strong> (run it on that server as an administrator — the app never installs software itself). It installs Ollama bound to 127.0.0.1 only and starts it:</div>
+        <div class="ai-cmd"><code id="ai-install-cmd"></code><button class="btn btn-ghost btn-xs" type="button" onclick="aiCopy('ai-install-cmd', this)">Copy</button></div>
+        <div class="field-hint">Then pull the model with the <em>Pull model</em> button above, or on the server: <code id="ai-pull-cmd"></code></div>
       </div>
 
       <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
@@ -1146,6 +1174,35 @@
       <div style="margin-top:4px">
         <span id="ai-live-status" style="font-size:11px;color:var(--text-dim)"></span>
       </div>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
+      <h3 class="sub-section-label">WEEKLY POST-SHOW SUMMARY E-MAIL</h3>
+      <p class="field-hint">Off by default. At the chosen day and hour the cluster leader queues last week's summary (the 7 days ending the day before); a server with Ollama writes it and it is e-mailed once, with the PDF, to the people below. Labor dollars are never included. Only people who can open Reports can receive it (re-checked at every send).</p>
+      <div class="field-group">
+        <label class="checkbox-label"><input type="checkbox" id="ws-email-enabled"> Send the weekly summary</label>
+      </div>
+      <div class="form-row cols-2">
+        <div class="field-group">
+          <label class="field-label">DAY</label>
+          <select id="ws-email-day" class="field-input">
+            <option value="0">Monday</option><option value="1">Tuesday</option><option value="2">Wednesday</option>
+            <option value="3">Thursday</option><option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label class="field-label">HOUR (SERVER TIME)</label>
+          <select id="ws-email-hour" class="field-input">{% for h in range(24) %}<option value="{{ h }}">{{ '%02d' % h }}:00</option>{% endfor %}</select>
+        </div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">RECIPIENTS</label>
+        <div id="ws-email-people" class="ai-people"><span class="text-dim">Loading…</span></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn btn-primary btn-sm" type="button" onclick="saveWeeklyEmail()">Save</button>
+        <span id="ws-email-msg" class="field-msg" style="display:none"></span>
+      </div>
+      <div id="ws-email-log" class="field-hint" style="margin-top:10px"></div>
     </div>
   </div>
 </div>
@@ -4200,7 +4257,7 @@ async function loadClusterStatus() {
     const tbody = document.querySelector('#cluster-peers-table tbody');
     if (tbody) {
       if (!d.peers || !d.peers.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="text-dim" style="padding:16px;font-size:12px">' +
+        tbody.innerHTML = '<tr><td colspan="9" class="text-dim" style="padding:16px;font-size:12px">' +
           (d.test_mode ? 'Test instance — peers are not read.' : 'No live peers (heartbeat disabled or no instances responding).') + '</td></tr>';
       } else {
         tbody.innerHTML = d.peers.map(p => {
@@ -4216,6 +4273,7 @@ async function loadClusterStatus() {
             <td class="text-dim" style="font-size:11px">${_fmtRelTime(p.started_at)}</td>
             <td class="text-dim" style="font-size:11px">${_fmtRelTime(p.last_seen)}</td>
             <td class="text-dim" style="font-size:11px">${p.app_version || '—'}</td>
+            <td style="font-size:11px">${_clusterAiLabel(p.ai)}</td>
             <td>${role}</td>
           </tr>`;
         }).join('');
@@ -4225,6 +4283,15 @@ async function loadClusterStatus() {
     const selfEl = document.getElementById('cluster-self');
     if (selfEl) selfEl.innerHTML = '<p class="text-dim text-sm" style="color:#dc3545">Failed to load cluster status: ' + (e.message || e) + '</p>';
   }
+}
+
+// AI column: fixed labels only (the published state is a few flags).
+function _clusterAiLabel(a) {
+  if (!a || !a.en) return '<span class="text-dim">—</span>';
+  if (a.run && a.has) return '<span style="color:#30a46c" title="Ollama running here with the model">Ready</span>';
+  if (a.run) return '<span style="color:#c98a00" title="Ollama running here, model missing">No model</span>';
+  if (a.inst) return '<span style="color:#e5484d" title="Ollama installed here but not answering">Not running</span>';
+  return '<span class="text-dim" title="Ollama is not installed on this server">Not installed</span>';
 }
 
 function startClusterPolling() {
@@ -4409,7 +4476,13 @@ async function testAiConnection() {
     const d = await resp.json();
     msg.textContent = d.message;
     msg.className = 'field-msg ' + (d.success ? 'field-msg-success' : 'field-msg-error');
+    _aiFillModels(d.models || []);
   } catch(e) { msg.textContent = 'Network error'; msg.className = 'field-msg field-msg-error'; }
+}
+function _aiFillModels(list) {
+  const dl = document.getElementById('ollama-models');
+  if (!dl || !list.length) return;
+  dl.replaceChildren(...list.slice(0, 50).map(n => { const o = document.createElement('option'); o.value = n; return o; }));
 }
 
 async function saveAiSettings() {
@@ -5594,14 +5667,175 @@ async function saveAiSessions() {
 }
 
 async function pollAiSlots() {
+  const pane = document.getElementById('stab-ai');
+  if (!pane || pane.offsetParent === null || document.hidden) return;   // only while the AI pane is on screen
   try {
     const resp = await fetch('/api/ai/slots');
     const d = await resp.json();
     const el = document.getElementById('ai-live-status');
     if (el) el.textContent = `Live: ${d.active}/${d.limit} slots in use`;
   } catch(e) {}
+  loadAiStatus();
 }
-if (document.getElementById('stab-ai')) setInterval(pollAiSlots, 5000);
+if (document.getElementById('stab-ai')) {
+  setInterval(pollAiSlots, 5000);
+  // Paint at once when the AI pane is opened (or the page opens on it).
+  document.addEventListener('click', e => { if (e.target.closest('[data-stab="ai"]')) setTimeout(pollAiSlots, 50); });
+  setTimeout(pollAiSlots, 300);
+}
+
+// ── AI servers (each server's OWN Ollama, 3.55.0) — textContent only ─────────
+let _aiStatusSeq = 0, _aiEmailLoaded = false;
+function _aiCell(tr, text, cls) {
+  const td = document.createElement('td');
+  td.textContent = text;
+  if (cls) td.className = cls;
+  tr.appendChild(td);
+  return td;
+}
+function _aiAgo(s) {
+  if (s == null) return '—';
+  if (s < 90) return s + ' s ago';
+  return Math.round(s / 60) + ' min ago';
+}
+async function loadAiStatus() {
+  const seq = ++_aiStatusSeq;
+  let d;
+  try {
+    const r = await fetch('/settings/ai/status', {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+    if (!r.ok) return;
+    d = await r.json();
+  } catch (e) { return; }
+  if (seq !== _aiStatusSeq) return;
+  const tbody = document.querySelector('#ai-servers-table tbody');
+  if (!tbody) return;
+  // This server's live probe, plus every other live server's published one.
+  const rows = [];
+  const self = d.local;
+  rows.push({hostname: self.hostname, self: true, installed: self.installed, running: self.running,
+             version: self.version, has: self.has_model, ago: self.checked_ago_s, enabled: self.enabled, fresh: true});
+  (d.servers || []).forEach(s => {
+    if (s.is_self) return;
+    const a = s.ai || {};
+    rows.push({hostname: s.hostname || s.ip, self: false, installed: !!a.inst, running: !!a.run, version: a.ver || '',
+               has: !!a.has && a.model === d.model, ago: s.checked_ago_s, enabled: !!a.en, fresh: s.fresh, noinfo: !s.ai});
+  });
+  const pullBusy = new Set((d.pulls || []).filter(p => p.status === 'queued' || p.status === 'running').map(p => p.host));
+  tbody.replaceChildren();
+  let anyReady = false, anyMissing = false;
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    const name = _aiCell(tr, r.hostname || '—');
+    if (r.self) { const t = document.createElement('span'); t.className = 'text-dim'; t.style.fontSize = '10px'; t.textContent = ' (this server)'; name.appendChild(t); }
+    if (r.noinfo) { _aiCell(tr, 'No report yet (older version?)', 'text-dim').colSpan = 5; _aiCell(tr, ''); tbody.appendChild(tr); return; }
+    _aiCell(tr, r.installed ? 'Yes' : 'No', r.installed ? 'ai-yes' : 'ai-no');
+    _aiCell(tr, r.running ? 'Yes' : 'No', r.running ? 'ai-yes' : 'ai-no');
+    _aiCell(tr, r.version || '—');
+    const ready = r.running && r.has && r.fresh;
+    _aiCell(tr, r.running ? (r.has ? d.model + ' ✓ Ready' : d.model + ' missing') : '—', r.running ? (r.has ? 'ai-yes' : 'ai-no') : '');
+    _aiCell(tr, _aiAgo(r.ago) + (r.fresh ? '' : ' (stale)'), 'text-dim');
+    const act = _aiCell(tr, '');
+    if (r.running && !r.has && !window.READONLY_VIEW) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'btn btn-ghost btn-xs';
+      b.textContent = pullBusy.has(r.hostname) ? 'Pulling…' : 'Pull model';
+      b.disabled = pullBusy.has(r.hostname);
+      b.addEventListener('click', () => aiPull(r.hostname, b));
+      act.appendChild(b);
+    }
+    if (ready) anyReady = true;
+    if (!r.installed) anyMissing = true;
+    tbody.appendChild(tr);
+  });
+  const note = document.getElementById('ai-servers-note');
+  if (note) {
+    const on = document.getElementById('ollama-enabled');
+    note.style.display = (on && on.checked && !anyReady) ? '' : 'none';
+    note.textContent = 'No server is ready: AI Extract and the weekly summary will not run until one server has Ollama running with the model.';
+  }
+  document.getElementById('ai-install-cmd').textContent = d.install_command;
+  document.getElementById('ai-pull-cmd').textContent = d.pull_command;
+  document.getElementById('ai-install').style.display = (anyMissing || !anyReady) ? '' : 'none';
+  if (self.models && self.models.length) _aiFillModels(self.models);
+  const hint = document.getElementById('ai-url-hint');
+  if (hint && d.url_source === 'env') hint.textContent = 'This server uses OLLAMA_URL from its .env (' + d.url + '); the value here is the default for servers without one. localhost only.';
+  else if (hint && d.stored_url_ignored) {
+    hint.textContent = 'The saved URL is not on this server, so it is ignored and ' + d.url + ' is used instead. Ollama has no password, so only localhost / 127.0.0.1 / [::1] is allowed: correct the URL and save.';
+    hint.style.color = 'var(--red)';
+  }
+  const ps = document.getElementById('ai-pull-status');
+  if (ps) {
+    ps.replaceChildren();
+    (d.pulls || []).forEach(p => {
+      const line = document.createElement('div');
+      const pct = p.total ? ' — ' + Math.min(100, Math.round(100 * p.done / p.total)) + '% (' + p.done + ' / ' + p.total + ' MB)' : '';
+      line.textContent = 'Pull ' + p.model + ' on ' + p.host + ': ' + (p.status === 'done' ? 'done' : p.status === 'error' ? 'failed — ' + p.message : p.stage) + pct;
+      ps.appendChild(line);
+    });
+  }
+  const lg = document.getElementById('ws-email-log');
+  if (lg) {
+    lg.replaceChildren();
+    (d.email_log || []).forEach(l => {
+      const line = document.createElement('div');
+      line.textContent = 'Week ending ' + l.end + ': ' + l.status + (l.recipients ? ' to ' + l.recipients : '') + (l.message ? ' — ' + l.message : '');
+      lg.appendChild(line);
+    });
+  }
+  if (!_aiEmailLoaded) { _aiEmailLoaded = true; loadWeeklyEmail(); }
+}
+async function aiProbeNow() {
+  try { await fetch('/settings/ai/probe', {method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest'}}); } catch (e) {}
+  loadAiStatus();
+}
+async function aiPull(host, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+  try {
+    const r = await fetch('/settings/ai/pull', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({hostname: host})});
+    const d = await r.json().catch(() => ({}));
+    if (!d.success) alert(d.error || 'Could not start the download.');
+  } catch (e) { alert('Network error'); }
+  loadAiStatus();
+}
+function aiCopy(id, btn) {
+  const t = document.getElementById(id).textContent;
+  const done = () => { const o = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = o; }, 1500); };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(t).then(done, () => {});
+  else { const r = document.createRange(); r.selectNodeContents(document.getElementById(id)); const s = getSelection(); s.removeAllRanges(); s.addRange(r); try { document.execCommand('copy'); done(); } catch (e) {} }
+}
+async function loadWeeklyEmail() {
+  let d;
+  try { const r = await fetch('/settings/ai/weekly-email'); if (!r.ok) return; d = await r.json(); } catch (e) { return; }
+  const st = d.settings;
+  document.getElementById('ws-email-enabled').checked = !!st.enabled;
+  document.getElementById('ws-email-day').value = String(st.day);
+  document.getElementById('ws-email-hour').value = String(st.hour);
+  const box = document.getElementById('ws-email-people');
+  box.replaceChildren();
+  const chosen = new Set(st.recipients);
+  if (!d.people.length) { const s = document.createElement('span'); s.className = 'text-dim'; s.textContent = 'Nobody can open Reports yet.'; box.appendChild(s); }
+  d.people.forEach(p => {
+    const l = document.createElement('label');
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = p.id; cb.checked = chosen.has(p.id);
+    const t = document.createElement('span'); t.textContent = p.name + (p.has_email ? '' : ' (no e-mail address)');
+    if (!p.has_email) t.className = 'text-dim';
+    l.append(cb, t); box.appendChild(l);
+  });
+}
+async function saveWeeklyEmail() {
+  const msg = document.getElementById('ws-email-msg');
+  const recipients = Array.from(document.querySelectorAll('#ws-email-people input:checked')).map(c => parseInt(c.value, 10));
+  const body = {enabled: document.getElementById('ws-email-enabled').checked,
+                day: parseInt(document.getElementById('ws-email-day').value, 10),
+                hour: parseInt(document.getElementById('ws-email-hour').value, 10), recipients};
+  msg.style.display = '';
+  try {
+    const r = await fetch('/settings/ai/weekly-email', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const d = await r.json().catch(() => ({}));
+    msg.textContent = d.success ? '✓ Saved' : (d.error || 'Save failed.');
+    msg.className = 'field-msg ' + (d.success ? 'field-msg-success' : 'field-msg-error');
+  } catch (e) { msg.textContent = 'Network error'; msg.className = 'field-msg field-msg-error'; }
+}
 
 // ── Pending Registrations ─────────────────────────────────────────────────────
 async function loadPendingRegs() {

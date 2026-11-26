@@ -1719,15 +1719,74 @@ CREATE INDEX IF NOT EXISTS idx_asset_dashboards_slug ON asset_dashboards(public_
 -- ── AI Session Tracking ───────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS ai_sessions (
-    id         SERIAL PRIMARY KEY,
-    user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    show_id    INTEGER REFERENCES shows(id) ON DELETE SET NULL,
-    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    ended_at   TIMESTAMP,
-    status     TEXT DEFAULT 'running'
+    id           SERIAL PRIMARY KEY,
+    user_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    show_id      INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+    started_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ended_at     TIMESTAMP,
+    status       TEXT DEFAULT 'running',
+    kind         TEXT DEFAULT 'extract',
+    heartbeat_at TIMESTAMP,
+    test_mode    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_ai_sessions_status ON ai_sessions(status);
+
+-- AI job queue (3.55.0, ai_module.py). Every AI call is a row here, claimed
+-- FOR UPDATE SKIP LOCKED only by a worker whose OWN local Ollama answers
+-- (Ollama is localhost-only). All timestamps are the DB clock (NOW()).
+CREATE TABLE IF NOT EXISTS ai_jobs (
+    id               SERIAL PRIMARY KEY,
+    kind             TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'queued',
+    test_mode        INTEGER NOT NULL DEFAULT 0,
+    requested_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    show_id          INTEGER REFERENCES shows(id) ON DELETE SET NULL,
+    target_host      TEXT,
+    period_start     DATE,
+    period_end       DATE,
+    with_labor       INTEGER NOT NULL DEFAULT 0,
+    auto             INTEGER NOT NULL DEFAULT 0,
+    stage            TEXT,
+    progress_done    INTEGER DEFAULT 0,
+    progress_total   INTEGER DEFAULT 0,
+    claimed_by       TEXT,
+    claimed_instance TEXT,
+    model            TEXT,
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    ai_session_id    INTEGER,
+    input_hash       TEXT,
+    prompt_version   INTEGER,
+    show_ids         TEXT,
+    payload_json     TEXT,
+    result_json      TEXT,
+    partial          INTEGER NOT NULL DEFAULT 0,
+    error_code       TEXT,
+    message          TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    model_hash       TEXT,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    queued_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at       TIMESTAMP,
+    heartbeat_at     TIMESTAMP,
+    finished_at      TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_jobs_status ON ai_jobs(status, kind);
+CREATE INDEX IF NOT EXISTS idx_ai_jobs_weekly ON ai_jobs(kind, period_start, period_end, with_labor);
+
+-- Weekly summary e-mail ledger (3.55.0): one row per week, claimed with
+-- INSERT … ON CONFLICT DO NOTHING before anything is generated or sent.
+CREATE TABLE IF NOT EXISTS ai_weekly_email_log (
+    period_end   DATE PRIMARY KEY,
+    period_start DATE,
+    job_id       INTEGER REFERENCES ai_jobs(id) ON DELETE SET NULL,
+    status       TEXT NOT NULL DEFAULT 'preparing',
+    recipients   INTEGER DEFAULT 0,
+    message      TEXT,
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    sent_at      TIMESTAMP
+);
 
 -- ── Cluster Heartbeat (multi-server leader election) ──────────────────────────
 
@@ -1738,10 +1797,34 @@ CREATE TABLE IF NOT EXISTS cluster_instances (
     port        INTEGER,
     app_version TEXT,
     started_at  TIMESTAMP,
-    last_seen   TIMESTAMP NOT NULL
+    last_seen   TIMESTAMP NOT NULL,
+    ai_state    TEXT,
+    ai_checked_at TIMESTAMP,
+    public_url  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_cluster_instances_last_seen ON cluster_instances(last_seen);
+
+-- "Switch server" hand-off tokens (3.56.0). One row per click: only the
+-- SHA-256 of the 256-bit token is stored, it lives 60 s (DB clock), is
+-- redeemable once and only on the server whose CLUSTER_SELF_URL it names.
+-- The hourly maintenance trims old rows.
+CREATE TABLE IF NOT EXISTS session_handoffs (
+    id           SERIAL PRIMARY KEY,
+    token_hash   TEXT UNIQUE NOT NULL,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    sid          TEXT NOT NULL,
+    target_url   TEXT NOT NULL,
+    from_url     TEXT DEFAULT '',
+    next_path    TEXT DEFAULT '/',
+    requester_ip TEXT DEFAULT '',
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at   TIMESTAMP NOT NULL,
+    used_at      TIMESTAMP,
+    used_ip      TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_handoffs_expires ON session_handoffs(expires_at);
 
 -- ── Prism FM integration (SANDBOXED — see prism_module.py) ────────────────────
 -- Staging area for events pulled from Prism, the building's scheduling system.
@@ -2234,6 +2317,25 @@ CREATE TABLE IF NOT EXISTS pm_note_versions (
 );
 CREATE INDEX IF NOT EXISTS idx_pm_note_versions_project ON pm_note_versions(project_id);
 CREATE INDEX IF NOT EXISTS idx_pm_note_versions_note ON pm_note_versions(note_id);
+
+-- Timeline markers: a dated note that is not a task (a holiday, a building
+-- closure). end_date NULL = one day, else an inclusive span. Markers never
+-- take part in dependencies, conflicts, shift plans, alerts or task counts.
+-- Delete is a hard delete (the project history keeps the activity row).
+CREATE TABLE IF NOT EXISTS pm_markers (
+    id          SERIAL PRIMARY KEY,
+    project_id  INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    marker_date DATE NOT NULL,
+    end_date    DATE,
+    label       TEXT NOT NULL DEFAULT '',
+    color       TEXT DEFAULT '',
+    notes       TEXT DEFAULT '',
+    created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_pm_markers_project ON pm_markers(project_id);
 """
 
 
@@ -2664,6 +2766,20 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         # 3.49.0: the "tasks and projects" email switch (optional Projects
         # module). Shown and honoured only for users with module access.
         f'ALTER TABLE "{app_schema}".user_notify_prefs ADD COLUMN IF NOT EXISTS email_tasks INTEGER DEFAULT 1',
+        # 3.55.0: AI queue — per-server Ollama state in the heartbeat, and
+        # AI slots that a long job keeps alive with a heartbeat.
+        f'ALTER TABLE "{app_schema}".cluster_instances ADD COLUMN IF NOT EXISTS ai_state TEXT',
+        f'ALTER TABLE "{app_schema}".cluster_instances ADD COLUMN IF NOT EXISTS ai_checked_at TIMESTAMP',
+        # "Switch server" hand-off (3.56.0): each server's CLUSTER_SELF_URL.
+        f'ALTER TABLE "{app_schema}".cluster_instances ADD COLUMN IF NOT EXISTS public_url TEXT',
+        f"ALTER TABLE \"{app_schema}\".ai_sessions ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'extract'",
+        f'ALTER TABLE "{app_schema}".ai_sessions ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP',
+        # 3.56.2: a TEST_MODE server sharing production's DB keeps its own
+        # AI slots (counted and pruned per test_mode, like ai_jobs).
+        f'ALTER TABLE "{app_schema}".ai_sessions ADD COLUMN IF NOT EXISTS test_mode INTEGER NOT NULL DEFAULT 0',
+        # Weekly summaries share model output across with/without-labor runs
+        # by a hash of exactly what the model is given.
+        f'ALTER TABLE "{app_schema}".ai_jobs ADD COLUMN IF NOT EXISTS model_hash TEXT',
     ]
 
     shared_alters = [

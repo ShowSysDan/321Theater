@@ -119,6 +119,36 @@
 }
 .pm-b-shows { min-width: 620px; }
 .pm-b-showsfoot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: space-between; }
+/* Invoice / quote dialog: options, task picker, live preview of the totals. */
+.pm-b-iseg { display: flex; flex-wrap: wrap; align-self: flex-start; }
+.pm-b-iscope { display: flex; flex-direction: column; gap: 10px; margin: 2px 0 14px; }
+.pm-b-ipick-head { display: flex; align-items: center; gap: 12px; }
+.pm-b-ipick-head .field-input { flex: 1 1 auto; min-width: 0; }
+.pm-b-ipick-head .pm-note { white-space: nowrap; }
+.pm-b-ipick { max-height: 240px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.pm-b-ipick .pm-row { padding: 7px 12px; }
+.pm-b-ipick-g { padding: 8px 12px 2px; }
+.pm-b-ishows { margin-top: 26px; }
+.pm-b-ipv { margin: 16px 0 6px; }
+.pm-b-iprev {
+  border: 1px solid var(--border-light); border-radius: var(--radius); padding: 10px 14px;
+  background: var(--bg-surface); min-height: 64px;
+}
+.pm-b-ihead { font-size: 12.5px; color: var(--text-dim); margin-bottom: 8px; overflow-wrap: anywhere; }
+.pm-b-ihead strong { color: var(--ink); }
+.pm-b-igroups { margin-bottom: 4px; }
+.pm-b-irow { display: flex; align-items: baseline; gap: 12px; padding: 3px 0; font-size: 13px; }
+.pm-b-irow .l { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+.pm-b-irow .l .pm-note { display: inline; }
+.pm-b-irow .v { font-family: var(--font-mono); white-space: nowrap; color: var(--text); }
+.pm-b-irow.is-show .l { padding-left: 12px; color: var(--text-dim); }
+.pm-b-irow.is-sub { border-top: 1px solid var(--pm-line); margin-top: 2px; font-weight: 600; }
+.pm-b-irow.is-total { border-top: 2px solid var(--border-light); margin-top: 6px; padding-top: 7px; font-weight: 700; font-size: 14.5px; }
+.pm-b-irow.is-total .l, .pm-b-irow.is-total .v { color: var(--ink); }
+.pm-b-inotes { margin: 8px 0 0; padding-left: 18px; font-size: 12px; color: var(--text-dim); }
+.pm-b-itext { margin-top: 14px; }
+.pm-b-itext > summary { cursor: pointer; font-size: 13px; color: var(--text-dim); padding: 4px 0; }
+.pm-b-itext[open] > summary { margin-bottom: 8px; }
 
 /* ── Files ────────────────────────────────────────────────────────────────── */
 .pm-f-list { position: relative; }
@@ -347,6 +377,11 @@ html.mobile-view .pm-b-src .pm-chip-text { max-width: none; }
 html.mobile-view .pm-b-addsrc { padding-top: 6px; padding-bottom: 6px; }
 html.mobile-view .pm-b-modes .pm-seg-btn { flex: 1 1 45%; }
 html.mobile-view .pm-b-hhead time { margin-left: 0; }
+html.mobile-view .pm-b-iseg .pm-seg-btn { flex: 1 1 30%; }
+html.mobile-view .pm-b-ipick-head { flex-wrap: wrap; }
+html.mobile-view .pm-b-ipick { max-height: 38vh; }
+html.mobile-view .pm-b-ishows { margin-top: 4px; }
+html.mobile-view .pm-b-iprev { padding: 10px; }
 html.mobile-view .pm-d-more { min-width: 40px; min-height: 36px; }
 /* File rows stack: tile + name + menu, then size and who on a second line. */
 html.mobile-view .pm-f-row,

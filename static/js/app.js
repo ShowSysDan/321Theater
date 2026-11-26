@@ -5972,16 +5972,21 @@ async function runAiExtract() {
   }, 800);
 
   try {
-    _log('Sending to Ollama...');
+    _log('Sending to the AI service...');
     const resp = await fetch(`/shows/${SHOW_ID}/ai-extract`, {
       method: 'POST',
       body: formData,
     });
+    let data = await resp.json().catch(() => ({success: false, error: 'Unexpected server response (HTTP ' + resp.status + ').'}));
+    // 3.55.0: the model call is a queued job run by a server whose own
+    // Ollama answers — poll it until it finishes.
+    if (data.success && data.queued && data.job_id) {
+      _log('Queued — waiting for a server with the AI model...');
+      data = await _aiWaitJob(data.job_id, _log);
+    }
     clearInterval(_waitTimer);
     if (_waitLine) _waitLine.remove();
     _resetBtn();
-
-    const data = await resp.json();
 
     if (!data.success) {
       _log('Error: ' + (data.error || 'Unknown error'), 'var(--red, #f44336)');
@@ -5997,6 +6002,27 @@ async function runAiExtract() {
     _resetBtn();
     _log('Network error: ' + e.message, 'var(--red, #f44336)');
   }
+}
+
+// Poll a queued AI job (/api/ai/jobs/<id>) until it is done; resolves to the
+// shape the old synchronous call returned ({success, suggestions, model…}).
+async function _aiWaitJob(jobId, log) {
+  let lastStage = '';
+  const t0 = Date.now();
+  while (Date.now() - t0 < 6 * 60 * 1000) {
+    await new Promise(r => setTimeout(r, 1000));
+    let j;
+    try {
+      const r = await fetch(`/api/ai/jobs/${encodeURIComponent(jobId)}`, {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+      if (r.status === 404) return {success: false, error: 'The AI job is no longer available.'};
+      j = await r.json();
+    } catch (e) { continue; }          // a blip — keep waiting
+    if (j.stage && j.stage !== lastStage) { lastStage = j.stage; if (log) log(j.stage); }
+    if (j.status === 'done' && j.result) return Object.assign({success: true}, j.result);
+    if (['error', 'cancelled', 'interrupted'].includes(j.status)) return {success: false, error: j.message || 'The AI job failed.'};
+  }
+  try { await fetch(`/api/ai/jobs/${encodeURIComponent(jobId)}/cancel`, {method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest'}}); } catch (e) {}
+  return {success: false, error: 'The AI model took too long.'};
 }
 
 function _showAiSuggestions(data) {

@@ -128,6 +128,7 @@
   <button type="button" class="rpt-tab" data-tab="variance">Estimate vs Settlement</button>{% endif %}
   {% if can_piano %}<button type="button" class="rpt-tab" data-tab="piano">Piano Tuning</button>{% endif %}
   {% if can_sound %}<button type="button" class="rpt-tab" data-tab="sound">Sound Levels</button>{% endif %}
+  {% if can_weekly %}<button type="button" class="rpt-tab" data-tab="weekly">Weekly Summary</button>{% endif %}
 </div>
 
 <div id="rpt-body">
@@ -404,6 +405,11 @@ html[data-theme="light"] .rpt-pill-warn { color: #8a5a00; }
 .rpt-warn-text { color: #c98a00; font-weight: 600; }
 html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
 .rs-person.off { cursor: default; opacity: .55; }
+.ws-progress { margin-top: 12px; }
+.ws-progress[hidden], #ws-msg[hidden] { display: none; }
+.ws-bar { height: 6px; border-radius: 3px; background: var(--bg-hover); overflow: hidden; max-width: 420px; }
+.ws-fill { height: 100%; width: 3%; background: var(--accent, #e8833a); transition: width .4s; }
+.ws-stage { font-size: 12.5px; margin-top: 6px; display: flex; gap: 8px; align-items: center; }
 .rs-person.off:hover { background: none; }
 </style>
 {% endblock %}
@@ -705,7 +711,108 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
     if (_tab === 'sound') Object.assign(extra, _soundParams());
     return extra;
   }
+  // ── Weekly Summary tab (3.55.0) — textContent only; one 2 s poll while a
+  // run is queued/running and the page is visible, sequence-guarded and
+  // aborted when hidden or when the tab is left.
+  const WS = {seq: 0, timer: null, ctl: null, run: null};
+  function wsStop() { clearTimeout(WS.timer); WS.timer = null; if (WS.ctl) { try { WS.ctl.abort(); } catch (e) {} WS.ctl = null; } }
+  function wsMsg(t, bad) { const m = document.getElementById('ws-msg'); if (!m) return; m.hidden = !t; m.textContent = t || ''; m.style.color = bad ? '#e5484d' : ''; }
+  async function wsJson(url, opts) {
+    WS.ctl = new AbortController();
+    const r = await fetch(url, Object.assign({headers: {'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/json'}, signal: WS.ctl.signal}, opts || {}));
+    const d = await r.json().catch(() => ({}));
+    return {ok: r.ok, status: r.status, d};
+  }
+  const WS_STATUS = {queued: 'Queued', running: 'Working', done: 'Ready', error: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted'};
+  function wsDrawRuns(runs) {
+    const tb = document.querySelector('#ws-runs tbody');
+    if (!tb) return;
+    tb.replaceChildren();
+    if (!runs.length) { const tr = document.createElement('tr'), td = document.createElement('td'); td.colSpan = 5; td.className = 'text-dim'; td.textContent = 'No summaries yet.'; tr.appendChild(td); tb.appendChild(tr); return; }
+    runs.forEach(r => {
+      const tr = document.createElement('tr');
+      const c = (t, cls) => { const td = document.createElement('td'); td.textContent = t; if (cls) td.className = cls; tr.appendChild(td); return td; };
+      c(r.label + (r.with_labor ? ' · with labor $' : '') + (r.auto ? ' · weekly e-mail' : ''), 'wrap');
+      c(String(r.shows), 'num');
+      c((WS_STATUS[r.status] || r.status) + (r.partial ? ' (some parts without AI)' : '') + (r.message && r.status !== 'done' ? ' — ' + r.message : ''));
+      c(r.created_at ? localIsoDate(parseServerTime(r.created_at)) : '—');
+      const td = c('');
+      if (r.status === 'done') {
+        const a = document.createElement('a');
+        a.href = '/reports/weekly-summary/' + encodeURIComponent(r.id) + '.pdf';
+        a.className = 'btn btn-xs btn-ghost no-prefetch'; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Open PDF';
+        td.appendChild(a);
+      }
+      tb.appendChild(tr);
+    });
+  }
+  async function wsLoadRuns() {
+    try { const {ok, d} = await wsJson('/api/reports/weekly-summary/runs'); if (ok) { wsDrawRuns(d.runs || []); return d; } } catch (e) {}
+    return null;
+  }
+  function wsShow(st) {
+    const box = document.getElementById('ws-progress');
+    if (!box) return;
+    const live = st && (st.status === 'queued' || st.status === 'running');
+    box.hidden = !live;
+    if (live) {
+      document.getElementById('ws-stage').textContent = st.stage || (st.status === 'queued' ? 'Queued' : 'Working…');
+      document.getElementById('ws-fill').style.width = (st.total ? Math.round(100 * st.done / st.total) : 3) + '%';
+    }
+  }
+  async function wsPoll(seq) {
+    if (seq !== WS.seq || _tab !== 'weekly' || !WS.run) return;
+    if (document.hidden) { WS.timer = setTimeout(() => wsPoll(seq), 2000); return; }
+    let st = null;
+    try { const {ok, d} = await wsJson('/api/reports/weekly-summary/runs/' + encodeURIComponent(WS.run)); if (ok) st = d; } catch (e) {}
+    if (seq !== WS.seq) return;
+    if (st) {
+      wsShow(st);
+      if (st.status === 'queued' || st.status === 'running') { WS.timer = setTimeout(() => wsPoll(seq), 2000); return; }
+      WS.run = null;
+      wsMsg(st.status === 'done' ? 'The summary is ready — open it below.' : (st.message || 'The summary could not be generated.'), st.status !== 'done');
+      wsLoadRuns();
+      return;
+    }
+    WS.timer = setTimeout(() => wsPoll(seq), 4000);
+  }
+  async function wsStart(force) {
+    const end = document.getElementById('ws-end').value;
+    wsStop(); const seq = ++WS.seq;
+    wsMsg('');
+    document.getElementById('ws-gen').disabled = document.getElementById('ws-regen').disabled = true;
+    try {
+      const {ok, d} = await wsJson('/api/reports/weekly-summary', {method: 'POST', body: JSON.stringify({end_date: end, force: !!force})});
+      if (seq !== WS.seq) return;
+      if (!ok) { wsMsg(d.error || 'Could not start the summary.', true); return; }
+      if (d.reused) { wsMsg(d.derived ? 'This week was already summarised by the AI — your copy (with your own figures) is listed below.' : 'Nothing changed since the last summary of this week — it is listed below.'); wsLoadRuns(); return; }
+      WS.run = d.run_id; wsShow({status: 'queued', stage: 'Queued', done: 0, total: 0});
+      wsLoadRuns(); wsPoll(seq);
+    } catch (e) { if (e.name !== 'AbortError') wsMsg('Network error.', true); }
+    finally { const g = document.getElementById('ws-gen'), r = document.getElementById('ws-regen'); if (g) g.disabled = false; if (r) r.disabled = false; }
+  }
+  window.rptWeeklyInit = async function() {
+    wsStop(); const seq = ++WS.seq;
+    const end = document.getElementById('ws-end');
+    end.max = localTodayIso();
+    const y = new Date(); y.setDate(y.getDate() - 1); end.value = localIsoDate(y);
+    document.getElementById('ws-gen').addEventListener('click', () => wsStart(false));
+    document.getElementById('ws-regen').addEventListener('click', () => wsStart(true));
+    document.getElementById('ws-cancel').addEventListener('click', async () => {
+      if (!WS.run) return;
+      try { await fetch('/api/reports/weekly-summary/runs/' + encodeURIComponent(WS.run) + '/cancel', {method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest'}}); } catch (e) {}
+    });
+    const d = await wsLoadRuns();
+    if (seq !== WS.seq || !d) return;
+    const live = (d.runs || []).find(r => r.mine && (r.status === 'queued' || r.status === 'running'));
+    if (live) { WS.run = live.id; wsShow(live); wsPoll(seq); }
+  };
+  document.addEventListener('visibilitychange', () => { if (document.hidden && WS.ctl) { try { WS.ctl.abort(); } catch (e) {} } });
+  window.addEventListener('pagehide', wsStop);
+  document.querySelectorAll('.rpt-tab').forEach(b => b.addEventListener('click', () => { if (b.dataset.tab !== 'weekly') { wsStop(); WS.seq++; } }));
+
   window.rptPdf = function() {
+    if (_tab === 'weekly') { alert('Use “Open PDF” next to a summary below.'); return; }
     if (_tab === 'advance' && !_adv.field) { alert('Pick an advance field first.'); return; }
     if (_tab === 'items' && !_item.types.length) { alert('Pick an item first.'); return; }
     openPdf(PDF_KEY[_tab], tabExtras());
@@ -878,6 +985,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
       if (seq !== _seq) return;
       body.innerHTML = html;
       if (_tab === 'rentals') rptRentalTypes(true);
+      if (_tab === 'weekly') rptWeeklyInit();
       drawAll();
     } catch (e) {
       if (seq === _seq) body.innerHTML = `<div class="rpt-loading" style="color:#e53e3e">Couldn't load this report: ${esc(e.message)}</div>`;
@@ -1321,6 +1429,34 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
         {key: 'cost', label: 'Cost', num: true, fmt: money}, {key: 'last_date', label: 'Last tuning'},
       ], d.pianos, {sortKey: 'tunings'});
     },
+    // Weekly post-show summary (3.55.0): AI-written 1-sheet, generated as a
+    // queued job and kept, so a re-download never re-runs the model. NOT a
+    // saved-report tab and not in PDF_KEY — saved reports never store
+    // results. The filters above don't apply. rptWeeklyInit() fills it.
+    async weekly() {
+      return `<div class="form-section rpt-section" id="ws-box">
+        <div class="form-section-header"><span class="section-icon">◈</span> Weekly post-show summary</div>
+        <div class="form-section-body">
+          <p class="rpt-note" style="margin-top:0">A one-page executive summary of the post-show notes and comments of every show that took place in the 7 days ending on the chosen date (test and cancelled shows left out). Written by the AI model on the theater's own server — an AI-assisted draft, so check anything important against the show's Post-Show tab. The filters above don't apply here.</p>
+          <div class="rpt-filter-row" style="align-items:flex-end">
+            <div class="field-group"><label class="field-label" for="ws-end">WEEK ENDING</label><input type="date" id="ws-end" class="field-input"></div>
+            <div class="rpt-filter-actions">
+              <button type="button" class="btn btn-primary btn-sm" id="ws-gen">Generate</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="ws-regen" title="Write it again even if nothing changed">Regenerate</button>
+            </div>
+          </div>
+          <div id="ws-progress" class="ws-progress" hidden>
+            <div class="ws-bar"><div class="ws-fill" id="ws-fill"></div></div>
+            <div class="ws-stage"><span id="ws-stage"></span> <button type="button" class="btn btn-xs btn-ghost" id="ws-cancel">Cancel</button></div>
+          </div>
+          <div id="ws-msg" class="rpt-note" hidden></div>
+        </div>
+      </div>
+      <div class="form-section rpt-section">
+        <div class="form-section-header"><span class="section-icon">◈</span> Recent summaries</div>
+        <div class="form-section-body no-pad rpt-scroll"><table class="data-table rpt-table" id="ws-runs"><thead><tr><th>Week</th><th class="num">Shows</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody></tbody></table></div>
+      </div>`;
+    },
   };
 
   window.rptRentalTypes = function(keep) {
@@ -1577,6 +1713,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
     if (text && document.getElementById('rs-modal').style.display === 'none') alert(text);
   }
   window.rptSavedOpen = async function() {
+    if (_tab === 'weekly') { alert('The weekly summary is generated, not saved — open a past one from its list.'); return; }
     document.getElementById('rs-modal').style.display = 'flex';
     document.getElementById('rs-what').textContent = 'Saves: ' + describe(currentView()) + '. A named range such as “This year” stays relative; typed dates stay fixed.';
     msg('');
