@@ -1395,6 +1395,13 @@ in full. Module key `projects`, default OFF.
   Audit Log, Performance, DB Snapshots or the updater, (b) a non-member gets
   404 on every route of someone else's project, (c) fresh install == upgrade.
 
+- **Markers (3.53.0)** `pm_markers` (date + optional inclusive end, label, colour, notes; hard delete, activity line kept): bundle key `markers`, routes `pm_marker_*`, Timeline Markers row + line/band, Overview card, search, summary PDF. Markers are NOT tasks: never read by dependencies, conflicts, shift plans, My Work, alerts or counts — keep it so.
+- **Linking shows (3.53.0)**: `POST …/shows` takes `{show_ids: [...]}` (≤ `LIMITS['link_shows']`, all-or-nothing validation, already-linked skipped; `{show_id}` / `{new}` still work).
+- **Invoice / Quote (3.53.0)** on the Budget tab (`_invoice` in projects_docs_module.py, budget-visibility gated like every budget route): basis estimate / forecast / actual, scope all / tasks / range (task span overlaps the range), show costs only via the injected `_pm_show_figures` (never fork billing; cancelled + test shows never billed). The query string carries only ids / dates / enums; bill-to, number and notes come ONLY from a POST form body and are never stored or logged.
+
+## Clone show (Settings → Shows, 3.53.0)
+`clone_show` (`POST /settings/shows/<id>/clone`, admin and not read-only) + `clone-info` (GET, read-only). The header comment above them is THE copy / shift / skip decision for every table with a show_id — a new show child table must be added there. Dates move by one offset (new start − source's earliest date) except days that hold a moved performance; show_date/time re-derived with `_sync_show_primary_date`. Gear re-priced via `_price_asset_line` (hand-priced lines kept), units unpinned, `_reset_asset_approval`; over-booking is a 409 unless `override_availability` (audit `availability_override=1`). Never copies comments, files, history, settlement, piano tunings, Prism links or project links.
+
 ## Reports (3.12.0)
 - `/reports` (`reports_page`, `templates/reports.html`) is its own nav
   section (nav key `reports`, audience `reports` = `_can_view_reports()`).

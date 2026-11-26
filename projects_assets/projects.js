@@ -10,7 +10,11 @@
      PM.pid                     the project id (int)
      PM.state                   the bundle from GET /api/projects/<pid>:
                                 {project, me, members, tasks, shows, contacts,
-                                 venues, discussion_count, counts, activity, today}
+                                 markers, venues, discussion_count, counts,
+                                 activity, today}
+                                markers = [{id, date, end_date|null, label,
+                                 color ('' | #rrggbb), notes}] by date — Timeline
+                                markers, NOT tasks (no deps / conflicts / alerts)
      PM.me                      PM.state.me
      PM.can                     {edit, manage, comment, budget, createShow}
                                 — recomputed on every reload. Read-only
@@ -31,8 +35,9 @@
                                 onProgress(fraction 0..1))
      PM.reload() -> Promise     refetch the bundle, emit 'state'
      PM.applyWrite(resp)        after YOUR OWN successful write: merges
-                                resp.tasks (by id), resp.project, resp.members
-                                and resp.contact into PM.state, adopts
+                                resp.tasks (by id), resp.project, resp.members,
+                                resp.contact and resp.markers (the whole list)
+                                into PM.state, adopts
                                 resp.rev when it is the known rev + 1 (else
                                 PM.reload()), emits 'state'.
    Events
@@ -53,7 +58,9 @@
      PM.openTask(id, {comment?})    the task dialog
      PM.newTask(defaults?)          e.g. {start_date, due_date, group_name, status}
      PM.newShow(defaults?)          creates a REAL show + links it
-     PM.linkShow()                  search + link an existing show
+     PM.linkShow()                  search + link existing shows (multi-select)
+     PM.newMarker(defaults?)        e.g. {date, end_date} — a Timeline marker
+     PM.openMarker(id)              its dialog (read-only for non-editors)
      PM.newContact(defaults?)       e.g. {name, email}
      PM.saveTask(id, changes) -> Promise<resp>
                                 partial PUT → applyWrite. On failure it
@@ -417,7 +424,15 @@
     x.addEventListener('click', () => d.ask());
     // A backdrop press asks like × does (overlay.dataset.noDirtyGuard keeps
     // app.js's own native question out of it).
-    overlay.addEventListener('click', e => { if (e.target === overlay) d.ask(); });
+    // The second click of a double-click that OPENED this dialog lands on
+    // the fresh backdrop: a backdrop click within the double-click interval
+    // of opening (or one that is itself a repeat click) is not a dismissal.
+    const openedAt = performance.now();
+    overlay.addEventListener('click', e => {
+      if (e.target !== overlay) return;
+      if (e.detail > 1 || performance.now() - openedAt < 600) return;
+      d.ask();
+    });
     document.body.appendChild(overlay);
     dialogs.push(d);
     // The caller fills body/footer right after this returns: focus next frame.
@@ -755,7 +770,7 @@
     PM.can = {edit: false, manage: false, comment: false, budget: false, createShow: false};
 
     const TABS = ['overview', 'tasks', 'timeline', 'budget', 'files', 'notes', 'contacts', 'discussion', 'settings'];
-    const LINK_PARAMS = ['task', 'comment', 'contact', 'line', 'file', 'note', 'mine'];
+    const LINK_PARAMS = ['task', 'comment', 'contact', 'line', 'file', 'note', 'mine', 'marker'];
     const tabs = {};                 // name → {impl, mounted}
     const taskMap = new Map();
     let knownRev = null;             // the project rev PM.state reflects
@@ -842,6 +857,7 @@
       }
       if (resp.project && typeof resp.project === 'object') s.project = resp.project;
       if (Array.isArray(resp.members)) s.members = resp.members;
+      if (Array.isArray(resp.markers)) s.markers = resp.markers;
       if (resp.contact && typeof resp.contact.id === 'number') {
         const i = s.contacts.findIndex(x => x.id === resp.contact.id);
         if (i >= 0) s.contacts[i] = resp.contact; else s.contacts.push(resp.contact);
@@ -1235,7 +1251,7 @@
 
     /* ── Search inside the project ───────────────────────────────────────── */
     const TYPE_LABEL = {task: 'Task', comment: 'Comment', contact: 'Contact', note: 'Note', file: 'File',
-                        budget_line: 'Budget', budget_source: 'Budget source'};
+                        budget_line: 'Budget', budget_source: 'Budget source', marker: 'Marker'};
     (function initSearch() {
       const input = $('pm-search-q');
       let seq = 0, timer = null;
@@ -1968,7 +1984,8 @@
       defaults = defaults || {};
       if (!PM.can.edit) return;
       if (!PM.can.createShow) { PM.toast('Your account can’t create shows.', true); return; }
-      const d = PM.dialog({title: defaults.task_id ? 'Make a show from this task' : 'New show'});
+      const fromTask = !!defaults.task_id;
+      const d = PM.dialog({title: fromTask ? 'Make a show from this task' : 'New show'});
       const name = h('input', {type: 'text', class: 'field-input', maxLength: 200, autocomplete: 'off'});
       name.value = defaults.name || '';
       const date = h('input', {type: 'date', class: 'field-input'});
@@ -1977,32 +1994,64 @@
       const venue = h('input', {type: 'text', class: 'field-input', maxLength: 200, list: vl.id, autocomplete: 'off'});
       venue.value = defaults.venue || '';
       const mode = select([{value: 'show', label: 'Show'}, {value: 'event', label: 'Event'}], defaults.show_mode || 'show');
+      // "Create and add another": the shows made in this dialog so far.
+      const made = h('div', {class: 'pm-made', role: 'status', hidden: true});
+      const madeNames = [];
       d.body.append(
         h('div', {class: 'pm-banner pm-banner-warn', role: 'note'},
           h('span', null, h('strong', {text: 'This creates a real show that everyone in 3·2·1→Theater can see.'}),
             ' It appears on the Shows board like any other; the project itself stays private.')),
+        made,
         field('Show name', name, {required: true}),
         h('div', {class: 'form-row cols-2'}, field('Date', date), field('Type', mode)),
         h('div', null, field('Venue', venue), vl));
       const go = h('button', {type: 'button', class: 'btn btn-primary', text: 'Create show'});
-      go.addEventListener('click', () => {
+      const again = fromTask ? null : h('button', {type: 'button', class: 'btn btn-ghost', text: 'Create and add another',
+                                                  title: 'Create this show and keep the dialog open for the next one (venue and type are kept)'});
+      const cancel = h('button', {type: 'button', class: 'btn btn-ghost', text: 'Cancel', onclick: () => d.ask()});
+      function create(keepOpen) {
         if (!name.value.trim()) { PM.toast('Give the show a name.', true); name.focus(); return; }
         const body = {name: name.value, show_date: date.value || null, venue: venue.value, show_mode: mode.value};
-        const call = defaults.task_id ? PM.api('POST', '/tasks/' + defaults.task_id + '/to-show', body)
-                                      : PM.api('POST', '/shows', {new: body});
+        const call = fromTask ? PM.api('POST', '/tasks/' + defaults.task_id + '/to-show', body)
+                              : PM.api('POST', '/shows', {new: body});
+        if (again) again.disabled = true;
         busy(go, call).then(resp => {
-          d.close();
+          if (again) again.disabled = false;
           if (typeof defaults.onDone === 'function') defaults.onDone(resp);
           PM.applyWrite(resp);
-          PM.toast('✓ Show created');
+          if (keepOpen) {
+            madeNames.push(body.name.trim());
+            made.hidden = false;
+            clear(made).append(h('strong', {text: '✓ Created ' + madeNames.length + (madeNames.length === 1 ? ' show: ' : ' shows: ')}),
+                               madeNames.join(', '));
+            name.value = '';
+            cancel.textContent = 'Done';
+            d.clean();
+            name.focus();
+            PM.toast('✓ Show created — add the next one');
+          } else {
+            d.close();
+            PM.toast(madeNames.length ? '✓ ' + (madeNames.length + 1) + ' shows created' : '✓ Show created');
+          }
           return PM.reload();          // the linked-shows list comes with the bundle
-        }).catch(say);
+        }).catch(e => { if (again && again.isConnected) again.disabled = false; say(e); });
+      }
+      go.addEventListener('click', () => create(false));
+      if (again) again.addEventListener('click', () => create(true));
+      // Enter goes through the buttons, which are disabled while a create is
+      // in flight — a repeated Enter must never POST a second (real) show.
+      name.addEventListener('keydown', e => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        if (e.repeat) return;
+        const b = (again && e.shiftKey) ? again : go;
+        if (!b.disabled && !go.disabled) b.click();
       });
-      d.footer.append(h('button', {type: 'button', class: 'btn btn-ghost', text: 'Cancel', onclick: () => d.ask()}), go);
+      d.footer.append(cancel, again, go);
     };
 
-    // A search-and-pick dialog (shows, the app's contacts): POSTs {q}, lists
-    // the results as buttons. Typing in it is not "unsaved changes".
+    // A search-and-pick dialog (the app's contacts): POSTs {q}, lists the
+    // results as buttons. Typing in it is not "unsaved changes".
     function pickDialog(title, placeholder, path, rowOf, onPick, emptyText) {
       const d = PM.dialog({title, noDirtyGuard: true});
       const q = h('input', {type: 'search', class: 'field-input', placeholder, 'aria-label': placeholder, maxLength: 200, autocomplete: 'off'});
@@ -2031,21 +2080,166 @@
       run();
       return d;
     }
+
+    // Link existing shows: a multi-select. Ticked shows are kept while the
+    // search changes (they sit as chips above the results) and are linked
+    // together by ONE request ({show_ids}). Shows already linked are not
+    // offered (the server skips any linked in the meantime and says so).
+    const LINK_MAX = 50;
     PM.linkShow = function () {
       if (!PM.can.edit) return;
-      pickDialog('Link a show', 'Search shows by name or venue…', '/show-search',
-        r => [h('span', {class: 'pm-row-main'}, h('span', {class: 'pm-row-title', text: r.name}),
-                h('span', {class: 'pm-row-sub', style: 'display:block', text: [r.venue, r.date ? PM.fmtDate(r.date) : 'No date'].filter(Boolean).join(' · ')})),
-              r.show_mode === 'event' ? h('span', {class: 'pm-badge pm-badge-event', text: 'Event'}) : null,
-              r.status !== 'active' ? h('span', {class: 'pm-badge pm-badge-muted', text: 'Archived'}) : null,
-              r.is_test ? h('span', {class: 'pm-badge pm-badge-muted', text: 'Test'}) : null],
-        (r, d, b) => busy(b, PM.api('POST', '/shows', {show_id: r.id})).then(() => {
+      const picked = new Map();          // show id → the search result
+      const d = PM.dialog({title: 'Link shows', noDirtyGuard: true,
+                           askClose: () => picked.size ? PM.confirm('Close without linking the ' + plural(picked.size, 'show') + ' you picked?', 'Discard')
+                                                       : Promise.resolve(true)});
+      const placeholder = 'Search shows by name or venue…';
+      const q = h('input', {type: 'search', class: 'field-input', placeholder, 'aria-label': placeholder, maxLength: 200, autocomplete: 'off'});
+      const chips = h('div', {class: 'pm-pick-chips', 'aria-label': 'Picked shows', hidden: true});
+      const out = h('div', {class: 'pm-list pm-pick-list', role: 'group', 'aria-label': 'Search results'});
+      const go = h('button', {type: 'button', class: 'btn btn-primary', text: 'Link shows', disabled: true});
+      let seq = 0, timer = null, last = [];
+      const sub = r => [r.venue, r.date ? PM.fmtDate(r.date) : 'No date'].filter(Boolean).join(' · ');
+      function paint() {
+        const n = picked.size;
+        go.disabled = n === 0;
+        go.textContent = n ? 'Link ' + plural(n, 'show') : 'Link shows';
+        chips.hidden = n === 0;
+        clear(chips);
+        picked.forEach(r => {
+          chips.appendChild(h('span', {class: 'pm-chip'}, h('span', {class: 'pm-chip-t', text: r.name}),
+            h('button', {type: 'button', class: 'pm-chip-x', text: '×', title: 'Remove', 'aria-label': 'Remove ' + r.name,
+                         data: {fk: 'pk' + r.id}, onclick: () => { picked.delete(r.id); paint(); drawResults(); }})));
+        });
+      }
+      function drawResults() {
+        clear(out);
+        if (!last.length) { out.appendChild(h('p', {class: 'pm-empty', text: 'No shows match (shows already linked are not listed).'})); return; }
+        last.forEach(r => {
+          const cb = h('input', {type: 'checkbox', checked: picked.has(r.id)});
+          cb.addEventListener('change', () => {
+            if (cb.checked) {
+              if (picked.size >= LINK_MAX) { cb.checked = false; PM.toast('Link at most ' + LINK_MAX + ' shows at a time.', true); return; }
+              picked.set(r.id, r);
+            } else picked.delete(r.id);
+            paint();
+          });
+          out.appendChild(h('label', {class: 'pm-row pm-pick-row'}, cb,
+            h('span', {class: 'pm-row-main'}, h('span', {class: 'pm-row-title', text: r.name}),
+              h('span', {class: 'pm-row-sub', style: 'display:block', text: sub(r)})),
+            r.show_mode === 'event' ? h('span', {class: 'pm-badge pm-badge-event', text: 'Event'}) : null,
+            r.status !== 'active' ? h('span', {class: 'pm-badge pm-badge-muted', text: 'Archived'}) : null,
+            r.is_test ? h('span', {class: 'pm-badge pm-badge-muted', text: 'Test'}) : null));
+        });
+      }
+      async function run() {
+        const my = ++seq;
+        try {
+          const j = await PM.api('POST', '/show-search', {q: q.value.trim()});
+          if (my !== seq) return;
+          last = j.results || [];
+          drawResults();
+        } catch (e) {
+          if (my === seq) clear(out).appendChild(h('p', {class: 'pm-empty', text: e.message}));
+        }
+      }
+      q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 250); });
+      q.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); run(); } });
+      go.addEventListener('click', () => {
+        if (!picked.size || !PM.can.edit) return;
+        busy(go, PM.api('POST', '/shows', {show_ids: Array.from(picked.keys())})).then(resp => {
+          picked.clear();
           d.close();
-          PM.toast('✓ Show linked');
+          const n = (resp.show_ids || []).length;
+          PM.toast('✓ ' + plural(n, 'show') + ' linked' + (resp.skipped ? ' (' + resp.skipped + ' already linked)' : ''));
+          PM.applyWrite(resp);
           return PM.reload();
-        }).catch(say),
-        'No shows match (shows already linked are not listed).');
+        }).catch(say);
+      });
+      d.body.append(h('p', {class: 'pm-note', text: 'Tick every show to link — your picks stay while you search again.'}), q, chips, out);
+      d.footer.append(h('button', {type: 'button', class: 'btn btn-ghost', text: 'Cancel', onclick: () => d.ask()}), go);
+      paint();
+      run();
     };
+
+    /* ── Timeline markers: a dated note that is not a task ──────────────── */
+    PM.newMarker = function (defaults) {
+      if (!PM.can.edit) return;
+      markerDialog(null, defaults || {});
+    };
+    PM.openMarker = function (id) {
+      const m = (PM.state.markers || []).find(x => x.id === +id);
+      if (!m) { PM.toast('That marker no longer exists.', true); return; }
+      markerDialog(m, {});
+    };
+    function markerWhen(m) {
+      return (m.end_date && m.end_date !== m.date) ? fmtRange(m.date, m.end_date) : PM.fmtDate(m.date);
+    }
+    PM.markerWhen = markerWhen;
+    function markerDialog(m, defaults) {
+      const edit = PM.can.edit;
+      const d = PM.dialog({title: m ? (edit ? 'Edit marker' : 'Marker') : 'New marker'});
+      if (!edit) {
+        // View only: the text, no controls.
+        d.body.append(
+          h('p', {class: 'pm-marker-view'}, h('span', {class: 'pm-marker-sw', 'aria-hidden': 'true',
+                                                         style: isHex(m.color) ? '--mk:' + m.color : null}),
+            h('strong', {text: m.label})),
+          h('p', {class: 'pm-note', text: markerWhen(m)}),
+          m.notes ? h('p', {class: 'pm-desc'}, PM.richText(m.notes)) : null);
+        d.footer.appendChild(h('button', {type: 'button', class: 'btn btn-primary', text: 'Close', onclick: () => d.close()}));
+        return d;
+      }
+      const v = m || {label: '', date: defaults.date || todayIso(), end_date: defaults.end_date || null, color: '', notes: ''};
+      const label = h('input', {type: 'text', class: 'field-input', maxLength: 200, autocomplete: 'off',
+                                placeholder: 'e.g. Labor Day, Building closed for fumigation'});
+      label.value = v.label;
+      const start = h('input', {type: 'date', class: 'field-input', required: true});
+      start.value = v.date || '';
+      const end = h('input', {type: 'date', class: 'field-input'});
+      end.value = v.end_date || '';
+      const notes = h('textarea', {class: 'field-input field-textarea', rows: 3, maxLength: 10000});
+      notes.value = v.notes || '';
+      const sw = swatches(v.color, () => { d.overlay.dataset.dirty = '1'; });
+      d.body.append(
+        field('Label', label, {required: true}),
+        h('div', {class: 'form-row cols-2'}, field('Date', start, {required: true}),
+          field('Until', end, {hint: 'Optional — for something that runs several days.'})),
+        h('div', {class: 'field-group'}, h('span', {class: 'field-label', text: 'Colour'}), sw.el),
+        field('Notes', notes),
+        h('p', {class: 'pm-note', text: 'A marker is a dated note on the Timeline — not a task: it has no status, dependencies or reminders.'}));
+      const save = h('button', {type: 'button', class: 'btn btn-primary', text: m ? 'Save' : 'Add marker'});
+      save.addEventListener('click', () => {
+        if (!PM.can.edit) return;
+        if (!label.value.trim()) { PM.toast('Give the marker a label.', true); label.focus(); return; }
+        if (!start.value) { PM.toast('Pick a date for the marker.', true); start.focus(); return; }
+        if (end.value && end.value < start.value) { PM.toast('The end date is before the start date.', true); end.focus(); return; }
+        const body = {label: label.value, date: start.value, end_date: end.value || null, color: sw.get(), notes: notes.value};
+        const call = m ? PM.api('PUT', '/markers/' + m.id, body) : PM.api('POST', '/markers', body);
+        busy(save, call).then(resp => {
+          d.close();
+          PM.applyWrite(resp);
+          if (!resp.unchanged) PM.toast(m ? '✓ Marker saved' : '✓ Marker added');
+        }).catch(say);
+      });
+      label.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); save.click(); } });
+      const foot = [];
+      if (m) {
+        foot.push(h('button', {type: 'button', class: 'btn btn-danger-ghost pm-foot-left', text: 'Delete', onclick: () => {
+          if (!PM.can.edit) return;
+          PM.confirm('Delete the marker “' + m.label + '”?', 'Delete').then(ok => {
+            if (!ok) return;
+            PM.api('DELETE', '/markers/' + m.id).then(resp => {
+              d.close();
+              PM.applyWrite(resp);
+              PM.toast('✓ Marker deleted');
+            }, say);
+          });
+        }}));
+      }
+      foot.push(h('button', {type: 'button', class: 'btn btn-ghost', text: 'Cancel', onclick: () => d.ask()}), save);
+      d.footer.append(...foot);
+      return d;
+    }
 
     /* ── Contacts ────────────────────────────────────────────────────────── */
     PM.newContact = function (defaults) {
@@ -2188,6 +2382,7 @@
     let activityStale = false, activityTimer = null;
     PM.registerTab('overview', (function () {
       let pane = null, c = null;       // c = the card bodies that get redrawn
+      let showsAll = false;            // the Linked shows card lists every show (else the first 12)
       const notes = {};                // summary_text / risks_text → {ta, base, dirty, saving, conflict, …}
 
       function card(titleText, bodyEl, actions) {
@@ -2366,6 +2561,7 @@
         pane = el;
         c = {desc: h('div', {class: 'form-section-body'}), progress: h('div', {class: 'form-section-body'}),
              overdue: h('div'), week: h('div'), miles: h('div'), shows: h('div'), showActs: h('span', {class: 'pm-h-actions'}),
+             markers: h('div'), markerActs: h('span', {class: 'pm-h-actions'}),
              activity: h('div'), overdueN: h('span'), descCard: null};
         c.descCard = card('About', c.desc);
         pane.append(c.descCard, h('div', {class: 'pm-cols'},
@@ -2376,6 +2572,7 @@
             card('Upcoming milestones', c.miles)),
           h('div', null,
             card('Linked shows', c.shows, c.showActs),
+            card('Timeline markers', c.markers, c.markerActs),
             noteBox('summary_text', 'Summary', 'Where the project stands — this text opens the Summary PDF.'),
             noteBox('risks_text', 'Risks / issues', 'What could go wrong, what is blocked, what needs a decision.'),
             card('Recent activity', c.activity))));
@@ -2439,11 +2636,12 @@
           // Linked shows
           clear(c.showActs);
           if (PM.can.edit) {
-            c.showActs.appendChild(h('button', {type: 'button', class: 'btn btn-xs btn-ghost', text: 'Link a show', data: {fk: 'link'}, onclick: () => PM.linkShow()}));
+            c.showActs.appendChild(h('button', {type: 'button', class: 'btn btn-xs btn-ghost', text: 'Link shows', data: {fk: 'link'}, onclick: () => PM.linkShow()}));
             if (PM.can.createShow) c.showActs.appendChild(h('button', {type: 'button', class: 'btn btn-xs btn-ghost', text: 'New show', data: {fk: 'newshow'}, onclick: () => PM.newShow()}));
           }
           const sl = h('div', {class: 'pm-list'});
-          (s.shows || []).forEach(sh => {
+          const allShows = s.shows || [], SHOW_CAP = 12;
+          (showsAll ? allShows : allShows.slice(0, SHOW_CAP)).forEach(sh => {
             sl.appendChild(h('div', {class: 'pm-row'},
               h('span', {class: 'pm-row-main'},
                 h('a', {class: 'pm-row-title', href: '/shows/' + sh.id, target: '_blank', rel: 'noopener', text: sh.name, data: {fk: 'sh' + sh.id}}),
@@ -2456,10 +2654,46 @@
               PM.can.edit ? h('button', {type: 'button', class: 'pm-chip-x', title: 'Unlink this show', 'aria-label': 'Unlink ' + sh.name,
                                          text: '×', data: {fk: 'un' + sh.id}, onclick: () => unlink(sh)}) : null));
           });
+          if (allShows.length > SHOW_CAP) {
+            sl.appendChild(h('button', {type: 'button', class: 'pm-row', data: {fk: 'shmore'},
+                                        onclick: () => { showsAll = !showsAll; sync(); }},
+              h('span', {class: 'pm-row-main pm-note', text: showsAll ? 'Show fewer' : 'Show all ' + allShows.length + ' shows'})));
+          }
           if (!(s.shows || []).length) {
             sl.appendChild(h('p', {class: 'pm-empty', text: 'No shows linked.' + (PM.can.edit ? ' Link one that exists, or create a new one.' : '')}));
           }
           clear(c.shows).appendChild(sl);
+
+          // Timeline markers (dated notes, not tasks): upcoming first, then
+          // the most recent past ones.
+          clear(c.markerActs);
+          if (PM.can.edit) {
+            c.markerActs.appendChild(h('button', {type: 'button', class: 'btn btn-xs btn-ghost', text: 'Add marker', data: {fk: 'newmk'},
+                                                  onclick: () => PM.newMarker()}));
+          }
+          const mks = s.markers || [];
+          const ahead = mks.filter(m => (m.end_date || m.date) >= today);
+          const past = mks.filter(m => (m.end_date || m.date) < today).reverse();
+          const ml = h('div', {class: 'pm-list'});
+          ahead.concat(past).slice(0, 12).forEach(m => {
+            const isPast = (m.end_date || m.date) < today;
+            const sw = h('span', {class: 'pm-marker-sw', 'aria-hidden': 'true'});
+            if (isHex(m.color)) sw.style.setProperty('--mk', m.color);
+            ml.appendChild(h('button', {type: 'button', class: 'pm-row', data: {fk: 'mk' + m.id}, onclick: () => PM.openMarker(m.id)},
+              sw,
+              h('span', {class: 'pm-row-main'}, h('span', {class: 'pm-row-title', text: m.label}),
+                m.notes ? h('span', {class: 'pm-row-sub', style: 'display:block', text: m.notes.split('\n')[0].slice(0, 120)}) : null),
+              isPast ? h('span', {class: 'pm-badge pm-badge-muted', text: 'Past'}) : null,
+              h('span', {class: 'pm-row-date', text: PM.markerWhen(m)})));
+          });
+          if (mks.length > 12) {
+            ml.appendChild(h('button', {type: 'button', class: 'pm-row', data: {fk: 'mkmore'}, onclick: () => PM.setTab('timeline')},
+              h('span', {class: 'pm-row-main pm-note', text: 'and ' + (mks.length - 12) + ' more — open Timeline'})));
+          }
+          if (!mks.length) {
+            ml.appendChild(h('p', {class: 'pm-empty', text: 'No markers.' + (PM.can.edit ? ' Add a holiday, a closure or any other date that matters — it shows on the Timeline.' : '')}));
+          }
+          clear(c.markers).appendChild(ml);
         });
         syncNotes();
         drawActivity();

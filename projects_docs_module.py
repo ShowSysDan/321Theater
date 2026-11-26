@@ -49,6 +49,10 @@ The rules this file protects (they are the point of the feature)
   replaces is kept as a version first.
 - GETs never lock, never bump a rev and never write — with one sanctioned
   exception: preview.pdf stores the converted PDF so LibreOffice runs once.
+- INVOICE / QUOTE (Budget tab, `_routes_invoice`): read-only, ctx 'budget'.
+  Options in a URL are ids, dates and enums only; the free text printed on
+  the paper comes ONLY from the body of a POST of invoice.pdf (that POST
+  writes nothing, so it takes no lock). Show money only via `show_figures`.
 """
 
 import gzip
@@ -1935,6 +1939,19 @@ def _summary(db, c, uid):
 
     contacts = [{'name': k['name'], 'company': k['company'], 'role': k['role']}
                 for k in pm._contacts_out(db, pid)]
+    # Timeline markers (feature A): dated notes that are not tasks. Ordered
+    # like the Overview card: upcoming / running ones first (soonest first),
+    # then past ones newest first — so the cap never hides an upcoming
+    # closure behind a long tail of holidays already gone by.
+    upcoming, past = [], []
+    for m in pm._markers_out(db, pid):
+        last = d(m['end_date']) or d(m['date'])
+        (past if last and last < today else upcoming).append(m)
+    past.reverse()
+    marker_rows, marker_more = _capped([
+        {'dates': _fmt_date(m['date']) + (f" \u2013 {_fmt_date(m['end_date'])}" if m['end_date'] else ''),
+         'label': m['label'], 'notes': m['notes'] or '', 'past': i >= len(upcoming)}
+        for i, m in enumerate(upcoming + past)])
     owner = next((m['name'] for m in members if m['role'] == 'owner'), '')
     over_rows, over_more = _capped([task_row(t) for t in overdue])
     next_rows, next_more = _capped([task_row(t) for t in coming], _PDF_SHORT_MAX)
@@ -1959,6 +1976,7 @@ def _summary(db, c, uid):
         'conflicts': conf_rows, 'conflicts_more': conf_more,
         'blocked': block_rows, 'blocked_more': block_more,
         'shows': shows, 'budget': budget,
+        'markers': marker_rows, 'markers_more': marker_more,
         'team': [{'name': m['name'], 'role': _ROLE.get(m['role'], m['role'])} for m in members],
         'contacts': contact_rows, 'contacts_more': contact_more,
     }
@@ -1983,11 +2001,357 @@ def _routes_summary(app):
                 f'project_summary_{int(pid)}_{date.today().isoformat()}.pdf', True), sandbox=False)
 
 
+# ─── Invoice / quote (Budget tab) ─────────────────────────────────────────────
+# One document built from the budget lines (and, optionally, the linked
+# shows' own billing figures) for a chosen SCOPE: the whole project, some
+# tasks, or the tasks in a date range (incremental billing). Rules:
+# - Budget visibility: every route is ctx(…, 'budget') — 404 for a member
+#   below budget_visibility, exactly like the other budget routes.
+# - Read-only: nothing is stored, nothing locked, no rev bump. The options
+#   arrive with each request.
+# - No project text in a URL: the JSON preview and a GET of the PDF take
+#   ids, dates and enum options only. The free text printed on the paper
+#   (number, bill-to, notes) travels ONLY in the body of a POST of the PDF
+#   route, and is never logged or kept.
+# - Show money comes from app.py's own engines through `show_figures`, for
+#   the CALLER (a figure their Reports permissions don't cover is left out
+#   and the document says so) — never re-derived here.
+
+_INV_DOCS = {'quote': 'Quote', 'invoice': 'Invoice'}
+# Figure basis → (label, how the dialog / paper explains it).
+_INV_BASIS = {
+    'estimate': ('Estimate', 'The estimate on each budget line; shows at their labor estimate.'),
+    'forecast': ('Forecast', 'The larger of committed and paid on each budget line (the forecast the '
+                             'variance uses); shows at settled labor, else the labor estimate.'),
+    'actual': ('Actual (paid)', 'What was actually paid on each budget line; shows at settled labor '
+                                'only (an unsettled show bills no labor).'),
+}
+_INV_DEFAULT_BASIS = {'quote': 'estimate', 'invoice': 'actual'}
+_INV_SCOPES = ('all', 'tasks', 'range')
+_INV_GROUPS = ('category', 'task')
+_INV_RULES = ('finish', 'overlap')
+_INV_TASKS_MAX = 500
+_INV_NUMBER_MAX = 60
+_INV_ID_LIST = re.compile(r'^\d{1,10}(?:,\d{1,10}){0,499}$')
+
+
+def _inv_flag(v, default):
+    if v is None or v == '':
+        return default
+    if v in ('1', 'true', 'on', 'yes'):
+        return True
+    if v in ('0', 'false', 'off', 'no'):
+        return False
+    raise _refuse(400, 'An option is not valid.')
+
+
+def _inv_opts(db, pid, src):
+    """The document's options from a GET query / POST form: ids, dates and
+    enums only, every one validated (400 on anything else). Task ids are
+    checked against THIS project's live tasks."""
+    doc = core.one_of(src.get('doc') or 'quote', tuple(_INV_DOCS), 'Document type')
+    basis = core.one_of(src.get('basis') or _INV_DEFAULT_BASIS[doc], tuple(_INV_BASIS), 'Figures')
+    scope = core.one_of(src.get('scope') or 'all', _INV_SCOPES, 'Scope')
+    group = core.one_of(src.get('group') or 'category', _INV_GROUPS, 'Group by')
+    rule = core.one_of(src.get('rule') or 'finish', _INV_RULES, 'Date rule')
+    o = {'doc': doc, 'basis': basis, 'scope': scope, 'group': group, 'rule': rule,
+         'unassigned': _inv_flag(src.get('unassigned'), False),
+         'shows': _inv_flag(src.get('shows'), True),
+         'tasks': [], 'start': None, 'end': None}
+    if scope == 'tasks':
+        raw = (src.get('tasks') or '').strip()
+        if not raw:
+            raise _refuse(400, 'Pick at least one task.')
+        if not _INV_ID_LIST.match(raw):
+            raise _refuse(400, 'The task list is not valid.')
+        ids = sorted({core.to_int(x, 'Task') for x in raw.split(',')})
+        live = {r['id'] for r in db.execute(
+            'SELECT id FROM pm_tasks WHERE project_id = %s AND deleted_at IS NULL AND id = ANY(%s::int[])',
+            (pid, ids)).fetchall()}
+        if len(live) != len(ids):
+            raise _refuse(400, 'A task you picked is no longer on this project.')
+        o['tasks'] = ids
+    elif scope == 'range':
+        o['start'] = core.parse_date(src.get('start') or None, 'From')
+        o['end'] = core.parse_date(src.get('end') or None, 'To')
+        if not o['start'] and not o['end']:
+            raise _refuse(400, 'Give the range a start or an end date.')
+        if o['start'] and o['end'] and o['end'] < o['start']:
+            raise _refuse(400, 'The range ends before it starts.')
+    return o
+
+
+def _inv_text(src):
+    """The free text of a POSTed PDF (never from a URL)."""
+    number = core.clean_text(src.get('number'), _INV_NUMBER_MAX, 'Number', line=True)
+    bill_to = core.clean_text(src.get('bill_to'), core.caps['comment'], 'Bill to')
+    notes = core.clean_text(src.get('notes'), core.caps['comment'], 'Notes')
+    return {'number': number, 'bill_to': bill_to, 'notes': notes}
+
+
+def _inv_span(a, b):
+    """(first, last) of a task / show from its two ends (either may be
+    missing; both missing = undated → None)."""
+    a, b = a or b, b or a
+    if not a:
+        return None
+    return (min(a, b), max(a, b))
+
+
+def _inv_in_range(span, o):
+    """THE date rule (the dialog's help text says the same): 'finish' — the
+    task / show FINISHES inside the range (so consecutive ranges never bill
+    one twice); 'overlap' — any of its days is inside the range. Open ends
+    of the range are unbounded. Undated → never."""
+    if span is None:
+        return False
+    lo, hi = o['start'] or date.min, o['end'] or date.max
+    first, last = span
+    if o['rule'] == 'finish':
+        return lo <= last <= hi
+    return first <= hi and last >= lo
+
+
+def _inv_line_amount(ln, basis):
+    if basis == 'estimate':
+        return ln['estimate']
+    if basis == 'actual':
+        return ln['actual']
+    com, act = ln['committed'], ln['actual']
+    if com is None and act is None:
+        return None
+    return round(max(com or 0.0, act or 0.0), 2)
+
+
+def _inv_dates(first, last):
+    a, b = _fmt_date(first), _fmt_date(last)
+    return (a if a == b or not b else f'{a} – {b}') if a else ''
+
+
+def _invoice(db, c, uid, o):
+    """Everything the preview shows and the PDF prints, as display-ready
+    values plus the raw numbers (the template does no arithmetic)."""
+    pid = c.pid
+    tasks = []
+    for r in db.execute(
+            'SELECT id, title, start_date, due_date, show_id FROM pm_tasks '
+            'WHERE project_id = %s AND deleted_at IS NULL ORDER BY sort_order, id', (pid,)).fetchall():
+        span = _inv_span(core.d['as_date'](r['start_date']), core.d['as_date'](r['due_date']))
+        tasks.append({'id': r['id'], 'title': r['title'], 'span': span, 'show_id': r['show_id']})
+    order = {t['id']: i for i, t in enumerate(tasks)}
+    by_id = {t['id']: t for t in tasks}
+
+    scope = o['scope']
+    if scope == 'all':
+        picked = set(by_id)
+    elif scope == 'tasks':
+        picked = set(o['tasks']) & set(by_id)
+    else:
+        picked = {t['id'] for t in tasks if _inv_in_range(t['span'], o)}
+    undated_skipped = (sum(1 for t in tasks if t['span'] is None) if scope == 'range' else 0)
+    with_unassigned = scope == 'all' or o['unassigned']
+
+    # ── Budget lines ──
+    lines, missing = [], 0
+    for ln in _budget(db, pid)['lines']:
+        tid = ln['task_id']
+        if not ((tid is not None and tid in picked) or (tid is None and with_unassigned)):
+            continue
+        amt = _inv_line_amount(ln, o['basis'])
+        if amt is None:
+            missing += 1
+        t = by_id.get(tid) if tid else None
+        lines.append({'id': ln['id'], 'description': ln['description'],
+                      'category': ln['category'] or 'Uncategorized',
+                      'task_id': t['id'] if t else None, 'task': t['title'] if t else '',
+                      'amount': amt, 'amount_text': _fmt_money(amt)})
+
+    groups, at = [], {}
+    if o['group'] == 'task':
+        lines.sort(key=lambda x: (x['task_id'] is None, order.get(x['task_id'], 0)))
+    for ln in lines:
+        if o['group'] == 'task':
+            key = ln['task_id'] or 0
+            name = ln['task'] or 'No task'
+            t = by_id.get(ln['task_id'])
+            sub = _inv_dates(*t['span']) if t and t['span'] else ''
+        else:
+            key, name, sub = ln['category'], ln['category'], ''
+        if key not in at:
+            at[key] = len(groups)
+            groups.append({'name': name, 'sub': sub, 'lines': [], 'total': 0.0})
+        g = groups[at[key]]
+        g['lines'].append(ln)
+        g['total'] += ln['amount'] or 0.0
+    for g in groups:
+        g['total'] = round(g['total'], 2)
+        g['total_text'] = _fmt_money(g['total'])
+    lines_total = round(sum(g['total'] for g in groups), 2)
+
+    # ── Linked shows (the app's own billing engines, for the caller) ──
+    shows_out, notes, can = [], [], {}
+    shows_total = 0.0
+    linked = _linked_show_ids(db, uid, pid)
+    if o['shows'] and linked:
+        # A cancelled show (archived before it happened) or a test / demo
+        # show is never billed — the same rule as every report.
+        unbilled = {r['id']: r for r in db.execute(
+            'SELECT id, COALESCE(is_cancelled, 0) AS cancelled, COALESCE(is_test, 0) AS test '
+            'FROM shows WHERE id = ANY(%s::int[]) '
+            'AND (COALESCE(is_cancelled, 0) = 1 OR COALESCE(is_test, 0) = 1)',
+            (list(linked),)).fetchall()}
+        billable = [s for s in linked if s not in unbilled]
+        bars = {s['id']: s for s in core.d['show_bars'](db, billable)} if billable else {}
+        if scope == 'all':
+            sel = list(billable)
+            left_out = list(unbilled)
+        elif scope == 'tasks':
+            want = {by_id[t]['show_id'] for t in picked if by_id[t]['show_id']}
+            sel = [s for s in billable if s in want]
+            left_out = [s for s in unbilled if s in want]
+        else:
+            spans = {s: (_inv_span(core.d['as_date'](bars[s].get('start')),
+                                   core.d['as_date'](bars[s].get('end'))) if s in bars else None)
+                     for s in billable}
+            sel = [s for s in billable if spans[s] is not None and _inv_in_range(spans[s], o)]
+            left_out = list(unbilled)
+            undated_shows = sum(1 for s in billable if spans[s] is None)
+            if undated_shows:
+                notes.append(f"{undated_shows} linked show{'s' if undated_shows != 1 else ''} "
+                             f"without dates {'are' if undated_shows != 1 else 'is'} outside every "
+                             f"date range — bill {'them' if undated_shows != 1 else 'it'} on a whole-project invoice.")
+        n_canc = sum(1 for s in left_out if unbilled[s]['cancelled'])
+        n_test = sum(1 for s in left_out if not unbilled[s]['cancelled'] and unbilled[s]['test'])
+        if n_canc:
+            notes.append(f"{n_canc} cancelled show{'s' if n_canc != 1 else ''} "
+                         f"{'are' if n_canc != 1 else 'is'} left out (never billed).")
+        if n_test:
+            notes.append(f"{n_test} test / demo show{'s' if n_test != 1 else ''} "
+                         f"{'are' if n_test != 1 else 'is'} left out (never billed).")
+        if sel:
+            figs = core.d['show_figures'](db, sel)
+            can = figs.get('can') or {}
+            if not any(can.get(k) for k in ('assets', 'piano', 'labor')):
+                figs['shows'] = []      # nothing this person may see: no rows, only the note
+            for f in figs.get('shows') or []:
+                b = bars.get(f['show_id']) or {}
+                settled = bool(f.get('settled'))
+                if o['basis'] == 'estimate':
+                    labor, labor_note = f.get('labor_estimate'), 'Labor estimate'
+                elif o['basis'] == 'actual':
+                    labor = f.get('labor_actual') if settled else None
+                    labor_note = 'Settled labor' if settled else 'Labor not settled yet'
+                else:
+                    labor = f.get('labor_actual') if settled else f.get('labor_estimate')
+                    labor_note = 'Settled labor' if settled else 'Labor estimate (not settled)'
+                parts = {'assets': f.get('assets'), 'external': f.get('external'),
+                         'piano': f.get('piano_billed'), 'labor': labor}
+                total = round(sum(v for v in parts.values() if v is not None), 2)
+                shows_total += total
+                shows_out.append({
+                    'id': f['show_id'], 'name': f['name'],
+                    'dates': _inv_dates(b.get('start'), b.get('end')) or 'No date yet',
+                    'venue': b.get('venue') or '',
+                    **{k: v for k, v in parts.items()},
+                    **{k + '_text': _fmt_money(v) if v is not None else '—' for k, v in parts.items()},
+                    'labor_note': labor_note if can.get('labor') else '',
+                    'total': total, 'total_text': _fmt_money(total)})
+            hidden = [label for key, label in (('assets', 'assets and external rentals'),
+                                               ('piano', 'piano tunings'), ('labor', 'labor'))
+                      if not can.get(key)]
+            if len(hidden) == 3:
+                notes.append('Show costs are left out: they need Reports access to assets, '
+                             'labor or piano.')
+            elif hidden:
+                notes.append('Show costs leave out ' + ', '.join(hidden) +
+                             ': those figures need Reports access you don’t have.')
+            if can.get('labor') and any(s['labor'] is None for s in shows_out):
+                notes.append('Shows without a labor figure bill no labor here (not settled yet, '
+                             'or the figure could not be worked out).')
+    shows_total = round(shows_total, 2)
+    if missing:
+        notes.insert(0, f"{missing} budget line{'s' if missing != 1 else ''} "
+                        f"{'have' if missing != 1 else 'has'} no {_INV_BASIS[o['basis']][0].lower()} "
+                        f"amount and count{'' if missing != 1 else 's'} as $0.00.")
+    if undated_skipped:
+        notes.append(f"{undated_skipped} task{'s' if undated_skipped != 1 else ''} without dates "
+                     f"{'are' if undated_skipped != 1 else 'is'} outside every date range.")
+
+    if scope == 'all':
+        scope_text = 'Whole project'
+    elif scope == 'tasks':
+        scope_text = f"{len(picked)} selected task{'s' if len(picked) != 1 else ''}"
+    else:
+        a, b = _fmt_date(o['start']), _fmt_date(o['end'])
+        rng = f'{a} – {b}' if a and b else (f'From {a}' if a else f'Through {b}')
+        scope_text = rng + (' (finishing in range)' if o['rule'] == 'finish' else ' (overlapping the range)')
+    if scope != 'all':
+        scope_text += ' · lines without a task included' if o['unassigned'] else ''
+    if scope == 'range' and o['unassigned'] and any(ln['task_id'] is None for ln in lines):
+        notes.append('Budget lines without a task have no date: they are on EVERY date-range '
+                     'invoice, so incremental invoices bill them again each time.')
+
+    has_labor_col = bool(can.get('labor'))
+    return {
+        'doc': o['doc'], 'doc_label': _INV_DOCS[o['doc']],
+        'basis': o['basis'], 'basis_label': _INV_BASIS[o['basis']][0],
+        'basis_help': _INV_BASIS[o['basis']][1],
+        'scope_text': scope_text, 'group': o['group'],
+        'project': c.project['name'],
+        'tasks_included': len(picked), 'task_ids': sorted(picked),
+        'groups': groups, 'line_count': len(lines), 'lines_missing': missing,
+        'lines_total': lines_total, 'lines_total_text': _fmt_money(lines_total),
+        'shows': shows_out, 'shows_total': shows_total, 'shows_total_text': _fmt_money(shows_total),
+        'show_cols': {'assets': bool(can.get('assets')), 'piano': bool(can.get('piano')),
+                      'labor': has_labor_col},
+        'include_shows': o['shows'], 'linked_shows': len(linked),
+        'total': round(lines_total + shows_total, 2),
+        'total_text': _fmt_money(lines_total + shows_total),
+        'notes': notes,
+    }
+
+
+def _routes_invoice(app):
+
+    @app.route('/api/projects/<int:pid>/budget/invoice', methods=['GET'], endpoint='pm_budget_invoice')
+    @core.wrap
+    def pm_budget_invoice(db, uid, pid):
+        """The live preview: the same numbers the PDF prints. Read-only."""
+        c = core.ctx(db, pid, 'budget')
+        return jsonify(_invoice(db, c, uid, _inv_opts(db, pid, request.args)))
+
+    @app.route('/projects/<int:pid>/budget/invoice.pdf', methods=['GET', 'POST'],
+               endpoint='pm_budget_invoice_pdf')
+    @core.wrap
+    def pm_budget_invoice_pdf(db, uid, pid):
+        """The PDF. GET = options only (ids / dates / enums in the query);
+        POST = the same options plus the free text printed on the paper
+        (number, bill-to, notes), from the form body — so project text never
+        sits in a URL. Nothing is written by either."""
+        c = core.ctx(db, pid, 'budget')
+        src = request.form if request.method == 'POST' else request.args
+        o = _inv_opts(db, pid, src)
+        text = _inv_text(src) if request.method == 'POST' else _inv_text({})
+        inv = _invoice(db, c, uid, o)
+        logo = _logo()
+        db.rollback()               # nothing open while WeasyPrint lays the pages out
+        html = render_template('pdf/project_invoice_pdf.html', inv=inv, t=text, logo=logo,
+                               issued=_fmt_date(date.today()),
+                               generated=_fmt_stamp(datetime.now()), generated_by=c.name)
+        pdf = _render_pdf(html)
+        core.syslog('PM_INVOICE_PDF', pid, tasks=len(inv['task_ids']) if o['scope'] != 'all' else 0,
+                    shows=len(inv['shows']))
+        return _doc_response(
+            pdf, 'application/pdf',
+            core.d['safe_content_disposition'](
+                f"project_{o['doc']}_{int(pid)}_{date.today().isoformat()}.pdf", True), sandbox=False)
+
+
 # ─── Registration ─────────────────────────────────────────────────────────────
 
 def register(app, core_ns):
     """Called once by projects_module.register() with its `core` namespace.
-    Installs the budget, file, note and summary routes (all under the URL
+    Installs the budget, invoice / quote, file, note and summary routes (all under the URL
     trees that module's gate already owns)."""
     global core
     core = core_ns
@@ -1995,4 +2359,5 @@ def register(app, core_ns):
     _routes_files(app)
     _routes_notes(app)
     _routes_summary(app)
+    _routes_invoice(app)
     return core

@@ -110,7 +110,7 @@ UNLISTED_TABLES = {
     'pm_access', 'pm_projects', 'pm_members', 'pm_contacts', 'pm_tasks',
     'pm_task_deps', 'pm_task_alerts', 'pm_comments', 'pm_activity', 'pm_shows',
     'pm_files', 'pm_file_versions', 'pm_budget_lines', 'pm_budget_history',
-    'pm_budget_sources', 'pm_notes', 'pm_note_versions',
+    'pm_budget_sources', 'pm_notes', 'pm_note_versions', 'pm_markers',
 }
 PRIVATE_TABLES |= UNLISTED_TABLES
 RESTORE_BLOCKED |= UNLISTED_TABLES

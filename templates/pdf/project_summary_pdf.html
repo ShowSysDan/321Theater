@@ -182,6 +182,20 @@
   {% if s.milestones_more %}<div class="more">and {{ s.milestones_more }} more</div>{% endif %}
   {% endif %}
 
+  {% if s.markers %}
+  <div class="section-title">Timeline markers <span class="n">· {{ s.markers|length + s.markers_more }}</span></div>
+  <table>
+    <colgroup><col style="width: 27%"><col style="width: 33%"><col style="width: 40%"></colgroup>
+    <thead><tr><th>Date</th><th>Marker</th><th>Notes</th></tr></thead>
+    <tbody>
+      {% for m in s.markers %}
+      <tr><td>{{ m.dates }}{% if m.past %} <span class="muted">(past)</span>{% endif %}</td><td>{{ m.label }}</td><td>{{ m.notes|truncate(200, true, '…') }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if s.markers_more %}<div class="more">and {{ s.markers_more }} more</div>{% endif %}
+  {% endif %}
+
   {% if s.overdue %}
   <div class="section-title">Overdue <span class="n">· {{ s.overdue|length + s.overdue_more }}</span></div>
   <table>

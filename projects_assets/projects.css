@@ -513,6 +513,23 @@ html.has-inbox:not(.mobile-view) .pm-discussion .pm-composer-wrap { padding-righ
 .pm-mywork a.pm-row { color: inherit; text-decoration: none; }
 .pm-mywork a.pm-row:hover { background: var(--bg-hover); }
 
+/* ── Link shows (multi-select) + New show "add another" ───────────────────── */
+.pm-pick-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 2px; }
+.pm-pick-chips .pm-chip { max-width: 260px; }
+.pm-pick-list { margin: 10px -22px -22px; max-height: min(52vh, 460px); overflow-y: auto; }
+label.pm-pick-row { cursor: pointer; }
+label.pm-pick-row:hover { background: var(--bg-hover); }
+label.pm-pick-row input[type="checkbox"] { flex: none; width: 17px; height: 17px; margin: 0; accent-color: var(--accent); }
+.pm-made { margin: 0 0 12px; padding: 8px 12px; border-radius: 8px; font-size: 13px; overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--pm-st-done) 12%, transparent); color: var(--text); }
+
+/* ── Timeline markers (Overview list, marker dialog) ─────────────────────── */
+.pm-marker-sw {
+  flex: none; display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+  background: var(--mk, var(--pm-mk-default, #8b5cf6)); vertical-align: middle;
+}
+.pm-marker-view { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; font-size: 15px; color: var(--ink); overflow-wrap: anywhere; }
+
 /* ═══ Phones (html.mobile-view) ═══════════════════════════════════════════ */
 html.mobile-view .pm-grid, html.mobile-view .pm-contact-grid, html.mobile-view .pm-cols { grid-template-columns: minmax(0, 1fr); }
 /* Only the tab strip stays pinned under the phone header: projects.js sets
@@ -599,3 +616,6 @@ html.mobile-view .pm-swatch { width: 34px; height: 34px; }
 html.mobile-view .pm-chip-x { min-width: 36px; min-height: 36px; font-size: 18px; }
 html.mobile-view .pm-chip .pm-chip-x { min-width: 28px; min-height: 28px; }
 html.mobile-view .pm-mywork h2 { font-size: 15px; }
+html.mobile-view label.pm-pick-row input[type="checkbox"] { width: 22px; height: 22px; }
+html.mobile-view .pm-pick-list { max-height: 50vh; }
+html.mobile-view .pm-pick-chips .pm-chip { max-width: 100%; }

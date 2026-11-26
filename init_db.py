@@ -2234,6 +2234,25 @@ CREATE TABLE IF NOT EXISTS pm_note_versions (
 );
 CREATE INDEX IF NOT EXISTS idx_pm_note_versions_project ON pm_note_versions(project_id);
 CREATE INDEX IF NOT EXISTS idx_pm_note_versions_note ON pm_note_versions(note_id);
+
+-- Timeline markers: a dated note that is not a task (a holiday, a building
+-- closure). end_date NULL = one day, else an inclusive span. Markers never
+-- take part in dependencies, conflicts, shift plans, alerts or task counts.
+-- Delete is a hard delete (the project history keeps the activity row).
+CREATE TABLE IF NOT EXISTS pm_markers (
+    id          SERIAL PRIMARY KEY,
+    project_id  INTEGER NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    marker_date DATE NOT NULL,
+    end_date    DATE,
+    label       TEXT NOT NULL DEFAULT '',
+    color       TEXT DEFAULT '',
+    notes       TEXT DEFAULT '',
+    created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_pm_markers_project ON pm_markers(project_id);
 """
 
 

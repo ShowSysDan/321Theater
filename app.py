@@ -907,7 +907,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.52.0'
+APP_VERSION = '3.53.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -11608,6 +11608,10 @@ def manage_shows():
                            # _readonly_guard refuses read-only staff.
                            can_write=(session.get('user_role') == 'admin'
                                       or not session.get('is_readonly')),
+                           # Clone: admin only, and never a read-only admin
+                           # (clone_show refuses them).
+                           can_clone=(session.get('user_role') == 'admin'
+                                      and not session.get('is_readonly')),
                            user=get_current_user())
 
 
@@ -11760,6 +11764,457 @@ def toggle_show_mode(show_id):
     syslog_logger.info(f"SHOW_MODE show_id={show_id} show_mode={mode} "
                        f"by={session.get('username')}")
     return jsonify({'success': True, 'show_mode': mode})
+
+
+# ─── Clone a show (Settings → Shows, admin) ───────────────────────────────────
+#
+# Builds a NEW show from an existing one, with the new dates asked for up
+# front. One transaction; the source is never touched. What a clone takes,
+# table by table (every table with a show_id — keep this list in step when a
+# new one appears):
+#
+#   COPIED
+#     shows row          name (new), venue, show_mode, performance_company,
+#                        cast/crew counts, is_test, labor_notes, load-in /
+#                        load-out (the dialog's dates). NOT status / archive
+#                        stamps / is_cancelled / restored_on, prism_status,
+#                        labor_settled_*, asset approval state, last_saved_*,
+#                        versions. show_date/time are re-derived from the new
+#                        performances by _sync_show_primary_date.
+#     show_performances  the dialog's list (dates + times, edited by the admin)
+#     advance_data       every field except file_upload / pdf_form /
+#                        piano_tuning fields (they point at files / tunings of
+#                        the source); show_name / dates / load range rewritten;
+#                        other 'date' fields shifted by the offset.
+#     schedule_meta      all keys; dark_day:<date> keys moved to the new date
+#                        (dropped if that date is not a day of the clone).
+#     security_signin_names  the sign-in list (names only).
+#     show_labor_billable_items  the per-show billable extras selection.
+#   COPIED + SHIFTED (optional groups in the dialog)
+#     schedule_rows      day_date moved, perf_id mapped to the new performance;
+#                        piano_tuning_id rows skipped (the tuning isn't cloned).
+#     labor_requests + show_labor_days   work_date moved; NEVER the scheduled
+#                        crew member / scheduled flags / scheduler notes.
+#     show_assets        rental window moved by the offset and kept inside the
+#                        clone's engagement; units UNPINNED; re-priced with
+#                        _price_asset_line at the CURRENT rates (only a line
+#                        whose price was overridden since add — locked !=
+#                        original — keeps its price); retired types skipped;
+#                        approval starts over (_reset_asset_approval).
+#                        Over-booking is a 409 listing the shortages unless
+#                        the request carries override_availability (the
+#                        dialog's confirm) — then audited per line with
+#                        availability_override=1 + ASSET_AVAILABILITY_OVERRIDE.
+#     show_external_rentals  description + cost only (no paperwork file);
+#                        piano-tuning rows skipped.
+#   NOT COPIED
+#     post_show_labor / post_show_notes (settlement), show_comments,
+#     show_attachments, pdf_submissions, export_log, form_history,
+#     advance_reads, field_alert_state, active_sessions, email_* logs
+#     (email_send_log must stay empty or the clone's advance mails would be
+#     treated as already sent), notifications, audit_log, piano_tunings,
+#     spot_captures, chat_threads, ai_sessions, prism_events, pm_* (projects).
+#
+# Dates: the offset = new start − the source's first date (load-in, show date
+# or first performance, whichever is earliest). Each source DAY maps to day +
+# offset, except a day holding a performance the admin moved by a different
+# amount in the dialog, which follows that performance.
+
+_CLONE_MAX_PERFS = 200
+_CLONE_ADV_SKIP_TYPES = ('file_upload', 'pdf_form', 'piano_tuning')
+
+
+def _clone_source_info(db, show_id):
+    """The source show for the clone dialog: dates, performances and how
+    much of each optional group there is. None when the show is gone."""
+    s = db.execute('SELECT id, name, venue, show_date, show_time, load_in_date, load_out_date '
+                   'FROM shows WHERE id=%s', (show_id,)).fetchone()
+    if not s:
+        return None
+    perfs = db.execute(
+        'SELECT id, perf_date, perf_time FROM show_performances WHERE show_id=%s '
+        'ORDER BY CASE WHEN perf_date IS NULL THEN 1 ELSE 0 END, perf_date, perf_time, id',
+        (show_id,)).fetchall()
+    dates = [d for d in [_as_date(s['load_in_date']), _as_date(s['show_date'])]
+             + [_as_date(p['perf_date']) for p in perfs] if d]
+    counts = db.execute("""
+        SELECT (SELECT COUNT(*) FROM schedule_rows WHERE show_id=%s
+                  AND piano_tuning_id IS NULL) AS schedule,
+               (SELECT COUNT(*) FROM labor_requests WHERE show_id=%s) AS labor,
+               (SELECT COUNT(*) FROM show_assets WHERE show_id=%s) AS assets,
+               (SELECT COUNT(*) FROM show_external_rentals WHERE show_id=%s
+                  AND piano_tuning_id IS NULL) AS rentals
+    """, (show_id,) * 4).fetchone()
+    iso = lambda v: _as_date(v).isoformat() if _as_date(v) else ''
+    return {
+        'id': s['id'], 'name': s['name'], 'venue': s['venue'] or '',
+        'anchor': min(dates).isoformat() if dates else '',
+        'load_in_date': iso(s['load_in_date']), 'load_out_date': iso(s['load_out_date']),
+        # A legacy / imported show with a show_date but no performance rows
+        # gets ONE synthetic row (no source id) so the clone keeps a dated
+        # show: show_date is re-derived only from performances.
+        'performances': [{'id': p['id'], 'date': iso(p['perf_date']),
+                          'time': p['perf_time'] or ''} for p in perfs]
+                        or ([{'id': None, 'date': iso(s['show_date']),
+                              'time': s['show_time'] or ''}] if _as_date(s['show_date']) else []),
+        'counts': dict(counts),
+    }
+
+
+def _clone_date(raw, label):
+    """'' / None → None; an ISO date (years 1900–2200) → date; else ValueError
+    with a message for the admin."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    try:
+        d = date.fromisoformat(str(raw).strip())
+    except ValueError:
+        raise ValueError(f'{label} is not a date (YYYY-MM-DD).')
+    if not 1900 <= d.year <= 2200:
+        raise ValueError(f'{label} is out of range.')
+    return d
+
+
+def _clone_admin_refusal():
+    """admin_required lets a read-only admin through; a clone is a write, so
+    refuse them like the raw is_readonly checks elsewhere do."""
+    if session.get('is_readonly'):
+        return jsonify({'success': False, 'error': 'Read-only access.'}), 403
+    return None
+
+
+@app.route('/settings/shows/<int:show_id>/clone-info')
+@admin_required
+def clone_show_info(show_id):
+    db = get_db()
+    try:
+        info = _clone_source_info(db, show_id)
+    finally:
+        db.close()
+    if not info:
+        return jsonify({'success': False, 'error': 'Show not found.'}), 404
+    return jsonify({'success': True, 'show': info})
+
+
+@app.route('/settings/shows/<int:show_id>/clone', methods=['POST'])
+@admin_required
+def clone_show(show_id):
+    refused = _clone_admin_refusal()
+    if refused:
+        return refused
+    data = _json_obj()
+    bad = lambda msg: (jsonify({'success': False, 'error': msg}), 400)
+    name = ' '.join(str(data.get('name') or '').split())
+    if not name:
+        return bad('The new show needs a name.')
+    if len(name) > 200:
+        return bad('The name is too long (200 characters at most).')
+    copy = data.get('copy') if isinstance(data.get('copy'), dict) else {}
+    want = {}
+    for k in ('schedule', 'labor', 'assets'):
+        v = copy.get(k, True)
+        # Only a real boolean (or 0/1): the string 'false' must never read
+        # as "copy it".
+        if v in (True, 1, '1', 'true') and v is not False:
+            want[k] = True
+        elif v in (False, 0, '0', 'false') or v is None:
+            want[k] = False
+        else:
+            return bad(f'copy.{k} must be true or false.')
+    override_avail = data.get('override_availability') is True
+    raw_perfs = data.get('performances')
+    if raw_perfs is None:
+        raw_perfs = []
+    if not isinstance(raw_perfs, list):
+        return bad('performances must be a list.')
+    if len(raw_perfs) > _CLONE_MAX_PERFS:
+        return bad(f'At most {_CLONE_MAX_PERFS} performances.')
+    try:
+        start = _clone_date(data.get('start_date'), 'The new start date')
+        load_in = _clone_date(data.get('load_in_date'), 'First Call (load-in)')
+        load_out = _clone_date(data.get('load_out_date'), 'Final Out (load-out)')
+        perfs = []
+        for i, p in enumerate(raw_perfs, 1):
+            if not isinstance(p, dict):
+                return bad(f'Performance {i} is not valid.')
+            pd = _clone_date(p.get('date'), f'Performance {i} date')
+            pt = p.get('time')
+            if pt is not None and not isinstance(pt, str):
+                return bad(f'Performance {i} time is not valid.')
+            pt = _normalize_perf_time(pt)[:40]
+            try:
+                src = int(p['src_id']) if p.get('src_id') not in (None, '') else None
+            except (TypeError, ValueError):
+                src = None
+            perfs.append((pd, pt, src))
+    except ValueError as e:
+        return bad(str(e))
+    if load_in and load_out and load_in > load_out:
+        return bad('First Call (load-in) must be on or before Final Out (load-out).')
+
+    db = get_db()
+    try:
+        src = db.execute('SELECT * FROM shows WHERE id=%s FOR SHARE', (show_id,)).fetchone()
+        if not src:
+            db.close()
+            return jsonify({'success': False, 'error': 'Show not found.'}), 404
+        src = dict(src)
+        info = _clone_source_info(db, show_id)
+        anchor = _as_date(info['anchor'])
+        if anchor and not start:
+            db.close()
+            return bad('Pick the new start date.')
+        offset = timedelta(days=(start - anchor).days) if (anchor and start) else timedelta(0)
+        src_perfs = {p['id']: _as_date(p['date']) for p in info['performances']
+                     if p['id'] is not None}
+        # Day map: each source day → its new day.
+        day_override = {}
+        for pd, _pt, sid in perfs:
+            old = src_perfs.get(sid)
+            if old and pd and old not in day_override:
+                day_override[old] = pd
+
+        def move(d):
+            d = _as_date(d)
+            if not d:
+                return None
+            return day_override.get(d, d + offset)
+
+        uid = session['user_id']
+        new_id = db.execute("""
+            INSERT INTO shows (name, venue, show_mode, performance_company, cast_count,
+                               crew_count, is_test, labor_notes, load_in_date,
+                               load_out_date, created_by, status)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active') RETURNING id
+        """, (name, src.get('venue') or '', src.get('show_mode') or 'show',
+              src.get('performance_company') or '', src.get('cast_count'),
+              src.get('crew_count'), 1 if src.get('is_test') else 0,
+              src.get('labor_notes') or '', load_in, load_out, uid)).fetchone()['id']
+
+        # Performances (the dialog's list, in its order).
+        perf_map = {}
+        for i, (pd, pt, sid) in enumerate(perfs):
+            pid = db.execute(
+                'INSERT INTO show_performances (show_id, perf_date, perf_time, sort_order) '
+                'VALUES (%s,%s,%s,%s) RETURNING id', (new_id, pd, pt, i)).fetchone()['id']
+            if sid in src_perfs and sid not in perf_map:
+                perf_map[sid] = pid
+
+        # Advance fields.
+        types = {r['field_key']: r['field_type'] for r in db.execute(
+            'SELECT field_key, field_type FROM form_fields').fetchall()}
+        rewrite = {'show_name': name,
+                   'load_in_date': load_in.isoformat() if load_in else '',
+                   'load_out_date': load_out.isoformat() if load_out else ''}
+        adv = {}
+        for r in db.execute('SELECT field_key, field_value FROM advance_data WHERE show_id=%s',
+                            (show_id,)).fetchall():
+            k, v = r['field_key'], r['field_value']
+            if types.get(k) in _CLONE_ADV_SKIP_TYPES or k in ('show_date', 'show_time'):
+                continue
+            if types.get(k) == 'date' and _as_date(v) and len(str(v).strip()) == 10:
+                v = (_as_date(v) + offset).isoformat()
+            adv[k] = v
+        adv.update(rewrite)
+        for k, v in adv.items():
+            db.execute('INSERT INTO advance_data (show_id, field_key, field_value) '
+                       'VALUES (%s,%s,%s) ON CONFLICT (show_id, field_key) '
+                       'DO UPDATE SET field_value = EXCLUDED.field_value', (new_id, k, v))
+        _sync_show_primary_date(db, new_id)
+
+        # Schedule meta (dark days follow their day).
+        new_days = None
+        for r in db.execute('SELECT field_key, field_value FROM schedule_meta WHERE show_id=%s',
+                            (show_id,)).fetchall():
+            k = r['field_key']
+            if k.startswith(DARK_DAY_PREFIX):
+                nd = move(k[len(DARK_DAY_PREFIX):])
+                if new_days is None:
+                    new_days = {d['date_key'] for d in _build_schedule_days(db, new_id)[1]
+                                if d.get('perf_date')}
+                if not nd or nd.isoformat() not in new_days:
+                    continue
+                k = DARK_DAY_PREFIX + nd.isoformat()
+            db.execute('INSERT INTO schedule_meta (show_id, field_key, field_value) '
+                       'VALUES (%s,%s,%s)', (new_id, k, r['field_value']))
+
+        db.execute('INSERT INTO security_signin_names (show_id, name, sort_order, created_by) '
+                   'SELECT %s, name, sort_order, %s FROM security_signin_names '
+                   'WHERE show_id=%s ORDER BY sort_order, id', (new_id, uid, show_id))
+        db.execute('INSERT INTO show_labor_billable_items (show_id, billable_item_id) '
+                   'SELECT %s, billable_item_id FROM show_labor_billable_items '
+                   'WHERE show_id=%s ON CONFLICT DO NOTHING', (new_id, show_id))
+
+        copied = {'performances': len(perfs), 'schedule': 0, 'labor': 0,
+                  'assets': 0, 'rentals': 0}
+        warnings = []
+        short_lines = {}          # new show_assets id → its source line (over-booked)
+
+        if want['schedule']:
+            for r in db.execute(
+                    'SELECT * FROM schedule_rows WHERE show_id=%s AND piano_tuning_id IS NULL '
+                    'ORDER BY sort_order, id', (show_id,)).fetchall():
+                day = move(r['day_date']) if r['day_date'] else None
+                new_perf = perf_map.get(r['perf_id'])
+                if not r['day_date'] and r['perf_id'] and not new_perf:
+                    # Legacy row of a performance left out of the clone: keep
+                    # it on that performance's (moved) day.
+                    day = move(src_perfs.get(r['perf_id']))
+                db.execute("""
+                    INSERT INTO schedule_rows (show_id, perf_id, day_date, sort_order,
+                        start_time, end_time, description, notes)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (new_id, new_perf, day.isoformat() if day else None, r['sort_order'],
+                      r['start_time'] or '', r['end_time'] or '', r['description'] or '',
+                      r['notes'] or ''))
+                copied['schedule'] += 1
+
+        if want['labor']:
+            for r in db.execute('SELECT * FROM labor_requests WHERE show_id=%s '
+                                'ORDER BY sort_order, id', (show_id,)).fetchall():
+                db.execute("""
+                    INSERT INTO labor_requests (show_id, position_id, work_date, in_time,
+                        out_time, break_start, break_end, break2_start, break2_end,
+                        requested_name, is_training_shift, sort_order)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (new_id, r['position_id'], move(r['work_date']), r['in_time'] or '',
+                      r['out_time'] or '', r['break_start'] or '', r['break_end'] or '',
+                      r['break2_start'] or '', r['break2_end'] or '',
+                      r['requested_name'] or '', r['is_training_shift'] or 0,
+                      r['sort_order'] or 0))
+                copied['labor'] += 1
+            seen_days = set()
+            for r in db.execute('SELECT * FROM show_labor_days WHERE show_id=%s ORDER BY work_date',
+                                (show_id,)).fetchall():
+                nd = move(r['work_date'])
+                if nd in seen_days:
+                    continue   # two source days folded onto one: keep the first
+                seen_days.add(nd)
+                db.execute("""
+                    INSERT INTO show_labor_days (show_id, work_date, cover_pm, day_notes,
+                                                 updated_by, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
+                """, (new_id, nd, r['cover_pm'] or '', r['day_notes'] or '', uid))
+
+        if want['assets']:
+            win_start, win_end = _show_rental_window(db, new_id)
+            rates = _show_company_rates(db, new_id)[1]
+            lines = db.execute("""
+                SELECT sa.*, at.name AS type_name, at.rental_cost, at.weekly_rate,
+                       at.is_consumable, at.is_system, at.is_package, at.is_retired
+                FROM show_assets sa JOIN asset_types at ON at.id = sa.asset_type_id
+                WHERE sa.show_id=%s ORDER BY sa.id
+            """, (show_id,)).fetchall()
+            windows = {}
+            hand_kept = 0
+            for r in lines:
+                if r['is_retired']:
+                    warnings.append(f'Skipped "{r["type_name"]}": the item is retired.')
+                    continue
+                rs = _as_date(r['rental_start'])
+                re_ = _as_date(r['rental_end'])
+                rs = rs + offset if rs else None
+                re_ = re_ + offset if re_ else None
+                if win_start and win_end:
+                    rs = min(max(rs or win_start, win_start), win_end)
+                    re_ = max(min(re_ or win_end, win_end), rs)
+                # Hand-priced = a real override on the source line (changed
+                # since it was added). NOT "differs from today's rate card":
+                # that is every line priced before a rate change, and a
+                # season-old show must clone at the CURRENT rates.
+                hand = (r['original_locked_price'] is not None
+                        and round(float(r['locked_price'] or 0), 2)
+                        != round(float(r['original_locked_price']), 2))
+                price, company = _price_asset_line(db, new_id, r, r['asset_type_id'],
+                                                   rs, re_, rates=rates)
+                if hand:
+                    hand_kept += 1
+                locked = float(r['locked_price'] or 0) if hand else price
+                # original = the current card's price, so a kept hand price is
+                # still an override against it (and a re-priced line is not).
+                sa_id = db.execute("""
+                    INSERT INTO show_assets (show_id, asset_type_id, asset_item_id, quantity,
+                        rental_start, rental_end, locked_price, original_locked_price,
+                        is_hidden, notes, added_by, rate_company)
+                    VALUES (%s,%s,NULL,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+                """, (new_id, r['asset_type_id'], r['quantity'] or 1, rs, re_, locked, price,
+                      r['is_hidden'] or 0, r['notes'] or '', uid,
+                      None if hand else company)).fetchone()['id']
+                copied['assets'] += 1
+                windows.setdefault((rs, re_), []).append(dict(r, new_sa_id=sa_id))
+            if hand_kept:
+                warnings.append(f'{hand_kept} asset line(s) kept their hand-set price; '
+                                'every other line is priced at the current rates.')
+            # Over-booking check on the new window (the clone's lines are
+            # visible to this transaction). Like POST /shows/<id>/assets, an
+            # over-booking is refused unless the admin confirmed it
+            # (override_availability, sent by the dialog after it listed the
+            # shortages) — and an override is audited + syslogged per line.
+            short = set()
+            shortages, short_lines = [], {}
+            for (ws, we), rows in windows.items():
+                avail = _get_asset_availability_many(db, [r['asset_type_id'] for r in rows], ws, we)
+                for r in rows:
+                    a = avail.get(r['asset_type_id'])
+                    if (a and not a.get('unlimited') and a.get('available') is not None
+                            and a['available'] < 0):
+                        short_lines[r['new_sa_id']] = r
+                        if r['asset_type_id'] not in short:
+                            short.add(r['asset_type_id'])
+                            shortages.append(f'"{r["type_name"]}" is over-booked by '
+                                             f'{-a["available"]} on the new dates.')
+                    if r['is_system'] or r['is_package']:
+                        for sh in _system_component_shortages(
+                                db, r['asset_type_id'], r['quantity'] or 1, ws, we,
+                                back_out_system_qty=r['quantity'] or 1):
+                            short_lines[r['new_sa_id']] = r
+                            shortages.append(f'"{r["type_name"]}": component '
+                                             f'"{sh["component_name"]}" is short on the new dates.')
+            if shortages and not override_avail:
+                db.rollback()
+                db.close()
+                return jsonify({'success': False, 'needs_override': True,
+                                'shortages': shortages,
+                                'error': 'Some gear is not available on the new dates.'}), 409
+            for sa_id, r in short_lines.items():
+                log_audit(db, 'ASSET_ADDED_TO_SHOW', 'show_asset', sa_id, show_id=new_id,
+                          detail=f"type_id={r['asset_type_id']} qty={r['quantity'] or 1} "
+                                 f"availability_override=1 (show clone from {show_id})")
+            warnings.extend(f'{m} (booked anyway — you confirmed the override)' for m in shortages)
+            for r in db.execute('SELECT description, cost, sort_order FROM show_external_rentals '
+                                'WHERE show_id=%s AND piano_tuning_id IS NULL ORDER BY sort_order, id',
+                                (show_id,)).fetchall():
+                db.execute('INSERT INTO show_external_rentals (show_id, description, cost, sort_order) '
+                           'VALUES (%s,%s,%s,%s)',
+                           (new_id, r['description'] or '', r['cost'] or 0, r['sort_order'] or 0))
+                copied['rentals'] += 1
+            if copied['assets'] or copied['rentals']:
+                _reset_asset_approval(db, new_id, 'asset_added')
+
+        log_audit(db, 'SHOW_CLONE', 'show', new_id, show_id=new_id,
+                  after={'name': name, 'source_show_id': show_id,
+                         'start_date': start.isoformat() if start else None,
+                         'offset_days': offset.days, 'copied': copied,
+                         'availability_override': 1 if short_lines else 0},
+                  detail=f"cloned from show {show_id} ('{src.get('name')}')")
+        db.commit()
+    except Exception as e:
+        try: db.rollback()
+        except Exception: pass
+        db.close()
+        app.logger.error(f'clone_show source={show_id} failed: {type(e).__name__}: {e}')
+        return jsonify({'success': False, 'error': 'Clone failed: '
+                        + _client_error_text(e)}), 500
+    db.close()
+    for r in short_lines.values():
+        syslog_logger.warning(
+            f"ASSET_AVAILABILITY_OVERRIDE show_id={new_id} type_id={r['asset_type_id']} "
+            f"qty={r['quantity'] or 1} source={show_id} by={session.get('username')}")
+    syslog_logger.info(f"SHOW_CLONE show_id={new_id} source={show_id} offset={offset.days} "
+                       f"by={session.get('username')}")
+    return jsonify({'success': True, 'show_id': new_id, 'copied': copied,
+                    'warnings': warnings,
+                    'url': url_for('show_page', show_id=new_id)})
 
 
 @app.route('/settings/shows/bulk-archive', methods=['POST'])
@@ -33190,12 +33645,14 @@ def _pm_show_figures(db, show_ids):
     _can_report_labor (estimate = _calc_labor_cost_for_show; actual =
     _calc_post_show_labor_cost, SETTLED shows only, as in every report). A
     figure the caller may not see is None, never 0. Read-only; nothing is
-    stored."""
+    stored. `piano_billed` = the part of `piano` the shows' own invoices
+    bill (_ER_BILLED_SQL: the tuning's bill_on_invoice) — what the project
+    invoice / quote prints; `piano` stays the whole expense (Reports' rule)."""
     ids = _pm_int_ids(show_ids)
     can = {'assets': bool(_can_report_assets()), 'labor': bool(_can_report_labor()),
            'piano': bool(_can_report_piano())}
-    keys = ('assets', 'external', 'piano', 'labor_estimate', 'labor_actual')
-    gate = {'assets': 'assets', 'external': 'assets', 'piano': 'piano',
+    keys = ('assets', 'external', 'piano', 'piano_billed', 'labor_estimate', 'labor_actual')
+    gate = {'assets': 'assets', 'external': 'assets', 'piano': 'piano', 'piano_billed': 'piano',
             'labor_estimate': 'labor', 'labor_actual': 'labor'}
     uid = session.get('user_id')
     rows = [r for r in db.execute(
@@ -33217,6 +33674,13 @@ def _pm_show_figures(db, show_ids):
                 shows[sid]['external'] = ext
             if can['piano']:
                 shows[sid]['piano'] = piano
+    if ids and can['piano']:
+        for r in db.execute(f"""
+            SELECT er.show_id, SUM(er.cost) AS c FROM show_external_rentals er
+             WHERE er.show_id = ANY(%s) AND er.piano_tuning_id IS NOT NULL AND {_ER_BILLED_SQL}
+             GROUP BY er.show_id
+        """, (ids,)).fetchall():
+            shows[r['show_id']]['piano_billed'] = float(r['c'] or 0)
     if can['labor']:
         for sid, s in shows.items():
             # One show's engine failing must not take the others down. A

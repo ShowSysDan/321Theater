@@ -95,6 +95,10 @@
           <td class="text-dim">{{ s.creator or '—' }}</td>
           {% if can_write %}
           <td style="text-align:right;white-space:nowrap">
+            {% if can_clone %}
+            <button type="button" class="btn btn-xs btn-ghost" title="Make a new show from this one — you pick the new dates first"
+                    onclick="openCloneShow({{ s.id }})">Clone</button>
+            {% endif %}
             <button type="button" class="btn btn-xs btn-ghost" data-is-test="{{ '1' if s.is_test else '0' }}"
                     title="Test / demo shows are left out of reports"
                     onclick="toggleShowTestMode(this, {{ s.id }}, true)">{{ 'Unmark test' if s.is_test else 'Mark as test' }}</button>
@@ -124,6 +128,35 @@
     {% endif %}
   </div>
 </div>
+
+{% if can_clone %}
+<div id="clone-show-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeCloneShow()">
+  <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="clone-show-title">
+    <div class="modal-header">
+      <span id="clone-show-title">Clone show</span>
+      <button type="button" class="modal-close" onclick="closeCloneShow()" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body" id="clone-show-body">
+      <p class="text-dim" style="margin:0">Loading…</p>
+    </div>
+    <div class="modal-footer" id="clone-show-footer">
+      <button type="button" class="btn btn-ghost" onclick="closeCloneShow()">Cancel</button>
+      <button type="button" class="btn btn-primary" id="clone-show-go" disabled onclick="submitCloneShow(this)">Clone show</button>
+    </div>
+  </div>
+</div>
+<style>
+  .clone-grid { display: flex; flex-wrap: wrap; gap: 10px 14px; }
+  .clone-grid > label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; flex: 1 1 160px; min-width: 0; }
+  .clone-perf { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .clone-perf input[type=date] { flex: 1 1 140px; min-width: 0; }
+  .clone-perf input.clone-time { flex: 0 1 96px; min-width: 0; }
+  .clone-perf .clone-was { font-size: 11px; flex: 1 1 100%; margin-top: -2px; }
+  .clone-copy label { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; margin-bottom: 6px; }
+  .clone-note { font-size: 12px; margin: 0; }
+  .clone-warn { font-size: 12px; margin: 0; padding-left: 18px; color: var(--orange-text, #d97a3f); }
+</style>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -156,6 +189,293 @@ function confirmArchive(form) {
                  'It will be hidden from the dashboard but nothing is deleted — ' +
                  'you can restore it here at any time.');
 }
+
+{% if can_clone %}
+// ── Clone show (admin) ───────────────────────────────────────────────────
+// Dates first: the new start date moves every date by the same number of
+// days; each performance / load date can then be edited, added or removed.
+// The server copies + shifts the rest (schedule, labor, gear) — DOM is built
+// with createElement / textContent only.
+let _clone = null;
+
+function _el(tag, attrs, text) {
+  const e = document.createElement(tag);
+  for (const k in (attrs || {})) {
+    if (k === 'class') e.className = attrs[k];
+    else e.setAttribute(k, attrs[k]);
+  }
+  if (text != null) e.textContent = text;
+  return e;
+}
+function _cloneShift(iso, days) {
+  if (!iso) return '';
+  const p = iso.split('-').map(Number);
+  const d = new Date(Date.UTC(p[0], p[1] - 1, p[2] + days));
+  return d.toISOString().slice(0, 10);   // UTC date math on a plain date: no TZ drift
+}
+function _cloneDays(fromIso, toIso) {
+  if (!fromIso || !toIso) return 0;
+  const a = fromIso.split('-').map(Number), b = toIso.split('-').map(Number);
+  return Math.round((Date.UTC(b[0], b[1] - 1, b[2]) - Date.UTC(a[0], a[1] - 1, a[2])) / 86400000);
+}
+
+function closeCloneShow() {
+  const done = _clone && _clone.done;
+  document.getElementById('clone-show-modal').style.display = 'none';
+  _clone = null;
+  if (done) location.reload();   // list the new show
+}
+
+async function openCloneShow(id) {
+  const modal = document.getElementById('clone-show-modal');
+  const body = document.getElementById('clone-show-body');
+  const go = document.getElementById('clone-show-go');
+  body.replaceChildren(_el('p', {class: 'text-dim', style: 'margin:0'}, 'Loading…'));
+  go.disabled = true; go.style.display = '';
+  _resetCloneFooter();
+  modal.style.display = 'flex';
+  _clone = {id: id};
+  try {
+    const r = await fetch('/settings/shows/' + id + '/clone-info',
+                          {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+    const d = await r.json();
+    if (!_clone || _clone.id !== id) return;
+    if (!d.success) throw new Error(d.error || 'Could not load the show.');
+    _clone.src = d.show;
+    _renderCloneForm();
+    go.disabled = false;
+  } catch (e) {
+    body.replaceChildren(_el('p', {class: 'field-msg field-msg-error'}, e.message || 'Could not load the show.'));
+  }
+}
+
+function _resetCloneFooter() {
+  const f = document.getElementById('clone-show-footer');
+  f.querySelectorAll('.clone-extra').forEach(b => b.remove());
+  const cancel = f.querySelector('.btn-ghost');
+  cancel.textContent = 'Cancel';
+  cancel.onclick = closeCloneShow;
+}
+
+function _renderCloneForm() {
+  const s = _clone.src;
+  const body = document.getElementById('clone-show-body');
+  body.replaceChildren();
+  document.getElementById('clone-show-title').textContent = 'Clone “' + s.name + '”';
+
+  const grid = _el('div', {class: 'clone-grid'});
+  const nameL = _el('label', null, 'New show name');
+  const name = _el('input', {type: 'text', class: 'field-input', id: 'clone-name', maxlength: '200'});
+  name.value = s.name + ' (copy)';
+  nameL.appendChild(name);
+  nameL.style.flexBasis = '100%';
+  grid.appendChild(nameL);
+
+  if (s.anchor) {
+    const stL = _el('label', null, 'New start date');
+    const st = _el('input', {type: 'date', class: 'field-input', id: 'clone-start', required: ''});
+    stL.appendChild(st);
+    stL.appendChild(_el('span', {class: 'text-dim', style: 'font-weight:400;font-size:11px'},
+                        'The original starts ' + s.anchor + '. Every date below moves with it.'));
+    st.addEventListener('change', () => _cloneApplyStart(st.value));
+    grid.appendChild(stL);
+    const kept = _el('span', {class: 'text-dim', id: 'clone-kept', style: 'flex-basis:100%;font-size:11px;display:none'});
+    grid.appendChild(kept);
+  }
+  const liL = _el('label', null, 'First Call (load-in)');
+  const li = _el('input', {type: 'date', class: 'field-input', id: 'clone-load-in'});
+  liL.appendChild(li);
+  const loL = _el('label', null, 'Final Out (load-out)');
+  const lo = _el('input', {type: 'date', class: 'field-input', id: 'clone-load-out'});
+  loL.appendChild(lo);
+  grid.appendChild(liL); grid.appendChild(loL);
+  body.appendChild(grid);
+
+  const perfHead = _el('div', {style: 'font-size:12px;font-weight:600'}, 'Performances');
+  body.appendChild(perfHead);
+  const list = _el('div', {id: 'clone-perfs'});
+  body.appendChild(list);
+  s.performances.forEach(p => _cloneAddPerf(p.date, p.time, p.id, p.date));
+  const add = _el('button', {type: 'button', class: 'btn btn-xs btn-ghost', style: 'align-self:flex-start'},
+                  '+ Add performance');
+  add.addEventListener('click', () => {
+    const rows = list.querySelectorAll('.clone-perf input[type=date]');
+    const last = rows.length ? rows[rows.length - 1].value : '';
+    _cloneAddPerf(last ? _cloneShift(last, 1) : '', '', null, '');
+  });
+  body.appendChild(add);
+
+  const copy = _el('div', {class: 'clone-copy'});
+  copy.appendChild(_el('div', {style: 'font-size:12px;font-weight:600;margin-bottom:6px'}, 'Also copy (dates move with the show)'));
+  const c = s.counts || {};
+  [['schedule', 'Production schedule', (c.schedule || 0) + ' row(s)'],
+   ['labor', 'Labor requests + Day PMs', (c.labor || 0) + ' line(s) — no technicians assigned'],
+   ['assets', 'Gear', (c.assets || 0) + ' asset line(s), ' + (c.rentals || 0) +
+     ' external rental(s) — re-priced, units unpinned, needs approval again']]
+    .forEach(([key, label, sub]) => {
+      const l = _el('label');
+      const cb = _el('input', {type: 'checkbox', 'data-copy': key});
+      cb.checked = true;
+      const t = _el('span');
+      t.appendChild(document.createTextNode(label));
+      t.appendChild(_el('span', {class: 'text-dim', style: 'display:block;font-size:11px'}, sub));
+      l.appendChild(cb); l.appendChild(t);
+      copy.appendChild(l);
+    });
+  body.appendChild(copy);
+  body.appendChild(_el('p', {class: 'text-dim clone-note'},
+    'Always copied: advance sheet fields, venue & tech notes, sign-in names. Never copied: ' +
+    'comments, files, PDF exports, history, piano tunings, post-show notes and settlement.'));
+  body.appendChild(_el('p', {class: 'field-msg field-msg-error', id: 'clone-msg', style: 'display:none'}));
+
+  li.value = s.load_in_date || '';
+  lo.value = s.load_out_date || '';
+  // A date the admin typed by hand is theirs: a later start-date change
+  // moves only the dates still following the start (dataset.touched).
+  [li, lo].forEach(inp => inp.addEventListener('input', () => { inp.dataset.touched = '1'; }));
+}
+
+function _cloneAddPerf(dateIso, time, srcId, srcDate) {
+  const list = document.getElementById('clone-perfs');
+  const row = _el('div', {class: 'clone-perf'});
+  if (srcId != null) row.dataset.src = String(srcId);
+  row.dataset.srcDate = srcDate || '';
+  const d = _el('input', {type: 'date', class: 'field-input field-input-sm', 'aria-label': 'Performance date'});
+  d.value = dateIso || '';
+  d.addEventListener('input', () => { d.dataset.touched = '1'; });
+  const t = _el('input', {type: 'text', class: 'field-input field-input-sm clone-time',
+                          placeholder: 'HH:MM', maxlength: '40', 'aria-label': 'Performance time'});
+  t.value = time || '';
+  const x = _el('button', {type: 'button', class: 'btn btn-xs btn-danger-ghost', title: 'Remove this performance'}, '×');
+  x.addEventListener('click', () => row.remove());
+  row.appendChild(d); row.appendChild(t); row.appendChild(x);
+  if (srcDate) row.appendChild(_el('span', {class: 'text-dim clone-was'}, 'was ' + srcDate + (time ? ' ' + time : '')));
+  list.appendChild(row);
+}
+
+function _cloneApplyStart(startIso) {
+  const s = _clone.src;
+  if (!startIso || !s.anchor) return;
+  const days = _cloneDays(s.anchor, startIso);
+  const li = document.getElementById('clone-load-in'), lo = document.getElementById('clone-load-out');
+  if (!li.dataset.touched) li.value = _cloneShift(s.load_in_date, days);
+  if (!lo.dataset.touched) lo.value = _cloneShift(s.load_out_date, days);
+  let kept = 0;
+  document.querySelectorAll('#clone-perfs .clone-perf').forEach(row => {
+    const inp = row.querySelector('input[type=date]');
+    if (!row.dataset.srcDate) return;
+    if (inp.dataset.touched) { kept++; return; }
+    inp.value = _cloneShift(row.dataset.srcDate, days);
+  });
+  if (li.dataset.touched) kept++;
+  if (lo.dataset.touched) kept++;
+  const note = document.getElementById('clone-kept');
+  if (note) {
+    note.textContent = kept ? kept + ' date(s) you edited by hand were kept as you set them.' : '';
+    note.style.display = kept ? '' : 'none';
+  }
+}
+
+async function submitCloneShow(btn, override) {
+  if (!_clone || !_clone.src) return;
+  if (btn.disabled) return;
+  const msg = document.getElementById('clone-msg');
+  const say = t => { msg.textContent = t; msg.style.display = ''; };
+  const start = document.getElementById('clone-start');
+  if (start && !start.value) { say('Pick the new start date first.'); start.focus(); return; }
+  const perfs = [];
+  document.querySelectorAll('#clone-perfs .clone-perf').forEach(row => {
+    perfs.push({date: row.querySelector('input[type=date]').value,
+                time: row.querySelector('.clone-time').value,
+                src_id: row.dataset.src ? Number(row.dataset.src) : null});
+  });
+  const copy = {};
+  document.querySelectorAll('#clone-show-body [data-copy]').forEach(cb => { copy[cb.dataset.copy] = cb.checked; });
+  const payload = {
+    name: document.getElementById('clone-name').value,
+    start_date: start ? start.value : '',
+    load_in_date: document.getElementById('clone-load-in').value,
+    load_out_date: document.getElementById('clone-load-out').value,
+    performances: perfs, copy: copy,
+  };
+  if (override === true) payload.override_availability = true;
+  else document.querySelectorAll('#clone-show-footer .clone-extra').forEach(b => b.remove());
+  btn.disabled = true;
+  try {
+    const r = await fetch('/settings/shows/' + _clone.id + '/clone', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
+      body: JSON.stringify(payload),
+    });
+    let d = {};
+    try { d = await r.json(); } catch (e) { d = {error: 'Clone failed (' + r.status + ').'}; }
+    if (r.status === 409 && d.needs_override) {
+      btn.disabled = false;
+      _cloneAskOverride(btn, d.shortages || []);
+      return;
+    }
+    if (!r.ok || !d.success) { say(d.error || 'Clone failed.'); btn.disabled = false; return; }
+    _cloneDone(d);
+  } catch (e) {
+    say('Clone failed — check your connection.');
+    btn.disabled = false;
+  }
+}
+
+// Gear short on the new dates: nothing was created. List the shortages
+// and let the admin book anyway (audited as an availability override, like
+// the Approvals add dialog) or go back and change dates / untick Gear.
+function _cloneAskOverride(btn, shortages) {
+  const msg = document.getElementById('clone-msg');
+  msg.replaceChildren(_el('div', {style: 'font-weight:600'},
+    'Nothing was created yet — this gear is not available on the new dates:'));
+  const ul = _el('ul', {class: 'clone-warn'});
+  shortages.forEach(w => ul.appendChild(_el('li', null, w)));
+  msg.appendChild(ul);
+  msg.appendChild(_el('div', null,
+    'Change the dates, untick Gear, or book it anyway (logged as an availability override).'));
+  msg.style.display = '';
+  const f = document.getElementById('clone-show-footer');
+  f.querySelectorAll('.clone-extra').forEach(b => b.remove());
+  const anyway = _el('button', {type: 'button', class: 'btn btn-danger-ghost clone-extra'}, 'Book anyway');
+  anyway.addEventListener('click', () => {
+    if (btn.disabled) return;
+    anyway.remove();
+    submitCloneShow(btn, true);
+  });
+  f.insertBefore(anyway, btn);
+  // The override covers the shortages SHOWN: any edit withdraws it.
+  const body = document.getElementById('clone-show-body');
+  const withdraw = () => { anyway.remove(); body.removeEventListener('input', withdraw);
+                           body.removeEventListener('change', withdraw); };
+  body.addEventListener('input', withdraw);
+  body.addEventListener('change', withdraw);
+  msg.scrollIntoView({block: 'nearest'});
+}
+
+function _cloneDone(d) {
+  const body = document.getElementById('clone-show-body');
+  body.replaceChildren();
+  const c = d.copied || {};
+  body.appendChild(_el('p', {class: 'field-msg field-msg-success', style: 'margin:0'},
+    'New show created: ' + (c.performances || 0) + ' performance(s), ' + (c.schedule || 0) +
+    ' schedule row(s), ' + (c.labor || 0) + ' labor line(s), ' + (c.assets || 0) +
+    ' asset line(s), ' + (c.rentals || 0) + ' external rental(s).'));
+  if (d.warnings && d.warnings.length) {
+    body.appendChild(_el('div', {style: 'font-size:12px;font-weight:600'}, 'Check on the new show:'));
+    const ul = _el('ul', {class: 'clone-warn'});
+    d.warnings.forEach(w => ul.appendChild(_el('li', null, w)));
+    body.appendChild(ul);
+  }
+  const f = document.getElementById('clone-show-footer');
+  document.getElementById('clone-show-go').style.display = 'none';
+  const cancel = f.querySelector('.btn-ghost');
+  cancel.textContent = 'Stay here';
+  _clone.done = true;
+  const open = _el('a', {class: 'btn btn-primary clone-extra no-prefetch', href: d.url}, 'Open the new show');
+  f.appendChild(open);
+}
+{% endif %}
 
 function filterShows() {
   const q  = document.getElementById('show-search').value.trim().toLowerCase();
