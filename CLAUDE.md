@@ -643,9 +643,19 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   never calls one. Inference claims take the `ai_sessions` slot in the SAME
   transaction under `pg_advisory_xact_lock(hashtext('ai_sessions'))` (the
   ai_max_sessions limit; slots stay alive via `heartbeat_at`). `worker_tick`
-  (10 s, not leader-gated) also recovers: running + heartbeat > 4 min →
+  (10 s, not leader-gated; with AI off it returns after one EXISTS read
+  unless jobs are pending) also recovers: running + heartbeat > 4 min →
   re-queued (≤ 2 attempts) else interrupted; queued too long →
-  `no_ai_server`. Progress / finish writes are guarded by `claimed_instance
+  `no_ai_server` only when NO server is capable, else `ai_busy` after a
+  longer wait (15 min extract / 120 min weekly — it is only waiting for a
+  slot). **Weekly runs may hold at most `weekly_slot_limit()` (= limit − 1)
+  slots and extract claims first**, so long runs never lock out AI Extract;
+  a non-admin may have one live weekly run at a time.
+  `ollama_client.chat`: the first byte may take the whole call deadline
+  (cold model load / Ollama's own queue), then `read_timeout` per read; a
+  timeout after the request went out is `OllamaTimeout` (`first_byte` /
+  `read_timeout`), `OllamaUnavailable` ONLY when nothing was delivered —
+  `_ask` falls back per show on everything but that and cancel. Progress / finish writes are guarded by `claimed_instance
   AND status='running'` (`_Lost` stops a worker that lost its claim). Never
   hold a connection across an Ollama call. Jobs carry `test_mode`: a test
   server claims only its own. The browser polls (`/api/ai/jobs/<id>`,
@@ -660,8 +670,17 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   job uses it too): facts from the DB (labor only for `with_labor` runs, via
   `_calc_post_show_labor_cost`), text scrubbed (`scrub()`: e-mail, phone,
   @mention, known names) — the model never gets $, headcounts or names.
+  `scrub()` also masks money amounts as `[amount]` on the way IN.
   Model output is whitelisted / clamped / money-stripped (`validate_show` /
-  `validate_week`), one retry, deterministic fallback (`partial`). A
+  `validate_week`), one retry, deterministic fallback (`partial`). A run
+  has a 30-min budget (`_WEEKLY_BUDGET_S`): when it runs out the remaining
+  shows / the reduce use the fallback and the run still finishes 'done'
+  (partial) — never fail a run and throw its summaries away. Model output
+  is reused by `ai_jobs.model_hash` (`model_hash()`: exactly what the model
+  is given — never labor): a run whose twin (other with_labor value, the
+  weekly e-mail) already finished non-partial copies its shows/week and
+  attaches its OWN facts (`_derived_result`); `force` (Regenerate) skips
+  that. A
   `with_labor` run is 404 for anyone without labor-report permission. The
   PDF (`/reports/weekly-summary/<id>.pdf`, `no-prefetch`) is rendered from
   the stored `result_json` (no bytes stored, never re-runs the model),

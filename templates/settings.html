@@ -5759,6 +5759,10 @@ async function loadAiStatus() {
   if (self.models && self.models.length) _aiFillModels(self.models);
   const hint = document.getElementById('ai-url-hint');
   if (hint && d.url_source === 'env') hint.textContent = 'This server uses OLLAMA_URL from its .env (' + d.url + '); the value here is the default for servers without one. localhost only.';
+  else if (hint && d.stored_url_ignored) {
+    hint.textContent = 'The saved URL is not on this server, so it is ignored and ' + d.url + ' is used instead. Ollama has no password, so only localhost / 127.0.0.1 / [::1] is allowed: correct the URL and save.';
+    hint.style.color = 'var(--red)';
+  }
   const ps = document.getElementById('ai-pull-status');
   if (ps) {
     ps.replaceChildren();

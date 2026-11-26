@@ -141,7 +141,15 @@ def _check_host(base):
         raise OllamaError('not_loopback')
 
 
-def _open(base, path, payload=None, timeout=5.0):
+def _open(base, path, payload=None, timeout=5.0, read_timeout=None):
+    """Open a request. `timeout` covers the connect AND the wait for the
+    response headers (Ollama sends none until the model is loaded, the prompt
+    evaluated, or a queued request got a runner); `read_timeout`, when given,
+    then applies to each later read of the stream.
+
+    OllamaUnavailable ('unreachable') = nothing was delivered (refused /
+    connect or send failed). A timeout AFTER the request went out is an
+    OllamaTimeout ('first_byte'); a reset after it went out is 'reset'."""
     ok, _m, norm = validate_url(base)
     if not ok:
         raise OllamaError('bad_url')
@@ -151,7 +159,7 @@ def _open(base, path, payload=None, timeout=5.0):
                                  headers={'Content-Type': 'application/json',
                                           'User-Agent': '321Theater'})
     try:
-        return _OPENER.open(req, timeout=max(0.5, float(timeout)))
+        resp = _OPENER.open(req, timeout=max(0.5, float(timeout)))
     except urllib.error.HTTPError as e:
         try:
             e.close()
@@ -163,10 +171,21 @@ def _open(base, path, payload=None, timeout=5.0):
             raise OllamaError('not_found')
         raise OllamaError(f'http_{e.code}')
     except urllib.error.URLError:
-        # refused / connect timeout / reset before an answer: nothing delivered
+        # urllib wraps every connect / send failure (refused, connect
+        # timeout): nothing was delivered
         raise OllamaUnavailable('unreachable')
-    except (socket.timeout, TimeoutError, ConnectionError, OSError):
-        raise OllamaUnavailable('unreachable')
+    except (socket.timeout, TimeoutError):
+        # raised bare by getresponse(): the request went out, Ollama is busy
+        # (loading the model / queued) and did not answer in time
+        raise OllamaTimeout('first_byte')
+    except (ConnectionError, OSError):
+        raise OllamaError('reset')
+    if read_timeout is not None:
+        try:
+            resp.fp.raw._sock.settimeout(max(0.5, float(read_timeout)))
+        except Exception:
+            pass                  # reads keep `timeout`; the deadline still applies
+    return resp
 
 
 def _read_capped(resp, cap):
@@ -260,9 +279,11 @@ def _iter_lines(resp, deadline, max_bytes, should_cancel=None):
 
 
 def chat(base, model, messages, *, fmt='json', options=None, deadline_s=180.0,
-         max_bytes=262144, read_timeout=60.0, should_cancel=None):
-    """Stream /api/chat and return the concatenated answer text. The overall
-    deadline is enforced between chunks; each read waits ≤ read_timeout."""
+         max_bytes=262144, read_timeout=60.0, first_byte_s=None, should_cancel=None):
+    """Stream /api/chat and return the concatenated answer text. The first
+    byte may take up to `first_byte_s` (default: the whole deadline — a cold
+    model load or a queued request answers late); after that each read waits
+    ≤ read_timeout and the overall deadline is enforced between chunks."""
     if not valid_model(model):
         raise OllamaError('bad_model')
     opts = {'temperature': 0.2, 'num_ctx': 8192}
@@ -271,7 +292,9 @@ def chat(base, model, messages, *, fmt='json', options=None, deadline_s=180.0,
     if fmt:
         payload['format'] = fmt
     deadline = time.monotonic() + float(deadline_s)
-    resp = _open(base, '/api/chat', payload, timeout=min(float(read_timeout), float(deadline_s)))
+    ttfb = float(deadline_s) if first_byte_s is None else min(float(first_byte_s), float(deadline_s))
+    resp = _open(base, '/api/chat', payload, timeout=ttfb,
+                 read_timeout=min(float(read_timeout), float(deadline_s)))
     out = []
     size = 0
     with resp:

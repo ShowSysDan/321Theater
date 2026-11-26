@@ -1763,6 +1763,7 @@ CREATE TABLE IF NOT EXISTS ai_jobs (
     error_code       TEXT,
     message          TEXT,
     cancel_requested INTEGER NOT NULL DEFAULT 0,
+    model_hash       TEXT,
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     queued_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at       TIMESTAMP,
@@ -2748,6 +2749,9 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         f'ALTER TABLE "{app_schema}".cluster_instances ADD COLUMN IF NOT EXISTS ai_checked_at TIMESTAMP',
         f"ALTER TABLE \"{app_schema}\".ai_sessions ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'extract'",
         f'ALTER TABLE "{app_schema}".ai_sessions ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP',
+        # Weekly summaries share model output across with/without-labor runs
+        # by a hash of exactly what the model is given.
+        f'ALTER TABLE "{app_schema}".ai_jobs ADD COLUMN IF NOT EXISTS model_hash TEXT',
     ]
 
     shared_alters = [

@@ -203,14 +203,39 @@ if [ "$WITH_OLLAMA" -eq 1 ]; then
             systemctl daemon-reload
             systemctl enable --now ollama >/dev/null 2>&1 || warn "Could not start ollama.service (journalctl -u ollama)."
             [ "$OLLAMA_CHANGED" -eq 1 ] && systemctl restart ollama || true
-            OLLAMA_EFF="$(systemctl show ollama -p Environment --value 2>/dev/null | tr ' ' '\n' | grep '^OLLAMA_HOST=' | tail -1 | cut -d= -f2-)"
+            # `|| true`: no OLLAMA_HOST at all must not abort the script (set -e / pipefail).
+            OLLAMA_EFF="$( { systemctl show ollama -p Environment --value 2>/dev/null | tr ' ' '\n' | grep '^OLLAMA_HOST=' || true; } | tail -1 | cut -d= -f2-)"
             case "${OLLAMA_EFF:-127.0.0.1:11434}" in
-                127.*|localhost*|"[::1]"*|::1*)
-                    info "Ollama listens on ${OLLAMA_EFF:-127.0.0.1:11434} (this machine only)." ;;
+                127.*|localhost*|"[::1]"*|::1*) ;;
                 *)
                     warn "Ollama's effective OLLAMA_HOST is '${OLLAMA_EFF}' — another drop-in opens it to the network."
                     warn "  Ollama has NO password. Remove that setting (systemctl cat ollama) so it listens on 127.0.0.1." ;;
             esac
+            # The sockets Ollama ACTUALLY listens on (an EnvironmentFile= or a
+            # manual setting is not in `systemctl show -p Environment`).
+            OLLAMA_LISTEN=""
+            if command -v ss >/dev/null 2>&1; then
+                for _i in 1 2 3 4 5 6 7 8 9 10; do
+                    OLLAMA_LISTEN="$( { ss -Hltnp 2>/dev/null | grep '"ollama"' || true; } | awk '{print $4}' | sort -u | tr '\n' ' ')"
+                    [ -n "$OLLAMA_LISTEN" ] && break
+                    sleep 1
+                done
+            fi
+            OLLAMA_OPEN=""
+            for _a in $OLLAMA_LISTEN; do
+                case "$_a" in
+                    127.*|"[::1]":*|"[::ffff:127."*) ;;
+                    *) OLLAMA_OPEN="${OLLAMA_OPEN}${_a} " ;;
+                esac
+            done
+            if [ -n "$OLLAMA_OPEN" ]; then
+                warn "Ollama is listening on ${OLLAMA_OPEN}— reachable from the network, and it has NO password."
+                warn "  Find what sets OLLAMA_HOST (systemctl cat ollama, any EnvironmentFile=) and make it 127.0.0.1:11434."
+            elif [ -n "$OLLAMA_LISTEN" ]; then
+                info "Ollama listens on ${OLLAMA_LISTEN}(this machine only)."
+            else
+                warn "Could not see Ollama's listening socket — check it with: ss -ltnp | grep ollama"
+            fi
             info "Next: pull the model from Settings → AI (Pull model), or: ollama pull <model>"
         else
             warn "ollama.service was not found after install — check the installer output above."

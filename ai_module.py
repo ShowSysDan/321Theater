@@ -23,7 +23,9 @@ The rules (keep every one):
   'running'`, so a worker that lost its claim (stale-recovered) stops.
 * A 'running' job whose heartbeat is > 4 min old is re-queued (twice at
   most, then 'interrupted'); a queued job nobody can take errors out
-  ('no_ai_server'). Jobs carry test_mode: a TEST_MODE server only ever
+  ('no_ai_server'; 'ai_busy' when a capable server exists but every slot
+  stayed busy). Weekly runs may hold at most limit-1 slots and extract is
+  claimed first, so long runs never lock out AI Extract. Jobs carry test_mode: a TEST_MODE server only ever
   claims test jobs and production never claims them.
 * Prompts, documents, notes, comments and model output never go to syslog,
   audit, a URL, localStorage or an e-mail subject (ids, counts and error
@@ -31,8 +33,11 @@ The rules (keep every one):
   hour; weekly results are kept (re-download never re-runs the model).
 * Weekly summary: labor $ only for viewers with labor-report permission (a
   run is created with_labor=1 only for them, and a with_labor run is 404 for
-  everyone else); $ and headcounts are never sent to the model; e-mails and
-  phone numbers and known names are scrubbed before the model sees text.
+  everyone else); $ and headcounts are never sent to the model; amounts,
+  e-mails, phone numbers and known names are scrubbed before the model sees
+  text. A run has a 30-min budget: past it the rest falls back (partial),
+  it never fails. Model output is shared by model_hash (labor-free), so the
+  same week with / without labor (or the e-mail) runs the model once.
 * The weekly e-mail is leader-gated, off by default, claimed once per week
   (ai_weekly_email_log, INSERT … ON CONFLICT DO NOTHING) before anything is
   enqueued, and delivered once (status queued → sending is the claim).
@@ -63,6 +68,8 @@ PROMPT_VERSION = 1
 MAX_SHOWS = 40
 MAX_RANGE_DAYS = 14
 MAX_LIVE_WEEKLY = 3
+_WEEKLY_BUDGET_S = 1800       # one weekly run, all model calls together
+_REDUCE_RESERVE_S = 90        # kept back from the per-show calls for the reduce
 _PROBE_FRESH_S = 150          # a local probe older than this doesn't count
 _PEER_FRESH_S = 180           # same for a peer's published probe
 _MAX_LOCAL_RUNS = 2           # jobs one worker process runs at once
@@ -70,7 +77,8 @@ _WAIT_STAGE = 'Waiting for a free AI slot'
 _JOB_COLS = ('id, kind, status, test_mode, requested_by, show_id, target_host, period_start, '
              'period_end, with_labor, auto, stage, progress_done, progress_total, claimed_by, '
              'claimed_instance, model, attempts, ai_session_id, input_hash, prompt_version, '
-             'show_ids, payload_json, result_json, partial, error_code, message, cancel_requested')
+             'show_ids, payload_json, result_json, partial, error_code, message, cancel_requested, '
+             'model_hash')
 
 _STATE_LOCK = threading.Lock()
 _STATE = {'enabled': False, 'checked': 0}
@@ -137,8 +145,26 @@ def ollama_url():
         if env not in _ENV_WARNED:
             _ENV_WARNED.add(env)
             _log().error('CONFIG_INVALID key=OLLAMA_URL reason=not_localhost')
-    ok, _m, norm = oc.validate_url(_setting('ollama_url', oc.DEFAULT_URL) or oc.DEFAULT_URL)
+    ok, norm = _stored_url()
     return norm if ok else oc.DEFAULT_URL
+
+
+def _stored_url():
+    """(valid, normalized) for the shared ollama_url setting. A value that
+    fails the localhost rule (e.g. a GPU host saved before 3.55.0) is
+    ignored — logged once per value and flagged on Settings → AI."""
+    raw = _setting('ollama_url', oc.DEFAULT_URL) or oc.DEFAULT_URL
+    ok, _m, norm = oc.validate_url(raw)
+    if not ok and ('s', raw) not in _ENV_WARNED:
+        _ENV_WARNED.add(('s', raw))
+        _log().error('CONFIG_INVALID key=ollama_url reason=not_localhost')
+    return ok, norm
+
+
+def stored_url_ignored():
+    """True when this server is using the default because the saved
+    setting is not a localhost URL (and no .env OLLAMA_URL overrides it)."""
+    return url_source() == 'settings' and not _stored_url()[0]
 
 
 def url_source():
@@ -152,6 +178,13 @@ def slot_limit():
     except (TypeError, ValueError):
         n = 2
     return min(10, max(1, n))
+
+
+def weekly_slot_limit():
+    """Slots weekly runs may hold at once: all but one (so AI Extract is
+    never locked out by long runs), or the only one when the limit is 1."""
+    n = slot_limit()
+    return n - 1 if n > 1 else 1
 
 
 # ── local probe (per process) ─────────────────────────────────────────────────
@@ -298,19 +331,20 @@ def _release_session(sid):
 
 def enqueue(db, kind, *, requested_by=None, show_id=None, target_host=None, period=None,
             with_labor=0, auto=0, input_hash=None, payload=None, show_ids=None, model_name=None,
-            stage='Queued'):
+            stage='Queued', model_hash=None):
     """INSERT one queued job; the CALLER commits (then calls kick())."""
     ps, pe = period or (None, None)
     return db.execute(
         "INSERT INTO ai_jobs (kind, status, test_mode, requested_by, show_id, target_host, "
         " period_start, period_end, with_labor, auto, stage, input_hash, prompt_version, "
-        " show_ids, payload_json, model, queued_at) "
-        "VALUES (%s, 'queued', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()) "
+        " show_ids, payload_json, model, model_hash, queued_at) "
+        "VALUES (%s, 'queued', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()) "
         "RETURNING id",
         (kind, _tm(), requested_by, show_id, target_host, ps, pe, 1 if with_labor else 0,
          1 if auto else 0, stage, input_hash, PROMPT_VERSION if kind == WEEKLY else None,
          json.dumps(show_ids) if show_ids is not None else None,
-         json.dumps(payload, default=str) if payload is not None else None, model_name)
+         json.dumps(payload, default=str) if payload is not None else None, model_name,
+         model_hash)
     ).fetchone()['id']
 
 
@@ -322,8 +356,11 @@ def kick():
 
 def worker_tick():
     """Scheduler job, every 10 s in EVERY worker (not leader-gated: the claim
-    is atomic and only a worker whose own probe passes claims)."""
+    is atomic and only a worker whose own probe passes claims). With AI off
+    it does nothing unless jobs are still queued / running (one cheap read)."""
     try:
+        if not enabled() and not _jobs_pending():
+            return
         _recover()
     except db_adapter.DatabaseUnavailable:
         _log().error('AI_WORKER_SKIPPED reason=database_unavailable')
@@ -331,6 +368,15 @@ def worker_tick():
     except Exception as e:
         _log().warning(f'AI_RECOVER_FAILED err={type(e).__name__}')
     _claim_and_run()
+
+
+def _jobs_pending():
+    db = _d['get_db']()
+    try:
+        return db.execute("SELECT EXISTS (SELECT 1 FROM ai_jobs WHERE status IN ('queued', 'running') "
+                          "AND test_mode=%s) AS x", (_tm(),)).fetchone()['x']
+    finally:
+        db.close()
 
 
 def _recover():
@@ -357,22 +403,35 @@ def _recover():
         db.execute("UPDATE ai_jobs SET status='cancelled', stage='Cancelled', finished_at=NOW(), "
                    "payload_json=NULL WHERE status='queued' AND cancel_requested=1 AND test_mode=%s",
                    (_tm(),))
-        gone = db.execute(
+        gone = [dict(r, code='no_ai_server') for r in db.execute(
             "UPDATE ai_jobs SET status='error', error_code='no_ai_server', stage='Not started', "
             " message='No server with the AI model took this job. Check Settings → AI.', "
             " finished_at=NOW(), payload_json=NULL "
+            "WHERE status='queued' AND test_mode=%s "
+            " AND kind='pull_model' AND queued_at < NOW() - INTERVAL '10 minutes' "
+            "RETURNING id", (_tm(),)).fetchall()]
+        # A capable server exists → the job is only waiting for a free slot
+        # (other jobs are running): give it longer, and say so if it expires.
+        if any_capable(db, 'infer'):
+            code, msg, ext, wk = ('ai_busy', 'The AI was busy with other work for too long. '
+                                  'Try again in a few minutes.', '15 minutes', '120 minutes')
+        else:
+            code, msg, ext, wk = ('no_ai_server', 'No server with the AI model took this job. '
+                                  'Check Settings → AI.', '3 minutes', '30 minutes')
+        gone += [dict(r, code=code) for r in db.execute(
+            "UPDATE ai_jobs SET status='error', error_code=%s, stage='Not started', message=%s, "
+            " finished_at=NOW(), payload_json=NULL "
             "WHERE status='queued' AND test_mode=%s AND ("
-            " (kind='extract' AND queued_at < NOW() - INTERVAL '3 minutes') OR "
-            " (kind='pull_model' AND queued_at < NOW() - INTERVAL '10 minutes') OR "
-            " (kind='weekly_postshow' AND queued_at < NOW() - INTERVAL '30 minutes')) "
-            "RETURNING id", (_tm(),)).fetchall()
+            " (kind='extract' AND queued_at < NOW() - %s::interval) OR "
+            " (kind='weekly_postshow' AND queued_at < NOW() - %s::interval)) "
+            "RETURNING id", (code, msg, _tm(), ext, wk)).fetchall()]
         db.commit()
     finally:
         db.close()
     for r in rows:
         _log().warning(f"AI_JOB_RECOVERED job={r['id']} status={r['status']}")
     for r in gone:
-        _log().error(f"AI_JOB_FAILED job={r['id']} stage=queued err=no_ai_server")
+        _log().error(f"AI_JOB_FAILED job={r['id']} stage=queued err={r['code']}")
 
 
 _CLAIM_SQL = (
@@ -381,7 +440,7 @@ _CLAIM_SQL = (
     " model=COALESCE(model, %s) "
     "WHERE id = (SELECT id FROM ai_jobs WHERE status='queued' AND test_mode=%s "
     "            AND cancel_requested=0 AND {where} "
-    "            ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) "
+    "            ORDER BY (kind = 'extract') DESC, id LIMIT 1 FOR UPDATE SKIP LOCKED) "
     f"RETURNING {_JOB_COLS}")
 
 
@@ -409,9 +468,18 @@ def claim(infer_ok, pull_ok):
                            (_WAIT_STAGE, _tm(), list(KINDS_INFER), _WAIT_STAGE))
                 db.commit()
                 return None
+            # Weekly runs hold a slot for up to 30 min: they may use at most
+            # limit-1 slots, so interactive AI Extract always has one.
+            wk = db.execute("SELECT COUNT(*) AS n FROM ai_sessions WHERE status='running' "
+                            "AND kind=%s", (WEEKLY,)).fetchone()['n']
+            kinds = list(KINDS_INFER) if int(wk or 0) < weekly_slot_limit() else ['extract']
             row = db.execute(_CLAIM_SQL.format(where='kind = ANY(%s)'),
-                             (HOST, _d['instance_id'], model(), _tm(), list(KINDS_INFER))).fetchone()
+                             (HOST, _d['instance_id'], model(), _tm(), kinds)).fetchone()
             if not row:
+                if WEEKLY not in kinds:
+                    db.execute("UPDATE ai_jobs SET stage=%s WHERE status='queued' AND test_mode=%s "
+                               "AND kind=%s AND stage IS DISTINCT FROM %s",
+                               (_WAIT_STAGE, _tm(), WEEKLY, _WAIT_STAGE))
                 db.commit()
                 return None
             job = dict(row)
@@ -529,6 +597,8 @@ def _finish(job, status, **cols):
 _ERR_TEXT = {
     'unreachable': 'The AI service stopped answering on the server doing this.',
     'deadline': 'The AI model took too long.', 'read_timeout': 'The AI model took too long.',
+    'first_byte': 'The AI model took too long to start answering (busy or still loading).',
+    'reset': 'The AI service dropped the connection. Try again.',
     'not_found': 'The AI model is not installed on that server.',
     'too_large': 'The AI answer was too long.', 'bad_json': 'The AI returned an unparseable response. Try again or use a different model.',
 }
@@ -593,7 +663,8 @@ def _exec_extract(job):
     fields = payload.get('fields') or {}
     _progress(job, stage='The AI model is reading the document')
     raw = oc.chat(ollama_url(), job['model'] or model(), payload.get('messages') or [],
-                  deadline_s=240, max_bytes=262144, should_cancel=_canceller(job))
+                  deadline_s=240, first_byte_s=200, max_bytes=262144,
+                  should_cancel=_canceller(job))
     try:
         extracted = json.loads(_strip_fences(raw))
         if not isinstance(extracted, dict):
@@ -750,14 +821,19 @@ _PHONE_RE = re.compile(r'(?<![\w])(?:\+?1[\s.\-]?)?(?:\(\d{3}\)|\d{3})[\s.\-]?\d
 _MENTION_RE = re.compile(r'(?<![\w@])@[A-Za-z][\w.\-]*')
 _CTRL_RE = re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
 _MONEY_RE = re.compile(r'[$€£]\s?\d')
+_AMOUNT_RE = re.compile(
+    r'(?:[$€£]|\b(?:USD|EUR|GBP)\s?)\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:[kKmM]|million|thousand)\b)?'
+    r'|\b\d[\d,]*(?:\.\d+)?\s?(?:[kKmM]\s?)?(?:dollars|bucks|usd|euros?)\b', re.I)
 _SEVERITIES = ('high', 'medium', 'low')
 _CATEGORIES = ('equipment', 'safety', 'house', 'crew', 'client', 'schedule', 'other')
 
 
 def scrub(text, names=()):
-    """E-mail addresses / phone numbers → [contact]; @mentions and known
-    names → [person]. Applied before the model AND before the PDF."""
+    """E-mail addresses / phone numbers → [contact]; money amounts →
+    [amount]; @mentions and known names → [person]. Applied before the model
+    AND before the PDF ($ is never sent to the model)."""
     t = str(text or '')
+    t = _AMOUNT_RE.sub('[amount]', t)
     t = _EMAIL_RE.sub('[contact]', t)
     t = _PHONE_RE.sub('[contact]', t)
     t = _MENTION_RE.sub('[person]', t)
@@ -778,7 +854,7 @@ def _clean(v, n):
     if not isinstance(v, str):
         return ''
     v = ' '.join(_CTRL_RE.sub(' ', v).split())
-    v = _strip_money(scrub(v))
+    v = scrub(_strip_money(v))           # drop a sentence the model gave a $ in
     if len(v) > n:
         v = v[:n - 1].rstrip() + '…'
     return v
@@ -1072,11 +1148,69 @@ def build_inputs(db, start, end, with_labor, access=None):
     return ids, facts, digests, counts, h
 
 
+def model_hash(start, end, facts, digests, counts):
+    """Hash of exactly what the MODEL is given (prompts, show ids, names /
+    venues and counts of the reduce input) — never labor, so a with-labor and
+    a without-labor run of the same week share the model's output."""
+    return hashlib.sha256(json.dumps({
+        'pv': PROMPT_VERSION, 'model': model(), 's': start.isoformat(), 'e': end.isoformat(),
+        'd': [[d['show_id'], d['has_text'], d['user'], d['fallback']] for d in digests],
+        'n': {k: [f.get('name', ''), f.get('venue', '')] for k, f in facts.items()},
+        'c': {k: counts.get(k) for k in ('shows', 'performances', 'settled', 'unsettled')},
+        'p': [_WS_SHOW_PROMPT, _WS_WEEK_PROMPT]}, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _reusable_result(db, mhash, exclude_id=None):
+    """The newest complete (not partial) weekly result made from the same
+    model input, or None."""
+    if not mhash:
+        return None
+    r = db.execute("SELECT id, result_json FROM ai_jobs WHERE kind=%s AND status='done' "
+                   "AND model_hash=%s AND test_mode=%s AND partial=0 AND result_json IS NOT NULL "
+                   "AND id <> %s ORDER BY id DESC LIMIT 1",
+                   (WEEKLY, mhash, _tm(), exclude_id or 0)).fetchone()
+    if not r:
+        return None
+    try:
+        res = json.loads(r['result_json'])
+    except ValueError:
+        return None
+    if not isinstance(res, dict) or not isinstance(res.get('shows'), dict) or not res.get('week'):
+        return None
+    res['_id'] = r['id']
+    return res
+
+
+def _derived_result(src, payload, with_labor):
+    """A run's result built from another run's model output plus THIS
+    run's own facts (its labor $ only if it was made with labor)."""
+    digests = payload.get('digests') or []
+    return {'v': 1, 'start': payload.get('start'), 'end': payload.get('end'),
+            'with_labor': bool(with_labor), 'model': src.get('model') or model(),
+            'order': [dg['show_id'] for dg in digests], 'facts': payload.get('facts') or {},
+            'counts': payload.get('counts') or {}, 'shows': src['shows'], 'week': src['week'],
+            'partial': 0, 'generated_at': src.get('generated_at') or
+            datetime.now().isoformat(timespec='minutes'), 'reused_from': src['_id']}
+
+
+def _complete_from(db, jid, src, payload, with_labor):
+    """Finish a just-enqueued (still queued, same transaction) weekly job
+    from an existing result — no model call. The caller commits."""
+    res = _derived_result(src, payload, with_labor)
+    n = len(payload.get('digests') or []) + 1
+    db.execute("UPDATE ai_jobs SET status='done', stage='Done', result_json=%s, partial=0, "
+               "progress_done=%s, progress_total=%s, payload_json=NULL, model=%s, "
+               "started_at=NOW(), finished_at=NOW() WHERE id=%s AND status='queued'",
+               (json.dumps(res, default=str), n, n, res['model'], jid))
+
+
 def _ask(job, messages, validator, deadline):
-    """(validated dict or None, calls). One retry on bad JSON. An Ollama
-    error on this call → None (the caller falls back); unreachable or
-    cancelled propagate."""
+    """(validated dict or None, calls). One retry on bad JSON, inside the
+    same `deadline` seconds. An Ollama error or timeout on this call → None
+    (the caller falls back); unreachable (nothing delivered) or cancelled
+    propagate."""
     calls = 0
+    end = time.monotonic() + deadline
     try:
         raw = oc.chat(ollama_url(), job['model'] or model(), messages, deadline_s=deadline,
                       max_bytes=65536, should_cancel=_canceller(job))
@@ -1084,9 +1218,12 @@ def _ask(job, messages, validator, deadline):
         v = validator(_parse(raw))
         if v:
             return v, calls
+        left = end - time.monotonic()
+        if left < 15:
+            return None, calls
         msgs = messages + [{'role': 'assistant', 'content': (raw or '')[:4000]},
                            {'role': 'user', 'content': _RETRY_MSG}]
-        raw = oc.chat(ollama_url(), job['model'] or model(), msgs, deadline_s=deadline,
+        raw = oc.chat(ollama_url(), job['model'] or model(), msgs, deadline_s=left,
                       max_bytes=65536, should_cancel=_canceller(job))
         calls += 1
         return validator(_parse(raw)), calls
@@ -1126,18 +1263,37 @@ def _exec_weekly(job, t0):
     facts, digests, counts = payload.get('facts') or {}, payload.get('digests') or [], payload.get('counts') or {}
     n = len(digests)
     total = n + 1
+    if not payload.get('fresh'):
+        # Someone finished a run of the same model input meanwhile (e.g. the
+        # same week with / without labor): reuse its output, no model call.
+        db = _d['get_db']()
+        try:
+            src = _reusable_result(db, job.get('model_hash'), job['id'])
+        finally:
+            db.close()
+        if src:
+            res = _derived_result(src, payload, job['with_labor'])
+            _finish(job, 'done', stage='Done', progress_done=total, partial=0,
+                    result_json=json.dumps(res, default=str))
+            _log().info(f"AI_SUMMARY_REUSED job={job['id']} from={src['_id']}")
+            return
+
+    def left():
+        return _WEEKLY_BUDGET_S - (time.monotonic() - t0)
     shows, calls, partial = {}, 0, 0
     for i, dg in enumerate(digests):
-        if time.monotonic() - t0 > 1800:
-            raise oc.OllamaTimeout('deadline')
         _progress(job, stage=f'Summarising show {i + 1} of {n}', done=i, total=total)
         sid = dg['show_id']
         if not dg.get('has_text'):
             shows[str(sid)] = {'one_liner': 'No post-show notes or comments recorded.',
                                'highlights': [], 'issues': [], 'follow_ups': [], 'ai': 0}
             continue
-        res, c = _ask(job, [{'role': 'system', 'content': _WS_SHOW_PROMPT},
-                            {'role': 'user', 'content': dg['user']}], validate_show, 150)
+        # Out of time → the remaining shows get the fallback text (partial),
+        # never a failed run that throws away the summaries already made.
+        budget = min(150.0, left() - _REDUCE_RESERVE_S)
+        res, c = (None, 0) if budget < 20 else _ask(
+            job, [{'role': 'system', 'content': _WS_SHOW_PROMPT},
+                  {'role': 'user', 'content': dg['user']}], validate_show, budget)
         calls += c
         if not res:
             partial = 1
@@ -1148,10 +1304,10 @@ def _exec_weekly(job, t0):
     order = [dg['show_id'] for dg in digests]
     valid = set(order)
     week = None
-    if any(s.get('ai') for s in shows.values()):
+    if any(s.get('ai') for s in shows.values()) and left() >= 30:
         week, c = _ask(job, [{'role': 'system', 'content': _WS_WEEK_PROMPT},
                              {'role': 'user', 'content': _reduce_input(order, shows, facts, counts)}],
-                       lambda d: validate_week(d, valid), 180)
+                       lambda d: validate_week(d, valid), min(180.0, left()))
         calls += c
     if not week:
         if any(s.get('ai') for s in shows.values()):
@@ -1239,18 +1395,35 @@ def _weekly_start_view():
         if r:
             db.commit()
             return jsonify({'run_id': r['id'], 'existing': True}), 202
+        mh = model_hash(start, end, facts, digests, counts)
+        payload = {'start': start.isoformat(), 'end': end.isoformat(), 'facts': facts,
+                   'digests': digests, 'counts': counts}
+        src = None if force else _reusable_result(db, mh)
+        if src:
+            jid = enqueue(db, WEEKLY, requested_by=uid, period=(start, end), with_labor=wl,
+                          input_hash=h, show_ids=ids, payload=payload, model_hash=mh)
+            _complete_from(db, jid, src, payload, wl)
+            db.commit()
+            _log().info(f"AI_SUMMARY_REUSED job={jid} from={src['_id']} by={uid}")
+            return jsonify({'run_id': jid, 'reused': True, 'derived': True})
         live = db.execute("SELECT COUNT(*) AS n FROM ai_jobs WHERE kind=%s AND test_mode=%s "
                           "AND status IN ('queued', 'running')", (WEEKLY, _tm())).fetchone()['n']
         if live >= MAX_LIVE_WEEKLY:
             db.rollback()
             return jsonify({'error': 'Summaries are already being generated — try again shortly.'}), 409
+        if session.get('user_role') != 'admin' and db.execute(
+                "SELECT 1 FROM ai_jobs WHERE kind=%s AND test_mode=%s AND requested_by=%s "
+                "AND status IN ('queued', 'running') LIMIT 1", (WEEKLY, _tm(), uid)).fetchone():
+            db.rollback()
+            return jsonify({'error': 'You already have a summary being generated — '
+                                     'wait for it to finish.'}), 409
         if not any_capable(db, 'infer'):
             db.rollback()
             return jsonify({'error': 'No server can reach the AI service right now.'}), 503
+        if force:
+            payload['fresh'] = True
         jid = enqueue(db, WEEKLY, requested_by=uid, period=(start, end), with_labor=wl,
-                      input_hash=h, show_ids=ids,
-                      payload={'start': start.isoformat(), 'end': end.isoformat(), 'facts': facts,
-                               'digests': digests, 'counts': counts})
+                      input_hash=h, show_ids=ids, payload=payload, model_hash=mh)
         db.commit()
     finally:
         db.close()
@@ -1495,13 +1668,19 @@ def _weekly_email_work(now):
                     db.execute("UPDATE ai_weekly_email_log SET status='skipped', "
                                "message='No shows that week.' WHERE period_end=%s", (end,))
                 elif ids:
+                    mh = model_hash(start, end, facts, digests, counts)
+                    payload = {'start': start.isoformat(), 'end': end.isoformat(),
+                               'facts': facts, 'digests': digests, 'counts': counts}
                     jid = enqueue(db, WEEKLY, requested_by=None, period=(start, end), with_labor=0,
-                                  auto=1, input_hash=h, show_ids=ids,
-                                  payload={'start': start.isoformat(), 'end': end.isoformat(),
-                                           'facts': facts, 'digests': digests, 'counts': counts})
+                                  auto=1, input_hash=h, show_ids=ids, payload=payload,
+                                  model_hash=mh)
+                    src = _reusable_result(db, mh)
+                    if src:          # someone already generated this week: no model work
+                        _complete_from(db, jid, src, payload, 0)
                     db.execute("UPDATE ai_weekly_email_log SET status='queued', job_id=%s "
                                "WHERE period_end=%s", (jid, end))
-                    _log().info(f'AI_WEEKLY_EMAIL_QUEUED job={jid} shows={len(ids)}')
+                    _log().info(f'AI_WEEKLY_EMAIL_QUEUED job={jid} shows={len(ids)} '
+                                f"reused={src['_id'] if src else 0}")
             db.commit()
         failed = db.execute(
             "UPDATE ai_weekly_email_log l SET status='failed', message='The summary could not be generated.' "
@@ -1622,7 +1801,8 @@ def _status_view():
              'checked_ago_s': int(time.time() - st['checked']) if st.get('checked') else None}
     return jsonify({
         'local': local, 'servers': srv, 'model': model(), 'url': ollama_url(),
-        'url_source': url_source(), 'test_mode': bool(_d.get('test_mode')),
+        'url_source': url_source(), 'stored_url_ignored': stored_url_ignored(),
+        'test_mode': bool(_d.get('test_mode')),
         'install_command': install_command(),
         'pull_command': f'ollama pull {model()}',
         'slots': {'limit': slot_limit()},

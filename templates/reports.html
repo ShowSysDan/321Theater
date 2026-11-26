@@ -785,7 +785,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
       const {ok, d} = await wsJson('/api/reports/weekly-summary', {method: 'POST', body: JSON.stringify({end_date: end, force: !!force})});
       if (seq !== WS.seq) return;
       if (!ok) { wsMsg(d.error || 'Could not start the summary.', true); return; }
-      if (d.reused) { wsMsg('Nothing changed since the last summary of this week — it is listed below.'); wsLoadRuns(); return; }
+      if (d.reused) { wsMsg(d.derived ? 'This week was already summarised by the AI — your copy (with your own figures) is listed below.' : 'Nothing changed since the last summary of this week — it is listed below.'); wsLoadRuns(); return; }
       WS.run = d.run_id; wsShow({status: 'queued', stage: 'Queued', done: 0, total: 0});
       wsLoadRuns(); wsPoll(seq);
     } catch (e) { if (e.name !== 'AbortError') wsMsg('Network error.', true); }
