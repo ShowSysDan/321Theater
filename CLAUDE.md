@@ -707,10 +707,26 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   attaches its OWN facts (`_derived_result`); `force` (Regenerate) skips
   that. A
   `with_labor` run is 404 for anyone without labor-report permission. The
-  PDF (`/reports/weekly-summary/<id>.pdf`, `no-prefetch`) is rendered from
+  PDF (`/reports/weekly-summary/<id>/<pdf_filename()>.pdf` — the name is
+  cosmetic, the old `<id>.pdf` still works; `no-prefetch`) is rendered from
   the stored `result_json` (no bytes stored, never re-runs the model),
   `font_config` passed, condensed to one page, the show table may spill
   to page 2 — nothing dropped.
+- **Per-server model (3.60.0):** `model()` = `.env` `OLLAMA_MODEL`, else
+  the shared `ollama_model`. A job runs on the CLAIMER's model (claim stamps
+  `ai_jobs.model`); `any_capable` counts a peer whose OWN model is ready;
+  weekly reuse (input_hash and `_reusable_result`) also requires
+  `model = model()` — never reuse output from a different model.
+  `model_hash` must cover every fact `_reduce_input` sends.
+- **Prompts (3.59.0):** both weekly prompts share `_WS_CONTEXT` (venue
+  shorthand glossary, keep-the-specifics rule, never guess initials,
+  severity definitions). Any prompt change bumps `PROMPT_VERSION` (it is
+  in both hashes, so old output is never reused). The reduce input
+  (`_reduce_input`) carries only shows with notes (AI text, or the fallback
+  line of an `ai_failed` one, flagged `summary_unavailable`) + a with/without-notes
+  count — never put the "no notes" shows back in (the model made them the
+  week's highlight). Week JSON adds `patterns` / `recommendations`;
+  readers must treat them as optional (older stored results lack them).
 - **Rental $ + AI History (3.58.0):** weekly facts carry `assets_in` /
   `assets_ext` per show from app.py `_report_rental_totals` (the Reports'
   reader — never fork it); the PDF prints them (and a Billed column /

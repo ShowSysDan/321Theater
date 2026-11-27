@@ -739,7 +739,8 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
       const td = c('');
       if (r.status === 'done') {
         const a = document.createElement('a');
-        a.href = '/reports/weekly-summary/' + encodeURIComponent(r.id) + '.pdf';
+        a.href = (typeof r.pdf === 'string' && r.pdf.startsWith('/reports/weekly-summary/'))
+          ? r.pdf : '/reports/weekly-summary/' + encodeURIComponent(r.id) + '.pdf';
         a.className = 'btn btn-xs btn-ghost no-prefetch'; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Open PDF';
         td.appendChild(a);
       }

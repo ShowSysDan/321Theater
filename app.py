@@ -1020,7 +1020,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.58.0'
+APP_VERSION = '3.60.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -17355,6 +17355,8 @@ def test_ai_connection():
     env_url = (app_config.get('OLLAMA_URL') or '').strip()
     if env_url:
         url = env_url        # this server's .env wins, exactly as the jobs see it
+    if ai_module.model_source() == 'env':
+        model = ai_module.model()   # same for OLLAMA_MODEL (3.60.0)
     ok, msg, norm = ollama_client.validate_url(url or ollama_client.DEFAULT_URL)
     if not ok:
         return jsonify({'success': False, 'message': msg})
