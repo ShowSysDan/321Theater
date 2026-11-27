@@ -7,7 +7,11 @@ The rules (keep every one):
 * Ollama has NO authentication, so each server only ever talks to the Ollama
   on its OWN machine (ollama_client.validate_url: localhost / 127.x / ::1).
   `OLLAMA_URL` in .env overrides the shared setting per machine and is held
-  to the same rule.
+  to the same rule. The one exception (3.61.0) is an AI NODE (ai_node/): a
+  box with no database access running Ollama on its own loopback behind a
+  pinned-HTTPS, signed front end. An app server whose .env sets AI_NODE_URL
+  / AI_NODE_SECRET / AI_NODE_CERT_SHA256 sends its model calls there; it
+  still claims the job, builds the prompt and writes every result itself.
 * Each worker PROCESS probes its own Ollama (`probe_refresh`, every 60 s, NOT
   leader-gated: the answer is per machine) and the cluster heartbeat
   publishes it (cluster_instances.ai_state / ai_checked_at). Settings → AI
@@ -171,9 +175,40 @@ def _env_url():
         return ''
 
 
+_NODE_KEYS = ('AI_NODE_URL', 'AI_NODE_SECRET', 'AI_NODE_CERT_SHA256')
+
+
+def _node():
+    """The AI node this server uses (normalized base URL), or None. Read
+    from .env each call (cheap) and pushed into ollama_client.set_node; a
+    half-set or invalid configuration is NOT used (logged once per value) —
+    the server then falls back to its own Ollama, if any."""
+    try:
+        url, secret, fp = (str(app_config.get(k) or '').strip() for k in _NODE_KEYS)
+    except Exception:
+        return None
+    if not (url or secret or fp):
+        oc.set_node(None, None, None)
+        return None
+    ok, msg = oc.set_node(url, secret, fp)
+    if not ok:
+        oc.set_node(None, None, None)
+        k = ('n', url, hashlib.sha256(secret.encode()).hexdigest(), fp)
+        if k not in _ENV_WARNED:
+            _ENV_WARNED.add(k)
+            _log().error('CONFIG_INVALID key=AI_NODE reason=' + re.sub(r'[^A-Za-z0-9_]+', '_', msg)[:60])
+        return None
+    return oc.node_base()
+
+
 def ollama_url():
-    """This machine's Ollama: .env OLLAMA_URL (per server) else the shared
-    setting; both localhost-only. An invalid value falls back (logged once)."""
+    """Where this server's model calls go: the AI node when .env names one
+    (3.61.0), else this machine's Ollama: .env OLLAMA_URL (per server) else
+    the shared setting; both localhost-only. An invalid value falls back
+    (logged once)."""
+    node = _node()
+    if node:
+        return node
     env = _env_url()
     if env:
         ok, _m, norm = oc.validate_url(env)
@@ -205,6 +240,8 @@ def stored_url_ignored():
 
 
 def url_source():
+    if _node():
+        return 'node'
     env = _env_url()
     return 'env' if env and oc.validate_url(env)[0] else 'settings'
 
@@ -235,7 +272,9 @@ def probe_refresh():
             st = {'installed': oc.installed(), 'running': False, 'version': '', 'models': [],
                   'has_model': False, 'err': '', 'ms': None, 'checked': time.time()}
         else:
-            st = oc.probe(ollama_url(), m)
+            base = ollama_url()
+            st = oc.probe(base, m)
+            st['via_node'] = oc.is_node(base)
         st['enabled'] = on
         st['model'] = m
     except Exception as e:
@@ -271,7 +310,8 @@ def heartbeat_state():
     doc = {'en': 1 if st.get('enabled') else 0, 'inst': 1 if st.get('installed') else 0,
            'run': 1 if st.get('running') else 0, 'ver': (st.get('version') or '')[:40],
            'model': (st.get('model') or '')[:200], 'has': 1 if st.get('has_model') else 0,
-           'n': len(st.get('models') or []), 'err': (st.get('err') or '')[:40], 'ms': st.get('ms')}
+           'n': len(st.get('models') or []), 'err': (st.get('err') or '')[:40], 'ms': st.get('ms'),
+           'node': 1 if st.get('via_node') else 0}
     return json.dumps(doc, separators=(',', ':')), datetime.utcfromtimestamp(st['checked'])
 
 
@@ -689,6 +729,12 @@ _ERR_TEXT = {
     'reset': 'The AI service dropped the connection. Try again.',
     'not_found': 'The AI model is not installed on that server.',
     'too_large': 'The AI answer was too long.', 'bad_json': 'The AI returned an unparseable response. Try again or use a different model.',
+    # AI node (3.61.0)
+    'cert_mismatch': 'The AI node’s certificate does not match AI_NODE_CERT_SHA256 — nothing was sent.',
+    'node_busy': 'The AI node was busy for too long. Try again.',
+    'ollama_unreachable': 'The AI node is up but its Ollama is not answering.',
+    'node_unauthorized': 'The AI node refused the request (AI_NODE_SECRET differs, or the clocks are more than a minute apart).',
+    'node_model_not_allowed': 'The AI node does not allow this model (NODE_MODELS on the node).',
 }
 
 
@@ -2156,12 +2202,13 @@ def _status_view():
     local = {'hostname': HOST, 'enabled': bool(st.get('enabled')), 'installed': bool(st.get('installed')),
              'running': bool(st.get('running')), 'version': st.get('version') or '',
              'has_model': bool(st.get('has_model')), 'models': (st.get('models') or [])[:50],
-             'err': st.get('err') or '',
+             'err': st.get('err') or '', 'via_node': bool(st.get('via_node')),
              'checked_ago_s': int(time.time() - st['checked']) if st.get('checked') else None}
     return jsonify({
         'local': local, 'servers': srv, 'model': model(), 'url': ollama_url(),
         'url_source': url_source(), 'stored_url_ignored': stored_url_ignored(),
         'model_source': model_source(),
+        'node': oc.node_base() if url_source() == 'node' else '',
         'test_mode': bool(_d.get('test_mode')),
         'install_command': install_command(),
         'pull_command': f'ollama pull {model()}',

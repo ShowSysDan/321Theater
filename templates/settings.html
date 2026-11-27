@@ -5723,12 +5723,14 @@ async function loadAiStatus() {
   const rows = [];
   const self = d.local;
   rows.push({hostname: self.hostname, self: true, installed: self.installed, running: self.running,
-             version: self.version, has: self.has_model, model: d.model, ago: self.checked_ago_s, enabled: self.enabled, fresh: true});
+             version: self.version, has: self.has_model, model: d.model, ago: self.checked_ago_s, enabled: self.enabled, fresh: true,
+             node: !!self.via_node, err: self.err || ''});
   (d.servers || []).forEach(s => {
     if (s.is_self) return;
     const a = s.ai || {};
     rows.push({hostname: s.hostname || s.ip, self: false, installed: !!a.inst, running: !!a.run, version: a.ver || '',
-               has: !!a.has, model: a.model || d.model, ago: s.checked_ago_s, enabled: !!a.en, fresh: s.fresh, noinfo: !s.ai});
+               has: !!a.has, model: a.model || d.model, ago: s.checked_ago_s, enabled: !!a.en, fresh: s.fresh, noinfo: !s.ai,
+               node: !!a.node, err: a.err || ''});
   });
   const pullBusy = new Set((d.pulls || []).filter(p => p.status === 'queued' || p.status === 'running').map(p => p.host));
   tbody.replaceChildren();
@@ -5737,9 +5739,11 @@ async function loadAiStatus() {
     const tr = document.createElement('tr');
     const name = _aiCell(tr, r.hostname || '—');
     if (r.self) { const t = document.createElement('span'); t.className = 'text-dim'; t.style.fontSize = '10px'; t.textContent = ' (this server)'; name.appendChild(t); }
+    // 3.61.0: this server's model calls go to the AI node (Installed / Running = the node's)
+    if (r.node) { const t = document.createElement('span'); t.className = 'text-dim'; t.style.fontSize = '10px'; t.textContent = ' via AI node'; name.appendChild(t); }
     if (r.noinfo) { _aiCell(tr, 'No report yet (older version?)', 'text-dim').colSpan = 5; _aiCell(tr, ''); tbody.appendChild(tr); return; }
     _aiCell(tr, r.installed ? 'Yes' : 'No', r.installed ? 'ai-yes' : 'ai-no');
-    _aiCell(tr, r.running ? 'Yes' : 'No', r.running ? 'ai-yes' : 'ai-no');
+    _aiCell(tr, r.running ? 'Yes' : (r.node && r.err ? 'No (' + r.err + ')' : 'No'), r.running ? 'ai-yes' : 'ai-no');
     _aiCell(tr, r.version || '—');
     const ready = r.running && r.has && r.fresh;
     // Each server reports its own model (3.60.0: OLLAMA_MODEL in .env can differ).
@@ -5771,7 +5775,8 @@ async function loadAiStatus() {
   const mhint = document.getElementById('ai-model-hint');
   if (mhint && d.model_source === 'env') mhint.textContent = 'This server uses OLLAMA_MODEL from its .env (' + d.model + '). The value here applies to servers without one.';
   const hint = document.getElementById('ai-url-hint');
-  if (hint && d.url_source === 'env') hint.textContent = 'This server uses OLLAMA_URL from its .env (' + d.url + '). The value here applies to servers without one. Localhost only.';
+  if (hint && d.url_source === 'node') hint.textContent = 'This server sends its AI calls to the AI node at ' + d.node + ' (AI_NODE_URL in its .env). The URL here is not used on this server.';
+  else if (hint && d.url_source === 'env') hint.textContent = 'This server uses OLLAMA_URL from its .env (' + d.url + '). The value here applies to servers without one. Localhost only.';
   else if (hint && d.stored_url_ignored) {
     hint.textContent = 'The saved URL isn\'t local, so ' + d.url + ' is used instead. Only localhost / 127.0.0.1 / [::1] is allowed; correct the URL and save.';
     hint.style.color = 'var(--red)';
