@@ -1064,10 +1064,11 @@
           <div class="field-hint" id="ai-url-hint">localhost / 127.0.0.1 / [::1] only. <code>OLLAMA_URL</code> in a server's <code>.env</code> overrides this for that server.</div>
         </div>
         <div class="field-group">
-          <label class="field-label">MODEL</label>
+          <label class="field-label">MODEL (ALL SERVERS, UNLESS OVERRIDDEN)</label>
           <input type="text" id="ollama-model" class="field-input" value="{{ ai_settings.ollama_model or 'llama3.2' }}" placeholder="llama3.2"
             list="ollama-models" onblur="_aiAutosave()">
           <datalist id="ollama-models"></datalist>
+          <div class="field-hint" id="ai-model-hint">e.g. <code>llama3.2</code> (small, fast) or <code>llama3.1:8b</code> / <code>qwen2.5:14b</code> (better summaries, need more memory). <code>OLLAMA_MODEL</code> in a server's <code>.env</code> overrides this for that server.</div>
         </div>
       </div>
       <div id="ai-msg" class="field-msg" style="display:none;margin-top:8px"></div>
@@ -5722,12 +5723,12 @@ async function loadAiStatus() {
   const rows = [];
   const self = d.local;
   rows.push({hostname: self.hostname, self: true, installed: self.installed, running: self.running,
-             version: self.version, has: self.has_model, ago: self.checked_ago_s, enabled: self.enabled, fresh: true});
+             version: self.version, has: self.has_model, model: d.model, ago: self.checked_ago_s, enabled: self.enabled, fresh: true});
   (d.servers || []).forEach(s => {
     if (s.is_self) return;
     const a = s.ai || {};
     rows.push({hostname: s.hostname || s.ip, self: false, installed: !!a.inst, running: !!a.run, version: a.ver || '',
-               has: !!a.has && a.model === d.model, ago: s.checked_ago_s, enabled: !!a.en, fresh: s.fresh, noinfo: !s.ai});
+               has: !!a.has, model: a.model || d.model, ago: s.checked_ago_s, enabled: !!a.en, fresh: s.fresh, noinfo: !s.ai});
   });
   const pullBusy = new Set((d.pulls || []).filter(p => p.status === 'queued' || p.status === 'running').map(p => p.host));
   tbody.replaceChildren();
@@ -5741,7 +5742,8 @@ async function loadAiStatus() {
     _aiCell(tr, r.running ? 'Yes' : 'No', r.running ? 'ai-yes' : 'ai-no');
     _aiCell(tr, r.version || '—');
     const ready = r.running && r.has && r.fresh;
-    _aiCell(tr, r.running ? (r.has ? d.model + ' ✓ Ready' : d.model + ' missing') : '—', r.running ? (r.has ? 'ai-yes' : 'ai-no') : '');
+    // Each server reports its own model (3.60.0: OLLAMA_MODEL in .env can differ).
+    _aiCell(tr, r.running ? (r.has ? r.model + ' ✓ Ready' : r.model + ' missing') : '—', r.running ? (r.has ? 'ai-yes' : 'ai-no') : '');
     _aiCell(tr, _aiAgo(r.ago) + (r.fresh ? '' : ' (stale)'), 'text-dim');
     const act = _aiCell(tr, '');
     if (r.running && !r.has && !window.READONLY_VIEW) {
@@ -5766,6 +5768,8 @@ async function loadAiStatus() {
   document.getElementById('ai-pull-cmd').textContent = d.pull_command;
   document.getElementById('ai-install').style.display = (anyMissing || !anyReady) ? '' : 'none';
   if (self.models && self.models.length) _aiFillModels(self.models);
+  const mhint = document.getElementById('ai-model-hint');
+  if (mhint && d.model_source === 'env') mhint.textContent = 'This server uses OLLAMA_MODEL from its .env (' + d.model + '). The value here applies to servers without one.';
   const hint = document.getElementById('ai-url-hint');
   if (hint && d.url_source === 'env') hint.textContent = 'This server uses OLLAMA_URL from its .env (' + d.url + '). The value here applies to servers without one. Localhost only.';
   else if (hint && d.stored_url_ignored) {

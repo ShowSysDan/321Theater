@@ -75,7 +75,7 @@ HOST = socket.gethostname()
 KINDS_INFER = ('extract', 'weekly_postshow')
 KIND_PULL = 'pull_model'
 WEEKLY = 'weekly_postshow'
-PROMPT_VERSION = 2          # 3.59.0: context + analysis sections
+PROMPT_VERSION = 3          # 3.59.0 context + analysis; 3.60.0 wording
 MAX_SHOWS = 40
 MAX_RANGE_DAYS = 14
 MAX_LIVE_WEEKLY = 3
@@ -133,9 +133,35 @@ def enabled():
         return False
 
 
+def _env_model():
+    """This server's .env OLLAMA_MODEL ('' = unset or invalid, logged once)."""
+    try:
+        m = (app_config.get('OLLAMA_MODEL') or '').strip()
+    except Exception:
+        return ''
+    if m and not oc.valid_model(m):
+        if ('m', m) not in _ENV_WARNED:
+            _ENV_WARNED.add(('m', m))
+            _log().error('CONFIG_INVALID key=OLLAMA_MODEL reason=bad_name')
+        return ''
+    return m
+
+
 def model():
+    """The model THIS server runs (3.60.0): .env OLLAMA_MODEL, else the
+    shared Settings → AI model. Servers may differ (a small model on a test
+    box, a larger one in production): a job runs on the claiming server's
+    model, stamped in ai_jobs.model, and output is reused only from a job
+    that ran on this server's model."""
+    env = _env_model()
+    if env:
+        return env
     m = (_setting('ollama_model', 'llama3.2') or '').strip()
     return m if oc.valid_model(m) else 'llama3.2'
+
+
+def model_source():
+    return 'env' if _env_model() else 'settings'
 
 
 def _env_url():
@@ -300,7 +326,9 @@ def any_capable(db, kind='infer', target_host=None):
             continue
         if target_host and s['hostname'] != target_host:
             continue
-        if kind == KIND_PULL or (a.get('has') and a.get('model') == model()):
+        # Each server runs jobs on its own model (3.60.0), so a peer counts
+        # when ITS model is ready, whatever this server's model is.
+        if kind == KIND_PULL or a.get('has'):
             return True
     return False
 
@@ -854,10 +882,11 @@ _WS_CONTEXT = (
     "Context: the venue is a performing-arts center (concerts, Broadway tours, orchestra, dance, "
     "comedy, school shows, galas, private events). The notes are written in production shorthand. "
     "Read them that way: kick / snare / tom / cymbal = drum-kit parts and a number before them is a "
-    "drum size in inches (\"22 kick\" = 22-inch kick drum); backline = band instruments and amps the "
+    "drum size in inches when it reads as one (\"22 kick\" = 22-inch kick drum; \"2 toms\" is a "
+    "count); backline = band instruments and amps the "
     "venue supplies; FOH = front of house (the mix position, or the audience side); monitors / "
     "wedges / IEMs = performers' sound; DI, mic, console, desk, PA = sound gear; LX = lighting; "
-    "SM = stage manager; PM = production manager; TD = technical director; A1 / A2 / L1 / V1 = "
+    "SM = stage manager; PM = production manager (\"7:30 PM\" is a time; times stay as written); TD = technical director; A1 / A2 / L1 / V1 = "
     "audio / lighting / video operators; load-in / load-out = setting up / striking; hold = a "
     "delayed start; house = the audience or front-of-house staff; rider = the artist's "
     "requirements; advance = pre-show planning with the artist; re-advance = planning it again.\n"
@@ -890,7 +919,8 @@ _WS_WEEK_PROMPT = (
     "You are an analyst writing the weekly executive summary for a performing-arts center's "
     "production leadership, from per-show summaries. The input lists only the shows that had "
     "post-show notes; how many had none is in counts and is printed separately, so never make "
-    "missing notes a highlight, issue or pattern.\n" + _WS_CONTEXT +
+    "missing notes a highlight, issue or pattern. A show marked summary_unavailable has only the "
+    "first line of its notes; use what it says and don't guess the rest.\n" + _WS_CONTEXT +
     "Analyse the week, don't just repeat it: say what mattered most, connect problems that share "
     "a cause, a venue, a kind of gear or a kind of show, and say what leadership should act on. "
     "Every claim must be supported by the input. Refer to shows only by numeric id in show_ids. "
@@ -1289,7 +1319,10 @@ def model_hash(start, end, facts, digests, counts):
     return hashlib.sha256(json.dumps({
         'pv': PROMPT_VERSION, 'model': model(), 's': start.isoformat(), 'e': end.isoformat(),
         'd': [[d['show_id'], d['has_text'], d['user'], d['fallback']] for d in digests],
-        'n': {k: [f.get('name', ''), f.get('venue', '')] for k, f in facts.items()},
+        # Every fact _reduce_input sends must be here (3.60.0: peak sound,
+        # dates, performance count reach the model).
+        'n': {k: [f.get('name', ''), f.get('venue', ''), f.get('dates', ''),
+                  len(f.get('perfs') or []), f.get('peak_leq')] for k, f in facts.items()},
         'c': {k: counts.get(k) for k in ('shows', 'performances', 'settled', 'unsettled')},
         'p': [_WS_SHOW_PROMPT, _WS_WEEK_PROMPT]}, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -1299,10 +1332,12 @@ def _reusable_result(db, mhash, exclude_id=None):
     model input, or None."""
     if not mhash:
         return None
+    # model = the model the job actually RAN on (the claimer's), which can
+    # differ from the hashed one when servers run different models.
     r = db.execute("SELECT id, result_json FROM ai_jobs WHERE kind=%s AND status='done' "
                    "AND model_hash=%s AND test_mode=%s AND partial=0 AND result_json IS NOT NULL "
-                   "AND id <> %s ORDER BY id DESC LIMIT 1",
-                   (WEEKLY, mhash, _tm(), exclude_id or 0)).fetchone()
+                   "AND model=%s AND id <> %s ORDER BY id DESC LIMIT 1",
+                   (WEEKLY, mhash, _tm(), model(), exclude_id or 0)).fetchone()
     if not r:
         return None
     try:
@@ -1369,7 +1404,8 @@ def _ask(job, messages, validator, deadline, step='AI call'):
 
 
 def _reduce_input(order, shows, facts, counts):
-    """The weekly (reduce) call's input: only the shows that had notes (the
+    """The weekly (reduce) call's input: only the shows that had notes —
+    a show whose own summary failed is kept with its fallback line (the
     model reads the rest as a count — 3.59.0, it used to make "no notes for
     12 shows" the week's highlight), each with the non-$ facts that help
     the analysis (venue, performances, peak sound level)."""
@@ -1377,11 +1413,13 @@ def _reduce_input(order, shows, facts, counts):
         lst = []
         for sid in order:
             s, f = shows.get(str(sid)) or {}, facts.get(str(sid)) or {}
-            if not s.get('ai'):
-                continue
+            if not s.get('ai') and not s.get('ai_failed'):
+                continue                   # no notes at all
             it = {'show_id': sid, 'name': f.get('name', ''), 'venue': f.get('venue', ''),
                   'dates': f.get('dates', ''), 'performances': len(f.get('perfs') or []),
                   'one_liner': s.get('one_liner', ''), 'issues': s.get('issues', [])}
+            if s.get('ai_failed'):         # had notes; its own summary failed
+                it['summary_unavailable'] = True
             if f.get('peak_leq') is not None:
                 it['peak_sound_leq_db'] = f['peak_leq']
             if not drop_fu:
@@ -1531,8 +1569,8 @@ def _weekly_start_view():
         db.execute("SELECT pg_advisory_xact_lock(hashtext('ai_jobs:weekly'))")
         if not force:
             r = db.execute("SELECT id FROM ai_jobs WHERE kind=%s AND status='done' AND input_hash=%s "
-                           "AND test_mode=%s AND with_labor=%s ORDER BY id DESC LIMIT 1",
-                           (WEEKLY, h, _tm(), wl)).fetchone()
+                           "AND test_mode=%s AND with_labor=%s AND model=%s ORDER BY id DESC LIMIT 1",
+                           (WEEKLY, h, _tm(), wl, model())).fetchone()
             if r:
                 db.commit()
                 return jsonify({'run_id': r['id'], 'reused': True})
@@ -2123,6 +2161,7 @@ def _status_view():
     return jsonify({
         'local': local, 'servers': srv, 'model': model(), 'url': ollama_url(),
         'url_source': url_source(), 'stored_url_ignored': stored_url_ignored(),
+        'model_source': model_source(),
         'test_mode': bool(_d.get('test_mode')),
         'install_command': install_command(),
         'pull_command': f'ollama pull {model()}',
@@ -2153,6 +2192,12 @@ def _pull_view():
     name = model()
     db = _d['get_db']()
     try:
+        if host != HOST:                # that server's own model (3.60.0)
+            for sv in servers(db):
+                pm = (sv.get('ai') or {}).get('model') or ''
+                if sv['hostname'] == host and oc.valid_model(pm):
+                    name = pm
+                    break
         if not any_capable(db, KIND_PULL, target_host=host):
             return jsonify({'success': False,
                             'error': 'Ollama is not running on that server.'}), 409
