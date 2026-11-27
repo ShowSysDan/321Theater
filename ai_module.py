@@ -75,7 +75,7 @@ HOST = socket.gethostname()
 KINDS_INFER = ('extract', 'weekly_postshow')
 KIND_PULL = 'pull_model'
 WEEKLY = 'weekly_postshow'
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2          # 3.59.0: context + analysis sections
 MAX_SHOWS = 40
 MAX_RANGE_DAYS = 14
 MAX_LIVE_WEEKLY = 3
@@ -847,31 +847,68 @@ _COMMENTS_PER_SHOW = 15
 _SHOW_PROMPT_MAX = 6000
 _REDUCE_MAX = 12000
 
+# Context both prompts share (3.59.0): the model has to know it is reading a
+# performing-arts venue's notes, or "Used a 22 kick instead of an 18" comes
+# back as "Used a 22".
+_WS_CONTEXT = (
+    "Context: the venue is a performing-arts center (concerts, Broadway tours, orchestra, dance, "
+    "comedy, school shows, galas, private events). The notes are written in production shorthand. "
+    "Read them that way: kick / snare / tom / cymbal = drum-kit parts and a number before them is a "
+    "drum size in inches (\"22 kick\" = 22-inch kick drum); backline = band instruments and amps the "
+    "venue supplies; FOH = front of house (the mix position, or the audience side); monitors / "
+    "wedges / IEMs = performers' sound; DI, mic, console, desk, PA = sound gear; LX = lighting; "
+    "SM = stage manager; PM = production manager; TD = technical director; A1 / A2 / L1 / V1 = "
+    "audio / lighting / video operators; load-in / load-out = setting up / striking; hold = a "
+    "delayed start; house = the audience or front-of-house staff; rider = the artist's "
+    "requirements; advance = pre-show planning with the artist; re-advance = planning it again.\n"
+    "Writing rules: report only what the text says; never invent facts, names, numbers, times or "
+    "causes. Keep the concrete specifics the note gives (sizes, models, quantities, times, what "
+    "was expected versus what happened) and expand the shorthand so a reader who was not there "
+    "understands it, e.g. \"Used a 22-inch kick drum instead of the 18-inch\", never \"Used a "
+    "22\". Initials or abbreviations you cannot expand with certainty (often a person's initials) "
+    "stay exactly as written; never guess what they stand for. Refer to people by role, not by "
+    "name. Never state dollar amounts, labor costs or headcounts; those are printed separately.\n"
+    "Severity: high = safety, injury, damage, a stopped or held show, or a client complaint; "
+    "medium = it noticeably affected the performance, the audience or the schedule, or needed a "
+    "workaround; low = minor or internal, no audience impact.\n")
+
 _WS_SHOW_PROMPT = (
-    "You summarize post-show reports for a performing-arts center's production leadership. "
-    "You receive one show's post-show notes and staff comments. Report only what the text says; "
-    "never invent facts, names, numbers, times or causes. Refer to people by role (stage manager, "
-    "client, house staff, technician), not by name. Do not state dollar amounts, labor costs or "
-    "headcounts; those are printed separately. Be brief and neutral. Return ONLY a JSON object:\n"
-    '{"one_liner": string (<=140 chars, how the show went),\n'
-    ' "highlights": [string] (0-3, <=120 chars each),\n'
-    ' "issues": [{"text": string (<=140 chars), "severity": "high"|"medium"|"low", '
-    '"category": "equipment"|"safety"|"house"|"crew"|"client"|"schedule"|"other"}] '
-    '(0-4; high = safety, injury, damage, show stop or client complaint),\n'
-    ' "follow_ups": [string] (0-3, <=120 chars, concrete open actions explicitly mentioned)}\n'
+    "You summarize one show's post-show report for a performing-arts center's production "
+    "leadership. You receive the show's post-show notes and staff comments.\n" + _WS_CONTEXT +
+    "Return ONLY a JSON object:\n"
+    '{"one_liner": string (<=160 chars, how the show went, with its most important specific),\n'
+    ' "highlights": [string] (0-3, <=140 chars each, what went well or was notable),\n'
+    ' "issues": [{"text": string (<=160 chars, what happened and its effect), '
+    '"severity": "high"|"medium"|"low", '
+    '"category": "equipment"|"safety"|"house"|"crew"|"client"|"schedule"|"other"}] (0-4),\n'
+    ' "follow_ups": [string] (0-3, <=140 chars, open actions the text explicitly mentions; say '
+    'what is to be done AND what it is about, e.g. "TP to find out why the video playback had no '
+    'audio", never just "TP looking into why")}\n'
     "Use empty lists when nothing applies.")
 
 _WS_WEEK_PROMPT = (
-    "You write a one-page weekly executive summary for theater leadership from per-show summaries. "
-    "Use only the input. Prioritise safety and equipment issues, problems repeated across shows, "
-    "and open follow-ups. Refer to shows only by numeric id in show_ids. No dollar amounts, "
-    "headcounts or personal names. Return ONLY JSON:\n"
-    '{"headline": string (<=120), "summary": string (<=450, 2-3 sentences),\n'
-    ' "highlights": [{"text": string <=140, "show_ids": [int]}] (0-4),\n'
-    ' "issues": [{"text": string <=160, "severity": "high"|"medium"|"low", "show_ids": [int]}] '
-    '(0-5, most severe first),\n'
+    "You are an analyst writing the weekly executive summary for a performing-arts center's "
+    "production leadership, from per-show summaries. The input lists only the shows that had "
+    "post-show notes; how many had none is in counts and is printed separately, so never make "
+    "missing notes a highlight, issue or pattern.\n" + _WS_CONTEXT +
+    "Analyse the week, don't just repeat it: say what mattered most, connect problems that share "
+    "a cause, a venue, a kind of gear or a kind of show, and say what leadership should act on. "
+    "Every claim must be supported by the input. Refer to shows only by numeric id in show_ids. "
+    "Return ONLY JSON:\n"
+    '{"headline": string (<=120, the single most important takeaway),\n'
+    ' "summary": string (<=600, 3-4 sentences: how the week went overall, the most significant '
+    'problems and their effect, and what stood out),\n'
+    ' "highlights": [{"text": string <=160, "show_ids": [int]}] (0-4, things that went well),\n'
+    ' "issues": [{"text": string <=180, "severity": "high"|"medium"|"low", "show_ids": [int]}] '
+    '(0-6, most severe first, each one problem with its effect),\n'
+    ' "patterns": [{"text": string <=180, "show_ids": [int]}] (0-4, trends or repeated problems '
+    'across two or more shows, venues or gear; [] when nothing repeats),\n'
+    ' "recommendations": [{"text": string <=180, "show_ids": [int]}] (0-4, concrete, practical '
+    'actions leadership could take to prevent or fix what the week showed; grounded in the '
+    'input, never generic advice),\n'
     ' "labor_note": string (<=200, qualitative only; "" if none),\n'
-    ' "follow_ups": [{"text": string <=140, "show_ids": [int]}] (0-4)}')
+    ' "follow_ups": [{"text": string <=160, "show_ids": [int]}] (0-6, open actions from the shows, '
+    'each listed once, saying what is to be done and what it is about)}')
 
 _RETRY_MSG = 'Your previous answer was not valid JSON for the schema. Answer again with JSON only.'
 
@@ -952,24 +989,39 @@ def _as_list(v):
 def validate_show(d):
     if not isinstance(d, dict):
         return None
-    one = _clean(d.get('one_liner'), 140)
+    one = _clean(d.get('one_liner'), 160)
     if not one:
         return None
     issues = []
     for x in _as_list(d.get('issues')):
         if isinstance(x, dict):
-            text = _clean(x.get('text'), 140)
+            text = _clean(x.get('text'), 160)
             sev = x.get('severity') if x.get('severity') in _SEVERITIES else 'low'
             cat = x.get('category') if x.get('category') in _CATEGORIES else 'other'
         else:
-            text, sev, cat = _clean(x, 140), 'low', 'other'
+            text, sev, cat = _clean(x, 160), 'low', 'other'
         if text:
             issues.append({'text': text, 'severity': sev, 'category': cat})
     return {'one_liner': one,
-            'highlights': [t for t in (_clean(x, 120) for x in _as_list(d.get('highlights'))) if t][:3],
+            'highlights': _uniq(_clean(x, 140) for x in _as_list(d.get('highlights')))[:3],
             'issues': issues[:4],
-            'follow_ups': [t for t in (_clean(x, 120) for x in _as_list(d.get('follow_ups'))) if t][:3],
+            'follow_ups': _uniq(_clean(x, 140) for x in _as_list(d.get('follow_ups')))[:3],
             'ai': 1}
+
+
+def _key(t):
+    """Duplicate test for model lists: case, spacing and punctuation-blind."""
+    return re.sub(r'[\W_]+', ' ', str(t).lower()).strip()
+
+
+def _uniq(texts):
+    out, seen = [], set()
+    for t in texts:
+        k = _key(t)
+        if t and k not in seen:
+            seen.add(k)
+            out.append(t)
+    return out
 
 
 def _ids(v, valid):
@@ -992,25 +1044,36 @@ def validate_week(d, valid_ids):
         return None
 
     def items(key, n, cap, sev=False):
-        out = []
+        out, seen = [], {}
         for x in _as_list(d.get(key)):
             if isinstance(x, dict):
                 text, ids = _clean(x.get('text'), cap), _ids(x.get('show_ids'), valid_ids)
                 s = x.get('severity') if x.get('severity') in _SEVERITIES else 'low'
             else:
                 text, ids, s = _clean(x, cap), [], 'low'
-            if text:
-                it = {'text': text, 'show_ids': ids}
-                if sev:
+            if not text:
+                continue
+            k = _key(text)
+            if k in seen:                       # the model repeated itself: merge
+                it = seen[k]
+                it['show_ids'] = (it['show_ids'] + [i for i in ids if i not in it['show_ids']])[:10]
+                if sev and _SEVERITIES.index(s) < _SEVERITIES.index(it['severity']):
                     it['severity'] = s
-                out.append(it)
+                continue
+            it = {'text': text, 'show_ids': ids}
+            if sev:
+                it['severity'] = s
+            seen[k] = it
+            out.append(it)
         if sev:
             out.sort(key=lambda i: _SEVERITIES.index(i['severity']))
         return out[:n]
-    return {'headline': head, 'summary': _clean(d.get('summary'), 450),
-            'highlights': items('highlights', 4, 140), 'issues': items('issues', 5, 160, True),
+    return {'headline': head, 'summary': _clean(d.get('summary'), 600),
+            'highlights': items('highlights', 4, 160), 'issues': items('issues', 6, 180, True),
+            'patterns': items('patterns', 4, 180),
+            'recommendations': items('recommendations', 4, 180),
             'labor_note': _clean(d.get('labor_note'), 200),
-            'follow_ups': items('follow_ups', 4, 140), 'ai': 1}
+            'follow_ups': items('follow_ups', 6, 160), 'ai': 1}
 
 
 def weekly_window(end=None, start=None):
@@ -1079,7 +1142,8 @@ def build_inputs(db, start, end, with_labor, access=None):
     ids = [r['id'] for _f, r in picked]
     facts, digests = {}, []
     if not ids:
-        return ids, facts, digests, {'shows': 0, 'performances': 0, 'settled': 0, 'unsettled': 0}, ''
+        return ids, facts, digests, {'shows': 0, 'performances': 0, 'settled': 0, 'unsettled': 0,
+                                     'with_notes': 0}, ''
     internal = _d['postnotes_internal_keys']
     notes = {}
     for r in db.execute('SELECT show_id, field_key, field_value FROM post_show_notes '
@@ -1209,7 +1273,8 @@ def build_inputs(db, start, end, with_labor, access=None):
         digests.append({'show_id': sid, 'has_text': has_text, 'user': msg, 'fallback': fb})
     n_unsettled = len([i for i in ids if i in unsettled])
     counts = {'shows': len(ids), 'performances': total_perfs,
-              'settled': len(ids) - n_unsettled, 'unsettled': n_unsettled}
+              'settled': len(ids) - n_unsettled, 'unsettled': n_unsettled,
+              'with_notes': sum(1 for dg in digests if dg['has_text'])}
     h = hashlib.sha256(json.dumps({'pv': PROMPT_VERSION, 'model': model(), 's': start.isoformat(),
                                    'e': end.isoformat(), 'wl': 1 if with_labor else 0,
                                    'f': facts, 'd': digests}, sort_keys=True,
@@ -1304,20 +1369,32 @@ def _ask(job, messages, validator, deadline, step='AI call'):
 
 
 def _reduce_input(order, shows, facts, counts):
+    """The weekly (reduce) call's input: only the shows that had notes (the
+    model reads the rest as a count — 3.59.0, it used to make "no notes for
+    12 shows" the week's highlight), each with the non-$ facts that help
+    the analysis (venue, performances, peak sound level)."""
     def build(drop_hl, drop_fu):
         lst = []
         for sid in order:
             s, f = shows.get(str(sid)) or {}, facts.get(str(sid)) or {}
+            if not s.get('ai'):
+                continue
             it = {'show_id': sid, 'name': f.get('name', ''), 'venue': f.get('venue', ''),
+                  'dates': f.get('dates', ''), 'performances': len(f.get('perfs') or []),
                   'one_liner': s.get('one_liner', ''), 'issues': s.get('issues', [])}
+            if f.get('peak_leq') is not None:
+                it['peak_sound_leq_db'] = f['peak_leq']
             if not drop_fu:
                 it['follow_ups'] = s.get('follow_ups', [])
             if not drop_hl:
                 it['highlights'] = s.get('highlights', [])
             lst.append(it)
-        return json.dumps({'counts': {'shows': counts['shows'], 'performances': counts['performances'],
-                                      'labor_settled': counts['settled'],
-                                      'labor_not_settled': counts['unsettled']},
+        n = counts.get('shows', 0)
+        return json.dumps({'counts': {'shows': n, 'performances': counts.get('performances', 0),
+                                      'shows_with_notes': len(lst),
+                                      'shows_without_notes': max(0, n - len(lst)),
+                                      'labor_settled': counts.get('settled', 0),
+                                      'labor_not_settled': counts.get('unsettled', 0)},
                            'shows': lst}, ensure_ascii=False)
     for dh, df in ((False, False), (True, False), (True, True)):
         txt = build(dh, df)
@@ -1390,8 +1467,8 @@ def _exec_weekly(job, t0):
         n_issues = sum(len(shows[str(s)].get('issues', [])) for s in order)
         week = {'headline': f"{counts.get('shows', 0)} shows, {counts.get('performances', 0)} "
                             f"performances: {n_issues} issues flagged",
-                'summary': '', 'highlights': [], 'issues': highs[:5], 'labor_note': '',
-                'follow_ups': [], 'ai': 0}
+                'summary': '', 'highlights': [], 'issues': highs[:6], 'patterns': [],
+                'recommendations': [], 'labor_note': '', 'follow_ups': [], 'ai': 0}
     result = {'v': 1, 'start': payload.get('start'), 'end': payload.get('end'),
               'with_labor': bool(job['with_labor']), 'model': job['model'] or model(),
               'order': order, 'facts': facts, 'counts': counts, 'shows': shows, 'week': week,
@@ -1536,6 +1613,7 @@ def _run_out(r):
            'end': r['period_end'].isoformat() if r['period_end'] else '',
            'label': fmt_range(r['period_start'], r['period_end']),
            'with_labor': bool(r['with_labor']), 'auto': bool(r['auto']), 'shows': n,
+           'pdf': pdf_url(r) if r['status'] == 'done' else '',
            'mine': r['requested_by'] == session.get('user_id'),
            'created_at': _d['ts_out'](r['created_at']), 'finished_at': _d['ts_out'](r['finished_at'])}
     if is_admin:
@@ -1591,14 +1669,36 @@ def _weekly_cancel_view(run_id):
     return jsonify({'success': True})
 
 
-def _weekly_pdf_view(run_id):
+def pdf_filename(start, end, with_labor=False, run_id=None):
+    """A descriptive download name (3.59.0), e.g.
+    Weekly-Post-Show-Summary_2026-11-06_to_2026-11-12_with-labor.pdf.
+    ASCII only (it goes into a URL and a Content-Disposition header)."""
+    as_date = _d['as_date']
+    a, b = as_date(start), as_date(end)
+    if a and b:
+        span = a.isoformat() if a == b else f'{a.isoformat()}_to_{b.isoformat()}'
+    else:
+        span = f'run-{int(run_id or 0)}'
+    return f"Weekly-Post-Show-Summary_{span}{'_with-labor' if with_labor else ''}.pdf"
+
+
+def pdf_url(r):
+    """/reports/weekly-summary/<id>/<descriptive name>.pdf — the browser's
+    PDF viewer saves under the URL's last segment, so the name lives there
+    too. The name part is cosmetic; the id decides (the old <id>.pdf URL
+    still works)."""
+    return (f"/reports/weekly-summary/{int(r['id'])}/"
+            f"{pdf_filename(r['period_start'], r['period_end'], r['with_labor'], r['id'])}")
+
+
+def _weekly_pdf_view(run_id, slug=None):
     _need_reports()
     r = _load_run(run_id, _RUN_COLS + ', result_json')
     if r['status'] != 'done' or not r['result_json']:
         abort(404)
     pdf = build_pdf(json.loads(r['result_json']), show_assets=_d['can_report_assets']())
     _log().info(f"AI_SUMMARY_PDF job={run_id} by={session.get('user_id')}")
-    fname = f"weekly-summary-{r['period_end'].isoformat() if r['period_end'] else run_id}.pdf"
+    fname = pdf_filename(r['period_start'], r['period_end'], r['with_labor'], run_id)
     return Response(pdf, mimetype='application/pdf',
                     headers={'Content-Disposition': f'inline; filename="{fname}"',
                              'Cache-Control': 'private, no-store'})
@@ -1653,6 +1753,7 @@ def _pdf_context(res, show_assets=False):
                      'labor': (f"${float(f['labor_total']):,.2f}" if f.get('labor_total') is not None
                                else ('Not settled' if not f.get('settled') else '—')),
                      'one_liner': s.get('one_liner', ''), 'ai_failed': s.get('ai_failed'),
+                     'no_notes': not s.get('ai') and not s.get('ai_failed'),
                      'issues': s.get('issues', []), 'peak_leq': f.get('peak_leq')})
     counts = res.get('counts') or {}
     sd, ed = as_date(res.get('start')), as_date(res.get('end'))
@@ -1665,6 +1766,12 @@ def _pdf_context(res, show_assets=False):
         'gear_total': money(gear_total), 'ext_total': money(ext_total), 'billed_total': money(billed_total),
         'unsettled': [r['name'] for r in rows if not r['settled']],
         'issues': [dict(i, shows=label(i.get('show_ids'))) for i in week.get('issues', [])],
+        'patterns': [dict(i, shows=label(i.get('show_ids'))) for i in week.get('patterns') or []],
+        'recommendations': [dict(i, shows=label(i.get('show_ids')))
+                            for i in week.get('recommendations') or []],
+        # Notes coverage: runs before 3.59.0 have no count — work it out.
+        'with_notes': counts.get('with_notes', sum(
+            1 for k in order if (shows.get(k) or {}).get('ai') or (shows.get(k) or {}).get('ai_failed'))),
         'highlights': [dict(i, shows=label(i.get('show_ids'))) for i in week.get('highlights', [])],
         'follow_ups': [dict(i, shows=label(i.get('show_ids'))) for i in week.get('follow_ups', [])],
         'partial': bool(res.get('partial')),
@@ -1823,6 +1930,11 @@ def _send_weekly(period_end, job_id):
                     blocks.append({'heading': 'Issues', 'items': [
                         f"{i['severity'].upper()}: {i['text']}" + (f" ({i['shows']})" if i['shows'] else '')
                         for i in ctx['issues']]})
+                if ctx['patterns']:
+                    blocks.append({'heading': 'Patterns', 'items': [i['text'] for i in ctx['patterns']]})
+                if ctx['recommendations']:
+                    blocks.append({'heading': 'Recommendations',
+                                   'items': [i['text'] for i in ctx['recommendations']]})
                 if ctx['follow_ups']:
                     blocks.append({'heading': 'Follow-ups', 'items': [i['text'] for i in ctx['follow_ups']]})
                 text, html = _d['mail'](
@@ -1833,7 +1945,7 @@ def _send_weekly(period_end, job_id):
                     note='AI-assisted draft. Verify against each show’s Post-Show tab.')
                 ok, smsg = _d['send_email'](
                     f"Weekly post-show summary · {ctx['period']}", emails, text, html,
-                    attachments=[{'filename': f'weekly-summary-{period_end}.pdf', 'data': pdf,
+                    attachments=[{'filename': pdf_filename(res.get('start'), period_end), 'data': pdf,
                                   'mimetype': 'application/pdf'}],
                     error_context={'purpose': 'weekly_summary', 'triggered_by': 'schedule'})
             n = len(emails)
@@ -1979,8 +2091,7 @@ def _history_job_view(job_id):
         pass
     if r['kind'] == WEEKLY:
         out['reused_from'] = res.get('reused_from')
-        out['pdf'] = (f"/reports/weekly-summary/{r['id']}.pdf"
-                      if r['status'] == 'done' and extra['result_json'] else '')
+        out['pdf'] = pdf_url(r) if r['status'] == 'done' and extra['result_json'] else ''
     else:
         sug = res.get('suggestions') or {}
         out['found'] = [{'label': v.get('label') or k, 'value': v.get('value') or ''}
@@ -2151,6 +2262,8 @@ def register(app, **deps):
     app.add_url_rule('/api/reports/weekly-summary/runs/<int:run_id>/cancel', 'weekly_summary_cancel',
                      login(_weekly_cancel_view), methods=['POST'])
     app.add_url_rule('/reports/weekly-summary/<int:run_id>.pdf', 'weekly_summary_pdf',
+                     login(_weekly_pdf_view))
+    app.add_url_rule('/reports/weekly-summary/<int:run_id>/<slug>.pdf', 'weekly_summary_pdf_named',
                      login(_weekly_pdf_view))
     app.add_url_rule('/settings/ai/status', 'ai_settings_status', admin(_status_view))
     app.add_url_rule('/settings/ai/history', 'ai_settings_history', admin(_history_view))
