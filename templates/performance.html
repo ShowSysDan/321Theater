@@ -5,15 +5,17 @@
 #}
 {% extends "base.html" %}
 {% block title %}Performance — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
     <h1 class="page-title">Performance</h1>
     <p class="page-sub">Per-page response times and database query timing.</p>
   </div>
-  <a href="{{ url_for('settings') }}" class="btn btn-ghost">← Settings</a>
 </div>
+{{ settings_nav_open('performance') }}
 
 {# ── View tabs (3.14.0) ───────────────────────────────────────────────────── #}
 <div class="perf-views" role="tablist">
@@ -493,4 +495,5 @@ function togglePerfSql(key) {
   if (row) row.style.display = row.style.display === 'none' ? '' : 'none';
 }
 </script>
+{{ settings_nav_close() }}
 {% endblock %}

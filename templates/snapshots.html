@@ -9,15 +9,17 @@
 #}
 {% extends "base.html" %}
 {% block title %}DB Snapshots — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
     <h1 class="page-title">DB Snapshots</h1>
     <p class="page-sub">Inspect a backup, see what changed, and recover pieces of it.</p>
   </div>
-  <a href="{{ url_for('settings') }}" class="btn btn-secondary">← Settings</a>
 </div>
+{{ settings_nav_open('snapshots') }}
 
 
 {# ── Snapshot list ─────────────────────────────────────────────────────────── #}
@@ -440,4 +442,5 @@ async function applyPlan() {
   if (wasShow) loadShows(); else openDiff(DIFF.schema, DIFF.table, DIFF.restorable);
 }
 </script>
+{{ settings_nav_close() }}
 {% endblock %}

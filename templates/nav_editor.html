@@ -5,8 +5,10 @@
 #}
 {% extends "base.html" %}
 {% block title %}Sidebar Editor — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
     <h1 class="page-title">Sidebar Editor</h1>
@@ -25,6 +27,7 @@
     <button class="btn btn-primary" type="button" id="save-btn" onclick="saveLayout()">Save</button>
   </div>
 </div>
+{{ settings_nav_open('nav') }}
 
 <div class="form-section">
   <div class="form-section-header">
@@ -41,6 +44,7 @@
     <div id="nav-rows"></div>
   </div>
 </div>
+{{ settings_nav_close() }}
 {% endblock %}
 
 {% block scripts %}

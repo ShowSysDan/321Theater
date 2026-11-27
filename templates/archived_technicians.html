@@ -5,6 +5,7 @@
 #}
 {% extends "base.html" %}
 {% block title %}Archived Technicians — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block head %}
 <style>
@@ -28,15 +29,14 @@
 {% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
     <h1 class="page-title">Archived Technicians{% if readonly_view %}<span class="rv-badge" title="Read-only account: you can view archived technicians but not restore or delete them">VIEW ONLY</span>{% endif %}</h1>
     <p class="page-sub">Technicians who have left. Hidden from scheduling; skills and work history are kept.</p>
   </div>
-  <div class="header-actions">
-    <a href="{{ url_for('settings') }}#technicians" class="btn btn-ghost btn-sm">← Manage Technicians</a>
-  </div>
 </div>
+{{ settings_nav_open('technicians') }}
 
 {% if not techs %}
 <div class="form-section">
@@ -140,4 +140,5 @@ async function deleteTech(mid) {
   else alert(d.error || 'Error deleting technician.');
 }
 </script>
+{{ settings_nav_close() }}
 {% endblock %}

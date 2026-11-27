@@ -1020,7 +1020,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.56.3'
+APP_VERSION = '3.57.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -29418,7 +29418,7 @@ _SYSTEM_PROGRAMS = (
      'packages': ('util-linux',), 'purpose': 'Caps the CPU time of LibreOffice conversions',
      'missing': 'LibreOffice runs without a CPU limit (the timeout still stops it).'},
     {'key': 'git', 'name': 'git', 'binary': 'git', 'level': 'info',
-     'packages': ('git',), 'purpose': 'Settings → System → Update (in-app updates)',
+     'packages': ('git',), 'purpose': 'Settings → Updates (in-app updates)',
      'missing': 'In-app updates are unavailable; update with git pull.'},
     {'key': 'ollama', 'name': 'Ollama (local AI)', 'binary': 'ollama', 'level': 'info',
      'packages': (), 'purpose': 'AI Extract and the weekly post-show summary (runs on this server only, '

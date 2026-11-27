@@ -5,8 +5,10 @@
 #}
 {% extends "base.html" %}
 {% block title %}About 321Theater — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
     <h1 class="page-title">About 321Theater</h1>
@@ -14,9 +16,9 @@
   </div>
   <div class="about-head-actions">
     <button type="button" class="btn btn-ghost" id="about-refresh">Check again</button>
-    <a href="{{ url_for('settings') }}" class="btn btn-ghost">← Settings</a>
   </div>
 </div>
+{{ settings_nav_open('about') }}
 
 <p class="text-dim about-checked" id="about-checked" role="status">Checking this server… (a few seconds)</p>
 
@@ -222,4 +224,5 @@
   load(false);
 })();
 </script>
+{{ settings_nav_close() }}
 {% endblock %}

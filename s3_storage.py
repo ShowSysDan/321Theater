@@ -237,7 +237,7 @@ def test_connection() -> dict:
     source = cfg.get('s3_source', 'ini')
     if not is_configured():
         where = ('.env (S3_*) / db_config.ini' if source == 'ini'
-                 else 'Settings → System → Database → File Storage')
+                 else 'Settings → Database → File Storage')
         return {'success': False, 'message': f'S3 storage not configured in {where}.',
                 'endpoint': cfg.get('s3_endpoint', ''), 'bucket': bucket,
                 'source': source, 'endpoints': []}

@@ -5,17 +5,19 @@
 #}
 {% extends "base.html" %}
 {% block title %}PDF Form Templates — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
-    <a href="{{ url_for('settings') }}" class="back-link">← All Settings</a>
     <h1 class="page-title">PDF Form Templates</h1>
     <p class="page-sub">
       Fillable PDFs for <code>pdf_form</code> advance fields: upload a PDF and place its fields.
     </p>
   </div>
 </div>
+{{ settings_nav_open('fields') }}
 
 <div class="form-section">
   <div class="form-section-header">
@@ -119,4 +121,5 @@ async function deletePdfTemplate(tid) {
   else alert(j.error || 'Delete failed.');
 }
 </script>
+{{ settings_nav_close() }}
 {% endblock %}

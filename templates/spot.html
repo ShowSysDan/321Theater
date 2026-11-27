@@ -5,8 +5,10 @@
 #}
 {% extends "base.html" %}
 {% block title %}Spot Sound Levels — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
     <h1 class="page-title">Spot Sound Levels</h1>
@@ -20,11 +22,11 @@
     </p>
   </div>
   <div style="display:flex;gap:8px;flex-wrap:wrap">
-    <a href="{{ url_for('settings') }}#modules" class="btn btn-ghost">← Modules</a>
     <button class="btn btn-ghost" type="button" onclick="spotTest(this)">Test Connection</button>
     <button class="btn btn-primary" type="button" onclick="spotRunNow(this)" {% if not module_on %}disabled title="Turn the module on first"{% endif %}>⟳ Pull Due Now</button>
   </div>
 </div>
+{{ settings_nav_open('modules') }}
 
 {% if not module_on %}
 <div class="form-section" style="border-left:3px solid var(--red)">
@@ -367,4 +369,5 @@
   spotLoadQueue();
 })();
 </script>
+{{ settings_nav_close() }}
 {% endblock %}

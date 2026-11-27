@@ -3638,3 +3638,49 @@ a.app-version:hover { text-decoration: underline; }
 .rd-form-msg { min-height: 18px; font-size: 12.5px; margin: 12px 0 6px; }
 .rd-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 html[data-theme="light"] .rd-t-good { color: #4d8a22; }
+
+/* ══ Settings menu (3.57.0) — templates/_settings_nav.html ══════════════
+   One grouped menu down the left of every Settings page. The column widens
+   by the menu's width (.settings-shell) so the content keeps the room it
+   had; under 1360px, or when hidden («), the menu folds into the one-line
+   "Settings [jump ▾]" bar above the content. */
+.main-content.settings-shell { max-width: calc(1315px + var(--snav-w) + var(--snav-gap)); }
+:root { --snav-w: 212px; --snav-gap: 28px; }
+.settings-layout { display: grid; grid-template-columns: var(--snav-w) minmax(0, 1fr); gap: var(--snav-gap); align-items: start; }
+.settings-main { min-width: 0; }
+.snav { position: sticky; top: var(--snav-top, 132px); max-height: calc(100vh - var(--snav-top, 132px) - 16px);
+  display: flex; flex-direction: column; min-height: 0; }
+.snav-top { display: flex; gap: 6px; margin-bottom: 6px; }
+.snav-find { flex: 1; min-width: 0; font: inherit; font-size: 12.5px; padding: 6px 9px; border-radius: 8px;
+  border: 1px solid var(--border-light); background: var(--bg-card); color: var(--text); }
+.snav-find:focus { outline: none; border-color: var(--accent); }
+.snav-hide, .snav-show { flex-shrink: 0; width: 28px; border-radius: 8px; border: 1px solid var(--border-light);
+  background: var(--bg-card); color: var(--text-dim); cursor: pointer; font-size: 13px; line-height: 1; padding: 0; }
+.snav-hide:hover, .snav-show:hover { color: var(--text); background: var(--bg-hover); }
+.snav-list { overflow-y: auto; overscroll-behavior: contain; padding-right: 2px; padding-bottom: 8px; }
+.snav-grp { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--text-muted); padding: 10px 10px 2px; }
+.snav-group:first-child .snav-grp { padding-top: 4px; }
+.snav-item { display: flex; align-items: center; gap: 8px; position: relative; padding: 4px 10px; border-radius: 7px;
+  color: var(--text); text-decoration: none; font-size: 13px; line-height: 1.35; }
+.snav-item:hover { background: var(--bg-hover); color: var(--ink); }
+.snav-item.active { background: rgba(245,127,32,.12); color: var(--ink); font-weight: 600; }
+.snav-item.active::before { content: ""; position: absolute; left: 0; top: 5px; bottom: 5px; width: 3px; border-radius: 2px; background: var(--accent); }
+.snav-item:focus-visible, .snav-find:focus-visible, .snav-hide:focus-visible, .snav-show:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.snav-badge { margin-left: auto; background: var(--accent); color: #000; border-radius: 99px; font-size: 10px; font-weight: 600; padding: 1px 6px; }
+.snav-none { color: var(--text-muted); font-size: 12px; padding: 6px 10px; }
+.snav-jump { display: none; align-items: center; gap: 8px; margin-bottom: 16px; }
+.snav-jump label { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted); }
+.snav-jump select { width: auto; min-width: 220px; max-width: 100%; }
+.snav-jump .snav-show { height: 30px; }
+html.snav-hidden .settings-layout { grid-template-columns: minmax(0, 1fr); }
+html.snav-hidden .snav { display: none; }
+html.snav-hidden .snav-jump { display: flex; }
+html.snav-hidden .main-content.settings-shell { max-width: 1315px; }
+@media (max-width: 1360px) {
+  .settings-layout { grid-template-columns: minmax(0, 1fr); }
+  .snav { display: none; }
+  .snav-jump { display: flex; }
+  .snav-jump .snav-show { display: none; }
+  .main-content.settings-shell { max-width: 1315px; }
+}

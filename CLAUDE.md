@@ -232,6 +232,27 @@ killing it alone orphaned soffice.bin at full CPU); at most `_LO_SLOTS` (2)
 per worker. Never call soffice any other way, and never `preexec_fn` (unsafe
 in threaded workers).
 
+## Settings menu (3.57.0) — ONE grouped menu, nothing nested
+- `templates/_settings_nav.html` is THE Settings navigation: groups You /
+  People / Shows & Paperwork / Communication / Features / Activity / Server.
+  Each entry = (key, label, href, in-page?, visible, description, search
+  words); visibility mirrors the route's own rule (display only). The old
+  22-tab strip and the System sub-tab row are gone; every former System
+  pane is a top-level item. Pane keys = `#hash`es, unchanged (`#system` is
+  an alias for `#messages`), so old links keep working.
+- settings.html: `switchSettingsTab(name)` is the one pane switcher (list
+  `ALL_STABS`; loaders per pane live there); `switchSystemTab` is an alias.
+  A new pane = a `stab-<key>` div + its key in `ALL_STABS` + an entry in
+  the menu. A new separate Settings page = an entry + `{% block main_class
+  %} settings-shell{% endblock %}` + `settings_nav_open('<key>')` right
+  after its `.page-header` and `settings_nav_close()` at the end of its
+  content block; no "← Settings" button.
+- Width: `.settings-shell` widens `.main-content` by the menu's width so
+  content keeps its 1315px. Under 1360px, on phones (mobile.css), or when
+  hidden with « (localStorage `settings.navHidden`), the menu folds into
+  the one-line "Settings [jump ▾]" select above the content.
+- "God Mode" is labelled **Who's Online** (pane key stays `godmode`).
+
 ## Settings → About 321Theater + server dependencies (3.50.0)
 - `/settings/about` (`about_page`, `templates/about.html`, admin) is a shell;
   its data is `/settings/about/data` (`about_data` → `_about_build()`),
@@ -713,11 +734,11 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   default), toggled at runtime by an admin (`GET/POST /settings/modules`,
   syslog `MODULE_TOGGLE`) — no restart, all instances. A disabled module's
   routes 404 (checked per request) and its UI hides; data is always kept.
-- Settings → **Modules** is a top-level tab (3.30.0; God Mode sits beside
-  Audit Log the same way): each entry's `settings_endpoint` gives an "Open
-  settings →" child page (Piano Tuning, Spot); `APP_INTEGRATIONS` lists
-  non-toggle integrations (Prism) the same way. A new module with its own
-  page sets `settings_endpoint`, and that page links back to `/settings#modules`.
+- Settings → **Modules** (Features group of the Settings menu): each
+  entry's `settings_endpoint` gives an "Open settings →" child page (Piano
+  Tuning, Spot); `APP_INTEGRATIONS` lists non-toggle integrations (Prism)
+  the same way. A module's own settings page wraps itself in the Settings
+  menu with `settings_nav_open('modules')` (see "Settings menu").
 - First module: **Security Sign-In Sheets** (`security_module.py`, 2.41.0;
   key `security_signin`, default ON). Sandboxed like Prism/Snapshots: one
   `register(app, **deps)` call, owns only `security_signin_names` (included
@@ -2048,7 +2069,7 @@ in full. Module key `projects`, default OFF.
   `/data`, `/show/<id>` (GETs, side-effect free), `/preview` (POST, unsaved
   knobs, writes nothing), `/config` (POST save / `{reset:true}`; audit
   SETTINGS_CHANGE, syslog READINESS_CONFIG). All `@admin_required`; the only
-  entry point is the Settings tab-strip link. No show-page / board / nav
+  entry point is the Settings menu (Features → Readiness). No show-page / board / nav
   surface until the owner asks (rollout: APP_MODULES key, then show card).
 - `readiness.py` is PURE (never imports app.py, no DB, never raises):
   `DEFAULTS` / `RANGES` / `PENALTY_CODES`, `clean_knobs(raw, strict)`,

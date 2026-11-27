@@ -5,8 +5,10 @@
 #}
 {% extends "base.html" %}
 {% block title %}Prism Sync — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
     <h1 class="page-title">Prism Sync</h1>
@@ -20,7 +22,6 @@
     </p>
   </div>
   <div style="display:flex;gap:8px;flex-wrap:wrap">
-    <a href="{{ url_for('settings') }}#modules" class="btn btn-ghost">← Modules</a>
     <button class="btn btn-ghost" title="Fetch the next 7 days live and show the raw request and response. Changes nothing."
             onclick="rawApiFetch(this)">Raw API Fetch</button>
     <button class="btn btn-ghost" onclick="testConnection(this)">Test Connection</button>
@@ -31,6 +32,7 @@
     </button>
   </div>
 </div>
+{{ settings_nav_open('modules') }}
 
 <div class="form-section" style="border-left:3px solid var(--accent)">
   <div class="form-section-body">
@@ -664,4 +666,5 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') hideRaw(); }
 
 filterEvents();
 </script>
+{{ settings_nav_close() }}
 {% endblock %}

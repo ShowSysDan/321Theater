@@ -5,18 +5,20 @@
 #}
 {% extends "base.html" %}
 {% block title %}Audit Log — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
     <h1 class="page-title">Audit Log</h1>
     <p class="page-sub">History of user actions — {{ total }} entries</p>
   </div>
   <div style="display:flex;gap:8px;flex-wrap:wrap">
-    <a href="{{ url_for('settings') }}#godmode" class="btn btn-secondary" title="Who is signed in and what they're viewing right now">God Mode</a>
-    <a href="{{ url_for('settings') }}" class="btn btn-secondary">← Settings</a>
+    <a href="{{ url_for('settings') }}#godmode" class="btn btn-secondary" title="Who is signed in and what they're viewing right now">Who's Online</a>
   </div>
 </div>
+{{ settings_nav_open('audit') }}
 
 {# ── Filters ──────────────────────────────────────────────────────────────── #}
 <form method="get" action="{{ url_for('audit_log_view') }}" class="form-row cols-5 align-end" style="margin-bottom:1.5rem">
@@ -236,4 +238,5 @@ async function undoAudit(id, action) {
   }
 }
 </script>
+{{ settings_nav_close() }}
 {% endblock %}
