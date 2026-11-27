@@ -82,6 +82,13 @@
     <div class="kpi"><div class="v">{{ labor_total }}</div><div class="l">Settled labor</div></div>
     <div class="kpi"><div class="v">{{ labor_hours }}</div><div class="l">Settled hours</div></div>
     {% endif %}
+    {% if show_assets %}
+    <div class="kpi"><div class="v">{{ gear_total }}</div><div class="l">In-house gear</div></div>
+    <div class="kpi"><div class="v">{{ ext_total }}</div><div class="l">External rentals</div></div>
+    {% endif %}
+    {% if show_money %}
+    <div class="kpi"><div class="v">{{ billed_total }}</div><div class="l">Billed total</div></div>
+    {% endif %}
   </div>
 
   {% if week.headline %}<div class="headline">{{ week.headline }}</div>{% endif %}
@@ -117,7 +124,7 @@
   <table>
     <thead><tr>
       <th>Show</th><th>Venue</th><th>Dates</th><th class="num">Perfs</th>
-      {% if with_labor %}<th class="num">Labor</th>{% endif %}
+      {% if show_money %}<th class="num">Billed</th>{% endif %}
       <th>How it went</th><th>Issues</th>
     </tr></thead>
     <tbody>
@@ -127,7 +134,7 @@
         <td>{{ r.venue or '—' }}</td>
         <td class="nowrap">{{ r.dates }}</td>
         <td class="num">{{ r.perfs }}</td>
-        {% if with_labor %}<td class="num">{{ r.labor }}</td>{% endif %}
+        {% if show_money %}<td class="num nowrap"><strong>{{ r.billed }}</strong>{% for p in r.billed_parts %}<div class="muted">{{ p }}</div>{% endfor %}</td>{% endif %}
         <td>{% if r.ai_failed %}<span class="muted">{{ r.one_liner or '—' }}</span>{% else %}{{ r.one_liner }}{% endif %}{% if r.peak_leq is not none %}<div class="muted">Peak Leq {{ r.peak_leq }} dB</div>{% endif %}</td>
         <td>{% for i in r.issues %}<span class="issue-line"><span class="dot {{ i.severity }}"></span>{{ i.text }}</span>{% else %}<span class="muted">—</span>{% endfor %}</td>
       </tr>

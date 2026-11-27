@@ -1020,7 +1020,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.57.0'
+APP_VERSION = '3.58.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -32014,6 +32014,19 @@ def _report_externals(db, show_ids):
     return out
 
 
+def _report_rental_totals(db, show_ids):
+    """{show_id: (in-house gear $, external rentals $)} — the same lines and
+    math as the Reports overview (non-hidden lines at locked price × qty;
+    external rentals without piano lines). Used by the weekly AI summary."""
+    out = {}
+    for r in _report_asset_lines(db, show_ids):
+        a = out.setdefault(r['show_id'], [0.0, 0.0])
+        a[0] += float(r['locked_price'] or 0) * int(r['quantity'] or 1)
+    for sid, (e, _p) in _report_externals(db, show_ids).items():
+        out.setdefault(sid, [0.0, 0.0])[1] += e
+    return {k: (v[0], v[1]) for k, v in out.items()}
+
+
 def _report_labor_billed(db, shows):
     """{show_id: billed labor $} for SETTLED shows (settlement engine)."""
     out = {}
@@ -34414,6 +34427,8 @@ ai_module.register(
     as_date=_as_date,
     can_view_reports=_can_view_reports,
     can_report_labor=_can_report_labor,
+    can_report_assets=_can_report_assets,
+    asset_totals=_report_rental_totals,
     get_accessible_shows=get_accessible_shows,
     calc_post_show_labor_cost=_calc_post_show_labor_cost,
     unsettled_show_ids=_unsettled_show_ids,

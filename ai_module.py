@@ -41,6 +41,14 @@ The rules (keep every one):
   text. A run has a 30-min budget: past it the rest falls back (partial),
   it never fails. Model output is shared by model_hash (labor-free), so the
   same week with / without labor (or the e-mail) runs the model once.
+* Rental $ (3.58.0): every weekly run's facts carry billed in-house gear and
+  external rentals per show (app.py `_report_rental_totals`, the Reports'
+  own reader). Never sent to the model; the PDF prints them only when the
+  VIEWER may see asset $ (`can_report_assets`), never in the e-mail.
+* Transcripts (3.58.0): every model call (`_chat`) is recorded on the job
+  (`transcript_json`: what was sent, the answer, time, error) for Settings →
+  AI → History, admin only. Trimmed after _TX_KEEP_DAYS, dropped by
+  on_show_delete, never logged or put in a URL.
 * The weekly e-mail is leader-gated, off by default, claimed once per week
   (ai_weekly_email_log, INSERT … ON CONFLICT DO NOTHING) before anything is
   enqueued, and delivered once (status queued → sending is the claim).
@@ -585,6 +593,48 @@ def _canceller(job, every=5.0):
     return check
 
 
+# ── transcript (3.58.0): what was sent to the model and what it answered ─────
+# Kept on the job row (ai_jobs.transcript_json), shown only to admins in
+# Settings → AI → History, trimmed after _TX_KEEP_DAYS and dropped with a
+# deleted show (on_show_delete). Never logged, never in a URL.
+_TX_MSG_MAX = 60000        # characters kept per message / reply
+_TX_TOTAL_MAX = 3000000    # characters kept per job
+_TX_KEEP_DAYS = 30
+
+
+def _tx_cut(t):
+    t = '' if t is None else str(t)
+    return t if len(t) <= _TX_MSG_MAX else t[:_TX_MSG_MAX] + f'\n…[{len(t) - _TX_MSG_MAX} more characters not kept]'
+
+
+def _tx_add(job, step, messages, reply=None, ms=0, error=None):
+    tx = job.setdefault('_tx', [])
+    ent = {'step': str(step)[:200], 'ms': int(ms), 'at': datetime.now().isoformat(timespec='seconds'),
+           'sent': [{'role': str(m.get('role') or ''), 'content': _tx_cut(m.get('content'))}
+                    for m in messages or []],
+           'reply': None if reply is None else _tx_cut(reply), 'error': error}
+    n = len(json.dumps(ent, default=str))
+    if job.get('_tx_size', 0) + n > _TX_TOTAL_MAX:
+        ent = {'step': ent['step'], 'ms': ent['ms'], 'at': ent['at'], 'sent': [], 'reply': None,
+               'error': error, 'omitted': True}
+        n = 200
+    job['_tx_size'] = job.get('_tx_size', 0) + n
+    tx.append(ent)
+
+
+def _chat(job, step, messages, **kw):
+    """oc.chat for this job, recorded in its transcript (errors too)."""
+    t = time.monotonic()
+    try:
+        raw = oc.chat(ollama_url(), job['model'] or model(), messages,
+                      should_cancel=_canceller(job), **kw)
+    except oc.OllamaError as e:
+        _tx_add(job, step, messages, None, (time.monotonic() - t) * 1000, error=e.code)
+        raise
+    _tx_add(job, step, messages, raw, (time.monotonic() - t) * 1000)
+    return raw
+
+
 def _finish(job, status, **cols):
     allowed = {'result_json', 'partial', 'error_code', 'message', 'stage', 'progress_done'}
     sets = ["status=%s", "finished_at=NOW()", "payload_json=NULL"]
@@ -593,6 +643,9 @@ def _finish(job, status, **cols):
         if k in allowed:
             sets.append(f'{k}=%s')
             params.append(v)
+    if job.get('_tx'):
+        sets.append('transcript_json=%s')
+        params.append(json.dumps(job['_tx'], default=str))
     db = _d['get_db']()
     try:
         _guard_update(db, job, ', '.join(sets), params)
@@ -669,9 +722,8 @@ def _exec_extract(job):
     payload = json.loads(job['payload_json'] or '{}')
     fields = payload.get('fields') or {}
     _progress(job, stage='The AI model is reading the document')
-    raw = oc.chat(ollama_url(), job['model'] or model(), payload.get('messages') or [],
-                  deadline_s=240, first_byte_s=200, max_bytes=262144,
-                  should_cancel=_canceller(job))
+    raw = _chat(job, 'AI Extract: ' + (payload.get('document') or 'document'),
+                payload.get('messages') or [], deadline_s=240, first_byte_s=200, max_bytes=262144)
     try:
         extracted = json.loads(_strip_fences(raw))
         if not isinstance(extracted, dict):
@@ -1062,6 +1114,11 @@ def build_inputs(db, start, end, with_labor, access=None):
             (ids, ids)).fetchall():
         names.setdefault(r['show_id'], set()).add(r['name'])
     unsettled = _d['unsettled_show_ids'](db, ids)
+    try:
+        gear = _d['asset_totals'](db, ids)
+    except Exception as e:
+        gear = {}
+        _log().warning(f'AI_SUMMARY_ASSETS_FAILED err={type(e).__name__}')
     pms = _d['pm_contacts_many'](db, ids)
     spot_on = _d['module_enabled']('spot')
     total_perfs = 0
@@ -1090,6 +1147,11 @@ def build_inputs(db, start, end, with_labor, access=None):
                                              and not l.get('is_day_subtotal')), 2)
             except Exception as e:
                 _log().warning(f'AI_SUMMARY_LABOR_FAILED show_id={sid} err={type(e).__name__}')
+        # Rental $ (3.58.0): billed in-house gear and external rentals, from
+        # the same reader the Reports use. Facts only, never sent to the
+        # model; the PDF prints them only for viewers who can see asset $.
+        a_in, a_ext = gear.get(sid, (0.0, 0.0))
+        f['assets_in'], f['assets_ext'] = round(a_in, 2), round(a_ext, 2)
         if spot_on:
             try:
                 import spot_module
@@ -1211,7 +1273,7 @@ def _complete_from(db, jid, src, payload, with_labor):
                (json.dumps(res, default=str), n, n, res['model'], jid))
 
 
-def _ask(job, messages, validator, deadline):
+def _ask(job, messages, validator, deadline, step='AI call'):
     """(validated dict or None, calls). One retry on bad JSON, inside the
     same `deadline` seconds. An Ollama error or timeout on this call → None
     (the caller falls back); unreachable (nothing delivered) or cancelled
@@ -1219,8 +1281,7 @@ def _ask(job, messages, validator, deadline):
     calls = 0
     end = time.monotonic() + deadline
     try:
-        raw = oc.chat(ollama_url(), job['model'] or model(), messages, deadline_s=deadline,
-                      max_bytes=65536, should_cancel=_canceller(job))
+        raw = _chat(job, step, messages, deadline_s=deadline, max_bytes=65536)
         calls += 1
         v = validator(_parse(raw))
         if v:
@@ -1230,8 +1291,8 @@ def _ask(job, messages, validator, deadline):
             return None, calls
         msgs = messages + [{'role': 'assistant', 'content': (raw or '')[:4000]},
                            {'role': 'user', 'content': _RETRY_MSG}]
-        raw = oc.chat(ollama_url(), job['model'] or model(), msgs, deadline_s=left,
-                      max_bytes=65536, should_cancel=_canceller(job))
+        raw = _chat(job, step + ' (retry: the first answer was not usable)', msgs,
+                    deadline_s=left, max_bytes=65536)
         calls += 1
         return validator(_parse(raw)), calls
     except oc.OllamaUnavailable:
@@ -1300,7 +1361,8 @@ def _exec_weekly(job, t0):
         budget = min(150.0, left() - _REDUCE_RESERVE_S)
         res, c = (None, 0) if budget < 20 else _ask(
             job, [{'role': 'system', 'content': _WS_SHOW_PROMPT},
-                  {'role': 'user', 'content': dg['user']}], validate_show, budget)
+                  {'role': 'user', 'content': dg['user']}], validate_show, budget,
+            step='Show summary: ' + str((facts.get(str(sid)) or {}).get('name') or f'Show #{sid}'))
         calls += c
         if not res:
             partial = 1
@@ -1314,7 +1376,8 @@ def _exec_weekly(job, t0):
     if any(s.get('ai') for s in shows.values()) and left() >= 30:
         week, c = _ask(job, [{'role': 'system', 'content': _WS_WEEK_PROMPT},
                              {'role': 'user', 'content': _reduce_input(order, shows, facts, counts)}],
-                       lambda d: validate_week(d, valid), min(180.0, left()))
+                       lambda d: validate_week(d, valid), min(180.0, left()),
+                       step='Weekly summary (all shows)')
         calls += c
     if not week:
         if any(s.get('ai') for s in shows.values()):
@@ -1533,7 +1596,7 @@ def _weekly_pdf_view(run_id):
     r = _load_run(run_id, _RUN_COLS + ', result_json')
     if r['status'] != 'done' or not r['result_json']:
         abort(404)
-    pdf = build_pdf(json.loads(r['result_json']))
+    pdf = build_pdf(json.loads(r['result_json']), show_assets=_d['can_report_assets']())
     _log().info(f"AI_SUMMARY_PDF job={run_id} by={session.get('user_id')}")
     fname = f"weekly-summary-{r['period_end'].isoformat() if r['period_end'] else run_id}.pdf"
     return Response(pdf, mimetype='application/pdf',
@@ -1543,7 +1606,7 @@ def _weekly_pdf_view(run_id):
 
 # ── PDF ───────────────────────────────────────────────────────────────────────
 
-def _pdf_context(res):
+def _pdf_context(res, show_assets=False):
     as_date = _d['as_date']
     facts, shows, week = res.get('facts') or {}, res.get('shows') or {}, res.get('week') or {}
     order = [str(i) for i in res.get('order') or []]
@@ -1555,6 +1618,12 @@ def _pdf_context(res):
     rows = []
     sev = {'high': 0, 'medium': 0, 'low': 0}
     labor_total, labor_hours = 0.0, 0.0
+    # Rental $ only where the stored facts carry it (runs from 3.58.0 on).
+    show_assets = bool(show_assets) and any('assets_in' in (facts.get(k) or {}) for k in order)
+    gear_total, ext_total, billed_total = 0.0, 0.0, 0.0
+
+    def money(v):
+        return f'${v:,.2f}'
     for sid in order:
         f, s = facts.get(sid) or {}, shows.get(sid) or {}
         for it in s.get('issues', []):
@@ -1562,7 +1631,23 @@ def _pdf_context(res):
         if wl and f.get('settled') and f.get('labor_total') is not None:
             labor_total += float(f['labor_total'])
             labor_hours += float(f.get('labor_hours') or 0)
-        rows.append({'name': f.get('name', ''), 'venue': f.get('venue', ''), 'dates': f.get('dates', ''),
+        lab = float(f['labor_total']) if (wl and f.get('labor_total') is not None) else None
+        gin, gext = float(f.get('assets_in') or 0), float(f.get('assets_ext') or 0)
+        billed = (gin + gext if show_assets else 0.0) + (lab or 0.0)
+        if show_assets:
+            gear_total += gin
+            ext_total += gext
+        billed_total += billed
+        parts = []
+        if show_assets:
+            parts.append(f'Gear {money(gin)}')
+            if gext:
+                parts.append(f'External {money(gext)}')
+        if wl:
+            parts.append(f'Labor {money(lab)}' if lab is not None
+                         else ('Labor not settled' if not f.get('settled') else 'Labor —'))
+        rows.append({'billed': money(billed), 'billed_parts': parts,
+                     'name': f.get('name', ''), 'venue': f.get('venue', ''), 'dates': f.get('dates', ''),
                      'perfs': len(f.get('perfs') or []), 'pm': f.get('pm', ''),
                      'settled': f.get('settled'),
                      'labor': (f"${float(f['labor_total']):,.2f}" if f.get('labor_total') is not None
@@ -1576,6 +1661,8 @@ def _pdf_context(res):
         'generated': res.get('generated_at', '').replace('T', ' '), 'model': res.get('model', ''),
         'week': week, 'rows': rows, 'with_labor': wl, 'sev': sev, 'counts': counts,
         'labor_total': f'${labor_total:,.2f}', 'labor_hours': f'{labor_hours:,.1f}',
+        'show_assets': show_assets, 'show_money': show_assets or wl,
+        'gear_total': money(gear_total), 'ext_total': money(ext_total), 'billed_total': money(billed_total),
         'unsettled': [r['name'] for r in rows if not r['settled']],
         'issues': [dict(i, shows=label(i.get('show_ids'))) for i in week.get('issues', [])],
         'highlights': [dict(i, shows=label(i.get('show_ids'))) for i in week.get('highlights', [])],
@@ -1585,12 +1672,13 @@ def _pdf_context(res):
     }
 
 
-def build_pdf(res):
+def build_pdf(res, show_assets=False):
     """One-page Letter PDF from a stored result (no model call, nothing
     written). Condenses in up to three steps, then lets the show table
-    continue on page 2 — never drops anything."""
+    continue on page 2 — never drops anything. show_assets: print rental $
+    (the viewer may see asset $; never for the weekly e-mail)."""
     from weasyprint import HTML
-    ctx = _pdf_context(res)
+    ctx = _pdf_context(res, show_assets)
     venue = ctx['venues'][0] if len(ctx['venues']) == 1 else ''
     db = _d['get_db']()
     try:
@@ -1784,22 +1872,24 @@ def on_show_delete(db, show_id):
     db.execute(
         "UPDATE ai_jobs SET status='cancelled', stage='Cancelled', finished_at=NOW(), "
         " cancel_requested=1, payload_json=NULL, result_json=NULL, input_hash=NULL, "
-        " model_hash=NULL, message='A show in this run was deleted.' "
+        " model_hash=NULL, transcript_json=NULL, message='A show in this run was deleted.' "
         f"WHERE status IN ('queued', 'running') AND {hit}", args)
     db.execute(
         "UPDATE ai_jobs SET status=CASE WHEN status='done' THEN 'error' ELSE status END, "
         " error_code=CASE WHEN status='done' THEN 'show_deleted' ELSE error_code END, "
         " message=CASE WHEN status='done' THEN 'A show in this summary was deleted. Run it again.' "
         "              ELSE message END, "
-        " payload_json=NULL, result_json=NULL, input_hash=NULL, model_hash=NULL "
+        " payload_json=NULL, result_json=NULL, input_hash=NULL, model_hash=NULL, transcript_json=NULL "
         f"WHERE status NOT IN ('queued', 'running') AND {hit} "
         " AND (result_json IS NOT NULL OR payload_json IS NOT NULL OR status='done' "
-        "      OR input_hash IS NOT NULL OR model_hash IS NOT NULL)", args)
+        "      OR input_hash IS NOT NULL OR model_hash IS NOT NULL OR transcript_json IS NOT NULL)", args)
 
 
 # ── housekeeping (from app.py's hourly maintenance) ───────────────────────────
 
 def hourly_trim(db):
+    db.execute("UPDATE ai_jobs SET transcript_json=NULL WHERE transcript_json IS NOT NULL "
+               "AND COALESCE(finished_at, created_at) < NOW() - %s * INTERVAL '1 day'", (_TX_KEEP_DAYS,))
     db.execute("DELETE FROM ai_sessions WHERE started_at < NOW() - INTERVAL '30 days'")
     db.execute("UPDATE ai_jobs SET payload_json=NULL WHERE payload_json IS NOT NULL "
                "AND status NOT IN ('queued', 'running')")
@@ -1816,6 +1906,87 @@ def hourly_trim(db):
 
 def install_command():
     return f"cd {_d['app_dir']} && sudo bash install.sh --with-ollama"
+
+
+# ── Settings → AI → History (3.58.0, admin) ──────────────────────────────────
+
+_HIST_KINDS = {'extract': 'AI Extract', WEEKLY: 'Weekly summary'}
+
+
+def _hist_row(r):
+    def secs(a, b):
+        try:
+            return int((b - a).total_seconds()) if a and b else None
+        except TypeError:
+            return None
+    what = (r['show_name'] or (f"Show #{r['show_id']}" if r['show_id'] else '')) if r['kind'] == 'extract' \
+        else fmt_range(r['period_start'], r['period_end'])
+    return {'id': r['id'], 'kind': r['kind'], 'kind_label': _HIST_KINDS.get(r['kind'], r['kind']),
+            'what': what, 'show_id': r['show_id'], 'status': r['status'], 'partial': bool(r['partial']),
+            'auto': bool(r['auto']), 'with_labor': bool(r['with_labor']),
+            'by': r['by_name'] or ('Weekly e-mail' if r['auto'] else ''),
+            'server': r['claimed_by'] or '', 'model': r['model'] or '',
+            'error': r['error_code'] or '', 'message': r['message'] or '',
+            'has_transcript': bool(r['has_tx']),
+            'created_at': _d['ts_out'](r['created_at']),
+            'took_s': secs(r['started_at'], r['finished_at'])}
+
+
+_HIST_SQL = ("SELECT j.id, j.kind, j.status, j.partial, j.auto, j.with_labor, j.show_id, "
+             "j.period_start, j.period_end, j.claimed_by, j.model, j.error_code, j.message, "
+             "j.created_at::timestamptz AS created_at, j.started_at, j.finished_at, "
+             "(j.transcript_json IS NOT NULL) AS has_tx, s.name AS show_name, "
+             "COALESCE(NULLIF(u.display_name, ''), u.username) AS by_name "
+             "FROM ai_jobs j LEFT JOIN shows s ON s.id = j.show_id "
+             "LEFT JOIN users u ON u.id = j.requested_by ")
+
+
+def _history_view():
+    kinds = list(_HIST_KINDS)
+    from flask import request
+    k = request.args.get('kind', '')
+    if k in _HIST_KINDS:
+        kinds = [k]
+    db = _d['get_db']()
+    try:
+        rows = db.execute(_HIST_SQL + "WHERE j.test_mode = %s AND j.kind = ANY(%s) "
+                          "ORDER BY j.id DESC LIMIT 100", (_tm(), kinds)).fetchall()
+    finally:
+        db.close()
+    return jsonify({'jobs': [_hist_row(r) for r in rows], 'keep_days': _TX_KEEP_DAYS})
+
+
+def _history_job_view(job_id):
+    db = _d['get_db']()
+    try:
+        r = db.execute(_HIST_SQL + "WHERE j.id = %s AND j.test_mode = %s AND j.kind = ANY(%s)",
+                       (job_id, _tm(), list(_HIST_KINDS))).fetchone()
+        extra = db.execute('SELECT transcript_json, result_json FROM ai_jobs WHERE id = %s',
+                           (job_id,)).fetchone() if r else None
+    finally:
+        db.close()
+    if not r:
+        abort(404)
+    out = _hist_row(r)
+    try:
+        out['steps'] = json.loads(extra['transcript_json']) if extra['transcript_json'] else []
+    except ValueError:
+        out['steps'] = []
+    res = {}
+    try:
+        res = json.loads(extra['result_json']) if extra['result_json'] else {}
+    except ValueError:
+        pass
+    if r['kind'] == WEEKLY:
+        out['reused_from'] = res.get('reused_from')
+        out['pdf'] = (f"/reports/weekly-summary/{r['id']}.pdf"
+                      if r['status'] == 'done' and extra['result_json'] else '')
+    else:
+        sug = res.get('suggestions') or {}
+        out['found'] = [{'label': v.get('label') or k, 'value': v.get('value') or ''}
+                        for k, v in sug.items()][:200]
+    _log().info(f"AI_HISTORY_VIEW job={job_id} by={session.get('user_id')}")
+    return jsonify(out)
 
 
 def _status_view():
@@ -1961,7 +2132,8 @@ def _email_save_view():
 def register(app, **deps):
     """deps: get_db, get_app_setting, syslog_logger,
     login_required, admin_required, test_mode, am_i_leader, json_obj, ts_out,
-    as_date, can_view_reports, can_report_labor, get_accessible_shows,
+    as_date, can_view_reports, can_report_labor, can_report_assets, asset_totals,
+    get_accessible_shows,
     calc_post_show_labor_cost, unsettled_show_ids, pm_contacts_many,
     module_enabled, wp_font_config, get_logo_for_venue, get_venue_pdf_colors,
     mail, mail_url, send_email, recipient_sql, postnotes_internal_keys,
@@ -1981,6 +2153,9 @@ def register(app, **deps):
     app.add_url_rule('/reports/weekly-summary/<int:run_id>.pdf', 'weekly_summary_pdf',
                      login(_weekly_pdf_view))
     app.add_url_rule('/settings/ai/status', 'ai_settings_status', admin(_status_view))
+    app.add_url_rule('/settings/ai/history', 'ai_settings_history', admin(_history_view))
+    app.add_url_rule('/settings/ai/history/<int:job_id>', 'ai_settings_history_job',
+                     admin(_history_job_view))
     app.add_url_rule('/settings/ai/probe', 'ai_settings_probe', admin(_probe_now_view), methods=['POST'])
     app.add_url_rule('/settings/ai/pull', 'ai_settings_pull', admin(_pull_view), methods=['POST'])
     app.add_url_rule('/settings/ai/weekly-email', 'ai_weekly_email_get', admin(_email_get_view))

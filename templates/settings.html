@@ -1121,7 +1121,7 @@
 
       <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
       <h3 class="sub-section-label">WEEKLY POST-SHOW SUMMARY EMAIL</h3>
-      <p class="field-hint">At the chosen day and hour, a summary of the previous 7 days is emailed once, with the PDF, to the people below. Labor dollars are never included, and only people with access to Reports receive it.</p>
+      <p class="field-hint">At the chosen day and hour, a summary of the previous 7 days is emailed once, with the PDF, to the people below. Labor and rental dollars are never included, and only people with access to Reports receive it.</p>
       <div class="field-group">
         <label class="checkbox-label"><input type="checkbox" id="ws-email-enabled"> Send the weekly summary</label>
       </div>
@@ -1149,7 +1149,46 @@
       <div id="ws-email-log" class="field-hint" style="margin-top:10px"></div>
     </div>
   </div>
+
+  <div class="form-section">
+    <div class="form-section-header"><span class="section-icon">◈</span> AI HISTORY
+      <span class="ml-auto" style="display:flex;gap:6px;align-items:center">
+        <select id="ai-hist-kind" class="field-input field-input-sm" style="width:auto" onchange="loadAiHistory()">
+          <option value="">All</option><option value="extract">AI Extract</option><option value="weekly_postshow">Weekly summary</option>
+        </select>
+        <button class="btn btn-ghost btn-xs" type="button" onclick="loadAiHistory()">↻ Refresh</button>
+      </span>
+    </div>
+    <div class="form-section-body">
+      <p class="field-hint" style="margin:0 0 10px">The last 100 AI jobs. <strong>View</strong> shows exactly what 321Theater sent the model and what it answered, step by step. Conversations are kept <span id="ai-hist-days">30</span> days; only admins can see them.</p>
+      <div class="ai-servers-scroll">
+        <table class="data-table" id="ai-hist-table">
+          <thead><tr><th>When</th><th>Job</th><th>For</th><th>Requested by</th><th>Result</th><th>Took</th><th>Server</th><th></th></tr></thead>
+          <tbody><tr><td colspan="8" class="text-dim">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
 </div>
+
+<div id="ai-hist-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAiHistory()">
+  <div class="modal-card" style="max-width:920px;width:calc(100vw - 32px)">
+    <div class="modal-header"><span id="ai-hist-title">AI job</span> <button type="button" onclick="closeAiHistory()" class="modal-close" aria-label="Close">×</button></div>
+    <div class="modal-body" id="ai-hist-body" style="max-height:72vh;overflow-y:auto"></div>
+  </div>
+</div>
+<style>
+  .aih-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--text-dim); margin-bottom: 12px; }
+  .aih-step { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+  .aih-step-head { display: flex; gap: 10px; align-items: baseline; padding: 8px 12px; background: var(--bg-hover); font-size: 12.5px; }
+  .aih-step-head .n { font-weight: 600; color: var(--ink); }
+  .aih-step-head .t { margin-left: auto; color: var(--text-dim); font-size: 11.5px; white-space: nowrap; }
+  .aih-part { padding: 8px 12px; border-top: 1px solid var(--border); }
+  .aih-part > summary { cursor: pointer; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted); }
+  .aih-part pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 11.5px; line-height: 1.45; max-height: 360px; overflow: auto; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+  .aih-err { color: var(--danger, #e5484d); font-size: 12px; }
+  .aih-found { font-size: 12px; margin: 0; padding-left: 18px; }
+</style>
 
 {# ── PENDING REGISTRATIONS ─────────────────────────────────────────────────── #}
 <div id="stab-registrations" class="stab-pane" style="display:none">
@@ -2870,6 +2909,7 @@ function switchSettingsTab(name) {
   if (name === 'messages')      { loadMessages(); loadMaintNotices(); }
   if (name === 'update')        detectService();
   if (name === 'branding')      loadVenueBranding();
+  if (name === 'ai')            loadAiHistory();
   if (name === 'cluster')       startClusterPolling(); else stopClusterPolling();
 }
 // Old name kept for any caller that still uses it.
@@ -6083,6 +6123,127 @@ async function pollUpdateStatus() {
     document.getElementById('update-log').innerHTML += '<div style="color:#FBBF24">Waiting for service to come back…</div>';
   }
 }
+
+/* ── Settings → AI → History (3.58.0) ───────────────────────────────
+   Everything is built with textContent: prompts and answers are user /
+   model text. */
+const _AIH_STATUS = { done: 'Done', error: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted',
+                      queued: 'Waiting', running: 'Running' };
+function _aihEl(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function _aihTook(s) { if (s == null) return '—'; return s < 60 ? s + ' s' : Math.floor(s / 60) + ' min ' + (s % 60) + ' s'; }
+function _aihWhen(iso) {
+  const d = iso ? parseServerTime(iso) : null;
+  return d && !isNaN(d) ? d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+}
+function _aihResult(j) {
+  let t = _AIH_STATUS[j.status] || j.status;
+  if (j.status === 'done' && j.partial) t += ' (partial)';
+  if (j.status !== 'done' && j.message) t += ': ' + j.message;
+  return t;
+}
+async function loadAiHistory() {
+  const tb = document.querySelector('#ai-hist-table tbody');
+  if (!tb) return;
+  const kind = document.getElementById('ai-hist-kind').value;
+  try {
+    const r = await fetch('/settings/ai/history' + (kind ? '?kind=' + encodeURIComponent(kind) : ''));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    document.getElementById('ai-hist-days').textContent = d.keep_days;
+    tb.textContent = '';
+    if (!d.jobs.length) {
+      const tr = tb.insertRow(); const td = tr.insertCell(); td.colSpan = 8; td.className = 'text-dim'; td.textContent = 'No AI jobs yet.';
+      return;
+    }
+    d.jobs.forEach(j => {
+      const tr = tb.insertRow();
+      tr.insertCell().textContent = _aihWhen(j.created_at);
+      tr.insertCell().textContent = j.kind_label + (j.with_labor ? ' · with labor $' : '');
+      tr.insertCell().textContent = j.what || '—';
+      tr.insertCell().textContent = j.by || '—';
+      const res = tr.insertCell(); res.textContent = _aihResult(j);
+      if (j.status === 'error' || j.status === 'interrupted') res.style.color = 'var(--danger, #e5484d)';
+      tr.insertCell().textContent = _aihTook(j.took_s);
+      tr.insertCell().textContent = j.server || '—';
+      const c = tr.insertCell();
+      const b = _aihEl('button', 'btn btn-ghost btn-xs', 'View');
+      b.type = 'button';
+      b.addEventListener('click', () => openAiHistory(j.id));
+      c.appendChild(b);
+    });
+  } catch (e) {
+    tb.textContent = '';
+    const tr = tb.insertRow(); const td = tr.insertCell(); td.colSpan = 8; td.className = 'text-dim';
+    td.textContent = 'Could not load AI history.';
+  }
+}
+const _AIH_ROLE = { system: 'Instructions sent to the model', user: 'Request sent to the model',
+                    assistant: 'The model’s earlier answer (sent back)' };
+async function openAiHistory(id) {
+  const body = document.getElementById('ai-hist-body');
+  document.getElementById('ai-hist-title').textContent = 'AI job #' + id;
+  body.textContent = 'Loading…';
+  document.getElementById('ai-hist-modal').style.display = 'flex';
+  let j;
+  try {
+    const r = await fetch('/settings/ai/history/' + encodeURIComponent(id));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    j = await r.json();
+  } catch (e) { body.textContent = 'Could not load this job.'; return; }
+  body.textContent = '';
+  document.getElementById('ai-hist-title').textContent = j.kind_label + (j.what ? ' — ' + j.what : '');
+  const meta = _aihEl('div', 'aih-meta');
+  [['Started', _aihWhen(j.created_at)], ['Requested by', j.by || '—'], ['Server', j.server || '—'],
+   ['Model', j.model || '—'], ['Took', _aihTook(j.took_s)], ['Result', _aihResult(j)]].forEach(([k, v]) => {
+    const s = _aihEl('span'); s.appendChild(_aihEl('strong', null, k + ': ')); s.appendChild(document.createTextNode(v)); meta.appendChild(s);
+  });
+  body.appendChild(meta);
+  if (j.pdf) {
+    const p = _aihEl('p', null); p.style.margin = '0 0 12px';
+    const a = _aihEl('a', 'btn btn-ghost btn-sm no-prefetch', 'Open the PDF it produced');
+    a.href = j.pdf; a.target = '_blank'; a.rel = 'noopener';
+    p.appendChild(a); body.appendChild(p);
+  }
+  if (j.reused_from) body.appendChild(_aihEl('p', 'field-hint',
+    'No model call: this run reused the AI’s answers from job #' + j.reused_from + ' (same shows and notes), with its own figures.'));
+  if (j.found && j.found.length) {
+    body.appendChild(_aihEl('div', 'sub-section-label', 'FIELDS IT FILLED'));
+    const ul = _aihEl('ul', 'aih-found');
+    j.found.forEach(f => ul.appendChild(_aihEl('li', null, f.label + ': ' + f.value)));
+    body.appendChild(ul);
+  }
+  const steps = j.steps || [];
+  if (!steps.length && !j.reused_from) {
+    body.appendChild(_aihEl('p', 'text-dim', j.has_transcript === false
+      ? 'No conversation was kept for this job (it ran before conversations were recorded, it is older than ' + document.getElementById('ai-hist-days').textContent + ' days, or it never reached the model).'
+      : 'No model calls.'));
+  }
+  steps.forEach((st, i) => {
+    const box = _aihEl('div', 'aih-step');
+    const head = _aihEl('div', 'aih-step-head');
+    head.appendChild(_aihEl('span', 'n', 'Step ' + (i + 1)));
+    head.appendChild(_aihEl('span', null, st.step || ''));
+    head.appendChild(_aihEl('span', 't', (st.ms / 1000).toFixed(1) + ' s'));
+    box.appendChild(head);
+    if (st.omitted) box.appendChild(_aihEl('div', 'aih-part text-dim', 'Not kept: this job’s conversation reached its size limit.'));
+    (st.sent || []).forEach(m => {
+      const d = _aihEl('details', 'aih-part');
+      if (m.role !== 'system') d.open = true;
+      d.appendChild(_aihEl('summary', null, _AIH_ROLE[m.role] || m.role));
+      d.appendChild(_aihEl('pre', null, m.content));
+      box.appendChild(d);
+    });
+    if (st.reply != null) {
+      const d = _aihEl('details', 'aih-part'); d.open = true;
+      d.appendChild(_aihEl('summary', null, 'What the model answered'));
+      d.appendChild(_aihEl('pre', null, st.reply));
+      box.appendChild(d);
+    }
+    if (st.error) box.appendChild(_aihEl('div', 'aih-part aih-err', 'No answer: ' + st.error.replace(/_/g, ' ')));
+    body.appendChild(box);
+  });
+}
+function closeAiHistory() { document.getElementById('ai-hist-modal').style.display = 'none'; }
 
 /* ── Feature modules on/off (Settings → Modules) ─────────────────── */
 async function loadModules() {
