@@ -49,9 +49,9 @@
           <button type="button" class="btn btn-xs btn-ghost" data-preset="next12">Next 12 months</button>
           <button type="button" class="btn btn-xs btn-ghost" data-preset="all">All time</button>
         </div>
-        <button type="button" class="btn btn-ghost btn-sm" onclick="rptRun()" title="Run this tab again with the filters above (they apply as you change them)">Refresh</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="rptRun()" title="Run this tab again with the current filters">Refresh</button>
         <button type="button" class="btn btn-ghost btn-sm" onclick="rptPdf()" title="This tab as a PDF, with the current filters">PDF</button>
-        <button type="button" class="btn btn-ghost btn-sm" onclick="rptSavedOpen()" title="Save this tab and its filters, re-open a saved report, send one to someone or pin it to a dashboard">Saved reports <span id="rs-count" class="rpt-more-count"></span></button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="rptSavedOpen()" title="Save this tab and its filters, reopen a saved report, send one or pin it to a dashboard">Saved reports <span id="rs-count" class="rpt-more-count"></span></button>
       </div>
     </div>
     {# Saved reports (3.48.0): which saved report is on screen, if any. #}
@@ -785,7 +785,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
       const {ok, d} = await wsJson('/api/reports/weekly-summary', {method: 'POST', body: JSON.stringify({end_date: end, force: !!force})});
       if (seq !== WS.seq) return;
       if (!ok) { wsMsg(d.error || 'Could not start the summary.', true); return; }
-      if (d.reused) { wsMsg(d.derived ? 'This week was already summarised by the AI — your copy (with your own figures) is listed below.' : 'Nothing changed since the last summary of this week — it is listed below.'); wsLoadRuns(); return; }
+      if (d.reused) { wsMsg(d.derived ? 'This week was already summarized — your copy is listed below.' : 'Nothing has changed since the last summary — it is listed below.'); wsLoadRuns(); return; }
       WS.run = d.run_id; wsShow({status: 'queued', stage: 'Queued', done: 0, total: 0});
       wsLoadRuns(); wsPoll(seq);
     } catch (e) { if (e.name !== 'AbortError') wsMsg('Network error.', true); }
@@ -1048,7 +1048,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
         [num(g.reduce((a, x) => a + x.lines, 0)), 'Rental lines'],
         [money(g.reduce((a, x) => a + x.assets, 0)), 'Asset revenue'],
       ]) + table('t-groups', 'Arts Groups', cols, g, {sortKey: 'total', onRow: groupDetail,
-        note: 'Click a row for every item that group rented and their shows. "Unit-days" = units × rental days. Labor counts only settled shows (Final Invoice figure).'});
+        note: 'Click a row to see what that group rented and on which shows. "Unit-days" = units × rental days. Labor counts settled shows only (Final Invoice figure).'});
     },
     async assets() {
       const head = document.getElementById('rpt-assets-filters').innerHTML;
@@ -1102,7 +1102,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
       });
       if (!_adv.field) {
         restore([]);
-        return head + '<div class="rpt-loading text-dim">Pick an advance form field to see what every show answered — e.g. <em>Runner</em>, then a venue and date range above, and <em>Answer</em> = Yes for every show that asked for one.</div>';
+        return head + '<div class="rpt-loading text-dim">Pick an advance field to see how every show answered it — e.g. <em>Runner</em> with <em>Answer</em> = Yes lists every show that asked for one.</div>';
       }
       const d = await get('/api/reports/advance-field?' + params(_advParams()));
       // Answer list = the field's own options, then anything else shows typed.
@@ -1127,10 +1127,10 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
         {key: 'updated', label: 'Last edited', fmt: v => v ? esc(localIsoDate(parseServerTime(v))) : '—',
          csv: r => r.updated ? localIsoDate(parseServerTime(r.updated)) : ''},
       ], d.rows, {sortKey: 'date',
-        note: `Shows ${_adv.answer ? `answering “${esc(_adv.answer)}”` : what}${_adv.q ? ` containing “${esc(_adv.q)}”` : ''}. Date, venue, Arts Group and More filters above apply. A multi-select matches when the answer is one of its picks; a yes/no left on “—” counts as not answered.`})
+        note: `Shows ${_adv.answer ? `answering “${esc(_adv.answer)}”` : what}${_adv.q ? ` containing “${esc(_adv.q)}”` : ''}. All filters above apply. A multi-select matches if the answer is among its picks; a yes/no left on “—” counts as not answered.`})
         + (d.values.length ? table('t-adv-values', 'Answers', [
           {key: 'value', label: 'Answer'}, {key: 'shows', label: 'Shows', num: true},
-        ], d.values, {sortKey: 'shows', note: 'Every answer given across the shows in the filter (ignores the Answer / contains pickers).'}) : '');
+        ], d.values, {sortKey: 'shows', note: 'Every answer given across the filtered shows (ignores Answer and Answer contains).'}) : '');
     },
     async items() {
       const head = document.getElementById('rpt-items-filters').innerHTML;
@@ -1148,7 +1148,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
       });
       if (!_item.types.length) {
         mount(null);
-        return head + '<div class="rpt-loading text-dim">Pick one or more items to see their usage, income and days rented, and every show that rented them — a hazer, a piano, four projectors. Pick a group to include all the items under it; then pick just some units to compare specific barcodes.</div>';
+        return head + '<div class="rpt-loading text-dim">Pick one or more items (or a whole group) to see usage, income, days rented and every show that rented them. Pick units to compare specific barcodes.</div>';
       }
       const d = await get('/api/reports/item-shows?' + params(_itemParams()));
       // The server drops ids it doesn't know — keep the URL in step.
@@ -1194,7 +1194,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
         {key: 'quantity', label: 'Qty', num: true},
         {key: 'total', label: 'Line total', num: true, fmt: v => v == null ? '<span class="sub">in system</span>' : money(v), csv: r => r.total == null ? '' : r.total},
       ], d.lines, {sortKey: 'date',
-        note: 'Direct rental lines' + (d.unit ? ' with ' + (_item.units.length === 1 ? 'this unit' : 'one of these units') + ' picked' : ', plus lines that booked a system/package containing an item (priced on the system line)') + '. The date, venue, Arts Group and More filters above still apply.'})
+        note: 'Direct rental lines' + (d.unit ? ' with ' + (_item.units.length === 1 ? 'this unit' : 'one of these units') + ' picked' : ', plus lines that booked a system/package containing an item (priced on the system line)') + '. All filters above apply.'})
         + table('t-items-co', 'By Arts Group', [
           {key: 'company', label: 'Arts Group'}, {key: 'shows', label: 'Shows', num: true},
           {key: 'lines', label: 'Lines', num: true}, {key: 'units', label: 'Units', num: true},
@@ -1244,7 +1244,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
         ...(lim ? [{key: 'over', label: `Leq ≥ ${d.limit}`, num: true}] : []),
         ...(plim ? [{key: 'peak_over', label: `Peak ≥ ${d.peak_limit}`, num: true}] : []),
       ], d.by_group, {
-        note: 'Leq = the equivalent continuous level over the measured performance — the fair “how loud was it” figure. Averages of Leq are taken on the energy scale (decibels are logarithmic), and levels in different units (dBA / dBC) are never mixed. To see what goes with louder shows, change Compare by — including any advance-sheet answer — or narrow the shows with the filters above: More filters → Had item booked (e.g. the subs), Job position or Technician (who mixed) all apply here.'})
+        note: 'Leq = the equivalent continuous level over the performance — the fair “how loud was it” figure. Leq averages use the energy scale (decibels are logarithmic), and dBA / dBC are never mixed. To see what goes with louder shows, change Compare by (any advance answer works) or use More filters — e.g. Had item booked (the subs), Job position or Technician (who mixed).'})
         + table('t-sound', 'Every performance', [
           {key: 'date', label: 'Date', sub: r => esc(r.time || '')},
           {key: 'show', label: 'Show', fmt: (v, r) => showLink(v, r.show_id), sub: r => esc(r.venue || '')},
@@ -1343,7 +1343,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
         [num(t.unfilled), 'Unfilled'],
       ]) + table('t-lines', 'Labor lines', cols, d.lines, {sortKey: 'date',
         note: (d.truncated ? '<strong>Only the first 5,000 lines are shown — narrow the filters.</strong> ' : '')
-          + 'One row per requested shift; settled shows add the settlement line\'s actual times and <em>Worked by</em> (bold when someone other than the scheduled tech worked it). Settlement-only lines (added hours, lines added at settlement) are listed too. Training shifts never bill.'});
+          + 'One row per requested shift. Settled shows add the actual times and <em>Worked by</em> (bold when it differs from the scheduled tech), plus lines added at settlement such as added hours. Training shifts never bill.'});
     },
     async breaks() {
       const min = _brk.min || '5';
@@ -1375,7 +1375,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
           {key: 'actual', label: 'On settlement', sub: r => r.actual_min ? `${r.actual_min} min` : ''},
           {key: 'diff_min', label: 'Diff (min)', num: true, fmt: diff},
         ], d.exceptions, {sortKey: 'date',
-          note: 'Compares each settled shift\'s lunches with the lunches that were scheduled when it was settled. <em>Not taken</em> = scheduled but blank on the settlement; <em>Shorter/Longer</em> = length changed by the amount above; <em>Added</em> = a lunch with none scheduled; <em>Moved</em> = same length, started 30+ min off. Shifts with no actual times (no-shows) and added-hours lines are skipped.'})
+          note: 'Compares each settled shift\'s lunches with what was scheduled at settlement. <em>Not taken</em> = scheduled but blank on the settlement; <em>Shorter/Longer</em> = length changed by the amount above; <em>Added</em> = a lunch with none scheduled; <em>Moved</em> = same length, started 30+ min off. Shifts with no actual times (no-shows) and added-hours lines are skipped.'})
         + table('t-brtech', 'By technician', gcols('tech'), d.by_tech, {sortKey: 'exceptions'})
         + table('t-brpos', 'By position', gcols('position'), d.by_position, {sortKey: 'exceptions'})
         + table('t-brshow', 'By show', gcols('show'), d.by_show, {sortKey: 'exceptions'});
@@ -1400,7 +1400,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
         {key: 'hours_diff', label: 'Hrs diff', num: true, fmt: v => v > 0 ? `<span class="rpt-up">+${num(v, 2)}</span>` : v < 0 ? `<span class="rpt-down">${num(v, 2)}</span>` : '0'},
         {key: 'added_lines', label: 'Added lines', num: true},
       ], d.shows, {sortKey: 'diff',
-        note: 'Settled shows only. Estimate = the Labor Estimate engine over the show\'s labor requests as they stand today; Settled = the Final Invoice labor (settlement engine). A jump usually means longer shifts, added hours, overtime or a higher-rate tech than estimated — open the show\'s Post-Show tab to see which lines.'});
+        note: 'Settled shows only. Estimate = the Labor Estimate for the show\'s current labor requests; Settled = the Final Invoice labor. A jump usually means longer shifts, added hours, overtime or a higher-rate tech — the show\'s Post-Show tab shows which lines.'});
     },
     async piano() {
       const d = await get('/api/reports/piano?' + params());
@@ -1437,7 +1437,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
       return `<div class="form-section rpt-section" id="ws-box">
         <div class="form-section-header"><span class="section-icon">◈</span> Weekly post-show summary</div>
         <div class="form-section-body">
-          <p class="rpt-note" style="margin-top:0">A one-page executive summary of the post-show notes and comments of every show that took place in the 7 days ending on the chosen date (test and cancelled shows left out). Written by the AI model on the theater's own server — an AI-assisted draft, so check anything important against the show's Post-Show tab. The filters above don't apply here.</p>
+          <p class="rpt-note" style="margin-top:0">A one-page summary of the post-show notes and comments for every show in the 7 days ending on the chosen date (test and cancelled shows left out). It is an AI-written draft from the theater's own server — check anything important against the show's Post-Show tab. The filters above don't apply.</p>
           <div class="rpt-filter-row" style="align-items:flex-end">
             <div class="field-group"><label class="field-label" for="ws-end">WEEK ENDING</label><input type="date" id="ws-end" class="field-input"></div>
             <div class="rpt-filter-actions">
@@ -1513,7 +1513,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
         {key: 'maintenance', label: 'Maintenance', num: true}, {key: 'logs', label: 'Log entries', num: true},
         ...(d.units.some(u => u.tunings) ? [{key: 'tunings', label: 'Piano tunings', num: true}, {key: 'last_tuned', label: 'Last tuned'}] : []),
       ], d.units, {sortKey: 'bookings', onRow: x => rptOpenItem(t.type_id, x.id),
-        note: 'Click a unit for every show it went out on. A booking counts against a unit only when that unit was picked on the show. Bookings from the general pool are counted above, not per unit.'})
+        note: 'Click a unit for every show it went out on. Only bookings with that unit picked count toward it; general-pool bookings are counted above.'})
         + `<p style="margin:10px 0 0"><button type="button" class="btn btn-sm btn-primary" onclick="rptOpenItem(${Number(t.type_id)}, '')">Every show that rented ${esc(t.type)} →</button></p>`,
         ['asset_units', {type_id: t.type_id, type_name: t.type}]);
     } catch (e) { modal(t.type, `<p style="color:#e53e3e">${esc(e.message)}</p>`); }
@@ -1713,7 +1713,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
     if (text && document.getElementById('rs-modal').style.display === 'none') alert(text);
   }
   window.rptSavedOpen = async function() {
-    if (_tab === 'weekly') { alert('The weekly summary is generated, not saved — open a past one from its list.'); return; }
+    if (_tab === 'weekly') { alert('Weekly summaries cannot be saved as reports — open a past one from the list below.'); return; }
     document.getElementById('rs-modal').style.display = 'flex';
     document.getElementById('rs-what').textContent = 'Saves: ' + describe(currentView()) + '. A named range such as “This year” stays relative; typed dates stay fixed.';
     msg('');
@@ -1785,7 +1785,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
       btn('Send to…', () => togglePanel(r, 'send'), 'Give someone their own copy of this report');
       btn('Add to dashboard…', () => togglePanel(r, 'dash'), 'Show this report as a widget on one of your dashboards');
       const del = btn('Delete', async () => {
-        if (!confirm(`Delete the saved report “${r.name}”? Copies you sent to other people stay with them. It is also taken off your dashboards.`)) return;
+        if (!confirm(`Delete the saved report “${r.name}”? It is also removed from your dashboards; copies you sent others are kept.`)) return;
         try {
           await send(`/api/reports/saved/${r.id}`, 'DELETE');
           if (RS.active && RS.active.id === r.id) rptSavedClose();
@@ -1809,7 +1809,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
   function sendPanel(r) {
     const tab = r.view.tab;
     const box = mk('div', 'rs-panel');
-    box.appendChild(mk('div', 'rpt-note', 'Each person gets their own copy in their Saved reports and a notification in their inbox. Only the tab and filters are sent — they see what their own access allows. Changes you make later are not sent along.'));
+    box.appendChild(mk('div', 'rpt-note', 'Each person gets their own copy and a notification. Only the tab and filters are sent — they see what their own access allows, and later changes are not sent.'));
     const find = mk('input', 'field-input');
     find.type = 'search'; find.placeholder = 'Search people…'; find.setAttribute('aria-label', 'Search people');
     box.appendChild(find);
@@ -1858,7 +1858,7 @@ html[data-theme="light"] .rpt-warn-text { color: #8a5a00; }
   }
   function dashPanel(r) {
     const box = mk('div', 'rs-panel');
-    box.appendChild(mk('div', 'rpt-note', 'Adds a widget to one of your dashboards showing this report’s summary and first rows, run fresh each time the dashboard opens. On a dashboard you made public, other signed-in people see it with their own access; visitors who are not signed in never do.'));
+    box.appendChild(mk('div', 'rpt-note', 'Adds a widget with this report’s summary and first rows, refreshed each time the dashboard opens. On a public dashboard, signed-in viewers see it with their own access; signed-out visitors never do.'));
     const row = mk('div', 'rs-panel-row');
     const sel = mk('select', 'field-input');
     RS.dashboards.forEach(d => { const o = mk('option', null, d.name); o.value = d.id; sel.appendChild(o); });

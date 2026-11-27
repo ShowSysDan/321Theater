@@ -346,7 +346,7 @@
 {% set can_edit = can_edit and not readonly_view %}
 <div class="page-header">
   <div>
-    <h1 class="page-title">Skill Tracker{% if readonly_view %}<span class="rv-badge" title="Your account is read-only: you can see qualifications but not change them">VIEW ONLY</span>{% endif %}</h1>
+    <h1 class="page-title">Skill Tracker{% if readonly_view %}<span class="rv-badge" title="Read-only account: you can view qualifications but not change them">VIEW ONLY</span>{% endif %}</h1>
     <p class="page-sub">Track which positions each technician is qualified for</p>
   </div>
   <div class="header-actions">
@@ -498,7 +498,7 @@
     <div class="crew-notes-section" style="padding:0 18px 18px">
       <label for="modal-training-notes">Training notes</label>
       {% if can_edit %}
-      <textarea id="modal-training-notes" placeholder="Track training progress for this technician — e.g. 'Audio console class 2 of 5 complete, next session 6/3'"></textarea>
+      <textarea id="modal-training-notes" placeholder="Training progress — e.g. 'Audio console class 2 of 5 done, next session 6/3'"></textarea>
       {% else %}
       <textarea id="modal-training-notes" readonly placeholder="No training notes."></textarea>
       {% endif %}

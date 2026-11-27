@@ -1765,6 +1765,7 @@ CREATE TABLE IF NOT EXISTS ai_jobs (
     message          TEXT,
     cancel_requested INTEGER NOT NULL DEFAULT 0,
     model_hash       TEXT,
+    transcript_json  TEXT,
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     queued_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at       TIMESTAMP,
@@ -2780,6 +2781,9 @@ def _apply_column_migrations(cur, app_schema, shared_schema, cat=None, billable_
         # Weekly summaries share model output across with/without-labor runs
         # by a hash of exactly what the model is given.
         f'ALTER TABLE "{app_schema}".ai_jobs ADD COLUMN IF NOT EXISTS model_hash TEXT',
+        # 3.58.0: what was sent to the model and what it answered, per call
+        # (Settings → AI → History, admin only; trimmed after 30 days).
+        f'ALTER TABLE "{app_schema}".ai_jobs ADD COLUMN IF NOT EXISTS transcript_json TEXT',
     ]
 
     shared_alters = [

@@ -79,7 +79,7 @@
         {% endfor %}
         {% if t.show_mode == 'event' %}<span class="today-card-tag tag-event">EVENT</span>{% endif %}
         {% if t.is_test %}<span class="today-card-tag tag-test">TEST</span>{% endif %}
-        {% if t.prism_status %}<span class="prism-tag prism-tag-{{ t.prism_status|lower|replace(' ', '') }}" style="margin-left:0" title="Prism event status — kept current by the Prism sync">{{ t.prism_status|upper }}</span>{% endif %}
+        {% if t.prism_status %}<span class="prism-tag prism-tag-{{ t.prism_status|lower|replace(' ', '') }}" style="margin-left:0" title="Prism event status (synced from Prism)">{{ t.prism_status|upper }}</span>{% endif %}
       </div>
       <div class="today-card-name">{{ t.name }}</div>
       <div class="today-card-meta">
@@ -136,7 +136,7 @@
             onclick="toggleVenue(this)" title="Show every venue">All venues</button>
     {% for venue, _ in venue_groups %}
     <button type="button" class="venue-pill" data-venue="{{ venue }}" aria-pressed="false"
-            onclick="toggleVenue(this)" title="Show only {{ venue }} (click more venues to add them)">{{ venue }}</button>
+            onclick="toggleVenue(this)" title="Show only {{ venue }} (click others to add them)">{{ venue }}</button>
     {% endfor %}
   </div>
   <div class="dash-layout-toggles" title="Show board layout (saved to your account)">
@@ -169,8 +169,8 @@
          data-is-test="{{ '1' if s.is_test else '0' }}">
         <div class="show-card-name">
           {{ s.name }}
-          {% if s.is_past %}<span class="past-badge" title="This show's dates have passed. It moves to the archive automatically on {{ s.archives_on_label }}.">PAST</span>{% endif %}
-          {% if s.prism_status %}<span class="prism-tag prism-tag-{{ s.prism_status|lower|replace(' ', '') }}" title="Prism event status — kept current by the Prism sync">{{ s.prism_status|upper }}</span>{% endif %}
+          {% if s.is_past %}<span class="past-badge" title="This show's dates have passed. It archives automatically on {{ s.archives_on_label }}.">PAST</span>{% endif %}
+          {% if s.prism_status %}<span class="prism-tag prism-tag-{{ s.prism_status|lower|replace(' ', '') }}" title="Prism event status (synced from Prism)">{{ s.prism_status|upper }}</span>{% endif %}
           {% if s.show_mode == 'event' %}<span class="event-badge" title="Event mode">EVENT</span>{% endif %}
           {% if s.is_test %}<span class="test-badge" title="Test / demo — excluded from reports">TEST</span>{% endif %}
         </div>
@@ -204,7 +204,7 @@
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
   {% if my_shows %}
   <p>You're not the production manager or a covering PM on any active show.<br>
-    <span class="text-dim" style="font-size:13px">Matched on your account's PM contact. <a href="{{ url_for('dashboard') }}">All shows →</a></span></p>
+    <span class="text-dim" style="font-size:13px">Matched by the contact linked to your account. <a href="{{ url_for('dashboard') }}">All shows →</a></span></p>
   {% else %}
   <p>No active shows.{% if not restricted %} <a href="{{ url_for('new_show') }}">Create one →</a>{% endif %}</p>
   {% endif %}

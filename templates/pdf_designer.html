@@ -5,6 +5,7 @@
 #}
 {% extends "base.html" %}
 {% block title %}PDF Designer — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block head %}
 <style>
@@ -55,18 +56,20 @@
 {% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
     <h1 class="page-title">PDF Designer</h1>
     <p class="page-sub">Section order, fields, labels and font size for each PDF type. Applies to all shows.</p>
   </div>
 </div>
+{{ settings_nav_open('pdf') }}
 
 <div class="pd-type-tabs" id="pd-type-tabs">
   {% for t in pdf_types %}
   <button type="button" class="pd-type-tab"
           data-type="{{ t }}"
-          {% if t not in enabled_types %}disabled title="Coming soon — wired in a later phase"{% endif %}>
+          {% if t not in enabled_types %}disabled title="Coming soon"{% endif %}>
     {{ t.replace('_',' ') }}
   </button>
   {% endfor %}
@@ -100,4 +103,5 @@ window.PD_FONT_CHOICES = {{ font_size_choices | tojson }};
 window.PD_ENABLED_TYPES = {{ enabled_types | tojson }};
 </script>
 <script src="{{ url_for('static', filename='js/pdf_designer.js') }}"></script>
+{{ settings_nav_close() }}
 {% endblock %}

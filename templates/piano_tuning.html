@@ -9,8 +9,8 @@
 {% block content %}
 <div class="page-header">
   <div>
-    <h1 class="page-title">Piano Tuning{% if readonly_view %}<span class="rv-badge" title="Your account is read-only: you can see every tuning, vendor and paperwork PDF, but not change them">VIEW ONLY</span>{% endif %}</h1>
-    <p class="page-sub">Tunings requested from shows, plus {% if readonly_view %}<strong>🏠 House</strong>{% else %}house{% endif %} tunings. Times go on the show's schedule and costs on its Assets tab and in Reports (on its invoices only when you tick Bill on invoices); completed tunings log to the piano's service record.</p>
+    <h1 class="page-title">Piano Tuning{% if readonly_view %}<span class="rv-badge" title="Read-only account: you can view tunings, vendors and paperwork, but not change them">VIEW ONLY</span>{% endif %}</h1>
+    <p class="page-sub">Tunings requested from shows, plus {% if readonly_view %}<strong>🏠 House</strong>{% else %}house{% endif %} tunings. Times go on the show's schedule, costs on its Assets tab and in Reports.</p>
   </div>
   <div class="header-actions">
     {% if user and user.role == 'admin' %}<a href="{{ url_for('settings') }}#modules" class="btn btn-ghost btn-sm">← Modules</a>{% endif %}
@@ -113,7 +113,7 @@
           <label style="display:flex;gap:8px;align-items:flex-start;font-size:12px;cursor:pointer">
             <input type="checkbox" id="pt-bill" style="margin-top:2px"{% if readonly_view %} disabled{% endif %}>
             <span><strong>Bill on the show's invoices</strong>
-              <span class="text-dim" style="display:block;font-size:11px;line-height:1.4">Off (normal): the cost and paperwork stay on the show's Assets tab and in Reports as a show expense, but are left off the Asset Estimate, Final Invoice and Combined Invoice — tunings are settled separately. Tick only when this tuning should be charged on the show's invoice.</span></span>
+              <span class="text-dim" style="display:block;font-size:11px;line-height:1.4">Leave off (normal) to keep the cost on the Assets tab and in Reports only. Tick to also charge it on the Asset Estimate and Final / Combined Invoice.</span></span>
           </label>
         </div>
         <div class="field-group" id="pt-paper-group">
@@ -130,7 +130,7 @@
           <textarea id="pt-mgr-notes" class="field-input field-textarea" rows="2" maxlength="4000" placeholder="Vendor confirmation, PO number…"></textarea>
         </div>
       </div>
-      <p class="text-dim pt-show-only" style="font-size:11px;margin:8px 0 0;line-height:1.45"><strong>Scheduled</strong> = sent to the vendor (a tuning date sets it); the requester is emailed. Cost and paperwork go on the show's Assets tab and Reports; they reach the invoices only with <strong>Bill on the show's invoices</strong> ticked. Cancelling removes the schedule row, cost line and paperwork.</p>
+      <p class="text-dim pt-show-only" style="font-size:11px;margin:8px 0 0;line-height:1.45"><strong>Scheduled</strong> = sent to the vendor (setting a tuning date does this); the requester is emailed. Cancelling removes the schedule row, cost line and paperwork.</p>
     </div>
     <div class="modal-footer">
       <a id="pt-show-link" class="btn btn-ghost" href="#" style="margin-right:auto">Open show →</a>
@@ -432,7 +432,7 @@
     if (RO) return;
     document.getElementById('pt-id').value = '';
     document.getElementById('pt-title').textContent = 'Add House Tuning';
-    document.getElementById('pt-show').textContent = 'Not tied to a show — maintenance, a rehearsal, a recording… It stays off every show\'s schedule and invoices; its cost counts in Reports → Piano Tuning.';
+    document.getElementById('pt-show').textContent = 'Not tied to a show (maintenance, a rehearsal, a recording…). Its cost appears only in Reports → Piano Tuning.';
     Object.values(F).forEach(el => { document.getElementById(el).value = ''; });
     document.getElementById('pt-status').value = 'scheduled';
     document.getElementById('pt-status').dataset.orig = '';
@@ -491,7 +491,7 @@
     if (payload.status === document.getElementById('pt-status').dataset.orig) delete payload.status;
     const cur = _rows.find(x => x.id == id);
     if (payload.status === 'cancelled' && cur && cur.paperwork_filename
-        && !confirm('Cancelling also removes its charge and the attached paperwork from the show. Continue?')) return;
+        && !confirm('Cancelling also removes its charge and paperwork from the show. Continue?')) return;
     const btn = document.getElementById('pt-save');
     btn.disabled = true;
     try {

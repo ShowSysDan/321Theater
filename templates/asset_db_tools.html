@@ -10,25 +10,25 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">Asset DB Tools</h1>
-    <p class="page-sub">Raw, audited access to the asset tables — for fixing rows the normal interface can't reach
+    <p class="page-sub">Direct, audited access to the asset tables, for fixing rows the Asset Manager can't reach
       {%- if readonly_view %}<span class="rv-badge" title="This account is read-only: everything can be viewed, nothing can be changed">VIEW ONLY</span>{% endif %}</p>
   </div>
   <div class="header-actions" style="align-items:center">
     <a href="/assets" class="btn btn-ghost btn-sm">← Asset Manager</a>
     {% if user and user.role == 'admin' %}{# /admin/audit is admin-only — a link would 403 for anyone else #}
-    <a href="/admin/audit" class="btn btn-ghost btn-sm" title="Every change made here is logged with before/after snapshots and can be undone from the audit log (admins)">Audit Log</a>
+    <a href="/admin/audit" class="btn btn-ghost btn-sm" title="Every change here is logged and can be undone from the Audit Log">Audit Log</a>
     {% endif %}
   </div>
 </div>
 
 <div style="background:rgba(245,127,32,.08);border:1px solid rgba(245,127,32,.35);border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:12px;line-height:1.5">
   <strong style="color:var(--accent)">How the tree works:</strong>
-  Categories → Groups → Types. A group is a parentless <code>asset_types</code> row; rows with
-  <code>parent_type_id</code> sit under it. Every edit is <strong>audited</strong> and can be undone from the Audit Log.
+  Categories → Groups → Types. A group is an <code>asset_types</code> row with no parent; types point to it with
+  <code>parent_type_id</code>. Every edit is <strong>audited</strong> and can be undone from the Audit Log.
 </div>
 {% if readonly_view %}
 <div style="background:rgba(74,85,104,.14);border:1px solid rgba(74,85,104,.5);border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:12px;line-height:1.5">
-  <strong>View only.</strong> Row tools are hidden; you can still run the integrity scan and browse every table.
+  <strong>View only.</strong> You can run the integrity scan and browse every table, but not edit rows.
 </div>
 {% endif %}
 
@@ -285,10 +285,10 @@ const COLS = {
 
 // Field labels/help for the edit modal (fallback: column name)
 const FIELD_HELP = {
-  parent_type_id: 'Group this type files under. Empty = top level (acts as a group itself once it has children).',
+  parent_type_id: 'Group this type sits under. Empty = top level (it becomes a group once it has children).',
   category_id: 'Top-level category (left column of the finder).',
-  hide_from_pm: 'Hide from the show-page advance picker (approvals portal still sees it).',
-  is_retired: 'Soft delete — keeps history, removes from pickers. retired_at is managed automatically.',
+  hide_from_pm: 'Hide from the show-page picker (still addable from Approvals).',
+  is_retired: 'Removes it from pickers but keeps its history. retired_at is set automatically.',
   asset_item_id: 'Pin this show line to a specific unit (forces quantity 1).',
   container_item_id: 'ID of the case/container item this unit lives in.',
   system_type_id: 'System this unit is allocated to (system types only).',
@@ -496,7 +496,7 @@ window.openDelete = function(i) {
   const label = _delRow.name || _delRow.barcode || ('row #' + _delRow.id);
   document.getElementById('dbt-del-summary').innerHTML =
     'Permanently delete <strong>' + esc(label) + '</strong> (#' + _delRow.id + ') from <code>' + _table + '</code>.' +
-    '<div style="font-size:11px;color:var(--text-dim);margin-top:4px">A snapshot goes to the audit log, so an admin can restore the row itself — but prefer Retire / Edit when history matters.</div>';
+    '<div style="font-size:11px;color:var(--text-dim);margin-top:4px">An admin can restore the row from the Audit Log, but use Retire or Edit when history matters.</div>';
   document.getElementById('dbt-del-info').innerHTML = '';
   document.getElementById('dbt-del-btn').style.display = '';
   document.getElementById('dbt-del-force-btn').style.display = 'none';

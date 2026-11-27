@@ -356,10 +356,10 @@
          sign-in page), so it no longer takes two lines of the footer. #}
       <div class="sidebar-meta">
         {% if session.get('user_role') == 'admin' %}<a class="app-version" href="{{ url_for('about_page') }}" title="About 321Theater — 3·2·1→Theater v{{ app_version }} — © Dr. Phillips Center for the Performing Arts · MIT Licensed · portions © Thauma Systems, LLC">v{{ app_version }}</a>{% else %}<span class="app-version" title="3·2·1→Theater v{{ app_version }} — © Dr. Phillips Center for the Performing Arts · MIT Licensed · portions © Thauma Systems, LLC">v{{ app_version }}</span>{% endif %}
-        {% if test_mode %}<span class="test-instance-badge sidebar-meta-test" title="TEST_MODE is on in this server's .env: not clustered, email only to admins, leader-only background jobs off">TEST</span>{% endif %}
+        {% if test_mode %}<span class="test-instance-badge sidebar-meta-test" title="Test server: email goes only to admins, and scheduled jobs don't run">TEST</span>{% endif %}
         <span class="sidebar-meta-sep" aria-hidden="true">·</span>
         <button type="button" class="view-mode-link" onclick="setSiteMode('{{ 'desktop' if is_mobile_view else 'mobile' }}')">{{ 'Desktop site' if is_mobile_view else 'Mobile site' }}</button>
-        {% if view_mode_forced %}<button type="button" class="view-mode-link" onclick="setSiteMode('auto')" title="Clear the forced mode and follow device auto-detection">(auto)</button>{% endif %}
+        {% if view_mode_forced %}<button type="button" class="view-mode-link" onclick="setSiteMode('auto')" title="Go back to picking mobile or desktop automatically">(auto)</button>{% endif %}
         {% if handoff_peers %}
         {# "Switch server" (3.56.0): open this page on another live server,
            still signed in. Each entry is a same-origin POST (CSRF-checked);
@@ -381,7 +381,7 @@
       </div>
       {% if test_mode %}
       {# Icon rail only: the meta line is hidden there, this short tag stays. #}
-      <div class="sidebar-test-flag rail-only" style="text-align:center"><span class="test-instance-badge" title="TEST_MODE is on in this server's .env">TEST INSTANCE</span></div>
+      <div class="sidebar-test-flag rail-only" style="text-align:center"><span class="test-instance-badge" title="This is a test server, not production">TEST INSTANCE</span></div>
       {% endif %}
     </div>
   </aside>
@@ -500,7 +500,7 @@
           <input type="text" id="inbox-c-to" class="field-input" autocomplete="off" placeholder="Name">
           <div id="inbox-c-to-sug" class="inbox-sug" hidden></div>
         </div>
-        <div id="inbox-c-self" class="inbox-hint">No one picked: this is a <strong>note to self</strong> — only you see it. Add a reminder below to have it come back to you.</div>
+        <div id="inbox-c-self" class="inbox-hint">No one picked, so this is a <strong>note to self</strong> only you can see. Add a reminder to have it come back to you.</div>
 
         <label class="field-label" for="inbox-c-show">ABOUT A SHOW OR EVENT <span class="text-dim" style="font-weight:400">(optional)</span></label>
         <div class="inbox-pick">
@@ -513,7 +513,7 @@
         <label id="inbox-c-pub-row" class="inbox-pub-row disabled">
           <input type="checkbox" id="inbox-c-pub" disabled>
           <span><strong>Also post to the show's comments</strong>
-            <span class="inbox-hint" style="display:block;margin:0">Leaves the question — and the replies — on the show for everyone working on it. <span id="inbox-c-pub-hint"></span></span></span>
+            <span class="inbox-hint" style="display:block;margin:0">The message and replies are posted to the show's Comments for everyone working on it. <span id="inbox-c-pub-hint"></span></span></span>
         </label>
         <div id="inbox-c-pub-warn" class="inbox-public-banner" role="note" hidden></div>
 
@@ -535,11 +535,11 @@
   {% endif %}
 
   <!-- Main -->
-  <main class="main-content">
+  <main class="main-content{% block main_class %}{% endblock %}">
     {% if session.get('_view_as') %}
     <div style="background:rgba(246,173,85,.15);border-bottom:1px solid rgba(246,173,85,.35);padding:7px 20px;display:flex;align-items:center;gap:10px;font-size:12px;position:sticky;top:0;z-index:50">
       <span style="color:#F6AD55;font-weight:700;letter-spacing:.05em">PREVIEW MODE</span>
-      <span style="color:var(--text-dim)">You are viewing the site as a <strong style="color:#F6AD55">{{ session['_view_as'].replace('_',' ') }}</strong> — changes you make will take effect as if you had that role.</span>
+      <span style="color:var(--text-dim)">You're viewing the site as a <strong style="color:#F6AD55">{{ session['_view_as'].replace('_',' ') }}</strong>. Changes you make are real and use that role's permissions.</span>
       <button onclick="resetViewAs()" style="margin-left:auto;font-size:11px;padding:3px 10px;background:rgba(246,173,85,.2);border:1px solid rgba(246,173,85,.5);color:#F6AD55;border-radius:4px;cursor:pointer;font-weight:600">Exit Preview</button>
     </div>
     {% endif %}
@@ -920,7 +920,7 @@ const _HELP_PAGES = {
         <li>The Production Schedule PDF is <strong>page-aware</strong>: a day that would spill 4 or fewer rows onto the next page is tightened a step at a time so it fits on its own page, and a day that would still be split moves whole to the next page when it fits there. A row is never cut in half at a page break.</li>
         <li>The Production Schedule PDF prints a <strong>Covering PM</strong> line (name, phone and email) only on days that have a covering PM other than the show PM; the show PM is in the PDF's header. Content admins can hide or relabel that line in Settings → PDF Designer (Production Schedule → "Covering PM (per day)").</li>
         <li><strong>Export History</strong> — the last 10 exports (type, version, who, when); <strong>Download</strong> re-fetches that exact stored PDF.</li>
-        <li><strong>Attachments</strong> — <strong>+ Attach File</strong> or drag a file onto the drop zone (a progress bar shows the upload). Each file lists its size, uploader and date; files uploaded through an Advance file field carry <em>↳ field</em>. Anyone who can edit the show can remove a file (<strong>×</strong>) — it's archived, not destroyed, and an admin can restore it (Settings → System → Files). Admins can also move a file to another show (<strong>⇄</strong>).</li>
+        <li><strong>Attachments</strong> — <strong>+ Attach File</strong> or drag a file onto the drop zone (a progress bar shows the upload). Each file lists its size, uploader and date; files uploaded through an Advance file field carry <em>↳ field</em>. Anyone who can edit the show can remove a file (<strong>×</strong>) — it's archived, not destroyed, and an admin can restore it (Settings → Settings → Files). Admins can also move a file to another show (<strong>⇄</strong>).</li>
         <li><strong>Advance Read By</strong> — read receipts: who has opened the advance, and at which version.</li>
       </ul>
     `
@@ -1094,7 +1094,7 @@ const _HELP_PAGES = {
         <li><strong>Item History</strong>: tick one or several items (a group counts everything under it), then optionally just some of their units — for example three of your four projectors. <strong>Usage by unit</strong> gives each unit's times rented, shows, days rented, utilization (pick a From and To date), income and last show; units that never went out are listed dimmed, and bookings made without picking a unit are on a <em>(no unit picked)</em> row. <strong>Usage by item</strong> compares the items when you picked more than one. Below: every show that rented them. Click a unit row to see only that unit. An item's drill-down on the Assets tab links here too.</li>
         <li><strong>Rental Lines</strong>: every asset line. Pick a category and/or item type and press <strong>Apply</strong>.</li>
         <li><strong>Sound Levels</strong> (when the Spot module is on): every performance the venue's sound sensors measured — Leq (the overall level), peak and when, L10 / L50 / L90, minutes measured. <strong>Flag at</strong> marks performances at or over a level you type. <strong>Compare by</strong> groups them by sensor, venue, Arts Group, show, month, day of week, start hour, or the answers to any advance-sheet field. To see what goes with louder shows, also narrow the shows with <em>More filters</em> — Had item booked, Job position, Technician. Averages are worked on the energy scale and dBA / dBC are never mixed.</li>
-        <li><strong>Weekly Summary</strong> (while AI is on): pick the week and <strong>Generate</strong> — a server with the AI model writes a one-page executive summary of that week's post-show notes and comments (headline, highlights, issues, follow-ups, labor settlement, every show). It runs in the background; <strong>Open PDF</strong> opens a finished one without running the AI again, <strong>Regenerate</strong> writes it fresh. Labor dollars show only if you can see labor reports. It is an AI-assisted draft — check against each show's Post-Show tab.</li>
+        <li><strong>Weekly Summary</strong> (while AI is on): pick the week and <strong>Generate</strong> — a server with the AI model writes a one-page executive summary of that week's post-show notes and comments (headline, highlights, issues, follow-ups, labor settlement, every show). It runs in the background; <strong>Open PDF</strong> opens a finished one without running the AI again, <strong>Regenerate</strong> writes it fresh. A <strong>Billed</strong> column and totals show what each show billed: in-house gear and external rentals if you can see asset reports, settled labor if you can see labor reports (show totals, not just that week). It is an AI-assisted draft — check against each show's Post-Show tab.</li>
         <li><strong>Labor &amp; Techs</strong>: for each technician, scheduled, settled, training and overhead shifts and hours; for each position, requested against filled.</li>
         <li><strong>Labor Lines</strong>: every shift, with its scheduled tech and, once settled, the actual times and Worked by. Example: Had item = a projector plus Position = Video Tech lists who was the video tech.</li>
         <li><strong>Break Exceptions</strong>: settled shifts whose lunch was not taken, shorter or longer than scheduled, added, or moved, broken down by tech, position and show.</li>
@@ -1143,7 +1143,7 @@ const _HELP_PAGES = {
         <li>Columns: time, user, action, the record it touched, show / detail, and the IP address it came from.</li>
         <li><strong>▾ Show diff</strong> — side-by-side BEFORE / AFTER snapshots where recorded.</li>
         <li><strong>↺ Undo</strong> (curved arrow) appears only on actions the app knows how to reverse safely, and is refused while other records still depend on that row. Each entry can be undone once; the undo is logged as a new entry and the original is tagged <em>undone</em>.</li>
-        <li><strong>God Mode</strong> (top right) — who is signed in and what they're looking at right now.</li>
+        <li><strong>Who's Online</strong> (top right) — who is signed in and what they're looking at right now.</li>
       </ul>
     `
   },
@@ -1163,18 +1163,20 @@ const _HELP_PAGES = {
   settings: {
     title: 'Settings',
     html: `
-      <p>The tabs you see depend on your role. <strong>Everyone</strong> gets Users and My Account; <strong>staff and admins</strong> also get Contacts, Shows, Form Fields, Arts Groups and PDF Designer; <strong>schedulers</strong> (and staff / admins) get Job Positions and Technicians; the rest is <strong>admin only</strong>. A <strong>read-only</strong> account sees its tabs <strong>VIEW ONLY</strong>: every list, with labor presets, day templates and arts groups opening with <strong>View</strong>, but no add, edit or delete. Tabs that open their own page have their own help there. On phones the tab row wraps and wide tables scroll sideways. More detail: README → <em>Admin &amp; Settings Guide</em>.</p>
-      <p style="margin:10px 0 0"><strong>People &amp; directory</strong></p>
+      <p>Pick a page from the <strong>menu on the left</strong>; <strong>Find a setting…</strong> filters it (try "smtp", "logo" or "restore"), and <strong>«</strong> hides it for more room (<strong>»</strong> brings it back). On a narrow window or a phone the menu becomes the <strong>Settings</strong> dropdown above the page. The menu also stays on the pages that open separately (Audit Log, Performance, DB Snapshots, About…).</p>
+      <p>What you see depends on your role. <strong>Everyone</strong> gets My Account and Users; <strong>staff and admins</strong> also get Contacts, Shows, Form Fields, Arts Groups and PDF Designer; <strong>schedulers</strong> (and staff / admins) get Job Positions and Technicians; the rest is <strong>admin only</strong>. A <strong>read-only</strong> account sees its pages <strong>VIEW ONLY</strong>. More detail: README → <em>Admin &amp; Settings Guide</em>.</p>
+      <p style="margin:10px 0 0"><strong>You &amp; People</strong></p>
       <ul style="${_HELP_UL}">
-        <li><strong>Contacts</strong> — the directory behind contact dropdowns and emails: search, department filter, <strong>+ Add Contact</strong>, ✎ edit, × delete (a <strong>USER</strong> row mirrors a user account; change it under Users). Admins also see the <strong>ALL / ADVANCE / PROD / POST</strong> columns — which PDF emails each contact receives — and set them in ✎ along with a venue filter and a shows-only / events-only filter. The <strong>?</strong> by the title explains who gets which email.</li>
+        <li><strong>My Account</strong> — change your password (8+ characters, an uppercase letter and a punctuation mark), and <strong>Email notifications</strong>: three switches for what is also emailed to you when you haven't seen it in the app — new messages (still unread after 10 minutes), @mentions in show comments, and reminders that came due. Everything always shows in your inbox whatever the switches say. Theme is the sun button in the sidebar footer.</li>
         <li><strong>Users</strong> — admins add accounts (username, name, email, temporary password, role: User / Staff / Admin / Read-only). Per row: <strong>Edit</strong> (role plus extra permissions: Scheduler, Asset Manager, Piano Tuning Manager, Document Viewer with allowed venues, document types and optional Labor Overview / Show Calendar access; the <em>Other applications</em> flags do nothing in this app), <strong>Reset PW</strong>, <strong>Devices</strong> (the browsers and screen sizes they've used), <strong>Require PW Change</strong>, <strong>Lock</strong>, <strong>Delete</strong>. <strong>Last Active</strong> — hover for the exact time, last login and whether they came in internally or through the gateway. Everyone else sees the list only.</li>
         <li><strong>Registrations</strong> — self-registered accounts waiting for approval (the tab shows how many): pick a role, then <strong>Approve</strong> or <strong>Deny</strong>; <strong>↻ Refresh</strong>.</li>
-        <li><strong>Arts Groups</strong> — touring companies and resident groups for arts-group fields: <strong>+ Add Group</strong>, <strong>Edit</strong> (primary contact, additional contacts, notes), ×. Names typed into an arts-group field on an advance are added here automatically.</li>
-        <li><strong>My Account</strong> — change your password (8+ characters, an uppercase letter and a punctuation mark), and <strong>Email notifications</strong>: three switches for what is also emailed to you when you haven't seen it in the app — new messages (still unread after 10 minutes), @mentions in show comments, and reminders that came due. Everything always shows in your inbox whatever the switches say. Theme is the sun button in the sidebar footer.</li>
+        <li><strong>Contacts</strong> — the directory behind contact dropdowns and emails: search, department filter, <strong>+ Add Contact</strong>, ✎ edit, × delete (a <strong>USER</strong> row mirrors a user account; change it under Users). Admins also see the <strong>ALL / ADVANCE / PROD / POST</strong> columns — which PDF emails each contact receives — and set them in ✎ along with a venue filter and a shows-only / events-only filter. The <strong>?</strong> by the title explains who gets which email.</li>
+        <li><strong>Technicians</strong> — <strong>pay rate levels</strong> (<em>In Estimate</em> decides which rates the pre-show estimate may use; only admins change rate levels), the technician list (✎ name / rate level, <strong>Archive</strong> someone who has left, × only for a mistaken entry with no shifts; <strong>Archived technicians</strong> opens their page), and <strong>per-crew billable items</strong> (e.g. parking).</li>
       </ul>
-      <p style="margin:10px 0 0"><strong>Shows, forms &amp; paperwork</strong></p>
+      <p style="margin:10px 0 0"><strong>Shows &amp; Paperwork</strong></p>
       <ul style="${_HELP_UL}">
-        <li><strong>Shows</strong> — opens Manage Shows: archive / restore any show and the auto-archive days.</li>
+        <li><strong>Shows</strong> — every show: archive / restore, clone, and the auto-archive days.</li>
+        <li><strong>Merge Duplicates</strong> — move everything from a duplicate show onto the one you keep.</li>
         <li><strong>Form Fields</strong>:
           <ul style="${_HELP_UL}">
             <li><strong>Advance Fields</strong> — <strong>+ Add Section</strong>, Edit / Delete sections and fields, drag <strong>⠿</strong> to reorder. Each field has a type (text, date, dropdown, yes/no, contact, arts group, file upload, notes, PDF form, piano tuning…), options, a width, an optional "show when" condition, change alerts, an AI hint, and can be left off the PDF. Changes apply to every show at once.</li>
@@ -1182,36 +1184,39 @@ const _HELP_PAGES = {
             <li><strong>Day Templates</strong> — <strong>+ New Template</strong>, Edit, Delete: named timelines (start, end, description, notes) that a schedule day applies from its Tools menu.</li>
             <li><strong>PDF Form Templates →</strong> — fillable PDFs for pdf_form fields (own page).</li>
           </ul></li>
-        <li><strong>PDF Designer</strong> — section order, labels, font sizes and page breaks of the exported PDFs (own page).</li>
-      </ul>
-      <p style="margin:10px 0 0"><strong>Labor</strong></p>
-      <ul style="${_HELP_UL}">
+        <li><strong>Arts Groups</strong> — touring companies and resident groups for arts-group fields: <strong>+ Add Group</strong>, <strong>Edit</strong> (primary contact, additional contacts, notes), ×. Names typed into an arts-group field on an advance are added here automatically.</li>
         <li><strong>Job Positions</strong> — venues (read-only, taken from show data), skill <strong>categories</strong>, <strong>positions</strong> (venue, category, optional special rate, training-only), and <strong>Labor Day Presets</strong> (<strong>+ New Preset</strong>: positions × quantity with times and notes, applied to a labor day from its Tools menu).</li>
-        <li><strong>Technicians</strong> — <strong>pay rate levels</strong> (<em>In Estimate</em> decides which rates the pre-show estimate may use; only admins change rate levels), the technician list (✎ name / rate level, <strong>Archive</strong> someone who has left, × only for a mistaken entry with no shifts; <strong>Archived technicians</strong> opens their page), and <strong>per-crew billable items</strong> (e.g. parking).</li>
-      </ul>
-      <p style="margin:10px 0 0"><strong>Email</strong> (admin)</p>
-      <ul style="${_HELP_UL}">
-        <li>Sending method (SMTP relay or direct send), server details and <strong>Send Test Email</strong>; the Advance Sheet and Production Schedule <strong>auto-emails</strong> (days before the show) and the <strong>send hour</strong>; <strong>Labor — No-Request Alerts</strong>; the subject / body <strong>message content</strong> with {variables}; the <strong>Next Scheduled Send</strong> preview.</li>
-        <li><strong>Email Send Errors</strong> — failed recipients to review: ✓ Reviewed, ↻ Resend, Mark all reviewed, Clear reviewed. <strong>Email Activity</strong> — every send, with search and filters; click a row for the message, why it failed and <strong>Resend</strong>; pick how long message content is kept.</li>
-      </ul>
-      <p style="margin:10px 0 0"><strong>System</strong> (admin) — sub-tabs</p>
-      <ul style="${_HELP_UL}">
-        <li><strong>Messages</strong> — <strong>Maintenance Notices</strong> (email a notice and post a banner to chosen groups, then <strong>✓ Work Complete</strong>) and <strong>Site-Wide Messages</strong> (banners for chosen groups, optionally on the sign-in page; the Seen / Dismissed count opens who saw it; <strong>✕ All</strong> takes one down for everyone).</li>
-        <li><strong>Updates</strong> — Auto-Detect the service, <strong>Check for Updates</strong>, then apply and restart.</li>
+        <li><strong>PDF Designer</strong> — section order, labels, font sizes and page breaks of the exported PDFs (own page).</li>
         <li><strong>Branding &amp; Paperwork</strong> — WiFi defaults (printed with a QR code on schedule PDFs), the 12-hour hint on PDF times, the organization logo, and <strong>Venue Branding</strong> (Edit a venue: its logo, paperwork colors and banner text color, with a preview).</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>Communication</strong> (admin)</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Email</strong> — sending method (SMTP relay or direct send), server details and <strong>Send Test Email</strong>; the Advance Sheet and Production Schedule <strong>auto-emails</strong> and the <strong>send hour</strong>; <strong>Labor — No-Request Alerts</strong>; message content with {variables}; the <strong>Next Scheduled Send</strong> preview; <strong>Email Send Errors</strong> and <strong>Email Activity</strong> (every send; click a row to see it or <strong>Resend</strong>).</li>
+        <li><strong>Site Messages</strong> — <strong>Maintenance Notices</strong> (email a notice and post a banner, then <strong>✓ Work Complete</strong>) and <strong>Site-Wide Messages</strong> (banners for chosen groups, optionally on the sign-in page; <strong>✕ All</strong> takes one down for everyone).</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>Features</strong> (admin)</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Modules</strong> — tick to switch an optional module on or off for everyone at once (Security Sign-In Sheets, Piano Tuning, Messages, Spot Sound Levels; data is kept while off — with Messages off the inbox shows notifications only), and <strong>Open settings →</strong> for Piano Tuning, Spot Sound Levels and Prism Sync.</li>
+        <li><strong>AI</strong> — turn AI on, the model and this server's Ollama URL (localhost only), Test this server, the Servers list (Ollama installed / running / model on each server, Pull model, the install command), the system prompt, how many AI jobs may run at once, the weekly summary e-mail, and <strong>AI History</strong>: the last 100 AI jobs; <strong>View</strong> shows exactly what was sent to the model and what it answered (kept 30 days, admins only).</li>
+        <li><strong>Dashboards</strong> — <strong>Load</strong> lists every dashboard, public ones first: owner, public link (<strong>Copy</strong>), <strong>View</strong>, and <strong>Make Private</strong> to switch a public link off.</li>
+        <li><strong>Sidebar Editor</strong> and <strong>Readiness (beta)</strong> open their own pages.</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>Activity</strong> (admin)</p>
+      <ul style="${_HELP_UL}">
+        <li><strong>Audit Log</strong> — every change and who made it, with undo (own page).</li>
+        <li><strong>Who's Online</strong> — who is on a show page right now (show, tab, last seen; <strong>Refresh</strong>), and every user's last login and last connection.</li>
+        <li><strong>Performance</strong> — page and database timing (own page).</li>
+      </ul>
+      <p style="margin:10px 0 0"><strong>Server</strong> (admin)</p>
+      <ul style="${_HELP_UL}">
         <li><strong>Server &amp; Logs</strong> — the app port; remote syslog (host, port, facility, BSD or IETF format).</li>
+        <li><strong>Updates</strong> — Auto-Detect the service, <strong>Check for Updates</strong>, then apply and restart.</li>
         <li><strong>Backups</strong> — hourly and daily database backups: <strong>Run Backup Now</strong>, ↓ Download.</li>
+        <li><strong>DB Snapshots</strong> — look inside a backup, compare it with today's data and restore rows or a whole show (own page).</li>
         <li><strong>Files</strong> — the upload size limit, and a file manager for every show's files (× archive, ↩ restore, ✕ delete an archived file for good).</li>
         <li><strong>Database</strong> — connection status and Test Connection; file storage (S3 endpoints, keys, bucket); file redundancy (keep copies in S3 and / or the database, which to read first, <strong>Copy S3 → Database</strong>, <strong>Copy Database → S3</strong>, <strong>Verify Both Copies</strong>).</li>
-        <li><strong>AI</strong> — turn AI on, the model and this server's Ollama URL (localhost only), Test this server, the Servers list (Ollama installed / running / model on each server, Pull model, the install command), the system prompt, how many AI jobs may run at once, and the weekly summary e-mail.</li>
         <li><strong>Cluster</strong> — this server, the other servers found and which is leader; heartbeat settings and the force-leader override.</li>
-      </ul>
-      <p style="margin:10px 0 0"><strong>Admin tools</strong></p>
-      <ul style="${_HELP_UL}">
-        <li><strong>Audit Log</strong>, <strong>Performance</strong>, <strong>DB Snapshots</strong>, <strong>Sidebar Editor</strong> and <strong>Merge Duplicates</strong> open their own pages.</li>
-        <li><strong>God Mode</strong> — who is on a show page right now (show, tab, last seen; <strong>Refresh</strong>), and every user's last login and last connection.</li>
-        <li><strong>Dashboards</strong> — <strong>Load</strong> lists every dashboard, public ones first: owner, public link (<strong>Copy</strong>), <strong>View</strong>, and <strong>Make Private</strong> to switch a public link off.</li>
-        <li><strong>Modules</strong> — tick to switch an optional module on or off for everyone at once (Security Sign-In Sheets, Piano Tuning, Messages, Spot Sound Levels; data is kept while off — with Messages off the inbox shows notifications only), and <strong>Open settings →</strong> for Piano Tuning, Spot Sound Levels and Prism Sync.</li>
+        <li><strong>About</strong> — this server, the service and what it depends on (own page).</li>
       </ul>
     `
   },

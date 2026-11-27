@@ -5,8 +5,10 @@
 #}
 {% extends "base.html" %}
 {% block title %}Prism Sync — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
     <h1 class="page-title">Prism Sync</h1>
@@ -20,8 +22,7 @@
     </p>
   </div>
   <div style="display:flex;gap:8px;flex-wrap:wrap">
-    <a href="{{ url_for('settings') }}#modules" class="btn btn-ghost">← Modules</a>
-    <button class="btn btn-ghost" title="Live 7-day events fetch showing the exact request, SDK chatter, and raw response — touches nothing"
+    <button class="btn btn-ghost" title="Fetch the next 7 days live and show the raw request and response. Changes nothing."
             onclick="rawApiFetch(this)">Raw API Fetch</button>
     <button class="btn btn-ghost" onclick="testConnection(this)">Test Connection</button>
     <button class="btn btn-primary" id="sync-now-btn" onclick="syncNow(this)"
@@ -31,12 +32,12 @@
     </button>
   </div>
 </div>
+{{ settings_nav_open('modules') }}
 
 <div class="form-section" style="border-left:3px solid var(--accent)">
   <div class="form-section-body">
     <p class="text-dim" style="font-size:12px;margin:0">
-      <strong>Sandboxed module.</strong> Syncing only stages events; nothing changes until you
-      <em>Import selected</em>, which creates normal shows.
+      Syncing only stages events. Shows are created only when you click <em>Import selected</em>.
     </p>
   </div>
 </div>
@@ -50,11 +51,9 @@
   <div class="form-section-body" id="prism-help" style="display:none;font-size:12.5px;line-height:1.55">
 
     <p style="margin:0 0 10px"><strong>Syncing.</strong>
-      <em>Sync Now</em> (or the optional daily auto-sync) asks Prism for every event from today
-      out to the configured lookahead and stages it below. Events are matched by their Prism
-      event ID, so re-syncing <em>updates</em> existing rows — it never creates duplicates.
-      Events that change in Prism are updated in place; events past their last date simply age
-      out of view ("Hide past").</p>
+      <em>Sync Now</em> (or the daily auto-sync) stages every Prism event from today through the
+      lookahead below. Re-syncing updates existing rows by Prism event ID, never duplicates them.
+      Past events drop out of view with "Hide past".</p>
 
     <p style="margin:0 0 6px"><strong>Every staged event is in exactly one state:</strong></p>
     <table class="data-table" style="margin-bottom:10px">
@@ -64,61 +63,49 @@
       </tr>
       <tr>
         <td style="white-space:nowrap"><span style="font-size:10px;background:rgba(255,176,46,.12);color:var(--accent);padding:2px 7px;border-radius:3px;letter-spacing:.06em">IMPORTED</span></td>
-        <td class="text-dim">You created a 321T show from it (linked in the State column). Re-syncs keep
-            watching it: if Prism changes it afterwards, it gets the CHANGED IN PRISM badge so you can
-            update the show by hand.</td>
+        <td class="text-dim">A 321T show was created from it (linked in the State column). If Prism changes
+            it later, it gets a CHANGED IN PRISM badge so you can update the show by hand.</td>
       </tr>
       <tr>
         <td style="white-space:nowrap"><span style="font-size:10px;background:rgba(148,163,184,.12);color:var(--text-muted);padding:2px 7px;border-radius:3px;letter-spacing:.06em">IGNORED</span></td>
-        <td class="text-dim">Dismissed. Kept in staging (never deleted) so the same event doesn't bounce
-            back as NEW on the next sync.</td>
+        <td class="text-dim">Dismissed. Kept in staging so it doesn't come back as NEW on the next sync.</td>
       </tr>
     </table>
 
     <p style="margin:0 0 10px"><strong>The buttons.</strong>
-      <em>Import selected → 321T</em> creates a real show per selected event — name, venue
-      (mapped to the Settings venue list when possible), one performance per Prism date with
-      its start time, and the Prism status tag (see below). Already-imported events and events
-      matching an existing show's name + date are skipped, never doubled. ·
+      <em>Import selected → 321T</em> creates a show per selected event: name, venue, one
+      performance per Prism date and time, and the Prism status tag. Events already imported or
+      matching an existing show's name + date are skipped. ·
       <em>Ignore</em> moves selected events to IGNORED. ·
-      <em>Restore to New</em> is the undo for Ignore: it moves selected IGNORED events back to
-      NEW — that's all it does (it never touches shows).</p>
+      <em>Restore to New</em> undoes Ignore; it never touches shows.</p>
 
     <p style="margin:0 0 10px"><strong>Prism status tag on shows.</strong>
-      Imported shows carry their Prism event status (<span class="prism-tag prism-tag-hold">HOLD</span>,
-      <span class="prism-tag prism-tag-confirmed">CONFIRMED</span>, …) as a tag on the homepage
-      show cards. Syncs keep it current: when Prism confirms a hold, the next sync updates the
-      tag automatically — the only thing the sync ever changes on a real show.</p>
+      Imported shows show their Prism status (<span class="prism-tag prism-tag-hold">HOLD</span>,
+      <span class="prism-tag prism-tag-confirmed">CONFIRMED</span>, …) on their show cards. Each sync
+      keeps this tag current; it's the only thing a sync changes on a show.</p>
 
     <p style="margin:0 0 10px"><strong>Auto-import (optional).</strong>
-      With <em>Auto-import new events</em> enabled in Settings, every sync also imports each
-      future-dated NEW event as a show — the same as selecting everything and clicking Import.
-      Hidden venues never qualify (their events arrive pre-ignored), and events caught by the
-      name+date duplicate guard are auto-ignored instead of retrying forever. Leave it off to
-      keep imports a deliberate, manual step.</p>
+      With <em>Auto-import new events</em> on, every sync also imports each upcoming NEW event,
+      as if you selected them all and clicked Import. Hidden venues are skipped, and likely
+      duplicates (same name + date) are ignored. Leave it off to import by hand.</p>
 
     <p style="margin:0 0 10px"><strong>Venues &amp; Stages panel.</strong>
-      Documents everything Prism reports (stages with capacities, pseudo-venues like
-      "Holidays") plus any venue names seen only on events. Unchecking <em>Visible</em> hides
-      that venue's events from the list, moves its current NEW events to IGNORED, and makes
-      future syncs stage its events pre-ignored. The panel row itself stays (it's the switch
-      you'd use to undo), and its "Staged events" count is everything in staging for that venue
-      regardless of state — so the number doesn't drop when you hide it. Tick
-      <em>Show hidden venues</em> in the events toolbar to see hidden events again; select +
-      <em>Restore to New</em> brings them fully back.</p>
+      Lists every venue and stage Prism reports, including pseudo-venues like "Holidays".
+      Unchecking <em>Visible</em> hides that venue's events, moves its NEW events to IGNORED, and
+      ignores its future events. Recheck it to undo. To bring hidden events back, tick
+      <em>Show hidden venues</em>, select them, and click <em>Restore to New</em>.</p>
 
     <p style="margin:0 0 10px"><strong>Badges.</strong>
       <span style="font-size:9px;background:rgba(245,158,11,.15);color:#f59e0b;padding:1px 5px;border-radius:3px">CHANGED IN PRISM</span>
-      = Prism edited this event after you imported it — review the linked show. ·
+      = Prism changed this event after import; review the linked show. ·
       <span style="font-size:9px;background:rgba(239,68,68,.15);color:var(--red);padding:1px 5px;border-radius:3px">NOT IN LAST SYNC</span>
       = the most recent sync didn't return this event (possibly cancelled or moved in Prism).</p>
 
     <p style="margin:0"><strong>Troubleshooting.</strong>
-      <em>Test Connection</em> checks the whole pipeline and does a live venues fetch.
-      <em>Raw API Fetch</em> shows the exact request and raw response for the next 7 days.
-      Each run in Sync History has an expandable debug log (request args, timing, SDK output,
-      per-event decisions), and the <em>{ }</em> button on any row shows its raw Prism payload.
-      Server-side setup lives in <code>prism_bridge/README.md</code>.</p>
+      <em>Test Connection</em> checks the setup and fetches venues live.
+      <em>Raw API Fetch</em> shows the raw request and response for the next 7 days.
+      Each Sync History run has a debug log, and the <em>{ }</em> button on an event shows its raw
+      Prism data. Server setup is in <code>prism_bridge/README.md</code>.</p>
   </div>
 </div>
 
@@ -165,8 +152,7 @@
         <div>Daily at <strong>{{ '%02d:00'|format(settings.prism_sync_hour|int) }}</strong>,
              looking <strong>{{ settings.prism_lookahead_days }}</strong> days out.</div>
         <div class="text-dim" style="margin-top:4px">
-          Runs on the cluster leader{% if is_leader %} (this instance is currently leader){% endif %}.
-          Skips if a scheduled sync already succeeded today.
+          Runs on one server{% if is_leader %} (this one){% endif %}; skipped if today's scheduled sync already succeeded.
         </div>
       {% else %}
         <div class="text-dim">Off — syncs only happen when you click <em>Sync Now</em>.</div>
@@ -180,7 +166,7 @@
       <div><span style="color:var(--green);font-weight:600">{{ counts.get('new', 0) }}</span> new ·
            <span style="color:var(--accent);font-weight:600">{{ counts.get('imported', 0) }}</span> imported ·
            <span class="text-dim">{{ counts.get('ignored', 0) }} ignored</span></div>
-      <div class="text-dim" style="margin-top:4px">Deduplicated by Prism event ID — re-syncs update in place, never duplicate.</div>
+      <div class="text-dim" style="margin-top:4px">Re-syncs update events in place, never duplicate them.</div>
     </div>
   </div>
 </div>
@@ -202,7 +188,7 @@
           <input type="checkbox" name="prism_auto_sync_enabled" value="1" {% if settings.prism_auto_sync_enabled == '1' %}checked{% endif %}>
           Auto-sync daily
         </label>
-        <label class="checkbox-label" title="Each sync also imports every future-dated NEW event as a 321T show — exactly like selecting everything and clicking Import. Hidden venues stay out (they arrive pre-ignored).">
+        <label class="checkbox-label" title="Each sync also imports every upcoming NEW event as a 321T show. Hidden venues are skipped.">
           <input type="checkbox" name="prism_auto_import_enabled" value="1" {% if settings.prism_auto_import_enabled == '1' %}checked{% endif %}>
           Auto-import new events
         </label>
@@ -274,8 +260,8 @@
   <div class="form-section-body no-pad" id="venue-panel" style="display:none">
     <div style="padding:10px 14px 0">
       <p class="text-dim" style="font-size:12px;margin:0">
-        Every venue and stage Prism reports. Unchecking <em>Visible</em> hides and ignores that
-        venue's events (e.g. "Holidays"); imported events are untouched, and it's reversible.
+        Every venue and stage Prism reports. Uncheck <em>Visible</em> to hide and ignore a venue's
+        events (e.g. "Holidays"). Imported events aren't affected, and you can undo it.
       </p>
     </div>
     <table class="data-table">
@@ -344,9 +330,9 @@
       <span id="sel-count" class="text-dim" style="font-size:12px"></span>
       <button class="btn btn-sm btn-primary" title="Create a normal 321T show (with performances) from each selected event"
               onclick="importSelected(this)">Import selected → 321T</button>
-      <button class="btn btn-sm btn-ghost" title="Dismiss selected events — kept in staging (state IGNORED) so they don't show as NEW again"
+      <button class="btn btn-sm btn-ghost" title="Dismiss selected events so they don't show as NEW again"
               onclick="setStateSelected('ignored', this)">Ignore</button>
-      <button class="btn btn-sm btn-ghost" title="Move selected IGNORED events back to NEW (undo an Ignore — affects nothing else)"
+      <button class="btn btn-sm btn-ghost" title="Move selected IGNORED events back to NEW"
               onclick="setStateSelected('new', this)">Restore to New</button>
     </div>
 
@@ -680,4 +666,5 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') hideRaw(); }
 
 filterEvents();
 </script>
+{{ settings_nav_close() }}
 {% endblock %}

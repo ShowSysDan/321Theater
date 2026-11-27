@@ -569,3 +569,10 @@ html.mobile-view .rd-card-head { gap: 14px; }
 /* "Switch server" menu (3.56.0) in the drawer footer: bigger tap targets. */
 html.mobile-view .srv-switch-item { padding: 10px 10px; font-size: 14px; }
 html.mobile-view .srv-switch-host { font-size: 12px; }
+
+/* Settings menu (3.57.0): phones always use the one-line jump select. */
+html.mobile-view .settings-layout { grid-template-columns: minmax(0, 1fr); }
+html.mobile-view .snav { display: none; }
+html.mobile-view .snav-jump { display: flex; }
+html.mobile-view .snav-jump .snav-show { display: none; }
+html.mobile-view .snav-jump select { flex: 1; min-width: 0; font-size: 16px; }

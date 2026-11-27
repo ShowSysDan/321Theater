@@ -19,7 +19,7 @@
       Show Retired
     </label>
     <a href="/assets/retired" class="btn btn-ghost btn-sm">Retired Archive</a>
-    <a href="/assets/db-tools" class="btn btn-ghost btn-sm" title="Raw row access: fix limbo types, duplicates, and broken references the finder can't reach">DB Tools</a>
+    <a href="/assets/db-tools" class="btn btn-ghost btn-sm" title="Fix orphaned types, duplicates, and broken references the finder can't reach">DB Tools</a>
     <button class="btn btn-ghost btn-sm" onclick="openWarehouseModal()">Warehouse Locations</button>
     <button class="btn btn-ghost btn-sm" onclick="openCompanyRatesList()" title="Every asset with special Performance Company pricing">Company Rates</button>
     <button id="overbooked-btn" class="btn btn-ghost btn-sm" onclick="openOverbookedModal()" style="display:none">⚠ Overbooked</button>
@@ -36,7 +36,7 @@
     </div>
     <div class="modal-body" style="max-height:60vh;overflow:auto">
       <p style="color:var(--text-dim);font-size:12px;margin:0 0 12px">
-        Asset types whose peak concurrent demand across all shows exceeds their usable units.
+        Asset types booked beyond their usable units on at least one day.
       </p>
       <div id="overbooked-list">
         <p style="color:var(--text-dim);font-size:12px">Loading…</p>
@@ -54,7 +54,7 @@
     </div>
     <div class="modal-body" style="overflow:auto">
       <p style="color:var(--text-dim);font-size:12px;margin:0 0 10px">
-        Every asset with special Performance Company pricing. A rate applies to show lines whose rental starts inside its period. {{ 'View' if readonly_view else 'Edit' }} opens the asset's rates.
+        Every asset with special Performance Company pricing. A rate applies when a line's rental starts within its period. {{ 'View' if readonly_view else 'Edit' }} opens the asset's rates.
       </p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
         <select id="crl-company" class="field-input field-input-sm" style="width:auto;min-width:160px" onchange="renderCompanyRatesList()"></select>
@@ -113,7 +113,7 @@
     <option value="cost-desc">Highest cost</option>
     <option value="cost-asc">Lowest cost</option>
   </select>
-  <button id="bulk-edit-btn" class="btn btn-ghost btn-sm rv-hide" onclick="enterBulkEdit()" title="Mass-toggle which types are hidden from the show-page advance picker. Hidden types can still be added via the approvals portal.">✎ Bulk: Hide from Advance Picker</button>
+  <button id="bulk-edit-btn" class="btn btn-ghost btn-sm rv-hide" onclick="enterBulkEdit()" title="Choose which types are hidden from the show-page picker. Hidden types can still be added from Approvals.">✎ Bulk: Hide from Advance Picker</button>
 </div>
 
 {# ── Bulk Edit Toolbar (only visible in bulk-edit mode) ── #}
@@ -1399,7 +1399,7 @@ function renderMembersHTML(members, systemTypeId) {
       </div>
       <label style="display:flex;align-items:center;gap:5px;flex-shrink:0;margin-right:6px"
              onclick="event.stopPropagation()"
-             title="How many of this component the system holds — deducted from inventory when the system is added to a show">
+             title="How many of this component the system includes (taken from inventory when the system is booked)">
         <span style="font-size:9.5px;font-weight:700;letter-spacing:.06em;color:var(--text-dim)">QTY</span>
         <input type="number" min="1" step="1" value="${qty}"
                class="field-input field-input-sm" style="width:56px;text-align:center"
@@ -2115,7 +2115,7 @@ window.addItems = async function() {
 };
 
 window.retireItem = async function(id) {
-  if (_RO || !confirm('Retire this unit? Record and history are preserved.')) return;
+  if (_RO || !confirm('Retire this unit? Its history is kept.')) return;
   await fetch(`/settings/asset-items/${id}`, {method:'DELETE',headers:{'X-Requested-With':'XMLHttpRequest'}});
   await loadItems();
   await selectItem(id);
@@ -2450,7 +2450,7 @@ window.saveType = async function() {
 };
 
 window.retireType = async function(id) {
-  if (_RO || !confirm('Retire this item type? All active units will also be retired. The record and history are preserved.')) return;
+  if (_RO || !confirm('Retire this item type and all its active units? History is kept.')) return;
   const r = await fetch(`/settings/asset-types/${id}`, {method:'DELETE',headers:{'X-Requested-With':'XMLHttpRequest'}});
   if (!r.ok) { const d = await r.json(); alert(d.error || 'Error'); return; }
   await loadTypes();

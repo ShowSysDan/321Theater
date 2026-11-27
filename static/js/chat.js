@@ -291,7 +291,7 @@
     if (!rows.length) {
       var empty = el('div', 'inbox-empty');
       empty.appendChild(el('div', null, S.threads.length ? 'No conversation matches.' : 'No messages yet.'));
-      if (!S.threads.length) empty.appendChild(el('div', 'inbox-empty-sub', 'Press + New to write to someone — or to yourself, with a reminder.'));
+      if (!S.threads.length) empty.appendChild(el('div', 'inbox-empty-sub', 'Use + New to message someone, or write yourself a note with a reminder.'));
       list.appendChild(empty);
       return;
     }
@@ -409,8 +409,8 @@
     var t = S.thread, ban = $('inbox-public-banner');
     ban.hidden = !publicNow();
     if (publicNow()) {
-      $('inbox-public-text').textContent = 'Every message sent here — yours and '
-        + (t.is_self ? 'any' : 'theirs') + ' — is also posted to the comments of “' + t.show.name
+      $('inbox-public-text').textContent = 'Every message sent here'
+        + (t.is_self ? '' : ' — yours and theirs —') + ' is also posted to the comments of “' + t.show.name
         + '”. Anyone with access to the show can read it.';
     }
   }
@@ -507,7 +507,7 @@
       // (tagged with this show) — nothing is sent to anyone.
       var rb = el('button', 'inbox-link-btn inbox-remind-idle', '⏰ Remind me');
       rb.type = 'button';
-      rb.title = 'Saves a private note to self that comes back at the time you pick';
+      rb.title = 'Save a private note to self that reminds you at the time you pick';
       rb.addEventListener('click', function () {
         pickTime(rb.closest('.inbox-msg'), function (iso) { remindOther(m, t, iso); });
       });
@@ -615,9 +615,9 @@
     var others = t.members.filter(function (m) { return m.id !== ME; }).map(function (m) { return m.name; }).join(', ');
     var msg = on
       ? 'Post this conversation to the comments of “' + t.show.name + '”?\n\n'
-        + 'From now on EVERY message sent here' + (others ? ' — by you or ' + others : '')
+        + 'From now on, EVERY message sent here' + (others ? ' — by you or ' + others : '')
         + ' — is also posted to that show’s comments, where anyone with access to the show can read it.\n\n'
-        + 'Messages already sent stay private.' + (others ? ' ' + others + ' will see a notice in the conversation.' : '')
+        + 'Earlier messages stay private.' + (others ? ' ' + others + ' will see a notice in the conversation.' : '')
         + roNote(t.members.filter(function (m) { return m.id !== ME && m.read_only; }), '\n\n')
       : 'Stop posting this conversation to the comments of “' + t.show.name + '”?\n\n'
         + 'New messages will be private again. Comments already posted stay on the show.';
@@ -659,7 +659,7 @@
     note.hidden = !pub;
     if (pub) {
       note.textContent = blocked
-        ? 'This conversation posts to show comments, and your account is read-only — you can read here but not send.'
+        ? 'This conversation posts to show comments. Your account is read-only, so you can read but not send.'
         : 'Posting to the comments of “' + t.show.name + '”';
     }
     $('inbox-input').placeholder = t.is_self ? 'Note to self…' : 'Message…';
@@ -679,7 +679,7 @@
       _draftPub = publicNow();
       flash(publicNow()
         ? 'Not sent — this conversation now posts to the show’s comments. Check the banner, then send again.'
-        : 'Not sent — this conversation no longer posts to the show’s comments, so your message would stay private. Send again if that is what you want.');
+        : 'Not sent — this conversation no longer posts to the show’s comments. Send again to send it privately.');
       return;
     }
     S.sending = true; paintComposer();
@@ -811,7 +811,7 @@
     if (!canPub) { c.pub = false; $('inbox-c-pub').checked = false; }
     $('inbox-c-pub-row').classList.toggle('disabled', !canPub);
     $('inbox-c-pub-hint').textContent = !c.show ? 'Tag a show first.'
-      : (panel.dataset.canComment === '1' ? '' : 'Your account is read-only, so it cannot post comments.');
+      : (panel.dataset.canComment === '1' ? '' : 'Read-only accounts can’t post comments.');
     var ex = existingThread(c);
     var cont = $('inbox-c-continue');
     cont.hidden = !ex;
@@ -819,7 +819,7 @@
       cont.textContent = (ex.is_self ? 'This is added to your notes to self' : 'This continues your conversation with ' + fullTitle(ex))
         + (ex.show ? ' about “' + ex.show.name + '”' : '')
         + (ex.last_at ? ' (last message ' + when(ex.last_at, true) + ')' : '') + '.'
-        + (ex.post_to_comments && !c.pub ? ' That conversation posts to the show’s comments: it opens for you to check before anything is sent.' : '');
+        + (ex.post_to_comments && !c.pub ? ' That conversation posts to the show’s comments, so it opens for you to review before anything is sent.' : '');
     }
     var warn = $('inbox-c-pub-warn');
     warn.hidden = !c.pub;
@@ -828,9 +828,9 @@
       warn.textContent = 'Public: this message — and every reply'
         + (names.length ? ' from ' + joinWith(names, 'or') : '') + ' in this conversation — will be posted to the comments of “'
         + c.show.name + '”, where anyone with access to the show can read it. '
-        + (names.length ? joinWith(names, 'and') + ' will see this stated at the top of the conversation.' : '');
+        + (names.length ? joinWith(names, 'and') + ' will see a notice at the top of the conversation.' : '');
       var more = (ex && !ex.post_to_comments
-        ? 'That conversation is private now — sending this turns on posting to comments for it from here on (earlier messages stay private).' : '')
+        ? 'That conversation is private now. Sending this makes it post to comments from here on (earlier messages stay private).' : '')
         + roNote(c.to.filter(function (p) { return p.read_only; }), ex && !ex.post_to_comments ? ' ' : '');
       if (more) warn.appendChild(el('span', 'inbox-warn-more', more));
     }
@@ -952,7 +952,7 @@
         $('inbox-c-send').disabled = false;
         await openThread(e.data.thread_id, true, true);
         if (S.thread && S.thread.id === e.data.thread_id) setReminder(keepRemind);
-        flash('Not sent yet — this conversation posts to the show’s comments. Check the banner, then press Send.');
+        flash('Not sent — this conversation posts to the show’s comments. Check the banner, then send again.');
         return;
       }
       flash(e.message);

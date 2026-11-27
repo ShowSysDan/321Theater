@@ -582,8 +582,8 @@
 
     if (R.capped) {
       capNote.hidden = false;
-      capNote.textContent = 'This plan is longer than the ' + ZOOMS[zoom].capText + ' the ' + ZOOMS[zoom].label +
-        ' view draws: showing ' + monthYear(R.start) + ' – ' + monthYear(R.end) +
+      capNote.textContent = 'Showing ' + monthYear(R.start) + ' – ' + monthYear(R.end) + ' only (the ' + ZOOMS[zoom].label +
+        ' view’s ' + ZOOMS[zoom].capText + ' limit)' +
         (outside ? ' — ' + plural(outside, 'item') + ' outside it ' + (outside === 1 ? 'is' : 'are') + ' marked at the edge' : '') +
         (zoom !== 'month' ? '. Zoom out to see more.' : '.');
     } else capNote.hidden = true;

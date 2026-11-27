@@ -50,7 +50,7 @@
   <div class="show-card archived{% if s.show_mode == 'event' %} show-card-event{% endif %}" data-search="{{ (s.name ~ ' ' ~ (s.venue or '') ~ ' ' ~ (s.company or ''))|lower }}"
        data-date="{{ s.show_date or '' }}" data-venue="{{ s.venue or 'Unassigned' }}">
     <a class="show-card-link-overlay" href="{{ url_for('show_page', show_id=s.id, tab='advance') }}"></a>
-    <div class="show-card-name">{{ s.name }}{% if s.is_test %} <span class="test-instance-badge" style="font-size:9px">TEST</span>{% endif %}{% if s.is_cancelled %} <span class="past-badge" title="Cancelled — did not happen. Left out of reports and the timeline.">CANCELLED</span>{% endif %}</div>
+    <div class="show-card-name">{{ s.name }}{% if s.is_test %} <span class="test-instance-badge" style="font-size:9px">TEST</span>{% endif %}{% if s.is_cancelled %} <span class="past-badge" title="Cancelled: didn't happen. Left out of reports and the timeline.">CANCELLED</span>{% endif %}</div>
     <div class="show-card-dates">
       <div>{{ s.show_date or 'No date' }}</div>
       <div class="show-meta" style="margin-top:2px">{{ s.venue or '—' }}{% if s.company %} · {{ s.company }}{% endif %}</div>

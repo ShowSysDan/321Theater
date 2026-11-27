@@ -336,7 +336,7 @@ function _showOtherSavedBanner(savedAt) {
     time = savedDate.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
   }
   banner.innerHTML = `
-    <span>⚠ Another user saved this form${time ? ' at ' + time : ''}. Reload to see their changes.</span>
+    <span>⚠ Someone else saved this form${time ? ' at ' + time : ''}. Reload to see their changes.</span>
     <div style="display:flex;gap:8px">
       <button class="btn btn-xs btn-primary" data-role="reload">Reload</button>
       <button class="btn btn-xs btn-ghost" data-role="dismiss">Dismiss</button>
@@ -1775,7 +1775,7 @@ ToolsMenu.register('sched-tab', () => {
                onSelect: () => openSaveSchedTemplate()});
   }
   defs.push({separator: true});
-  defs.push({label: 'History', title: 'Every saved version of this schedule, with what changed',
+  defs.push({label: 'History', title: 'Past versions of this schedule and what changed',
              onSelect: () => openHistory('schedule')});
   return defs;
 });
@@ -1871,9 +1871,8 @@ function _setOrphanNote(pane, d) {
   if (note || !sec) return;
   note = document.createElement('div');
   note.className = 'sched-orphan-note';
-  note.innerHTML = `<strong>${_esc(d.perf_date || d.date_key)} is outside this show's dates</strong>
-    (load-in → load-out and performances). These rows are kept here so nothing is lost — copy them
-    to a real day (that day's Tools → Copy from day) or delete them. They don't print on the schedule PDF.`;
+  note.innerHTML = `<strong>${_esc(d.perf_date || d.date_key)} is outside this show's dates.</strong>
+    These rows don't print. Copy them to another day (that day's Tools → Copy from day) or delete them.`;
   sec.querySelector('.form-section-header')?.insertAdjacentElement('afterend', note);
 }
 
@@ -2070,8 +2069,8 @@ function _confirmTemplateApply(existingCount) {
       <div style="background:var(--bg-card);color:var(--text);padding:18px 20px;border-radius:6px;max-width:440px;border:1px solid var(--border);box-shadow:0 10px 40px rgba(0,0,0,0.4)">
         <h3 style="margin:0 0 8px;font-size:14px;letter-spacing:0.5px">APPLY TEMPLATE</h3>
         <p style="margin:0 0 16px;font-size:13px;line-height:1.45;color:var(--text-dim,#aaa)">
-          This day already has <strong>${existingCount}</strong> timeline ${existingCount === 1 ? 'entry' : 'entries'}.
-          Replace them with the template, or merge the template rows in after what's already there?
+          This day already has <strong>${existingCount}</strong> ${existingCount === 1 ? 'row' : 'rows'}.
+          Replace them with the template, or add the template rows after them?
         </p>
         <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
           <button type="button" class="btn btn-ghost btn-sm" data-action="cancel">Cancel</button>
@@ -2341,8 +2340,8 @@ function openSaveSchedTemplate() {
       ${dayPick}
       <label class="field-label">Template name</label>
       <input type="text" class="field-input" data-name maxlength="120" placeholder="e.g. Orchestra concert — single day">
-      <p class="text-dim" style="margin:0;font-size:12px">Saves this day's rows for anyone to apply from Tools → Templates.
-        An existing name is replaced.</p>`,
+      <p class="text-dim" style="margin:0;font-size:12px">Anyone can apply it from a day's Tools → Templates.
+        Using an existing name replaces that template.</p>`,
     `<button type="button" class="btn btn-ghost" data-close>Cancel</button>
      <button type="button" class="btn btn-primary" data-go>Save template</button>`, 480);
   const nameEl = ov.querySelector('[data-name]');
@@ -2567,8 +2566,7 @@ function _schedClearedBanner() {
   div.id = 'sched-conflict-banner';
   div.className = 'sched-conflict-banner';
   div.innerHTML = `
-    <div><strong>The schedule was not cleared.</strong> Removing every row was cancelled, so the
-      saved schedule still has its rows — they'll reappear here in a moment.</div>
+    <div><strong>Schedule not cleared.</strong> The saved rows will reappear here in a moment.</div>
     <div class="sched-conflict-actions">
       <button type="button" class="btn btn-sm btn-primary" data-act="reload">Reload</button>
     </div>`;
@@ -2733,7 +2731,7 @@ function _schedServerRow(r) {
     const tr = document.createElement('tr');
     tr.className = 'schedule-row piano-sched-row';
     tr.dataset.pianoId = r.piano_id;
-    tr.title = "Added by Piano Tuning — change it on the Advance tab's Piano Tuning panel";
+    tr.title = "From Piano Tuning — edit it in the Advance tab's Piano Tuning panel";
     tr.innerHTML = `
       ${RESTRICTED ? '' : '<td class="drag-col"></td>'}
       <td><input type="text" class="sched-cell" value="${_esc(r.start_time)}" readonly tabindex="-1"></td>
@@ -3015,7 +3013,7 @@ function _schedDayPmBar(iso) {
   const sel = document.createElement('select');
   sel.className = 'field-input field-input-sm sched-daypm-select';
   sel.id = 'sched-daypm-' + iso;
-  sel.title = "Production manager on duty this day — blank = the show's PM. Same setting as Day PM on the Labor Requests tab.";
+  sel.title = "PM on duty this day (blank = the show's PM). Same as Day PM on the Labor Requests tab.";
   sel.disabled = !window.SCHED_DAY_PM_EDIT;
   lab.htmlFor = sel.id;
   const contact = document.createElement('span');
@@ -3671,7 +3669,7 @@ async function saveSchedField() {
 }
 
 async function deleteSchedField(fid) {
-  if (!confirm('Delete this schedule field? Saved values for this field will remain in existing shows but the field will no longer appear on the schedule.')) return;
+  if (!confirm('Delete this schedule field? It disappears from the schedule; values already saved on shows are kept.')) return;
   const resp = await fetch(`/settings/schedule-meta-fields/${fid}/delete`, {method: 'POST'});
   const d = await resp.json();
   if (d.success) location.reload();
@@ -3867,7 +3865,7 @@ async function saveField() {
 }
 
 async function deleteField(fid) {
-  if (!confirm('Delete this field? Saved values for this field will remain in existing shows but the field will no longer appear in the form.')) return;
+  if (!confirm('Delete this field? It disappears from the form; values already saved on shows are kept.')) return;
   const resp = await fetch(`/settings/form-fields/${fid}/delete`, {method:'POST'});
   const d = await resp.json();
   if (d.success) location.reload();
@@ -4085,7 +4083,7 @@ async function loadLaborPresets() {
     const presets = await (await fetch('/api/labor-presets')).json();
     if (!presets.length) {
       el.innerHTML = '<p class="text-dim" style="font-size:12px">No presets yet.' +
-        (ro ? '' : ' Click + New Preset to create one.') + '</p>';
+        (ro ? '' : ' Use + New Preset to add one.') + '</p>';
       return;
     }
     el.innerHTML = presets.map(p => `
@@ -4214,7 +4212,7 @@ async function saveLaborPreset() {
 
 async function deleteLaborPreset(pid) {
   if (window.READONLY_VIEW) return;
-  if (!confirm('Delete this preset? Shows it was already applied to keep their labor lines.')) return;
+  if (!confirm('Delete this preset? Shows it was applied to keep their labor lines.')) return;
   const resp = await fetch(`/settings/labor-presets/${pid}/delete`, {method:'POST'});
   const d = await resp.json();
   if (d.success) loadLaborPresets();
@@ -4847,8 +4845,8 @@ async function toggleShowMode(btn, showId) {
 // availability and the timeline). Reloads so every badge is right.
 async function toggleShowCancelled(btn, showId) {
   const next = btn.dataset.isCancelled !== '1';
-  if (next && !confirm('Mark this show as CANCELLED?\n\nIt did not happen: it will be left out of ' +
-                       'reports, asset availability and the timeline. Nothing is deleted, and you can unmark it.')) return;
+  if (next && !confirm('Mark this show as cancelled (it never happened)?\n\nIt will be left out of ' +
+                       'reports, asset availability and the timeline. Nothing is deleted; you can undo this.')) return;
   btn.disabled = true;
   try {
     const r = await fetch(`/shows/${showId}/cancelled`, {
@@ -4956,7 +4954,7 @@ function renderComments(comments) {
   const visible = comments.filter(c => !c.deleted_at);
   const deleted = comments.filter(c => c.deleted_at);
   if (!visible.length && !deleted.length) {
-    list.innerHTML = '<p class="text-dim" style="padding:28px;text-align:center;margin:0">No comments yet. Start the conversation!</p>';
+    list.innerHTML = '<p class="text-dim" style="padding:28px;text-align:center;margin:0">No comments yet.</p>';
     return;
   }
   const isAdmin = typeof IS_ADMIN !== 'undefined' && IS_ADMIN;
@@ -5303,7 +5301,7 @@ function renderAttachments(files) {
       ? `<button class="btn btn-xs btn-ghost" onclick="moveAttachment(${f.id})" title="Move to another show">⇄</button>`
       : '';
     const delBtn = _canEditFiles()
-      ? `<button class="btn btn-xs btn-danger-ghost" onclick="deleteAttachment(${f.id})" title="Remove (archives — an admin can restore)">×</button>`
+      ? `<button class="btn btn-xs btn-danger-ghost" onclick="deleteAttachment(${f.id})" title="Remove (an admin can restore it)">×</button>`
       : '';
     return `
       <div class="attachment-item">
@@ -5428,7 +5426,7 @@ async function loadAdvFieldFiles(wrap) {
       const desc = f.description ? ` <span class="text-dim">— ${_esc(f.description)}</span>` : '';
       const delBtn = _canEditFiles()
         ? `<button class="btn btn-xs btn-danger-ghost" style="margin-left:auto"
-                onclick="deleteAdvFieldFile(${f.id}, this)" title="Remove (archives — an admin can restore)">×</button>`
+                onclick="deleteAdvFieldFile(${f.id}, this)" title="Remove (an admin can restore it)">×</button>`
         : '';
       return `<li style="display:flex;align-items:center;gap:8px;padding:3px 0">
         <span>${_fileIcon(f.mime_type)}</span>
@@ -5490,7 +5488,7 @@ function uploadAdvField(input) {
 
 async function deleteAdvFieldFile(aid, btn) {
   if (!SHOW_ID || !aid) return;
-  if (!confirm('Remove this file? It will be archived — an admin can restore it from Settings → File Manager.')) return;
+  if (!confirm('Remove this file? An admin can restore it from Settings → File Manager.')) return;
   const wrap = btn.closest('.adv-file-upload');
   const resp = await fetch(`/shows/${SHOW_ID}/attachments/${aid}/delete`, {method:'POST'});
   const d = await resp.json();
@@ -5507,7 +5505,7 @@ function initAdvFileFields() {
 }
 
 async function deleteAttachment(aid) {
-  if (!confirm('Remove this attachment? It will be archived — an admin can restore it from Settings → File Manager.')) return;
+  if (!confirm('Remove this attachment? An admin can restore it from Settings → File Manager.')) return;
   const resp = await fetch(`/shows/${SHOW_ID}/attachments/${aid}/delete`, {method:'POST'});
   const d = await resp.json();
   if (d.success) loadAttachments();
@@ -5917,7 +5915,7 @@ async function runAiExtract() {
 
   if (!hasFile && !attachId) {
     msgEl.style.display = '';
-    msgEl.textContent = 'Please upload a document or select an existing attachment.';
+    msgEl.textContent = 'Upload a document or pick an existing attachment.';
     msgEl.style.color = 'var(--danger, #f44336)';
     return;
   }
@@ -5972,7 +5970,7 @@ async function runAiExtract() {
   }, 800);
 
   try {
-    _log('Sending to the AI service...');
+    _log('Sending to AI…');
     const resp = await fetch(`/shows/${SHOW_ID}/ai-extract`, {
       method: 'POST',
       body: formData,
@@ -5981,7 +5979,7 @@ async function runAiExtract() {
     // 3.55.0: the model call is a queued job run by a server whose own
     // Ollama answers — poll it until it finishes.
     if (data.success && data.queued && data.job_id) {
-      _log('Queued — waiting for a server with the AI model...');
+      _log('Queued — waiting for an AI server…');
       data = await _aiWaitJob(data.job_id, _log);
     }
     clearInterval(_waitTimer);
@@ -6038,7 +6036,7 @@ function _showAiSuggestions(data) {
   header.textContent = `Document: ${data.document}  ·  Model: ${data.model}  ·  ${count} field${count !== 1 ? 's' : ''} found`;
 
   if (!count) {
-    list.innerHTML = '<p style="font-size:13px;color:var(--text-dim)">No fields could be extracted from this document. Make sure fields have AI hints configured in Settings → Form Fields.</p>';
+    list.innerHTML = '<p style="font-size:13px;color:var(--text-dim)">No fields found in this document. Check that fields have AI hints in Settings → Form Fields.</p>';
     if (applyBtn) applyBtn.disabled = true;
     return;
   }
@@ -6595,7 +6593,7 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
     if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
     const msg = toast && toast.querySelector('[data-role="msg"]');
     if (msg) msg.innerHTML =
-      'Auto-reload cancelled — copy out any unsaved work, then reload to sign back in.';
+      'Auto-reload cancelled. Copy any unsaved work, then reload to sign back in.';
   }
 
   /* ── UI ────────────────────────────────────────────────────────── */
@@ -6630,7 +6628,7 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
           <div class="session-toast-body">
             <div class="session-toast-title">Secure access expiring</div>
             <div class="session-toast-msg" data-role="msg">Your email-code access ends in
-              <b data-role="count"></b>. Save your work — a new code is needed to continue.</div>
+              <b data-role="count"></b>. Save your work; you'll need a new code to continue.</div>
           </div>
           <button type="button" class="session-toast-btn" data-role="act">Get new code</button>
           <button type="button" class="session-toast-x" data-role="dismiss" aria-label="Dismiss">×</button>`;
@@ -6675,7 +6673,7 @@ function pwRulesBind(newId, confirmId, rulesId, onChange) {
       <div class="session-toast-body">
         <div class="session-toast-title">Session ended</div>
         <div class="session-toast-msg" data-role="msg">${why}
-          Reloading in <b id="sw-reload-count">${RELOAD_GRACE_S}</b>s so you can sign back in.</div>
+          Reloading in <b id="sw-reload-count">${RELOAD_GRACE_S}</b>s to sign back in.</div>
       </div>
       <button type="button" class="session-toast-btn" data-role="act">Reload now</button>
       <button type="button" class="session-toast-x" data-role="dismiss"

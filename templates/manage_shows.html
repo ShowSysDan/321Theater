@@ -5,15 +5,17 @@
 #}
 {% extends "base.html" %}
 {% block title %}Manage Shows — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
     <h1 class="page-title">Manage Shows</h1>
     <p class="page-sub">{{ active_count }} active · {{ archived_count }} archived</p>
   </div>
-  <a href="{{ url_for('settings') }}" class="btn btn-ghost">← Back to Settings</a>
 </div>
+{{ settings_nav_open('shows') }}
 
 <div class="form-section">
   <div class="form-section-header">
@@ -22,8 +24,8 @@
   </div>
   <div class="form-section-body" style="border-bottom:1px solid var(--border)">
     <p class="text-dim" style="font-size:12px;margin:0">
-      Archiving hides a show from the board; nothing is deleted and it can be restored.
-      Shows archive automatically the set number of days after their last date (shown as <strong>PAST</strong> until then).
+      Archiving hides a show from the board without deleting anything; you can restore it anytime.
+      Shows auto-archive after their last date and show as <strong>PAST</strong> until then.
     </p>
     <div id="auto-archive-setting" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;font-size:12px">
       <label for="auto-archive-days" style="font-weight:600">Auto-archive shows</label>
@@ -82,7 +84,7 @@
             <span style="font-size:10px;background:rgba(239,68,68,.12);color:var(--red);padding:2px 7px;border-radius:3px;letter-spacing:.06em">ARCHIVED</span>
             {% if s.is_cancelled %}
             <span style="font-size:10px;background:rgba(180,83,42,.18);color:var(--orange-text, #d97a3f);padding:2px 7px;border-radius:3px;letter-spacing:.06em;margin-left:4px"
-                  title="Cancelled — did not happen. Left out of reports, asset availability and the timeline.">CANCELLED</span>
+                  title="Cancelled: didn't happen. Left out of reports, asset availability and the timeline.">CANCELLED</span>
             {% endif %}
             {% else %}
             <span style="font-size:10px;background:rgba(34,197,94,.12);color:var(--green);padding:2px 7px;border-radius:3px;letter-spacing:.06em">ACTIVE</span>
@@ -104,7 +106,7 @@
                     onclick="toggleShowTestMode(this, {{ s.id }}, true)">{{ 'Unmark test' if s.is_test else 'Mark as test' }}</button>
             {% if s.status == 'archived' %}
             <button type="button" class="btn btn-xs btn-ghost" data-is-cancelled="{{ '1' if s.is_cancelled else '0' }}"
-                    title="Cancelled = the show did not happen: left out of reports, asset availability and the timeline"
+                    title="The show didn't happen: leave it out of reports, asset availability and the timeline"
                     onclick="toggleShowCancelled(this, {{ s.id }})">{{ 'Unmark cancelled' if s.is_cancelled else 'Mark as cancelled' }}</button>
             <form method="post" action="{{ url_for('restore_show', show_id=s.id) }}" style="display:inline">
               <input type="hidden" name="next" value="{{ url_for('manage_shows') }}">
@@ -157,6 +159,7 @@
   .clone-warn { font-size: 12px; margin: 0; padding-left: 18px; color: var(--orange-text, #d97a3f); }
 </style>
 {% endif %}
+{{ settings_nav_close() }}
 {% endblock %}
 
 {% block scripts %}
@@ -186,8 +189,8 @@ async function saveAutoArchiveDays(btn) {
 
 function confirmArchive(form) {
   return confirm('Archive “' + form.dataset.name + '”?\n\n' +
-                 'It will be hidden from the dashboard but nothing is deleted — ' +
-                 'you can restore it here at any time.');
+                 'It will be hidden from the Shows board. Nothing is deleted, ' +
+                 'and you can restore it here anytime.');
 }
 
 {% if can_clone %}
@@ -428,7 +431,7 @@ async function submitCloneShow(btn, override) {
 function _cloneAskOverride(btn, shortages) {
   const msg = document.getElementById('clone-msg');
   msg.replaceChildren(_el('div', {style: 'font-weight:600'},
-    'Nothing was created yet — this gear is not available on the new dates:'));
+    'Nothing was created. This gear isn\'t available on the new dates:'));
   const ul = _el('ul', {class: 'clone-warn'});
   shortages.forEach(w => ul.appendChild(_el('li', null, w)));
   msg.appendChild(ul);

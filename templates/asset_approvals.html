@@ -202,7 +202,7 @@
   </div>
   <button class="btn btn-primary btn-sm" onclick="applyRange()">Apply</button>
   <div class="approvals-presets" title="Reset the window to start from today">
-    <button class="btn btn-ghost btn-sm" onclick="presetRange(-21)" title="Today − 21 days through today — includes archived past shows for cost adjustments">↻ Past 3 weeks</button>
+    <button class="btn btn-ghost btn-sm" onclick="presetRange(-21)" title="Last 21 days, including archived shows, for cost adjustments">↻ Past 3 weeks</button>
     <button class="btn btn-ghost btn-sm" onclick="presetRange(21)" title="Today through today + 21 days">↻ Today + 3 weeks</button>
     <button class="btn btn-ghost btn-sm" onclick="presetRange(42)" title="Today through today + 42 days">↻ Today + 6 weeks</button>
   </div>
@@ -328,7 +328,7 @@
             {% if not readonly_view %}
             <button class="btn btn-xs btn-ghost appr-restore-btn"
                     style="margin-left:4px;padding:1px 6px;font-size:10px;{% if not is_override %}display:none{% endif %}"
-                    title="Restore to the price set when this asset was added to the show ($ {{ '%.2f' | format(orig_price or 0) }}). Rate-card changes don't apply to existing rentals."
+                    title="Restore the price set when this line was added (${{ '%.2f' | format(orig_price or 0) }})"
                     onclick="restorePrice(this, {{ s.id }}, {{ a.id }})">↻</button>
             {% endif %}
           </td>
@@ -386,7 +386,7 @@
 </div>
 
 <div id="appr-hide-empty-note" class="appr-empty-note" style="display:none;margin-top:12px">
-  All shows in this window have no requests yet — clear the “Hide shows with no requests” filter to see them.
+  No show in this window has requests yet. Clear “Hide shows with no requests” to see them.
 </div>
 
 {% endif %}
@@ -424,7 +424,7 @@
         <select id="appr-add-unit" class="field-input" onchange="onApprUnitChange()">
           <option value="">Any available unit (from pool)</option>
         </select>
-        <div style="font-size:10px;color:var(--text-dim);margin-top:2px">Pin to a specific unit — booking removes it from the pool for these dates.</div>
+        <div style="font-size:10px;color:var(--text-dim);margin-top:2px">Pin a specific unit; it's removed from the pool for these dates.</div>
       </div>
       <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px">
         <div class="field-group">
@@ -432,9 +432,9 @@
           <input type="number" id="appr-add-qty" class="field-input" value="1" min="1" oninput="updateApprAddState()">
         </div>
         <div class="field-group">
-          <label class="field-label" title="Auto-filled from the rate card. As approver you may override before adding — the value gets locked to this line on save and becomes the new restore target.">UNIT PRICE</label>
+          <label class="field-label" title="Filled from the rate card. You can override it; the price is locked to this line when added.">UNIT PRICE</label>
           <input type="text" id="appr-add-price" class="field-input" placeholder="0.00">
-          <div style="font-size:10px;color:var(--text-dim);margin-top:2px">Auto-filled from rate card · editable here (approver override) · locks on save</div>
+          <div style="font-size:10px;color:var(--text-dim);margin-top:2px">From the rate card · editable · locked when added</div>
           <div id="appr-add-rate-note" style="display:none;font-size:10px;color:#2F855A;font-weight:600;margin-top:2px"></div>
         </div>
         <div class="field-group">
@@ -452,7 +452,7 @@
       </div>
       <div id="appr-avail-info" style="margin-top:10px;font-size:12px;color:var(--text-dim)"></div>
       <div id="appr-overbook-warning" style="display:none;margin-top:8px;padding:10px 12px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.4);border-radius:var(--radius);font-size:12px;color:#F59E0B">
-        <strong>⚠ Availability Override</strong> — adding this will overbook the asset. Proceed only if you have authority to override.
+        <strong>⚠ Availability Override</strong> — adding this overbooks the asset. Only proceed if you're authorized to override.
       </div>
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
         <button class="btn btn-ghost" onclick="closeApprAssetAdd()">Cancel</button>

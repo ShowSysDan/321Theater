@@ -573,7 +573,7 @@
       if (det.email) { drawMail(v); return; }
       if (kind === 'email') {
         if (reading(v, view)) return;
-        noPreview(view, v, 'This message can’t be previewed here — the server could not read this Outlook file. Download it to open it in your mail program.');
+        noPreview(view, v, 'This Outlook message can’t be previewed here. Download it to open it in your mail program.');
         return;
       }
       if (kind === 'pdf') {
@@ -724,7 +724,7 @@
       addBtn = h('button', {type: 'button', class: 'btn btn-primary btn-sm', text: '+ Add line', data: {fk: 'add'}, onclick: () => lineDialog(null)});
       // Read-only (nothing is stored): anyone who can see the budget.
       invBtn = h('button', {type: 'button', class: 'btn btn-ghost btn-sm', text: 'Invoice / quote…', data: {fk: 'inv'},
-                            title: 'A quote or invoice from these lines (and the linked shows) — whole project, some tasks or a date range',
+                            title: 'Make a quote or invoice for the whole project, selected tasks or a date range',
                             onclick: () => invoiceDialog()});
       tableBox = h('div');
       showsBox = h('div', {class: 'form-section-body'});
@@ -1105,7 +1105,7 @@
         clear(body);
         if (mode === 'upload') {
           body.append(field('File', fileIn),
-            h('div', {class: 'pm-banner', role: 'note'}, h('span', {text: 'The file will be visible only to people who can see the budget. It is added to Files as “Budget only”.'})),
+            h('div', {class: 'pm-banner', role: 'note'}, h('span', {text: 'Added to Files as “Budget only” — visible only to people who can see the budget.'})),
             prog);
         } else if (mode === 'file') {
           body.append(filter, pickList, h('p', {class: 'pm-note', text: 'The line keeps the version that is current now, even if the file gets a newer one later.'}));
@@ -1171,7 +1171,7 @@
         if (!shows) {
           const n = PM.state.shows.length;
           add(showsBox, [
-            h('p', {class: 'pm-note', text: n ? 'What the linked shows cost, straight from their own pages: assets, external rentals, piano and labor. Nothing is copied into this budget.'
+            h('p', {class: 'pm-note', text: n ? 'Costs of the linked shows (assets, external rentals, piano and labor), read from each show. They aren’t added to this budget.'
                                               : 'No shows are linked to this project. Link one on the Overview tab to see its costs here.'}),
             showsErr ? h('p', {class: 'pm-note pm-b-err', role: 'alert', text: showsErr}) : null,
             n ? h('div', null, h('button', {type: 'button', class: 'btn btn-ghost btn-sm', data: {fk: 'ls'},
@@ -1224,7 +1224,7 @@
     // never in localStorage.
     const INV_BASIS = [
       ['estimate', 'Estimate', 'Each line’s estimate. Shows at their labor estimate.'],
-      ['forecast', 'Forecast (larger of committed / paid)', 'Each line’s committed or paid amount, whichever is larger — the same forecast the variance uses. Shows at settled labor, else the labor estimate.'],
+      ['forecast', 'Forecast (larger of committed / paid)', 'Each line’s committed or paid amount, whichever is larger. Shows at settled labor, else the labor estimate.'],
       ['actual', 'Actual (paid so far)', 'What was actually paid on each line. Shows bill labor only once settled.']];
     const INV_DEFAULT = {quote: 'estimate', invoice: 'actual'};
     function invoiceDialog() {
@@ -1329,14 +1329,13 @@
         if (o.scope === 'tasks') {
           scopeBox.append(h('div', {class: 'pm-b-ipick-head'}, filter, pickCount), pick, unRow);
           drawPick();
-          showsHelp.textContent = 'Shows: those created from or linked to a picked task (and linked to this project).';
+          showsHelp.textContent = 'Shows: linked shows created from or linked to a picked task.';
         } else if (o.scope === 'range') {
           scopeBox.append(h('div', {class: 'form-row cols-3'}, field('From', from), field('To', to), field('A task or show counts when it', ruleSel)),
-            h('p', {class: 'pm-note', text: 'A task’s days run from its start to its due date (one date if it has only one); tasks with no dates are left out. ' +
-              '“Finishes in the range” never bills a task or show twice across back-to-back ranges — use it for incremental billing. ' +
-              'Shows with no dates yet are left out too.'}),
+            h('p', {class: 'pm-note', text: 'A task runs from its start to its due date; tasks and shows with no dates are left out. ' +
+              'For back-to-back invoices, use “Finishes in the range” — it never bills anything twice.'}),
             unRow,
-            h('p', {class: 'pm-note', text: 'Budget lines without a task have no date: ticked, they appear on EVERY range invoice (billed again each time).'}));
+            h('p', {class: 'pm-note', text: 'Budget lines without a task have no date: if included, they’re billed again on every range invoice.'}));
           showsHelp.textContent = 'Shows: linked shows whose dates (load-in to load-out and performances) meet the same rule.';
         } else {
           scopeBox.appendChild(h('p', {class: 'pm-note', text: 'Every budget line, with or without a task.'}));
@@ -1967,7 +1966,7 @@
         clear(listBox);
         if (!notes.length) {
           listBox.appendChild(h('div', {class: 'pm-empty'}, 'No notes yet.',
-            h('span', {class: 'pm-empty-sub', text: 'Meeting notes, site visits, decisions — written here, kept with the project.'}),
+            h('span', {class: 'pm-empty-sub', text: 'Meeting notes, site visits, decisions — kept with the project.'}),
             PM.can.edit ? h('div', null, h('button', {type: 'button', class: 'btn btn-primary btn-sm', text: 'Write the first note', data: {fk: 'new1'}, onclick: newNote})) : null));
           return;
         }
@@ -2041,7 +2040,7 @@
       } else if (n.error) {
         bannerBox.appendChild(h('div', {class: 'pm-banner pm-banner-warn', role: 'alert'},
           h('span', null, h('strong', {text: n.tooLong ? 'This note is too long.' : 'Not saved.'}),
-            n.tooLong ? ' Shorten it, or move part of it into another note — your text is still here and will be saved once it fits.' : ' ' + n.error),
+            n.tooLong ? ' Shorten it or move part into another note — your text is still here and saves once it fits.' : ' ' + n.error),
           n.tooLong ? null : h('button', {type: 'button', class: 'btn btn-sm btn-ghost', text: 'Try again', onclick: () => save()})));
       }
     }
@@ -2659,7 +2658,7 @@
           const vs = j.versions || [];
           if (!vs.length) {
             list.appendChild(h('p', {class: 'pm-empty', text: 'No earlier versions yet.'}));
-            clear(view).appendChild(h('p', {class: 'pm-note', text: 'While a note is being edited its earlier text is kept every ten minutes, and whenever someone else takes over. The newest 50 are kept.'}));
+            clear(view).appendChild(h('p', {class: 'pm-note', text: 'While a note is edited, a version is kept every ten minutes and whenever someone else takes over. The newest 50 are kept.'}));
             return;
           }
           vs.forEach(v => {

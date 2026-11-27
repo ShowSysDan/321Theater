@@ -199,7 +199,7 @@
     }
     strip.innerHTML = tags.map(function (t) {
       return '<a class="tag-chip" href="' + href(t) + '" title="Everything tagged #' + esc(t) + '">#' + esc(t) + '</a>';
-    }).join('') + (more ? '<a class="tag-chip tag-chip-more" href="/tags" title="This box holds more tags — see every tag">+ more</a>' : '');
+    }).join('') + (more ? '<a class="tag-chip tag-chip-more" href="/tags" title="More tags here — see all tags">+ more</a>' : '');
     if (ctrl.nextElementSibling !== strip) ctrl.insertAdjacentElement('afterend', strip);
     chipState.set(ctrl, {val: val, sig: sig, strip: strip});
     return !st || st.sig !== sig;

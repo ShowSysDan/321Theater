@@ -5,8 +5,10 @@
 #}
 {% extends "base.html" %}
 {% block title %}About 321Theater — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
     <h1 class="page-title">About 321Theater</h1>
@@ -14,9 +16,9 @@
   </div>
   <div class="about-head-actions">
     <button type="button" class="btn btn-ghost" id="about-refresh">Check again</button>
-    <a href="{{ url_for('settings') }}" class="btn btn-ghost">← Settings</a>
   </div>
 </div>
+{{ settings_nav_open('about') }}
 
 <p class="text-dim about-checked" id="about-checked" role="status">Checking this server… (a few seconds)</p>
 
@@ -41,8 +43,8 @@
   <div class="form-section">
     <div class="form-section-header"><span class="section-icon">◈</span> AUTOMATIC UPDATES</div>
     <div class="form-section-body"><dl class="about-kv" id="about-auto"></dl>
-      <p class="text-dim about-note">Debian installs security updates for the system (LibreOffice included) by itself when
-        <strong>unattended-upgrades</strong> is on — <code>sudo bash install.sh</code> switches it on. Nothing on this page changes the server.</p>
+      <p class="text-dim about-note">With <strong>unattended-upgrades</strong> on, Debian installs security updates (LibreOffice included) automatically;
+        <code>sudo bash install.sh</code> turns it on. This page never changes the server.</p>
     </div>
   </div>
 </div>
@@ -50,7 +52,7 @@
 <div class="form-section">
   <div class="form-section-header"><span class="section-icon">◈</span> SYSTEM PROGRAMS</div>
   <div class="form-section-body">
-    <p class="text-dim about-note">Programs the app runs. Versions are Debian's packages; "update waiting" comes from this server's own package lists.</p>
+    <p class="text-dim about-note">Programs the app runs, with their Debian package versions. "Update waiting" comes from this server's package lists.</p>
     <div class="about-scroll"><table class="data-table about-table" id="about-programs">
       <thead><tr><th>Program</th><th>Used for</th><th>Installed</th><th>Status</th></tr></thead><tbody></tbody>
     </table></div>
@@ -60,7 +62,7 @@
 <div class="form-section">
   <div class="form-section-header"><span class="section-icon">◈</span> PYTHON PACKAGES (VENV)</div>
   <div class="form-section-body">
-    <p class="text-dim about-note">Everything in <code>requirements.txt</code>, checked against the app's virtual environment. A missing or too-old package is fixed by <code>sudo bash install.sh</code>.</p>
+    <p class="text-dim about-note">Packages from <code>requirements.txt</code>, checked in the app's virtual environment. Run <code>sudo bash install.sh</code> to fix a missing or too-old one.</p>
     <div class="about-scroll"><table class="data-table about-table" id="about-python">
       <thead><tr><th>Package</th><th>Used for</th><th>Required</th><th>Installed</th><th>Status</th></tr></thead><tbody></tbody>
     </table></div>
@@ -199,7 +201,7 @@
       tr.appendChild(stc);
       qb.appendChild(tr);
     });
-    $('about-checked').textContent = 'Checked ' + when(d.checked_at) + ' — results are kept for 10 minutes; “Check again” re-runs them now.';
+    $('about-checked').textContent = 'Checked ' + when(d.checked_at) + ' (results cached for 10 minutes).';
   }
 
   let seq = 0;
@@ -222,4 +224,5 @@
   load(false);
 })();
 </script>
+{{ settings_nav_close() }}
 {% endblock %}

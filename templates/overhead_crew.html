@@ -301,8 +301,8 @@
 {% set CAN_EDIT = can_edit %}
 <div class="page-header">
   <div>
-    <h1 class="page-title">Overhead &amp; Project Crew{% if not CAN_EDIT %}<span class="rv-badge" title="Your account is read-only: you can see this schedule, its projects and templates, but not change them">VIEW ONLY</span>{% endif %}</h1>
-    <p class="page-sub">Running list of labor requests not tied to a show. Closest dates on top.</p>
+    <h1 class="page-title">Overhead &amp; Project Crew{% if not CAN_EDIT %}<span class="rv-badge" title="Read-only account: you can view this schedule, its projects and templates, but not change them">VIEW ONLY</span>{% endif %}</h1>
+    <p class="page-sub">Labor requests not tied to a show, soonest first.</p>
   </div>
   <div class="header-actions">
     {# Projects / Recurring Templates open read-only for a view-only account
@@ -341,7 +341,7 @@
       Project Hour Totals <span id="oh-summary-arrow" style="margin-left:4px">▼</span>
     </button>
     <span class="text-dim" style="font-size:11px;margin-left:auto">
-      Range numbers cover the From / To filter. Lifetime numbers cover every day ever logged.
+      Range = the From / To dates. Lifetime = every day ever logged.
     </span>
   </div>
   <div class="form-section-body" id="oh-summary-body" style="display:none">
@@ -361,7 +361,7 @@
     </div>
     <div class="modal-body">
       <div class="oh-help">
-        Projects used by sub-groups. Edits here reach every sub-group without its own override.
+        Edits here apply to every sub-group that doesn't override them.
       </div>
       <div id="oh-proj-list" class="oh-tpl-list" style="margin-top:14px"></div>
       {% if CAN_EDIT %}
@@ -546,7 +546,7 @@
           <label>New Project Name *</label>
           <input type="text" id="oh-addgrp-newname" class="field-input" placeholder="e.g. Capital Project — Mainstage">
         </div>
-        <p class="oh-help">A new project will be created and used. Edit details later via <strong>Projects</strong>.</p>
+        <p class="oh-help">Creates a new project. Edit its details later under <strong>Projects</strong>.</p>
       </div>
       <div class="modal-footer" style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
         <button class="btn btn-ghost"   onclick="window.__overhead.closeAddGroup()">Cancel</button>
@@ -1787,7 +1787,7 @@
     if (!confirm(
       `Generate labor lines from every active recurring template ` +
       `for matching weekdays between ${fromVal} and ${toVal}?\n\n` +
-      `Existing matching lines (same date / position / times) will be left alone.`
+      `Lines that already exist (same date, position and times) are skipped.`
     )) return;
     const res = await postJSON('/api/overhead-crew/templates/generate', { from: fromVal, to: toVal });
     if (!res || !res.success) { alert('Generate failed.'); return; }

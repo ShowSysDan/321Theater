@@ -1,0 +1,178 @@
+{#
+  3·2·1→Theater
+  © 2026 Dr. Phillips Center for the Performing Arts; portions © 2026 Thauma Systems, LLC.
+  MIT Licensed — see LICENSE for details.
+
+  Settings menu (3.57.0) — THE one navigation for every Settings page.
+  Settings.html panes are in-page items (data-stab = the pane key, also the
+  #hash); every other entry is its own page that wraps its content in
+  settings_nav_open(key) … settings_nav_close() so the menu never goes away.
+  A new Settings page = one entry here + those two calls on the page. Each
+  entry's visibility mirrors its route's rule (the server stays the
+  authority). Import WITH context (needs session / url_for).
+#}
+{% macro _items() -%}
+{%- set role = session.get('user_role') -%}
+{%- set admin = role == 'admin' -%}
+{%- set ca = admin or session.get('is_content_admin') -%}
+{%- set crew = ca or session.get('is_scheduler') -%}
+{%- set staff = role in ('admin', 'staff') -%}
+{%- set S = url_for('settings') -%}
+{{- caller([
+  ('You', [
+    ('account', 'My Account', S ~ '#account', true, true, 'Your name, password, theme and notifications.', 'profile password theme notifications email'),
+  ]),
+  ('People', [
+    ('users', 'Users', S ~ '#users', true, true, 'Accounts, roles and permissions.', 'accounts roles permissions lock password reset'),
+    ('registrations', 'Registrations', S ~ '#registrations', true, admin, 'Account requests waiting for approval.', 'pending sign up approve'),
+    ('contacts', 'Contacts', S ~ '#contacts', true, ca, 'The contact directory: PMs, recipients, show contacts.', 'directory pm phone recipients'),
+    ('technicians', 'Technicians', S ~ '#technicians', true, crew, 'Crew members and their skills.', 'crew skills qualifications archive'),
+  ]),
+  ('Shows & Paperwork', [
+    ('shows', 'Shows', url_for('manage_shows'), false, staff, 'Show list, archive, clone.', 'archive restore clone cancel auto-archive'),
+    ('merge', 'Merge Duplicates', url_for('merge_shows_page'), false, admin, 'Combine two copies of the same show.', 'duplicate'),
+    ('fields', 'Form Fields', S ~ '#fields', true, ca, 'Advance and schedule fields, day templates, PDF form templates.', 'advance schedule template pdf form'),
+    ('arts-groups', 'Arts Groups', S ~ '#arts-groups', true, ca, 'The arts group / company list.', 'company companies'),
+    ('positions', 'Job Positions', S ~ '#positions', true, crew, 'Labor positions, rates and labor day presets.', 'labor rates presets pay'),
+    ('pdf', 'PDF Designer', url_for('pdf_designer_page'), false, ca, 'Layout of the advance, schedule and post-show PDFs.', 'paperwork layout sections'),
+    ('branding', 'Branding & Paperwork', S ~ '#branding', true, admin, 'Logos, venue colors, WiFi defaults, PDF time format.', 'logo venue colors wifi time format'),
+  ]),
+  ('Communication', [
+    ('email', 'Email', S ~ '#email', true, admin, 'Mail server, scheduled PDF emails, sent mail and errors.', 'smtp graph outbox send log errors scheduled'),
+    ('messages', 'Site Messages', S ~ '#messages', true, admin, 'Banners and maintenance notices.', 'banner maintenance notice announcement'),
+  ]),
+  ('Features', [
+    ('modules', 'Modules', S ~ '#modules', true, admin, 'Turn optional features on or off.', 'piano spot sound prism sign-in security inbox'),
+    ('ai', 'AI', S ~ '#ai', true, admin, 'Local AI for AI Extract and the weekly summary.', 'ollama weekly summary extract model'),
+    ('dashboards', 'Dashboards', S ~ '#dashboards', true, admin, 'Public dashboards and their links.', 'public link'),
+    ('nav', 'Sidebar Editor', url_for('nav_editor_page'), false, admin, 'Order and grouping of the main sidebar.', 'navigation menu sidebar'),
+    ('readiness', 'Readiness (beta)', url_for('readiness_page'), false, admin, 'How ready each upcoming show is.', 'score scoring'),
+  ]),
+  ('Activity', [
+    ('audit', 'Audit Log', url_for('audit_log_view'), false, admin, 'Every change and who made it, with undo.', 'history undo changes'),
+    ('godmode', "Who's Online", S ~ '#godmode', true, admin, 'Who is signed in and what they are looking at.', 'god mode sessions online active'),
+    ('performance', 'Performance', url_for('performance_view'), false, admin, 'Page and database timing.', 'speed slow queries timing'),
+  ]),
+  ('Server', [
+    ('syslog', 'Server & Logs', S ~ '#syslog', true, admin, 'Server settings and syslog forwarding.', 'syslog logging public url'),
+    ('update', 'Updates', S ~ '#update', true, admin, 'Check for and install app updates.', 'git pull upgrade version'),
+    ('backups', 'Backups', S ~ '#backups', true, admin, 'Hourly and daily database backups.', 'backup dump'),
+    ('snapshots', 'DB Snapshots', url_for('snapshots_page'), false, admin, 'Look inside a backup and restore rows or a whole show.', 'restore recover backup'),
+    ('files', 'Files', S ~ '#files', true, admin, 'Upload limit, file manager, archived files.', 'attachments storage purge upload'),
+    ('database', 'Database', S ~ '#database', true, admin, 'Database status and file storage (S3).', 'postgres postgresql s3 seaweedfs storage'),
+    ('cluster', 'Cluster', S ~ '#cluster', true, admin, 'The servers sharing this database.', 'servers leader instances'),
+    ('about', 'About', url_for('about_page'), false, admin, 'This server, the service and its dependencies.', 'version packages dependencies'),
+  ]),
+]) -}}
+{%- endmacro %}
+
+{% macro settings_nav_open(active='') -%}
+{%- set badge = (pending_regs|length) if (pending_regs is defined and pending_regs) else 0 -%}
+<div class="settings-layout">
+  <nav class="snav" id="snav" aria-label="Settings">
+    <div class="snav-top">
+      <input type="search" class="snav-find" id="snav-find" placeholder="Find a setting…" aria-label="Find a setting" autocomplete="off">
+      <button type="button" class="snav-hide" id="snav-hide" title="Hide this menu (more room for the page)" aria-label="Hide settings menu">«</button>
+    </div>
+    <div class="snav-list" id="snav-list">
+    {%- call(groups) _items() %}
+    {%- for g, items in groups %}
+      {%- set shown = items|selectattr(4)|list %}
+      {%- if shown %}
+      <div class="snav-group">
+        <div class="snav-grp">{{ g }}</div>
+        {%- for key, label, href, inpage, ok, desc, kw in shown %}
+        <a href="{{ href }}" class="snav-item{% if key == active %} active{% endif %}"
+           {% if inpage %}data-stab="{{ key }}"{% endif %} data-desc="{{ desc }}" data-group="{{ g }}"
+           data-find="{{ (label ~ ' ' ~ g ~ ' ' ~ kw)|lower }}"
+           {% if key == active %}aria-current="page"{% endif %}>{{ label }}{% if key == 'registrations' and badge %}<span class="snav-badge">{{ badge }}</span>{% endif %}</a>
+        {%- endfor %}
+      </div>
+      {%- endif %}
+    {%- endfor %}
+    {%- endcall %}
+      <div class="snav-none" id="snav-none" hidden>No setting matches.</div>
+    </div>
+  </nav>
+  <div class="settings-main">
+    <div class="snav-jump">
+      <button type="button" class="snav-show" id="snav-show" title="Show the settings menu" aria-label="Show settings menu">»</button>
+      <label for="snav-jump-sel">Settings</label>
+      <select id="snav-jump-sel" class="field-input field-input-sm">
+      {%- call(groups) _items() %}
+      {%- for g, items in groups %}
+        {%- set shown = items|selectattr(4)|list %}
+        {%- if shown %}
+        <optgroup label="{{ g }}">
+          {%- for key, label, href, inpage, ok, desc, kw in shown %}
+          <option value="{{ href }}" {% if inpage %}data-stab="{{ key }}"{% endif %}{% if key == active %} selected{% endif %}>{{ label }}{% if key == 'registrations' and badge %} ({{ badge }}){% endif %}</option>
+          {%- endfor %}
+        </optgroup>
+        {%- endif %}
+      {%- endfor %}
+      {%- endcall %}
+      </select>
+    </div>
+{%- endmacro %}
+
+{% macro settings_nav_close() -%}
+  </div>
+</div>
+<script>
+/* Settings menu: filter, hide/show (remembered per browser), jump select.
+   On settings.html, items with data-stab switch panes in place via
+   window.switchSettingsTab; everywhere else they are plain links. */
+(function () {
+  var root = document.documentElement;
+  try { if (localStorage.getItem('settings.navHidden') === '1') root.classList.add('snav-hidden'); } catch (e) {}
+  function setHidden(h) {
+    root.classList.toggle('snav-hidden', h);
+    try { localStorage.setItem('settings.navHidden', h ? '1' : '0'); } catch (e) {}
+  }
+  var hideBtn = document.getElementById('snav-hide'), showBtn = document.getElementById('snav-show');
+  if (hideBtn) hideBtn.addEventListener('click', function () { setHidden(true); });
+  if (showBtn) showBtn.addEventListener('click', function () { setHidden(false); });
+
+  var nav = document.getElementById('snav');
+  if (nav) nav.addEventListener('click', function (e) {
+    var a = e.target.closest('a.snav-item[data-stab]');
+    if (!a || !window.switchSettingsTab || e.metaKey || e.ctrlKey || e.shiftKey || e.button) return;
+    e.preventDefault();
+    window.switchSettingsTab(a.dataset.stab);
+  });
+  var find = document.getElementById('snav-find');
+  if (find) {
+    find.addEventListener('input', function () {
+      var q = find.value.trim().toLowerCase(), any = false;
+      document.querySelectorAll('#snav-list .snav-group').forEach(function (g) {
+        var groupAny = false;
+        g.querySelectorAll('.snav-item').forEach(function (a) {
+          var hit = !q || a.dataset.find.indexOf(q) !== -1;
+          a.hidden = !hit; if (hit) groupAny = true;
+        });
+        g.hidden = !groupAny; if (groupAny) any = true;
+      });
+      document.getElementById('snav-none').hidden = any;
+    });
+    find.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { find.value = ''; find.dispatchEvent(new Event('input')); }
+      if (e.key !== 'Enter') return;
+      var first = document.querySelector('#snav-list .snav-item:not([hidden])');
+      if (first) { e.preventDefault(); first.click(); }
+    });
+  }
+  var sel = document.getElementById('snav-jump-sel');
+  if (sel) sel.addEventListener('change', function () {
+    var o = sel.options[sel.selectedIndex];
+    if (o.dataset.stab && window.switchSettingsTab) window.switchSettingsTab(o.dataset.stab);
+    else location.href = o.value;
+  });
+  // Stick just below this page's own sticky header, whatever its height.
+  var head = document.querySelector('.main-content > .page-header');
+  function setTop() { if (head) root.style.setProperty('--snav-top', (head.offsetHeight + 16) + 'px'); }
+  setTop(); window.addEventListener('resize', setTop);
+  var cur = document.querySelector('#snav-list .snav-item.active');
+  if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: 'nearest' });
+})();
+</script>
+{%- endmacro %}

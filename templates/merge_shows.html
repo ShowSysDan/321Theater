@@ -5,15 +5,17 @@
 #}
 {% extends "base.html" %}
 {% block title %}Merge Shows — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
-    <a href="{{ url_for('settings') }}" class="back-link">← Settings</a>
     <h1 class="page-title">Merge Duplicate Shows</h1>
     <p class="page-sub">Move everything from a duplicate onto the show you keep, then delete the duplicate.</p>
   </div>
 </div>
+{{ settings_nav_open('merge') }}
 
 <div class="form-page-card">
   <div class="form-row cols-2">
@@ -163,4 +165,5 @@ async function doMerge() {
 
 loadShows();
 </script>
+{{ settings_nav_close() }}
 {% endblock %}

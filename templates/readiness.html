@@ -5,20 +5,20 @@
 #}
 {% extends "base.html" %}
 {% block title %}Show Readiness — 3·2·1→Theater{% endblock %}
+{% block main_class %} settings-shell{% endblock %}
 
 {% block content %}
+{% from "_settings_nav.html" import settings_nav_open, settings_nav_close with context %}
 <div class="page-header">
   <div>
     <h1 class="page-title">Show Readiness <span class="rd-beta">BETA</span></h1>
-    <p class="page-sub">How ready each upcoming show is for showtime. Admins only — nobody else sees these numbers yet.</p>
-  </div>
-  <div class="about-head-actions">
-    <a href="{{ url_for('settings') }}" class="btn btn-ghost">← Settings</a>
+    <p class="page-sub">How ready each upcoming show is. Only admins see these scores for now.</p>
   </div>
 </div>
+{{ settings_nav_open('readiness') }}
 
 <div class="rd-preview-banner" id="rd-preview-banner" hidden role="status">
-  Previewing <strong>unsaved</strong> scoring settings — nothing has been saved.
+  Previewing <strong>unsaved</strong> scoring settings.
   <button type="button" class="btn btn-ghost btn-sm" id="rd-preview-exit">Back to saved settings</button>
 </div>
 
@@ -61,7 +61,7 @@
 <details class="form-section rd-settings" id="rd-settings">
   <summary class="form-section-header"><span class="section-icon">◈</span> SCORING SETTINGS</summary>
   <div class="form-section-body">
-    <p class="text-dim about-note">Change any value, press <strong>Preview</strong> to see every show above re-scored with it (nothing is saved), then <strong>Save</strong>. A weight of 0 turns that part off.</p>
+    <p class="text-dim about-note"><strong>Preview</strong> re-scores the shows above without saving; <strong>Save</strong> keeps the changes. A weight of 0 turns that part off.</p>
     <form id="rd-form" autocomplete="off" novalidate>
       <h3 class="rd-h3">Weights</h3>
       <div class="rd-grid" id="rd-weights"></div>
@@ -229,7 +229,7 @@
         (r.penalty_raw > r.penalty ? ' (capped from ' + r.penalty_raw + ')' : '') : '') + ' = ' + (r.score == null ? '—' : r.score + '%')));
       if (r.scheduler_floor != null) {
         hm.appendChild(el('div', 'text-dim rd-math',
-          'Scheduling-gap points reduced: starting to schedule never scores below nothing scheduled (' + r.scheduler_floor + '%).'));
+          'Scheduling-gap penalty reduced: partly scheduled never scores below not scheduled at all (' + r.scheduler_floor + '%).'));
       }
     }
     head.appendChild(hm);
@@ -483,4 +483,5 @@
   })();
 })();
 </script>
+{{ settings_nav_close() }}
 {% endblock %}
