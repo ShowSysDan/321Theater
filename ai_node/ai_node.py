@@ -45,11 +45,13 @@ import ipaddress
 import json
 import logging
 import os
+import select
 import socket
 import ssl
 import sys
 import threading
 import time
+import http.client
 import urllib.error
 import urllib.request
 from urllib.parse import urlparse
@@ -58,8 +60,12 @@ VERSION = '1'
 SIG_WINDOW_S = 60
 NONCE_TTL_S = 2 * SIG_WINDOW_S + 10
 BODY_MAX = 2 * 1024 * 1024
-CONN_MAX = 32
+CONN_MAX = 48
+PER_IP_MAX = 8                 # one app server: 4 workers' probes + a few model calls
+PREAUTH_S = 15                 # handshake + headers + body + signature check, in total
 FIRST_BYTE_MAX_S = 900
+WAIT_DEFAULT_S = 120
+STREAM_READ_S = 120            # longest pause between two pieces of a running answer
 _LINE_MAX = 65536
 
 log = logging.getLogger('321ai-node')
@@ -101,7 +107,11 @@ def load_config():
     if not _loopback_url(ollama):
         raise ConfigError('NODE_OLLAMA_URL must be http://127.0.0.1:<port> (Ollama has no password)')
     nets = []
-    for part in _env('NODE_ALLOW_IPS').split(','):
+    raw_allow = _env('NODE_ALLOW_IPS')
+    if not raw_allow:
+        raise ConfigError('NODE_ALLOW_IPS is empty: list the app servers (IPs or CIDRs), '
+                          'or set it to "any" to accept every address')
+    for part in ([] if raw_allow.lower() == 'any' else raw_allow.split(',')):
         part = part.strip()
         if part:
             try:
@@ -128,8 +138,8 @@ def load_config():
 
 # ── request signing (the app side is ollama_client._node_headers) ─────────────
 
-def signature(secret, method, path, ts, nonce, body):
-    msg = '\n'.join((method.upper(), path, str(ts), nonce,
+def signature(secret, method, path, ts, nonce, wait, body):
+    msg = '\n'.join((method.upper(), path, str(ts), nonce, str(wait),
                      hashlib.sha256(body or b'').hexdigest())).encode()
     return hmac.new(secret, msg, hashlib.sha256).hexdigest()
 
@@ -251,11 +261,64 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.0'          # one request per connection; body ends at close
 
     def setup(self):
-        self.request.settimeout(30)
+        # Until the signature checks out, the whole exchange (TLS handshake,
+        # request line, headers, body) gets PREAUTH_S in total — a per-read
+        # timeout alone let a client trickle bytes and hold a connection
+        # forever without the secret.
+        self._fd = self.request.fileno()
+        self._preauth = threading.Timer(PREAUTH_S, self._kill)
+        self._preauth.daemon = True
+        self._preauth.start()
+        self.request.settimeout(PREAUTH_S)
         self.request = self.server.tls.wrap_socket(self.request, server_side=True)
         super().setup()
 
+    def _kill(self):
+        """Pre-auth deadline passed: cut the connection (any blocked read fails)."""
+        try:
+            s = socket.socket(fileno=os.dup(self._fd))
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            finally:
+                s.close()
+        except OSError:
+            pass
+
+    def _authed(self):
+        self._preauth.cancel()
+
+    def _client_gone(self):
+        """True when the caller hung up (it sends nothing after its request,
+        so a readable socket means EOF / close_notify / reset)."""
+        try:
+            r, _w, _x = select.select([self.request], [], [], 0)
+        except (OSError, ValueError):
+            return True
+        if not r:
+            return False
+        try:
+            self.request.settimeout(0.2)
+            return self.request.recv(1) == b''
+        except (OSError, ssl.SSLError):
+            return True
+        finally:
+            try:
+                self.request.settimeout(300)
+            except OSError:
+                pass
+
+    def _wait_budget(self):
+        try:
+            w = int(self.headers.get('X-321-Node-Wait', WAIT_DEFAULT_S))
+        except ValueError:
+            w = WAIT_DEFAULT_S
+        return max(1, min(FIRST_BYTE_MAX_S, w))
+
     def finish(self):
+        try:
+            self._preauth.cancel()
+        except AttributeError:
+            pass
         try:
             super().finish()
         finally:
@@ -300,10 +363,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         now = time.time()
         if abs(now - t) > SIG_WINDOW_S or not (16 <= len(nonce) <= 64) or not nonce.isalnum():
             return False
-        want = signature(self.server.cfg['secret'], self.command, self.path, t, nonce, body)
+        want = signature(self.server.cfg['secret'], self.command, self.path, t, nonce,
+                         h.get('X-321-Node-Wait', ''), body)
         if not hmac.compare_digest(want, sig):
             return False
-        return self.server.nonces.add(nonce, now)   # only a VALID request spends a nonce
+        if not self.server.nonces.add(nonce, now):  # only a VALID request spends a nonce
+            return False
+        self._authed()
+        return True
 
     def _body(self):
         try:
@@ -335,7 +402,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             names = []
             for m in (obj.get('models') if isinstance(obj, dict) else None) or []:
                 n = m.get('name') if isinstance(m, dict) else None
-                if isinstance(n, str) and n and len(n) <= 100:
+                # Only models this node lets the app use, so "has the model"
+                # on the app side means a chat will be accepted.
+                if isinstance(n, str) and n and len(n) <= 100 and \
+                        model_allowed(n, self.server.cfg['models']):
                     names.append({'name': n})
             obj = {'models': names[:100], 'node': {'version': VERSION,
                                                    'allowed': self.server.cfg['models'][:50]}}
@@ -369,29 +439,126 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except ValueError as e:
             code = str(e)
             return self._err(403 if code == 'model_not_allowed' else 400, code)
+        # The caller says (signed) how long it will wait for the first byte;
+        # the node never waits longer — for a slot or for Ollama — and stops
+        # as soon as the caller hangs up, so abandoned calls don't hold slots.
+        now = time.monotonic()
+        end = now + self._wait_budget()
+        # Answer node_busy a few seconds BEFORE the caller's budget runs out,
+        # so the app hears it (and re-queues) instead of timing out.
+        slot_until = now + max(1.0, min(cfg['queue_s'], end - now - 5))
         sem = self.server.slots
-        if not sem.acquire(timeout=cfg['queue_s']):
-            return self._err(503, 'node_busy')
+        while not sem.acquire(timeout=1.0):
+            if self._client_gone():
+                return self._done(499, 'client_gone')
+            if time.monotonic() > slot_until:
+                return self._err(503, 'node_busy')
         try:
-            # The first byte can take a cold model load or Ollama's own queue,
-            # but a caller that gave up must not hold the slot for long.
-            return self._stream('/api/chat', payload, sem, FIRST_BYTE_MAX_S)
+            return self._chat_stream(payload, end)
         finally:
             sem.release()
 
+    def _chat_stream(self, payload, end):
+        """POST /api/chat to Ollama on a connection we hold, waiting for the
+        first byte in a helper thread while watching the caller: if it hangs
+        up (or its budget runs out) the upstream socket is shut, which makes
+        Ollama cancel the generation."""
+        u = urlparse(self.server.cfg['ollama'])
+        conn = http.client.HTTPConnection(u.hostname, u.port or 80,
+                                          timeout=max(1.0, end - time.monotonic()))
+        box = {}
+
+        def run():
+            try:
+                conn.request('POST', '/api/chat', body=json.dumps(payload).encode(),
+                             headers={'Content-Type': 'application/json',
+                                      'User-Agent': '321ai-node'})
+                box['resp'] = conn.getresponse()
+            except BaseException as e:      # noqa: BLE001 — handed to the caller
+                box['err'] = e
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+        why = ''
+        while th.is_alive():
+            th.join(0.5)
+            if not th.is_alive():
+                break
+            if self._client_gone():
+                why = 'client_gone'
+            elif time.monotonic() > end:
+                why = 'ollama_timeout'
+            if why:
+                try:
+                    if conn.sock:
+                        conn.sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                th.join(5)
+                conn.close()
+                return self._done(499, why) if why == 'client_gone' else self._err(504, why)
+        err = box.get('err')
+        if err is not None:
+            conn.close()
+            if isinstance(err, (ConnectionRefusedError, ConnectionError)) and 'resp' not in box:
+                return self._err(503, 'ollama_unreachable')
+            if isinstance(err, (socket.timeout, TimeoutError)):
+                return self._err(504, 'ollama_timeout')
+            return self._err(502, 'ollama_reset')
+        resp = box['resp']
+        if resp.status != 200:
+            conn.close()
+            return self._err(502, f'ollama_http_{resp.status}')
+        # After the first byte, each read of the stream may take up to
+        # STREAM_READ_S (http.client has already handed the socket to resp).
+        try:
+            resp.fp.raw._sock.settimeout(STREAM_READ_S)
+        except Exception:
+            pass
+        return self._relay(resp, conn)
+
     def _stream(self, path, payload, _sem, first_byte_s):
-        """Relay Ollama's NDJSON stream line by line. A caller that hangs up
-        closes the upstream request, which stops the generation."""
+        """Relay Ollama's NDJSON stream (pull) line by line."""
         try:
             resp = ollama_open(self.server.cfg, path, payload, timeout=first_byte_s)
         except Upstream as e:
             return self._err(e.status, e.code)
+        try:
+            resp.fp.raw._sock.settimeout(STREAM_READ_S)
+        except Exception:
+            pass
+        return self._relay(resp, None)
+
+    def _relay(self, resp, conn):
+        """Copy the NDJSON stream to the caller. A caller that hangs up
+        ends the upstream request, which stops the generation."""
         status, code = 200, ''
+        stop = threading.Event()
+        hung_up = []
+
+        def watch():
+            # The caller sends nothing while it reads: its socket turning
+            # readable means it hung up. select() only (no read: the SSL
+            # object belongs to this thread); then shut the upstream socket so
+            # a stalled model can't keep the slot.
+            while not stop.wait(1.0):
+                try:
+                    r, _w, _x = select.select([self.request], [], [], 0)
+                except (OSError, ValueError):
+                    r = [1]
+                if r:
+                    hung_up.append(1)
+                    try:
+                        up = resp.fp.raw._sock
+                        s2 = socket.socket(fileno=os.dup(up.fileno()))
+                        try:
+                            s2.shutdown(socket.SHUT_RDWR)
+                        finally:
+                            s2.close()
+                    except Exception:
+                        pass
+                    return
+        threading.Thread(target=watch, daemon=True).start()
         with resp:
-            try:
-                resp.fp.raw._sock.settimeout(300)
-            except Exception:
-                pass
             self.send_response(200)
             self.send_header('Content-Type', 'application/x-ndjson')
             self.send_header('Cache-Control', 'no-store')
@@ -413,6 +580,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 code = 'ollama_read_timeout'
             except OSError:
                 code = 'stream_error'
+            finally:
+                stop.set()
+        if hung_up:
+            code = 'client_gone'
+        if code and code != 'client_gone':
+            # Never end a cut-off stream silently: the app's stream reader
+            # turns an {"error": …} line into an error instead of a short answer.
+            try:
+                self.wfile.write((json.dumps({'error': code}) + '\n').encode())
+                self.wfile.flush()
+            except OSError:
+                pass
+        if conn is not None:
+            conn.close()
         self._done(status, code)
 
 
@@ -425,6 +606,8 @@ class Server(http.server.ThreadingHTTPServer):
         self.nonces = NonceCache()
         self.slots = threading.BoundedSemaphore(cfg['max_concurrent'])
         self.conns = threading.BoundedSemaphore(CONN_MAX)
+        self.per_ip = {}
+        self.per_ip_lock = threading.Lock()
         fam = socket.AF_INET6 if ':' in cfg['host'] else socket.AF_INET
         self.address_family = fam
         super().__init__((cfg['host'], cfg['port']), Handler)
@@ -446,17 +629,36 @@ class Server(http.server.ThreadingHTTPServer):
         return False
 
     def process_request(self, request, client_address):
-        if not self.conns.acquire(blocking=False):
-            log.warning('REFUSED ip=%s reason=too_many_connections', client_address[0])
+        ip = client_address[0]
+        with self.per_ip_lock:
+            n = self.per_ip.get(ip, 0)
+            ok = n < PER_IP_MAX and self.conns.acquire(blocking=False)
+            if ok:
+                self.per_ip[ip] = n + 1
+        if not ok:
+            log.warning('REFUSED ip=%s reason=too_many_connections', ip)
             self.shutdown_request(request)
             return
-        super().process_request(request, client_address)
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._release(ip)
+            raise
+
+    def _release(self, ip):
+        with self.per_ip_lock:
+            n = self.per_ip.get(ip, 1) - 1
+            if n <= 0:
+                self.per_ip.pop(ip, None)
+            else:
+                self.per_ip[ip] = n
+            self.conns.release()
 
     def process_request_thread(self, request, client_address):
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self.conns.release()
+            self._release(client_address[0])
 
     def handle_error(self, request, client_address):
         e = sys.exc_info()[1]
@@ -480,7 +682,7 @@ def main():
         log.error('CONFIG_INVALID %s', e)
         sys.exit(2)
     if not cfg['allow']:
-        log.warning('NODE_ALLOW_IPS is empty: any address may connect (requests still need the secret)')
+        log.warning('NODE_ALLOW_IPS=any: every address may connect (requests still need the secret)')
     srv = Server(cfg, tls)
     log.info('START listen=%s:%s ollama=%s models=%s max_concurrent=%s', cfg['host'], cfg['port'],
              cfg['ollama'], ','.join(cfg['models']) or '(any installed)', cfg['max_concurrent'])

@@ -185,11 +185,16 @@ def is_node(base):
     return bool(base) and base == _NODE['base']
 
 
-def _node_headers(secret, method, path, body):
+def _node_headers(secret, method, path, body, wait):
+    """Signed headers. `wait` = how long this caller will wait for the first
+    byte; the node never waits longer (for a slot or the model) and answers
+    node_busy before it runs out, so an abandoned call can't hold a slot."""
     ts = str(int(time.time()))
     nonce = secrets.token_hex(16)
-    msg = '\n'.join((method, path, ts, nonce, hashlib.sha256(body or b'').hexdigest())).encode()
-    return {'X-321-Node-Time': ts, 'X-321-Node-Nonce': nonce,
+    wait = str(max(1, min(900, int(wait))))
+    msg = '\n'.join((method, path, ts, nonce, wait,
+                     hashlib.sha256(body or b'').hexdigest())).encode()
+    return {'X-321-Node-Time': ts, 'X-321-Node-Nonce': nonce, 'X-321-Node-Wait': wait,
             'X-321-Node-Sig': hmac.new(secret, msg, hashlib.sha256).hexdigest()}
 
 
@@ -289,7 +294,7 @@ def _open(base, path, payload=None, timeout=5.0, read_timeout=None):
         node = dict(_NODE) if is_node(base) else None
     if node:
         norm, opener = node['base'], node['opener']
-        headers.update(_node_headers(node['secret'], method, path, data))
+        headers.update(_node_headers(node['secret'], method, path, data, timeout))
     else:
         ok, _m, norm = validate_url(base)
         if not ok:
@@ -449,6 +454,7 @@ def chat(base, model, messages, *, fmt='json', options=None, deadline_s=180.0,
                  read_timeout=min(float(read_timeout), float(deadline_s)))
     out = []
     size = 0
+    done = False
     with resp:
         for obj in _iter_lines(resp, deadline, max_bytes * 4, should_cancel):
             piece = (obj.get('message') or {}).get('content') or ''
@@ -458,7 +464,13 @@ def chat(base, model, messages, *, fmt='json', options=None, deadline_s=180.0,
                     raise OllamaTooLarge('too_large')
                 out.append(piece)
             if obj.get('done'):
+                done = True
                 break
+    if not done:
+        # the stream ended without Ollama's final {"done": true}: the answer
+        # was cut off (3.61.0 — an AI node relays the stream; never pass a
+        # partial answer on as a complete one)
+        raise OllamaError('truncated')
     return ''.join(out)
 
 

@@ -663,7 +663,17 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   path, ts ±60 s, one-time nonce, body SHA-256). The node exposes only
   version / tags / chat / pull, rebuilds chat bodies from an allow-list
   (`clean_chat`), pulls only `NODE_MODELS`, honours `NODE_ALLOW_IPS` before
-  TLS. App servers still claim jobs, build prompts and write results — the
+  TLS (REQUIRED — empty refuses to start; `any` opts out). 3.61.1 review
+  rules, keep them: everything before a valid signature gets `PREAUTH_S`
+  in TOTAL (a Timer shuts the socket — per-read timeouts alone allowed
+  slowloris), `PER_IP_MAX` connections per address; the signed
+  `X-321-Node-Wait` (the caller's first-byte budget) bounds the slot wait
+  and the first-byte wait, `node_busy` comes 5 s before it runs out; the
+  caller hanging up is noticed (select on its socket — no SSL read from
+  the watcher thread) and shuts the upstream socket so Ollama cancels;
+  /api/tags lists only allowed models (so `has_model` means accepted); a
+  stream the node cuts ends with an `{"error"}` line, and `chat()` raises
+  `truncated` without Ollama's `done`. App servers still claim jobs, build prompts and write results — the
   node never gets DB access or a callback; keep it that way. Node codes
   `ollama_unreachable` / `node_busy` / `cert_mismatch` are
   OllamaUnavailable (nothing reached the model); others are

@@ -108,11 +108,13 @@ systemctl restart 321ai-node
 sleep 1
 systemctl is-active --quiet 321ai-node && info "321ai-node is running." || warn "321ai-node did not start — journalctl -u 321ai-node"
 
-LISTEN="$(grep -E '^NODE_LISTEN=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '"')"
+# `|| true`: a missing line must not end the script (set -e / pipefail) before
+# the three lines below are printed.
+LISTEN="$( { grep -E '^NODE_LISTEN=' "$ENV_FILE" || true; } | tail -1 | cut -d= -f2- | tr -d '"')"
 PORT="${LISTEN##*:}"; PORT="${PORT:-11500}"
 FP="$(openssl x509 -in "$CERT" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')"
-NODE_SECRET_VAL="$(grep -E '^NODE_SECRET=' "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '"')"
-grep -qE '^NODE_ALLOW_IPS=.+' "$ENV_FILE" || warn "NODE_ALLOW_IPS is empty — list the app servers' IPs in ${ENV_FILE}."
+NODE_SECRET_VAL="$( { grep -E '^NODE_SECRET=' "$ENV_FILE" || true; } | tail -1 | cut -d= -f2- | tr -d '"')"
+grep -qE '^NODE_ALLOW_IPS=.+' "$ENV_FILE" || warn "NODE_ALLOW_IPS is empty, so the node will NOT start: list the app servers' IPs in ${ENV_FILE}, then: systemctl restart 321ai-node"
 grep -qE '^NODE_MODELS=.+' "$ENV_FILE" || warn "NODE_MODELS is empty — 'Pull model' from Settings → AI is refused until it lists the model(s)."
 
 echo ""

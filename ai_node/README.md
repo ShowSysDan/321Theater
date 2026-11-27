@@ -25,7 +25,11 @@ server, **without database access**.
     never go to a box that isn't this one.
   - Every request is signed with a shared secret (HMAC-SHA256), within a
     ±60 s clock window, and each request can be used only once.
-  - `NODE_ALLOW_IPS`: only the app servers' addresses may connect.
+  - `NODE_ALLOW_IPS`: only the app servers' addresses may connect, at most 8
+    connections each, and a connection that hasn't proven it has the secret
+    within 15 seconds is closed.
+  - The app says (signed) how long it will wait; the node never holds a call
+    longer, and stops the model as soon as the app hangs up.
   - The node's log has method, path, status, time, IP and an error code, never
     prompt or answer text.
 
@@ -39,7 +43,8 @@ sudo bash ai_node/install.sh --with-ollama
 
 Then edit `/etc/321ai-node/node.env`:
 
-- `NODE_ALLOW_IPS`: the app servers' IPs, e.g. `10.201.2.101,10.201.2.102,10.201.2.103`
+- `NODE_ALLOW_IPS` (**required**, the node won't start without it): the app
+  servers' IPs, e.g. `10.201.2.101,10.201.2.102,10.201.2.103`
 - `NODE_MODELS`: the model(s) the app uses, e.g. `llama3.1:8b`. **Pull model**
   in Settings → AI only works for models listed here.
 

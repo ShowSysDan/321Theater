@@ -727,6 +727,7 @@ _ERR_TEXT = {
     'deadline': 'The AI model took too long.', 'read_timeout': 'The AI model took too long.',
     'first_byte': 'The AI model took too long to start answering (busy or still loading).',
     'reset': 'The AI service dropped the connection. Try again.',
+    'truncated': 'The AI answer was cut off before it finished. Try again.',
     'not_found': 'The AI model is not installed on that server.',
     'too_large': 'The AI answer was too long.', 'bad_json': 'The AI returned an unparseable response. Try again or use a different model.',
     # AI node (3.61.0)
