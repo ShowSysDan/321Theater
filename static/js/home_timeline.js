@@ -127,7 +127,7 @@
     }).then(r => {
       const ct = r.headers.get('Content-Type') || '';
       if (ct.indexOf('application/json') < 0) {
-        throw new Error(r.ok ? 'Your session may have ended — reload the page to sign in again.'
+        throw new Error(r.ok ? 'Your session may have ended. Reload to sign in again.'
                              : 'Could not load the day (HTTP ' + r.status + ').');
       }
       return r.json().then(j => ({ ok: r.ok, j: j }));
@@ -152,7 +152,7 @@
         hideTip();
         // nor its venue chips
         renderVenueChips();
-        showEmpty('This day could not be loaded. It will try again in a minute.');
+        showEmpty('Couldn’t load this day. Retrying shortly.');
         renderContext();
       }
     });
@@ -534,7 +534,7 @@
     if (s.is_test) badges.appendChild(badge('test-badge', 'TEST', 'Test / demo — excluded from reports'));
     if (s.prism_status) badges.appendChild(badge('prism-tag prism-tag-' + String(s.prism_status).toLowerCase().replace(/[^a-z]/g, ''),
       String(s.prism_status).toUpperCase(), 'Prism event status'));
-    if (s.dark) badges.appendChild(badge('tl-badge tl-badge-dark', 'DARK', 'Marked dark on the Schedule tab — left off the schedule PDF'));
+    if (s.dark) badges.appendChild(badge('tl-badge tl-badge-dark', 'DARK', 'Dark day — left off the schedule PDF'));
     if (s.status === 'archived') badges.appendChild(badge('past-badge', 'ARCHIVED', 'This show is archived'));
     if (badges.childNodes.length) meta.appendChild(badges);
     meta.appendChild(glyph('venue', 'Venue'));

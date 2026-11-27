@@ -113,7 +113,7 @@
               </tr>
             </tbody>
           </table>
-          <p style="margin:8px 0 0;font-size:11px;color:var(--text-muted)">Schedules for advance + schedule auto-emails (days before show, send hour) live in <strong>Settings → Email → Auto-email Schedule</strong>. Without an SMTP host or direct-MX configuration set there, no automatic email is sent.</p>
+          <p style="margin:8px 0 0;font-size:11px;color:var(--text-muted)">Auto-email timing (days before the show, send hour) is set in <strong>Settings → Email</strong>. No email goes out until a send method is configured there.</p>
         </div>
       </span>
       <span class="section-count ml-auto text-dim">{{ contacts|length }} contacts</span>
@@ -771,7 +771,7 @@
   <div class="form-section" style="margin-bottom:16px">
     <div class="form-section-header"><span class="section-icon">◈</span> WIFI DEFAULTS</div>
     <div class="form-section-body">
-      <p class="text-dim" style="font-size:12px;margin-bottom:12px">Default WiFi info used in schedule PDFs when not overridden per-show. A QR code will be generated automatically.</p>
+      <p class="text-dim" style="font-size:12px;margin-bottom:12px">WiFi printed on schedule PDFs (with a QR code) unless a show sets its own.</p>
       <form onsubmit="event.preventDefault(); saveWifiSettings(this)" style="max-width:400px">
         <div class="field-group">
           <label class="field-label">WIFI NETWORK NAME</label>
@@ -811,7 +811,7 @@
   <div class="form-section" style="margin-bottom:16px">
     <div class="form-section-header"><span class="section-icon">◈</span> ORGANIZATION LOGO</div>
     <div class="form-section-body">
-      <p class="text-dim" style="font-size:12px;margin-bottom:12px">Default logo shown in PDF headers when a show's venue has no override below. Max 2 MB (PNG/JPG/GIF/WebP).</p>
+      <p class="text-dim" style="font-size:12px;margin-bottom:12px">PDF header logo for venues without their own logo below. Max 2 MB (PNG, JPG, GIF or WebP).</p>
       {% if logo_data %}
       <div style="margin-bottom:12px">
         <img id="org-logo-img" src="{{ logo_data }}" alt="Logo" style="max-height:60px;max-width:200px;border:1px solid var(--border);border-radius:4px;padding:4px">
@@ -954,7 +954,7 @@
                    {% if syslog_settings.get('cluster_heartbeat_enabled', '1') in ('1','true') %}checked{% endif %}>
             Enable cluster heartbeat
           </label>
-          <p class="field-hint" style="font-size:11px">When off, this instance acts as sole leader (single-server behavior).</p>
+          <p class="field-hint" style="font-size:11px">When off, this server runs as if it were the only one.</p>
         </div>
         <div class="field-group">
           <label class="field-label">HEARTBEAT INTERVAL (seconds)</label>
@@ -967,7 +967,7 @@
           <input type="number" name="cluster_peer_timeout_sec" class="field-input"
                  min="5" max="600" style="max-width:140px"
                  value="{{ syslog_settings.get('cluster_peer_timeout_sec', '30') }}">
-          <p class="field-hint" style="font-size:11px">Instances not heard from within this window are dropped from the leader pool.</p>
+          <p class="field-hint" style="font-size:11px">Servers silent longer than this are treated as offline.</p>
         </div>
         <div class="field-group">
           <label class="field-label">FORCE LEADER OVERRIDE</label>
@@ -977,7 +977,7 @@
             <option value="always" {% if _fl=='always' %}selected{% endif %}>Always leader (this instance)</option>
             <option value="never"  {% if _fl=='never'  %}selected{% endif %}>Never leader (this instance)</option>
           </select>
-          <p class="field-hint" style="font-size:11px">Operational escape hatch — leave on Auto in normal operation.</p>
+          <p class="field-hint" style="font-size:11px">Leave on Auto unless troubleshooting.</p>
         </div>
         <p id="cluster-settings-msg" class="field-msg" style="display:none;margin:8px 0"></p>
         <button type="submit" class="btn btn-primary">Save Cluster Settings</button>
@@ -1019,7 +1019,7 @@
     <div class="form-section-header"><span class="section-icon">◈</span> FEATURE MODULES</div>
     <div class="form-section-body">
       <p class="text-dim" style="font-size:12px;margin:0 0 14px">
-        Switch optional features on or off (applies immediately). A disabled module is hidden; its data is kept.
+        Turn optional features on or off; changes apply right away. A module that's off is hidden, but its data is kept.
       </p>
       <div id="modules-list">
         <p class="text-dim" style="font-size:12px;margin:0">Loading...</p>
@@ -1104,7 +1104,7 @@
   <div class="form-section">
     <div class="form-section-header"><span class="section-icon">◈</span> AI EXTRACTION (OLLAMA)</div>
     <div class="form-section-body" style="max-width:600px">
-      <p class="field-hint" style="margin-bottom:16px">A local Ollama model suggests values from an uploaded document for fields with an AI Hint, and writes the weekly post-show summary on the Reports page. Each server only talks to the Ollama on its <strong>own machine</strong> (Ollama has no password); a server without Ollama hands its AI work to one that has it.</p>
+      <p class="field-hint" style="margin-bottom:16px">A local Ollama model fills in fields that have an AI Hint from uploaded documents, and writes the weekly post-show summary in Reports. Each server uses only the Ollama on its <strong>own machine</strong>; servers without one leave AI work to those that have it.</p>
       <div class="field-group">
         <label class="checkbox-label">
           <input type="checkbox" id="ollama-enabled" {% if ai_settings.ollama_enabled == '1' %}checked{% endif %}
@@ -1144,7 +1144,7 @@
       <div id="ai-servers-note" class="field-msg field-msg-error" style="display:none;margin-top:8px"></div>
       <div id="ai-pull-status" class="field-hint" style="margin-top:8px"></div>
       <div id="ai-install" class="ai-install" style="display:none">
-        <div class="field-hint"><strong>Install Ollama on a server</strong> (run it on that server as an administrator — the app never installs software itself). It installs Ollama bound to 127.0.0.1 only and starts it:</div>
+        <div class="field-hint"><strong>Install Ollama on a server</strong>: run this on that server as an administrator. It installs Ollama (local access only) and starts it:</div>
         <div class="ai-cmd"><code id="ai-install-cmd"></code><button class="btn btn-ghost btn-xs" type="button" onclick="aiCopy('ai-install-cmd', this)">Copy</button></div>
         <div class="field-hint">Then pull the model with the <em>Pull model</em> button above, or on the server: <code id="ai-pull-cmd"></code></div>
       </div>
@@ -1164,7 +1164,7 @@
 
       <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
       <h3 class="sub-section-label">AI SESSION CONCURRENCY</h3>
-      <p class="field-hint">Limit how many AI extraction jobs can run simultaneously across all Gunicorn workers. Recommended: 1–2.</p>
+      <p class="field-hint">How many AI jobs can run at the same time. 1–2 recommended.</p>
       <div class="field-group">
         <label class="field-label">MAX CONCURRENT AI SESSIONS</label>
         <input type="number" id="ai-max-sessions" class="field-input" value="{{ ai_max_sessions }}" min="1" max="10" style="width:80px"
@@ -1176,8 +1176,8 @@
       </div>
 
       <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
-      <h3 class="sub-section-label">WEEKLY POST-SHOW SUMMARY E-MAIL</h3>
-      <p class="field-hint">Off by default. At the chosen day and hour the cluster leader queues last week's summary (the 7 days ending the day before); a server with Ollama writes it and it is e-mailed once, with the PDF, to the people below. Labor dollars are never included. Only people who can open Reports can receive it (re-checked at every send).</p>
+      <h3 class="sub-section-label">WEEKLY POST-SHOW SUMMARY EMAIL</h3>
+      <p class="field-hint">At the chosen day and hour, a summary of the previous 7 days is emailed once, with the PDF, to the people below. Labor dollars are never included, and only people with access to Reports receive it.</p>
       <div class="field-group">
         <label class="checkbox-label"><input type="checkbox" id="ws-email-enabled"> Send the weekly summary</label>
       </div>
@@ -1664,7 +1664,7 @@
     <div class="form-section-body" style="border-bottom:1px solid var(--border)">
       {% if not readonly_view %}<h3 class="sub-section-label">ADD BILLABLE ITEM</h3>{% endif %}
       <p class="text-dim text-sm" style="margin:0 0 8px 0">
-        Per-crew charges (e.g. parking), opted into per show on its <strong>Post-Show</strong> tab.
+        Per-crew charges (e.g. parking). Turn them on for a show on its <strong>Post-Show</strong> tab.
       </p>
       {% if not readonly_view %}
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -1736,7 +1736,7 @@
     <div class="form-section-header"><span class="section-icon">◈</span> DIRECT SEND</div>
     <div class="form-section-body">
       <p class="text-dim text-sm" style="margin-bottom:12px">
-        Sends email directly to the recipient's mail server via MX record lookup. No external SMTP relay needed.
+        Delivers straight to each recipient's mail server (MX lookup); no SMTP relay needed.
       </p>
       <div class="form-row cols-3">
         <div class="field-group">
@@ -1748,7 +1748,7 @@
           <label class="field-label">DISPLAY NAME</label>
           <input type="text" id="direct_display_name" class="field-input" placeholder="321Theater"
                  value="{{ email_provider_settings.direct_display_name }}">
-          <span class="field-hint">Shown as sender name in recipient's inbox</span>
+          <span class="field-hint">The sender name recipients see</span>
         </div>
         <div class="field-group">
           <label class="field-label">EHLO HOSTNAME</label>
@@ -1831,7 +1831,7 @@
     <div class="form-section-header"><span class="section-icon">◈</span> ADVANCE SHEET — AUTO EMAIL</div>
     <div class="form-section-body">
       <p class="text-dim text-sm" style="margin-bottom:12px">
-        Automatically email the Advance Sheet PDF to all report recipients a set number of days before the show.
+        Email the Advance Sheet PDF to its recipients a set number of days before the show.
       </p>
       <div class="form-row cols-3">
         <div class="field-group">
@@ -1895,8 +1895,8 @@
     <div class="form-section-header"><span class="section-icon">◈</span> LABOR — NO-REQUEST ALERTS</div>
     <div class="form-section-body">
       <p class="text-dim text-sm" style="margin-bottom:12px">
-        Email and notify schedulers about upcoming shows with <strong>no labor requested yet</strong>,
-        once per window, at the send hour below.
+        Email and notify schedulers when an upcoming show has <strong>no labor requested yet</strong>.
+        Each alert goes out once, at the send hour below.
       </p>
       <div class="form-row cols-3">
         <div class="field-group">
@@ -2059,11 +2059,11 @@
     </div>
     <div class="form-section-body no-pad">
       <p class="text-dim text-sm" style="padding:10px 14px 0">
-        Every email sent, one row per recipient (kept for good). Click a row to view or resend. Message bodies are kept for
+        Every email sent, one row per recipient. Click a row to view or resend it. Message bodies are kept for
         <select id="email-log-retention" class="field-input field-input-sm" style="width:auto;display:inline-block"
                 onchange="saveEmailRetention(this.value)" title="After this, the content is deleted; the log row stays">
           <option value="60">60 days</option>
-        </select>, then deleted (sign-in codes and password/confirmation links are never kept).
+        </select> (never for sign-in codes or password and confirmation links).
       </p>
       <div class="email-log-filters">
         <input type="search" id="email-log-q" class="field-input field-input-sm"
@@ -2170,14 +2170,14 @@
     <div class="form-section-header"><span class="section-icon">◈</span> EMAIL NOTIFICATIONS</div>
     <div class="form-section-body">
       <div style="max-width:560px">
-        <p class="text-dim" style="font-size:12px;line-height:1.5;margin:0 0 12px">Everything below always shows in your <strong>inbox</strong> {{ "(the Inbox tab at the bottom)" if is_mobile_view else "(the envelope button, bottom right)" }}. These switches decide what is <em>also</em> emailed to <strong id="np-email">your address</strong> when you haven't seen it in the app.</p>
+        <p class="text-dim" style="font-size:12px;line-height:1.5;margin:0 0 12px">These always show in your <strong>inbox</strong> {{ "(the Inbox tab at the bottom)" if is_mobile_view else "(the envelope button, bottom right)" }}. Choose which are <em>also</em> emailed to <strong id="np-email">your address</strong> if you haven't seen them in the app.</p>
         <label class="np-row"><input type="checkbox" id="np-messages"> <span><strong>New messages</strong><span class="text-dim np-sub">A message someone sent you that is still unread after <span id="np-delay">10</span> minutes. One email covers everything unread.</span></span></label>
         <label class="np-row"><input type="checkbox" id="np-mentions"> <span><strong>@mentions</strong><span class="text-dim np-sub">Someone typed @your name in a show's comments and you haven't opened the notification.</span></span></label>
         <label class="np-row"><input type="checkbox" id="np-reminders"> <span><strong>Reminders</strong><span class="text-dim np-sub">A reminder you set on a message or a note to self has come due.</span></span></label>{% if projects_enabled() %}
         {# Only in the page of someone with the optional Projects module, and
            shown only once the GET returned the switch (same rule, server side). #}
         <label class="np-row" id="np-tasks-row" hidden><input type="checkbox" id="np-tasks"> <span><strong>Tasks and projects</strong><span class="text-dim np-sub">You were added to a project, given a task or mentioned, or a task of yours is due — and you haven't opened the notification.</span></span></label>{% endif %}
-        <p class="text-dim" style="font-size:12px;line-height:1.5;margin:0 0 12px">Approval, piano and advance-change notifications aren’t covered by these switches: they always show in your inbox, and any email about them is set up separately by an administrator.</p>
+        <p class="text-dim" style="font-size:12px;line-height:1.5;margin:0 0 12px">Approval, piano and advance-change notifications always show in your inbox; email for those is set up by an administrator.</p>
         <div id="np-msg" class="field-msg" style="display:none"></div>
         <button class="btn btn-primary" type="button" onclick="saveNotifyPrefs()">Save</button>
       </div>
@@ -2516,7 +2516,7 @@
                   <tr><td><code>runner_needed=Yes && venue!=Judson's Live</code></td><td>Combine conditions with <code>&amp;&amp;</code> — show only when <em>every</em> condition matches.</td></tr>
                 </tbody>
               </table>
-              <p style="margin:8px 0 0;font-size:11px;color:var(--text-muted)">The trigger field must exist on the same form. Field keys (not labels) are case-sensitive — match exactly the FIELD KEY shown above. For yes/no toggles use <code>Yes</code> / <code>No</code>; for checkboxes use <code>true</code> / <code>false</code>. Type the operator as plain <code>!=</code> (two characters — the box's font used to draw them as one ≠-looking symbol; that was only a display quirk and is fixed). A real <code>≠</code> or curly quotes (some keyboards auto-substitute them) are corrected back to <code>!=</code> / straight quotes on save.</p>
+              <p style="margin:8px 0 0;font-size:11px;color:var(--text-muted)">The trigger field must be on the same form. Use its FIELD KEY (not the label), exactly as written — keys are case-sensitive. Yes/no toggles use <code>Yes</code> / <code>No</code>; checkboxes use <code>true</code> / <code>false</code>. A <code>≠</code> or curly quotes from your keyboard are changed to <code>!=</code> and straight quotes on save.</p>
             </div>
           </span>
         </label>
@@ -2609,7 +2609,7 @@
             <input type="radio" name="default_open" value="0"> Closed by default
           </label>
         </div>
-        <p class="field-hint" style="margin-top:4px">Whether this section starts expanded or collapsed on first view. Users can override this per-session.</p>
+        <p class="field-hint" style="margin-top:4px">How the section first appears; users can still open or close it.</p>
       </div>
       <div class="field-group">
         <label class="field-label">LINKED ASSET CATEGORY <span class="text-dim" style="font-size:10px">(optional)</span></label>
@@ -2666,7 +2666,7 @@
           <option value="">— Not linked (field is editable on the schedule) —</option>
         </select>
         <p class="field-hint" style="margin-top:4px;font-size:11px;color:var(--text-muted)">
-          If linked, this field will be read-only and auto-populated from the advance form.
+          A linked field is read-only and filled in from the advance form.
         </p>
       </div>
       <div class="field-group">
@@ -2675,7 +2675,7 @@
           Render in the Show Contacts section (instead of Venue &amp; Tech Info)
         </label>
         <p class="field-hint" style="margin-top:4px;font-size:11px;color:var(--text-muted)">
-          When checked, this field appears alongside the dpc Contacts list on the schedule and in the schedule PDF.
+          Shows this field next to the DPC contacts on the schedule and its PDF.
         </p>
       </div>
     </div>
@@ -2746,7 +2746,7 @@
         </div>
         <div id="edit-user-viewer-extras" style="display:none;margin-top:10px;padding:10px;border:1px dashed var(--border);border-radius:4px;background:var(--bg-hover)">
           <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">
-            Document viewers land on a documents-only page. Leave a section empty for no filter on that dimension.
+            Document viewers see only a documents page, filtered by the choices below.
           </div>
           <div class="form-row cols-2" style="align-items:start">
             <div class="field-group">
@@ -2789,13 +2789,12 @@
             Also show a Show Calendar page (limited to their allowed shows)
           </label>
         </div>
-        <div style="font-size:11px;color:var(--text-dim);margin-top:6px">Admins always have full access. These only apply to User/Staff accounts.</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:6px">Admins always have full access; these apply to User and Staff accounts.</div>
       </div>
       <div id="edit-user-app-flags" style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
         <div style="font-size:11px;font-weight:600;color:var(--text-dim);letter-spacing:.05em;margin-bottom:4px">OTHER APPLICATIONS</div>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
-          Shared account flags read by other apps that use this same user directory.
-          They have <strong>no effect inside 3&middot;2&middot;1&rarr;Theater</strong>.
+          Flags for other apps that share this user directory. <strong>No effect in 3&middot;2&middot;1&rarr;Theater</strong>.
         </div>
         <div style="display:flex;flex-direction:column;gap:8px">
           <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);cursor:pointer">
@@ -3008,8 +3007,8 @@ async function deleteUser(id, btn) {
 async function toggleUserLock(id, isLocked, btn) {
   const locking = !isLocked;
   const msg = locking
-    ? 'Lock this account? The user will be signed out and unable to log in. '
-      + 'Their data on past shows/events is preserved and nothing is deleted.'
+    ? 'Lock this account? They will be signed out and unable to log in. '
+      + 'Nothing is deleted.'
     : 'Unlock this account? The user will be able to log in again.';
   if (!confirm(msg)) return;
   const resp = await fetch(`/settings/users/${id}/lock`, {
@@ -3034,7 +3033,7 @@ async function openUserDevices(uid, name) {
     const r = await fetch(`/settings/users/${uid}/clients`);
     const j = await r.json();
     if (!j.success) throw new Error(j.error || 'failed');
-    if (!j.clients.length) { body.innerHTML = '<p class="text-dim">No devices recorded yet — rows appear after the person opens the app on 3.33.0 or later.</p>'; return; }
+    if (!j.clients.length) { body.innerHTML = '<p class="text-dim">No devices recorded yet. They appear once this person opens the app.</p>'; return; }
     const when = v => { const t = parseServerTime(v); return t ? t.toLocaleString([], {month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'}) : '—'; };
     body.innerHTML = `<table class="data-table" style="font-size:12px"><thead><tr>
         <th>Browser</th><th>System</th><th>Type</th><th>Screen</th><th>Window</th><th>Scale</th><th>Touch</th><th>Site mode</th><th>Locale</th><th>Last seen</th><th>First seen</th><th>Visits</th>
@@ -3091,8 +3090,7 @@ async function toggleForcePwChange(id, isForced) {
   const forcing = !isForced;
   const msg = forcing
     ? 'Require this user to set a new password at their next login? '
-      + 'Their current password keeps working until then, but they must '
-      + 'change it before doing anything else in the app.'
+      + 'Their current password works until then.'
     : 'Cancel the required password change for this user?';
   if (!confirm(msg)) return;
   const resp = await fetch(`/settings/users/${id}/force_password_change`, {
@@ -3966,18 +3964,18 @@ async function loadFileRedundancy() {
       <label class="checkbox-label" style="display:block;margin:4px 0">
         <input type="checkbox" id="fr-dual-write" ${d.dual_write ? 'checked' : ''}>
         <strong>Save new files to both S3 and the database</strong>
-        <span class="text-dim">(uploads and generated PDFs keep a database copy after the S3 upload; off = today's S3-only behavior)</span>
+        <span class="text-dim">(keeps a database copy of uploads and generated PDFs; off = S3 only)</span>
       </label>
     </div>
     <div class="field-group" style="margin-bottom:10px">
       <label class="field-label">READ FILES FROM</label>
       <label class="checkbox-label" style="display:block;margin:4px 0">
         <input type="radio" name="fr-read-pref" value="s3" ${d.read_preference !== 'db' ? 'checked' : ''}>
-        <strong>S3 first</strong> <span class="text-dim">(the default — database copy used if S3 fails or is missing the file)</span>
+        <strong>S3 first</strong> <span class="text-dim">(default; falls back to the database copy)</span>
       </label>
       <label class="checkbox-label" style="display:block;margin:4px 0">
         <input type="radio" name="fr-read-pref" value="db" ${d.read_preference === 'db' ? 'checked' : ''}>
-        <strong>Database first</strong> <span class="text-dim">(S3 used if the file has no database copy)</span>
+        <strong>Database first</strong> <span class="text-dim">(falls back to S3)</span>
       </label>
     </div>
     <div id="fr-msg" class="field-msg" style="display:none;margin-bottom:8px"></div>
@@ -4001,7 +3999,7 @@ async function loadFileRedundancy() {
       <button class="btn btn-ghost" onclick="startFileMigration('db_to_s3')" ${running || !d.s3_configured ? 'disabled' : ''}>Copy Database → S3</button>
       <button class="btn btn-ghost" onclick="startFileMigration('verify')" ${running || !d.s3_configured ? 'disabled' : ''}>Verify Both Copies</button>
     </div>
-    <p class="field-hint" style="margin-top:6px;font-size:12px">Runs in the background on the server — you can leave this page. The checked file types above are included.</p>
+    <p class="field-hint" style="margin-top:6px;font-size:12px">Covers the checked file types and runs in the background; you can leave this page.</p>
     <div id="fr-progress" style="margin-top:12px"></div>
     <div id="fr-history" style="margin-top:12px"></div>
     <div id="fr-run-detail" style="margin-top:8px"></div>`;
@@ -4107,7 +4105,7 @@ async function startFileMigration(direction) {
 }
 
 async function cancelFileMigration(runId, btn) {
-  if (!confirm('Cancel this run? Files already copied stay copied; re-running later picks up where it stopped.')) return;
+  if (!confirm('Cancel this run? Files already copied stay copied, and the next run picks up where this one stopped.')) return;
   btn.disabled = true;
   await fetch(`/settings/file-storage/runs/${runId}/cancel`, {method: 'POST'});
 }
@@ -4240,7 +4238,7 @@ async function loadClusterStatus() {
         ? `<br><strong>Override:</strong> <code>${d.force_leader}</code>`
         : '';
       const enabledLine = d.test_mode
-        ? '<br><span style="color:#dc3545"><strong>TEST INSTANCE</strong> (TEST_MODE in .env) — not a cluster member: no heartbeat, never leader, never primary. Leader-only jobs (scheduled emails, alerts, Prism auto-sync) do not run here; email goes only to admins.</span>'
+        ? '<br><span style="color:#dc3545"><strong>TEST INSTANCE</strong> (TEST_MODE in .env): not part of the cluster and never leader, so scheduled emails, alerts and Prism auto-sync do not run here. Email goes only to admins.</span>'
         : d.enabled ? '' : '<br><span style="color:#dc3545">Cluster heartbeat is <strong>disabled</strong> — this instance acts as sole leader.</span>';
       selfEl.innerHTML =
         `<strong>IP:</strong> <code>${d.self_ip}</code> &nbsp; ` +
@@ -4250,7 +4248,7 @@ async function loadClusterStatus() {
         `<strong>Current leader:</strong> <code>${d.leader_ip || '—'}</code>` +
         (serverIsLeader ? ' (this server)' : ' (remote)') +
         forceLine + enabledLine +
-        '<br><span class="text-dim" style="font-size:11px">Each Gunicorn worker registers itself; the table below groups workers by server. Only one worker globally runs scheduled PDF emails.</span>';
+        '<br><span class="text-dim" style="font-size:11px">The table below groups workers by server. Only the leader sends scheduled emails.</span>';
     }
 
     // Peers table
@@ -4983,7 +4981,7 @@ function editCrewMember(btn) {
 }
 
 async function archiveCrewMember(mid) {
-  if (!confirm('Archive this technician?\n\nThey leave this list, the Skill Tracker and the scheduling pickers. Their skills, notes and every shift they worked are kept (Archived technicians), and they stay in Reports. You can restore them at any time.')) return;
+  if (!confirm('Archive this technician?\n\nThey are hidden from this list, the Skill Tracker and scheduling. Their skills, notes and work history are kept, they stay in Reports, and you can restore them any time.')) return;
   const r = await fetch(`/settings/crew-members/${mid}/archive`, {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
   });
@@ -5249,14 +5247,14 @@ async function loadPdfEmailPreview() {
   }
   if (!d.enabled) {
     box.innerHTML = '<span style="opacity:.8">Automatic sending is <strong>disabled</strong>. '
-      + 'Enable the Advance Sheet and/or Production Schedule auto-email above to schedule sends.</span>';
+      + 'Turn on an Advance Sheet or Production Schedule auto-email above.</span>';
     return;
   }
   let html = 'Next run: <strong>' + _emailErrEsc(d.next_send_human) + '</strong> '
     + '<span style="opacity:.6">(server time)</span>';
   if (!d.delivery_ok) {
-    html += '<div style="margin-top:8px;color:#F6AD55">⚠ No SMTP host or direct-MX delivery is configured '
-      + '(Settings → Email), so nothing will actually be delivered until that\'s set.</div>';
+    html += '<div style="margin-top:8px;color:#F6AD55">⚠ No send method is configured above, '
+      + 'so nothing will be delivered until one is set.</div>';
   }
   if (!d.items || d.items.length === 0) {
     html += '<div style="margin-top:8px;opacity:.8">No documents are due at that run.</div>';
@@ -5583,7 +5581,7 @@ async function openEmailDetail(logId) {
                placeholder="address, or several separated by commas">
         <button type="button" class="btn btn-sm btn-primary" id="email-resend-btn"
                 onclick="resendEmail(${m.id}, ${d.id})">Resend</button></div>
-        <div class="text-dim" style="font-size:11px;margin-top:4px">Sends the same message${(m.attachments || []).length ? ' and attachments' : ''} again. Change the address to send it to a corrected or different one.</div>
+        <div class="text-dim" style="font-size:11px;margin-top:4px">Sends the same message${(m.attachments || []).length ? ' and attachments' : ''} again. Edit the address to send it somewhere else.</div>
         <div id="email-resend-result" style="margin-top:6px;font-size:12px"></div>`;
     } else {
       h += `<p class="text-dim" style="font-size:12px;margin:0">${E(m.why_not_resend || 'Can\'t be resent.')}</p>`;
@@ -5596,7 +5594,7 @@ async function openEmailDetail(logId) {
       h += '<div class="email-detail-h">Message</div><iframe id="email-preview-frame" class="email-preview-frame" sandbox title="Email preview"></iframe>';
     }
   } else {
-    h += '<p class="text-dim" style="font-size:12px;margin-top:12px">This email was sent before message content was kept (3.23.0), so there is no preview and it can\'t be resent from here.</p>';
+    h += '<p class="text-dim" style="font-size:12px;margin-top:12px">This email\'s content wasn\'t saved, so it can\'t be previewed or resent.</p>';
   }
   body.innerHTML = h;
   const fr = document.getElementById('email-preview-frame');
@@ -5751,16 +5749,16 @@ async function loadAiStatus() {
   if (note) {
     const on = document.getElementById('ollama-enabled');
     note.style.display = (on && on.checked && !anyReady) ? '' : 'none';
-    note.textContent = 'No server is ready: AI Extract and the weekly summary will not run until one server has Ollama running with the model.';
+    note.textContent = 'No server is ready. AI Extract and the weekly summary won\'t run until a server has Ollama running with the model.';
   }
   document.getElementById('ai-install-cmd').textContent = d.install_command;
   document.getElementById('ai-pull-cmd').textContent = d.pull_command;
   document.getElementById('ai-install').style.display = (anyMissing || !anyReady) ? '' : 'none';
   if (self.models && self.models.length) _aiFillModels(self.models);
   const hint = document.getElementById('ai-url-hint');
-  if (hint && d.url_source === 'env') hint.textContent = 'This server uses OLLAMA_URL from its .env (' + d.url + '); the value here is the default for servers without one. localhost only.';
+  if (hint && d.url_source === 'env') hint.textContent = 'This server uses OLLAMA_URL from its .env (' + d.url + '). The value here applies to servers without one. Localhost only.';
   else if (hint && d.stored_url_ignored) {
-    hint.textContent = 'The saved URL is not on this server, so it is ignored and ' + d.url + ' is used instead. Ollama has no password, so only localhost / 127.0.0.1 / [::1] is allowed: correct the URL and save.';
+    hint.textContent = 'The saved URL isn\'t local, so ' + d.url + ' is used instead. Only localhost / 127.0.0.1 / [::1] is allowed; correct the URL and save.';
     hint.style.color = 'var(--red)';
   }
   const ps = document.getElementById('ai-pull-status');
@@ -6073,7 +6071,7 @@ async function checkUpdates() {
 let _updatePollTimer = null;
 
 async function applyUpdate() {
-  if (!confirm('This will pull from git and restart the service. A backup of changed files will be made first. Continue?')) return;
+  if (!confirm('Pull the latest version from git and restart the service? Changed files are backed up first.')) return;
   const service = document.getElementById('update-service').value.trim();
   document.getElementById('update-apply-btn').disabled = true;
   const resp = await fetch('/settings/update/apply', {
@@ -6717,7 +6715,7 @@ function escHtml(s) {
         <label class="checkbox-label" id="msg-m-login-wrap"><input type="checkbox" id="msg-m-login"> Also show on the sign-in page</label>
       </div>
       <div id="msg-m-login-hint" class="text-dim text-sm" style="margin-top:-8px">
-        Also shown on the sign-in page. <strong>All users</strong> messages only.
+        Only for messages shown to <strong>All users</strong>.
       </div>
     </div>
     <div class="modal-footer">
@@ -6789,7 +6787,7 @@ function escHtml(s) {
         <div id="maint-m-estimate" class="text-dim text-sm" style="margin-top:4px"></div>
       </div>
       <div id="maint-m-done-note" class="text-dim text-sm" style="display:none">
-        This notice is complete. Use <strong>↻ Resend</strong> in the list to resend the completion email.
+        This notice is complete. To resend the completion email, use <strong>↻ Resend</strong> in the list.
       </div>
       <div id="maint-m-delivery" style="display:flex;flex-direction:column;gap:10px">
         <label class="field-label" style="margin:0">DELIVERY</label>
@@ -6826,7 +6824,7 @@ function escHtml(s) {
       <div class="field-group">
         <label class="field-label">MESSAGE</label>
         <textarea id="maint-c-body" class="field-input" rows="4"></textarea>
-        <div class="text-dim text-sm" style="margin-top:4px">The original notice's title, window and details are included below this message.</div>
+        <div class="text-dim text-sm" style="margin-top:4px">The original notice's title, window and details are added below this message.</div>
       </div>
       <div class="field-group">
         <label class="field-label">AUDIENCE</label>

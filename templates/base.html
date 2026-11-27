@@ -356,10 +356,10 @@
          sign-in page), so it no longer takes two lines of the footer. #}
       <div class="sidebar-meta">
         {% if session.get('user_role') == 'admin' %}<a class="app-version" href="{{ url_for('about_page') }}" title="About 321Theater — 3·2·1→Theater v{{ app_version }} — © Dr. Phillips Center for the Performing Arts · MIT Licensed · portions © Thauma Systems, LLC">v{{ app_version }}</a>{% else %}<span class="app-version" title="3·2·1→Theater v{{ app_version }} — © Dr. Phillips Center for the Performing Arts · MIT Licensed · portions © Thauma Systems, LLC">v{{ app_version }}</span>{% endif %}
-        {% if test_mode %}<span class="test-instance-badge sidebar-meta-test" title="TEST_MODE is on in this server's .env: not clustered, email only to admins, leader-only background jobs off">TEST</span>{% endif %}
+        {% if test_mode %}<span class="test-instance-badge sidebar-meta-test" title="Test server: email goes only to admins, and scheduled jobs don't run">TEST</span>{% endif %}
         <span class="sidebar-meta-sep" aria-hidden="true">·</span>
         <button type="button" class="view-mode-link" onclick="setSiteMode('{{ 'desktop' if is_mobile_view else 'mobile' }}')">{{ 'Desktop site' if is_mobile_view else 'Mobile site' }}</button>
-        {% if view_mode_forced %}<button type="button" class="view-mode-link" onclick="setSiteMode('auto')" title="Clear the forced mode and follow device auto-detection">(auto)</button>{% endif %}
+        {% if view_mode_forced %}<button type="button" class="view-mode-link" onclick="setSiteMode('auto')" title="Go back to picking mobile or desktop automatically">(auto)</button>{% endif %}
         {% if handoff_peers %}
         {# "Switch server" (3.56.0): open this page on another live server,
            still signed in. Each entry is a same-origin POST (CSRF-checked);
@@ -381,7 +381,7 @@
       </div>
       {% if test_mode %}
       {# Icon rail only: the meta line is hidden there, this short tag stays. #}
-      <div class="sidebar-test-flag rail-only" style="text-align:center"><span class="test-instance-badge" title="TEST_MODE is on in this server's .env">TEST INSTANCE</span></div>
+      <div class="sidebar-test-flag rail-only" style="text-align:center"><span class="test-instance-badge" title="This is a test server, not production">TEST INSTANCE</span></div>
       {% endif %}
     </div>
   </aside>
@@ -500,7 +500,7 @@
           <input type="text" id="inbox-c-to" class="field-input" autocomplete="off" placeholder="Name">
           <div id="inbox-c-to-sug" class="inbox-sug" hidden></div>
         </div>
-        <div id="inbox-c-self" class="inbox-hint">No one picked: this is a <strong>note to self</strong> — only you see it. Add a reminder below to have it come back to you.</div>
+        <div id="inbox-c-self" class="inbox-hint">No one picked, so this is a <strong>note to self</strong> only you can see. Add a reminder to have it come back to you.</div>
 
         <label class="field-label" for="inbox-c-show">ABOUT A SHOW OR EVENT <span class="text-dim" style="font-weight:400">(optional)</span></label>
         <div class="inbox-pick">
@@ -513,7 +513,7 @@
         <label id="inbox-c-pub-row" class="inbox-pub-row disabled">
           <input type="checkbox" id="inbox-c-pub" disabled>
           <span><strong>Also post to the show's comments</strong>
-            <span class="inbox-hint" style="display:block;margin:0">Leaves the question — and the replies — on the show for everyone working on it. <span id="inbox-c-pub-hint"></span></span></span>
+            <span class="inbox-hint" style="display:block;margin:0">The message and replies are posted to the show's Comments for everyone working on it. <span id="inbox-c-pub-hint"></span></span></span>
         </label>
         <div id="inbox-c-pub-warn" class="inbox-public-banner" role="note" hidden></div>
 
@@ -539,7 +539,7 @@
     {% if session.get('_view_as') %}
     <div style="background:rgba(246,173,85,.15);border-bottom:1px solid rgba(246,173,85,.35);padding:7px 20px;display:flex;align-items:center;gap:10px;font-size:12px;position:sticky;top:0;z-index:50">
       <span style="color:#F6AD55;font-weight:700;letter-spacing:.05em">PREVIEW MODE</span>
-      <span style="color:var(--text-dim)">You are viewing the site as a <strong style="color:#F6AD55">{{ session['_view_as'].replace('_',' ') }}</strong> — changes you make will take effect as if you had that role.</span>
+      <span style="color:var(--text-dim)">You're viewing the site as a <strong style="color:#F6AD55">{{ session['_view_as'].replace('_',' ') }}</strong>. Changes you make are real and use that role's permissions.</span>
       <button onclick="resetViewAs()" style="margin-left:auto;font-size:11px;padding:3px 10px;background:rgba(246,173,85,.2);border:1px solid rgba(246,173,85,.5);color:#F6AD55;border-radius:4px;cursor:pointer;font-weight:600">Exit Preview</button>
     </div>
     {% endif %}

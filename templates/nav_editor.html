@@ -33,8 +33,8 @@
   </div>
   <div class="form-section-body" style="border-bottom:1px solid var(--border)">
     <p class="text-dim" style="font-size:12px;margin:0">
-      The sidebar below the fixed links, for every user. <strong>Who can see each item is set by its
-      role</strong> — hiding an item here never changes permissions.
+      Changes apply to everyone's sidebar, below the fixed links. <strong>Each item's role still decides
+      who sees it</strong>; hiding an item never changes permissions.
     </p>
   </div>
   <div class="form-section-body no-pad">
@@ -82,7 +82,7 @@ function render() {
   wrap.innerHTML = '';
   entries.forEach((e, i) => wrap.appendChild(e.type === 'section' ? sectionRow(e, i) : itemRow(e, i)));
   if (!entries.length) {
-    wrap.innerHTML = '<p class="text-dim" style="padding:16px">Nothing here — Reset to Default to restore the standard layout.</p>';
+    wrap.innerHTML = '<p class="text-dim" style="padding:16px">Nothing here. Use Reset to Default to restore the standard layout.</p>';
   }
 }
 

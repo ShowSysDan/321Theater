@@ -44,17 +44,15 @@
     <span class="ml-auto text-dim" style="font-size:11px">click to expand</span>
   </div>
   <div class="form-section-body" id="spot-help" style="display:none;font-size:12.5px;line-height:1.55">
-    <p style="margin:0 0 8px"><strong>Window.</strong> Each performance's start is its date + time from the advance
-      form. The end is the end time of the production-schedule row on that day that starts at the performance time
-      (e.g. <em>19:30–22:15 Show</em>); without one, start + the default show length. With curtain detection on, Spot
-      looks for the real curtain up/down within ± the search window and reports on those.</p>
-    <p style="margin:0 0 8px"><strong>When.</strong> Every 5 minutes the cluster's primary server (only one server,
-      never all of them) pulls every performance that ended more than the grace period ago — plus the detection window
-      when detection is on, so a late curtain-down is in the data. A pulled performance is not pulled again unless its
-      times or sensors change. Failures retry with back-off up to the attempt limit.</p>
-    <p style="margin:0"><strong>Where it lands.</strong> The numbers (Leq, Max, L10/L50/L90, Avg per sensor) show in
-      the show's Post Show tab and print on the Post-Show Notes PDF; Spot's PDF report is filed under the show's Files
-      (a re-pull archives the earlier report). Shows marked test/demo are skipped.</p>
+    <p style="margin:0 0 8px"><strong>Window.</strong> A performance starts at its advance-form date + time and ends
+      when the schedule row starting at that time ends (e.g. <em>19:30–22:15 Show</em>), else after the default show
+      length. With curtain detection on, Spot finds the real curtain up/down within ± the detection window.</p>
+    <p style="margin:0 0 8px"><strong>When.</strong> Every 5 minutes, one server pulls each performance that ended
+      more than the grace period ago (plus the detection window, if on). A performance is pulled once unless its
+      times or sensors change; failures retry up to the attempt limit.</p>
+    <p style="margin:0"><strong>Where it lands.</strong> Levels (Leq, Max, L10/L50/L90, Avg per sensor) show on the
+      show's Post Show tab and Post-Show Notes PDF; Spot's PDF report is filed under the show's Files (a re-pull
+      archives the old one). Test/demo shows are skipped.</p>
   </div>
 </div>
 
@@ -70,7 +68,7 @@
           <label class="field-label">Spot URL</label>
           <input type="url" name="spot_base_url" class="field-input" maxlength="500"
                  value="{{ cfg.spot_base_url }}" placeholder="http://spot.internal:6100">
-          <p class="field-hint" style="font-size:10.5px;color:var(--text-muted);margin-top:3px">The Spot server's address (with or without /api/v1). Use https:// off the trusted network.</p>
+          <p class="field-hint" style="font-size:10.5px;color:var(--text-muted);margin-top:3px">The Spot server's address (with or without /api/v1). Use https:// outside the trusted network.</p>
         </div>
         <div class="field-group" style="flex:2;min-width:240px">
           <label class="field-label">API key</label>
@@ -139,7 +137,7 @@
   </div>
   <div class="form-section-body">
     <p class="text-dim" style="font-size:12px;margin:0 0 10px">
-      Tick each venue's Spot sensors. ★ = the sensor that decides curtain times (blank = the first dB sensor).
+      Tick each venue's Spot sensors. ★ marks the sensor used for curtain times (default: the first dB sensor).
     </p>
     <div id="spot-venues" style="display:flex;flex-direction:column;gap:10px">
       {% for v in venues %}
@@ -318,7 +316,7 @@
     const q = document.getElementById('spot-queue'), rc = document.getElementById('spot-recent');
     if (!d) { q.innerHTML = '<tr><td colspan="7" class="text-dim">Could not load.</td></tr>'; return; }
     document.getElementById('spot-leader').textContent =
-      d.leader ? 'This server is the cluster primary — it runs the automatic pulls.' : 'Automatic pulls run on the cluster primary (not this server).';
+      d.leader ? 'This server runs the automatic pulls.' : 'Automatic pulls run on another server (the cluster primary).';
     q.innerHTML = (d.queue || []).map(p => {
       const [lbl, col] = STATE[p.state] || [p.state, ''];
       const c = p.capture || {};

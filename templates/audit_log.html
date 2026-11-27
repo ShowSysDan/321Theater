@@ -10,7 +10,7 @@
 <div class="page-header">
   <div>
     <h1 class="page-title">Audit Log</h1>
-    <p class="page-sub">Full history of user actions — {{ total }} total entries</p>
+    <p class="page-sub">History of user actions — {{ total }} entries</p>
   </div>
   <div style="display:flex;gap:8px;flex-wrap:wrap">
     <a href="{{ url_for('settings') }}#godmode" class="btn btn-secondary" title="Who is signed in and what they're viewing right now">God Mode</a>
@@ -218,7 +218,7 @@ function toggleDiff(id) {
 }
 
 async function undoAudit(id, action) {
-  if (!confirm(`Undo "${action}" (audit #${id})?\n\nThis will reverse the action and record a new audit entry.`)) return;
+  if (!confirm(`Undo "${action}" (audit #${id})?\n\nThis reverses the action and logs a new audit entry.`)) return;
   try {
     const resp = await fetch(`/admin/audit/${id}/undo`, {
       method: 'POST',

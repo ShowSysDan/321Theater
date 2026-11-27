@@ -22,7 +22,7 @@
   <div>
     <h1 class="page-title">Projects</h1>
     <p class="page-sub">
-      Private projects with tasks, a timeline, budgets, files and notes. Only people ticked below see anything of it.
+      Private projects with tasks, a timeline, budgets, files and notes. Only people checked below can use it.
       <span id="pma-pill" class="pma-pill" hidden></span>
     </p>
   </div>
@@ -41,7 +41,7 @@
 <div id="pma-off-note" class="form-section" style="border-left:3px solid var(--red)" hidden>
   <div class="form-section-body">
     <p style="font-size:12.5px;margin:0">
-      The module is <strong>off</strong>: nobody sees Projects, whatever is ticked below. Existing projects are kept.
+      Projects is <strong>off</strong> for everyone. Existing projects are kept.
     </p>
   </div>
 </div>
@@ -52,9 +52,9 @@
   </div>
   <div class="form-section-body">
     <p class="pma-note">
-      A ticked person sees the Projects link and can create projects and be added to other people's. Access does not
-      open anyone's project: a project is visible only to the people its owner added — administrators included.
-      Unticking keeps their place on projects (tick again to restore it) and clears their project notifications.
+      Checked people can create projects and be added to others'. Each project is visible only to its members —
+      administrators included. Unchecking keeps their project memberships (check again to restore) and clears their
+      project notifications.
     </p>
     <input type="search" id="pma-filter" class="field-input" placeholder="Filter by name, username or role…" aria-label="Filter people" autocomplete="off" style="max-width:360px">
     <div id="pma-users" class="pma-users" role="group" aria-label="People with access"><p class="pma-note">Loading…</p></div>
@@ -70,8 +70,7 @@
   <div class="form-section-header"><span>Projects with no members</span></div>
   <div class="form-section-body">
     <p class="pma-note">
-      Every member of these projects has had their account deleted, so nobody can open them. They are listed by number
-      only. Deleting one removes it and its files for good.
+      Every member's account was deleted, so nobody can open these. Deleting one removes it and its files for good.
     </p>
     <div id="pma-orphans"></div>
   </div>
@@ -216,10 +215,10 @@ html.mobile-view #pma-filter { max-width: none !important; }
     box.textContent = '';
     box.appendChild(statusLine(!!data.msg_support, 'Reading Outlook .msg emails',
       'uploaded .msg files are opened and searched like .eml ones.',
-      'the optional extract-msg package is not installed on this server; .msg files can still be stored and downloaded.'));
+      'the extract-msg package is not installed; .msg files can still be uploaded and downloaded.'));
     box.appendChild(statusLine(!!data.office_preview, 'Previewing Office documents',
       'Word / Excel / PowerPoint files are shown as PDF.',
-      'LibreOffice (soffice) is not installed on this server; Office files can still be stored and downloaded.'));
+      'LibreOffice is not installed; Office files can still be uploaded and downloaded.'));
   }
 
   function renderOrphans() {
@@ -234,7 +233,7 @@ html.mobile-view #pma-filter { max-width: none !important; }
       b.type = 'button';
       b.addEventListener('click', function () {
         // The server wants the literal word, typed by a person.
-        var typed = window.prompt('Delete project #' + o.id + ' and its files for good?\nNobody can open it any more. Type DELETE to confirm.');
+        var typed = window.prompt('Delete project #' + o.id + ' and its files for good?\nType DELETE to confirm.');
         if (typed === null) return;
         if (typed.trim() !== 'DELETE') { toast('Not deleted — type DELETE to confirm.', true); return; }
         b.disabled = true;
@@ -262,7 +261,7 @@ html.mobile-view #pma-filter { max-width: none !important; }
   $('pma-toggle').addEventListener('click', function () {
     if (!data || busy) return;
     var want = !data.enabled;
-    if (!want && !window.confirm('Turn Projects off for everyone? Nothing is deleted — turning it back on restores it.')) return;
+    if (!want && !window.confirm('Turn Projects off for everyone? Nothing is deleted.')) return;
     busy = true;
     $('pma-toggle').disabled = true;
     call('POST', '/module', {enabled: want}).then(function (j) {

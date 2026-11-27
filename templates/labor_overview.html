@@ -132,7 +132,7 @@
 {% block content %}
 <div class="page-header">
   <h1 class="page-title">Labor Overview</h1>
-  <p class="page-sub">Week-at-a-glance look at every scheduled show and project labor line.</p>
+  <p class="page-sub">A week of scheduled labor across shows and overhead crew.</p>
 </div>
 
 <div class="lo-toolbar">
@@ -143,7 +143,7 @@
   <div class="lo-week-range">
     {{ week_start.strftime('%a, %b %-d') }} → {{ week_end.strftime('%a, %b %-d, %Y') }}
     {% if overnight_running %}
-    <span class="lo-week-sub">Starting yesterday — an overnight shift is still running</span>
+    <span class="lo-week-sub">Starting yesterday — an overnight shift is still on</span>
     {% elif active_day %}
     <span class="lo-week-sub">Starting today · next 7 days</span>
     {% elif rolling %}
@@ -181,10 +181,10 @@
         <th>Venue / Client</th>
         <th>Role</th>
         <th class="lo-time">Call</th>
-        <th class="lo-time">Meal 1 Start</th>
-        <th class="lo-time">Meal 1 End</th>
-        <th class="lo-time">Meal 2 Start</th>
-        <th class="lo-time">Meal 2 End</th>
+        <th class="lo-time">Lunch 1 Start</th>
+        <th class="lo-time">Lunch 1 End</th>
+        <th class="lo-time">Lunch 2 Start</th>
+        <th class="lo-time">Lunch 2 End</th>
         <th class="lo-time">Wrap</th>
         <th>Tech Name</th>
         <th>PM / Contact</th>

@@ -176,7 +176,7 @@
 {% set sched_view_only = readonly_view or session.get('is_readonly') %}
 <div class="page-header">
   <div>
-    <h1 class="page-title">Labor Scheduler{% if sched_view_only %}<span class="rv-badge" title="Your account is read-only: you can see the schedule but not change it">VIEW ONLY</span>{% endif %}</h1>
+    <h1 class="page-title">Labor Scheduler{% if sched_view_only %}<span class="rv-badge" title="Read-only account: you can see the schedule but not change it">VIEW ONLY</span>{% endif %}</h1>
   </div>
   <div class="header-actions">
     <a href="{{ url_for('labor_scheduler_no_labor') }}" class="btn btn-ghost"
@@ -466,7 +466,7 @@
       </td>
       <td class="sched-training-cell">
         <button type="button" class="sched-training-dot ${lr.is_training_shift ? 'active' : ''}"
-                title="Training shift — this tech is shadowing/learning on this position"
+                title="Training shift — this tech is shadowing this position"
                 aria-label="Toggle training shift"
                 aria-pressed="${lr.is_training_shift ? 'true' : 'false'}" ${_dis}
                 onclick="window.__scheduler.onTrainingShiftToggle(this)"></button>
@@ -561,7 +561,7 @@
       <input type="date" class="field-input field-input-sm sched-day-date" value="${date || ''}" ${_ro}
              title="${RO ? 'Work date for this day' : 'Work date for this day — changing it moves every line in this block'}"
              onchange="window.__scheduler.onDayDateChange(this)">
-      <span class="sched-day-pm-wrap" title="PM on duty for this day — pick one when another PM covers the show for the day. Blank = the show's main PM.">
+      <span class="sched-day-pm-wrap" title="PM on duty this day, if another PM is covering. Blank = the show's main PM.">
         <label>Day PM</label>
         <select class="field-input field-input-sm sched-day-pm" ${_dis}
                 onchange="window.__scheduler.onDayPmChange(this)"></select>
@@ -584,7 +584,7 @@
       <thead>
         <tr>
           <th style="width:52px;text-align:center" title="Scheduled — counts toward staffing">SCHED ✓</th>
-          <th style="width:58px;text-align:center;line-height:1.05" title="Training shift — extra body on this position for learning, doesn't replace the staffed tech">IN<br>TRAINING</th>
+          <th style="width:58px;text-align:center;line-height:1.05" title="Training shift — an extra person learning the position; doesn't replace the staffed tech">IN<br>TRAINING</th>
           <th style="min-width:160px">POSITION</th>
           <th style="width:72px">IN</th>
           <th style="width:78px;white-space:nowrap" title="Lunch 1 — start (S) over end (E)">LUNCH 1</th>
@@ -695,7 +695,7 @@
         <thead>
           <tr>
             <th style="width:52px;text-align:center" title="Scheduled — counts toward staffing">SCHED ✓</th>
-            <th style="width:58px;text-align:center;line-height:1.05" title="Training shift — extra body on this position for learning, doesn't replace the staffed tech">IN<br>TRAINING</th>
+            <th style="width:58px;text-align:center;line-height:1.05" title="Training shift — an extra person learning the position; doesn't replace the staffed tech">IN<br>TRAINING</th>
             <th style="width:110px">DATE</th>
             <th style="min-width:160px">POSITION</th>
             <th style="width:72px">IN</th>

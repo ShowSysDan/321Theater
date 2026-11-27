@@ -1049,7 +1049,7 @@
       // Archived: the one badge below says it (no second "Archived" pill).
       if (!me.archived) tags.appendChild(projectPill(p.status));
       if (me.archived) {
-        tags.appendChild(h('span', {class: 'pm-badge pm-badge-muted', text: 'Archived — read only'}));
+        tags.appendChild(h('span', {class: 'pm-badge pm-badge-muted', text: 'Archived — read-only'}));
         if (PM.can.manage) {
           tags.appendChild(h('button', {type: 'button', class: 'btn btn-xs btn-ghost', text: 'Reopen', data: {fk: 'reopen'},
                                         onclick: e => reopen(e.currentTarget)}));
@@ -1078,8 +1078,8 @@
       if (p.ownerless) {
         const b = h('div', {class: 'pm-banner pm-banner-warn pm-head-banner', role: 'status'},
                     h('span', null, h('strong', {text: 'This project has no owner.'}),
-                      me.can_claim ? ' You have been on it longest — you can take it over.'
-                                   : ' Its owner can no longer use it (account removed, locked or without access); the member first in line can take it over.'));
+                      me.can_claim ? ' You’ve been on it longest, so you can take it over.'
+                                   : ' Its owner no longer has access; the next member in line can take it over.'));
         if (me.can_claim) {
           b.appendChild(h('button', {type: 'button', class: 'btn btn-sm btn-primary', text: 'Become the owner', data: {fk: 'claim'},
             onclick: e => busy(e.currentTarget, PM.api('POST', '/claim-owner')).then(() => {
@@ -1137,7 +1137,7 @@
     }
     function leaveProject() {
       if (PM.me.role === 'owner' || PM.me.readonly) return;
-      PM.confirm('Leave this project? You will no longer see it. Tasks assigned to you stay assigned until someone changes them.',
+      PM.confirm('Leave this project? You’ll lose access to it. Tasks assigned to you stay assigned.',
                  'Leave project').then(ok => {
         if (!ok) return;
         PM.api('DELETE', '/members/' + PM.me.id).then(() => {
@@ -1594,7 +1594,7 @@
         return;
       }
       d.body.appendChild(h('p', {class: 'pm-desc',
-        text: 'Each task below moves later by the fewest days that lets it start after what it depends on, keeping its length. Nothing else changes, and nothing moves until you apply.'}));
+        text: 'Each task below moves later just enough to start after what it depends on, keeping its length. Nothing moves until you apply.'}));
       const tb = h('tbody');
       let withShow = 0;
       moves.forEach(m => {
@@ -2000,7 +2000,7 @@
       d.body.append(
         h('div', {class: 'pm-banner pm-banner-warn', role: 'note'},
           h('span', null, h('strong', {text: 'This creates a real show that everyone in 3·2·1→Theater can see.'}),
-            ' It appears on the Shows board like any other; the project itself stays private.')),
+            ' The project itself stays private.')),
         made,
         field('Show name', name, {required: true}),
         h('div', {class: 'form-row cols-2'}, field('Date', date), field('Type', mode)),
@@ -2113,7 +2113,7 @@
       }
       function drawResults() {
         clear(out);
-        if (!last.length) { out.appendChild(h('p', {class: 'pm-empty', text: 'No shows match (shows already linked are not listed).'})); return; }
+        if (!last.length) { out.appendChild(h('p', {class: 'pm-empty', text: 'No matching shows. Shows already linked aren’t listed.'})); return; }
         last.forEach(r => {
           const cb = h('input', {type: 'checkbox', checked: picked.has(r.id)});
           cb.addEventListener('change', () => {
@@ -2155,7 +2155,7 @@
           return PM.reload();
         }).catch(say);
       });
-      d.body.append(h('p', {class: 'pm-note', text: 'Tick every show to link — your picks stay while you search again.'}), q, chips, out);
+      d.body.append(h('p', {class: 'pm-note', text: 'Check each show to link — your picks are kept as you search.'}), q, chips, out);
       d.footer.append(h('button', {type: 'button', class: 'btn btn-ghost', text: 'Cancel', onclick: () => d.ask()}), go);
       paint();
       run();
@@ -2206,7 +2206,7 @@
           field('Until', end, {hint: 'Optional — for something that runs several days.'})),
         h('div', {class: 'field-group'}, h('span', {class: 'field-label', text: 'Colour'}), sw.el),
         field('Notes', notes),
-        h('p', {class: 'pm-note', text: 'A marker is a dated note on the Timeline — not a task: it has no status, dependencies or reminders.'}));
+        h('p', {class: 'pm-note', text: 'A marker is a dated note on the Timeline. Unlike a task, it has no status, dependencies or reminders.'}));
       const save = h('button', {type: 'button', class: 'btn btn-primary', text: m ? 'Save' : 'Add marker'});
       save.addEventListener('click', () => {
         if (!PM.can.edit) return;
@@ -2306,7 +2306,7 @@
             t.due_date ? h('span', {class: 'pm-row-date' + (isOverdue(t) ? ' is-over' : ''), text: PM.fmtDate(t.due_date)}) : null)));
           d.body.appendChild(list);
         } else {
-          d.body.appendChild(h('p', {class: 'pm-note', text: 'No tasks point at this contact yet — pick it in a task’s Contact field.'}));
+          d.body.appendChild(h('p', {class: 'pm-note', text: 'No tasks use this contact yet — pick it in a task’s Contact field.'}));
         }
         if (PM.can.budget) {
           // Budget lines live with the Budget tab's API; shown when it answers.
@@ -2631,7 +2631,7 @@
           clear(c.week).appendChild(taskRows(tasks.filter(t => t.status !== 'done' && t.due_date && t.due_date >= today && t.due_date <= end)
             .sort(byDue), 8, 'Nothing is due in the next 7 days.'));
           clear(c.miles).appendChild(taskRows(tasks.filter(t => t.is_milestone && t.status !== 'done' && (t.due_date || t.start_date || '') >= today)
-            .sort(byDue), 6, 'No upcoming milestones — tick “Milestone” on a task to mark a key date.'));
+            .sort(byDue), 6, 'No upcoming milestones — check “Milestone” on a task to mark a key date.'));
 
           // Linked shows
           clear(c.showActs);
@@ -2691,7 +2691,7 @@
               h('span', {class: 'pm-row-main pm-note', text: 'and ' + (mks.length - 12) + ' more — open Timeline'})));
           }
           if (!mks.length) {
-            ml.appendChild(h('p', {class: 'pm-empty', text: 'No markers.' + (PM.can.edit ? ' Add a holiday, a closure or any other date that matters — it shows on the Timeline.' : '')}));
+            ml.appendChild(h('p', {class: 'pm-empty', text: 'No markers.' + (PM.can.edit ? ' Add holidays, closures or other key dates to the Timeline.' : '')}));
           }
           clear(c.markers).appendChild(ml);
         });
@@ -3330,12 +3330,12 @@
         const p = PM.state.project;
         f = {name: h('input', {type: 'text', class: 'field-input', maxLength: 200, autocomplete: 'off'}),
              description: h('textarea', {class: 'field-input field-textarea', rows: 3, maxLength: 10000}),
-             status: select(Object.keys(PROJECT_STATUS).map(k => ({value: k, label: PROJECT_STATUS[k] + (k === 'archived' ? ' (read only for everyone)' : '')})), p.status),
+             status: select(Object.keys(PROJECT_STATUS).map(k => ({value: k, label: PROJECT_STATUS[k] + (k === 'archived' ? ' (read-only for everyone)' : '')})), p.status),
              start_date: h('input', {type: 'date', class: 'field-input'}), end_date: h('input', {type: 'date', class: 'field-input'})};
         col = swatches(p.color);
         saveBtn = h('button', {type: 'button', class: 'btn btn-primary', text: 'Save details', onclick: saveDetails});
         lockNote = h('div', {class: 'pm-banner pm-banner-warn', hidden: true},
-          h('span', {text: 'This project is archived: it is read only for everyone. Reopen it to change anything.'}),
+          h('span', {text: 'This project is archived and read-only for everyone. Reopen it to make changes.'}),
           h('button', {type: 'button', class: 'btn btn-sm btn-primary', text: 'Reopen', onclick: e => reopen(e.currentTarget)}));
         vis = select([{value: 'members', label: 'Everyone on the project'}, {value: 'editors', label: 'Owner and editors'},
                       {value: 'owner', label: 'Only the owner'}], p.budget_visibility);
@@ -3355,11 +3355,11 @@
             membersBox, addBox),
           h('div', {class: 'form-section'}, h('div', {class: 'form-section-header'}, h('span', {text: 'Sharing'})),
             h('div', {class: 'form-section-body'},
-              field('Who can see the budget', vis, {hint: 'People who can’t see it are not shown the Budget tab, its files or its history at all.'}),
+              field('Who can see the budget', vis, {hint: 'Everyone else won’t see the Budget tab, budget files or budget history.'}),
               h('label', {class: 'pm-check'}, vcc, 'Viewers can comment'))),
           h('div', {class: 'form-section pm-danger'}, h('div', {class: 'form-section-header'}, h('span', {text: 'Delete project'})),
             h('div', {class: 'form-section-body'},
-              h('p', {class: 'pm-note', text: 'Deletes the project with its tasks, budget, files, notes, contacts and discussion — for everyone, for good. Linked shows are not touched.'}),
+              h('p', {class: 'pm-note', text: 'Permanently deletes the project and everything in it for everyone. Linked shows aren’t affected.'}),
               h('div', null, h('button', {type: 'button', class: 'btn btn-danger', text: 'Delete this project…', onclick: deleteProject})))));
         base0 = snap(p);
         fill(base0, false);
@@ -3387,7 +3387,7 @@
           PM.applyWrite(resp);
         }).catch(say);
         if (ch.status === 'archived') {
-          PM.confirm('Archive this project? It becomes read only for everyone until you reopen it.', 'Archive').then(ok => { if (ok) go(); });
+          PM.confirm('Archive this project? It becomes read-only for everyone until you reopen it.', 'Archive').then(ok => { if (ok) go(); });
         } else go();
       }
       function saveSharing(body) {

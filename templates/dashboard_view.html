@@ -358,7 +358,7 @@ html.has-inbox:not(.mobile-view) #widgets-container { padding-bottom: 72px; }
 
 {% if dash.is_public and dash.public_slug and not public %}
 <div class="flash flash-info" style="margin-bottom:16px">
-  Public URL: <span class="mono">/d/{{ dash.public_slug }}</span> — shareable without login
+  Public link: <span class="mono">/d/{{ dash.public_slug }}</span> — anyone with it can view this dashboard without signing in
 </div>
 {% endif %}
 
@@ -414,7 +414,7 @@ async function safeFetch(url) {
   const resp = await fetch(url);
   const ct = resp.headers.get('content-type') || '';
   if (!ct.includes('application/json')) {
-    throw new Error(`Server returned non-JSON response (status ${resp.status}). You may need to log in.`);
+    throw new Error(`Could not load (status ${resp.status}). You may need to sign in again.`);
   }
   return resp.json();
 }
@@ -664,7 +664,7 @@ async function loadSavedReportWidget(idx, section, loadEl, contentEl) {
   catch (e) {
     // The report was deleted: tell the dashboard's owner how to tidy up.
     note(e.message + (e.status === 404 && CAN_EDIT
-      ? ' Remove this widget with × (top right), or add another report from Reports → Saved reports → Add to dashboard.' : ''));
+      ? ' Remove this widget with × (top right), or add another from Reports → Saved reports.' : ''));
     show(); return;
   }
   if (!meta.query) { note('Could not load this report.'); show(); return; }
@@ -1467,10 +1467,9 @@ function drawTimeline(idx) {
 
   html += '</div></div></div>';  // tl-body, tl-inner, tl-wrap
   html += '<div style="margin-top:8px;font-size:11px;color:var(--text-dim)">'
-        + 'Each bar is one reservation (show × quantity) spanning its rental window. '
-        + 'Bars stack when reservations overlap. Scroll horizontally to move through time — '
-        + 'the date range above follows the view and loads more dates at each edge. '
-        + 'Zoom with the controls' + (ANON ? '.' : '; click a bar to open the show.')
+        + 'Each bar is one reservation (show × quantity) over its rental window; overlaps stack. '
+        + 'Scroll sideways to move through time; more dates load at each edge.'
+        + (ANON ? '' : ' Click a bar to open the show.')
         + (todayX !== null ? ' The accent line marks today.' : '')
         + '</div>';
   contentEl.innerHTML = html;

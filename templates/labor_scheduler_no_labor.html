@@ -49,8 +49,8 @@
 {% set nl_view_only = readonly_view or session.get('is_readonly') %}
 <div class="page-header">
   <div>
-    <h1 class="page-title">Shows Without Labor{% if nl_view_only %}<span class="rv-badge" title="Your account is read-only: you can see these shows but not add labor">VIEW ONLY</span>{% endif %}</h1>
-    <p class="page-sub">Active shows that have no labor requested yet — the same signal the scheduler alert watches.</p>
+    <h1 class="page-title">Shows Without Labor{% if nl_view_only %}<span class="rv-badge" title="Read-only account: you can see these shows but not add labor">VIEW ONLY</span>{% endif %}</h1>
+    <p class="page-sub">Active shows with no labor requested yet.</p>
   </div>
   <div class="header-actions">
     <a href="{{ url_for('labor_scheduler') }}" class="btn btn-ghost">← Labor Scheduler</a>

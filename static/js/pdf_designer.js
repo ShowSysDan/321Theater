@@ -273,7 +273,7 @@
 
   async function resetLayout() {
     if (!currentType) return;
-    if (!confirm(`Reset the ${currentType} layout to defaults? This cannot be undone (audit logged).`)) return;
+    if (!confirm(`Reset the ${currentType} layout to defaults? This can't be undone.`)) return;
     setStatus('Resetting…');
     try {
       const res = await fetch(`/admin/pdf-designer/${currentType}/reset`, {

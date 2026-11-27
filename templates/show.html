@@ -214,7 +214,7 @@
           <button type="button" class="btn btn-sm btn-ghost arts-group-new-cancel">✕</button>
         </div>
       </div>
-      <p class="field-hint" style="font-size:10px;color:var(--text-muted);margin-top:3px">Pick from the list or choose <strong>+ Add new…</strong> to type a new arts group — new names are saved automatically.</p>
+      <p class="field-hint" style="font-size:10px;color:var(--text-muted);margin-top:3px">Pick one, or choose <strong>+ Add new…</strong> to add a new arts group.</p>
 
     {% elif field.field_type == 'file_upload' %}
       <div class="adv-file-upload" data-field-key="{{ field.field_key }}">
@@ -233,7 +233,7 @@
         {% endif %}
         <ul class="adv-file-list" style="list-style:none;padding:0;margin:6px 0 0;font-size:12px"></ul>
       </div>
-      <p class="field-hint" style="font-size:10px;color:var(--text-muted);margin-top:3px">PDFs, images, and Word documents are appended to the advance PDF on export.</p>
+      <p class="field-hint" style="font-size:10px;color:var(--text-muted);margin-top:3px">PDFs, images and Word files are added to the end of the advance PDF.</p>
 
     {% elif field.field_type == 'textarea' %}
       <textarea class="field-input field-textarea adv-field" data-key="{{ field.field_key }}"
@@ -287,7 +287,7 @@
     {% if not restricted %}
     <button type="button" class="btn btn-sm show-mode-toggle" id="show-mode-btn"
             data-show-mode="{{ show.show_mode or 'show' }}"
-            title="Toggle between Show mode and Event mode — changes the home-screen accent and email routing"
+            title="Switch between Show and Event mode (changes the card color and email routing)"
             onclick="toggleShowMode(this, {{ show.id }})">
       <span class="show-mode-dot"></span>
       <span class="show-mode-label">{{ 'Event Mode' if (show.show_mode == 'event') else 'Show Mode' }}</span>
@@ -311,7 +311,7 @@
     {% endif %}
     {% endif %}
     {% if not restricted and ollama_enabled %}
-    <button type="button" class="btn btn-ghost btn-sm" id="ai-extract-btn" onclick="openAiExtract()" title="Extract field values from a document using AI">AI Extract</button>
+    <button type="button" class="btn btn-ghost btn-sm" id="ai-extract-btn" onclick="openAiExtract()" title="Fill in fields from a document using AI">AI Extract</button>
     {% endif %}
     {% if not restricted %}
     <button class="btn btn-primary" id="save-btn" onclick="saveActive()">Save</button>
@@ -328,7 +328,7 @@
       <button onclick="closeAiExtract()" class="modal-close">×</button>
     </div>
     <div class="modal-body">
-      <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px">Upload a PDF or text document; the AI suggests values for fields with AI hints.</p>
+      <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px">Upload a document and AI will suggest values for the advance fields it can fill.</p>
       <div id="ai-upload-section">
         <div class="field-group">
           <label class="field-label">UPLOAD DOCUMENT</label>
@@ -419,7 +419,7 @@
         </div>
       </div>
       <p class="field-note" style="margin:6px 0 0;font-size:11px;color:var(--text-muted)">
-        First billed call through end of load-out. Set this first — show dates must fall inside it; it also sets schedule days and rental pricing.
+        First billed call to end of load-out. Set this first: show dates must fall inside it, and it sets the schedule days and rental pricing.
       </p>
       <div id="load-range-warning" class="load-range-warning" style="display:none"></div>
     </div>
@@ -569,7 +569,7 @@
           <textarea id="piano-notes" class="field-input field-textarea" rows="3" maxlength="4000" placeholder="Pitch (A440?), access, quiet time needed, rehearsal schedule…"></textarea>
         </div>
       </div>
-      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">The piano is booked on this show's Assets and the piano tuning manager is emailed. You can change or cancel until they schedule it.</p>
+      <p class="text-dim" style="font-size:11px;margin:8px 0 0;line-height:1.45">This books the piano on the Assets tab and emails the piano tuning manager. You can change or cancel until they schedule it.</p>
     </div>
     <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
       <button type="button" class="btn btn-ghost" onclick="closePianoModal()">Close</button>
@@ -613,7 +613,7 @@
       <tbody>${_tunings.map(t => {
         const sched = t.tuning_date
           ? `${esc(t.tuning_date)} ${esc(t.tuning_start || '')}`
-            + (t.status !== 'cancelled' && !t.on_schedule ? ' <span class="piano-warn" title="This date isn\'t one of the show\'s schedule days, so the row won\'t show on the production schedule until the show\'s dates cover it.">not on schedule dates</span>' : '')
+            + (t.status !== 'cancelled' && !t.on_schedule ? ' <span class="piano-warn" title="Not one of the show\'s schedule days, so it won\'t appear on the production schedule until the show\'s dates include it.">not on schedule dates</span>' : '')
           : '—';
         // Editable by the PM until the manager starts on it (vendor/cost/paperwork).
         const mine = CAN_EDIT && (t.status === 'requested' || t.status === 'seen') && t.cost === null
@@ -851,7 +851,7 @@ window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
 <div class="sched-daypm" data-date="{{ iso }}">
   <label class="sched-daypm-label" for="sched-daypm-{{ iso }}">Day PM</label>
   <select id="sched-daypm-{{ iso }}" class="field-input field-input-sm sched-daypm-select"
-          title="Production manager on duty this day — blank = the show's PM. Same setting as Day PM on the Labor Requests tab."
+          title="PM on duty this day; blank = the show's PM. Same as Day PM on the Labor Requests tab."
           {% if not can_edit %}disabled{% endif %}>
     <option value="">— Show PM{% if show_pm %} ({{ show_pm.name }}){% endif %} —</option>
     {% if _cover %}<option value="{{ _cover }}" selected>{{ _cover }}</option>{% endif %}
@@ -913,7 +913,7 @@ window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
           <div class="field-input" style="background:var(--bg-hover);color:var(--text-muted);cursor:default">
             <strong>{{ global_wifi_network }}</strong>{% if global_wifi_password %} &nbsp;·&nbsp; {{ global_wifi_password }}{% endif %}
           </div>
-          <p class="field-hint" style="font-size:10px;color:var(--text-muted);margin-top:3px">From global WiFi settings — change in Admin → Settings → WiFi</p>
+          <p class="field-hint" style="font-size:10px;color:var(--text-muted);margin-top:3px">From the global WiFi settings (Settings → WiFi)</p>
         </div>
         {% endif %}
       </div>
@@ -1118,7 +1118,7 @@ window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
           {% endif %}
         </div>
         {% else %}
-        <p class="text-dim" style="font-size:12px;grid-column:1/-1;padding:4px 0">No artist/tour contact fields configured. Add fields in Settings &rarr; Form Fields &rarr; Schedule Template and tick "Render in the Show Contacts section."</p>
+        <p class="text-dim" style="font-size:12px;grid-column:1/-1;padding:4px 0">No artist/tour contact fields yet. Add them in Settings &rarr; Form Fields &rarr; Schedule Template with "Render in the Show Contacts section" checked.</p>
         {% endfor %}
       </div>
 
@@ -1197,7 +1197,7 @@ window.SCHED_DAY_PM_EDIT = {{ 'true' if day_pm_can_edit else 'false' }};
     <div class="show-labor-notes-wrap">
       <label class="show-labor-notes-label" for="show-labor-notes">Show Labor Notes</label>
       <textarea id="show-labor-notes" class="field-input show-labor-notes-text"
-                rows="2" placeholder="Split-shift instructions, task lists, scheduler nuance — visible to schedulers and on the Labor Overview."
+                rows="2" placeholder="Split shifts, task lists, notes for the scheduler — shown to schedulers and on the Labor Overview."
                 {% if restricted %}disabled{% endif %}
                 onblur="saveShowLaborNotes(this)">{{ show.labor_notes or '' }}</textarea>
     </div>
@@ -1296,7 +1296,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     <div class="form-section-body">
       <p class="text-dim" style="font-size:12px;margin:0">
         The security desk's sign-in sheet: each name with Signature / Time In columns (one
-        <strong>initials column per day</strong> for multi-day shows), plus the <strong>PM on duty</strong>.
+        <strong>initials column per day</strong> on multi-day shows) and the <strong>PM on duty</strong>.
       </p>
     </div>
   </div>
@@ -1317,7 +1317,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     <div class="form-section-header"><span class="section-icon">◈</span> BULK ADD NAMES</div>
     <div class="form-section-body">
       <p class="text-dim" style="font-size:12px;margin:0 0 10px">
-        Paste names one per line or comma-separated; they're <strong>added</strong> below (Save to keep).
+        Paste names, one per line or comma-separated. They're <strong>added</strong> to the list below; click Save to keep them.
       </p>
       <textarea id="sec-bulk-paste" class="field-input" rows="5"
                 placeholder="Jane Doe&#10;John Smith&#10;…&#10;&#10;or:  Jane Doe, John Smith, Alex Roe"
@@ -1330,7 +1330,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         <span id="sec-bulk-msg" class="text-dim" style="font-size:12px"></span>
       </div>
       <p class="text-dim" style="font-size:11px;margin:8px 0 0">
-        CSV: uses a <code>Name</code> or <code>First</code> + <code>Last</code> column. Review before saving.
+        CSV files need a <code>Name</code> column, or <code>First</code> and <code>Last</code> columns.
       </p>
     </div>
   </div>
@@ -1350,7 +1350,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     </div>
     <div class="form-section-body">
       <p id="sec-unsaved-note" class="text-dim" style="font-size:11px;margin:0 0 10px;display:none;color:var(--accent)">
-        Unsaved changes — click Save to keep them. The PDF only includes saved names.
+        Unsaved changes. Click Save; the PDF only includes saved names.
       </p>
       <div id="sec-name-rows" style="display:flex;flex-direction:column;gap:6px;max-width:560px"></div>
       <p id="sec-empty-msg" class="text-dim" style="font-size:12px;margin:0">
@@ -1703,7 +1703,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         <select id="asset-add-unit" class="field-input" onchange="onAssetAddUnitChange()">
           <option value="">Any available unit (from pool)</option>
         </select>
-        <div style="font-size:10px;color:var(--text-dim);margin-top:2px">Pin to a specific unit (e.g. by model number) — booking removes it from the pool for these dates.</div>
+        <div style="font-size:10px;color:var(--text-dim);margin-top:2px">Reserve one specific unit; it's taken out of the pool for these dates.</div>
       </div>
       <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:10px">
         <div class="field-group">
@@ -1711,9 +1711,9 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
           <input type="number" id="asset-add-qty" class="field-input" value="1" min="1">
         </div>
         <div class="field-group">
-          <label class="field-label" title="Auto-calculated from the asset type's rate card. Only the approver can override prices in the approval portal.">UNIT PRICE (locked)</label>
+          <label class="field-label" title="Set from the rate card. Only the asset approver can change prices.">UNIT PRICE (locked)</label>
           <input type="text" id="asset-add-price" class="field-input" placeholder="0.00" readonly style="background:var(--bg);cursor:not-allowed;opacity:.7">
-          <div style="font-size:10px;color:var(--text-dim);margin-top:2px">Auto-filled from rate card · price overrides happen in the approval portal</div>
+          <div style="font-size:10px;color:var(--text-dim);margin-top:2px">From the rate card · only the approver can change it</div>
           <div id="asset-add-rate-note" style="display:none;font-size:10px;color:#2F855A;font-weight:600;margin-top:2px"></div>
         </div>
         <div id="asset-add-breakdown" class="field-group" style="grid-column:span 2;display:none;margin:-4px 0 0">
@@ -2034,10 +2034,10 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td data-tag-focus="rental:${er.id}">${er.piano_tuning_id ? esc(er.description) : renderTaggedText(er.description)}</td>
-          <td>$${Number(er.cost).toFixed(2)}${er.on_invoice === 0 ? ` <span class="er-off-invoice" title="A show expense kept here and in Reports. It is not billed on the Asset Estimate, Final Invoice or Combined Invoice — the piano tuning manager can switch that on for this tuning.">not on invoice</span>` : ''}</td>
+          <td>$${Number(er.cost).toFixed(2)}${er.on_invoice === 0 ? ` <span class="er-off-invoice" title="Tracked here and in Reports, but not billed on the estimate or invoices. The piano tuning manager can turn billing on.">not on invoice</span>` : ''}</td>
           <td>${er.pdf_filename ? `<a href="/shows/${SHOW_ID}/external-rentals/${er.id}/pdf" target="_blank" style="font-size:11px">View PDF</a>` : '—'}</td>
           ${IS_ADMIN ? `<td style="white-space:nowrap">${er.piano_tuning_id
-            ? `<span class="piano-er-tag" title="From Piano Tuning — the piano tuning manager sets its cost and paperwork; not part of asset approval">🎹 Piano Tuning</span>`
+            ? `<span class="piano-er-tag" title="From Piano Tuning. The piano tuning manager sets its cost and paperwork; it's not part of asset approval.">🎹 Piano Tuning</span>`
             : `<button class="btn btn-xs btn-ghost" onclick="editExternalRental(${esc(JSON.stringify(er))})" title="Edit">✎</button>
             <button class="btn btn-xs btn-ghost" style="color:#e53e3e" onclick="removeExternalRental(${er.id})" title="Remove">✕</button>`}
           </td>` : ''}
@@ -3282,7 +3282,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
     const desc = document.getElementById('er-description').value.trim();
     const cost = document.getElementById('er-cost').value;
     const pdfFile = document.getElementById('er-pdf').files[0];
-    if (!desc) { alert('Description required'); return; }
+    if (!desc) { alert('Enter a description.'); return; }
 
     const fd = new FormData();
     fd.append('description', desc);
@@ -3493,7 +3493,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
                 {% if not post_show_settlement %}style="display:none"{% endif %}
                 title="Pull in any newly-scheduled labor lines (with their times). Your edits are kept.">Re-sync from Schedule</button>
         <button type="button" class="btn btn-sm btn-ghost" onclick="openAddHoursForm()"
-                title="Bill arbitrary hours (e.g. prep work weeks out) with a justification. Straight time only — never counts toward overtime.">+ Add Hours</button>
+                title="Bill extra hours (e.g. prep work) with a justification. Straight time only; never counts toward overtime.">+ Add Hours</button>
         <button type="button" class="btn btn-sm btn-primary" onclick="addPostShowLaborRow()">+ Add Line</button>
       </div>
       {% endif %}
@@ -3511,7 +3511,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       </div>
       <p id="ps-settled-info" class="text-dim" style="padding:10px 14px 0;font-size:11px;margin:0{% if not post_show_settlement %};display:none{% endif %}">✓ Settled</p>
       <p class="text-dim" style="padding:10px 14px 0;font-size:11px;margin:0">
-        Adjust to what actually happened; edits bill the client and never change the schedule. <strong>Worked by</strong> is tracking only. <strong>+ Add Hours</strong> bills off-schedule work at straight time.
+        Edit lines to match what actually happened; this is what the client is billed, and the schedule isn't changed. <strong>Worked by</strong> is for tracking only. <strong>+ Add Hours</strong> bills off-schedule work at straight time.
       </p>
       {% if not restricted %}
       <div id="ps-addhours-form" style="display:none;margin:10px 14px 0;padding:10px 12px;border:1px dashed var(--border);border-radius:6px">
@@ -3562,7 +3562,7 @@ window._laborRequestsData = {{ labor_requests_data | tojson }};
       <p class="text-dim" id="ps-labor-empty" style="padding:16px;text-align:center;display:none">
         {% if restricted %}No actual labor recorded.{% else %}
         <span class="ps-empty-unsettled"{% if post_show_settlement %} style="display:none"{% endif %}>No labor lines yet. Press <strong>Settle Now</strong> after the show, or use <strong>+ Add Line</strong> / <strong>+ Add Hours</strong>.</span>
-        <span class="ps-empty-settled"{% if not post_show_settlement %} style="display:none"{% endif %}>No labor lines. Use <strong>+ Add Line</strong> for extra crew, or <strong>Re-sync from Schedule</strong> to pull newly-scheduled lines.</span>
+        <span class="ps-empty-settled"{% if not post_show_settlement %} style="display:none"{% endif %}>No labor lines. Use <strong>+ Add Line</strong> for extra crew, or <strong>Re-sync from Schedule</strong> to pull in newly scheduled lines.</span>
         {% endif %}
       </p>
     </div>
@@ -3715,7 +3715,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       <p class="export-card-desc">Final billing invoice: internal &amp; external assets, actual labor, and costs.</p>
       {% if not post_show_settlement %}
       <p class="ps-unsettled-hint" style="font-size:11px;color:#f59e0b;margin:0 0 10px">
-        ⚠ Labor not settled yet — this invoice bills no labor until someone presses
+        ⚠ Labor isn't settled yet, so this invoice bills no labor. Press
         <a href="#" onclick="switchTab('postnotes');return false;" style="color:inherit;text-decoration:underline">Settle Now on the Post-Show tab</a>.
       </p>
       {% endif %}
@@ -4350,7 +4350,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       const resp = await fetch(`/shows/${SHOW_ID}/history/${formType}`);
       const entries = await resp.json();
       if (!entries.length) {
-        list.innerHTML = '<p class="text-dim" style="padding:16px;margin:0">No history yet. Versions are recorded as the form is saved.</p>';
+        list.innerHTML = '<p class="text-dim" style="padding:16px;margin:0">No history yet. A version is saved each time the form is saved.</p>';
         return;
       }
       list.innerHTML = `<p class="hist-help">Newest first. A version is recorded each time this form is saved
@@ -4840,7 +4840,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     header.innerHTML = `
       <span class="labor-day-label">${date ? _esc(_dayLabel(date).toUpperCase()) : 'UNSCHEDULED'}</span>
       <input type="date" class="field-input field-input-sm labor-day-date" value="${_esc(date || '')}" ${RESTRICTED ? 'disabled' : ''} title="Work date for this day">
-      <span class="labor-day-pm-wrap" title="PM on duty for this day — pick one when another PM covers the show for the day. Blank = the show's main PM.">
+      <span class="labor-day-pm-wrap" title="PM on duty this day, when someone other than the show's PM covers. Blank = the show's PM.">
         <label>Day PM</label>
         <select class="field-input field-input-sm labor-day-pm" ${RESTRICTED ? 'disabled' : ''}
                 onchange="onLaborDayPmChange(this)"></select>
@@ -5785,9 +5785,9 @@ window._psSettlement = {{ post_show_settlement | tojson }};
 
   async function settleNow(btn) {
     if (!confirm('Settle this show\'s labor now?\n\n' +
-                 'Pulls the labor schedule as it stands right now — who worked each position and their ' +
-                 'times — into the settlement as the starting point for billing. Do this once the show is ' +
-                 'over. Afterwards you edit the lines here; the schedule itself is never changed.')) return;
+                 'Copies the current labor schedule (who worked each position and their times) in as the ' +
+                 'starting point for billing. Do this after the show. You then edit the lines here; ' +
+                 'the schedule itself is never changed.')) return;
     const btns = [document.getElementById('ps-settle-btn'), btn].filter(Boolean);
     btns.forEach(b => { b.disabled = true; });
     try {
@@ -6308,7 +6308,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
       if (data.settlement) _psApplySettlement(data.settlement);
       _renderPostShowLabor();
       const parts = [];
-      if (data.added) parts.push(`pulled ${data.added} newly-scheduled line(s)`);
+      if (data.added) parts.push(`pulled ${data.added} newly scheduled line(s)`);
       if (data.refreshed) parts.push(`updated ${data.refreshed} line(s) from the schedule`);
       alert(parts.length
         ? `Re-synced — ${parts.join(' and ')}.`
@@ -6433,7 +6433,7 @@ window._psSettlement = {{ post_show_settlement | tojson }};
     const trimmed = (toDate || '').trim();
     if (!trimmed) { alert('A target date is required.'); return; }
     if (!_laborDateOk(trimmed)) { alert(`"${trimmed}" isn't a date — use YYYY-MM-DD.`); return; }
-    if (trimmed === fromDate) { alert('Target date must differ from source.'); return; }
+    if (trimmed === fromDate) { alert('Pick a different date from the one you\'re cloning.'); return; }
 
     const rows = Array.from(block.querySelectorAll('tbody tr'));
     if (!rows.length) { alert('Nothing to clone — this day has no rows yet.'); return; }
@@ -6774,7 +6774,7 @@ async function emailPdf(showId, pdfType, btn) {
     canPull = !!d.can_pull;
     const perfs = d.performances || [];
     if (!d.configured) {
-      body.innerHTML = '<p class="text-dim" style="font-size:12px;margin:0">Spot isn\'t connected yet — an admin sets it up in Settings → Spot.</p>';
+      body.innerHTML = '<p class="text-dim" style="font-size:12px;margin:0">Spot isn\'t set up yet. An admin can connect it in Settings → Spot.</p>';
       return;
     }
     if (!perfs.length) {
