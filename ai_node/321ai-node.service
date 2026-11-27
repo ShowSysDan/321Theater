@@ -1,0 +1,41 @@
+# systemd unit for the 3·2·1→Theater AI node (installed by ai_node/install.sh).
+# Install to /etc/systemd/system/321ai-node.service, then:
+#   systemctl daemon-reload && systemctl enable --now 321ai-node
+
+[Unit]
+Description=321Theater AI node (signed HTTPS front end for the local Ollama)
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=321ai-node
+Group=321ai-node
+WorkingDirectory=/opt/321ai-node
+EnvironmentFile=/etc/321ai-node/node.env
+ExecStart=/usr/bin/python3 -I /opt/321ai-node/ai_node.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=321ai-node
+
+# Hardening: it needs its own files, an inbound port and a loopback socket to
+# Ollama, nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+# Ports below 1024 would need CAP_NET_BIND_SERVICE: keep NODE_LISTEN above 1023.
+
+[Install]
+WantedBy=multi-user.target

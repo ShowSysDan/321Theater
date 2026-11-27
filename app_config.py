@@ -229,7 +229,7 @@ def warn_legacy(section, env_keys):
 # SDK), pg_dump (given PGPASSWORD explicitly). PG_*/S3_* are this app's own
 # prefixes (libpq's variables have no underscore: PGHOST, PGPASSWORD).
 _CHILD_SCRUB_PREFIXES = ('PG_', 'S3_')
-_CHILD_SCRUB_KEYS = frozenset({'SECRET_KEY', 'GATEWAY_SHARED_SECRET', 'PGPASSWORD',
+_CHILD_SCRUB_KEYS = frozenset({'SECRET_KEY', 'GATEWAY_SHARED_SECRET', 'PGPASSWORD', 'AI_NODE_SECRET',
                                'TEST_MODE_EMAIL_ALLOWLIST'})
 
 

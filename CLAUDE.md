@@ -649,8 +649,28 @@ anything with no unsaved edit here. Nothing posts a whole form or list.
   machine.** `ollama_client.validate_url` (localhost / 127.x / ::1, no path /
   userinfo; names re-resolved to loopback at call time) is the one
   validator — save, test and every call. `OLLAMA_URL` in `.env` overrides
-  the shared `ollama_url` per server (same rule). Never add a LAN endpoint,
-  never forward AI calls between instances. The client: no env proxy, no
+  the shared `ollama_url` per server (same rule). Never add a LAN endpoint
+  to Ollama itself, never forward AI calls between 321T instances.
+- **AI node (3.61.0) — the ONE network path for model calls** (the owner's
+  call: the GPU box must have NO PostgreSQL access). `ai_node/ai_node.py`
+  (stdlib only, imports nothing of the app, keeps nothing, logs no text)
+  fronts the node's loopback Ollama; app servers with `AI_NODE_URL` /
+  `AI_NODE_SECRET` / `AI_NODE_CERT_SHA256` in `.env` (all three, else
+  ignored + CONFIG_INVALID once) send calls there via
+  `ollama_client.set_node` (`ai_module._node()`): https only, cert PINNED
+  by SHA-256 in `_PinnedConnection.connect` BEFORE the request is sent,
+  every request HMAC-signed (`_node_headers` ↔ `ai_node.signature`: method,
+  path, ts ±60 s, one-time nonce, body SHA-256). The node exposes only
+  version / tags / chat / pull, rebuilds chat bodies from an allow-list
+  (`clean_chat`), pulls only `NODE_MODELS`, honours `NODE_ALLOW_IPS` before
+  TLS. App servers still claim jobs, build prompts and write results — the
+  node never gets DB access or a callback; keep it that way. Node codes
+  `ollama_unreachable` / `node_busy` / `cert_mismatch` are
+  OllamaUnavailable (nothing reached the model); others are
+  `node_<code>`. `validate_url()` stays loopback-only — only the exact
+  configured node base bypasses it. `AI_NODE_SECRET` is in
+  `_CHILD_SCRUB_KEYS`. Signature format changes need the node redeployed
+  in step (third deployment target). The client: no env proxy, no
   redirects, size caps, overall deadline; errors are content-free codes.
   `ollama_client` / `ai_module` never import app.py (ONE `ai_module.register`).
 - **Probe + publish:** `ai_module.probe_refresh` (60 s, every worker, NOT
@@ -2123,8 +2143,8 @@ in full. Module key `projects`, default OFF.
   app_settings `readiness_<name>`; a new knob = DEFAULTS + RANGES + the form
   (GROUPS in readiness.html).
 
-## Two deployment targets — ALWAYS tell the user what to redeploy
-This project ships to **two** machines, and a change often only affects one.
+## Deployment targets — ALWAYS tell the user what to redeploy
+This project ships to **two** machines (three with an AI node), and a change often only affects one.
 At the end of any change that touches code/config, **state plainly which
 side(s) need to be redeployed** and give the commands. Never leave the user
 to guess.
@@ -2147,6 +2167,12 @@ to guess.
   or a shared secret / cookie-name / server-list change — say so and give
   both command blocks, and flag anything that must stay in sync between the
   two `.env` files (`GATEWAY_SHARED_SECRET` == `GATE_SHARED_SECRET`).
+
+- **AI node** (the GPU box, 3.61.0): anything under `ai_node/`, or its
+  `/etc/321ai-node/node.env`.
+  → `cd /opt/321ai-node-src && git pull && sudo bash ai_node/install.sh`
+  A change to the request signing / routes must ship to the node AND every
+  app server together; `AI_NODE_SECRET` == the node's `NODE_SECRET`.
 
 - **Neither / docs-only**: say that too, so the user knows no redeploy is
   needed.

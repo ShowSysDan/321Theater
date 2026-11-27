@@ -1020,7 +1020,7 @@ BACKUP_DIR = os.path.join(APP_DIR, 'backups')
 #   MAJOR — breaking schema or architectural changes
 #   MINOR — new feature sets (e.g. asset manager, user enhancements)
 #   PATCH — bug fixes, small improvements, security patches
-APP_VERSION = '3.60.0'
+APP_VERSION = '3.61.0'
 
 # ── Static asset caching ──────────────────────────────────────────────────────
 # Stamp every url_for('static', ...) with the file's mtime (?v=…) so a changed
@@ -17357,13 +17357,24 @@ def test_ai_connection():
         url = env_url        # this server's .env wins, exactly as the jobs see it
     if ai_module.model_source() == 'env':
         model = ai_module.model()   # same for OLLAMA_MODEL (3.60.0)
-    ok, msg, norm = ollama_client.validate_url(url or ollama_client.DEFAULT_URL)
-    if not ok:
-        return jsonify({'success': False, 'message': msg})
+    via_node = ai_module.url_source() == 'node'
+    if via_node:                    # and for the AI node (3.61.0)
+        norm = ai_module.ollama_url()
+    else:
+        ok, msg, norm = ollama_client.validate_url(url or ollama_client.DEFAULT_URL)
+        if not ok:
+            return jsonify({'success': False, 'message': msg})
     if not ollama_client.valid_model(model):
         return jsonify({'success': False, 'message': 'Enter a valid model name.'})
     st = ollama_client.probe(norm, model.strip())
     host = socket.gethostname()
+    if via_node:
+        host += ' → AI node'
+    if not st['running'] and via_node:
+        return jsonify({'success': False, 'models': [], 'installed': False, 'running': False,
+                        'message': f"{host}: not answering ({st.get('err') or 'unknown'}). "
+                                   "Check the node is running, the firewall, AI_NODE_SECRET and "
+                                   "AI_NODE_CERT_SHA256."})
     if not st['running']:
         hint = ('Ollama is not installed on this server.' if not st['installed']
                 else 'Ollama is installed but not answering — is the service running?')
